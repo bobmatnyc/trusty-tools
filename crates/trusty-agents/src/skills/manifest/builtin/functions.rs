@@ -98,12 +98,13 @@ const TICKETING_MEMBERS: &[&str] = &[
 /// claimed here; it is surfaced separately and honestly by the route's
 /// `dead_scope_patterns`.
 ///
-/// **On the display name.** The id is `google-workspace`, as asked. The NAME is
-/// "Google Workspace Mail and Tasks" because the card renders the name, and a
-/// card reading "Google Workspace" over a bundle holding no Drive, Docs, Sheets,
-/// Slides or Calendar skill claims a coverage the row does not have — the same
-/// over-claim `granted_state` exists to prevent one level down. Widen the name
-/// when the membership widens, not before.
+/// **On the display name — read this before trusting the card.** The name is the
+/// short "Google Workspace" (owner decision, 2026-07-28, made with the narrower
+/// alternative and this caveat in front of him). The MEMBERSHIP is narrower than
+/// that name: Gmail and Google Tasks ONLY. This row holds no Drive, Docs, Sheets,
+/// Slides or Calendar skill, and none of the exclusions listed above. Read the
+/// member list, not the name, when reviewing what a `google-workspace` grant
+/// confers; the card's description states the same scope to the user.
 /// Test: `google_workspace_function_skill_bundles_the_mail_and_tasks_leaves`,
 /// `google_workspace_bundle_excludes_account_and_settings_administration`,
 /// `super::super::super::api::server::tests::agent_skills::skills_route_rolls_up_group_provider_requirements`.
@@ -161,7 +162,9 @@ pub(super) static TABLE: &[SkillDef] = &[
     ),
     function_skill(
         "google-workspace",
-        "Google Workspace Mail and Tasks",
+        // Short name by owner decision; membership is Gmail + Tasks only — see
+        // the `GOOGLE_WORKSPACE_MEMBERS` doc comment.
+        "Google Workspace",
         "Gmail and Google Tasks as one capability: search, read, compose, draft, \
          label and download attachments from mail, and list, create, update and \
          complete tasks. Covers mail and tasks ONLY — Drive, Docs, Sheets, Slides \
