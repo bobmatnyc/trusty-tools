@@ -1,13 +1,24 @@
 //! The bundled-fallback PM prompt, expressed as an [`InstructionPackage`].
 //!
-//! Why: #4184 landed the sectioned-JSON package type with zero call sites — a
-//! schema nothing composes from is a schema nothing validates. This module is
-//! the first real producer (#4183, carrying the scope formerly tracked as
-//! #4186): it re-sources the DEFAULT PM prompt — the one every project with no
-//! `.trusty-mpm/` override receives — through
-//! [`InstructionPackage::compose`], so the eight-section taxonomy and its
-//! `fixed | project | user` tiers describe the prompt that actually ships
-//! rather than a parallel model.
+//! Why: #4184 landed the sectioned-JSON package type and #4249 made it the
+//! composer for the DEFAULT PM prompt — the one every project with no
+//! `.trusty-mpm/` override receives. Both steps were mechanical: the package was
+//! still built by *cutting the legacy monolithic assets at runtime*, so the
+//! eight-section taxonomy described text that was authored as four blobs. This
+//! module now builds the package from **per-section sources** — one markdown
+//! file per [`SectionId`] under `assets/instructions/sections/` — which is what
+//! makes a section an editable, independently overridable unit rather than a
+//! documented offset into someone else's file (#4183).
+//!
+//! What changed with the sourcing swap, and what did not:
+//!
+//! * GONE — `split_asset`, the `Cut` tables, and the marker-uniqueness guards.
+//!   A marker that could silently relocate cannot exist when there is no marker;
+//!   the section boundary is now the file boundary. A mis-authored section is
+//!   caught by [`InstructionPackage::validate`] instead (an empty file is
+//!   `EmptyText`, a missing one fails to compile at `include_str!`).
+//! * UNCHANGED — the block stream's order, joins, and the composition mechanism.
+//!   [`InstructionPackage::compose`] is untouched by this module.
 //!
 //! Scope — deliberately ONE of the three configurations
 //! [`crate::core::instruction_overrides::resolve_pm_prompt`] can emit:
@@ -18,213 +29,64 @@
 //! | 2 | `.trusty-mpm/AGENT_DELEGATION.md` override | legacy, unchanged |
 //! | 3 | `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` | legacy, unchanged |
 //!
-//! Configurations 2 and 3 are not merely unported, they are currently
-//! *inexpressible*: an `AGENT_DELEGATION.md` override replaces the whole
-//! delegation section and so never consumes the computed roster
+//! Configurations 2 and 3 remain *inexpressible* in the schema — an
+//! `AGENT_DELEGATION.md` override replaces the whole delegation section and so
+//! never consumes the computed roster
 //! ([`crate::core::instruction_package::ValidationError::RosterNotConsumed`]),
-//! and `PM_INSTRUCTIONS_DEPLOYED.md` replaces the entire body with opaque
-//! prose that contributes no delegation section at all (additionally
-//! `SectionWithoutBlocks`). Both are tracked as follow-up work on epic #4183;
-//! neither is weakened here.
+//! and `PM_INSTRUCTIONS_DEPLOYED.md` contributes no delegation section at all
+//! (additionally `SectionWithoutBlocks`). #4247 tracks the decision; neither
+//! check is weakened here, and both configurations keep resolving exactly as
+//! they do today.
 //!
-//! What: [`compose_bundled_fallback`] builds the package for the compiled-in
-//! assets and composes it with the three host-supplied inputs (rendered agent
-//! roster, stack profile, project addendum).
+//! THE BYTE-EQUALITY CONTRACT, and why it survives a content change. #4249's
+//! acceptance gate was byte-equality against the *pre-#4249* prompt, and that
+//! gate is necessarily gone here: this PR changes the delivered prompt on
+//! purpose. What remains — and is still asserted — is byte-equality between the
+//! TWO COMPOSERS: the packaged path and the legacy assembly must agree for the
+//! same inputs. That stays true without any pasted duplication, because
+//! [`crate::core::instruction_pipeline::pm_instructions`] and
+//! [`crate::core::instruction_pipeline::base_pm`] reconstitute the legacy
+//! multi-section strings *from these same section files*, joining them with the
+//! literal [`Join::Blank`] emits. Editing a section therefore moves both
+//! composers together; it cannot move one.
 //!
-//! THE BYTE-EQUALITY CONTRACT. The composed prompt is byte-identical to what
-//! the legacy concatenation in `instruction_overrides` produces for the same
-//! inputs — not "semantically equivalent". Nothing resolves later: the agent
-//! roster is fixed at session launch and Claude Code cannot change the agent
-//! set afterwards, so the composed string IS the delivered prompt and any
-//! divergence is a delivered-prompt regression. Two mechanisms hold the line:
+//! What replaces the removed gate for CONTENT is
+//! `pm_prompt_golden_tests.rs`: a committed snapshot of the fully composed
+//! prompt for both configurations. Every future edit to a section file shows up
+//! there as a reviewable prose diff, which is the property #4183's acceptance
+//! criteria ask for and which byte-equality against a frozen legacy string could
+//! never provide.
 //!
-//! * every block that comes from a bundled asset is *cut out of that asset at
-//!   runtime* by [`split_asset`], which derives each block's [`Join`] from the
-//!   exact bytes it removed. Reassembling the pieces therefore reproduces the
-//!   asset by construction, so re-sectioning an asset cannot move a byte;
-//! * [`Join::Rule`] is `"\n\n---\n\n"`, the same literal as
-//!   [`crate::core::instruction_pipeline::SECTION_SEPARATOR`], so top-level
-//!   section boundaries match the legacy `join_sections` join.
-//!
-//! WHAT BYTE-EQUALITY DOES NOT COVER, stated precisely because the reassembly
-//! property cuts both ways: composed output equals `asset.trim()` **wherever the
-//! cuts land**, so the byte gate is structurally incapable of catching a cut
-//! placed at the wrong offset. Bytes would be fine; the section *attribution* —
-//! the thing this module exists to establish, and which #4247 will act on —
-//! would be silently wrong. Two guards cover that instead of the byte gate:
-//! [`split_asset`] requires every marker to occur EXACTLY ONCE in its asset
-//! ([`PackageError::MarkerNotUnique`]), which makes a duplicated marker red
-//! rather than silent; and the cut tests pin each block's opening content, not
-//! merely the section-id sequence. A marker that is deleted is
-//! [`PackageError::MarkerNotFound`]; one that moves in a way that reorders the
-//! sections fails the same way, because marker search is forward-only.
-//!
-//! Test: `bundled_pm_package_tests.rs` — in particular
-//! `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`, which
-//! diffs the two strings and reports the first differing byte offset, and
-//! `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`, which asserts
-//! the same through the production entry point.
+//! Test: `bundled_pm_package_tests.rs`.
 
 use crate::core::instruction_overrides::ROSTER_PRECEDENCE_NOTE;
 use crate::core::instruction_package::{
     BlockBody, CompositionError, CompositionInputs, CustomizationTier, Generator, InstructionBlock,
     InstructionPackage, InstructionSection, Join, SCHEMA_VERSION, SectionId,
 };
-use crate::core::instruction_pipeline::{AGENT_DELEGATION, BASE_PM, PM_INSTRUCTIONS, WORKFLOW};
+use crate::core::instruction_pipeline::{
+    AGENT_DELEGATION, SECTION_CORE, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
+    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, WORKFLOW,
+};
 
 /// Stable identity of the package this module builds.
 pub(crate) const PACKAGE_ID: &str = "trusty-mpm.pm.bundled-fallback";
 
-/// A failure building or composing the bundled-fallback package.
-///
-/// Why: every variant means the delivered PM prompt, or the section model
-/// behind it, would be wrong — so none may be swallowed. The two marker
-/// variants are the guards that make a mis-cut asset loud, since the
-/// byte-equality gate cannot see one (see the module docs).
-/// What: an absent cut marker, an ambiguous (duplicated) one, an empty piece, or
-/// a composition failure from the package type.
-/// Test: `missing_cut_marker_is_an_error`, `duplicated_cut_marker_is_an_error`,
-/// `adjacent_cut_markers_report_an_empty_piece`, and
-/// `shipped_assets_build_and_validate` proves none occurs for what we ship.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PackageError {
-    /// A cut marker is absent from the asset it is supposed to split.
-    #[error("asset {asset} no longer contains the section cut marker {marker:?}")]
-    MarkerNotFound {
-        /// The asset file name.
-        asset: &'static str,
-        /// The marker that could not be located.
-        marker: &'static str,
-    },
-    /// A cut marker occurs more than once, so the cut location is ambiguous.
-    ///
-    /// This is the guard the byte gate cannot provide: a duplicated marker still
-    /// reassembles to identical bytes while attributing the wrong text to a
-    /// section.
-    #[error(
-        "asset {asset} contains the section cut marker {marker:?} {count} times; \
-         a cut marker must occur exactly once or the section boundary is ambiguous"
-    )]
-    MarkerNotUnique {
-        /// The asset file name.
-        asset: &'static str,
-        /// The ambiguous marker.
-        marker: &'static str,
-        /// How many times it occurs.
-        count: usize,
-    },
-    /// Two cut markers are adjacent, so a block would carry no content.
-    #[error("asset {asset} yields an empty piece starting at marker {marker:?}")]
-    EmptyPiece {
-        /// The asset file name.
-        asset: &'static str,
-        /// The marker that starts the empty piece.
-        marker: &'static str,
-    },
-    /// Composing the built package failed.
-    #[error(transparent)]
-    Compose(#[from] CompositionError),
-}
-
-/// One section boundary inside a bundled markdown asset.
-///
-/// `start_marker` is the literal text that begins the piece; the first cut of
-/// an asset uses `""` to mean "start of asset". [`split_asset`] requires each
-/// marker to occur exactly once in its asset and searches forward from the
-/// previous cut, so both a duplicated marker and a reordering edit are errors
-/// rather than a silent re-cut.
-struct Cut {
-    /// Section the resulting block is attributed to.
-    section: SectionId,
-    /// Literal text that starts this piece (`""` for the first piece).
-    start_marker: &'static str,
-}
-
-/// How `PM_INSTRUCTIONS.md` divides into Core / Memory / Search blocks.
-///
-/// Why: the taxonomy needs a Memory and a Search section, and the asset's
-/// "Context-First Protocol" block is exactly that guidance — item 1 is the
-/// memory protocol, item 2 the code-search protocol. Cutting mid-list looks
-/// odd but is precisely what the two-array block model exists for: a section is
-/// lifted out of the middle of a legacy document without moving a byte. The
-/// asset's own `## Identity` heading stays in `Core`, NOT
-/// [`SectionId::Identity`] — that section is the non-overridable floor's
-/// identity block, and attributing an overridable block to it would make every
-/// later block "overridable after the floor".
-///
-/// CONSTRAINT FOR #4247, recorded here because the declaration that creates it
-/// is here. Memory and Search declare tier `project` — a machine-readable claim
-/// that a project may replace either independently — but the underlying asset
-/// text is one numbered list. Replacing Memory alone would delete item `1.` and
-/// leave Search opening on a bare `2.`, and the closing sentence "Both tools are
-/// stable and recommended…" refers to *both* tools while sitting in the Search
-/// block. Harmless today (nothing honours the tiers yet), a malformed system
-/// prompt the moment #4247 does. Memory and Search are therefore NOT
-/// independently overridable until `PM_INSTRUCTIONS.md` gives each its own
-/// heading; #4247 must either restructure the asset first or ship those two
-/// sections as a single override unit.
-/// What: four pieces — Core prologue, Memory, Search, Core remainder.
-/// Test: `pm_instructions_cuts_reassemble_the_asset`,
-/// `pm_instructions_cut_locations_are_pinned_by_content`.
-const PM_INSTRUCTIONS_CUTS: &[Cut] = &[
-    Cut {
-        section: SectionId::Core,
-        start_marker: "",
-    },
-    Cut {
-        section: SectionId::Memory,
-        start_marker: "## Context-First Protocol",
-    },
-    Cut {
-        section: SectionId::Search,
-        start_marker: "2. `search` (`mcp__trusty-search__search`)",
-    },
-    Cut {
-        section: SectionId::Core,
-        start_marker: "## Agent Routing",
-    },
-];
-
-/// How `BASE_PM.md` divides into the three absorbed floor sections.
-///
-/// Why: the mapping is the one documented on
-/// [`crate::core::instruction_package::SectionId`]. The resulting block stream
-/// runs `Identity, NonOverridableRules, FrameworkGuaranteedConventions,
-/// NonOverridableRules` — a canonical-order inversion, because the asset places
-/// the tool-priority block last. That is exactly the shape
-/// `validate_floor_is_last` deliberately permits.
-/// What: four pieces; `## Customizing PM Behavior` rides with
-/// `## Non-Overridable Rules`, and `## Trusty Tool Priority` returns to it.
-/// Test: `base_pm_cuts_reassemble_the_asset`, `floor_blocks_are_the_contiguous_tail`,
-/// `base_pm_cut_locations_are_pinned_by_content`.
-const BASE_PM_CUTS: &[Cut] = &[
-    Cut {
-        section: SectionId::Identity,
-        start_marker: "",
-    },
-    Cut {
-        section: SectionId::NonOverridableRules,
-        start_marker: "## Non-Overridable Rules",
-    },
-    Cut {
-        section: SectionId::FrameworkGuaranteedConventions,
-        start_marker: "## Framework-Guaranteed Conventions (Non-Overridable)",
-    },
-    Cut {
-        section: SectionId::NonOverridableRules,
-        start_marker: "## Trusty Tool Priority (Non-Overridable)",
-    },
-];
-
 /// The declared eight-section taxonomy with the tiers this build ships.
 ///
 /// Why: tiers are not decoration — they are the machine-readable statement of
-/// which `.trusty-mpm/` override files `BASE_PM.md` advertises. The five content
-/// sections are `project` because every advertised override file is project
-/// scoped; the three floor sections are `fixed` because
+/// which `.trusty-mpm/` override files the floor advertises, and they are what
+/// #4247 will enforce. Now that each section has its own source file, the claim
+/// "a project may replace this one" is finally true of the artifact as well as
+/// of the schema: replacing Memory alone no longer orphans half a numbered list,
+/// which was the constraint the runtime-cut model recorded and could not fix.
+/// What: [`SectionId::CANONICAL`] paired with its tier and title. The five
+/// content sections are `project` because every advertised override file is
+/// project-scoped; the three floor sections are `fixed` because
 /// `resolve_pm_prompt` appends the floor last under every branch.
-/// What: [`SectionId::CANONICAL`] paired with its tier and title.
-/// Test: `shipped_assets_build_and_validate`.
+/// Test: `every_advertised_override_file_maps_to_an_overridable_section`,
+/// `floor_sections_refuse_every_override_tier`,
+/// `content_sections_admit_project_but_not_user_overrides`.
 fn sections() -> Vec<InstructionSection> {
     let declare = |id: SectionId, title: &str, tier: CustomizationTier| InstructionSection {
         id,
@@ -268,133 +130,16 @@ fn sections() -> Vec<InstructionSection> {
     ]
 }
 
-/// The exact bytes between two adjacent pieces, as a declared [`Join`].
-///
-/// Why: byte-equality requires every boundary to be declared rather than
-/// inferred; naming the two common gaps keeps a composed package readable
-/// while `Literal` guarantees fidelity for anything else.
-/// What: maps the removed gap bytes onto the closest [`Join`] variant.
-/// Test: `pm_instructions_cuts_reassemble_the_asset`.
-fn join_for_gap(gap: &str) -> Join {
-    match gap {
-        "" => Join::None,
-        "\n\n" => Join::Blank,
-        "\n\n---\n\n" => Join::Rule,
-        other => Join::Literal(other.to_string()),
+/// A block whose content is an authored section source, trimmed.
+fn authored(section: SectionId, text: &str, join_before: Join) -> InstructionBlock {
+    InstructionBlock {
+        section,
+        body: BlockBody::Text {
+            text: text.trim().to_string(),
+        },
+        join_before,
+        optional: false,
     }
-}
-
-/// Cut a bundled asset into per-section blocks without moving a byte.
-///
-/// Why: the alternative — pasting asset text into a hand-authored package —
-/// makes the byte-equality gate a thing someone must re-verify after every
-/// asset edit. Cutting at runtime makes reassembly true by construction: each
-/// block carries the literal gap that was removed before it, so concatenating
-/// the blocks with their joins reproduces `asset.trim()` exactly.
-/// What: first requires every marker to occur EXACTLY ONCE in the asset — the
-/// guard against a cut silently relocating to a duplicate, which reassembly
-/// alone cannot detect — then locates each marker (searching forward from the
-/// previous cut, so a reordering edit also fails), slices the asset, trims each
-/// piece, and records the removed whitespace as the next block's [`Join`].
-/// `lead_join` is the join before the FIRST piece, i.e. the boundary with
-/// whatever precedes this asset in the stream.
-/// Test: `pm_instructions_cuts_reassemble_the_asset`, `base_pm_cuts_reassemble_the_asset`,
-/// `missing_cut_marker_is_an_error`, `duplicated_cut_marker_is_an_error`,
-/// `adjacent_cut_markers_report_an_empty_piece`.
-fn split_asset(
-    asset: &'static str,
-    raw: &str,
-    cuts: &'static [Cut],
-    lead_join: Join,
-) -> Result<Vec<InstructionBlock>, PackageError> {
-    let text = raw.trim();
-
-    // Ambiguity check BEFORE any cutting. A marker that occurs twice would cut
-    // at the first hit, attribute the wrong text to a section, and still
-    // reassemble to identical bytes — invisible to the byte-equality gate.
-    for cut in cuts.iter().skip(1) {
-        let count = text.matches(cut.start_marker).count();
-        if count != 1 {
-            return Err(if count == 0 {
-                PackageError::MarkerNotFound {
-                    asset,
-                    marker: cut.start_marker,
-                }
-            } else {
-                PackageError::MarkerNotUnique {
-                    asset,
-                    marker: cut.start_marker,
-                    count,
-                }
-            });
-        }
-    }
-
-    // Resolve each cut to an absolute byte offset, forward-only.
-    let mut offsets: Vec<usize> = Vec::with_capacity(cuts.len());
-    let mut search_from = 0usize;
-    for (index, cut) in cuts.iter().enumerate() {
-        if index == 0 {
-            offsets.push(0);
-            continue;
-        }
-        let Some(relative) = text
-            .get(search_from..)
-            .and_then(|t| t.find(cut.start_marker))
-        else {
-            // Unique but behind the previous cut: the asset reordered its
-            // sections, so the declared cut order no longer holds.
-            return Err(PackageError::MarkerNotFound {
-                asset,
-                marker: cut.start_marker,
-            });
-        };
-        let absolute = search_from + relative;
-        offsets.push(absolute);
-        search_from = absolute + cut.start_marker.len();
-    }
-
-    let mut blocks: Vec<InstructionBlock> = Vec::with_capacity(cuts.len());
-    for (index, cut) in cuts.iter().enumerate() {
-        let start = offsets.get(index).copied().unwrap_or(0);
-        let end = offsets.get(index + 1).copied().unwrap_or(text.len());
-        let piece = text.get(start..end).unwrap_or_default();
-        let body = piece.trim();
-        if body.is_empty() {
-            // Two cut markers are adjacent — a mis-authored cut table, not valid
-            // content. Distinct from `MarkerNotFound`: the marker WAS found, so
-            // reporting it as missing would send the reader hunting for a string
-            // that is present.
-            return Err(PackageError::EmptyPiece {
-                asset,
-                marker: cut.start_marker,
-            });
-        }
-
-        let join_before = if index == 0 {
-            lead_join.clone()
-        } else {
-            let previous = text.get(offsets.get(index - 1).copied().unwrap_or(0)..start);
-            let trailing = previous
-                .map(|p| p.get(p.trim_end().len()..).unwrap_or_default())
-                .unwrap_or_default();
-            let leading = piece
-                .get(..piece.len() - piece.trim_start().len())
-                .unwrap_or_default();
-            join_for_gap(&format!("{trailing}{leading}"))
-        };
-
-        blocks.push(InstructionBlock {
-            section: cut.section,
-            body: BlockBody::Text {
-                text: body.to_string(),
-            },
-            join_before,
-            optional: false,
-        });
-    }
-
-    Ok(blocks)
 }
 
 /// A block whose content arrives at composition time from a named generator.
@@ -412,94 +157,85 @@ fn generated(
     }
 }
 
-/// A block of literal text authored outside the bundled markdown assets.
-fn literal(section: SectionId, text: &str, join_before: Join) -> InstructionBlock {
-    InstructionBlock {
-        section,
-        body: BlockBody::Text {
-            text: text.trim().to_string(),
-        },
-        join_before,
-        optional: false,
-    }
-}
-
-/// Build the bundled-fallback package from the compiled-in assets.
+/// Build the bundled-fallback package from the authored section sources.
 ///
 /// Why: this is the executable statement of what the DEFAULT PM prompt is made
-/// of. Reviewing this one function answers "which section does this text belong
-/// to, and who may override it?" — a question the previous four-`include_str!`
-/// concatenation could not be asked.
+/// of. Reading this one function answers "which section does this text belong
+/// to, and who may override it?" — and, since #4183's sourcing swap, the answer
+/// is a file you can open rather than a byte range.
 ///
-/// What: `PM_INSTRUCTIONS.md` cut into Core/Memory/Search, the derived stack
-/// profile, `WORKFLOW.md`, then the delegation section — bundled doctrine, the
-/// roster-precedence note, and the live roster — then the optional project
-/// addendum, then `BASE_PM.md` cut into the three floor sections. Block order
-/// is emission order and mirrors today's `join_sections` argument order
-/// exactly; the two generator-backed project inputs are `optional` because the
-/// legacy assembly likewise drops an empty section rather than emitting a
-/// dangling `---`. The agent roster is NOT optional — losing it is #4196.
+/// What, in emission order: Core, Memory and Search (the former
+/// `PM_INSTRUCTIONS.md`, now three files); the derived stack profile; Workflow;
+/// the delegation section — bundled doctrine, the roster-precedence note, and
+/// the live roster; the optional project addendum; then the three floor
+/// sections. Infallible by construction: every source is `include_str!`d, so a
+/// missing section is a compile error rather than a runtime one — which is why
+/// this returns a package rather than a `Result`.
 ///
-/// Test: `shipped_assets_build_and_validate`,
+/// Joins are chosen so the composed output is byte-identical to
+/// [`crate::core::instruction_overrides::assemble_sections`] for the same
+/// inputs: [`Join::Rule`] at every top-level boundary (the literal
+/// [`crate::core::instruction_pipeline::SECTION_SEPARATOR`]), [`Join::Blank`]
+/// wherever a former monolith held two sections in one string. The two
+/// generator-backed project inputs are `optional` because the legacy assembly
+/// likewise drops an empty section rather than emitting a dangling `---`. The
+/// agent roster is NOT optional — losing it is #4196.
+///
+/// Test: `shipped_sections_build_and_validate`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
-pub(crate) fn bundled_fallback_package() -> Result<InstructionPackage, PackageError> {
-    let mut blocks = split_asset(
-        "PM_INSTRUCTIONS.md",
-        PM_INSTRUCTIONS,
-        PM_INSTRUCTIONS_CUTS,
-        Join::Rule,
-    )?;
+pub(crate) fn bundled_fallback_package() -> InstructionPackage {
+    let blocks = vec![
+        // The former `PM_INSTRUCTIONS.md`, now three independently editable
+        // sources. `Join::Blank` reproduces the paragraph break that separated
+        // them inside the monolith.
+        authored(SectionId::Core, SECTION_CORE, Join::Rule),
+        authored(SectionId::Memory, SECTION_MEMORY, Join::Blank),
+        authored(SectionId::Search, SECTION_SEARCH, Join::Blank),
+        // Auto-derived framework context, not a user override (#1971). Optional
+        // only so an empty profile is dropped exactly as `join_sections` drops it.
+        generated(SectionId::Core, Generator::StackProfile, Join::Rule, true),
+        authored(SectionId::Workflow, WORKFLOW, Join::Rule),
+        // Delegation: bundled doctrine, the precedence note, then the LIVE
+        // roster (#4069/#4196). The roster block is non-optional by contract.
+        authored(SectionId::AgentDelegation, AGENT_DELEGATION, Join::Rule),
+        authored(
+            SectionId::AgentDelegation,
+            ROSTER_PRECEDENCE_NOTE,
+            Join::Blank,
+        ),
+        generated(
+            SectionId::AgentDelegation,
+            Generator::AgentRoster,
+            Join::Blank,
+            false,
+        ),
+        // Additive `.trusty-mpm/INSTRUCTIONS.md` rules, when the project has any.
+        generated(
+            SectionId::Core,
+            Generator::ProjectAddendum,
+            Join::Rule,
+            true,
+        ),
+        // The non-overridable floor, always last. `Join::Blank` between the three
+        // reproduces the paragraph breaks that separated them inside `BASE_PM.md`.
+        authored(SectionId::Identity, SECTION_IDENTITY, Join::Rule),
+        authored(
+            SectionId::NonOverridableRules,
+            SECTION_NON_OVERRIDABLE_RULES,
+            Join::Blank,
+        ),
+        authored(
+            SectionId::FrameworkGuaranteedConventions,
+            SECTION_FRAMEWORK_CONVENTIONS,
+            Join::Blank,
+        ),
+    ];
 
-    // Auto-derived framework context, not a user override (#1971). Optional
-    // only so an empty profile is dropped exactly as `join_sections` drops it.
-    blocks.push(generated(
-        SectionId::Core,
-        Generator::StackProfile,
-        Join::Rule,
-        true,
-    ));
-
-    blocks.push(literal(SectionId::Workflow, WORKFLOW, Join::Rule));
-
-    // Delegation: bundled doctrine, the precedence note, then the LIVE roster
-    // (#4069/#4196). The roster block is non-optional by contract.
-    blocks.push(literal(
-        SectionId::AgentDelegation,
-        AGENT_DELEGATION,
-        Join::Rule,
-    ));
-    blocks.push(literal(
-        SectionId::AgentDelegation,
-        ROSTER_PRECEDENCE_NOTE,
-        Join::Blank,
-    ));
-    blocks.push(generated(
-        SectionId::AgentDelegation,
-        Generator::AgentRoster,
-        Join::Blank,
-        false,
-    ));
-
-    // Additive `.trusty-mpm/INSTRUCTIONS.md` rules, when the project has any.
-    blocks.push(generated(
-        SectionId::Core,
-        Generator::ProjectAddendum,
-        Join::Rule,
-        true,
-    ));
-
-    blocks.extend(split_asset(
-        "BASE_PM.md",
-        BASE_PM,
-        BASE_PM_CUTS,
-        Join::Rule,
-    )?);
-
-    Ok(InstructionPackage {
+    InstructionPackage {
         schema_version: SCHEMA_VERSION,
         package_id: PACKAGE_ID.to_string(),
         description: Some(
-            "Default PM instruction package: bundled assets plus the live agent roster."
+            "Default PM instruction package: authored section sources plus the live agent roster."
                 .to_string(),
         ),
         // `resolve_pm_prompt` emits no trailing newline; the prompt is embedded,
@@ -507,7 +243,7 @@ pub(crate) fn bundled_fallback_package() -> Result<InstructionPackage, PackageEr
         trailing_newline: false,
         sections: sections(),
         blocks,
-    })
+    }
 }
 
 /// Compose the bundled-fallback PM prompt.
@@ -520,10 +256,9 @@ pub(crate) fn bundled_fallback_package() -> Result<InstructionPackage, PackageEr
 ///
 /// What: builds the package, then composes it with `stack` (the derived stack
 /// profile), `roster` (the rendered `## Delegation Authority` block, required)
-/// and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All three are
-/// trimmed by the composer. The result is byte-identical to
-/// `instruction_overrides`' legacy assembly for the same inputs — see the
-/// module docs.
+/// and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All three are trimmed
+/// by the composer. The result is byte-identical to `instruction_overrides`'
+/// legacy assembly for the same inputs — see the module docs.
 ///
 /// Test: `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`,
@@ -532,14 +267,12 @@ pub(crate) fn compose_bundled_fallback(
     stack: &str,
     roster: &str,
     addendum: Option<&str>,
-) -> Result<String, PackageError> {
-    let package = bundled_fallback_package()?;
-    let inputs = CompositionInputs {
+) -> Result<String, CompositionError> {
+    bundled_fallback_package().compose(&CompositionInputs {
         agent_roster: roster.to_string(),
         stack_profile: Some(stack.to_string()),
         project_addendum: addendum.map(str::to_string),
-    };
-    Ok(package.compose(&inputs)?)
+    })
 }
 
 #[cfg(test)]
