@@ -135,6 +135,24 @@ so a 2.0.0 would signal a break that cannot reach anyone.
 
 ### Fixed
 
+- **`tm launch` and `tm connect` deployed agents to a tier `--setting-sources`
+  excludes, so no tm-deployed agent ever loaded**
+  ([#4203](https://github.com/bobmatnyc/trusty-tools/issues/4203)): both CLI
+  paths built their `FrameworkPaths` with `default()`, which resolves against
+  `dirs::home_dir()` and writes the agent roster into `$HOME/.claude/agents` —
+  the `user` tier. Both then spawned `claude` carrying
+  `--setting-sources project,local`, a list that deliberately excludes `user`
+  (#1269). The deployed tier and the loaded tiers never intersected, so every
+  agent the launch step had just deployed was invisible to the session it was
+  deployed for. Both call sites now use
+  `FrameworkPaths::for_managed_workspace(<harness cwd>)` — the managed worktree
+  for `launch`, the live checkout for `connect` — landing the payload in
+  `<cwd>/.claude/{agents,skills}`, which the `project` and `local` tiers read.
+  This is the same fix the daemon's `spawn_managed_inproject` already carried
+  for the identical defect (#1931); the two CLI paths never received it. A
+  regression test asserts the RELATIONSHIP (deployed tier ∈ the tiers the flag
+  names), not a literal path, so it keeps biting if either side moves.
+
 - **Two wrong instructions corrected in the bundled assets composed into every
   session's prompt.** Both were static text that no project could override, and
   both had demonstrably misrouted live sessions.

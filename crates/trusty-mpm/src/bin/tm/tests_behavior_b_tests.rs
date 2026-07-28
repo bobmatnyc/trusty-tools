@@ -1679,3 +1679,52 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
          proving launch(Some(worktree)) was invoked rather than launch(None)"
     );
 }
+
+/// Issue #4203: the tier `launch`/`connect` deploy agents INTO must be one of
+/// the tiers the spawn's `--setting-sources` flag actually loads.
+///
+/// Before the fix both paths built `FrameworkPaths::default()` (deploying to
+/// `$HOME/.claude/agents`, the `user` tier) and then spawned `claude` with
+/// `--setting-sources project,local` — a list that excludes `user` — so no
+/// tm-deployed agent was ever loaded by either CLI session. The assertion is on
+/// the RELATIONSHIP (deployed tier ∈ loaded tiers), not on a literal path, so it
+/// keeps biting if either the deploy destination or the flag's tier list moves.
+#[test]
+fn launch_and_connect_deploy_into_a_tier_setting_sources_loads() {
+    use trusty_mpm::core::model_inject::{
+        SETTING_SOURCES_FLAG, setting_source_tiers, settings_tier_of,
+    };
+
+    // The cwd the tmux pane is rooted at, which is also the cwd `claude` is
+    // spawned with: the managed worktree for `launch` (step 12), the live
+    // checkout for `connect` (step 4). Both go through the same seam, so one
+    // synthetic cwd exercises the invariant for both paths.
+    let harness_cwd = std::path::Path::new("/work/some-checkout");
+    let fw = crate::commands::launch::session_framework_paths(harness_cwd);
+
+    let tiers = setting_source_tiers();
+    assert!(
+        !tiers.is_empty(),
+        "SETTING_SOURCES_FLAG ({SETTING_SOURCES_FLAG}) must name at least one tier; \
+         an empty list would make this invariant vacuous"
+    );
+
+    let deployed_tier = settings_tier_of(&fw.claude_home_dir(), harness_cwd);
+    assert!(
+        tiers.contains(&deployed_tier),
+        "agents deploy into the `{deployed_tier}` tier ({}) but the spawned session carries \
+         `{SETTING_SOURCES_FLAG}`, loading only {tiers:?} — no tm-deployed agent would be \
+         visible to the session (issue #4203)",
+        fw.claude_agents_dir().display()
+    );
+
+    // The tier name is only meaningful if the destination really is under the
+    // harness cwd — guards against `settings_tier_of` being satisfied by a path
+    // that merely compares equal for an unrelated reason.
+    assert!(
+        fw.claude_agents_dir().starts_with(harness_cwd),
+        "deploy destination {} must lie under the harness cwd {}",
+        fw.claude_agents_dir().display(),
+        harness_cwd.display()
+    );
+}
