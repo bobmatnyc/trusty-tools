@@ -1,6 +1,6 @@
 ---
 name: mpm-skills-manager
-role: base
+role: mpm-skills-manager
 description: Manages skill lifecycle in trusty-mpm — discovery, deployment, tech-stack-based recommendations, and contribution workflow for the skills catalog
 model: sonnet
 extends: base-agent

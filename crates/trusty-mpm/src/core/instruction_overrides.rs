@@ -194,6 +194,39 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     join_sections(sections)
 }
 
+/// Note slotted between the bundled doctrine and the live roster.
+///
+/// Why: it resolves two ambiguities the append creates, both raised in review.
+///
+/// (1) PRECEDENCE. The retained asset contradicts the roster on concrete points
+/// — it calls the generic `ops` agent DEPRECATED while the roster lists `ops`,
+/// and it advertises agents the roster may not carry. Reconciling the asset is
+/// #4183's job; until then the PM needs one unambiguous tie-break rule.
+///
+/// (2) LOADABILITY. The roster is the UNION of three tiers, but no launch mode
+/// reads all three: the daemon managed-spawn passes `--setting-sources
+/// project,local`, which excludes both user-level tiers. A narrower per-mode
+/// tier set is not available here — `tm launch` / `tm connect` deploy into
+/// `~/.claude/agents` (`FrameworkPaths::default()`) and then spawn with that
+/// very flag, so the tier they populate is the tier the flag excludes. Passing
+/// "the tier the flag reads" would render an EMPTY roster there and silently
+/// revert those paths to the stale asset — reintroducing #4069. Passing "the
+/// tier that was deployed to" would advertise unloadable agents anyway. Until
+/// that deploy/read mismatch is fixed, the union plus an explicit re-route
+/// instruction is the shape that cannot silently under-advertise; a failed
+/// dispatch is self-correcting, a missing agent is not.
+///
+/// What: a Markdown blockquote stating the roster wins on WHICH agents exist,
+/// and to re-route rather than retry on an unknown-agent-type error.
+/// Test: `bundled_delegation_appends_deployed_roster`.
+const ROSTER_PRECEDENCE_NOTE: &str = "\
+> The live roster below is authoritative for WHICH agents exist and what each handles; the \
+tables above are routing doctrine only. Where the two disagree, trust the roster.\n\
+>\n\
+> Depending on how this session was launched, a listed agent may not be loadable. If a \
+dispatch fails with an unknown agent type, re-route to the closest listed alternative — do \
+not retry the same agent.";
+
 /// The DEFAULT delegation section: bundled routing doctrine + the live roster.
 ///
 /// Why (#4069): the delegation section is meant to be constructed from what is
@@ -221,7 +254,7 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 fn bundled_delegation(project_dir: &Path) -> String {
     let bundled = AGENT_DELEGATION.trim();
     match crate::core::delegation_authority::deployed_roster_section(project_dir) {
-        Some(roster) => format!("{bundled}\n\n{}", roster.trim()),
+        Some(roster) => format!("{bundled}\n\n{ROSTER_PRECEDENCE_NOTE}\n\n{}", roster.trim()),
         None => bundled.to_string(),
     }
 }
@@ -312,11 +345,26 @@ mod tests {
         assert!(prompt.contains("# Agent Delegation Routing"));
         assert!(prompt.contains("## Make / Mise Command Routing"));
 
-        // Ordering: doctrine first, roster after, and the BASE_PM floor last.
+        // Review HIGH-2 / MEDIUM-2: the two blocks contradict each other on
+        // concrete points, and the roster is a tier UNION that no single launch
+        // mode fully loads. Both are resolved by the note between them, which
+        // must be present whenever a roster is rendered.
+        assert!(
+            prompt.contains("trust the roster"),
+            "the roster must be declared authoritative over the stale doctrine table"
+        );
+        assert!(
+            prompt.contains("re-route to the closest listed alternative"),
+            "an advertised-but-unloadable agent must carry a recovery instruction"
+        );
+
+        // Ordering: doctrine first, note, roster after, BASE_PM floor last.
         let doctrine = prompt.find("# Agent Delegation Routing").expect("doctrine");
+        let note = prompt.find("trust the roster").expect("note");
         let roster = prompt.find("## Delegation Authority").expect("roster");
         let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(doctrine < roster, "doctrine precedes the roster");
+        assert!(doctrine < note, "doctrine precedes the note");
+        assert!(note < roster, "the note precedes the roster it governs");
         assert!(roster < base, "BASE_PM floor stays last");
     }
 

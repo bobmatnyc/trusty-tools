@@ -123,8 +123,24 @@ fn is_base_role(role: &str) -> bool {
 ///
 /// Test: `scan_finds_agents`, `scan_excludes_base_agents`, `scan_empty_dir`
 pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
-    let Ok(entries) = std::fs::read_dir(agents_dir) else {
-        return Vec::new();
+    // An ABSENT tier is normal (not every launch mode populates every tier) and
+    // stays silent. Any OTHER enumeration failure — permissions, a bad mount, an
+    // I/O fault — is NOT normal and must never be indistinguishable from "empty"
+    // (#4069 review): a tier that fails to enumerate silently shrinks the roster,
+    // and if every tier fails the prompt reverts to the stale bundled asset with
+    // no alarm anywhere. Fail open (a launch must not be blocked by one bad
+    // directory) but never fail quiet.
+    let entries = match std::fs::read_dir(agents_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::warn!(
+                dir = %agents_dir.display(),
+                %err,
+                "agent tier could not be enumerated; the delegation roster may be incomplete"
+            );
+            return Vec::new();
+        }
     };
 
     let mut summaries: Vec<AgentSummary> = Vec::new();
@@ -204,7 +220,16 @@ fn build_extends_chain(extends: Option<&str>, name: &str) -> Vec<String> {
 /// What: produces a Markdown section listing each agent with name,
 /// description, extends chain, and model hint.
 ///
-/// Test: `generate_authority_nonempty`, `generate_authority_empty`
+/// Zero-information lines are omitted (#4069 review): `Role` is skipped when it
+/// merely repeats the `###` heading (it falls back to `name` when unset, true
+/// for ~14 of 40 deployed agents) and `Foundation` is skipped for a
+/// single-element chain, which renders as the agent citing itself as its own
+/// foundation (true for every composed agent, since composition flattens
+/// `extends`). This section is re-emitted into EVERY PM session, so ~2 KB of
+/// per-session noise is worth deleting.
+///
+/// Test: `generate_authority_nonempty`, `generate_authority_empty`,
+/// `generate_authority_omits_self_referential_lines`
 pub fn generate_authority(agents: &[AgentSummary]) -> String {
     let mut out = String::from("## Delegation Authority\n\n");
 
@@ -223,16 +248,20 @@ pub fn generate_authority(agents: &[AgentSummary]) -> String {
 
     for agent in agents {
         out.push_str(&format!("### {}\n", agent.name));
-        out.push_str(&format!("- **Role:** {}\n", agent.role));
+        if agent.role != agent.name {
+            out.push_str(&format!("- **Role:** {}\n", agent.role));
+        }
         let handles = agent
             .description
             .as_deref()
             .unwrap_or("(no description provided)");
         out.push_str(&format!("- **Handles:** {handles}\n"));
-        out.push_str(&format!(
-            "- **Foundation:** {}\n",
-            agent.extends_chain.join(" → ")
-        ));
+        if agent.extends_chain.len() > 1 {
+            out.push_str(&format!(
+                "- **Foundation:** {}\n",
+                agent.extends_chain.join(" → ")
+            ));
+        }
         if let Some(model) = &agent.model {
             out.push_str(&format!("- **Model:** {model}\n"));
         }
@@ -282,13 +311,18 @@ pub fn deployed_agent_dirs(project_dir: &Path) -> Vec<PathBuf> {
 /// precedence, and the rendered roster must describe the copy that actually
 /// wins.
 /// What: scans each directory in order and keeps the FIRST summary seen per
-/// agent name, returning them name-sorted for a stable prompt.
-/// Test: `roster_from_dirs_dedupes_with_first_dir_winning`.
+/// agent name, returning them name-sorted for a stable prompt. The dedup key is
+/// LOWER-CASED — agent names are case-insensitive to Claude Code's dispatcher,
+/// so `QA` in one tier and `qa` in another are one agent, not two.
+/// Test: `roster_from_dirs_dedupes_with_first_dir_winning`,
+/// `roster_from_dirs_dedup_is_case_insensitive`.
 pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
     let mut by_name: BTreeMap<String, AgentSummary> = BTreeMap::new();
     for dir in dirs {
         for agent in scan_agents(dir) {
-            by_name.entry(agent.name.clone()).or_insert(agent);
+            by_name
+                .entry(agent.name.to_ascii_lowercase())
+                .or_insert(agent);
         }
     }
     by_name.into_values().collect()
@@ -316,8 +350,20 @@ pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
 /// (the rendered output reaching the delivered prompt). This function itself
 /// consults machine-global tiers, so it has no hermetic direct test.
 pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
-    let agents = roster_from_dirs(&deployed_agent_dirs(project_dir));
+    let dirs = deployed_agent_dirs(project_dir);
+    let agents = roster_from_dirs(&dirs);
     if agents.is_empty() {
+        // Reverting to the bundled asset must be an OBSERVABLE event, not an
+        // invisible one — this is the state #4069 describes, and if it recurs
+        // (every tier empty, or every tier unreadable per `scan_agents`'s warn)
+        // the operator needs a thread to pull rather than a silently stale
+        // 8-name prompt that looks healthy.
+        tracing::info!(
+            project = %project_dir.display(),
+            tiers = dirs.len(),
+            "no deployed agents found in any tier; delegation section falls back to the \
+             bundled asset alone"
+        );
         return None;
     }
     Some(generate_authority(&agents))
@@ -537,6 +583,101 @@ mod tests {
             Some("Deployed at 2026-06-05T14:31:34"),
             "timestamp in description must not be truncated"
         );
+    }
+
+    #[test]
+    fn every_bundled_non_base_agent_reaches_the_roster() {
+        // Issue #4069 REGRESSION GATE (review HIGH-1). `is_base_role` drops any
+        // agent whose `role:` starts with "base" — a deliberate rule that also
+        // catches base agents whose FILE name does not follow the `BASE-`
+        // convention (see `scan_excludes_base_agents`). Three bundled agents
+        // were misfiled with `role: base` despite being ordinary delegatable
+        // agents (`memory-manager`, `mpm-agent-manager`, `mpm-skills-manager`),
+        // so they were silently dropped from EVERY tier they deploy into — the
+        // exact "advertised roster != real roster" defect #4069 exists to fix.
+        //
+        // This asserts the invariant at the ASSET level rather than weakening
+        // the scanner: every bundled `.md` that is not a `BASE-*` foundation
+        // file must survive `scan_agents`.
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents");
+
+        let mut expected: Vec<String> = fs::read_dir(&assets)
+            .expect("bundled agent assets dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .filter_map(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .filter(|stem| !stem.to_ascii_lowercase().starts_with("base"))
+                    .map(str::to_string)
+            })
+            .collect();
+        expected.sort();
+
+        let mut scanned: Vec<String> = scan_agents(&assets).into_iter().map(|a| a.name).collect();
+        scanned.sort();
+
+        let dropped: Vec<&String> = expected.iter().filter(|n| !scanned.contains(n)).collect();
+        assert!(
+            dropped.is_empty(),
+            "bundled agents silently dropped from every roster (check for a stray \
+             `role: base` in their frontmatter): {dropped:?}"
+        );
+        assert_eq!(
+            scanned.len(),
+            expected.len(),
+            "every non-BASE bundled agent must be delegatable"
+        );
+    }
+
+    #[test]
+    fn generate_authority_omits_self_referential_lines() {
+        // Review MEDIUM-3: `Role` that merely repeats the heading and a
+        // single-element `Foundation` chain are pure noise, re-emitted into
+        // every PM session. A real (multi-element) chain still renders.
+        let agents = vec![AgentSummary {
+            name: "ticketing".to_string(),
+            role: "ticketing".to_string(),
+            description: Some("Files tickets.".to_string()),
+            model: None,
+            extends_chain: vec!["ticketing".to_string()],
+        }];
+        let md = generate_authority(&agents);
+
+        assert!(md.contains("### ticketing"));
+        assert!(md.contains("Files tickets."));
+        assert!(
+            !md.contains("**Role:**"),
+            "role duplicating the heading must be omitted"
+        );
+        assert!(
+            !md.contains("**Foundation:**"),
+            "a self-referential single-element chain must be omitted"
+        );
+    }
+
+    #[test]
+    fn roster_from_dirs_dedup_is_case_insensitive() {
+        // Review LOW-1: agent names are case-insensitive to the dispatcher, so
+        // `QA` and `qa` across two tiers are one agent, not two entries.
+        let high = TempDir::new().unwrap();
+        let low = TempDir::new().unwrap();
+        write_agent(
+            high.path(),
+            "QA",
+            "---\nname: QA\nrole: qa\ndescription: PROJECT TIER\n---\n\n# QA\n",
+        );
+        write_agent(
+            low.path(),
+            "qa",
+            "---\nname: qa\nrole: qa\ndescription: USER TIER\n---\n\n# QA\n",
+        );
+
+        let roster = roster_from_dirs(&[high.path().to_path_buf(), low.path().to_path_buf()]);
+
+        assert_eq!(roster.len(), 1, "QA and qa are the same agent");
+        assert_eq!(roster[0].description.as_deref(), Some("PROJECT TIER"));
     }
 
     #[test]
