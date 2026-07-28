@@ -595,6 +595,19 @@ pub mod slack_format;
 /// Test: `cargo test -p trusty-common -- data_dir::tests`.
 pub mod data_dir;
 
+/// Cross-process locked read-modify-write for whole-file JSON documents.
+///
+/// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`
+/// (#3502) and the worktree registry of epic #4207 are each a small JSON file
+/// mutated by several independent PROCESSES via load → mutate → save. Without
+/// cross-process serialisation those writers lose each other's updates, and a
+/// shared scratch path lets them publish a corrupt document. This module is the
+/// single implementation of that critical section.
+/// What: Exposes [`json_rmw::update`], [`json_rmw::lock_path`], and
+/// [`json_rmw::JsonRmwError`].
+/// Test: `cargo test -p trusty-common -- json_rmw::tests`.
+pub mod json_rmw;
+
 /// Shared CLI daemon-guard helper (probe + spinner + spawn).
 ///
 /// Why: trusty-search, trusty-memory, and trusty-analyze each had an identical

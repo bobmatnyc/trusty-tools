@@ -133,10 +133,17 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// authoritative, later-and-more-specific memory instruction.
 ///
 /// Delegation roster: the DEFAULT delegation section is composed by
-/// [`bundled_delegation`], which appends the LIVE deployed-agent roster to the
-/// bundled asset (#4069). Like the stack profile it is auto-derived framework
+/// [`delegation_with_roster`], which appends the LIVE deployed-agent roster to
+/// the bundled asset (#4069). Like the stack profile it is auto-derived framework
 /// context — but unlike it, it lives inside the overridable delegation section,
 /// so an `AGENT_DELEGATION.md` override still replaces section and roster alike.
+///
+/// Composition source (#4183): the BUNDLED-FALLBACK configuration — no
+/// delegation, workflow or memory override, and a roster present — is composed
+/// through [`crate::core::bundled_pm_package`] and its typed
+/// [`crate::core::instruction_package::InstructionPackage`], byte-identically to
+/// the legacy assembly below. Every other configuration is deliberately still
+/// assembled by [`assemble_sections`]; see the branch comment for why.
 ///
 /// Test: `no_overrides_uses_bundled`, `instructions_appended`,
 /// `workflow_override_replaces`, `agent_delegation_override_replaces`,
@@ -146,6 +153,81 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
 /// and the robustness tests.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
+    let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
+    // `info!`, deliberately: this is the operator-visible record of WHICH
+    // composer produced the session's prompt, and the two are byte-identical by
+    // contract so nothing else can reveal it. `debug!` sits below the default
+    // filter in both subscriber setups, which would make the claim false as
+    // shipped. Matches `delegation_authority`'s analogous roster-source event.
+    tracing::info!(?source, "resolved the PM system prompt");
+    prompt
+}
+
+/// Which composer produced a resolved prompt.
+///
+/// Why: the two composers are byte-identical by contract (#4183), so the
+/// delivered string cannot tell you which one ran. That is exactly the property
+/// that let a call-site mutation survive a green suite — a test asserting
+/// byte-equality through [`resolve_pm_prompt`] would keep passing even if the
+/// package branch were deleted outright. Reporting the source turns "the
+/// composed path was actually taken" into an assertable fact, and gives the
+/// operator a log line saying which model produced their prompt.
+/// What: [`PromptSource::Package`] for the re-sourced bundled fallback,
+/// [`PromptSource::Legacy`] for the two override configurations and for the
+/// compose-error degradation.
+/// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
+/// `workflow_override_forces_the_legacy_path_even_with_a_roster`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptSource {
+    /// Composed via [`crate::core::bundled_pm_package`] / `InstructionPackage`.
+    Package,
+    /// Assembled by the legacy string concatenation.
+    Legacy,
+}
+
+/// [`resolve_pm_prompt`], additionally reporting which composer ran.
+///
+/// Why: see [`PromptSource`] — byte-identical outputs make the path
+/// unobservable from the result alone, so the seam is what keeps the acceptance
+/// gate anchored to the branch it claims to cover.
+/// What: the resolved prompt plus its source, with the deployed-agent roster
+/// scanned from the real tiers.
+/// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
+/// `workflow_override_forces_the_legacy_path_even_with_a_roster`.
+pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
+    resolve_pm_prompt_with_roster(project_dir, || {
+        crate::core::delegation_authority::deployed_roster_section(project_dir)
+    })
+}
+
+/// [`resolve_pm_prompt_with_source`] with the agent roster supplied by the
+/// caller.
+///
+/// Why: the roster is the one composition input this function cannot control
+/// and cannot re-derive. [`crate::core::delegation_authority::deployed_roster_section`]
+/// unions three tiers — the project tier, `$CLAUDE_CONFIG_DIR/agents` and
+/// `~/.claude/agents` — on EVERY call, and the latter two are machine-global
+/// mutable state that live `tm` sessions rewrite at launch; `scan_agents` also
+/// drops a file silently on a transient read failure. Two successive scans can
+/// therefore disagree. A byte-equality test that scans once per side is
+/// consequently racing, and it fails with a message indistinguishable from a
+/// genuine delivered-prompt regression — observed at ~1 red in 4 full-suite
+/// runs on a provisioned workstation, and invisible in CI, where no ambient
+/// tier exists. Injecting the roster gives both sides of that comparison ONE
+/// value without touching `$HOME` (which would cost the serial `HOME_LOCK`) and
+/// without altering the wiring under test.
+///
+/// What: identical to [`resolve_pm_prompt_with_source`] except that
+/// `roster_source` supplies the rendered `## Delegation Authority` block. It is
+/// a closure, not a value, so it stays LAZY: an `AGENT_DELEGATION.md` override
+/// short-circuits before any scan, exactly as before.
+/// Test: `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`,
+/// `resolve_pm_prompt_is_byte_identical_with_a_project_addendum`,
+/// `gate_is_deterministic_across_repeated_runs`.
+pub(crate) fn resolve_pm_prompt_with_roster(
+    project_dir: &Path,
+    roster_source: impl FnOnce() -> Option<String>,
+) -> (String, PromptSource) {
     let dir = project_dir.join(OVERRIDE_DIR_NAME);
 
     // Floor is always appended last and never replaceable.
@@ -157,26 +239,111 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     // configured from that project's detected stack, never a hardcoded default.
     let stack = crate::core::stack_profile::stack_profile_section(project_dir);
 
-    // Branch 1: full replacement short-circuit. BASE_PM still floors it.
+    // Branch 1 (configuration 3): full replacement short-circuit. BASE_PM still
+    // floors it. See #4183 — deliberately still on the legacy path: a deployed
+    // body is opaque prose contributing no delegation section, so it fails both
+    // `SectionWithoutBlocks` and `RosterNotConsumed`. Porting it needs schema
+    // work tracked as follow-up on the epic; do not make it "schema-valid" by
+    // weakening either check.
     if let Some(body) = read_override(&dir, FILE_PM_DEPLOYED) {
         let mut sections: Vec<String> = vec![body, stack];
         if let Some(extra) = read_override(&dir, FILE_INSTRUCTIONS) {
             sections.push(extra);
         }
         sections.push(floor.trim().to_string());
-        return join_sections(sections);
+        return (join_sections(sections), PromptSource::Legacy);
     }
 
     // Branch 2: section-by-section assembly with per-section overrides.
-    let workflow =
-        read_override(&dir, FILE_WORKFLOW).unwrap_or_else(|| WORKFLOW.trim().to_string());
-    let delegation = read_override(&dir, FILE_AGENT_DELEGATION)
-        .unwrap_or_else(|| bundled_delegation(project_dir));
+    let workflow_override = read_override(&dir, FILE_WORKFLOW);
+    let delegation_override = read_override(&dir, FILE_AGENT_DELEGATION);
+    let memory_override = read_override(&dir, FILE_MEMORY);
+    let addendum = read_override(&dir, FILE_INSTRUCTIONS);
 
+    let delegation = match delegation_override {
+        // See #4183 — configuration 2 is deliberately still on the legacy path:
+        // an `AGENT_DELEGATION.md` override replaces the whole section and so
+        // never consumes the computed roster, which `RosterNotConsumed` exists
+        // to forbid. Follow-up on the epic, not a check to relax.
+        Some(body) => body,
+        None => {
+            let roster = roster_source();
+
+            // #4183: configuration 1 (bundled fallback) composes through the
+            // typed InstructionPackage. Gated on there being no section
+            // override and a roster to consume — the only shape the schema can
+            // express — and byte-identical to the assembly below.
+            let bundled_fallback = roster
+                .as_deref()
+                .filter(|_| workflow_override.is_none() && memory_override.is_none());
+            if let Some(roster) = bundled_fallback {
+                // PRECONDITION, established by the `filter` directly above and
+                // relied on by the error arm: on this branch `workflow_override`
+                // and `memory_override` are both `None`. That is what makes the
+                // degradation below byte-identical rather than merely "close" —
+                // the legacy assembly reached on error must be the SAME
+                // configuration the package was composing. If the filter ever
+                // widens, the error path silently stops being equivalent.
+                debug_assert!(
+                    workflow_override.is_none() && memory_override.is_none(),
+                    "the bundled-fallback branch requires no workflow/memory override"
+                );
+                match crate::core::bundled_pm_package::compose_bundled_fallback(
+                    &stack,
+                    roster,
+                    addendum.as_deref(),
+                ) {
+                    Ok(prompt) => return (prompt, PromptSource::Package),
+                    // Unreachable for the shipped assets — `shipped_assets_
+                    // build_and_validate` proves it — so this is a loud last
+                    // resort, never a routine fallback. Given the precondition
+                    // above, the legacy assembly below composes the identical
+                    // configuration and is byte-identical to it, so degrading
+                    // still delivers the right prompt; the error is what says
+                    // the package model drifted from the assets.
+                    Err(err) => tracing::error!(
+                        %err,
+                        "bundled PM instruction package failed to compose; \
+                         falling back to the legacy assembly"
+                    ),
+                }
+            }
+
+            delegation_with_roster(roster.as_deref())
+        }
+    };
+
+    let workflow = workflow_override.unwrap_or_else(|| WORKFLOW.trim().to_string());
+
+    (
+        assemble_sections(stack, memory_override, workflow, delegation, addendum),
+        PromptSource::Legacy,
+    )
+}
+
+/// The legacy section-by-section assembly (branch 2).
+///
+/// Why: extracted so the configurations #4183 leaves on the legacy path share
+/// one implementation with the byte-equality oracle the package path is tested
+/// against — an oracle that is dead test code proves nothing.
+/// What: `PM_INSTRUCTIONS` → stack profile → optional memory block → workflow →
+/// delegation → optional addendum → the non-overridable floor, joined with
+/// [`SECTION_SEPARATOR`] and with empty sections dropped.
+/// Test: `no_overrides_uses_bundled`, `workflow_override_replaces`,
+/// `memory_override_is_slotted_after_pm_instructions`, and
+/// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback` in
+/// `bundled_pm_package_tests.rs`.
+pub(crate) fn assemble_sections(
+    stack: String,
+    memory_override: Option<String>,
+    workflow: String,
+    delegation: String,
+    addendum: Option<String>,
+) -> String {
     let mut sections: Vec<String> = vec![PM_INSTRUCTIONS.trim().to_string(), stack];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.
-    if let Some(memory) = read_override(&dir, FILE_MEMORY) {
+    if let Some(memory) = memory_override {
         sections.push(format!("{MEMORY_OVERRIDE_HEADING}\n\n{memory}"));
     }
 
@@ -184,12 +351,12 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     sections.push(delegation);
 
     // Additive project rules.
-    if let Some(extra) = read_override(&dir, FILE_INSTRUCTIONS) {
+    if let Some(extra) = addendum {
         sections.push(extra);
     }
 
     // Non-overridable floor, always last.
-    sections.push(floor.trim().to_string());
+    sections.push(BASE_PM.trim().to_string());
 
     join_sections(sections)
 }
@@ -218,8 +385,11 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 ///
 /// What: a Markdown blockquote stating the roster wins on WHICH agents exist,
 /// and to re-route rather than retry on an unknown-agent-type error.
+///
+/// `pub(crate)` since #4183: [`crate::core::bundled_pm_package`] emits it as its
+/// own delegation-section block, so both composers use the identical literal.
 /// Test: `bundled_delegation_appends_deployed_roster`.
-const ROSTER_PRECEDENCE_NOTE: &str = "\
+pub(crate) const ROSTER_PRECEDENCE_NOTE: &str = "\
 > The live roster below is authoritative for WHICH agents exist and what each handles; the \
 tables above are routing doctrine only. Where the two disagree, trust the roster.\n\
 >\n\
@@ -245,15 +415,18 @@ not retry the same agent.";
 /// This is the FALLBACK only: a project/user `AGENT_DELEGATION.md` override
 /// still replaces the whole section, unchanged, exactly as documented.
 ///
-/// What: returns the trimmed bundled asset, with
-/// [`crate::core::delegation_authority::deployed_roster_section`]'s rendered
-/// `## Delegation Authority` block appended when any agent is deployed. With no
-/// deployed agents the asset is returned alone (pre-#4069 behaviour).
+/// What: returns the trimmed bundled asset, with the rendered
+/// `## Delegation Authority` block from
+/// [`crate::core::delegation_authority::deployed_roster_section`] appended when
+/// any agent is deployed. With no deployed agents the asset is returned alone
+/// (pre-#4069 behaviour). Takes the already-rendered roster rather than scanning
+/// itself (#4183) so `resolve_pm_prompt` scans the agent tiers exactly once
+/// whichever composition path it takes.
 /// Test: `bundled_delegation_appends_deployed_roster`,
 /// `no_overrides_uses_bundled`, `agent_delegation_override_replaces`.
-fn bundled_delegation(project_dir: &Path) -> String {
+pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
     let bundled = AGENT_DELEGATION.trim();
-    match crate::core::delegation_authority::deployed_roster_section(project_dir) {
+    match roster {
         Some(roster) => format!("{bundled}\n\n{ROSTER_PRECEDENCE_NOTE}\n\n{}", roster.trim()),
         None => bundled.to_string(),
     }

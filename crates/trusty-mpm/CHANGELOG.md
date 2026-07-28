@@ -7,6 +7,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- `core::instruction_overrides`: the DEFAULT PM prompt — the bundled-fallback
+  configuration every project without a `.trusty-mpm/` section override receives
+  — is now composed through the typed `InstructionPackage`
+  (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)) instead
+  of a four-asset string concatenation. The new `core::bundled_pm_package` cuts
+  `PM_INSTRUCTIONS.md` into Core/Memory/Search blocks and `BASE_PM.md` into the
+  three absorbed floor blocks *at runtime*, deriving each block's join from the
+  exact bytes it removed, so re-sectioning an asset cannot move a byte and the
+  eight-section taxonomy now describes the prompt that actually ships. The
+  composed prompt is byte-identical to the previous assembly, gated by
+  `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`, which
+  reports the first differing byte offset with surrounding context on failure.
+  Scope is the bundled fallback ONLY: an `AGENT_DELEGATION.md` override
+  (replaces the section, so never consumes the computed roster) and
+  `PM_INSTRUCTIONS_DEPLOYED.md` (opaque body, no delegation section) are
+  currently inexpressible in the schema and stay on the legacy path by design —
+  neither `RosterNotConsumed` nor `SectionWithoutBlocks` is weakened to
+  accommodate them. The gate is asserted through `resolve_pm_prompt` itself with
+  a project-tier agent deployed, so the composed branch is a property of the test
+  rather than of the machine's `~/.claude/agents`, and `resolve_pm_prompt` now
+  logs which composer produced the prompt — the two are byte-identical by
+  contract, so the delivered string alone cannot tell you. The gate injects a
+  fixed roster rather than scanning the agent tiers per side: those tiers are
+  machine-global mutable state that live `tm` sessions rewrite at launch, so
+  scanning twice made the gate itself intermittently red with a message
+  indistinguishable from a real prompt regression.
+
 ### Added
 
 - `core::instruction_package`: the sectioned-JSON instruction-package schema
@@ -40,6 +69,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to prevent.
 
 ### Fixed
+
+- Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
+  The project-store upsert was an unsynchronised read-modify-write of the whole
+  file — two processes interleaving read/read/write/write silently dropped one
+  registration while both callers saw success, and because every writer shared
+  one fixed `projects.json.tmp` scratch path, overlapping writes could publish a
+  mangled document that no longer parsed. All mutations now run through
+  `ProjectStore::mutate`, which performs the whole cycle inside a cross-process
+  file lock and publishes atomically via `trusty_common::json_rmw`. `PATCH
+  /api/v1/projects/{name}` gets the same guarantee: its fetch→mutate→persist
+  runs under one held lock instead of two separate store calls. A failed lock is
+  an error, never an unsynchronised write.
 
 - Worktree discovery is derived from `git worktree list --porcelain` instead of
   walking five hard-coded location shapes, so a session worktree is found
