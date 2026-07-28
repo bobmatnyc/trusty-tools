@@ -377,9 +377,22 @@ fn collect_from_anchor(
     };
     for wt in worktrees {
         // `locked` is git's own removal veto — the operator ran
-        // `git worktree lock` to say "do not remove this". Honouring it here is
-        // the only place that can: `decommission::remove_session_worktree` runs
-        // `git worktree remove --force`, which overrides the lock outright.
+        // `git worktree lock` to say "do not remove this".
+        //
+        // Be precise about WHY skipping here is load-bearing, because the
+        // obvious reading is wrong and would get this filter deleted as
+        // redundant. `git worktree remove --force` does NOT override a lock:
+        // verified on git 2.54.0, a single `--force` exits 128 with "cannot
+        // remove a locked working tree; use 'remove -f -f' to override or
+        // unlock first", leaving the directory intact. Git respects the lock.
+        //
+        // The danger is what `decommission::remove_session_worktree` does with
+        // that refusal: it treats ANY non-zero git exit as "git failed" and
+        // falls back to `std::fs::remove_dir_all`, which deletes the directory
+        // regardless — defeating the lock via the error path rather than the
+        // force flag, AND leaving git's now-dangling registry entry behind.
+        // Never enumerating a locked worktree is therefore the only place the
+        // operator's veto actually survives.
         if wt.bare || wt.is_main || wt.prunable || wt.locked {
             continue;
         }

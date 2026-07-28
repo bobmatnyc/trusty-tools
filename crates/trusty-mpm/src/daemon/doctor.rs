@@ -377,13 +377,22 @@ fn build_gh_account_check(active: Option<String>, accounts: Vec<String>) -> Doct
 /// that were decommissioned before this fix—or where `git worktree remove`
 /// failed—may leave stale `.worktrees/<session-id>/` directories on disk. This
 /// probe surfaces orphaned dirs so operators know to run
-/// `tm session prune --worktrees`. The filesystem walk is delegated to
+/// `tm session prune --worktrees`. Discovery is delegated to
 /// [`crate::session_manager::prune::find_orphaned_worktrees`] inside
-/// `spawn_blocking` so the async executor is not blocked by synchronous I/O.
+/// `spawn_blocking` so the async executor is not blocked by the synchronous
+/// git subprocesses it spawns.
 /// What: builds a canonicalized active-path set, then spawns a blocking task
-/// to walk `<repos_root>/<owner>/<repo>/.worktrees/`; any leaf directory not
-/// in the active set is counted as an orphan. Reports `Ok` (no orphans),
-/// `Warn` (orphans found), or `Ok` (repos_root absent / unconfigured).
+/// that asks GIT for the worktrees of each managed project (#4207 — this is no
+/// longer a filesystem walk of `.worktrees/`, and a candidate is no longer "any
+/// leaf directory"): every git-registered worktree that is a strict descendant
+/// of the project whose registry named it, minus the active set, is counted as
+/// an orphan. Reports `Ok` (no orphans), `Warn` (orphans found), or `Ok`
+/// (repos_root absent / unconfigured).
+///
+/// Note this probe is REPORT-ONLY — it counts, it never removes — so it
+/// deliberately reports candidates that the reclaim path would refuse to
+/// delete (owner-unknown, dirty). A directory git does not register is not
+/// counted at all; reclaiming unregistered husks is #3715, still open.
 /// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
 async fn check_worktrees(
     repos_root: Option<&Path>,

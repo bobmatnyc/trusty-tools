@@ -350,16 +350,24 @@ fn enumerate_excludes_a_worktree_parked_beside_the_project() {
 /// Containment is STRICT: a path equal to its own containment boundary is
 /// never a candidate.
 ///
-/// Why: the boundary exists so the operator's project checkout can never be
-/// selected, and `starts_with` alone is reflexive — `p.starts_with(p)` is
-/// `true` — so without the explicit `!=` the project directory would satisfy
-/// its own containment test. The ordinary case is masked by the `is_main`
-/// filter, which is exactly why the strictness needs pinning here rather than
-/// through [`enumerate_registered_worktrees`]: `is_main` would keep the
-/// enumeration-level test passing with the `!=` deleted, making it a guard no
-/// test defends. Driving [`collect_from_anchor`] directly lets the boundary be
-/// set to a path that IS in the registry, so the `!=` is the only thing that
-/// can exclude it.
+/// Why: `starts_with` alone is reflexive — `p.starts_with(p)` is `true` — so
+/// without the explicit `!=` a path equal to the boundary satisfies its own
+/// containment test.
+///
+/// Scope honestly: on every topology observed today it is `is_main`, NOT this
+/// `!=`, that keeps the operator's project checkout unselectable — git lists a
+/// project's own root as the main record, and main records are already
+/// filtered. Zero instances on this machine reach the `!=`. It is kept as
+/// defence in depth for the case `is_main` does not cover: a project directory
+/// that is itself a NON-main linked worktree of some other registry being
+/// interrogated, which is reachable in principle and would otherwise put the
+/// operator's checkout on a deletion list.
+///
+/// That same masking is why the strictness is pinned HERE rather than through
+/// [`enumerate_registered_worktrees`] — an enumeration-level test would keep
+/// passing with the `!=` deleted, making it a guard no test defends. Driving
+/// [`collect_from_anchor`] directly lets the boundary be set to a path that IS
+/// in the registry, so the `!=` is the only thing that can exclude it.
 #[test]
 fn collect_from_anchor_never_yields_the_containment_boundary_itself() {
     let fixture = GitWorktreeFixture::new();
@@ -403,9 +411,14 @@ fn collect_from_anchor_never_yields_the_containment_boundary_itself() {
 /// A git-`locked` worktree — the operator's explicit "do not remove this" — is
 /// never a candidate.
 ///
-/// Why: `decommission::remove_session_worktree` removes with `--force`, which
-/// overrides the lock outright. Refusing to enumerate a locked worktree is the
-/// only place git's own removal veto can still be honoured.
+/// Why: NOT because `--force` overrides the lock — it does not. Git refuses a
+/// single `--force` on a locked worktree (exit 128, "use 'remove -f -f' to
+/// override or unlock first") and leaves the directory intact. The problem is
+/// that `decommission::remove_session_worktree` reads that refusal as a generic
+/// git failure and falls back to `std::fs::remove_dir_all`, deleting the
+/// directory anyway and orphaning git's registry entry. So the veto is defeated
+/// through the error path, and never enumerating a locked worktree is the only
+/// place it survives.
 #[test]
 fn enumerate_excludes_a_locked_worktree() {
     let fixture = GitWorktreeFixture::new();

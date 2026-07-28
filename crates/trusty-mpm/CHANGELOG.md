@@ -33,10 +33,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   position rather than by a list of names, so a new one is excluded the day you
   create it. Location remains irrelevant *within* a project, so no reclaim
   capability is lost (#4207).
-- A git-`locked` worktree is never enumerated for reclamation. Removal uses
-  `git worktree remove --force`, which overrides the lock, so refusing to
-  consider a locked worktree is the only place `git worktree lock` can be
-  honoured (#4207).
+- A git-`locked` worktree is never enumerated for reclamation. Git itself
+  respects the lock — `git worktree remove --force` refuses it — but the
+  removal path treats that refusal as a generic git failure and falls back to
+  deleting the directory outright, which defeats the lock and strands git's
+  registry entry. Excluding locked worktrees from enumeration is the only place
+  `git worktree lock` is actually honoured (#4207).
 
 ---
 ## [1.2.3] — 2026-07-28

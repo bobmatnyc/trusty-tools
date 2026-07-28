@@ -643,7 +643,8 @@ impl SessionManager {
     /// Dry-run returns after Phase 1 (no deletion, no snapshot).
     ///
     /// What: Phase 1 calls [`find_orphaned_worktrees`] inside `spawn_blocking`
-    /// (the filesystem walk is blocking); panics are propagated as `Err`. Phase 2
+    /// (git-derived since #4207, but still blocking — it spawns git per
+    /// project); panics are propagated as `Err`. Phase 2
     /// (real-delete only) takes ONE fresh `self.store` snapshot, then per candidate:
     /// canonicalize (skip on error — item 8), check against snapshot, apply the
     /// #3649 OWNERSHIP GATE (below), then call `remove_session_worktree` in its
