@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/bobmatnyc/trusty-tools/schemas/instruction-package-v1.json",
+  "title": "trusty-mpm instruction package",
+  "description": "A PM instruction package: a section taxonomy carrying the customization-tier axis, plus an ORDERED block stream that composes to the PM system prompt. Ordering is array order — never map iteration order — so composition is byte-deterministic (SPEC-PMINSTR-01 / DOC-59 §4a, epic #4183, schema ticket #4184).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "package_id", "sections", "blocks"],
+  "properties": {
+    "schema_version": {
+      "description": "Schema major version. A package whose version this build does not implement is rejected outright — never partially interpreted.",
+      "const": 1
+    },
+    "package_id": {
+      "description": "Stable identifier for this package (e.g. `trusty-mpm/pm`). Identity only; it never affects composed bytes.",
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "trailing_newline": {
+      "description": "Append exactly one '\\n' after the last emitted block. `false` reproduces today's `resolve_pm_prompt` output; `true` reproduces a file-shaped artifact.",
+      "type": "boolean",
+      "default": false
+    },
+    "sections": {
+      "description": "The section taxonomy. Declaration order MUST be the canonical order (identity, core, memory, search, workflow, agent-delegation, non-overridable-rules, framework-guaranteed-conventions) and every canonical section MUST be declared exactly once. Declaration order does not affect composed bytes — `blocks` alone determines output order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/section" },
+      "minItems": 8,
+      "maxItems": 8
+    },
+    "blocks": {
+      "description": "The ordered composition stream. Emitted strictly in array order. A section may own several non-contiguous blocks, which is what lets a section be lifted out of the middle of a legacy asset without moving a single byte.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/block" },
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "section-id": {
+      "description": "The closed section taxonomy, in canonical declaration order. `identity`, `non-overridable-rules` and `framework-guaranteed-conventions` are the absorbed BASE_PM floor blocks and are always tier `fixed`.",
+      "type": "string",
+      "enum": [
+        "identity",
+        "core",
+        "memory",
+        "search",
+        "workflow",
+        "agent-delegation",
+        "non-overridable-rules",
+        "framework-guaranteed-conventions"
+      ]
+    },
+    "customization-tier": {
+      "description": "Who may override this section, by increasing permissiveness. `fixed`: nobody, at any tier (the framework floor). `project`: a project-tier override only — deliberately NOT a user-tier one, so a personal machine config can never silently leak into a shared project. `user`: both project- and user-tier, project winning on collision (most-specific-wins).",
+      "type": "string",
+      "enum": ["fixed", "project", "user"]
+    },
+    "generator": {
+      "description": "A named composition-time input the host must supply. Generated content is never authored in the package — it is computed per project/session and passed in.",
+      "type": "string",
+      "enum": ["agent-roster", "stack-profile", "project-addendum"]
+    },
+    "join": {
+      "description": "The literal bytes inserted BEFORE this block when it is not the first emitted block. `rule` = \"\\n\\n---\\n\\n\", `blank` = \"\\n\\n\", `none` = \"\", `{\"literal\": \"...\"}` = verbatim. Explicit joins are what make a faithful, byte-identical lift possible: blocks split out of one legacy document rejoin with `blank`, while distinct legacy assets rejoin with `rule`.",
+      "oneOf": [
+        { "type": "string", "enum": ["rule", "blank", "none"] },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["literal"],
+          "properties": { "literal": { "type": "string" } }
+        }
+      ]
+    },
+    "body": {
+      "description": "Where a block's markdown comes from. `text` is authored in the package; `generated` is supplied at composition time by the named generator.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "const": "text" },
+            "text": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "generator"],
+          "properties": {
+            "kind": { "const": "generated" },
+            "generator": { "$ref": "#/$defs/generator" }
+          }
+        }
+      ]
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "customization_tier"],
+      "properties": {
+        "id": { "$ref": "#/$defs/section-id" },
+        "title": { "type": "string", "minLength": 1 },
+        "customization_tier": { "$ref": "#/$defs/customization-tier" },
+        "description": { "type": "string" }
+      }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "body"],
+      "properties": {
+        "section": { "$ref": "#/$defs/section-id" },
+        "body": { "$ref": "#/$defs/body" },
+        "join_before": { "$ref": "#/$defs/join", "default": "rule" },
+        "optional": {
+          "description": "Only a `generated` block may be optional. An optional block is dropped when its generator supplies no content; a non-optional block whose content is missing or empty is a hard composition error, never a silent drop (issue #4196 — the computed 42-agent roster was discarded at the final composition step and the prompt shipped naming 8).",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "package_id": "trusty-mpm/example",
+      "description": "Minimal structurally-valid package. Content authoring is #4185; this example exists so the schema's own shape is executable and testable.",
+      "trailing_newline": false,
+      "sections": [
+        {
+          "id": "identity",
+          "title": "Identity",
+          "customization_tier": "fixed",
+          "description": "Absorbed BASE_PM `## Identity`."
+        },
+        {
+          "id": "core",
+          "title": "Core PM Instructions",
+          "customization_tier": "project"
+        },
+        {
+          "id": "memory",
+          "title": "Memory",
+          "customization_tier": "project"
+        },
+        {
+          "id": "search",
+          "title": "Search",
+          "customization_tier": "project"
+        },
+        {
+          "id": "workflow",
+          "title": "Workflow",
+          "customization_tier": "project"
+        },
+        {
+          "id": "agent-delegation",
+          "title": "Agent Delegation",
+          "customization_tier": "project",
+          "description": "Dynamic: built from the deployed-agent roster at composition time."
+        },
+        {
+          "id": "non-overridable-rules",
+          "title": "Non-Overridable Rules",
+          "customization_tier": "fixed",
+          "description": "Absorbed BASE_PM `## Non-Overridable Rules`, `## Customizing PM Behavior`, `## Trusty Tool Priority (Non-Overridable)`."
+        },
+        {
+          "id": "framework-guaranteed-conventions",
+          "title": "Framework-Guaranteed Conventions",
+          "customization_tier": "fixed",
+          "description": "Absorbed BASE_PM `## Framework-Guaranteed Conventions (Non-Overridable)`."
+        }
+      ],
+      "blocks": [
+        {
+          "section": "core",
+          "body": { "kind": "text", "text": "# PM Agent -- Trusty MPM" }
+        },
+        {
+          "section": "memory",
+          "join_before": "blank",
+          "body": { "kind": "text", "text": "## Context-First Protocol" }
+        },
+        {
+          "section": "core",
+          "join_before": "blank",
+          "body": { "kind": "text", "text": "## Agent Routing" }
+        },
+        {
+          "section": "search",
+          "body": { "kind": "text", "text": "## Code/Architecture Search" }
+        },
+        {
+          "section": "core",
+          "body": { "kind": "generated", "generator": "stack-profile" },
+          "optional": true
+        },
+        {
+          "section": "workflow",
+          "body": { "kind": "text", "text": "# PM Workflow Configuration" }
+        },
+        {
+          "section": "agent-delegation",
+          "body": { "kind": "generated", "generator": "agent-roster" }
+        },
+        {
+          "section": "core",
+          "body": { "kind": "generated", "generator": "project-addendum" },
+          "optional": true
+        },
+        {
+          "section": "identity",
+          "body": { "kind": "text", "text": "## Identity" }
+        },
+        {
+          "section": "non-overridable-rules",
+          "join_before": "blank",
+          "body": { "kind": "text", "text": "## Non-Overridable Rules" }
+        },
+        {
+          "section": "framework-guaranteed-conventions",
+          "join_before": "blank",
+          "body": { "kind": "text", "text": "## Framework-Guaranteed Conventions" }
+        }
+      ]
+    }
+  ]
+}

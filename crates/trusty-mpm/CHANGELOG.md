@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- `core::instruction_package`: the sectioned-JSON instruction-package schema
+  ([#4184](https://github.com/bobmatnyc/trusty-tools/issues/4184), epic #4183) —
+  the eight-section taxonomy (Core, Memory, Search, Workflow, Agent Delegation
+  plus the absorbed BASE_PM floor sections Identity, Non-Overridable Rules,
+  Framework-Guaranteed Conventions), the `fixed | project | user`
+  customization-tier axis, an ordered block stream with explicit join literals,
+  structural validation, and a pure deterministic `compose`. The JSON Schema
+  ships as `assets/instructions/instruction-package.schema.json`. Types and
+  validation only — no instruction content is authored (#4185) and no build is
+  re-sourced (#4186); nothing in the session-launch path composes from it yet.
+
 ### Fixed
 
 - Worktree discovery is derived from `git worktree list --porcelain` instead of

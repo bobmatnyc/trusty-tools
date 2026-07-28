@@ -52,6 +52,9 @@ pub mod hook;
 pub mod idle_nudge;
 pub mod idle_parking;
 pub mod instruction_overrides;
+// Issue #4184 / epic #4183: the sectioned-JSON instruction package schema. Types
+// + validation only — nothing in the launch path composes from it yet (#4186).
+pub mod instruction_package;
 pub mod instruction_pipeline;
 pub mod ipc;
 pub mod llm_overseer;
