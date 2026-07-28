@@ -10,12 +10,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [0.21.3] — 2026-07-27
+## [0.22.0] — 2026-07-27
+
+MINOR, not the patch 0.21.3 this was originally staged as (#4177). This crate
+publicly re-exports `trusty-common` items — `src/palace_id_derive.rs:19`:
+
+```rust
+pub use trusty_common::palace_id::{
+    derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
+    parent_dir_slug, PALACE_OVERRIDE_ENV,
+};
+```
+
+The module is declared `pub mod palace_id_derive;` at `lib.rs:140` with no
+`cfg` gate and no feature guard, so the whole shim is unconditional public API.
+Raising the `trusty-common` requirement from `^0.26.2` to `^0.27` changes the
+identity of publicly re-exported items, which at patch level would let `^0.21.2`
+re-resolve already-published consumers onto the new identity — the same shape
+that forced the trusty-analyze 0.7.3 yank. `^0.21` excludes 0.22.0, so
+published consumers keep resolving to 0.21.2 and stay installable.
+
+Consumer pin updated in the same change: `trusty-agents` required
+`trusty-memory = "0.21.1"`, i.e. `^0.21.1` = `>=0.21.1, <0.22.0`, which 0.22.0
+does **not** satisfy — left alone it would have traded one red for another. It
+is now `"0.22"`. `trusty-agents` is unpublished (0.38.6), so this is a
+requirement edit only and its own version is untouched.
 
 ### Changed
 
 - `trusty-common` requirement raised to `^0.27` (was `^0.26.2`): 0.27.0 makes
   `ChatEvent` `#[non_exhaustive]`, which a `^0.26` requirement cannot express.
+  Because the re-exports above are public, this requirement change is itself
+  the reason for the MINOR level.
 
 ### Fixed
 

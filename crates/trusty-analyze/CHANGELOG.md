@@ -11,13 +11,37 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [0.7.5] — 2026-07-27
+## [0.8.0] — 2026-07-27
+
+MINOR, not the patch 0.7.5 this was originally staged as (#4177). This crate
+publicly re-exports `trusty-common` types — `src/types/entity.rs:14-15`:
+
+```rust
+pub use trusty_common::symgraph::contracts::EdgeKind;
+pub use trusty_common::symgraph::{fact_hash_str, EntityType, RawEntity};
+```
+
+surfaced unconditionally as `trusty_analyze::types::{EntityType, RawEntity,
+EdgeKind, fact_hash_str}` (`lib.rs:82 pub mod types` → `types/mod.rs:14 pub mod
+entity` → `types/mod.rs:21 pub use entity::{…}`; no `cfg`, and the
+`trusty-common/symgraph` feature is enabled unconditionally). Raising the
+`trusty-common` requirement from `^0.26` to `^0.27` therefore changes the
+*identity* of publicly re-exported types.
+
+At patch level that is a break shipped silently: `^0.7.4` re-resolves
+already-published consumers onto the new type identity, and a consumer that
+also depends on `trusty-common 0.26` directly gets two semver-incompatible
+copies linked at once and mismatched-type errors against
+`trusty_analyze::types::EntityType`. That is bit-for-bit the defect that forced
+the **0.7.3 yank** on this very crate. `^0.7` excludes 0.8.0, so published
+consumers keep resolving to 0.7.4 and stay installable.
 
 ### Changed
 
 - `trusty-common` requirement raised to `^0.27` (was `^0.26`, inherited from
   `[workspace.dependencies]`): 0.27.0 makes `ChatEvent` `#[non_exhaustive]`,
-  which a `^0.26` requirement cannot express.
+  which a `^0.26` requirement cannot express. Because the re-exports above are
+  public, this requirement change is itself the reason for the MINOR level.
 
 ### Fixed
 

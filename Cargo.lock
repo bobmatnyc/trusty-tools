@@ -10302,7 +10302,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.9.4"
+version = "2.10.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11269,7 +11269,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11634,7 +11634,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.21.3"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "async-trait",
