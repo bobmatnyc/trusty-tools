@@ -7,7 +7,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **The Skills pane renders function skills as groups (#4024).** A `kind:
+  "function"` bundle is no longer filtered out of the pane — it renders as a
+  collapsed group header over its member skill cards, with the tri-state grant
+  display DOC-57 S-16 specifies: "granted" only when every member is granted,
+  "partial — k of n" when some are, "not granted" when none are. Members render
+  inside their group instead of the flat Actions/Knowledge/System buckets (one
+  card, one place); a skill belonging to no bundle renders exactly as before.
+  Membership and grant state are read from the route's `groups[]`, never
+  re-derived client-side, and a bundle still does not move the "N of M known
+  skills granted" count — it is not a capability of its own.
+- **A `Google Workspace` function skill (#4024)** bundling the Gmail and Google
+  Tasks leaf skills (search, read, compose, draft, format, labels, attachments;
+  task lists, create, update, complete) as one grantable unit. Gmail account
+  settings and filters, Google account administration, and the Drive/Docs/
+  Sheets/Slides/Calendar families are deliberately NOT members.
+- **A `CTO Tools` function skill (#4024)** bundling the four CTO operations
+  database queries (headcount, budget, risks, work classification).
+- **`groups[].providers` on `GET /api/agents/:name/skills` (#4024).** A bundle
+  carries no credential of its own, so the group now reports the DISTINCT
+  credential requirements across its members, each with the same tri-state
+  `configured` a leaf card carries. Members needing different credentials
+  produce one entry each — a divergence is rendered, never collapsed into a
+  single verdict — and an OAuth requirement still reports `configured: null`
+  ("not verified"), never a check nobody ran. Additive: existing fields are
+  unchanged.
+
 ### Changed
+
+- **The `ticketing` function skill now also bundles the two read-only git
+  inspection skills (#4024)** — `git_search_commits` and `git_branches` — so
+  git and ticketing are granted as one unit. Git *mutation* skills (commit,
+  push, branch creation, checkout, stash) remain excluded, and a test pins
+  that exclusion.
 
 - `trusty-memory` requirement raised to `^0.22` (was `^0.21.1`). trusty-memory
   goes 0.21.3 -> 0.22.0 because it publicly re-exports `trusty_common::palace_id`

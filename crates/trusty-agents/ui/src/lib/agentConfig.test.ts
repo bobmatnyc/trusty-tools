@@ -15,6 +15,7 @@ import {
   matchesToolGlob,
   fetchAgentSkills,
   fetchAgentSubagents,
+  providerChip,
   type AgentStores,
 } from './agentConfig';
 
@@ -272,5 +273,45 @@ describe('STORE_BOUND_KNOWLEDGE_TOOLS', () => {
     // taxonomy that same section warns against; classification belongs to
     // `kind = "knowledge"` manifests (#3933).
     expect([...STORE_BOUND_KNOWLEDGE_TOOLS]).toEqual(['vector_search']);
+  });
+});
+
+describe('providerChip (#4024)', () => {
+  // The chip is shared by a leaf card and a function-skill group header, so it
+  // is the one place a credential could be claimed in one and denied in the
+  // other. `configured: null` — an OAuth grant nobody verified — must read as
+  // "not verified", never as a green check (DOC-57 S-11b).
+  it('never renders an unverified credential as configured', () => {
+    const chip = providerChip({
+      provider: 'Google Workspace',
+      requirement: 'An authorized Google account profile.',
+      env_var: null,
+      configured: null,
+    });
+    expect(chip.tone).toBe('unknown');
+    expect(chip.label).toBe('Google Workspace \u2014 not verified');
+  });
+
+  it('states the variable to set when an env-backed credential is absent', () => {
+    const chip = providerChip({
+      provider: 'MTA',
+      requirement: 'An MTA developer API key.',
+      env_var: 'MTA_API_KEY',
+      configured: false,
+    });
+    expect(chip.tone).toBe('bad');
+    expect(chip.label).toBe('MTA NOT configured');
+    expect(chip.title).toContain('Set MTA_API_KEY.');
+  });
+
+  it('reports configured only from evidence', () => {
+    const chip = providerChip({
+      provider: 'Brave Search',
+      requirement: 'A Brave Search API key.',
+      env_var: 'BRAVE_API_KEY',
+      configured: true,
+    });
+    expect(chip.tone).toBe('ok');
+    expect(chip.label).toBe('Brave Search configured');
   });
 });
