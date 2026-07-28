@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`project_index_id` — project-derived trusty-search index identity (#4207).**
+  New `ProjectIdentity` (origin + root + gh user) with a pure, deterministic
+  `index_id()`, plus `derive_project_index_id()` and `resolve_gh_user()`. Unlike
+  the basename rule in `index_id` (which collides for unrelated checkouts sharing
+  a directory name) and the session-worktree UUID (which binds service identity to
+  ephemeral writer isolation), this id *partitions*: the canonical content-tree
+  root is a hashed component, so sibling clones, linked worktrees, and differing
+  accounts derive distinct ids by construction. Derivation only — nothing is wired
+  into `ensure_project_indexed`, `trusty-search serve`, or the daemon's resolution
+  path; registry reconciliation and migration of existing indexes are separate
+  slices of #4207. No behaviour change for any existing caller.
+
 ---
 ## [0.27.0] — 2026-07-27
 
