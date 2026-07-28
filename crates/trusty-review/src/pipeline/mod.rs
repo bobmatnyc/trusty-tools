@@ -25,6 +25,11 @@
 //! Test: each submodule carries its own unit tests.
 
 pub mod citation_check;
+// Why: the grounding guard for package-registry / version-existence claims
+// (#4081) — kept separate from `finding_hygiene` (self-admission markers) and
+// `citation_check` (path/content verification) because it keys on a different
+// signal entirely and carries its own marker sets and test surface.
+pub mod claim_grounding;
 pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;

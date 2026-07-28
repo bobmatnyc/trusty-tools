@@ -181,6 +181,29 @@ pub enum VerifyOutcome {
     /// The finding was below the verification confidence threshold; not sent
     /// to the verifier.
     Skipped,
+    /// The finding makes a claim NOTHING in this pipeline can verify, so it was
+    /// deliberately never sent to the verifier and may never be marked
+    /// `Confirmed` (#4081).
+    ///
+    /// Why: `Confirmed` is the trust signal consumers read to decide a finding
+    /// is real. A package-registry assertion ("version X does not exist", "X is
+    /// deprecated") rests on the model's training-cutoff recollection, and the
+    /// verifier is the SAME kind of oracle — asking it launders a stale
+    /// recollection into a confirmation. Recording the un-verifiability
+    /// explicitly is honest where `Skipped` (which means "below the confidence
+    /// threshold") would be a lie about why the verifier was not consulted.
+    /// What: set by `pipeline::claim_grounding::demote_ungrounded_registry_claims`
+    /// BEFORE the verification round; `verify::select_candidates` skips any
+    /// finding whose outcome is already decided, so it can never be overwritten
+    /// with `Confirmed`. Unlike the refutation variants it is NOT excluded from
+    /// the verdict floor — the finding survives as an advisory note (it is the
+    /// demotion of `effort`/`confidence`/`code_provable` that keeps it from
+    /// escalating), because "we could not check this" is not "this is false".
+    Unverifiable {
+        /// Human-readable reason the claim is unverifiable (e.g.
+        /// `"package-registry version claim; no registry lookup performed"`).
+        reason: String,
+    },
 }
 
 // ─── Finding category ──────────────────────────────────────────────────────────

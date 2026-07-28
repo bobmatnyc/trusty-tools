@@ -243,7 +243,7 @@ fn does_not_demote_legitimate_implementation_grounded_finding() {
 // ─── Orchestration ─────────────────────────────────────────────────────────────
 
 #[test]
-fn sanitize_findings_runs_both_passes() {
+fn sanitize_findings_runs_every_pass() {
     let mut findings = vec![
         finding(
             Effort::Medium,
@@ -253,14 +253,25 @@ fn sanitize_findings_runs_both_passes() {
             Effort::High,
             "If implementation follows the interface literally, this breaks.",
         ),
+        finding(
+            Effort::High,
+            "The workflow runs `pip install \"ruff==0.16.0\"`, but version 0.16.0 \
+             does not exist on PyPI.",
+        ),
         finding(Effort::High, "Real SQL injection provable from the diff."),
     ];
-    let (dropped, demoted) = sanitize_findings(&mut findings);
-    assert_eq!(dropped, 1);
-    assert_eq!(demoted, 1);
-    assert_eq!(findings.len(), 2);
+    let counts = sanitize_findings(&mut findings);
+    assert_eq!(counts.dropped_self_negated, 1);
+    assert_eq!(counts.demoted_diff_absent, 1);
+    assert_eq!(counts.demoted_ungrounded_registry, 1, "#4081 pass is wired");
+    assert_eq!(findings.len(), 3);
     assert_eq!(findings[0].effort, Effort::Medium, "demoted, not dropped");
-    assert_eq!(findings[1].effort, Effort::High, "untouched real finding");
+    assert_eq!(
+        findings[1].effort,
+        Effort::Medium,
+        "#4081 demoted, not dropped"
+    );
+    assert_eq!(findings[2].effort, Effort::High, "untouched real finding");
 }
 
 // ─── relax_verdict_if_evidence_wiped (#4042, #4044) ───────────────────────────
