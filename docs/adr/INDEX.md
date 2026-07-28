@@ -1,6 +1,6 @@
 # ADR Index — Accepted Decisions
 
-**Last updated:** 2026-07-27 | **Format version:** 1.0
+**Last updated:** 2026-07-28 | **Format version:** 1.0
 
 This index is the **single source of truth** for the ADR corpus. It serves as a quick reference for **consistency vetting** (see DOC-46 §3, "Related Decisions" protocol) and as a discoverability surface for understanding the architectural decision landscape.
 
@@ -27,9 +27,10 @@ This index is the **single source of truth** for the ADR corpus. It serves as a 
 | [0017](./0017-shared-ingress-via-console-tailscale-funnel.md) | Shared webhook ingress via trusty-console + Tailscale Funnel | Proposed | External webhooks flow through one /api/webhooks/{source} endpoint, reverse-proxied by trusty-console, exposed publicly via Tailscale Funnel | Workspace |
 | [0018](./0018-loopback-only-doctrine.md) | Loopback-only doctrine: `trusty-console` is the sole off-loopback HTTP surface | Accepted | trusty-console is the only daemon allowed to bind off-loopback; sibling daemons may run loopback-only HTTP for CLI/stdio-bridge/GUI use (amends 0011) | Workspace |
 | [0019](./0019-unified-ipc-messaging-on-event-bus.md) | Unified IPC messaging on the event-driven control bus | Accepted | Single durable IPC channel for all cross-PM and cross-agent messaging, built on the event bus with explicit delivery acknowledgment | Workspace |
-| [0020](./0020-session-owned-worktrees.md) | Session-owned worktrees: ownership registry + owner-gated reclamation | Accepted | Worktree sentinels + `SessionRecord.worktree_owner` registry field record an owning session; orphan-GC and `decommission` never reclaim an owner-unknown or live-owned worktree; zero migration for legacy worktrees | crate `trusty-mpm` |
+| [0020](./0020-session-owned-worktrees.md) | Session-owned worktrees: ownership registry + owner-gated reclamation | Amended by 0023 | Worktree sentinels + `SessionRecord.worktree_owner` registry field record an owning session; orphan-GC and `decommission` never reclaim an owner-unknown or live-owned worktree; zero migration for legacy worktrees | crate `trusty-mpm` |
 | [0021](./0021-slack-inbound-hybrid-gateway-eventstream.md) | Slack inbound = hybrid gateway+eventstream | Accepted | The Socket-Mode gateway stays the transport/reply path; inbound messages are ADDITIONALLY mirrored onto the generic listener `EventStore`/`ListenerEventReceived` eventstream, with no wake binding wired (direct dispatch already replies) | crate `trusty-agents` |
 | [0022](./0022-knowledge-tree-sync-model.md) | Knowledge-tree sync model: config-only monorepo + separate per-store repos | Accepted | Monorepo (`trusty-agents-agents`) holds config only; knowledge trees sync via optional per-store repos (e.g., `trusty-kb-<tree>`), each opt-in via a `[[stores]]` binding field | Workspace |
+| [0023](./0023-worktree-authority-existence-vs-ownership.md) | Worktree authority split: git decides existence, a rebuildable index decides ownership | Accepted | `git worktree list --porcelain` is the sole authority for what worktrees exist; a rebuildable registration record (built from sentinels + git's list) is the sole authority for who owns one; the #3649 sentinel is retained; the destructive path fails closed on a missing/stale index; branch role as an ownership signal is deferred | crate `trusty-mpm` |
 
 ## Notes
 
