@@ -383,10 +383,19 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
 /// deriving from it deletes the whole category of missed-location bug.
 /// What: delegates discovery to
 /// [`super::worktree_registry::enumerate_registered_worktrees`] — every
-/// worktree git itself registers, wherever it lives — then removes any whose
-/// path is in `active_set`. Candidates come back canonicalized (so the
-/// active-set comparison is symlink-safe), sorted, and de-duplicated. A
-/// non-existent or unreadable `repos_root` yields an empty vec.
+/// worktree git itself registers inside a managed project, wherever in that
+/// project it lives — then removes any whose path is in `active_set`.
+/// Candidates come back canonicalized (so the active-set comparison is
+/// symlink-safe), sorted, and de-duplicated. A non-existent or unreadable
+/// `repos_root` yields an empty vec.
+///
+/// BOUNDARY (#4224 review, HIGH): "wherever it lives" is bounded — a candidate
+/// must be a strict descendant of the managed project directory whose registry
+/// named it. Location is irrelevant WITHIN a project (that is the #4207 fix);
+/// it is decisive at the project edge, so an operator checkout parked beside a
+/// project, or a worktree the operator registered outside it, is never a
+/// candidate. See
+/// [`super::worktree_registry::enumerate_registered_worktrees`].
 ///
 /// A candidate here is still only a CANDIDATE: `prune_orphaned_worktrees`
 /// applies the #3649 ownership-sentinel gate and the #4091 dirty-tree gate
@@ -914,13 +923,40 @@ impl SessionManager {
     /// What: snapshots every live record's `workspace_path` from the store as the
     /// active set, then delegates to `prune_orphaned_worktrees` with
     /// `dry_run = false`. The two-phase TOCTOU safety (a fresh store snapshot taken
-    /// immediately before deletion) and the "only leaf dirs under `.worktrees/`,
-    /// never the base clone" guard are inherited unchanged, as is the #4091
+    /// immediately before deletion) is inherited unchanged, as is the #4091
     /// dirty-tree gate — the periodic daemon sweep ALWAYS uses the default
     /// [`DirtyWorktreePolicy::Skip`] and has no way to opt into discarding
     /// work. Returns the paths removed.
+    ///
+    /// # What actually bounds THIS path (#4224 review, corrected)
+    ///
+    /// This is the only entry point that deletes with no human present, so the
+    /// guarantees named here have to be the ones that hold. Until #4207 this doc
+    /// claimed an "only leaf dirs under `.worktrees/`, never the base clone"
+    /// guard; that guard was a property of the five-shape walk and no longer
+    /// exists. In its place, a directory must clear ALL of:
+    ///
+    /// 1. git itself registers it as a worktree (a husk or a stray `mkdir` is
+    ///    not a candidate) that is not main, bare, prunable, or `locked`;
+    /// 2. it is a STRICT DESCENDANT of the managed project directory whose
+    ///    registry named it, and lies under `repos_root`
+    ///    ([`super::worktree_registry::enumerate_registered_worktrees`]) — so
+    ///    the operator's own checkouts and anything parked beside a project are
+    ///    structurally unreachable, not merely unlisted;
+    /// 3. it is absent from both the initial and the pre-deletion active set;
+    /// 4. it carries a #3649 ownership sentinel naming an owner that is
+    ///    provably ownerless past [`super::worktree_ownership::OWNERLESS_GRACE`]
+    ///    — an absent, empty, or unparsable sentinel is reported, never removed;
+    /// 5. `git worktree list` (asked at the candidate itself) agrees; and
+    /// 6. the #4091/#4118 dirty gate finds no uncommitted or unpushed work,
+    ///    re-checked immediately before the removal.
+    ///
+    /// Gates 2 and 4 are independent structural boundaries by design: neither is
+    /// load-bearing alone.
     /// Test: `reap_orphaned_worktrees_removes_orphan_preserves_live` in
-    /// `super::reap_orphaned_worktrees_tests`.
+    /// `super::reap_orphaned_worktrees_tests`;
+    /// `enumerate_excludes_a_sibling_checkout_of_the_same_repo` and
+    /// `enumerate_excludes_a_worktree_parked_beside_the_project` pin gate 2.
     pub async fn reap_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,

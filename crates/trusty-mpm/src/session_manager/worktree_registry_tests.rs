@@ -68,6 +68,39 @@ fn parse_worktree_list_empty_input_is_empty() {
     assert!(parse_worktree_list("").is_empty());
 }
 
+/// `locked` is git's removal veto and must be read in BOTH spellings the
+/// porcelain format emits — bare, and with an operator-supplied reason.
+#[test]
+fn parse_worktree_list_reads_locked_with_and_without_reason() {
+    let stdout = "\
+worktree /repos/owner/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /repos/owner/repo/.worktrees/bare-lock
+HEAD def456
+locked
+
+worktree /repos/owner/repo/.worktrees/lock-with-reason
+HEAD 789abc
+locked keeping this for the postmortem
+
+worktree /repos/owner/repo/.worktrees/unlocked
+HEAD 000111
+";
+    let got = parse_worktree_list(stdout);
+    assert_eq!(got.len(), 4, "one record per stanza; got {got:?}");
+    assert!(got[1].locked, "the bare `locked` line must set the flag");
+    assert!(
+        got[2].locked,
+        "`locked <reason>` must set the flag too, not just the bare word"
+    );
+    assert!(
+        !got[3].locked,
+        "control: a worktree with no `locked` line must not be flagged"
+    );
+}
+
 // ── registry_root_for: the replacement for grandparent inference ─────────
 
 /// A linked worktree resolves to the checkout that REGISTERED it, whatever
@@ -230,12 +263,181 @@ fn enumerate_excludes_the_main_checkout() {
     );
 }
 
-/// A worktree registered to a repo under `repos_root` but living OUTSIDE it is
-/// not enumerated — the containment boundary the old walk had structurally.
+// ── the structural containment boundary (#4224 review, HIGH) ─────────────
+//
+// Deriving from git widened what is SEEN from five path shapes to anything
+// registered under `repos_root`. Replayed against the dogfood machine that
+// admitted five of the operator's own long-lived checkouts, leaving the #3649
+// sentinel as the only thing between enumeration and an unattended
+// `remove_dir_all`. The rule these tests pin is that a candidate must be a
+// STRICT DESCENDANT of the managed project directory whose registry named it.
+//
+// Each test below asserts the negative AND a positive control that must be
+// enumerated in the same call, so none of them can pass because enumeration
+// returned nothing at all — the way this module fails when git rejects a flag
+// or the anchor check regresses.
+
+/// An operator checkout the operator parked at the project-slot position, next
+/// to a managed project, is NOT a reclaim candidate.
 ///
-/// Why: the walk could only ever produce paths beneath the root it was handed.
-/// Git will happily report a worktree parked in `/tmp`; enumerating it would
-/// silently widen the sweep's blast radius beyond the managed workspace root.
+/// Why: this is the live shape the #4224 review measured —
+/// `<owner>/ft-follow-links`, `<owner>/trusty-tools-main-build` and
+/// `<owner>/gb-connect-card` are all real linked worktrees of a managed project
+/// that the operator parked beside it, and all three became enumerable the
+/// moment discovery stopped being shape-based. They are excluded by POSITION:
+/// a candidate must live inside the project that owns it, which no checkout
+/// parked as a sibling can ever satisfy, whatever it is named.
+#[test]
+fn enumerate_excludes_a_sibling_checkout_of_the_same_repo() {
+    let fixture = GitWorktreeFixture::new();
+    let owner_dir = fixture.repo.parent().expect("<repos_root>/<owner>");
+    let sibling = fixture.add_worktree_at(owner_dir, "operator-checkout");
+    // Positive control: an ordinary in-project worktree in the SAME call.
+    let control = fixture.add_worktree("control-session");
+
+    let found = enumerate_registered_worktrees(&fixture.repos_root);
+    let canonical_control = std::fs::canonicalize(&control).unwrap_or_else(|_| control.clone());
+    assert!(
+        found.contains(&canonical_control),
+        "control: an in-project worktree MUST still be enumerated, or this test \
+         proves nothing; got {found:?}"
+    );
+
+    let canonical_sibling = std::fs::canonicalize(&sibling).unwrap_or_else(|_| sibling.clone());
+    assert!(
+        !found.contains(&canonical_sibling),
+        "a checkout parked beside the managed project must never be a reclaim \
+         candidate; got {found:?}"
+    );
+    assert!(sibling.exists(), "the sibling checkout must be untouched");
+}
+
+/// A worktree in a sibling DIRECTORY whose name merely shares a string prefix
+/// with the project is NOT a candidate.
+///
+/// Why: two things at once. It is the live
+/// `<owner>/trusty-tools-worktrees/wt-*` shape — the operator's own worktree
+/// parking lot, three of which the review measured as newly enumerable. And it
+/// is the string-prefix trap: `repo-worktrees` starts with `repo` as a string,
+/// so a containment check written on strings rather than on PATH COMPONENTS
+/// would admit every one of them. `Path::starts_with` is component-wise; this
+/// test is what stops someone "simplifying" it into a `to_string_lossy()`
+/// comparison.
+#[test]
+fn enumerate_excludes_a_worktree_parked_beside_the_project() {
+    let fixture = GitWorktreeFixture::new();
+    let owner_dir = fixture.repo.parent().expect("<repos_root>/<owner>");
+    let parking_lot = owner_dir.join("repo-worktrees");
+    let parked = fixture.add_worktree_at(&parking_lot, "wt-1");
+    let control = fixture.add_worktree("control-session");
+
+    let found = enumerate_registered_worktrees(&fixture.repos_root);
+    let canonical_control = std::fs::canonicalize(&control).unwrap_or_else(|_| control.clone());
+    assert!(
+        found.contains(&canonical_control),
+        "control: an in-project worktree MUST still be enumerated; got {found:?}"
+    );
+
+    let canonical_parked = std::fs::canonicalize(&parked).unwrap_or_else(|_| parked.clone());
+    assert!(
+        !found.contains(&canonical_parked),
+        "`<owner>/repo-worktrees/wt-1` merely shares a string prefix with the \
+         project `<owner>/repo` and must NOT be enumerated; got {found:?}"
+    );
+    assert!(parked.exists(), "the parked worktree must be untouched");
+}
+
+/// Containment is STRICT: a path equal to its own containment boundary is
+/// never a candidate.
+///
+/// Why: the boundary exists so the operator's project checkout can never be
+/// selected, and `starts_with` alone is reflexive — `p.starts_with(p)` is
+/// `true` — so without the explicit `!=` the project directory would satisfy
+/// its own containment test. The ordinary case is masked by the `is_main`
+/// filter, which is exactly why the strictness needs pinning here rather than
+/// through [`enumerate_registered_worktrees`]: `is_main` would keep the
+/// enumeration-level test passing with the `!=` deleted, making it a guard no
+/// test defends. Driving [`collect_from_anchor`] directly lets the boundary be
+/// set to a path that IS in the registry, so the `!=` is the only thing that
+/// can exclude it.
+#[test]
+fn collect_from_anchor_never_yields_the_containment_boundary_itself() {
+    let fixture = GitWorktreeFixture::new();
+    let wt = fixture.add_worktree("session-a");
+    let canonical_wt = std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone());
+    let canonical_root = std::fs::canonicalize(&fixture.repos_root).expect("canonical root");
+    let canonical_repo = std::fs::canonicalize(&fixture.repo).expect("canonical repo");
+
+    // Control: bounded by the real project, the worktree IS collected — so the
+    // exclusion below cannot be attributed to the anchor or the registry.
+    let mut collected = std::collections::BTreeSet::new();
+    collect_from_anchor(
+        &fixture.repo,
+        &canonical_root,
+        &canonical_repo,
+        &mut collected,
+    );
+    assert!(
+        collected.contains(&canonical_wt),
+        "control: bounded by the project, a real in-project worktree must be \
+         collected; got {collected:?}"
+    );
+
+    // Now make the worktree its OWN boundary: it is no longer a STRICT
+    // descendant, and must not be collected.
+    let mut collected = std::collections::BTreeSet::new();
+    collect_from_anchor(
+        &fixture.repo,
+        &canonical_root,
+        &canonical_wt,
+        &mut collected,
+    );
+    assert!(
+        !collected.contains(&canonical_wt),
+        "a path equal to its containment boundary must never be a candidate — \
+         this is what keeps the operator's project checkout unselectable; got \
+         {collected:?}"
+    );
+}
+
+/// A git-`locked` worktree — the operator's explicit "do not remove this" — is
+/// never a candidate.
+///
+/// Why: `decommission::remove_session_worktree` removes with `--force`, which
+/// overrides the lock outright. Refusing to enumerate a locked worktree is the
+/// only place git's own removal veto can still be honoured.
+#[test]
+fn enumerate_excludes_a_locked_worktree() {
+    let fixture = GitWorktreeFixture::new();
+    let locked = fixture.add_worktree("locked-by-operator");
+    fixture.lock_worktree(&locked);
+    let control = fixture.add_worktree("not-locked");
+
+    let found = enumerate_registered_worktrees(&fixture.repos_root);
+    let canonical_control = std::fs::canonicalize(&control).unwrap_or_else(|_| control.clone());
+    assert!(
+        found.contains(&canonical_control),
+        "control: an identically-placed UNLOCKED worktree must be enumerated, so \
+         the exclusion below is attributable to the lock and nothing else; got {found:?}"
+    );
+
+    let canonical_locked = std::fs::canonicalize(&locked).unwrap_or_else(|_| locked.clone());
+    assert!(
+        !found.contains(&canonical_locked),
+        "a git-locked worktree must never be enumerated for reclaim; got {found:?}"
+    );
+}
+
+/// A worktree registered to a repo under `repos_root` but living OUTSIDE it is
+/// not enumerated.
+///
+/// Why: git will happily report a worktree parked in `/tmp`; enumerating it
+/// would put the sweep's blast radius outside the managed workspace entirely.
+/// Since #4224 the strict-descendant rule already rejects this path (a `/tmp`
+/// worktree is not inside the project either), so the `repos_root` check this
+/// test names is now the OUTER of two independent bounds rather than the only
+/// one — it still matters for a project directory that symlinks out of the
+/// managed root, which is the only way the two can disagree.
 #[test]
 fn enumerate_excludes_worktrees_outside_the_repos_root() {
     let fixture = GitWorktreeFixture::new();
