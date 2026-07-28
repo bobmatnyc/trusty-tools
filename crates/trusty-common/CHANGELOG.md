@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- `json_rmw`: cross-process locked read-modify-write for whole-file JSON
+  documents — the single implementation of the load → mutate → save critical
+  section that `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s
+  `tokens.json` (#3502) and the epic #4207 worktree registry all need.
+  `json_rmw::update` takes an exclusive advisory lock on a `<path>.lock`
+  sidecar, re-reads the document under that lock (never trusting a caller's
+  stale copy), applies the mutation, and publishes atomically via a
+  per-writer-unique temp file + `fsync` + `rename` + directory `fsync`. Never
+  fails open: a failed lock, read, parse or write returns `Err` with the
+  document byte-for-byte unchanged, and only a genuinely absent file starts
+  from `Default`. Adds `fd-lock` as an unconditional dependency.
+
 ---
 ## [0.27.0] — 2026-07-27
 
