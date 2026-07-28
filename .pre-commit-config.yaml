@@ -80,6 +80,22 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Document-number allocation lint. Fails the commit when two files claim the
+  # same DOC-N or ADR-NNNN (by filename or by their own header self-label), when
+  # a file's filename and self-label disagree, when a spec-catalog row points at
+  # a file that does not exist, or when the catalog's "next free DOC-N" hint is
+  # already taken. Grandfathered pre-existing collisions live in
+  # .doc-number-allowlist.tsv (ratchet). Runs against the whole tracked tree
+  # (pass_filenames: false), matching the line-cap hook's holistic scan.
+  - repo: local
+    hooks:
+      - id: doc-numbers
+        name: "DOC-N / ADR number allocation lint"
+        entry: scripts/check_doc_numbers.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Spec-Linked Documentation (DOC-38) lint (issue #2854). Fails the commit when
   # a declared spec reference does not resolve (inline `# Spec References` blocks
   # across crates/**, or `spec_refs:` frontmatter in docs/specs/**/*.md), or when
