@@ -13,6 +13,13 @@
 //! for which test pins which behavior.
 
 use super::*;
+// #4171: the pure gating helpers moved to `persona_gate` (see that
+// module's doc comment for why); imported directly so these tests keep
+// exercising the same functions, unchanged.
+use super::super::persona_gate::filter_persona_tool_names;
+// `persona.rs` no longer imports `Scope` (its only user moved to
+// `persona_gate`), but these tests still construct one directly.
+use crate::tools::registry::scope::Scope;
 
 /// #3223: `run_pm_task_with_persona` now resolves the agent via
 /// `AgentConfig::by_name_async` instead of a hand-rolled `.toml`-only
@@ -757,4 +764,70 @@ fn shipped_agents_with_live_google_patterns_are_not_flagged() {
             "{name}: the extends union produced duplicate scope patterns: {scopes:?}"
         );
     }
+}
+
+/// #4171 (epic #4167): an L1 persona that DECLARES the session-state tools
+/// still gets none of them out of the persona-chat gate.
+///
+/// Why: `session_list`, `session_status`, `project_list` and
+/// `console_metrics` are registered into every persona's registry by the
+/// trusty-mpm MCP service, and `system_status` natively; before #4171 the L1
+/// black-box posture held them back only by their ABSENCE from each persona's
+/// `[tools].allow`. This test pins the enforcement that replaced that
+/// convention, at the exact function `run_pm_task_with_persona` calls.
+/// What: an allow-list naming every gated tool plus `git_log`, an
+/// unrestricted RBAC tier and no scope requirements — so the first three
+/// gates admit everything — leaves only `git_log` once the tier gate runs at
+/// `AgentTier::L1Standard`.
+/// Test: this function IS the test.
+#[test]
+fn persona_tier_gate_strips_session_state_for_l1() {
+    let all_names: Vec<String> = crate::tools::session_state::L0_ONLY_SESSION_STATE_TOOLS
+        .iter()
+        .map(|s| s.to_string())
+        .chain(std::iter::once("git_log".to_string()))
+        .collect();
+    let patterns = vec!["*".to_string()];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let kept = super::super::persona_gate::filter_persona_tool_names_for_tier(
+        all_names,
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+        crate::agents::AgentTier::L1Standard,
+    );
+
+    assert_eq!(kept, vec!["git_log".to_string()]);
+}
+
+/// #4171 counter-test: the identical declaration on an L0 persona keeps every
+/// session-state tool, so the gate is a tier boundary and not a blanket deny.
+///
+/// Why: a gate that denies everyone is not a grant — issue #4171's acceptance
+/// criterion is that L0 CAN reach session state.
+/// What: same inputs as `persona_tier_gate_strips_session_state_for_l1` with
+/// `AgentTier::L0Orchestration`; nothing is removed.
+/// Test: this function IS the test.
+#[test]
+fn persona_tier_gate_keeps_session_state_for_l0() {
+    let all_names: Vec<String> = crate::tools::session_state::L0_ONLY_SESSION_STATE_TOOLS
+        .iter()
+        .map(|s| s.to_string())
+        .chain(std::iter::once("git_log".to_string()))
+        .collect();
+    let patterns = vec!["*".to_string()];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let kept = super::super::persona_gate::filter_persona_tool_names_for_tier(
+        all_names.clone(),
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+        crate::agents::AgentTier::L0Orchestration,
+    );
+
+    assert_eq!(kept, all_names);
 }
