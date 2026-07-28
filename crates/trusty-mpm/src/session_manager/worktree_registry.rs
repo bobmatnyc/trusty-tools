@@ -26,8 +26,9 @@
 //! [`parse_worktree_list`] (the pure parser), [`registry_root_for`] (replaces
 //! grandparent-as-repo-root inference), [`list_registered_worktrees`] (what
 //! git says about the repository owning a path), and
-//! [`enumerate_registered_worktrees`] (every registered worktree under a
-//! managed repos root).
+//! [`enumerate_registered_worktrees`] (every registered worktree living INSIDE
+//! a managed project under the repos root — see that function's "positive
+//! assertion" section for the structural boundary that bounds the sweep).
 //!
 //! # An unanswerable probe is never a verdict
 //!
@@ -83,6 +84,10 @@ pub(crate) struct RegisteredWorktree {
     pub bare: bool,
     /// `true` when git reports the worktree's directory is missing.
     pub prunable: bool,
+    /// `true` when git reports the worktree is LOCKED — an explicit operator
+    /// "do not remove this", which `git worktree remove` refuses to override
+    /// without `--force`.
+    pub locked: bool,
     /// `true` for the first record — git always lists the main worktree first.
     pub is_main: bool,
 }
@@ -101,7 +106,8 @@ pub(crate) struct RegisteredWorktree {
 /// flagged [`RegisteredWorktree::is_main`]. Unknown attribute lines are
 /// ignored so a future git version cannot break the parse.
 /// Test: `parse_worktree_list_reads_porcelain_records`,
-/// `parse_worktree_list_marks_only_the_first_record_main`.
+/// `parse_worktree_list_marks_only_the_first_record_main`,
+/// `parse_worktree_list_reads_locked_with_and_without_reason`.
 pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
     let mut out: Vec<RegisteredWorktree> = Vec::new();
     for line in stdout.lines() {
@@ -112,6 +118,7 @@ pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
                 branch: None,
                 bare: false,
                 prunable: false,
+                locked: false,
                 is_main: out.is_empty(),
             });
             continue;
@@ -130,6 +137,8 @@ pub(crate) fn parse_worktree_list(stdout: &str) -> Vec<RegisteredWorktree> {
             current.bare = true;
         } else if line == "prunable" || line.starts_with("prunable ") {
             current.prunable = true;
+        } else if line == "locked" || line.starts_with("locked ") {
+            current.locked = true;
         }
     }
     out
@@ -215,18 +224,85 @@ pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredW
 /// `<repo>/.base` — but only after confirming (via [`registry_root_for`]) that
 /// the anchor IS that repository's root. That confirmation is load-bearing:
 /// without it, `git -C <non-repo>` walks UP the filesystem and would report an
-/// unrelated enclosing repository's worktrees. Records that are bare, main, or
-/// already prunable are dropped (there is no working tree to reclaim), as is
-/// any worktree resolving outside `repos_root` — preserving the containment
-/// boundary the old walk had structurally, since it could only ever produce
-/// paths beneath the root it was handed. Results are canonicalized (so they
-/// compare cleanly against the canonicalized active-session set) and returned
-/// sorted and de-duplicated, since both anchors may report the same worktree.
+/// unrelated enclosing repository's worktrees. Records that are bare, main,
+/// already prunable, or git-`locked` are dropped, as is any worktree failing
+/// the [`collect_from_anchor`] containment rule. Results are canonicalized (so
+/// they compare cleanly against the canonicalized active-session set) and
+/// returned sorted and de-duplicated, since both anchors may report the same
+/// worktree.
+///
+/// # Containment is a POSITIVE assertion, not a denylist (#4224 review, HIGH)
+///
+/// Enumerating from git's registry rather than from five path shapes widens
+/// what can be SEEN, and the first cut of this module let anything git
+/// registered anywhere under `repos_root` through — leaving the #3649 ownership
+/// sentinel as the single structural boundary in front of an unattended
+/// `remove_dir_all`. Replayed against the dogfood machine that admitted seven
+/// paths the old walk never produced, FIVE of them the operator's own
+/// long-lived checkouts (`<owner>/ft-follow-links`,
+/// `<owner>/trusty-tools-main-build`, `<owner>/trusty-tools-worktrees/wt-*`,
+/// `<owner>/gb-connect-card`). None was deletable — each lacks a sentinel — but
+/// "one gate happens to hold" is not a boundary, and this repository has
+/// already lost a bare clone to an over-broad removal (2026-07-21).
+///
+/// So a candidate must additionally be a STRICT DESCENDANT of the managed
+/// project directory whose registry named it. That is an assertion the path IS
+/// inside a tree trusty-mpm provisions and manages, which is an invariant of
+/// the WRITE side: `provisioner::workspace` only ever creates worktrees beneath
+/// `<repos_root>/<owner>/<repo>/` (in the checkout, in its `.base` clone, or in
+/// an agent runtime's directory inside either). It is deliberately NOT a list
+/// of blessed path shapes — any depth and any directory name inside the project
+/// qualifies, so the "we forgot a location" bug class this PR deletes (#3649,
+/// #3971) stays deleted. And it is not a denylist of known operator paths: an
+/// operator checkout is excluded by its POSITION relative to the repository
+/// that owns it, so a newly created one is excluded on the day it is created,
+/// under any name.
+///
+/// Both operands come from git — the path from `git worktree list --porcelain`,
+/// the project root from `git rev-parse --git-common-dir` — so this adds no
+/// state that could drift out of sync with git's own registry. That matters:
+/// worktrees present in one registry and absent from another is a failure this
+/// repository has already had twice.
+///
+/// ## Why provenance is not available, and branch role does not substitute
+///
+/// The discriminator one WANTS is "was this provisioned for a writing agent, on
+/// a workstream branch?". Git cannot answer the first half at all: nothing in
+/// the porcelain record, and nothing in the `worktrees/<id>/` admin directory,
+/// records WHO ran `git worktree add`. The only provenance fact that exists is
+/// trusty-mpm's own #3649 sentinel, which is why the sentinel gate stays where
+/// it is — this boundary is layered IN FRONT of it, not a second copy of it.
+///
+/// Branch role does not substitute, measured rather than assumed. Across the
+/// 201 candidates on this machine the branch namespaces are
+/// `fix/` (88), `feat/` (44), `docs/` (12), detached (10), `session/` (9),
+/// `chore/` (9) — and the operator's own checkouts, the Claude-native
+/// `agent-*` worktrees, and the genuinely tm-owned ones are ALL drawn from
+/// `fix/` and `feat/`. Gating reclamation on a `session|ws|workstream`
+/// namespace would admit 9 of 201 candidates and ZERO of the 3 sentinel-bearing
+/// ones — reclamation would silently drop to nothing while still looking
+/// healthy. A branch namespace is also just a name pattern, and an operator may
+/// check out any branch in their own checkout.
+///
+/// Containment is therefore the strongest git-observable boundary available,
+/// and it is count- and name-independent: the 1.3.0 direction (one worktree per
+/// writing agent, more of them, shorter-lived) makes it MORE useful, not less,
+/// because every agent worktree is provisioned inside the project tree no
+/// matter how many there are or what they are called.
+///
+/// Measured on the same machine, the rule drops all five operator checkouts,
+/// retains all 54 `.base`-resident worktrees (the class that was structurally
+/// unreclaimable before this PR), and leaves the count of sentinel-bearing —
+/// i.e. actually reclaimable — candidates unchanged at 3. The narrowing costs
+/// no reclaim capability; it only removes reach the sweep never needed.
 /// Test: `enumerate_finds_worktree_at_an_unwalked_location`,
 /// `enumerate_finds_worktree_registered_to_base_clone`,
 /// `enumerate_ignores_plain_directory_that_is_not_a_worktree`,
 /// `enumerate_excludes_the_main_checkout`,
-/// `enumerate_excludes_worktrees_outside_the_repos_root`.
+/// `enumerate_excludes_worktrees_outside_the_repos_root`,
+/// `enumerate_excludes_a_sibling_checkout_of_the_same_repo`,
+/// `enumerate_excludes_a_worktree_parked_beside_the_project`,
+/// `enumerate_excludes_a_locked_worktree`.
 pub(crate) fn enumerate_registered_worktrees(repos_root: &Path) -> Vec<PathBuf> {
     let canonical_root = std::fs::canonicalize(repos_root).unwrap_or_else(|_| repos_root.into());
     let mut found: BTreeSet<PathBuf> = BTreeSet::new();
@@ -243,8 +319,16 @@ pub(crate) fn enumerate_registered_worktrees(repos_root: &Path) -> Vec<PathBuf> 
         };
         for repo_entry in repo_entries.flatten() {
             let repo_path = repo_entry.path();
+            // The containment boundary below is expressed against the project's
+            // RESOLVED path. A project directory that will not canonicalize
+            // cannot bound anything, so the whole project is skipped rather
+            // than falling back to the far wider `repos_root` — a failed
+            // observation may only ever shrink what this function proposes.
+            let Ok(canonical_project) = std::fs::canonicalize(&repo_path) else {
+                continue;
+            };
             for anchor in [repo_path.clone(), repo_path.join(BASE_CLONE_DIRNAME)] {
-                collect_from_anchor(&anchor, &canonical_root, &mut found);
+                collect_from_anchor(&anchor, &canonical_root, &canonical_project, &mut found);
             }
         }
     }
@@ -259,10 +343,22 @@ pub(crate) fn enumerate_registered_worktrees(repos_root: &Path) -> Vec<PathBuf> 
 /// drift apart from each other.
 /// What: no-ops unless `anchor` is a directory that is ITSELF the root of the
 /// repository owning its registry (see [`registry_root_for`]); then inserts
-/// every non-bare, non-main, non-prunable worktree whose canonicalized path
-/// lies under `canonical_root`.
+/// every non-bare, non-main, non-prunable, non-`locked` worktree whose
+/// canonicalized path is a STRICT DESCENDANT of `canonical_project` (the
+/// managed project directory — see [`enumerate_registered_worktrees`]' "positive
+/// assertion" section) and also lies under `canonical_root`.
+///
+/// Both containment checks are applied even though the first normally implies
+/// the second: `canonical_project` is derived by canonicalizing a `read_dir`
+/// entry, so a symlinked project directory could resolve OUTSIDE the managed
+/// root, and the pair keeps the sweep bounded in that case too.
 /// Test: covered by every `enumerate_*` test.
-fn collect_from_anchor(anchor: &Path, canonical_root: &Path, found: &mut BTreeSet<PathBuf>) {
+fn collect_from_anchor(
+    anchor: &Path,
+    canonical_root: &Path,
+    canonical_project: &Path,
+    found: &mut BTreeSet<PathBuf>,
+) {
     if !anchor.is_dir() {
         return;
     }
@@ -280,7 +376,11 @@ fn collect_from_anchor(anchor: &Path, canonical_root: &Path, found: &mut BTreeSe
         return;
     };
     for wt in worktrees {
-        if wt.bare || wt.is_main || wt.prunable {
+        // `locked` is git's own removal veto — the operator ran
+        // `git worktree lock` to say "do not remove this". Honouring it here is
+        // the only place that can: `decommission::remove_session_worktree` runs
+        // `git worktree remove --force`, which overrides the lock outright.
+        if wt.bare || wt.is_main || wt.prunable || wt.locked {
             continue;
         }
         // #1845 item 8, preserved: a path that cannot be canonicalized is
@@ -293,7 +393,15 @@ fn collect_from_anchor(anchor: &Path, canonical_root: &Path, found: &mut BTreeSe
         let Ok(canonical) = std::fs::canonicalize(&wt.path) else {
             continue;
         };
-        if canonical.starts_with(canonical_root) {
+        // The structural boundary (#4224 HIGH). `starts_with` is component-wise,
+        // so `<owner>/trusty-tools-worktrees/x` cannot match the project
+        // `<owner>/trusty-tools`. The `!=` makes it STRICT: the project checkout
+        // itself — the operator's working copy — is never a candidate, whether
+        // or not some other registry lists it as a linked worktree.
+        if canonical != canonical_project
+            && canonical.starts_with(canonical_project)
+            && canonical.starts_with(canonical_root)
+        {
             found.insert(canonical);
         }
     }

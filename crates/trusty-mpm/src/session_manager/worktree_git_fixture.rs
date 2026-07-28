@@ -14,9 +14,9 @@
 //! exact failure #4091 exists to prevent.
 //!
 //! What: [`GitWorktreeFixture`], which owns the temp dir and exposes
-//! `repos_root` (the `<repos_root>/<owner>/<repo>/` shape
-//! `find_orphaned_worktrees` walks) plus helpers to add worktrees and dirty
-//! them.
+//! `repos_root` (the `<repos_root>/<owner>/<repo>/` layout
+//! `find_orphaned_worktrees` is pointed at) plus helpers to add worktrees, park
+//! them outside the project, lock them, and dirty them.
 //! Test: exercised by every `#4091` test in `worktree_safety_tests` and
 //! `prune_orphan_tests`.
 
@@ -27,10 +27,11 @@ use super::record::ManagedSessionId;
 
 /// A throwaway `<repos_root>/owner/repo` checkout with a bare remote (#4091).
 ///
-/// Why: `prune_orphaned_worktrees` walks `<repos_root>/<owner>/<repo>/…`, the
-/// `git worktree list` cross-check resolves the repo root as the candidate's
-/// GRANDPARENT, and the unpushed-commit check needs real remote-tracking refs.
-/// One fixture has to satisfy all three at once.
+/// Why: `prune_orphaned_worktrees` enumerates per managed project under
+/// `<repos_root>/<owner>/<repo>/`, the `git worktree list` cross-check resolves
+/// the owning repo from the candidate itself (#4207 — it used to guess the
+/// candidate's GRANDPARENT), and the unpushed-commit check needs real
+/// remote-tracking refs. One fixture has to satisfy all three at once.
 /// What: owns the `TempDir` (dropped = everything cleaned up) and exposes the
 /// repos root and the checkout path.
 /// Test: used by `inspect_dirt_clean_pushed_worktree_is_none` and friends.
@@ -118,10 +119,12 @@ impl GitWorktreeFixture {
 
     /// Add a real per-session worktree at `<repo>/.worktrees/<name>`.
     ///
-    /// Why: the reclaim path only ever considers leaf dirs under a
-    /// `.worktrees`-shaped parent, and `git_worktree_list_agrees` requires the
-    /// path to be a genuinely registered worktree — a bare `mkdir` would be
-    /// rejected before the dirty gate ever ran.
+    /// Why: `.worktrees/<name>` is where the provisioner actually parks a
+    /// per-session worktree, so this is the ordinary shape most tests want, and
+    /// `git_worktree_list_agrees` requires the path to be a genuinely
+    /// registered worktree — a bare `mkdir` would be rejected before the dirty
+    /// gate ever ran. Note the reclaim path is no longer LIMITED to this shape
+    /// (#4207); use [`Self::add_worktree_at`] to prove that.
     /// What: `git worktree add -b session/<name>` off the current `HEAD`.
     /// Returns the worktree path.
     /// Test: `inspect_dirt_clean_pushed_worktree_is_none`.
@@ -170,6 +173,23 @@ impl GitWorktreeFixture {
             ],
         );
         wt
+    }
+
+    /// Mark `wt` as git-`locked` — the operator's explicit "do not remove
+    /// this" (#4224 review).
+    ///
+    /// Why: `decommission::remove_session_worktree` runs `git worktree remove
+    /// --force`, which overrides a lock outright, so the lock can only be
+    /// honoured by never enumerating the worktree in the first place. Proving
+    /// that requires a really-locked worktree; setting the flag on a parsed
+    /// record instead would test the parser, not the filter.
+    /// What: `git -C <repo> worktree lock <wt>`.
+    /// Test: `enumerate_excludes_a_locked_worktree`.
+    pub(crate) fn lock_worktree(&self, wt: &Path) {
+        git_ok(
+            &self.repo,
+            &["worktree", "lock", wt.to_str().expect("utf8 worktree path")],
+        );
     }
 
     /// Create a bare `.base` clone inside the checkout and register a worktree

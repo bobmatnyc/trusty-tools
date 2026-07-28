@@ -370,6 +370,64 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     );
 }
 
+/// THE OTHER DIRECTION of the #4224 containment boundary: a genuine tm-owned
+/// husk at a location NO hard-coded shape covers is still reclaimed, end to end.
+///
+/// Why: the #4224 review's HIGH is that git-native enumeration widened the
+/// auto-deletion surface, and the fix narrows it back to "inside the managed
+/// project". A narrowing is only correct if it costs no reclaim capability, and
+/// the cheapest way to satisfy a containment test is to stop deleting
+/// altogether — which would silently restore the very leak #4207 exists to fix
+/// while every exclusion test still passed. So this asserts the positive:
+/// `<repo>/agents/scratch/husk` matches none of the five removed shapes
+/// (`.worktrees/`, `.base/.worktrees/`, `.claude/worktrees/`,
+/// `.base/.claude/worktrees/`, `.base/.worktrees/<id>/.claude/worktrees/`), and
+/// it is REMOVED FROM DISK.
+///
+/// This runs the whole gauntlet, not just enumeration: the #3649 ownership
+/// gate (aged sentinel, owner that never resolves), the `git worktree list`
+/// cross-check, and the #4091/#4118 dirty gate.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_orphaned_worktrees_reclaims_owned_husk_at_an_unwalked_location() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let fx = GitWorktreeFixture::new();
+    let husk = fx.add_worktree_at(&fx.repo.join("agents").join("scratch"), "husk");
+    assert!(
+        !husk.starts_with(fx.repo.join(".worktrees"))
+            && !husk.starts_with(fx.repo.join(".claude"))
+            && !husk.starts_with(fx.repo.join(".base")),
+        "test invariant: the husk must sit at a location none of the five \
+         removed shapes covered, or this test cannot prove the #4207 fix \
+         survived the #4224 narrowing; got {}",
+        husk.display()
+    );
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&husk);
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.iter().any(|p| p == &husk),
+        "a sentinel-bearing, ownerless worktree inside the project must be \
+         reclaimed wherever in the project it lives; got removed={:?} \
+         owner_unknown={:?} skipped_dirty={:?}",
+        outcome.removed,
+        outcome.owner_unknown,
+        outcome.skipped_dirty
+    );
+    assert!(!husk.exists(), "the reclaimed husk must be gone from disk");
+}
+
 /// A candidate whose sentinel names an owner with NO resolvable session
 /// record, but whose sentinel was stamped RECENTLY (within the creation-race
 /// grace window), must NOT be reclaimed — this is the exact bug the #3649
