@@ -8,7 +8,7 @@
   "required": ["schema_version", "package_id", "sections", "blocks"],
   "properties": {
     "schema_version": {
-      "description": "Schema major version. A package whose version this build does not implement is rejected outright — never partially interpreted.",
+      "description": "Schema major version. A package whose version this build does not implement is rejected outright — never partially interpreted; the version is checked BEFORE any field, so a newer package reports a version error rather than blaming one of its own valid keys. EVOLUTION POLICY: every object here sets `additionalProperties: false`, so unknown keys are errors, not ignored. Any field addition that can change composed bytes MUST bump this version. Adding a field while leaving the version at 1 is the one case strictness cannot protect against — an older build would compose a prompt missing the new field's effect and report success.",
       "const": 1
     },
     "package_id": {
