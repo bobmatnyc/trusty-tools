@@ -283,6 +283,48 @@ pub fn merge_hook_entries(existing: &Value, additions: &Value) -> Value {
     result
 }
 
+/// Reserve a unique, timestamped quarantine path for a corrupt config file.
+///
+/// Why (issue #4206): two independent writers in trusty-mpm
+/// (`core::standalone::trust_seed` and `core::mcp_config`) each renamed a
+/// malformed `.claude.json` to the FIXED name `.claude.json.corrupt`. The
+/// second quarantine therefore silently overwrote the first — destroying the
+/// only record of the first failure, in the exact file that also holds
+/// `oauthAccount` and every project's trust state. A post-mortem could see
+/// that corruption had happened at least once and nothing more. Centralising
+/// the naming here (rather than fixing it twice) means the two writers can
+/// never drift back apart, and any future third writer inherits the same
+/// scheme.
+/// What: `<path>.corrupt-<UTC timestamp>`, e.g.
+/// `.claude.json.corrupt-20260728T025723.418Z`. Millisecond precision makes a
+/// same-second collision unlikely; the function additionally probes for an
+/// unused name (appending `-1`, `-2`, …, bounded) so two quarantine events can
+/// NEVER collapse onto one file even under a coarse clock. Purely a name
+/// computation — it does not create, rename, or touch anything, so the tiny
+/// TOCTOU window between probing and the caller's `rename` is acceptable: the
+/// worst case is the same overwrite that was previously guaranteed, and only
+/// under a race that the timestamp already makes vanishingly rare.
+/// Test: `quarantine_path_is_timestamped_and_unique`,
+///   `quarantine_path_avoids_existing_file`.
+pub fn quarantine_path(path: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+    let base = append_extension(path, &format!("corrupt-{stamp}"));
+    if !base.exists() {
+        return base;
+    }
+    // Coarse clock or a genuine same-millisecond race: find an unused sibling
+    // rather than clobbering the earlier record. Bounded so a pathological
+    // filesystem can never spin here; the final fallback still returns a
+    // distinct-by-timestamp name.
+    for n in 1..1000 {
+        let candidate = append_extension(path, &format!("corrupt-{stamp}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
 // ─── internal helpers ─────────────────────────────────────────────────────
 
 /// Path of the backup file written before an atomic JSON write: `<path>.bak`.

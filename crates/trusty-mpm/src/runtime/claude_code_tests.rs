@@ -1809,3 +1809,205 @@ fn prepare_managed_config_excludes_builtins_when_mcp_json_write_fails() {
         );
     }
 }
+
+// ─── issue #4206: the trust seed must stay inside the redirected $HOME ────
+
+/// RAII guard that prepends `dir` to `PATH` and restores it on drop.
+struct PathGuard {
+    prev: Option<std::ffi::OsString>,
+}
+impl PathGuard {
+    fn prepend(dir: &Path) -> Self {
+        let prev = std::env::var_os("PATH");
+        let mut entries = vec![dir.to_path_buf()];
+        if let Some(ref p) = prev {
+            entries.extend(std::env::split_paths(p));
+        }
+        let joined = std::env::join_paths(entries).expect("join PATH");
+        // SAFETY: callers are #[serial].
+        unsafe { std::env::set_var("PATH", joined) };
+        Self { prev }
+    }
+}
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+    }
+}
+
+/// Every `.claude.json` found anywhere beneath `root`.
+///
+/// Why (issue #4206): the leak assertion must catch the seeded config wherever
+/// it lands under a redirected `$HOME`, not only at the one path the current
+/// resolver happens to compute — a future refactor that moved the managed dir
+/// would otherwise silently stop being covered.
+/// What: a depth-bounded recursive walk (symlinks are not followed, so a
+/// self-referential link cannot spin), returning display paths.
+fn find_claude_json_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<String>) {
+        if depth > 8 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk(&path, depth + 1, out);
+            } else if entry.file_name() == std::ffi::OsStr::new(".claude.json") {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, 0, &mut out);
+    out
+}
+
+/// Plant an executable stub named `claude` in `dir` and return its directory.
+///
+/// Why: `ClaudeCodeAdapter::spawn_resume` calls `resolve_claude()` FIRST and
+/// returns `BinaryNotFound` before ever reaching `prepare_managed_config`. The
+/// pre-existing tests in this file handle that with
+/// `if resolve_claude().is_none() { return; }` — a silent skip that makes them
+/// vacuous on any machine without Claude Code installed (most CI runners).
+/// A leak test that can silently pass by not running is worse than no test, so
+/// this plants a stub and prepends its directory to `PATH`
+/// (`bin_resolve::resolve_binary` honours the live `PATH` first), guaranteeing
+/// the spawn path is actually entered on every platform.
+#[cfg(unix)]
+fn plant_fake_claude(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("claude");
+    std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").expect("write fake claude");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake claude");
+}
+
+// Issue #4206 TEST 1 — THE ISOLATION INVARIANT, locked at the REAL call chain
+// (`ClaudeCodeAdapter::spawn_resume` → `prepare_managed_config` →
+// `preseed_managed_trust`): with `$HOME` redirected, trust seeding must write
+// NOTHING outside that redirected `$HOME`.
+//
+// Why this test exists, and what the #4206 investigation actually established:
+// the reported root cause was that `managed_claude_config_dir()` "takes no
+// injectable base". That is NOT correct. It resolves via `dirs::home_dir()`,
+// which reads `$HOME` on Unix — so `$HOME` IS the injectable base, and
+// redirecting it genuinely confines the seeder (proven by running this very
+// test against unpatched code: the seed landed in the redirected temp home,
+// not the operator's real one). There is no production defect here; a daemon
+// running with the operator's real `$HOME` correctly targets the operator's
+// real config dir.
+//
+// The actual defect was TEST HYGIENE: several tests reach this production
+// seeding path without redirecting `$HOME` at all, so they wrote straight into
+// `~/.trusty-tools/trusty-mpm/claude-config/.claude.json` — which is how 2,443
+// `tempfile::TempDir` entries accumulated there. Those tests are fixed in this
+// same change (`daemon::managed_routes::lifecycle_tests`,
+// `tests/session_manager_mvp.rs`); this test locks the invariant they were
+// missing, at the layer they all funnel through, so the next test to drive
+// `spawn`/`spawn_resume` has an executable statement of the rule.
+//
+// Note the pre-existing isolation test
+// (`standalone::trust_seed_tests::test_preseed_managed_trust_no_home_write`)
+// calls `preseed_managed_trust` DIRECTLY with an explicit `claude_config_dir`,
+// so it can never observe what the production call chain resolves. Only a test
+// that enters through `spawn_resume` covers that resolution step.
+#[serial_test::serial]
+#[test]
+#[cfg(unix)]
+fn spawn_resume_trust_seed_stays_within_redirected_home() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let bindir = tempfile::tempdir().expect("bin tempdir");
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+
+    plant_fake_claude(bindir.path());
+    let _path = PathGuard::prepend(bindir.path());
+
+    // Redirect HOME to an EMPTY dir — the isolation seam every test that
+    // drives this path must use.
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: #[serial].
+    unsafe { std::env::set_var("HOME", home.path()) };
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+    let _home_guard = RestoreHome(prev_home);
+
+    // The managed dir this run must resolve to, derived the same way
+    // production does, AFTER the redirect above.
+    let base = crate::core::trusty_tools_config::managed_claude_config_dir()
+        .expect("managed config dir resolves under the redirected HOME");
+    assert!(
+        base.starts_with(home.path()),
+        "precondition: the resolved managed dir must sit under the redirected \
+         HOME, else this test is not isolated at all (resolved {})",
+        base.display()
+    );
+
+    // Sanity: the binary really is resolvable, so the spawn path below is
+    // genuinely entered and this test can never pass by skipping.
+    assert!(
+        ClaudeCodeAdapter::resolve_claude().is_some(),
+        "fake claude must be resolvable on PATH — otherwise this test is vacuous"
+    );
+
+    let fake = FakeTmux::new();
+    let adapter = ClaudeCodeAdapter::new(fake.clone());
+    adapter
+        .spawn_resume(
+            "tmpm-4206",
+            None,
+            workspace.path(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("spawn_resume must succeed against the fake tmux");
+
+    // THE ISOLATION ASSERTION: every `.claude.json` written by this run must
+    // sit under the redirected $HOME — none anywhere else.
+    //
+    // Scoped to `.claude.json` rather than "HOME is empty": other, unrelated
+    // parts of the launch path legitimately resolve under `$HOME` (the
+    // framework roster at `~/.trusty-mpm/framework`, and macOS's own
+    // `~/Library` caches). Those are out of scope; asserting on them would
+    // make this test fail for reasons unrelated to the config leak.
+    let found = find_claude_json_files(home.path());
+    assert!(
+        found.iter().all(|p| Path::new(p).starts_with(home.path())),
+        "every seeded .claude.json must live under the redirected HOME: {found:?}"
+    );
+
+    // Positive counterpart: the seed really did happen, at the resolved
+    // managed dir. Without this the test could pass simply by never seeding
+    // anything — the exact way an isolation test goes vacuous.
+    let seeded = base.join(".claude.json");
+    let text = std::fs::read_to_string(&seeded).unwrap_or_else(|e| {
+        panic!(
+            ".claude.json must be seeded at the resolved managed dir {}: {e}",
+            seeded.display()
+        )
+    });
+    let val: serde_json::Value = serde_json::from_str(&text).expect("seeded config is valid JSON");
+    let key = workspace.path().to_string_lossy().to_string();
+    assert_eq!(
+        val["projects"][&key]["hasTrustDialogAccepted"],
+        serde_json::Value::Bool(true),
+        "the workspace must actually be trust-seeded under the redirected HOME: {text}"
+    );
+}
