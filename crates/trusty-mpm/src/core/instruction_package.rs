@@ -721,16 +721,9 @@ impl InstructionPackage {
     /// output** as its acceptance gate; it is the strongest faithfulness check
     /// available and nothing here forces weakening it.
     ///
-    /// The one real divergence, which #4186 must decide deliberately: when NO
-    /// agents are deployed, `deployed_roster_section` returns `None` and today's
-    /// composer silently degrades to the bundled asset alone. Under this schema
-    /// that case is a hard [`CompositionError::MissingGeneratedInput`], because
-    /// the roster block may not be marked `optional` ([`ValidationError::OptionalRoster`]).
-    /// That is a deliberate strengthening — the silent degradation *is* #4069's
-    /// failure shape — but it means byte-identity holds for the normal
-    /// agents-deployed case and intentionally does not hold for the zero-agent
-    /// case. #4186 must either guarantee a non-empty roster at the call site or
-    /// record an explicit decision for zero-agent projects.
+    /// Scope — including the other override configurations `resolve_pm_prompt`
+    /// can emit, and which of them this schema can reproduce — is tracked on
+    /// #4186, not here.
     /// Test: `todays_delegation_section_shape_is_expressible`.
     fn validate_roster(&self) -> Result<(), ValidationError> {
         let mut seen = false;
