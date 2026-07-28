@@ -469,12 +469,6 @@ pub enum ValidationError {
         /// The owning section.
         section: SectionId,
     },
-    /// A declared section contributes no block.
-    #[error("section {section:?} is declared but contributes no block")]
-    SectionWithoutBlocks {
-        /// The silent section.
-        section: SectionId,
-    },
     /// No block consumes [`Generator::AgentRoster`].
     #[error(
         "no block consumes the agent roster; the computed roster must reach the \
@@ -486,6 +480,21 @@ pub enum ValidationError {
     OptionalRoster {
         /// Index into `blocks`.
         index: usize,
+    },
+    /// A declared section contributes no block.
+    #[error("section {section:?} is declared but contributes no block")]
+    SectionWithoutBlocks {
+        /// The silent section.
+        section: SectionId,
+    },
+    /// A declared section's blocks are all `optional`, so it may emit nothing.
+    #[error(
+        "section {section:?} contributes only `optional` blocks, so it can emit nothing \
+         while still validating; give it at least one non-optional block"
+    )]
+    SectionOnlyOptionalBlocks {
+        /// The section that is not guaranteed to emit.
+        section: SectionId,
     },
     /// A non-floor block follows the first floor block.
     #[error(
@@ -550,10 +559,35 @@ impl InstructionPackage {
     /// Why: unknown fields are rejected (`deny_unknown_fields` throughout) so a
     /// typo in a key becomes a parse error rather than silently dropped
     /// instruction content.
-    /// What: `serde_json::from_str`, without validation — call [`Self::validate`]
-    /// or [`Self::compose`] for that.
-    /// Test: `schema_example_deserializes_validates_and_round_trips`, `rejects_unknown_fields_at_every_level_and_names_the_key`.
+    ///
+    /// The `schema_version` probe runs FIRST, before the package is
+    /// deserialized, because strictness and version-gating otherwise collide:
+    /// a package written against a later schema almost certainly carries a field
+    /// this build does not know, so plain deserialization would report `unknown
+    /// field \`whatever\`` — blaming a key that is perfectly valid in its own
+    /// schema — instead of the actionable "you need a newer trusty-mpm". The
+    /// probe deliberately ignores unknown fields; it reads nothing but the
+    /// version.
+    ///
+    /// What: version probe, then `serde_json::from_str`. No structural
+    /// validation — call [`Self::validate`] or [`Self::compose`] for that.
+    /// Test: `schema_example_deserializes_validates_and_round_trips`,
+    /// `rejects_unknown_fields_at_every_level_and_names_the_key`,
+    /// `later_schema_version_is_reported_as_a_version_error_not_a_field_error`.
     pub fn from_json(raw: &str) -> Result<Self, serde_json::Error> {
+        /// Reads only `schema_version`, tolerating every other key by design.
+        #[derive(Deserialize)]
+        struct VersionProbe {
+            schema_version: u32,
+        }
+
+        let probe: VersionProbe = serde_json::from_str(raw)?;
+        if probe.schema_version != SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported schema_version {}; this build implements {SCHEMA_VERSION}",
+                probe.schema_version
+            )));
+        }
         serde_json::from_str(raw)
     }
 
@@ -582,7 +616,9 @@ impl InstructionPackage {
     /// contract.
     /// What: version, identity, canonical section set/order, floor tiers,
     /// non-empty block stream, per-block text/optional sanity, every section
-    /// contributing, the roster being consumed and non-optional, and nothing
+    /// contributing *and being guaranteed to emit* (owning blocks is not
+    /// enough — a section covered only by `optional` blocks composes to
+    /// nothing), the roster being consumed and non-optional, and nothing
     /// overridable following the floor.
     /// Test: one test per [`ValidationError`] variant.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -630,37 +666,72 @@ impl InstructionPackage {
             }
         }
 
+        // Roster checks run BEFORE section coverage so that an optional roster
+        // block reports the precise `OptionalRoster` (#4196) diagnosis rather
+        // than the broader "this section may emit nothing" one — both are true,
+        // but only the first names the actual mistake.
+        self.validate_roster()?;
+
+        // A section must not merely OWN blocks — it must own at least one block
+        // that is guaranteed to emit. A section covered only by `optional`
+        // blocks passes the ownership check and still composes to nothing,
+        // which is precisely the silent-missing-section shape this check exists
+        // to prevent (#4069/#4196: the taxonomy claims the content is
+        // delivered, the output does not contain it).
         let covered: BTreeSet<SectionId> = self.blocks.iter().map(|b| b.section).collect();
+        let guaranteed: BTreeSet<SectionId> = self
+            .blocks
+            .iter()
+            .filter(|b| !b.optional)
+            .map(|b| b.section)
+            .collect();
         for id in SectionId::CANONICAL {
             if !covered.contains(&id) {
                 return Err(ValidationError::SectionWithoutBlocks { section: id });
             }
+            if !guaranteed.contains(&id) {
+                return Err(ValidationError::SectionOnlyOptionalBlocks { section: id });
+            }
         }
 
-        self.validate_roster()?;
         self.validate_floor_is_last()
     }
 
     /// The roster must reach the output, and must not be droppable (#4196).
     ///
-    /// Scope limit #4186 must resolve explicitly, recorded here so it is a
-    /// decision rather than a mid-implementation discovery: this check makes the
-    /// roster's *consumption* structurally mandatory, but #4196's root cause was
-    /// upstream of composition. `instruction_overrides::resolve_pm_prompt` still
-    /// builds the launch prompt from the static `AGENT_DELEGATION` asset, while
-    /// the computed roster lands in `PipelineOutput::merged`, which the launch
-    /// path never reads. So #4186 must choose one of:
+    /// What today's launch path actually does, since #4186 lifts exactly these
+    /// bytes: `instruction_overrides::resolve_pm_prompt` resolves its delegation
+    /// section through `bundled_delegation`, which since #4196 (closing #4069)
+    /// appends the LIVE computed roster from
+    /// `delegation_authority::deployed_roster_section` to the bundled
+    /// `AGENT_DELEGATION` asset, separated by `ROSTER_PRECEDENCE_NOTE`. The
+    /// delivered prompt therefore already carries the real roster; the stale
+    /// `PipelineOutput::merged` path that originally caused #4069 is no longer
+    /// the launch path.
     ///
-    /// * pass the real computed roster — fixes #4196, but the output then
-    ///   *cannot* be byte-identical to today's `resolve_pm_prompt`; or
-    /// * pass the static `AGENT_DELEGATION.md` text as `agent_roster` — bytes
-    ///   match, but #4196 survives into the new format.
+    /// Consequence for #4186, stated because an earlier revision of this comment
+    /// got it wrong: byte-identity and roster consumption are **not** in
+    /// tension. Today's section is
+    /// `<asset>\n\n<ROSTER_PRECEDENCE_NOTE>\n\n<roster>`, which this schema
+    /// expresses directly as three blocks — [`BlockBody::Text`] for the asset, a
+    /// [`Join::Blank`] [`BlockBody::Text`] for the note, and a [`Join::Blank`]
+    /// [`BlockBody::Generated`] for [`Generator::AgentRoster`] — so a package can
+    /// be byte-identical to today's output AND consume the computed roster.
+    /// #4186 should therefore keep **strict byte-equality against today's
+    /// output** as its acceptance gate; it is the strongest faithfulness check
+    /// available and nothing here forces weakening it.
     ///
-    /// "Byte-identical to today's output" and "fixes #4196" are mutually
-    /// exclusive. #4186's acceptance criterion should therefore read
-    /// *byte-identical across runs for the same manifest and roster* — which
-    /// this module does fully guarantee — plus an explicitly reviewed diff
-    /// against today's bytes, not strict equality with the legacy output.
+    /// The one real divergence, which #4186 must decide deliberately: when NO
+    /// agents are deployed, `deployed_roster_section` returns `None` and today's
+    /// composer silently degrades to the bundled asset alone. Under this schema
+    /// that case is a hard [`CompositionError::MissingGeneratedInput`], because
+    /// the roster block may not be marked `optional` ([`ValidationError::OptionalRoster`]).
+    /// That is a deliberate strengthening — the silent degradation *is* #4069's
+    /// failure shape — but it means byte-identity holds for the normal
+    /// agents-deployed case and intentionally does not hold for the zero-agent
+    /// case. #4186 must either guarantee a non-empty roster at the call site or
+    /// record an explicit decision for zero-agent projects.
+    /// Test: `todays_delegation_section_shape_is_expressible`.
     fn validate_roster(&self) -> Result<(), ValidationError> {
         let mut seen = false;
         for (index, block) in self.blocks.iter().enumerate() {

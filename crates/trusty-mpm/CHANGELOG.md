@@ -26,11 +26,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   change that added a field while leaving the version at 1 — precisely the case
   that must not be tolerated, since an older binary would then compose a prompt
   missing the new field's effect and report success. Any field addition that can
-  change composed bytes must bump `SCHEMA_VERSION`. Floor blocks are
+  change composed bytes must bump `SCHEMA_VERSION`. That version is now checked
+  *before* the package is deserialized, so a package from a later schema reports
+  the actionable "unsupported schema_version" rather than blaming one of its own
+  perfectly valid new keys. Floor blocks are
   deliberately *not* constrained to canonical section order: `BASE_PM.md` places
   `## Trusty Tool Priority` after `## Framework-Guaranteed Conventions`, so
   requiring non-decreasing order would reject a faithful byte-identical lift of
-  that asset.
+  that asset. A declared section must own at least one *non-optional* block.
+  Owning blocks is not the same as emitting: a section covered only by
+  `optional` blocks passed validation and still composed to nothing,
+  recreating the very silent-missing-section shape the coverage check exists
+  to prevent.
 
 ### Fixed
 

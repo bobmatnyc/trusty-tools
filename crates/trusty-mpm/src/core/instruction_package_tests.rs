@@ -304,7 +304,20 @@ fn join_rejects_an_unknown_key_alongside_literal() {
     // module, so nothing else would catch it regressing.
     let err = serde_json::from_str::<Join>(r#"{"literal":"x","bogus":1}"#)
         .expect_err("an extra key alongside `literal` must be rejected");
-    let _ = err;
+
+    // DEFERRED LOW (#4223 re-review): unlike the struct errors, this one does
+    // not NAME the offending key — serde's externally tagged representation
+    // reports "expected value" plus a position. Deferred rather than fixed: it
+    // is a REJECTION, not a silent drop, so the failure mode this PR exists to
+    // close is already shut; naming the key would need a hand-written
+    // Deserialize for `Join` purely to improve a message on the rarest variant
+    // (`Literal` is an escape hatch). Pin the POSITION instead, so the
+    // diagnostic can never degrade to something with no locator at all.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("line") && msg.contains("column"),
+        "the error must at least locate the offending key: {msg}"
+    );
 
     // An unrecognised variant is named, in both spellings.
     let err = serde_json::from_str::<Join>(r#""rulez""#).unwrap_err();
@@ -514,6 +527,60 @@ fn rejects_optional_text_block() {
             index: 0,
             section: SectionId::Core,
         }
+    );
+}
+
+#[test]
+fn rejects_section_covered_only_by_optional_blocks() {
+    // Why (#4223 re-review MEDIUM): owning blocks is not the same as emitting.
+    // A section whose every block is `optional` passes the ownership check and
+    // still composes to nothing — the taxonomy claims the content is delivered
+    // and the output does not contain it, which is exactly the silent-missing-
+    // section shape the ownership check exists to prevent.
+    //
+    // The complement — a section with BOTH an optional and a non-optional block
+    // — must stay legal, and does: `fixture()`'s `core` owns two text blocks
+    // plus two optional generated ones, and `fixture_is_valid` covers it.
+    let mut pkg = fixture();
+    pkg.blocks.retain(|b| b.section != SectionId::Search);
+    pkg.blocks.insert(
+        3,
+        generated(SectionId::Search, Generator::ProjectAddendum, true),
+    );
+    assert_eq!(
+        pkg.validate().unwrap_err(),
+        ValidationError::SectionOnlyOptionalBlocks {
+            section: SectionId::Search
+        }
+    );
+}
+
+#[test]
+fn later_schema_version_is_reported_as_a_version_error_not_a_field_error() {
+    // Why (#4223 re-review LOW): the module promises that a package from a later
+    // schema is rejected with a loud "unsupported schema_version". That promise
+    // was not kept for the case that actually matters — a v2 package almost
+    // certainly carries a v2 field, and plain deserialization blamed THAT key
+    // ("unknown field `...`"), pointing the author at something perfectly valid
+    // in its own schema instead of telling them to upgrade trusty-mpm.
+    let mut value: serde_json::Value =
+        serde_json::from_str(&schema_example()).expect("example is JSON");
+    value["schema_version"] = serde_json::json!(SCHEMA_VERSION + 1);
+    value["blocks"][0]["field_added_in_v2"] = serde_json::json!("x");
+
+    let err = InstructionPackage::from_json(&value.to_string()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("schema_version"),
+        "the VERSION must be blamed, got: {msg}"
+    );
+    assert!(
+        msg.contains(&(SCHEMA_VERSION + 1).to_string()),
+        "the offending version must be named, got: {msg}"
+    );
+    assert!(
+        !msg.contains("field_added_in_v2"),
+        "must NOT blame a key that is valid in its own schema, got: {msg}"
     );
 }
 
@@ -805,6 +872,69 @@ fn valid_package_with_non_contiguous_blocks_still_round_trips() {
         composed,
         again.compose(&inputs()).expect("composes"),
         "a JSON round trip must not change a single byte"
+    );
+}
+
+#[test]
+fn todays_delegation_section_shape_is_expressible() {
+    // Why: this pins the CORRECTION of a wrong conclusion an earlier revision of
+    // this PR drew and propagated to issue #4186 — that #4186 must choose
+    // between a byte-identical lift and consuming the computed roster.
+    //
+    // It does not have to choose. Since #4196 (closing #4069),
+    // `instruction_overrides::bundled_delegation` builds the section as
+    //
+    //     format!("{bundled}\n\n{ROSTER_PRECEDENCE_NOTE}\n\n{}", roster.trim())
+    //
+    // — bundled asset, blank line, precedence note, blank line, LIVE roster. So
+    // the delivered prompt ALREADY carries the real roster, and this schema
+    // expresses that exact shape with three blocks joined by `blank`. Byte
+    // identity and roster consumption are therefore compatible, and #4186 should
+    // keep strict byte-equality against today's output as its acceptance gate.
+    //
+    // (Stand-in strings, not the real assets: `ROSTER_PRECEDENCE_NOTE` is
+    // private to `instruction_overrides`. What is pinned here is the SHAPE
+    // `A\n\nB\n\n<generated roster>`, which is the load-bearing claim.)
+    let mut pkg = fixture();
+    let at = pkg
+        .blocks
+        .iter()
+        .position(|b| b.section == SectionId::AgentDelegation)
+        .expect("fixture has a delegation block");
+
+    let asset = text(SectionId::AgentDelegation, "BUNDLED-ASSET");
+    let mut note = text(SectionId::AgentDelegation, "PRECEDENCE-NOTE");
+    note.join_before = Join::Blank;
+    let mut roster = generated(SectionId::AgentDelegation, Generator::AgentRoster, false);
+    roster.join_before = Join::Blank;
+    pkg.blocks.splice(at..=at, [asset, note, roster]);
+
+    pkg.validate()
+        .expect("today's delegation shape must be a valid package");
+    let out = pkg.compose(&inputs()).expect("composes");
+    assert!(
+        out.contains("BUNDLED-ASSET\n\nPRECEDENCE-NOTE\n\nROSTER"),
+        "asset/note/roster must rejoin exactly as bundled_delegation writes them: {out:?}"
+    );
+
+    // And the roster is genuinely the generated block, not authored text --
+    // swapping it for static text must fail validation (#4196's whole point).
+    let mut static_roster = pkg.clone();
+    for block in &mut static_roster.blocks {
+        if matches!(
+            block.body,
+            BlockBody::Generated {
+                generator: Generator::AgentRoster
+            }
+        ) {
+            block.body = BlockBody::Text {
+                text: "STATIC ROSTER".to_string(),
+            };
+        }
+    }
+    assert_eq!(
+        static_roster.validate().unwrap_err(),
+        ValidationError::RosterNotConsumed
     );
 }
 
