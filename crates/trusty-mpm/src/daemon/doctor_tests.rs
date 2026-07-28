@@ -276,47 +276,23 @@ async fn worktrees_no_repos_root_is_ok() {
 
 #[tokio::test]
 async fn worktrees_no_orphans_is_ok() {
-    // Why (#1845 item 2): on macOS /tmp is a symlink to /private/tmp. If we pass the
-    // raw tempfile path as active (e.g. /tmp/…) but the walk canonicalises it to
-    // /private/tmp/…, the active-set lookup misses and a live worktree is falsely
-    // flagged as an orphan — causing a spurious CI failure. Canonicalize the active
-    // path in the test so the set membership check in find_orphaned_worktrees matches.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // Create owner/repo/.worktrees/session-abc/ and register it as active.
-    let wt = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-abc");
-    std::fs::create_dir_all(&wt).unwrap();
-    // Canonicalize so /tmp vs /private/tmp symlink differences are resolved.
-    let canonical_wt = std::fs::canonicalize(&wt).unwrap_or(wt);
-    let active = vec![canonical_wt];
-    let check = check_worktrees(Some(root), &active).await;
+    // #4207: a REAL `git worktree add`, since discovery is now derived from
+    // git's registry — a `mkdir` is not a candidate and would make this pass
+    // for the wrong reason. The fixture canonicalizes its own root, so the
+    // /tmp vs /private/tmp symlink hazard (#1845 item 2) is handled there.
+    let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let wt = fx.add_worktree("session-abc");
+    let check = check_worktrees(Some(&fx.repos_root), &[wt]).await;
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
 #[tokio::test]
 async fn worktrees_with_orphan_is_warn() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // Create two worktrees; only one has an active session.
-    let wt1 = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-live");
-    let wt2 = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-dead");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::create_dir_all(&wt2).unwrap();
-    // wt2 is orphaned (no active session).
-    let active = vec![wt1];
-    let check = check_worktrees(Some(root), &active).await;
+    // #4207: two REAL worktrees; only one has an active session.
+    let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let live = fx.add_worktree("session-live");
+    let _dead = fx.add_worktree("session-dead");
+    let check = check_worktrees(Some(&fx.repos_root), &[live]).await;
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains("1 orphaned"));
     assert!(check.message.contains("tm session prune --worktrees"));

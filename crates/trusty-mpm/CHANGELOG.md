@@ -44,6 +44,19 @@ PATCH: merge-and-local-install only, no crates.io publish.
   and existing hand-placed or committed `.claude/` content is never overwritten
   — unmanaged files are skipped as user-owned, and managed files whose checksum
   drifted are skipped with a warning.
+- Worktree discovery is derived from `git worktree list --porcelain` instead of
+  walking five hard-coded location shapes, so a session worktree is found
+  wherever it lives rather than only where someone remembered to look (#4207
+  slice 1).
+- The checkout that owns a worktree is now resolved with
+  `git rev-parse --git-common-dir` instead of being guessed as the candidate's
+  grandparent directory. Worktrees physically inside `.base/.worktrees/` but
+  registered to the parent repository were previously disowned by that guess
+  and were structurally unreclaimable — never deleted, never reportable (#4207,
+  underlying defect of #4204).
+- `tm session prune --worktrees` and the daemon orphan-GC no longer propose a
+  plain directory as a reclaim candidate. A directory git does not register is
+  not trusty-mpm's to remove.
 
 - **Two paths no longer write into a destroyed worktree**
   ([#4204](https://github.com/bobmatnyc/trusty-tools/issues/4204)):

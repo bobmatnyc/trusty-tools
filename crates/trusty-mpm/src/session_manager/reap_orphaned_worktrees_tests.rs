@@ -35,16 +35,16 @@ use super::tests::FakeTmuxDriver;
 #[tokio::test]
 async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
     let store_dir = TempDir::new().unwrap();
-    let repos = TempDir::new().unwrap();
     let mgr = SessionManager::new(store_dir.path(), FakeTmuxDriver::new())
         .await
         .expect("manager");
 
-    let wt_root = repos.path().join("owner").join("repo").join(".worktrees");
-    let live_wt = wt_root.join("live-session");
-    let orphan_wt = wt_root.join("orphan-session");
-    std::fs::create_dir_all(&live_wt).unwrap();
-    std::fs::create_dir_all(&orphan_wt).unwrap();
+    // #4207: both worktrees are REAL `git worktree add`s. Discovery is now
+    // derived from git's registry, so a `mkdir` is not a candidate and the
+    // orphan half of this test would pass vacuously without them.
+    let fx = super::worktree_git_fixture::GitWorktreeFixture::new();
+    let live_wt = fx.add_worktree("live-session");
+    let orphan_wt = fx.add_worktree("orphan-session");
 
     // #3649: the auto-reaper now NEVER deletes an owner-unknown worktree (a
     // dir with no sentinel, or a legacy zero-byte one). Write a valid
@@ -87,7 +87,7 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
         .expect("create live record");
 
     let outcome = mgr
-        .reap_orphaned_worktrees(repos.path())
+        .reap_orphaned_worktrees(&fx.repos_root)
         .await
         .expect("reap must not error");
     let removed = outcome.removed;

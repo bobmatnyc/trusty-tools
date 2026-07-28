@@ -76,9 +76,16 @@ impl GitWorktreeFixture {
     /// Test: `inspect_dirt_clean_pushed_worktree_is_none`.
     pub(crate) fn new() -> Self {
         let tmp = tempfile::tempdir().expect("fixture: tempdir");
-        let repos_root = tmp.path().join("repos");
+        // #4207: canonicalize the root. On macOS `tempfile` hands back a path
+        // under `/var`, which is a symlink to `/private/var`; git records the
+        // RESOLVED path in its worktree registry, so a fixture that kept the
+        // unresolved form would compare git-reported paths against a different
+        // spelling of the same directory and fail for a reason unrelated to
+        // what any of these tests are about.
+        let tmp_root = std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().into());
+        let repos_root = tmp_root.join("repos");
         let repo = repos_root.join("owner").join("repo");
-        let remote = tmp.path().join("remote.git");
+        let remote = tmp_root.join("remote.git");
         std::fs::create_dir_all(&repo).expect("fixture: create repo dir");
         std::fs::create_dir_all(&remote).expect("fixture: create remote dir");
 
@@ -133,6 +140,71 @@ impl GitWorktreeFixture {
         git_ok(&wt, &["config", "user.email", "ci@test.invalid"]);
         git_ok(&wt, &["config", "user.name", "CI"]);
         git_ok(&wt, &["config", "commit.gpgsign", "false"]);
+        wt
+    }
+
+    /// Add a real worktree at `<parent>/<name>`, anywhere on disk (#4207).
+    ///
+    /// Why: [`Self::add_worktree`] parks every worktree at
+    /// `<repo>/.worktrees/<name>`, whose grandparent happens to be the owning
+    /// checkout — so it cannot distinguish git-derived ownership from the
+    /// grandparent inference #4207 replaces, nor prove that enumeration is
+    /// independent of location. This helper takes the parent directory
+    /// explicitly so a test can park a worktree somewhere no hard-coded shape
+    /// covers, or outside the repos root entirely.
+    /// What: `git worktree add -b wt/<name> <parent>/<name>` off the current
+    /// `HEAD`, creating `<parent>` if needed. Returns the worktree path.
+    /// Test: `enumerate_finds_worktree_at_an_unwalked_location`,
+    /// `registry_root_for_ignores_where_the_worktree_is_parked`.
+    pub(crate) fn add_worktree_at(&self, parent: &Path, name: &str) -> PathBuf {
+        std::fs::create_dir_all(parent).expect("fixture: create worktree parent");
+        let wt = parent.join(name);
+        git_ok(
+            &self.repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("wt/{name}"),
+                wt.to_str().expect("utf8 worktree path"),
+            ],
+        );
+        wt
+    }
+
+    /// Create a bare `.base` clone inside the checkout and register a worktree
+    /// in ITS registry (#4207).
+    ///
+    /// Why: a managed project has two checkouts that can own a worktree
+    /// registry, and `enumerate_registered_worktrees` interrogates both. Without
+    /// a fixture for the `.base` anchor, only the project-checkout half of that
+    /// contract is covered.
+    /// What: `git clone --bare` the checkout to `<repo>/.base`, then
+    /// `git -C <repo>/.base worktree add` at `<repo>/.base/.worktrees/<name>`.
+    /// Returns the worktree path.
+    /// Test: `enumerate_finds_worktree_registered_to_base_clone`.
+    pub(crate) fn add_base_clone_worktree(&self, name: &str) -> PathBuf {
+        let base = self.repo.join(".base");
+        git_ok(
+            &self.repo,
+            &[
+                "clone",
+                "--bare",
+                ".",
+                base.to_str().expect("utf8 base clone path"),
+            ],
+        );
+        let wt = base.join(".worktrees").join(name);
+        git_ok(
+            &base,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("session/{name}"),
+                wt.to_str().expect("utf8 worktree path"),
+            ],
+        );
         wt
     }
 
