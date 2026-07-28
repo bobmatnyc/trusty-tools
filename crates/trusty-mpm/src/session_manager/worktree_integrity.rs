@@ -379,8 +379,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(Collector(Arc::clone(&seen)));
         tracing::subscriber::with_default(subscriber, body);
-        let levels = seen.lock().expect("lock").clone();
-        levels
+        seen.lock().expect("lock").clone()
     }
 
     fn finding(verdict: WorktreeIntegrity) -> IntegrityFinding {

@@ -25,7 +25,7 @@
 //! What: [`CwdCorrelation`] (the pure verdict), [`classify`] (the pure
 //! classifier — the testable core), and [`alarm`] (the loud rendering of a
 //! [`CwdCorrelation::Collision`]).
-//! Test: `classify_*` and `collision_*` below; the wired-in behaviour is
+//! Test: `classify_*` and `alarm_is_error_level` below; the wired-in behaviour is
 //! covered by `session_start_hook_correlates_claude_id` in `api_tests.rs`.
 
 use crate::session_manager::record::ManagedSessionId;
@@ -80,8 +80,8 @@ pub(crate) fn classify(matched: &[ManagedSessionId]) -> CwdCorrelation {
 /// `session_manager::prune`, which escalates the same way for the same reason.
 /// What: one `error!` naming the cwd, the collision count, and EVERY colliding
 /// session id, plus the concrete next action. No side effects beyond the log.
-/// Test: `alarm_is_error_level` (pins the level via `tracing::Level`),
-/// `collision_ids_are_all_reported`.
+/// Test: `alarm_is_error_level` (pins the level via `tracing::Level`, and that
+/// every colliding id appears in the `sessions` field).
 pub(crate) fn alarm(cwd: &str, ids: &[ManagedSessionId]) {
     let rendered: Vec<String> = ids.iter().map(ToString::to_string).collect();
     tracing::error!(
