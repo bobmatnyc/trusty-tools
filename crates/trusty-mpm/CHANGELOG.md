@@ -29,8 +29,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   accommodate them. The gate is asserted through `resolve_pm_prompt` itself with
   a project-tier agent deployed, so the composed branch is a property of the test
   rather than of the machine's `~/.claude/agents`, and `resolve_pm_prompt` now
-  reports which composer produced the prompt — the two are byte-identical by
-  contract, so the delivered string alone cannot tell you.
+  logs which composer produced the prompt — the two are byte-identical by
+  contract, so the delivered string alone cannot tell you. The gate injects a
+  fixed roster rather than scanning the agent tiers per side: those tiers are
+  machine-global mutable state that live `tm` sessions rewrite at launch, so
+  scanning twice made the gate itself intermittently red with a message
+  indistinguishable from a real prompt regression.
 
 ### Added
 

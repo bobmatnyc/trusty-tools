@@ -8,11 +8,10 @@
 //! join that changed.
 
 use super::*;
-use crate::core::delegation_authority::deployed_roster_section;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
     PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt,
-    resolve_pm_prompt_with_source,
+    resolve_pm_prompt_with_roster, resolve_pm_prompt_with_source,
 };
 use crate::core::instruction_package::ValidationError;
 use crate::core::stack_profile::stack_profile_section;
@@ -184,6 +183,14 @@ fn pm_instructions_cuts_reassemble_the_asset() {
 
     assert_eq!(blocks.len(), PM_INSTRUCTIONS_CUTS.len());
     assert_eq!(reassemble(&blocks), PM_INSTRUCTIONS.trim());
+    // `reassemble` skips the first block's join by design; pin it separately so
+    // "reproduces the asset exactly" is a complete statement rather than one
+    // with an unexamined hole.
+    assert_eq!(
+        blocks.first().map(|b| &b.join_before),
+        Some(&Join::Rule),
+        "the lead join is the boundary with the preceding asset, not part of this one"
+    );
 
     // The asset's own `## Identity` heading stays in `Core`. Attributing it to
     // `SectionId::Identity` would open the floor at block 0 and make every later
@@ -209,6 +216,7 @@ fn base_pm_cuts_reassemble_the_asset() {
         split_asset("BASE_PM.md", BASE_PM, BASE_PM_CUTS, Join::Rule).expect("cuts resolve");
 
     assert_eq!(reassemble(&blocks), BASE_PM.trim());
+    assert_eq!(blocks.first().map(|b| &b.join_before), Some(&Join::Rule));
     let sections: Vec<SectionId> = blocks.iter().map(|b| b.section).collect();
     assert_eq!(
         sections,
@@ -315,49 +323,116 @@ fn resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed() {
     );
 }
 
-#[test]
-fn resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly() {
-    // THE ACCEPTANCE GATE, at the layer that ships the prompt (#4183). Both the
-    // stack profile and the roster are recomputed from the same project, so the
-    // comparison is deterministic whatever the ambient agent tiers hold; what is
-    // under test is the WIRING — that `resolve_pm_prompt` hands the package
-    // exactly the inputs the legacy assembly would have received.
-    let tmp = project_with_roster();
+/// Run the entry-point gate for one project, with the roster pinned.
+///
+/// Why: `deployed_roster_section` unions three tiers on every call, two of them
+/// machine-global and rewritten by live `tm` sessions, so scanning once per side
+/// of a byte comparison is a race — observed red 1 run in 4, with a message
+/// indistinguishable from a real prompt regression. Both sides here take
+/// [`FIXED_ROSTER`], so the only thing that can differ is the wiring, which is
+/// what the gate is for. No `$HOME` scoping, hence no `HOME_LOCK` serialisation.
+fn assert_entry_point_gate(project: &Path, addendum: Option<&str>) {
+    let (composed, source) =
+        resolve_pm_prompt_with_roster(project, || Some(FIXED_ROSTER.to_string()));
+    assert_eq!(
+        source,
+        PromptSource::Package,
+        "the gate must run against the COMPOSED path, or it proves nothing"
+    );
 
-    let (composed, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(source, PromptSource::Package);
-
-    let roster = deployed_roster_section(tmp.path()).expect("a deployed agent yields a roster");
-    let legacy = legacy_bundled_fallback(&stack_profile_section(tmp.path()), &roster, None);
-
+    let legacy = legacy_bundled_fallback(&stack_profile_section(project), FIXED_ROSTER, addendum);
     assert_byte_identical(&legacy, &composed);
 }
 
 #[test]
+fn resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly() {
+    // THE ACCEPTANCE GATE, at the layer that ships the prompt (#4183). What is
+    // under test is the WIRING — that `resolve_pm_prompt` hands the package
+    // exactly the inputs the legacy assembly would have received.
+    let tmp = TempDir::new().expect("tempdir");
+    assert_entry_point_gate(tmp.path(), None);
+}
+
+#[test]
 fn resolve_pm_prompt_is_byte_identical_with_a_project_addendum() {
-    // Kills the `addendum.as_deref()` → `None` mutation: the legacy oracle reads
-    // INSTRUCTIONS.md, so dropping it at the call site diverges the two.
-    let tmp = project_with_roster();
+    // Kills the `addendum.as_deref()` → `None` mutation: the legacy oracle takes
+    // the addendum, so dropping it at the call site diverges the two.
+    let tmp = TempDir::new().expect("tempdir");
     write_override(
         tmp.path(),
         FILE_INSTRUCTIONS,
         "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK\n",
     );
 
-    let (composed, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(source, PromptSource::Package);
+    let (composed, _) =
+        resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert!(
         composed.contains("ALWAYS_RUN_MAKE_CHECK"),
         "the project addendum must reach the delivered prompt on the composed path"
     );
 
-    let roster = deployed_roster_section(tmp.path()).expect("roster");
-    let legacy = legacy_bundled_fallback(
-        &stack_profile_section(tmp.path()),
-        &roster,
-        Some("# Project Rules\n\nALWAYS_RUN_MAKE_CHECK"),
+    assert_entry_point_gate(tmp.path(), Some("# Project Rules\n\nALWAYS_RUN_MAKE_CHECK"));
+}
+
+#[test]
+fn gate_is_deterministic_across_repeated_runs() {
+    // The gate's own flake guard. The previous revision scanned the ambient agent
+    // tiers once per side and compared the results; this asserts the replacement
+    // is stable under repetition, and that the composed prompt for a fixed
+    // (project, roster) pair is a pure function of its inputs.
+    let tmp = TempDir::new().expect("tempdir");
+    let first = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+    for _ in 0..32 {
+        assert_entry_point_gate(tmp.path(), None);
+        let again = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+        assert_byte_identical(&first, &again);
+    }
+}
+
+#[test]
+fn injected_roster_does_not_change_which_path_runs() {
+    // The seam must not become a back door that alters routing: injecting a
+    // roster changes only WHICH roster, never whether the composed branch is
+    // eligible. With a delegation override the roster is irrelevant and the
+    // legacy path must still win.
+    let tmp = TempDir::new().expect("tempdir");
+    write_override(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
+    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    assert_eq!(source, PromptSource::Legacy);
+
+    // And a `None` roster is not composable, injected or scanned.
+    let bare = TempDir::new().expect("tempdir");
+    let (_, source) = resolve_pm_prompt_with_roster(bare.path(), || None);
+    assert_eq!(source, PromptSource::Legacy);
+}
+
+#[test]
+fn injected_roster_is_lazy_for_the_override_configurations() {
+    // The roster source stays a closure so an `AGENT_DELEGATION.md` override
+    // short-circuits before any tier scan — the pre-PR behaviour, which a plain
+    // `Option<String>` parameter would have silently regressed into an
+    // unconditional scan on every launch.
+    use std::cell::Cell;
+    let scans = Cell::new(0usize);
+
+    let tmp = TempDir::new().expect("tempdir");
+    write_override(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
+    let _ = resolve_pm_prompt_with_roster(tmp.path(), || {
+        scans.set(scans.get() + 1);
+        Some(FIXED_ROSTER.to_string())
+    });
+    assert_eq!(
+        scans.get(),
+        0,
+        "a delegation override must not scan the tiers"
     );
-    assert_byte_identical(&legacy, &composed);
+
+    let plain = TempDir::new().expect("tempdir");
+    let _ = resolve_pm_prompt_with_roster(plain.path(), || {
+        scans.set(scans.get() + 1);
+        Some(FIXED_ROSTER.to_string())
+    });
+    assert_eq!(scans.get(), 1, "the bundled fallback scans exactly once");
 }
 
 #[test]
@@ -444,8 +519,20 @@ fn deployed_prompt_override_forces_the_legacy_path_even_with_a_roster() {
 fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
     // The public entry point must return exactly what the seam returns — the
     // logging wrapper may not alter the prompt.
-    let tmp = project_with_roster();
-    let (with_source, _) = resolve_pm_prompt_with_source(tmp.path());
+    //
+    // Uses a delegation override deliberately: both calls below scan the ambient
+    // agent tiers independently, and on this configuration the override replaces
+    // the whole delegation section, so no roster byte reaches either output and
+    // the comparison cannot race a concurrent agent redeploy.
+    let tmp = TempDir::new().expect("tempdir");
+    write_override(
+        tmp.path(),
+        FILE_AGENT_DELEGATION,
+        "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n",
+    );
+
+    let (with_source, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
     assert_byte_identical(&resolve_pm_prompt(tmp.path()), &with_source);
 }
 
@@ -523,6 +610,48 @@ fn adjacent_cut_markers_report_an_empty_piece() {
             asset: "PM_INSTRUCTIONS.md",
             marker: "",
         }
+    );
+}
+
+#[test]
+fn derived_joins_survive_irregular_whitespace_around_cuts() {
+    // Automated-review MEDIUM: the concern was that `previous.trim_end()` reads
+    // the trailing whitespace of the WHOLE previous slice rather than just the
+    // inter-piece gap, so a piece ending in whitespace before a marker — "a
+    // fenced block with a blank line before the next heading" — would derive a
+    // wrong `Join`.
+    //
+    // It does not, and this is the named case. `trim_end` removes only from the
+    // END, so `p[p.trim_end().len()..]` IS exactly the trailing run; the gap is
+    // that run plus the current piece's leading run, which telescopes back to
+    // the original for ANY cut offsets. Asserted here rather than argued,
+    // against gaps the real assets do not currently contain: a fenced block, a
+    // blank line carrying spaces, and a three-newline separation.
+    let asset = "# Head\n\n\
+         ```markdown\ncode\n```\n   \n\n\
+         ## Context-First Protocol\n\nmemory\n\n\n\
+         2. `search` (`mcp__trusty-search__search`)\n\nsearch\n\t\n\
+         ## Agent Routing\n\nrouting\n";
+
+    let blocks = split_asset("SYNTHETIC.md", asset, PM_INSTRUCTIONS_CUTS, Join::Rule)
+        .expect("irregular whitespace still cuts");
+
+    assert_eq!(
+        reassemble(&blocks),
+        asset.trim(),
+        "derived joins must reproduce the asset byte-for-byte across irregular gaps"
+    );
+
+    // The gaps are genuinely irregular — otherwise this would prove nothing.
+    let joins: Vec<&Join> = blocks.iter().skip(1).map(|b| &b.join_before).collect();
+    assert_eq!(
+        joins,
+        vec![
+            &Join::Literal("\n   \n\n".to_string()),
+            &Join::Literal("\n\n\n".to_string()),
+            &Join::Literal("\n\t\n".to_string()),
+        ],
+        "each derived join must be the exact removed bytes, not a normalised guess"
     );
 }
 
@@ -682,6 +811,13 @@ fn empty_stack_profile_is_dropped_without_a_dangling_rule() {
 ///
 /// Only valid for text-only block slices — generated blocks have no body until
 /// composition time.
+///
+/// The FIRST block's `join_before` is deliberately excluded, matching
+/// `InstructionPackage::compose`, which never emits a join before the first
+/// emitted block. For an asset slice that join is `lead_join` — the boundary
+/// with the PRECEDING asset in the full stream, not part of this asset — so what
+/// this reproduces is `asset.trim()`, exactly and by definition, rather than
+/// "everything the blocks carry". Callers assert `lead_join` separately.
 fn reassemble(blocks: &[InstructionBlock]) -> String {
     let mut out = String::new();
     for (index, block) in blocks.iter().enumerate() {

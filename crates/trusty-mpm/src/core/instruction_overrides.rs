@@ -154,7 +154,12 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// and the robustness tests.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
-    tracing::debug!(?source, "resolved the PM system prompt");
+    // `info!`, deliberately: this is the operator-visible record of WHICH
+    // composer produced the session's prompt, and the two are byte-identical by
+    // contract so nothing else can reveal it. `debug!` sits below the default
+    // filter in both subscriber setups, which would make the claim false as
+    // shipped. Matches `delegation_authority`'s analogous roster-source event.
+    tracing::info!(?source, "resolved the PM system prompt");
     prompt
 }
 
@@ -185,11 +190,44 @@ pub(crate) enum PromptSource {
 /// Why: see [`PromptSource`] — byte-identical outputs make the path
 /// unobservable from the result alone, so the seam is what keeps the acceptance
 /// gate anchored to the branch it claims to cover.
-/// What: the resolved prompt plus its source. All composition logic lives here;
-/// [`resolve_pm_prompt`] is a thin logging wrapper.
-/// Test: `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`,
-/// `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`.
+/// What: the resolved prompt plus its source, with the deployed-agent roster
+/// scanned from the real tiers.
+/// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
+/// `workflow_override_forces_the_legacy_path_even_with_a_roster`.
 pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
+    resolve_pm_prompt_with_roster(project_dir, || {
+        crate::core::delegation_authority::deployed_roster_section(project_dir)
+    })
+}
+
+/// [`resolve_pm_prompt_with_source`] with the agent roster supplied by the
+/// caller.
+///
+/// Why: the roster is the one composition input this function cannot control
+/// and cannot re-derive. [`crate::core::delegation_authority::deployed_roster_section`]
+/// unions three tiers — the project tier, `$CLAUDE_CONFIG_DIR/agents` and
+/// `~/.claude/agents` — on EVERY call, and the latter two are machine-global
+/// mutable state that live `tm` sessions rewrite at launch; `scan_agents` also
+/// drops a file silently on a transient read failure. Two successive scans can
+/// therefore disagree. A byte-equality test that scans once per side is
+/// consequently racing, and it fails with a message indistinguishable from a
+/// genuine delivered-prompt regression — observed at ~1 red in 4 full-suite
+/// runs on a provisioned workstation, and invisible in CI, where no ambient
+/// tier exists. Injecting the roster gives both sides of that comparison ONE
+/// value without touching `$HOME` (which would cost the serial `HOME_LOCK`) and
+/// without altering the wiring under test.
+///
+/// What: identical to [`resolve_pm_prompt_with_source`] except that
+/// `roster_source` supplies the rendered `## Delegation Authority` block. It is
+/// a closure, not a value, so it stays LAZY: an `AGENT_DELEGATION.md` override
+/// short-circuits before any scan, exactly as before.
+/// Test: `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`,
+/// `resolve_pm_prompt_is_byte_identical_with_a_project_addendum`,
+/// `gate_is_deterministic_across_repeated_runs`.
+pub(crate) fn resolve_pm_prompt_with_roster(
+    project_dir: &Path,
+    roster_source: impl FnOnce() -> Option<String>,
+) -> (String, PromptSource) {
     let dir = project_dir.join(OVERRIDE_DIR_NAME);
 
     // Floor is always appended last and never replaceable.
@@ -229,7 +267,7 @@ pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, Prom
         // to forbid. Follow-up on the epic, not a check to relax.
         Some(body) => body,
         None => {
-            let roster = crate::core::delegation_authority::deployed_roster_section(project_dir);
+            let roster = roster_source();
 
             // #4183: configuration 1 (bundled fallback) composes through the
             // typed InstructionPackage. Gated on there being no section
@@ -239,6 +277,17 @@ pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, Prom
                 .as_deref()
                 .filter(|_| workflow_override.is_none() && memory_override.is_none());
             if let Some(roster) = bundled_fallback {
+                // PRECONDITION, established by the `filter` directly above and
+                // relied on by the error arm: on this branch `workflow_override`
+                // and `memory_override` are both `None`. That is what makes the
+                // degradation below byte-identical rather than merely "close" —
+                // the legacy assembly reached on error must be the SAME
+                // configuration the package was composing. If the filter ever
+                // widens, the error path silently stops being equivalent.
+                debug_assert!(
+                    workflow_override.is_none() && memory_override.is_none(),
+                    "the bundled-fallback branch requires no workflow/memory override"
+                );
                 match crate::core::bundled_pm_package::compose_bundled_fallback(
                     &stack,
                     roster,
@@ -247,10 +296,11 @@ pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, Prom
                     Ok(prompt) => return (prompt, PromptSource::Package),
                     // Unreachable for the shipped assets — `shipped_assets_
                     // build_and_validate` proves it — so this is a loud last
-                    // resort, never a routine fallback. The legacy assembly
-                    // below is byte-identical, so degrading to it still
-                    // delivers the right prompt; the error is what says the
-                    // package model drifted from the assets.
+                    // resort, never a routine fallback. Given the precondition
+                    // above, the legacy assembly below composes the identical
+                    // configuration and is byte-identical to it, so degrading
+                    // still delivers the right prompt; the error is what says
+                    // the package model drifted from the assets.
                     Err(err) => tracing::error!(
                         %err,
                         "bundled PM instruction package failed to compose; \
