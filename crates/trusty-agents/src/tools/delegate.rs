@@ -79,7 +79,9 @@ pub struct DelegateToAgentTool {
     /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
     /// `delegate_assistant_role_gate_rejects_controller_role`,
     /// `delegate_assistant_role_gate_allows_worker_role`,
-    /// `delegate_assistant_role_gate_allows_peer_assistant_role`.
+    /// `delegate_peer_assistant_is_refused_despite_role_allowlist` (ADR-0024:
+    /// this list still ADMITS the assistant role — the peer edge is refused
+    /// by the kind predicate in `execute`, never by curating this list).
     allowed_target_roles: Option<Vec<String>>,
     /// This instance's OWN privilege tier — the DELEGATOR's tier, not the
     /// target's (#4169, epic #4167 — one-directional L0/L1 delegation gate).
@@ -98,7 +100,7 @@ pub struct DelegateToAgentTool {
     /// `allowed_target_roles` is set OR this field is explicitly set (see
     /// `execute`'s `needs_full_resolution`).
     /// What: `None` (the default — every caller that constructs a
-    /// `DelegateToAgentTool` and never calls `with_delegator_tier`, which
+    /// `DelegateToAgentTool` and never calls `with_delegator`, which
     /// includes `pm`/`ctrl`-as-orchestrator's own unrestricted delegation
     /// and pre-#4169 tests exercising unrelated resolution behavior with
     /// bare/incomplete fixture TOMLs) means "this instance was never asked
@@ -113,15 +115,44 @@ pub struct DelegateToAgentTool {
     /// check still runs with a FAIL-CLOSED `AgentTier::L1Standard` default
     /// (via `unwrap_or_default()`) — belt-and-suspenders: the population
     /// that cares about role-gating can never silently skip tier-gating
-    /// too. Set explicitly via `with_delegator_tier`.
+    /// too. Set explicitly via `with_delegator`, together with the
+    /// delegator's role — see `delegator_role` for why they are indivisible.
     /// Test: `delegate_l1_to_l0_is_refused`, `delegate_l0_to_l1_succeeds`,
-    /// `delegate_l1_to_l1_is_unaffected_by_tier_gate`,
-    /// `delegate_multi_hop_l1_peer_to_l0_is_refused`,
+    /// `delegate_multi_hop_assistant_hop_is_refused`,
     /// `delegate_tier_gate_applies_even_without_role_allowlist`,
     /// `delegate_role_gate_without_declared_tier_fails_closed_to_l1`,
     /// `no_tier_and_no_role_gate_preserves_cheap_existence_check`,
-    /// `delegator_tier_defaults_to_none_on_construction`.
+    /// `delegator_identity_defaults_to_none_on_construction`.
     delegator_tier: Option<crate::agents::AgentTier>,
+    /// This instance's OWN `agent.role` — the DELEGATOR's KIND (ADR-0024,
+    /// issue #4201 follow-up).
+    ///
+    /// Why: ADR-0024 makes delegation authority a function of KIND
+    /// (assistant vs. sub-agent), never of tier order, because a total order
+    /// over tiers cannot forbid an edge WITHIN a rank — see
+    /// [`crate::agents::delegation`] for the structural argument. Enforcing
+    /// that rule needs the delegator's own kind, which this tool previously
+    /// never knew: it knew the delegator's TIER (`delegator_tier` above) and
+    /// nothing else. This field is deliberately set through the SAME builder
+    /// call as that tier ([`DelegateToAgentTool::with_delegator`]) rather than
+    /// through a separate opt-in method, so a call site cannot declare half of
+    /// its identity: whichever gates the choke point derives, it derives them
+    /// all, from one statement. That shape is the direct lesson of #4201,
+    /// where a per-gate builder method one call site simply forgot to call
+    /// left that path ungated with nothing to catch it.
+    /// What: `None` — no delegator identity was declared — means the kind
+    /// predicate does not run, byte-identical to pre-ADR-0024 behavior. That
+    /// population is `runtime::pm_mode::run_pm` (which also attaches no
+    /// `config_dirs`, so it skips the entire pre-flight block regardless) and
+    /// tests exercising unrelated resolution behavior. `Some(role)` means
+    /// "this delegator's kind is `role`"; when that role IS the assistant
+    /// kind, `execute` refuses any target that is also the assistant kind.
+    /// Test: `delegate_assistant_to_assistant_is_refused`,
+    /// `delegate_assistant_to_assistant_is_refused_at_every_tier_pairing`,
+    /// `delegate_assistant_to_sub_agent_still_succeeds`,
+    /// `delegate_kind_gate_does_not_touch_orchestrator_sources`,
+    /// `delegator_identity_defaults_to_none_on_construction`.
+    delegator_role: Option<String>,
     /// #3737 (per-message chat attribution, epic #3052): the id of the task
     /// whose turn this tool is delegating within, used as the `session_id` on
     /// the `AgentSpawned` event emitted on a successful delegation so the API
@@ -157,6 +188,7 @@ impl DelegateToAgentTool {
             config_dirs: Vec::new(),
             allowed_target_roles: None,
             delegator_tier: None,
+            delegator_role: None,
             session_id: None,
         }
     }
@@ -244,28 +276,43 @@ impl DelegateToAgentTool {
     /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
     /// `delegate_assistant_role_gate_rejects_controller_role`,
     /// `delegate_assistant_role_gate_allows_worker_role`,
-    /// `delegate_assistant_role_gate_allows_peer_assistant_role`.
+    /// `delegate_peer_assistant_is_refused_despite_role_allowlist`.
     pub fn with_allowed_target_roles(mut self, roles: Vec<String>) -> Self {
         self.allowed_target_roles = Some(roles);
         self
     }
 
-    /// Declare THIS instance's own delegator tier (#4169, epic #4167).
+    /// Declare THIS instance's own delegator identity — its `agent.role`
+    /// (KIND, ADR-0024) and its `AgentInfo::tier()` (#4169, epic #4167).
     ///
-    /// Why: See the `delegator_tier` field doc for the full rationale.
-    /// Every production call site that constructs a `DelegateToAgentTool`
-    /// for an assistant-tier (persona) caller must call this with that
-    /// caller's own resolved `AgentInfo::tier()` so the one-directional
-    /// L1->L0 gate has something to check against. Callers representing a
-    /// caller OUTSIDE the persona tier model entirely — `pm`/`ctrl`-as-
-    /// orchestrator, already fully trusted and already unaffected by
-    /// `allowed_target_roles` — pass [`crate::agents::AgentTier::L0Orchestration`]
-    /// explicitly to mean "this caller is not gated by the L0/L1 boundary",
-    /// not because it IS an L0 persona.
-    /// What: Stores `Some(tier)`, which — combined with `config_dirs` being
-    /// non-empty — forces full target resolution so the tier gate can run.
-    /// Test: `delegate_l1_to_l0_is_refused`, `delegate_l0_to_l1_succeeds`.
-    pub fn with_delegator_tier(mut self, tier: crate::agents::AgentTier) -> Self {
+    /// Why: See the `delegator_role` and `delegator_tier` field docs. Role and
+    /// tier are taken TOGETHER, in one call, on purpose (ADR-0024 conformance;
+    /// superseded the tier-only `with_delegator_tier`): they are two readings
+    /// of one fact — who this delegator is — and the gates derived from them
+    /// are meant to be indivisible. A per-gate builder method that each caller
+    /// must remember is precisely the shape that produced #4201's gap, where
+    /// one of three construction sites omitted `with_allowed_target_roles` and
+    /// nothing caught it; a caller can no longer opt into the tier gate while
+    /// silently skipping the kind gate, because there is no call that does
+    /// only one. Callers OUTSIDE the assistant/sub-agent model — `pm`/`ctrl`
+    /// -as-orchestrator, already fully trusted — pass their real role
+    /// (`orchestrator`/`controller`, which the kind predicate ignores by
+    /// design) with [`crate::agents::AgentTier::L0Orchestration`], meaning
+    /// "this caller is not gated by the L0/L1 boundary", not that it IS an L0
+    /// persona.
+    /// What: Stores `Some(role)` and `Some(tier)`, which — combined with
+    /// `config_dirs` being non-empty — forces full target resolution so both
+    /// the kind predicate and the tier gate can run against the resolved
+    /// target.
+    /// Test: `delegate_l1_to_l0_is_refused`, `delegate_l0_to_l1_succeeds`,
+    /// `delegate_assistant_to_assistant_is_refused`,
+    /// `delegator_identity_defaults_to_none_on_construction`.
+    pub fn with_delegator(
+        mut self,
+        role: impl Into<String>,
+        tier: crate::agents::AgentTier,
+    ) -> Self {
+        self.delegator_role = Some(role.into());
         self.delegator_tier = Some(tier);
         self
     }
@@ -360,7 +407,7 @@ impl ToolExecutor for DelegateToAgentTool {
             // `ctrl::pm_task::dispatch::persona`).
             let needs_full_resolution =
                 self.allowed_target_roles.is_some() || self.delegator_tier.is_some();
-            let (rejected, tier_blocked) = if needs_full_resolution {
+            let (rejected, tier_blocked, kind_blocked) = if needs_full_resolution {
                 // Fail-closed default (#4169 constraint 1): a caller that DID
                 // opt into role-gating but never declared its own tier is
                 // still checked as if it were L1Standard — the population
@@ -397,7 +444,40 @@ impl ToolExecutor for DelegateToAgentTool {
                             }
                             None => true,
                         };
-                        (tier_blocked || !role_ok, tier_blocked)
+                        // ADR-0024 predicates 1+2, the PRIMARY carrier of the
+                        // rule: an assistant may never DELEGATE to another
+                        // assistant ("assistants communicate with each other,
+                        // but never delegate"). Enforced here, in the shared
+                        // choke point every delegation traverses, rather than
+                        // via a per-call-site builder opt-in — see
+                        // `with_delegator`. It reads only ROLES, never tiers,
+                        // so it holds identically before and after the
+                        // ratified inversion that moves assistants to L0 and
+                        // makes the tier comparison below vacuous for this
+                        // case. `delegator_role` of `None` (no identity
+                        // declared) leaves this a no-op, and a non-assistant
+                        // source (`pm`/`ctrl`) is outside the rule entirely.
+                        let kind_blocked =
+                            self.delegator_role.as_deref().is_some_and(|source_role| {
+                                crate::agents::delegation::kind_refuses_delegation(
+                                    source_role,
+                                    &cfg.agent.role,
+                                )
+                            });
+                        if kind_blocked {
+                            tracing::warn!(
+                                agent_name,
+                                target_role = %cfg.agent.role,
+                                "delegate_to_agent: refusing an assistant-to-assistant \
+                                 delegation — assistants communicate, they do not delegate \
+                                 to one another (ADR-0024)"
+                            );
+                        }
+                        (
+                            tier_blocked || kind_blocked || !role_ok,
+                            tier_blocked,
+                            kind_blocked,
+                        )
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -405,7 +485,7 @@ impl ToolExecutor for DelegateToAgentTool {
                             error = %format!("{e:#}"),
                             "delegate_to_agent: gated target failed to resolve"
                         );
-                        (true, false)
+                        (true, false, false)
                     }
                 }
             } else if !crate::agents::agent_name_resolves(&self.config_dirs, agent_name) {
@@ -414,10 +494,26 @@ impl ToolExecutor for DelegateToAgentTool {
                     config_dirs = ?self.config_dirs,
                     "delegate_to_agent: agent not found in any candidate directory"
                 );
-                (true, false)
+                (true, false, false)
             } else {
-                (false, false)
+                (false, false, false)
             };
+            if kind_blocked {
+                // ADR-0024 AC, same rationale as the tier message below: the
+                // assistant/sub-agent split is a product-level concept the
+                // owner named directly, so explaining it educates rather than
+                // leaking — it enumerates no roster entry beyond the one name
+                // the caller already supplied. Deliberately distinct from the
+                // generic roster-hiding message, and checked BEFORE the tier
+                // message so a peer edge is always reported as the peer
+                // prohibition it is, never as a tier accident.
+                return ToolResult::err(format!(
+                    "'{agent_name}' cannot be delegated to: it is a peer assistant, and \
+                     assistants communicate with each other rather than delegating to one \
+                     another. Delegation is for sub-agents (specialists). Handle this \
+                     yourself, or hand it to a specialist instead."
+                ));
+            }
             if tier_blocked {
                 // #4169 AC: "error message educates the user on the
                 // constraint" — deliberately DISTINCT from the generic
@@ -445,6 +541,26 @@ impl ToolExecutor for DelegateToAgentTool {
                      as tools instead of via delegate_to_agent."
                 ));
             }
+            // ADR-0024 observability gap: until now ONLY refusals logged, so a
+            // gate that had silently stopped matching (exactly #4201's shape)
+            // produced no signal at all — an operator could not tell an
+            // authorized delegation from an unenforced one. One line on the
+            // authorized path records which predicates were consulted, so
+            // predicate 3 being redundant-as-designed is observable rather
+            // than inferred. Identity metadata only: roles, tier, and the
+            // agent name the caller already supplied — never the task body,
+            // credentials, or any user content.
+            tracing::info!(
+                agent_name,
+                source_role = self.delegator_role.as_deref().unwrap_or("<undeclared>"),
+                source_is_assistant_kind = self
+                    .delegator_role
+                    .as_deref()
+                    .is_some_and(crate::agents::delegation::is_assistant_kind),
+                delegator_tier = ?self.delegator_tier,
+                role_allowlist_enforced = self.allowed_target_roles.is_some(),
+                "delegate_to_agent: delegation authorized (kind + role + tier predicates passed)"
+            );
         }
 
         // Detect coding persona + language idiom skill from the task and

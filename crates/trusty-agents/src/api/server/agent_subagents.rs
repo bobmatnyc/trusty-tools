@@ -256,13 +256,32 @@ async fn in_product_surface(
                 let target_tier = target.agent.tier();
                 let tier_blocked = target_tier == AgentTier::L0Orchestration
                     && delegator_tier != AgentTier::L0Orchestration;
+                // ADR-0024: the KIND predicate the gate now enforces, read
+                // from the SAME function `DelegateToAgentTool::execute` calls
+                // — not a second copy of the comparison. Without this the
+                // pane would advertise every peer assistant as reachable
+                // while the gate refuses it, which is the drift this module's
+                // doc exists to forbid. Checked FIRST, matching the order
+                // `execute` reports refusals in.
+                let kind_blocked = crate::agents::delegation::kind_refuses_delegation(
+                    &cfg.agent.role,
+                    &target.agent.role,
+                );
                 targets.push(json!({
                     "name": target.agent.name,
                     "display_name": target.agent.display_label(),
                     "role": target.agent.role,
                     "tier": target_tier.wire_label(),
-                    "reachable": !tier_blocked,
-                    "reason": if tier_blocked {
+                    "reachable": !(kind_blocked || tier_blocked),
+                    "reason": if kind_blocked {
+                        Some(
+                            "refused by the delegation kind rule: this target is a peer \
+                             assistant, and assistants communicate with each other rather \
+                             than delegating to one another (ADR-0024). Delegation targets \
+                             are sub-agents (specialists)."
+                                .to_string(),
+                        )
+                    } else if tier_blocked {
                         Some(format!(
                             "refused by the L0/L1 delegation gate: this agent is tier \
                              {} and may not delegate into an L0-orchestration target \

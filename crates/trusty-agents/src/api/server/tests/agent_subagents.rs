@@ -151,9 +151,25 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(named.contains(&"engineer"), "{named:?}");
+    // ADR-0024: a peer assistant is still REPORTED (role-eligible, so it is
+    // not silently dropped) but is no longer REACHABLE — assistants
+    // communicate with each other rather than delegating. This assertion
+    // replaces the pre-ADR-0024 one that treated izzie as a live target; the
+    // pane must never advertise a capability the gate refuses.
+    let izzie = targets
+        .iter()
+        .find(|t| t["name"] == "izzie")
+        .expect("peer assistant must still be reported, with a reason");
+    assert_eq!(
+        izzie["reachable"], false,
+        "peer assistant is not a delegation target: {izzie:?}"
+    );
     assert!(
-        named.contains(&"izzie"),
-        "peer assistant is a target: {named:?}"
+        izzie["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("peer assistant"),
+        "the pane must explain the kind rule: {izzie:?}"
     );
     // `documentation` is the role that exists ONLY in
     // `ASSISTANT_ALLOWED_DELEGATE_ROLES` — its presence here is what proves the
@@ -203,13 +219,20 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
 /// target". The gate (`tools::delegate`, #4169) refuses that delegation, so a
 /// config surface reporting it as reachable would advertise a capability the
 /// runtime denies.
+///
+/// ADR-0024 update: the L0 fixture is now a SUB-AGENT (`engineer`), not an
+/// assistant. An assistant-role L0 target is refused by the kind predicate
+/// before the tier comparison is consulted, which would leave this test
+/// green while testing nothing about tier — the same isolation applied to
+/// `delegate_l1_to_l0_is_refused` in `tools::delegate`'s tests.
 #[tokio::test]
 async fn subagents_route_hides_l0_target_from_l1_delegator() {
     let dir = tempfile::tempdir().unwrap();
     standard_roster(dir.path());
-    // An L0-orchestration peer assistant — role-eligible (`assistant`), so the
-    // ONLY thing that can keep it out of reach is the tier gate.
-    write_agent(dir.path(), "orch", "assistant", Some("l0"), &[], None);
+    // An L0-orchestration sub-agent — role-eligible (`engineer`) and NOT the
+    // assistant kind, so the ONLY thing that can keep it out of reach is the
+    // tier gate.
+    write_agent(dir.path(), "orch", "engineer", Some("l0"), &[], None);
 
     let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
     let body = body_json(resp).await;
@@ -230,16 +253,22 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
     assert!(reason.contains("L0/L1"), "{reason}");
     assert!(reason.contains("#4169"), "{reason}");
 
-    // Every L1 peer is still reachable — the gate is one-directional, not a
-    // blanket denial.
-    let izzie = targets.iter().find(|t| t["name"] == "izzie").unwrap();
-    assert_eq!(izzie["tier"], "l1");
-    assert_eq!(izzie["reachable"], true);
+    // Not a blanket denial: an L1 SUB-AGENT is still reachable. (Pre-ADR-0024
+    // this assertion used the peer assistant `izzie`; a peer is now refused by
+    // kind, so the "one-directional, not blanket" property is demonstrated
+    // with a target the kind rule permits.)
+    let eng = targets.iter().find(|t| t["name"] == "engineer").unwrap();
+    assert_eq!(eng["tier"], "l1");
+    assert_eq!(eng["reachable"], true);
 }
 
 /// The counter-test: an L0 delegator DOES reach an L0 target (and still reaches
 /// L1 ones). Without this, a bug that reported every L0 target as unreachable
 /// would pass the test above.
+///
+/// ADR-0024 update: the L0 target is a sub-agent (`engineer` role) for the
+/// same isolation reason as the test above — an assistant-role target would
+/// be refused by kind, so this would no longer prove anything about tier.
 #[tokio::test]
 async fn subagents_route_shows_l0_target_to_l0_delegator() {
     let dir = tempfile::tempdir().unwrap();
@@ -254,7 +283,7 @@ async fn subagents_route_shows_l0_target_to_l0_delegator() {
     write_agent(
         dir.path(),
         "orch",
-        "assistant",
+        "engineer",
         Some("orchestration"),
         &[],
         None,
@@ -298,7 +327,9 @@ async fn subagents_route_tier_fails_closed_for_an_unrecognized_value() {
         &["delegate_to_agent"],
         None,
     );
-    write_agent(dir.path(), "orch", "assistant", Some("l0"), &[], None);
+    // ADR-0024: sub-agent-kind L0 target, so the tier fail-closed posture is
+    // what this test observes rather than the kind predicate.
+    write_agent(dir.path(), "orch", "engineer", Some("l0"), &[], None);
 
     let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
     let body = body_json(resp).await;

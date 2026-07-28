@@ -409,10 +409,17 @@ pub async fn run_pm_task_with_history(
     // #3737: thread the task's session id so a successful delegation emits
     // `AgentSpawned` and the API server can attribute the answer to the
     // specialist that produced it (chat-bubble responder attribution).
+    // ADR-0024: the delegator's IDENTITY (role = KIND, plus tier) is declared
+    // in one call, so this path gets the kind predicate and the tier gate
+    // together and cannot acquire one without the other. `pm_cfg.agent.role`
+    // verbatim: for `ctrl.toml` that is `assistant` (#3812) and the kind
+    // predicate applies; for a resolved `pm.toml` it is `orchestrator`, which
+    // the predicate ignores by design (ADR-0024 predicate 1's scope caveat),
+    // so orchestrator delegation is unchanged.
     let mut delegate_tool = DelegateToAgentTool::new(runner)
         .with_config_dir(config_dir.clone())
         .with_session_id(sid.clone())
-        .with_delegator_tier(delegator_tier);
+        .with_delegator(pm_cfg.agent.role.clone(), delegator_tier);
     if let Some(roles) = allowed_target_roles {
         delegate_tool = delegate_tool.with_allowed_target_roles(roles);
     }

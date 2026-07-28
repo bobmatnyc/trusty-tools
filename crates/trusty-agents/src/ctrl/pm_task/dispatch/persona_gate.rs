@@ -1,4 +1,4 @@
-//! Pure per-turn gating helpers for the persona-chat dispatch path.
+//! Per-turn gating helpers for the persona-chat dispatch path.
 //!
 //! Why: `persona.rs` sits exactly at the 500-SLOC production cap enforced by
 //! `scripts/check_line_cap.sh`, so #4171 could not add its tier gate there
@@ -11,14 +11,86 @@
 //! `use super::*`, because `persona.rs` re-imports them.
 //! What: `filter_persona_tool_names` (allow-glob + RBAC-tier + scope gate),
 //! `filter_persona_tool_names_for_tier` (that gate plus #4171's L0-only
-//! session-state strip), `persona_max_turns`, and `persona_allowed_tools`.
+//! session-state strip), `persona_max_turns`, `persona_allowed_tools`, and
+//! (#4201) `build_persona_delegate_tool` — the DELEGATION gate, which is the
+//! one non-pure item here: it returns a constructed `DelegateToAgentTool`
+//! rather than a decision, deliberately, so the regression test drives the
+//! exact value `persona.rs` registers instead of a re-derived copy of it.
 //! Test: `persona_tests.rs` — `filter_persona_tool_names_*`,
-//! `persona_max_turns_*`, `persona_allowed_tools_*`; #4171's own coverage
-//! lives in `tools::session_state::tests`.
+//! `persona_max_turns_*`, `persona_allowed_tools_*`,
+//! `persona_delegate_*`; #4171's own coverage lives in
+//! `tools::session_state::tests`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::tools::registry::scope::{Scope, ScopePattern, agent_can_use};
+use crate::tools::{AgentRunner, delegate::DelegateToAgentTool};
 
 use super::super::helpers::match_any_glob;
+
+/// Build the `delegate_to_agent` tool the persona-chat dispatch path arms,
+/// with BOTH delegation gates applied (#4201).
+///
+/// Why: `run_pm_task_with_persona` built this tool inline with the L0/L1 tier
+/// gate (#4169) but WITHOUT the role allowlist (#3555 CRITICAL follow-up)
+/// that its sibling dispatch path applies via `history::ctrl_delegate_posture`
+/// — so an assistant-tier persona reached from the REPL `/agent` command could
+/// delegate to a target whose role is not in
+/// `ASSISTANT_ALLOWED_DELEGATE_ROLES` at all (`pm`, role `orchestrator`;
+/// `ctrl`, role `controller`), whose subprocess would then be armed from the
+/// SPAWNED child's own role by `run_subagent` — an unrestricted orchestrator
+/// registry (shell, `write_file`, unrestricted `delegate_to_agent`) obtained
+/// straight out of the sandboxed, untrusted-content-ingesting assistant tier.
+/// The tier gate did not cover for it: it can only refuse an `L0Orchestration`
+/// TARGET, and no bundled agent declares `tier = "l0"` today, so that layer is
+/// structurally present but inert and the defense-in-depth model collapsed to
+/// zero effective layers on this path. Extracted as a function (rather than
+/// fixed in place) for the same reason `ctrl_delegate_posture` was: it is the
+/// only way this security contract is testable without a live LLM turn, and a
+/// test that rebuilt the tool itself would keep passing if the call site
+/// regressed.
+/// What: `persona_role != ASSISTANT_TIER_ROLE` — a persona outside the
+/// assistant tier model entirely, exactly the population `run_pm_task_with_
+/// persona` also declines to taint and the mirror of `ctrl_delegate_posture`'s
+/// `role != "assistant"` branch — gets `L0Orchestration` as its DELEGATOR tier
+/// (never blocked by the one-directional gate) and NO role allowlist, byte-
+/// identical to the pre-#4201 behavior. The assistant tier gets its own
+/// `declared_tier` verbatim (fail-closed to `L1Standard` for every persona
+/// shipped before #4168) plus `ASSISTANT_ALLOWED_DELEGATE_ROLES` — the same
+/// single-source-of-truth constant `build_assistant_tier_registry` and
+/// `ctrl_delegate_posture` use, never a hand-copied second list.
+/// Test: `persona_delegate_tool_refuses_orchestrator_role_target`,
+/// `persona_delegate_tool_refuses_controller_role_target`,
+/// `persona_delegate_tool_allows_worker_role_target`,
+/// `persona_delegate_tool_refuses_peer_assistant_target` (ADR-0024 renamed
+/// this from `..._allows_peer_assistant_role_target` when the peer-consult
+/// lane closed — the pointer must track the rename, not the old name),
+/// `persona_delegate_tool_leaves_non_assistant_roles_ungated`.
+pub(super) fn build_persona_delegate_tool(
+    runner: Arc<dyn AgentRunner>,
+    config_dir: PathBuf,
+    session_id: String,
+    persona_role: &str,
+    declared_tier: crate::agents::AgentTier,
+) -> DelegateToAgentTool {
+    // #3737: thread the session id so a persona that delegates onward
+    // attributes the answer to the specialist that produced it.
+    let tool = DelegateToAgentTool::new(runner)
+        .with_config_dir(config_dir)
+        .with_session_id(session_id);
+    if !crate::agents::delegation::is_assistant_kind(persona_role) {
+        return tool.with_delegator(persona_role, crate::agents::AgentTier::L0Orchestration);
+    }
+    tool.with_delegator(persona_role, declared_tier)
+        // #4201: the allowlist this path was missing — see the fn doc.
+        .with_allowed_target_roles(
+            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+}
 
 /// Narrow a persona's full candidate tool-name list down to what it may
 /// actually reach on this turn (#3285).

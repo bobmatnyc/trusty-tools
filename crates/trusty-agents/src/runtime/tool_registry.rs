@@ -92,9 +92,12 @@ use tools::{ToolRegistry, shell_exec::ShellExecTool};
 /// Sub-agents configuration section — must report whether `delegate_to_agent`
 /// is registered for a given agent AT ALL, which is exactly the
 /// `role == ASSISTANT_TIER_ROLE` branch in `build_registry_for_agent` below.
-/// Reading the constant (rather than re-typing the literal `"assistant"`, as
-/// `ctrl::pm_task::dispatch::persona` was forced to) keeps the config surface
-/// from claiming a mechanism the registry would not wire.
+/// Reading the constant (rather than re-typing the literal `"assistant"`)
+/// keeps the config surface from claiming a mechanism the registry would not
+/// wire. ADR-0024 gave this constant a second reader of the same shape:
+/// `crate::agents::delegation::is_assistant_kind`, the ONE definition of the
+/// assistant KIND, which `ctrl::pm_task::dispatch::persona_gate` now calls
+/// instead of comparing the literal inline.
 pub(crate) const ASSISTANT_TIER_ROLE: &str = "assistant";
 
 /// Fail-closed allowlist of `agent.role` values an assistant-tier
@@ -114,17 +117,23 @@ pub(crate) const ASSISTANT_TIER_ROLE: &str = "assistant";
 /// sandboxed assistant tier.
 /// What: the exact `role` field values declared in each bundled worker's
 /// `agent.toml` (NOT the agent/file name — `qa-agent.toml` declares
-/// `role = "qa"`, not `"qa-agent"`) plus [`ASSISTANT_TIER_ROLE`] itself, so
-/// the Izzie <-> cto-assistant peer-consult lane keeps working: spawning a
-/// peer assistant is safe because IT ALSO gets routed through
-/// `build_assistant_tier_registry` (the same restricted registry), never an
-/// unrestricted one. Any role not in this list — including anything not yet
-/// declared in the bundled roster — is rejected.
+/// `role = "qa"`, not `"qa-agent"`) plus [`ASSISTANT_TIER_ROLE`] itself. That
+/// last entry was added for the Izzie <-> cto-assistant peer-consult lane;
+/// ADR-0024 has since CLOSED that lane (see the note below), so it no longer
+/// admits any delegation edge on its own. Any role not in this list —
+/// including anything not yet declared in the bundled roster — is rejected.
 /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
 /// `delegate_assistant_role_gate_rejects_controller_role`,
 /// `delegate_assistant_role_gate_allows_worker_role`,
-/// `delegate_assistant_role_gate_allows_peer_assistant_role`
-/// (`src/tools/delegate.rs`).
+/// `delegate_peer_assistant_is_refused_despite_role_allowlist`
+/// (`src/tools/delegate.rs`). ADR-0024 note: `ASSISTANT_TIER_ROLE` remains in
+/// this list, but an assistant-to-assistant EDGE is now refused by the kind
+/// predicate inside `DelegateToAgentTool::execute`
+/// (`crate::agents::delegation`) — the peer-consult lane this entry was added
+/// for is closed. The entry is kept because this list is also read by
+/// non-delegation consumers (the `/subagents` route's `allowed_roles`
+/// report), and because the kind rule must be enforced by CODE, not by which
+/// names happen to appear in a curated list.
 ///
 /// `pub(crate)` (security fix, third dispatch path, #4126): `ctrl::pm_task::
 /// dispatch::history::run_pm_task_with_history` builds its OWN
@@ -484,11 +493,11 @@ pub(super) fn build_registry_for_agent(
 ///
 /// `delegator_tier` (#4169, epic #4167 — one-directional L0/L1 delegation
 /// gate): this agent's own resolved `AgentInfo::tier()`, threaded into the
-/// `DelegateToAgentTool` via `with_delegator_tier` (always called here,
+/// `DelegateToAgentTool` via `with_delegator` (always called here,
 /// alongside `with_allowed_target_roles`) so its pre-flight check refuses
 /// any target that resolves to `AgentTier::L0Orchestration` unless THIS
 /// agent is itself L0. If a call to this function ever omitted the
-/// `with_delegator_tier` wiring, `DelegateToAgentTool` would STILL enforce
+/// `with_delegator` wiring, `DelegateToAgentTool` would STILL enforce
 /// the tier gate fail-closed to `AgentTier::L1Standard` (because
 /// `with_allowed_target_roles` is always called here too — see
 /// `DelegateToAgentTool::delegator_tier`'s doc comment for the
@@ -562,7 +571,13 @@ pub(crate) fn build_assistant_tier_registry(
                     .map(|s| s.to_string())
                     .collect(),
             )
-            .with_delegator_tier(delegator_tier),
+            // ADR-0024: the delegator's KIND is `ASSISTANT_TIER_ROLE` by
+            // construction, not by assumption — `build_registry_for_agent`
+            // (line ~188) routes into this function on exactly that role and
+            // on no other, so every caller of this registry IS an assistant.
+            // Declared together with the tier in one call so this site cannot
+            // acquire the tier gate while missing the kind predicate.
+            .with_delegator(ASSISTANT_TIER_ROLE, delegator_tier),
     ));
 
     // #3745 item C: register the izzie platform-hosted tools

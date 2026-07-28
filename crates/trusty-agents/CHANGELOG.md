@@ -51,6 +51,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Delegation authority is now governed by agent KIND, not by tier order
+  (ADR-0024, "Assistants Are Level-0 Delegators; Sub-Agents Are In-Process,
+  Single-Edge Leaves That Never Delegate" — cited by title as well as number
+  because the ADR is not on `main` yet; it lands with PR #4243).** The
+  shipped L0/L1 gate expressed its rule as a tier
+  comparison, which is a proxy: a total order cannot forbid an edge WITHIN a
+  rank, for any numbering. It appeared to work only because every assistant
+  was L1 and L0 was empty. Under the ratified model — where all assistants
+  become L0 and "assistants communicate with each other, but never delegate"
+  — that check becomes vacuous for exactly the case it must forbid, and no
+  renumbering fixes it. `DelegateToAgentTool::execute` now refuses any
+  assistant-to-assistant delegation edge by reading the two endpoints' `role`
+  (the KIND discriminator), never a tier. The check lives in the shared
+  `execute()` choke point every delegation traverses rather than in a
+  per-call-site builder method, and the delegator's role and tier are declared
+  through a single `with_delegator(role, tier)` call (superseding
+  `with_delegator_tier`), so no construction site can acquire one gate while
+  silently missing the other — the failure shape the persona-path fix above
+  was filed for. The tier gate is RETAINED unchanged as defense-in-depth over
+  a different config field. `pm`/`ctrl`-as-orchestrator are explicitly outside
+  this rule and are unaffected. The `GET /api/agents/:name/subagents` route
+  reports peer assistants as unreachable with the kind reason, reading the
+  same predicate the gate enforces rather than a second copy of it.
+
+  **Known regression, accepted by the owner:** this closes the Izzie <->
+  cto-assistant peer-consult lane, and the replacement mechanism
+  ("assistants communicate") does not exist yet — there is no implemented
+  agent-to-agent messaging path for trusty-agents personas today.
+
+- **Applied the `ASSISTANT_ALLOWED_DELEGATE_ROLES` gate on the persona-chat
+  dispatch path (#4201).** The REPL `/agent` persona path built its
+  `DelegateToAgentTool` with the #4169 L0/L1 tier gate but WITHOUT the role
+  allowlist its sibling ctrl/session path applies, so an assistant-tier
+  persona could delegate to `pm` (role `orchestrator`) or `ctrl` (role
+  `controller`) — roles that are not in the allowlist at all — and
+  `run_subagent` would arm the spawned subprocess from that child's own role,
+  handing an unrestricted orchestrator registry (shell, `write_file`,
+  unrestricted `delegate_to_agent`) to a persona that ingests untrusted
+  content. The tier gate did not cover for it: it can only refuse an
+  `L0Orchestration` TARGET and no bundled agent declares `tier = "l0"` today,
+  so on this path both defense-in-depth layers were ineffective. Both gates
+  are now applied from one place (`persona_gate::build_persona_delegate_tool`,
+  reusing the same single-source-of-truth constant the other paths use), which
+  the regression tests drive directly so a call-site regression cannot pass
+  silently. A persona whose own role is outside the assistant tier is
+  unaffected.
+
 - **Defined the L0/L1 persona privilege tier and made the L1->L0 delegation
   path structurally forbidden (#4168, #4169, epic #4167).** Added an
   explicit `AgentTier` (`AgentInfo::tier`, TOML `[agent].tier` / `.md`
