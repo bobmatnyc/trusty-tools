@@ -17,7 +17,7 @@ use crate::llm;
 use crate::subprocess::SubprocessAgentRunner;
 use crate::tools::registry::dead_scope;
 use crate::tools::registry::scope::ScopePattern;
-use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
+use crate::tools::{AgentRunner, ToolRegistry};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
@@ -31,7 +31,8 @@ use super::super::super::handlers::{
 use super::super::super::state::ConversationTurn;
 use super::classification;
 use super::persona_gate::{
-    filter_persona_tool_names_for_tier, persona_allowed_tools, persona_max_turns,
+    build_persona_delegate_tool, filter_persona_tool_names_for_tier, persona_allowed_tools,
+    persona_max_turns,
 };
 use super::persona_memory;
 
@@ -279,36 +280,27 @@ pub async fn run_pm_task_with_persona(
             } else {
                 None
             };
-            // #4169 (epic #4167): the one-directional L0/L1 delegation gate.
-            // This persona-chat dispatch path (backing the REPL `/agent`
-            // command) is the SECOND site — besides `runtime::subagent_mode`
-            // — that builds a `DelegateToAgentTool` for a persona that may
-            // hold live external-content tools. `role == "assistant"` is the
-            // SAME population `delegation_taint` above already gates; a
-            // non-assistant-tier role here is treated the same way the
-            // taint above treats it — outside the persona tier model
-            // entirely (mirrors `ctrl_delegate_posture`'s `role !=
-            // "assistant"` branch in `history.rs`) — so it is never gated by
-            // the L1->L0 boundary, exactly as it is never tainted.
-            let delegator_tier = if persona_cfg.agent.role == "assistant" {
-                persona_cfg.agent.tier()
-            } else {
-                crate::agents::AgentTier::L0Orchestration
-            };
             let runner: Arc<dyn AgentRunner> = Arc::new(
                 SubprocessAgentRunner::new()
                     .with_config_dir(Some(config_dir.clone()))
                     .with_delegation_taint(delegation_taint),
             );
-            registry.register(Arc::new(
-                // #3737: thread the session id so a persona that delegates
-                // onward attributes the answer to the specialist that produced
-                // it (chat-bubble responder attribution).
-                DelegateToAgentTool::new(runner)
-                    .with_config_dir(config_dir.clone())
-                    .with_session_id(sid.clone())
-                    .with_delegator_tier(delegator_tier),
-            ));
+            // #4201: this path applied the #4169 L0/L1 tier gate but NOT the
+            // `ASSISTANT_ALLOWED_DELEGATE_ROLES` allowlist its sibling
+            // dispatch path applies (`history::ctrl_delegate_posture`), so an
+            // assistant-tier persona could delegate to `pm`/`ctrl`. Both gates
+            // now come from ONE place — `build_persona_delegate_tool`, which
+            // also owns the `role != "assistant"` (outside the tier model)
+            // branch this block used to compute inline, and which the
+            // regression tests drive directly so a call-site regression here
+            // cannot pass silently. See that function's doc comment.
+            registry.register(Arc::new(build_persona_delegate_tool(
+                runner,
+                config_dir.clone(),
+                sid.clone(),
+                &persona_cfg.agent.role,
+                persona_cfg.agent.tier(),
+            )));
             registry.register(Arc::new(AddProjectTool));
             registry.register(Arc::new(ListProjectsTool));
             registry.register(Arc::new(RemoveProjectTool));

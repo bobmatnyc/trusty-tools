@@ -20,6 +20,9 @@ use super::super::persona_gate::filter_persona_tool_names;
 // `persona.rs` no longer imports `Scope` (its only user moved to
 // `persona_gate`), but these tests still construct one directly.
 use crate::tools::registry::scope::Scope;
+// #4201: the delegation-gate tests below EXECUTE the real tool this path
+// registers, so they need the trait that carries `execute`.
+use crate::tools::traits::ToolExecutor;
 
 /// #3223: `run_pm_task_with_persona` now resolves the agent via
 /// `AgentConfig::by_name_async` instead of a hand-rolled `.toml`-only
@@ -830,4 +833,206 @@ fn persona_tier_gate_keeps_session_state_for_l0() {
     );
 
     assert_eq!(kept, all_names);
+}
+
+// ---------------------------------------------------------------------------
+// #4201: the delegation gate on the PERSONA dispatch path.
+//
+// These tests deliberately drive `build_persona_delegate_tool` — the single
+// function `run_pm_task_with_persona` registers — and then `execute()` the
+// resulting tool against a spy runner, rather than re-asserting a posture
+// tuple. A test that rebuilt the tool itself would keep passing if the call
+// site dropped `.with_allowed_target_roles(...)` again, which is exactly the
+// regression #4201 filed. Verified non-vacuous: with that call removed from
+// `build_persona_delegate_tool`, the two refusal tests below fail (the spy
+// runner is invoked).
+// ---------------------------------------------------------------------------
+
+/// Spy runner: records every agent name a delegation actually reached a
+/// spawn for. An empty log is the proof a gate rejected BEFORE spawn.
+struct SpyRunner {
+    spawned: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl AgentRunner for SpyRunner {
+    async fn run(
+        &self,
+        agent_name: &str,
+        _task: &str,
+    ) -> anyhow::Result<crate::tools::traits::AgentOutput> {
+        self.spawned
+            .lock()
+            .expect("spy runner lock poisoned")
+            .push(agent_name.to_string());
+        Ok(crate::tools::traits::AgentOutput {
+            content: "ok".into(),
+            summary: None,
+            usage: crate::perf::TokenUsage::default(),
+        })
+    }
+}
+
+/// Seed one resolvable agent TOML with an explicit `role` (and no `tier`, so
+/// it fails closed to `L1Standard` exactly like every bundled agent today).
+fn seed_agent_with_role(dir: &Path, name: &str, role: &str) {
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!(
+            r#"[agent]
+name = "{name}"
+role = "{role}"
+model = "anthropic/claude-sonnet-4-6"
+description = "issue 4201 test fixture"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "test"
+"#
+        ),
+    )
+    .expect("failed to seed agent fixture");
+}
+
+/// Run one delegation attempt through the persona path's own tool.
+///
+/// Returns `(is_error, message, spawn_count)`.
+async fn persona_delegate_attempt(
+    target_name: &str,
+    target_role: &str,
+    persona_role: &str,
+) -> (bool, String, usize) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_agent_with_role(dir.path(), target_name, target_role);
+
+    let runner = Arc::new(SpyRunner {
+        spawned: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = super::super::persona_gate::build_persona_delegate_tool(
+        runner.clone(),
+        dir.path().to_path_buf(),
+        "sess-4201".to_string(),
+        persona_role,
+        // Every persona shipped today resolves to L1Standard — see the
+        // known-gap note: no bundled agent declares `tier = "l0"`, which is
+        // precisely why the tier gate cannot cover for the role allowlist.
+        crate::agents::AgentTier::L1Standard,
+    );
+
+    let result = tool
+        .execute(serde_json::json!({
+            "agent_name": target_name,
+            "task": "#4201 delegation attempt",
+        }))
+        .await;
+    let spawned = runner
+        .spawned
+        .lock()
+        .expect("spy runner lock poisoned")
+        .len();
+    (result.is_error(), result.content().to_string(), spawned)
+}
+
+/// #4201 PRIMARY regression: an assistant-tier persona on the REPL `/agent`
+/// path must NOT be able to delegate to `pm` (role `orchestrator`).
+///
+/// Why: `orchestrator` is not in `ASSISTANT_ALLOWED_DELEGATE_ROLES` at all;
+/// `run_subagent` arms the spawned child from ITS OWN role, so a successful
+/// spawn here hands an unrestricted orchestrator registry (shell,
+/// `write_file`, unrestricted `delegate_to_agent`) to a persona that ingests
+/// untrusted content. The #4169 tier gate does not catch this: the fixture
+/// declares no `tier`, so the target resolves to `L1Standard` and
+/// `tier_blocked` is false — the role allowlist is the ONLY thing standing
+/// between this call and the spawn.
+/// What: refuses before the runner is touched, and does not leak the target's
+/// role taxonomy in the message.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_refuses_orchestrator_role_target() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt("pm", "orchestrator", "assistant").await;
+
+    assert!(
+        is_error,
+        "persona path must refuse a role=orchestrator target"
+    );
+    assert_eq!(spawned, 0, "runner must never be reached: {msg}");
+    assert!(
+        !msg.to_lowercase().contains("orchestrator"),
+        "refusal must not leak the target's role, got: {msg}"
+    );
+}
+
+/// Sibling of the above for `ctrl` (role `controller`) — the other privileged
+/// meta-agent the allowlist excludes.
+///
+/// Why: `controller` is likewise absent from
+/// `ASSISTANT_ALLOWED_DELEGATE_ROLES`; pinning both means a partial fix that
+/// special-cased only `pm` cannot pass.
+/// What: same refusal, same no-spawn guarantee.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_refuses_controller_role_target() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt("ctrl", "controller", "assistant").await;
+
+    assert!(
+        is_error,
+        "persona path must refuse a role=controller target"
+    );
+    assert_eq!(spawned, 0, "runner must never be reached: {msg}");
+}
+
+/// The gate must not become a blanket denial: a worker role IS allowlisted
+/// and must still spawn.
+///
+/// Why: a refusal-only test would pass against a gate that broke every
+/// delegation, which would be a worse regression than the hole it closed.
+/// What: `engineer` (role `engineer`, in the allowlist) reaches the runner.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_allows_worker_role_target() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt("engineer", "engineer", "assistant").await;
+
+    assert!(!is_error, "allowlisted worker role must pass: {msg}");
+    assert_eq!(spawned, 1, "runner must be reached exactly once");
+}
+
+/// The peer-consult lane (Izzie <-> cto-assistant) must survive the gate.
+///
+/// Why: `ASSISTANT_TIER_ROLE` is in the allowlist precisely so a peer spawn
+/// keeps working — safe because the peer is ALSO routed through the
+/// restricted assistant-tier registry, never an unrestricted one.
+/// What: role `assistant` reaches the runner.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_allows_peer_assistant_role_target() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt("cto-assistant", "assistant", "assistant").await;
+
+    assert!(!is_error, "peer assistant role must pass: {msg}");
+    assert_eq!(spawned, 1, "runner must be reached exactly once");
+}
+
+/// A persona whose OWN role is outside the assistant tier model is unchanged
+/// by #4201 — no role allowlist, no tier gate.
+///
+/// Why: `build_persona_delegate_tool`'s `role != "assistant"` branch mirrors
+/// `ctrl_delegate_posture`'s, and this pins that the fix did not silently
+/// narrow a population it was never meant to touch (the same reason
+/// `delegate_without_role_gate_allows_any_resolvable_role` exists for the
+/// history path).
+/// What: a non-assistant persona delegating to `pm` still spawns.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_leaves_non_assistant_roles_ungated() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt("pm", "orchestrator", "orchestrator").await;
+
+    assert!(!is_error, "non-assistant persona must stay ungated: {msg}");
+    assert_eq!(spawned, 1, "runner must be reached exactly once");
 }

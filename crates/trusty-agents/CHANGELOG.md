@@ -51,6 +51,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Applied the `ASSISTANT_ALLOWED_DELEGATE_ROLES` gate on the persona-chat
+  dispatch path (#4201).** The REPL `/agent` persona path built its
+  `DelegateToAgentTool` with the #4169 L0/L1 tier gate but WITHOUT the role
+  allowlist its sibling ctrl/session path applies, so an assistant-tier
+  persona could delegate to `pm` (role `orchestrator`) or `ctrl` (role
+  `controller`) — roles that are not in the allowlist at all — and
+  `run_subagent` would arm the spawned subprocess from that child's own role,
+  handing an unrestricted orchestrator registry (shell, `write_file`,
+  unrestricted `delegate_to_agent`) to a persona that ingests untrusted
+  content. The tier gate did not cover for it: it can only refuse an
+  `L0Orchestration` TARGET and no bundled agent declares `tier = "l0"` today,
+  so on this path both defense-in-depth layers were ineffective. Both gates
+  are now applied from one place (`persona_gate::build_persona_delegate_tool`,
+  reusing the same single-source-of-truth constant the other paths use), which
+  the regression tests drive directly so a call-site regression cannot pass
+  silently. A persona whose own role is outside the assistant tier is
+  unaffected.
+
 - **Defined the L0/L1 persona privilege tier and made the L1->L0 delegation
   path structurally forbidden (#4168, #4169, epic #4167).** Added an
   explicit `AgentTier` (`AgentInfo::tier`, TOML `[agent].tier` / `.md`
