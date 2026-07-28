@@ -23,6 +23,8 @@ pub mod format_translator;
 pub mod fs_reader;
 pub mod git_tools;
 pub mod izzie;
+// #4173 (epic #4167): the L0-orchestration-tier-only shell/build/test grant.
+pub mod l0_exec;
 pub mod mcp_live;
 pub mod mcp_service_tools;
 pub mod mcp_tools;

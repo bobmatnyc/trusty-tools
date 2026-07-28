@@ -90,8 +90,12 @@ pub fn is_dangerous_command(cmd: &str) -> Result<(), String> {
 /// Why: Capping output keeps a noisy command from blowing past the LLM's
 /// context window. char-based truncation avoids splitting multi-byte UTF-8.
 /// What: Returns `s` unchanged when short; otherwise "<head>… [truncated N chars]".
+///
+/// `pub(crate)` (#4173): `tools::l0_exec` reuses this verbatim for its own
+/// (wider) output cap rather than shipping a second truncation routine with a
+/// subtly different marker string.
 /// Test: `truncate_noop_when_short`, `truncate_caps_long_output`.
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     let count = s.chars().count();
     if count <= max {
         return s.to_string();

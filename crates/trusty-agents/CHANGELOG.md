@@ -47,6 +47,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`l0_shell_exec` — a shell/build/test executor granted to the L0
+  orchestration tier ONLY** (#4173, epic #4167). `tools::l0_exec` returns an
+  empty tool vector for `AgentTier::L1Standard`, so an L1 persona never has the
+  tool *registered* — it cannot be reached by declaring it (or `l0_*`, or `*`)
+  in `[tools].allow`, cannot be reached through a delegation taint (which only
+  ever intersects with what the child registry already holds), and cannot be
+  reached transitively (the #4200 tier gate refuses every L1 → L0 hop). The
+  grant follows the spawned agent's OWN resolved tier — never a delegator's —
+  and `AgentInfo::tier()`'s fail-closed resolver means an absent, blank or
+  unrecognized `tier =` resolves to L1 and therefore to nothing. RBAC still
+  applies on top: the tool is refused for the `ReadOnly` and `Analytics`
+  service tiers. Per-call `working_dir` is contained to the project root
+  (absolute escapes, `..` traversal and symlink escapes are rejected); the
+  catastrophic-pattern predicate is reused from `tools::run_bash` rather than
+  re-invented, and is documented as defense-in-depth, not the boundary. The
+  tier gate is the boundary.
 - **`GET /api/agents/:name/kg`, `/kg/subjects`, `/kg/all` and `/kg/count` — a
   read-only proxy onto the Knowledge Graph of the memory palace the agent binds
   via `[[stores]].palace`** (#4290). trusty-memory already owns every one of

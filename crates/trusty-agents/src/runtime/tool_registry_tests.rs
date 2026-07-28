@@ -1249,6 +1249,396 @@ async fn assistant_tier_registry_l0_delegator_tier_reaches_l0_target_end_to_end(
     );
 }
 
+// ============================================================================
+// #4173 (epic #4167) — the L0-orchestration shell/build/test execution grant.
+//
+// Shell execution is the capability that made #4126 a P0 (untrusted content ->
+// persona -> delegation -> ungated shell). PR #4161 closed that path and
+// PR #4200 added the L0/L1 tier boundary; #4173 deliberately hands shell back
+// to exactly ONE tier. These tests exercise the REAL registry-construction
+// path (`build_registry_for_agent` / `build_assistant_tier_registry`), the
+// REAL glob-scoping and taint composition (`scope_assistant_allowed_tools` /
+// `scope_for_delegation`), the REAL config loader (`AgentConfig::by_name_in`)
+// and the REAL dispatch surface (`ToolRegistry::dispatch*`) — never a
+// hand-rolled restatement of the gate.
+// ============================================================================
+
+/// Build the assistant-tier registry the way `run_subagent` does, for a
+/// persona whose declared `tier` string is `raw` — resolved by the REAL
+/// loader + the REAL fail-closed resolver, not by a hand-built `AgentTier`.
+fn registry_for_declared_tier(raw: Option<&str>) -> (tempfile::TempDir, ToolRegistry) {
+    registry_for_declared_tier_and_role("assistant", raw)
+}
+
+/// As above, but with the persona's `role` under test too — needed since
+/// ADR-0024 decision 3 made an undeclared tier a function of the KIND.
+fn registry_for_declared_tier_and_role(
+    role: &str,
+    raw: Option<&str>,
+) -> (tempfile::TempDir, ToolRegistry) {
+    let dir = tempfile::tempdir().unwrap();
+    let tier_line = raw.map(|t| format!("tier = \"{t}\"")).unwrap_or_default();
+    std::fs::write(
+        dir.path().join("fixture-persona.toml"),
+        format!(
+            "[agent]\nname = \"fixture-persona\"\nrole = \"{role}\"\nmodel = \"m\"\n\
+             description = \"d\"\n{tier_line}\n\n[llm]\ntemperature = 0.2\n\
+             max_tokens = 1024\n\n[system_prompt]\ncontent = \"x\"\n"
+        ),
+    )
+    .unwrap();
+    let cfg =
+        crate::agents::AgentConfig::by_name_in(&[dir.path().to_path_buf()], "fixture-persona")
+            .expect("fixture agent loads");
+    let reg = build_registry_for_agent(
+        "fixture-persona",
+        &cfg.agent.role,
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        cfg.agent.tier(),
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+    (dir, reg)
+}
+
+/// An L1 (standard) persona's registry must not contain the execution grant
+/// at all — not merely be denied it at dispatch. L1 holds the full
+/// Gmail/Drive/Calendar surface, which is exactly why it never gets a shell.
+#[test]
+fn l0_grant_absent_from_l1_assistant_registry() {
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L1Standard,
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+    assert!(
+        !reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        "an L1 persona must not have the L0 execution grant registered"
+    );
+    // The pre-#4173 curated surface is untouched.
+    assert!(reg.contains("delegate_to_agent"));
+    assert!(reg.contains("web_search"));
+}
+
+/// The counter-test: an L0 (orchestration) persona does get it, through the
+/// same real construction path.
+#[test]
+fn l0_grant_present_in_l0_assistant_registry() {
+    let reg = build_registry_for_agent(
+        "orchestration-assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L0Orchestration,
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+    assert!(
+        reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        "an L0 persona must receive the execution grant"
+    );
+}
+
+/// THE requirement: an L1 persona that DECLARES the grant in `[tools].allow`
+/// — by exact name, or by a wildcard that would match it — still does not
+/// receive it. Exercised through the real glob-scoping gate and then through
+/// the real dispatch surface, both layers.
+#[tokio::test]
+async fn l1_persona_declaring_the_l0_grant_does_not_receive_it() {
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L1Standard,
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+
+    for allow in [
+        vec![
+            crate::tools::l0_exec::L0_SHELL_EXEC.to_string(),
+            "web_search".to_string(),
+        ],
+        vec!["*".to_string()],
+        vec!["l0_*".to_string()],
+    ] {
+        let kept =
+            scope_assistant_allowed_tools(true, None, Some(&allow), Some(&reg)).unwrap_or_default();
+        assert!(
+            !kept
+                .iter()
+                .any(|n| n == crate::tools::l0_exec::L0_SHELL_EXEC),
+            "declaring {allow:?} must not surface the L0 grant to an L1 persona, got: {kept:?}"
+        );
+        // Layer 2: even if a caller ignored the scoped list, dispatch has
+        // nothing registered under the name.
+        let denied = reg
+            .dispatch_gated(
+                crate::tools::l0_exec::L0_SHELL_EXEC,
+                serde_json::json!({"command": "echo pwned"}),
+                Some(&kept),
+            )
+            .await;
+        assert!(
+            denied.is_error(),
+            "dispatch must refuse: {}",
+            denied.content()
+        );
+        let unregistered = reg
+            .dispatch(
+                crate::tools::l0_exec::L0_SHELL_EXEC,
+                serde_json::json!({"command": "echo pwned"}),
+            )
+            .await;
+        assert!(
+            unregistered.content().contains("no tool registered"),
+            "the tool must not exist in an L1 registry at all, got: {}",
+            unregistered.content()
+        );
+    }
+}
+
+/// Fail-closed on a malformed tier DECLARATION: a typo, or a near-miss that
+/// merely CONTAINS "l0" (the shape a typo takes), resolves to L1 through the
+/// real loader, so the registry it produces carries no grant.
+///
+/// ADR-0024 decision 3 (PR #4296) made an ABSENT/blank tier derive from the
+/// agent's KIND instead, so those spellings are no longer "indeterminate" and
+/// are covered by `l0_grant_follows_the_kind_derivation` below. What must NOT
+/// happen — and is what this test pins — is a declared-but-unrecognized string
+/// falling THROUGH to that derivation and quietly electing an assistant to L0
+/// by way of a typo. The fixture is assistant-kind precisely so that
+/// fall-through would be visible here.
+#[test]
+fn l0_grant_fails_closed_for_malformed_tier_declaration() {
+    for raw in [
+        Some("bogus"),
+        Some("l0-ish"),
+        Some("not-l0"),
+        Some("l1"),
+        Some("L2"),
+    ] {
+        let (_dir, reg) = registry_for_declared_tier(raw);
+        assert!(
+            !reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+            "declared tier {raw:?} is unrecognized and must be DENIED the execution grant"
+        );
+    }
+    // And the positive control through the same helper, so a broken fixture
+    // cannot make the assertions above vacuously pass.
+    let (_dir, reg) = registry_for_declared_tier(Some("l0"));
+    assert!(reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC));
+}
+
+/// With no usable declaration the grant follows ADR-0024 decision 3's KIND
+/// derivation, through the real registry-construction path: assistant-kind
+/// registers it, every sub-agent kind does not.
+///
+/// The registration is not by itself a capability — reachability still requires
+/// the persona's own `[tools].allow` to name the tool, which no bundled
+/// assistant does (pinned by
+/// `agents::tests::loading::bundled_assistant_personas_resolve_l0_and_gain_nothing`,
+/// extended by this PR to cover the execution grant).
+#[test]
+fn l0_grant_follows_the_kind_derivation() {
+    for raw in [None, Some(""), Some("   ")] {
+        let (_dir, reg) = registry_for_declared_tier_and_role("assistant", raw);
+        assert!(
+            reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+            "assistant-kind with tier {raw:?} derives L0 and registers the grant"
+        );
+
+        for role in ["engineer", "researcher", "planner"] {
+            let (_dir, reg) = registry_for_declared_tier_and_role(role, raw);
+            assert!(
+                !reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+                "sub-agent kind {role:?} with tier {raw:?} must be denied the grant"
+            );
+        }
+    }
+}
+
+/// The taint must still NARROW, never widen. When an L0 persona delegates
+/// downward to an L1 target, the child is tainted with the L0 delegator's own
+/// `[tools].allow` — which legitimately names the execution grant. The child's
+/// registry is an L1 registry and never registered that tool, so the real
+/// `scope_for_delegation` intersection cannot conjure it: the taint grants
+/// only what the child's registry already holds.
+#[test]
+fn tainted_delegation_cannot_widen_into_the_l0_grant() {
+    let child_reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L1Standard,
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+
+    let l0_delegator_allow = vec![
+        crate::tools::l0_exec::L0_SHELL_EXEC.to_string(),
+        "web_search".to_string(),
+        "delegate_to_agent".to_string(),
+    ];
+    let scoped = scope_for_delegation(
+        true,
+        true,
+        None,
+        None,
+        Some(&l0_delegator_allow),
+        Some(&child_reg),
+    )
+    .unwrap_or_default();
+
+    assert!(
+        !scoped
+            .iter()
+            .any(|n| n == crate::tools::l0_exec::L0_SHELL_EXEC),
+        "a taint carrying the L0 grant must not widen an L1 child into it, got: {scoped:?}"
+    );
+    assert!(
+        scoped.iter().any(|n| n == "web_search"),
+        "the taint must still admit tools the child registry does hold, got: {scoped:?}"
+    );
+
+    // Composition, at the pattern level, is likewise narrowing-only: an L1
+    // agent's own native allow-list intersected with an inbound taint can
+    // never gain a pattern neither side held.
+    let composed =
+        compose_delegation_taint(Some(&["web_search".to_string()]), Some(&l0_delegator_allow))
+            .unwrap_or_default();
+    assert_eq!(composed, vec!["web_search".to_string()]);
+}
+
+/// Transitive reach: an L1 persona must not obtain the grant by delegating
+/// through an intermediary. Both legs are checked on the real paths — the
+/// intermediary's OWN registry (built from its real resolved tier) never
+/// carries the grant, and its `delegate_to_agent` refuses the L0 target that
+/// would.
+#[tokio::test]
+async fn l1_cannot_reach_the_l0_grant_through_an_untiered_intermediary() {
+    use crate::agents::tests::loading::ENV_LOCK;
+
+    let _guard = ENV_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    // The intermediary is an assistant that EXPLICITLY declares L1 — after
+    // ADR-0024 decision 3 (PR #4296) that declaration is the only way an
+    // assistant-kind persona is L1, since an absent tier now derives L0 from
+    // the kind. The escalation target is an L0 assistant that DOES hold the
+    // grant.
+    std::fs::write(
+        tmp.path().join("peer-assistant.toml"),
+        "[agent]\nname = \"peer-assistant\"\nrole = \"assistant\"\ntier = \"l1\"\n\
+         model = \"m\"\ndescription = \"d\"\n\n[llm]\ntemperature = 0.2\n\
+         max_tokens = 1024\n\n[system_prompt]\ncontent = \"x\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("orchestration-assistant.toml"),
+        "[agent]\nname = \"orchestration-assistant\"\nrole = \"assistant\"\n\
+         tier = \"orchestration\"\nmodel = \"m\"\ndescription = \"d\"\n\n[llm]\n\
+         temperature = 0.2\nmax_tokens = 1024\n\n[system_prompt]\ncontent = \"x\"\n",
+    )
+    .unwrap();
+
+    // Hop 1: what the L1 intermediary itself receives. Its real resolved tier
+    // is L1, so its registry never registers the grant it could pass along.
+    let peer_cfg =
+        crate::agents::AgentConfig::by_name_in(&[tmp.path().to_path_buf()], "peer-assistant")
+            .expect("intermediary loads");
+    assert_eq!(peer_cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
+    }
+    let seed = vec!["orchestration-assistant".to_string()];
+    let peer_reg = build_assistant_tier_registry(None, peer_cfg.agent.tier(), Some(&seed));
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    assert!(
+        !peer_reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        "the intermediary must not carry the grant it could pass along"
+    );
+
+    // Hop 2: from that intermediary, reaching the persona that DOES carry the
+    // grant is refused by the real delegation gates — even with the target
+    // explicitly whitelisted in the reachable set, so the refusal is a gate
+    // and not merely an unlisted name.
+    let refused = peer_reg
+        .dispatch(
+            "delegate_to_agent",
+            serde_json::json!({
+                "agent_name": "orchestration-assistant",
+                "task": "run cargo test and push the fix"
+            }),
+        )
+        .await;
+    assert!(
+        refused.is_error(),
+        "reaching an L0 grant-holder must be refused at hop 2, got: {}",
+        refused.content()
+    );
+    // Either gate refusing is a correct outcome — the KIND rule (assistants
+    // never delegate to a peer assistant, ADR-0024 clause 6) is checked before
+    // the tier gate, so it is the one that speaks for this pair. Asserting
+    // "refused, for a stated boundary reason" rather than pinning which gate
+    // fired keeps this test about the escalation property, not about the
+    // ordering of two rules that both deny.
+    assert!(
+        refused.content().contains("peer assistant")
+            || (refused.content().contains("L0") && refused.content().contains("L1")),
+        "the refusal should name the boundary it enforced, got: {}",
+        refused.content()
+    );
+    assert!(
+        !peer_reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        "a refused escalation must leave the intermediary's surface unchanged"
+    );
+
+    // The other transitive leg, after decision 3: a SUB-AGENT kind is L1 by
+    // derivation, and its registry holds neither the grant nor the delegation
+    // tool that could chase it — there is no hop to make.
+    let sub_reg = build_registry_for_agent(
+        "research-agent",
+        "researcher",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L1Standard,
+        None,
+    )
+    .expect("sub-agent builds a registry");
+    assert!(
+        !sub_reg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        "a sub-agent kind must never hold the execution grant"
+    );
+}
+
 // --- `build_assistant_tier_registry`'s `delegator_subagents` wiring
 // (ADR-0024 decision 4, owner ratification 2026-07-29) ---
 //
