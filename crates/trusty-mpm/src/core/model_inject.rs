@@ -69,6 +69,45 @@ pub fn resolve_pm_model(config: &MpmConfig, explicit: Option<&str>) -> String {
 /// Test: `claude_command_includes_setting_sources`.
 pub const SETTING_SOURCES_FLAG: &str = "--setting-sources project,local";
 
+/// The settings tiers [`SETTING_SOURCES_FLAG`] actually enumerates.
+///
+/// Why (issue #4203): a deploy step that writes agents into a tier this list
+/// does NOT name is a silent no-op — Claude Code never loads them, and nothing
+/// reports an error. Parsing the flag instead of hard-coding
+/// `["project", "local"]` keeps that invariant honest if the flag's value ever
+/// changes: the tier check and the spawned command can never drift apart.
+/// What: splits [`SETTING_SOURCES_FLAG`] at its first space and then the
+/// comma-separated tier list, trimming each name.
+/// Test: `setting_source_tiers_parses_the_flag`.
+pub fn setting_source_tiers() -> Vec<&'static str> {
+    SETTING_SOURCES_FLAG
+        .split_once(' ')
+        .map(|(_, list)| list.split(',').map(str::trim).collect())
+        .unwrap_or_default()
+}
+
+/// Name the Claude Code settings tier a `.claude/` deploy destination lands in,
+/// relative to the cwd the harness is spawned with.
+///
+/// Why (issue #4203): `FrameworkPaths::default()` deploys agents into
+/// `$HOME/.claude` — the `user` tier — while every trusty-mpm spawn carries
+/// [`SETTING_SOURCES_FLAG`], which excludes `user`. Deploy and load never
+/// intersect. Naming the tier turns that mismatch into something a test can
+/// assert on directly, rather than comparing hard-coded path strings that would
+/// both pass vacuously if either side moved.
+/// What: `"project"` when `claude_home` IS the harness cwd (the payload lands
+/// in `<cwd>/.claude`, which both the `project` and `local` tiers read);
+/// `"user"` otherwise.
+/// Test: `settings_tier_of_names_project_for_the_harness_cwd`,
+/// `settings_tier_of_names_user_for_anything_else`.
+pub fn settings_tier_of(claude_home: &Path, harness_cwd: &Path) -> &'static str {
+    if claude_home == harness_cwd {
+        "project"
+    } else {
+        "user"
+    }
+}
+
 /// The permission-mode flag every trusty-mpm-spawned `claude` carries.
 ///
 /// Why: tm runs Claude Code in unattended orchestration mode; `--dangerously-skip-permissions`
@@ -252,5 +291,34 @@ mod tests {
         // Config per-agent override (haiku) wins over frontmatter (sonnet).
         let cmd = build_agent_command(&cfg, &agent, None, None);
         assert_eq!(cmd, format!("claude --model claude-haiku-4-5 {FLAGS}"));
+    }
+
+    #[test]
+    fn setting_source_tiers_parses_the_flag() {
+        // Derived from the flag itself, never hard-coded — the tier check and
+        // the spawned command must not be able to drift apart (issue #4203).
+        assert_eq!(setting_source_tiers(), vec!["project", "local"]);
+        assert!(
+            !setting_source_tiers().contains(&"user"),
+            "the `user` tier is deliberately excluded (issue #1269); a deploy \
+             landing there is invisible to the session"
+        );
+    }
+
+    #[test]
+    fn settings_tier_of_names_project_for_the_harness_cwd() {
+        // `<cwd>/.claude` is read by the project (and local) tiers.
+        let cwd = Path::new("/work/checkout");
+        assert_eq!(settings_tier_of(cwd, cwd), "project");
+    }
+
+    #[test]
+    fn settings_tier_of_names_user_for_anything_else() {
+        // What `FrameworkPaths::default()` produced: `$HOME/.claude`, a tier
+        // `--setting-sources project,local` never loads (issue #4203).
+        assert_eq!(
+            settings_tier_of(Path::new("/Users/someone"), Path::new("/work/checkout")),
+            "user"
+        );
     }
 }
