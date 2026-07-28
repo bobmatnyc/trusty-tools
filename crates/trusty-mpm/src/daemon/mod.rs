@@ -666,10 +666,16 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // no longer true: a registered worktree at ANY depth inside a
                 // managed project, e.g. `<repo>/agents/scratch/wt-1`, is a
                 // candidate). A directory must clear ALL of: git registers it as
-                // a worktree that is not main/bare/prunable/locked; it is a
-                // strict descendant of the managed project whose registry named
-                // it (so operator checkouts and the base clone are unreachable by
-                // position, not by name); it is in neither the initial nor the
+                // a worktree that is not main/bare/prunable/locked — this is
+                // what excludes the BASE CLONE, which is a separate
+                // `git clone --bare` absent from `<repo>`'s registry entirely
+                // and bare+main in its own; it is a strict descendant of the
+                // managed project whose registry named it, which is what puts
+                // the operator's own checkouts parked beside a project out of
+                // reach by POSITION rather than by name — note this gate does
+                // NOT exclude `.base`, which IS a strict descendant of `<repo>`,
+                // so do not re-attribute the base clone to it; it is in neither
+                // the initial nor the
                 // pre-deletion active set; it carries a #3649 ownership sentinel
                 // naming a provably-ownerless owner past the grace window; and
                 // the #4091/#4118 dirty gate finds no uncommitted or unpushed
