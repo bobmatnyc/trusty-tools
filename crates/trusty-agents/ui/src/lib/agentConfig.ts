@@ -513,6 +513,15 @@ export interface SubagentInProduct {
   targets: SubagentInProductTarget[];
   /** Roster entries excluded by the role allowlist — counted, never named. */
   role_excluded_count: number;
+  /**
+   * Roster entries excluded because they carry `[agent].hidden = true` (#4235)
+   * — counted, never named, exactly like `role_excluded_count`. Disjoint from
+   * it: the server checks `hidden` first, so an entry contributes to one
+   * counter or the other, never both. Rendered as its own line rather than
+   * summed with the role count, because the two have different remedies (edit
+   * the agent's `hidden` flag vs. its `role`).
+   */
+  hidden_excluded_count: number;
   unresolved: { name: string; reason: string }[];
 }
 

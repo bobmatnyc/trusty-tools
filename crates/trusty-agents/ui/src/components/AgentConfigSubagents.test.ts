@@ -44,6 +44,7 @@ function inProduct(over: Partial<SubagentInProduct> = {}): SubagentInProduct {
     allowed_roles: ['engineer', 'qa', 'researcher', 'documentation', 'ops', 'planner', 'assistant'],
     targets: [inTarget()],
     role_excluded_count: 0,
+    hidden_excluded_count: 0,
     unresolved: [],
     ...over,
   };
@@ -288,5 +289,23 @@ describe('AgentConfigSubagents — honest degradation', () => {
     render(payload({ in_product: inProduct({ role_excluded_count: 4 }) }));
     expect(target.textContent).toContain('4 further agent(s)');
     expect(target.textContent).toContain('excluded by the role');
+  });
+
+  // #4235: the server omits `hidden` agents from `targets` entirely, so the
+  // pane must account for them rather than leaving them silently missing —
+  // and must keep the two exclusion reasons on separate lines, since the fix
+  // for each is a different field of the agent's TOML.
+  it('counts hidden roster entries separately from role-excluded ones', () => {
+    render(
+      payload({
+        in_product: inProduct({ role_excluded_count: 4, hidden_excluded_count: 2 }),
+      }),
+    );
+    expect(target.textContent).toContain('4 further agent(s)');
+    expect(target.textContent).toContain('excluded by the role');
+    expect(target.textContent).toContain('2 further agent(s)');
+    expect(target.textContent).toContain('are hidden');
+    // Counted, never named — the no-roster-dump posture.
+    expect(target.textContent).not.toContain('personal-assistant');
   });
 });
