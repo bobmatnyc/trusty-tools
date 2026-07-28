@@ -117,23 +117,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **`tm launch` and `tm connect` deployed agents to a tier `--setting-sources`
-  excludes, so no tm-deployed agent ever loaded**
-  ([#4203](https://github.com/bobmatnyc/trusty-tools/issues/4203)): both CLI
-  paths built their `FrameworkPaths` with `default()`, which resolves against
-  `dirs::home_dir()` and writes the agent roster into `$HOME/.claude/agents` —
-  the `user` tier. Both then spawned `claude` carrying
-  `--setting-sources project,local`, a list that deliberately excludes `user`
-  (#1269). The deployed tier and the loaded tiers never intersected, so every
-  agent the launch step had just deployed was invisible to the session it was
-  deployed for. Both call sites now use
-  `FrameworkPaths::for_managed_workspace(<harness cwd>)` — the managed worktree
-  for `launch`, the live checkout for `connect` — landing the payload in
-  `<cwd>/.claude/{agents,skills}`, which the `project` and `local` tiers read.
-  This is the same fix the daemon's `spawn_managed_inproject` already carried
-  for the identical defect (#1931); the two CLI paths never received it. A
-  regression test asserts the RELATIONSHIP (deployed tier ∈ the tiers the flag
-  names), not a literal path, so it keeps biting if either side moves.
+- **`tm launch`, `tm connect`, and `tm meta launch` deployed agents to a tier
+  `--setting-sources` excludes, so no tm-deployed agent ever loaded**
+  ([#4203](https://github.com/bobmatnyc/trusty-tools/issues/4203)): all three
+  CLI paths built their `FrameworkPaths` with `default()`, which resolves
+  against `dirs::home_dir()` and writes the agent roster into
+  `$HOME/.claude/agents` — the `user` tier. All three then spawned `claude`
+  carrying `--setting-sources project,local`, a list that deliberately excludes
+  `user` (#1269). The deployed tier and the loaded tiers never intersected, so
+  every agent the launch step had just deployed was invisible to the session it
+  was deployed for, and nothing reported it: the deploy genuinely succeeded and
+  the load silently found nothing.
+
+  These paths now deploy through a new `session_launch::prepare_isolated_session`
+  entry point, which resolves the layout itself rather than accepting one from
+  the caller — the harness cwd is the deploy base, so `<cwd>/.claude/{agents,skills}`
+  lands in a tier the `project`/`local` sources read. Removing the parameter
+  removes the defect: there is no longer a wrong `FrameworkPaths` for a call
+  site to pass. This is the same correction the daemon's `spawn_managed_inproject`
+  already carried (#1931); the three CLI paths never received it. `tm session
+  start` is deliberately unchanged — it spawns a bare `claude` with no
+  `--setting-sources`, so it does read the user tier and `default()` is correct
+  there.
+
+  **Operator-visible change:** `tm connect` now writes the agent roster, skills,
+  and output styles into the `.claude/` directory of your **live checkout**
+  rather than `$HOME/.claude/`, so they will show up in `git status` for that
+  repo. The scaffolding paths are added to `.gitignore` automatically (#3427),
+  and existing hand-placed or committed `.claude/` content is never overwritten
+  — unmanaged files are skipped as user-owned, and managed files whose checksum
+  drifted are skipped with a warning.
 
 - **Two wrong instructions corrected in the bundled assets composed into every
   session's prompt.** Both were static text that no project could override, and

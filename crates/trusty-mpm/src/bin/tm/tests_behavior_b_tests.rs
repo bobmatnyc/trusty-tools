@@ -1680,51 +1680,63 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
     );
 }
 
-/// Issue #4203: the tier `launch`/`connect` deploy agents INTO must be one of
-/// the tiers the spawn's `--setting-sources` flag actually loads.
+/// Issue #4203: every CLI path whose spawn carries `--setting-sources
+/// project,local` must deploy through `prepare_isolated_session`, never through
+/// a self-resolved `FrameworkPaths::default()`.
 ///
-/// Before the fix both paths built `FrameworkPaths::default()` (deploying to
-/// `$HOME/.claude/agents`, the `user` tier) and then spawned `claude` with
-/// `--setting-sources project,local` — a list that excludes `user` — so no
-/// tm-deployed agent was ever loaded by either CLI session. The assertion is on
-/// the RELATIONSHIP (deployed tier ∈ loaded tiers), not on a literal path, so it
-/// keeps biting if either the deploy destination or the flag's tier list moves.
+/// Why a SOURCE-TEXT guard rather than a behavioural one: `launch()`,
+/// `connect()`, and `launch_and_wait()` are async functions that create tmux
+/// sessions, register with the daemon over HTTP, and then block on
+/// `attach-session`, so none of them is reachable from a unit test. A test that
+/// exercises the deploy layout alone proves the layout is right while staying
+/// completely silent if a call site stops using it — which is exactly how the
+/// first version of this guard shipped green with the bug reintroduced in both
+/// call sites. Binding the CALL SITES is the whole point, so the guard reads the
+/// call sites. Source-text guards are the established idiom here
+/// (`scripts/check_line_cap.sh` and the tracked-file CI guards are the same
+/// shape).
+///
+/// What: asserts neither file constructs `FrameworkPaths::default()`, and that
+/// each still routes through the isolated seam the expected number of times.
+/// The counts are deliberately exact — a call site deleted or a fourth one added
+/// without thought fails here and forces the author to confirm its spawn posture.
 #[test]
-fn launch_and_connect_deploy_into_a_tier_setting_sources_loads() {
-    use trusty_mpm::core::model_inject::{
-        SETTING_SOURCES_FLAG, setting_source_tiers, settings_tier_of,
-    };
+fn launch_paths_prepare_through_the_isolated_seam() {
+    // `include_str!` is relative to THIS file (`src/bin/tm/`).
+    const LAUNCH_SRC: &str = include_str!("commands/launch.rs");
+    const META_LAUNCH_SRC: &str = include_str!("commands/meta/launch.rs");
 
-    // The cwd the tmux pane is rooted at, which is also the cwd `claude` is
-    // spawned with: the managed worktree for `launch` (step 12), the live
-    // checkout for `connect` (step 4). Both go through the same seam, so one
-    // synthetic cwd exercises the invariant for both paths.
-    let harness_cwd = std::path::Path::new("/work/some-checkout");
-    let fw = crate::commands::launch::session_framework_paths(harness_cwd);
+    for (name, src, expected_calls) in [
+        ("commands/launch.rs", LAUNCH_SRC, 2usize),
+        ("commands/meta/launch.rs", META_LAUNCH_SRC, 1usize),
+    ] {
+        assert!(
+            !src.contains("FrameworkPaths::default()"),
+            "{name} spawns `claude` with `{}`, which excludes the `user` tier \
+             `FrameworkPaths::default()` deploys into — deploy via \
+             `session_launch::prepare_isolated_session` instead (issue #4203)",
+            trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG
+        );
+        assert_eq!(
+            src.matches("prepare_isolated_session(").count(),
+            expected_calls,
+            "{name} must deploy through `prepare_isolated_session` exactly \
+             {expected_calls}x (issue #4203); if a call site was added or removed, \
+             confirm its spawn's `--setting-sources` posture and update this count"
+        );
+    }
 
-    let tiers = setting_source_tiers();
+    // `commands/session/start.rs` is deliberately NOT in the list above: it
+    // spawns a bare `claude {PERMISSION_MODE_FLAG}` with no `--setting-sources`,
+    // so Claude Code reads its default tiers INCLUDING `user` and
+    // `FrameworkPaths::default()` is correct there. Pin that premise — if
+    // `start.rs` ever gains the flag, it acquires this defect and this
+    // assertion is what says so.
+    const START_SRC: &str = include_str!("commands/session/start.rs");
     assert!(
-        !tiers.is_empty(),
-        "SETTING_SOURCES_FLAG ({SETTING_SOURCES_FLAG}) must name at least one tier; \
-         an empty list would make this invariant vacuous"
-    );
-
-    let deployed_tier = settings_tier_of(&fw.claude_home_dir(), harness_cwd);
-    assert!(
-        tiers.contains(&deployed_tier),
-        "agents deploy into the `{deployed_tier}` tier ({}) but the spawned session carries \
-         `{SETTING_SOURCES_FLAG}`, loading only {tiers:?} — no tm-deployed agent would be \
-         visible to the session (issue #4203)",
-        fw.claude_agents_dir().display()
-    );
-
-    // The tier name is only meaningful if the destination really is under the
-    // harness cwd — guards against `settings_tier_of` being satisfied by a path
-    // that merely compares equal for an unrelated reason.
-    assert!(
-        fw.claude_agents_dir().starts_with(harness_cwd),
-        "deploy destination {} must lie under the harness cwd {}",
-        fw.claude_agents_dir().display(),
-        harness_cwd.display()
+        !START_SRC.contains("SETTING_SOURCES_FLAG"),
+        "commands/session/start.rs now carries a `--setting-sources` flag, so its \
+         `FrameworkPaths::default()` deploy has become the #4203 defect — route it \
+         through `prepare_isolated_session` and add it to the list above"
     );
 }
