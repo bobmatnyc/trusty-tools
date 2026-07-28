@@ -10,7 +10,7 @@
 pub(crate) mod loading;
 mod params;
 
-use crate::agents::{AgentConfig, ToolsConfig};
+use crate::agents::{AgentConfig, AgentInfo, ToolsConfig};
 
 #[test]
 fn llm_params_parses_model_override() {
@@ -763,4 +763,66 @@ fn agent_tier_default_trait_is_l1_standard() {
         crate::agents::AgentTier::default(),
         crate::agents::AgentTier::L1Standard
     );
+}
+
+// #4029: `AgentTier::from_declared` extracted `AgentInfo::tier()`'s match so
+// the `/api/agents/:name/subagents` route — which must report exactly the
+// targets #4169's gate admits — shares ONE parser with the gate instead of
+// hand-rolling a second one. These two tests exist to make that extraction a
+// pinned equivalence rather than an assumed one.
+
+#[test]
+fn agent_tier_from_declared_matches_agent_info_tier() {
+    // Every alias and every fail-closed case the tests above cover, asserted to
+    // produce the IDENTICAL result through both entry points. If the two ever
+    // diverge, the config surface starts advertising a target the delegation
+    // gate refuses (or hiding one it allows).
+    for raw in [
+        None,
+        Some(""),
+        Some("   "),
+        Some("l0"),
+        Some("L0"),
+        Some("  l0  "),
+        Some("orchestration"),
+        Some("Orchestration"),
+        Some("l1"),
+        Some("standard"),
+        Some("orchestrator"),
+        Some("l2"),
+        Some("yolo"),
+    ] {
+        let via_info = AgentInfo {
+            tier: raw.map(str::to_string),
+            ..toml::from_str::<AgentConfig>(&agent_toml_with_tier(""))
+                .expect("parses")
+                .agent
+        }
+        .tier();
+        assert_eq!(
+            crate::agents::AgentTier::from_declared(raw),
+            via_info,
+            "from_declared({raw:?}) must equal AgentInfo::tier() for the same raw value"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_wire_label_round_trips_through_from_declared() {
+    for tier in [
+        crate::agents::AgentTier::L0Orchestration,
+        crate::agents::AgentTier::L1Standard,
+    ] {
+        assert_eq!(
+            crate::agents::AgentTier::from_declared(Some(tier.wire_label())),
+            tier,
+            "the wire label the API emits must parse back to the same tier"
+        );
+    }
+    assert_eq!(
+        crate::agents::AgentTier::L0Orchestration.wire_label(),
+        "l0",
+        "the SHORT alias is the wire value, matching what an operator writes"
+    );
+    assert_eq!(crate::agents::AgentTier::L1Standard.wire_label(), "l1");
 }

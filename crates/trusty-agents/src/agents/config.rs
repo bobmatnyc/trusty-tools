@@ -712,6 +712,57 @@ pub enum AgentTier {
     L0Orchestration,
 }
 
+impl AgentTier {
+    /// Resolve a RAW declared tier string, fail-closed (#4168; extracted #4029).
+    ///
+    /// Why: [`AgentInfo::tier`] was the only place this normalization lived,
+    /// which meant any consumer holding a declared tier string WITHOUT a full
+    /// [`AgentInfo`] — `GET /api/agents/:name/subagents` (#4029) reporting the
+    /// delegation targets the #4169 gate would actually admit is the first —
+    /// had to hand-roll the match and could silently drift from the gate. A
+    /// privilege boundary must have exactly one parser: if this function and
+    /// the gate ever disagreed, the config surface would advertise a target
+    /// the gate refuses (or hide one it allows), which is the whole failure
+    /// class #4029 exists to avoid. `AgentInfo::tier()` now delegates here, so
+    /// there is still only one match in the codebase.
+    /// What: Case-insensitive, trimmed match against `"l0"`/`"orchestration"`
+    /// (-> [`AgentTier::L0Orchestration`]); EVERYTHING else — `None`, blank, or
+    /// an unrecognized string — resolves to [`AgentTier::L1Standard`]. Byte-for
+    /// byte the behavior `AgentInfo::tier()` shipped in #4200, which its own
+    /// unchanged tests still pin.
+    /// Test: `agent_tier_defaults_to_l1_when_absent`,
+    /// `agent_tier_parses_l0_orchestration_aliases`,
+    /// `agent_tier_parses_l1_standard_aliases`,
+    /// `agent_tier_unknown_value_fails_closed_to_l1`,
+    /// `agent_tier_blank_value_fails_closed_to_l1`,
+    /// `agent_tier_from_declared_matches_agent_info_tier`.
+    pub fn from_declared(raw: Option<&str>) -> Self {
+        match raw.map(str::trim) {
+            Some(s) if s.eq_ignore_ascii_case("l0") || s.eq_ignore_ascii_case("orchestration") => {
+                AgentTier::L0Orchestration
+            }
+            _ => AgentTier::L1Standard,
+        }
+    }
+
+    /// The canonical lowercase wire label for this tier (`"l0"` / `"l1"`).
+    ///
+    /// Why: `GET /api/agents/:name/subagents` (#4029) reports both the
+    /// delegator's and each target's resolved tier, and a JSON consumer must
+    /// not have to parse `Debug` output (`"L0Orchestration"`) or re-derive the
+    /// alias set. Returning the SHORT alias — not the long one — keeps the wire
+    /// value identical to what an operator writes in `tier = "l0"`.
+    /// What: `"l0"` for [`AgentTier::L0Orchestration`], `"l1"` for
+    /// [`AgentTier::L1Standard`]. Round-trips through [`Self::from_declared`].
+    /// Test: `agent_tier_wire_label_round_trips_through_from_declared`.
+    pub fn wire_label(self) -> &'static str {
+        match self {
+            AgentTier::L0Orchestration => "l0",
+            AgentTier::L1Standard => "l1",
+        }
+    }
+}
+
 impl AgentInfo {
     /// Resolve this agent's privilege tier, fail-closed (#4168).
     ///
@@ -729,13 +780,14 @@ impl AgentInfo {
     /// `agent_tier_parses_l1_standard_aliases`,
     /// `agent_tier_unknown_value_fails_closed_to_l1`,
     /// `agent_tier_blank_value_fails_closed_to_l1`.
+    ///
+    /// #4029: the match itself moved to [`AgentTier::from_declared`] so a
+    /// consumer holding only the raw declared string (the `/subagents` route,
+    /// which must report exactly the targets the #4169 gate admits) shares this
+    /// one parser instead of hand-rolling a second one. Behavior is unchanged —
+    /// the tests above are the proof and were not touched.
     pub fn tier(&self) -> AgentTier {
-        match self.tier.as_deref().map(str::trim) {
-            Some(s) if s.eq_ignore_ascii_case("l0") || s.eq_ignore_ascii_case("orchestration") => {
-                AgentTier::L0Orchestration
-            }
-            _ => AgentTier::L1Standard,
-        }
+        AgentTier::from_declared(self.tier.as_deref())
     }
 
     /// The human-facing speaker label for this persona (#3738).

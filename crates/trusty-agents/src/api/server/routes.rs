@@ -27,6 +27,7 @@ use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_r
 use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
 use super::agent_stores::agent_stores_route;
+use super::agent_subagents::agent_subagents_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
 use super::ctrl_sessions::{
@@ -182,6 +183,17 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/knowledge",
             axum::routing::get(agent_knowledge_route),
+        )
+        // #4029 (epic #4021, OQ-5): the Sub-agents pane reads the UNION of the
+        // two delegation mechanisms — in-product `delegate_to_agent` targets
+        // (role allowlist + #4169's L0/L1 tier gate) and cross-product
+        // `dispatch_task` specialists (`[subagents].allowed` ∩ the bridge's
+        // `NON_CODING_TARGETS` floor) — labelled by kind, never flattened.
+        // A dedicated route rather than an extension of `GET /api/agents/:name`:
+        // see `agent_subagents`'s module doc. Read-only.
+        .route(
+            "/api/agents/{name}/subagents",
+            axum::routing::get(agent_subagents_route),
         )
         .route("/api/workstreams", get(list_workstreams_route))
         .route(

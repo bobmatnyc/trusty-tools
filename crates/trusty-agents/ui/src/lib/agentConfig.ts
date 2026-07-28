@@ -432,3 +432,103 @@ export async function fetchAgentSkills(name: string): Promise<AgentSkills | null
   if (!r.ok) throw new Error(`GET /api/agents/${name}/skills failed: ${r.status}`);
   return (await r.json()) as AgentSkills;
 }
+
+/**
+ * One in-product delegation target from `GET /api/agents/:name/subagents`
+ * (#4029) — a trusty-agents agent this agent may hand a task to via
+ * `delegate_to_agent`.
+ *
+ * `reachable` already accounts for #4169's one-directional L0/L1 tier gate, so a
+ * pane must render `reachable === false` as DENIED with its `reason` and must
+ * never present the card as callable. The server refuses to list targets the
+ * gate would refuse; a card that arrives unreachable is one the operator needs
+ * an explanation for, not one to hide.
+ */
+export interface SubagentInProductTarget {
+  name: string;
+  display_name: string;
+  /** The target's resolved `[agent].role` — the field the allowlist gates on. */
+  role: string;
+  /** `l0` | `l1`, resolved fail-closed server-side. */
+  tier: string;
+  reachable: boolean;
+  /** Present iff `reachable === false`. Explains which gate refused it. */
+  reason: string | null;
+}
+
+/**
+ * The in-product half of the Sub-agents section: `delegate_to_agent`.
+ *
+ * `tool_registered` and `tool_granted` are deliberately separate. The tool is
+ * only registered for assistant-tier personas, and even then dispatch is gated
+ * by the agent's own resolved tool patterns — collapsing the two into one badge
+ * would report "can delegate" for an agent that holds no such grant.
+ */
+export interface SubagentInProduct {
+  mechanism: 'in_product';
+  tool: string;
+  tool_registered: boolean;
+  tool_granted: boolean;
+  /** THIS agent's own resolved tier — the left-hand side of the gate. */
+  delegator_tier: string;
+  /** `ASSISTANT_ALLOWED_DELEGATE_ROLES`, verbatim, so the pane can state the rule. */
+  allowed_roles: string[];
+  targets: SubagentInProductTarget[];
+  /** Roster entries excluded by the role allowlist — counted, never named. */
+  role_excluded_count: number;
+  unresolved: { name: string; reason: string }[];
+}
+
+/**
+ * The cross-product half: `dispatch_task` into trusty-code's non-coding roster.
+ *
+ * Every `bridge_floor` specialist appears in `targets` with its grant state
+ * (the `/skills` precedent — report the whole vocabulary, not only the granted
+ * subset), so a denied specialist carries a reason rather than being invisible.
+ * `rejected` holds declared names the bridge floor hard-denies, which is the one
+ * way a hand-written `[subagents].allowed` silently does nothing.
+ */
+export interface SubagentCrossProduct {
+  mechanism: 'cross_product';
+  tool: string;
+  tool_granted: boolean;
+  /** `false` when the agent declares no `[subagents]` section at all. */
+  declares_allowed: boolean;
+  /** `NON_CODING_TARGETS` — the bridge-owned floor config can only narrow. */
+  bridge_floor: string[];
+  targets: { name: string; granted: boolean; reason: string | null }[];
+  rejected: { name: string; reason: string }[];
+}
+
+/** `GET /api/agents/:name/subagents`'s wire shape (#4029). */
+export interface AgentSubagents {
+  /**
+   * `false` when the agent's own config could not be resolved. Both halves then
+   * arrive empty and deny-everything, with `config_error` set — fail-closed, not
+   * a partial-parse guess.
+   */
+  resolved: boolean;
+  in_product: SubagentInProduct;
+  cross_product: SubagentCrossProduct;
+  config_error?: string;
+}
+
+/**
+ * Why (#4029, epic #4021 OQ-5): neither delegation mechanism was reachable over
+ * HTTP — `parse_agent_toml` enumerates twelve fields and `subagents` is not one
+ * of them — so the Sub-agents pane needs its own route rather than a derivation
+ * from `AgentDetail`. Critically, the in-product target set is not config at
+ * all: it is a hardcoded role allowlist crossed with the resolvable roster and
+ * narrowed by #4169's tier gate, none of which a client can compute.
+ * What: `null` on 404 (unknown agent) so a stale roster selection is a normal
+ * outcome, not a thrown error — same contract as `fetchAgentSkills`.
+ * Test: `fetchAgentSubagents_returns_null_on_404`.
+ */
+export async function fetchAgentSubagents(name: string): Promise<AgentSubagents | null> {
+  const r = await fetch(`${apiBase()}/api/agents/${encodeURIComponent(name)}/subagents`, {
+    headers: authHeaders(),
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GET /api/agents/${name}/subagents failed: ${r.status}`);
+  return (await r.json()) as AgentSubagents;
+}
