@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [1.2.0] — 2026-07-27
+
+MINOR: substantial new public library surface (`core::push_guard`,
+`core::claude_json_guard`, `control::delegation_tracker`,
+`core::worktree_safety`) plus the MCP-trust hardening chain. Two internal
+plumbing functions (`core::mcp_config::managed_mcp_server_names`,
+`core::standalone::trust_seed::preseed_managed_trust`) did gain parameters,
+which is technically MAJOR-shaped for a 1.x crate; no published crate depends
+on `trusty-mpm` as a library (verified against the published `trusty-code`
+0.2.0 and `trusty-agents-common` 0.3.0 manifests, neither of which declares
+it), and no in-workspace caller outside this crate references either symbol,
+so a 2.0.0 would signal a break that cannot reach anyone.
+
 ### Added
 
 - **Cross-branch `git push` guard for every worktree of a managed base clone**
@@ -110,6 +124,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
 
 ### Changed
+
+- `trusty-common` requirement raised to `^0.27` (was `^0.26`): 0.27.0 makes
+  `ChatEvent` `#[non_exhaustive]`, which a `^0.26` requirement cannot express.
+  `activity::monitor`'s `ChatEvent` match gained a wildcard arm accordingly.
 
 - **Orphan-sweep candidates are processed in sorted order** rather than
   filesystem order, so a `--dry-run` preview predicts the real run and any

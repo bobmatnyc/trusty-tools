@@ -222,7 +222,24 @@ pub struct ChatUsage {
 /// provider also returns `Err` from `chat_stream`, but `Error` lets the
 /// caller display partial-stream failures inline).
 /// Test: `ollama_provider_streams_sse_deltas`.
+///
+/// # Stability
+///
+/// `#[non_exhaustive]`: adding a variant here is otherwise a SemVer-breaking
+/// change for every downstream crate, because an exhaustive `match` over the
+/// old variant set stops compiling with E0004. That is not hypothetical — the
+/// `Usage` variant forced arm additions in five consumers at once
+/// (`trusty-agents`, `trusty-analyze`, `trusty-memory`, `trusty-mpm`,
+/// `trusty-search`) and is the direct cause of the 0.27.0 MINOR bump: a patch
+/// release would have re-resolved the already-published, arm-less consumer
+/// sources against the new variant and hard-failed `cargo install` (the same
+/// failure that forced `trusty-analyze` 0.7.3 to be yanked).
+///
+/// Downstream matches must therefore carry a wildcard arm. This attribute does
+/// NOT retroactively fix consumers published before it landed — it only stops
+/// the next variant addition from repeating the break.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ChatEvent {
     Delta(String),
     ToolCall(ToolCall),

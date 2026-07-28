@@ -7,6 +7,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.27.0] — 2026-07-27
+
+MINOR, not patch — deliberately. `ChatEvent::Usage` (added below) is a new
+variant on an enum that was neither `#[non_exhaustive]` nor private, so every
+downstream exhaustive `match` over it stops compiling with E0004; five
+in-workspace consumers had to gain an arm. Shipping that as 0.26.3 would have
+let `^0.26` re-resolve the ALREADY-PUBLISHED, arm-less consumer sources onto
+the new variant and hard-fail `cargo install` — the exact failure that forced
+`trusty-analyze` 0.7.3 to be yanked on 2026-07-27. `^0.26` excludes 0.27.0, so
+published consumers keep resolving to 0.26.2 and stay installable.
+
+### Changed
+
+- **`chat::ChatEvent` is now `#[non_exhaustive]`.** Downstream `match`es must
+  carry a wildcard arm. This is itself the breaking change that the MINOR bump
+  covers, and it is an ADDITION to that bump rather than a substitute for it:
+  it does nothing for consumers published before it landed, it only stops the
+  *next* variant addition from repeating the break.
+
 ### Added
 
 - **`chat::BedrockProvider` now streams via `ConverseStream` instead of

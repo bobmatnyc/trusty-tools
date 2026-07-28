@@ -315,6 +315,9 @@ pub async fn chat_handler(
             ChatEvent::Usage(_) => {}
             ChatEvent::Done => {}
             ChatEvent::Error(e) => stream_error = Some(e),
+            // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
+            // keeps a future variant from breaking this crate's build.
+            _ => {}
         }
     }
     match stream_task.await {

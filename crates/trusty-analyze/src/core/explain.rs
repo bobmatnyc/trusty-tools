@@ -147,6 +147,9 @@ pub async fn explain_report(
                     stream_error = Some(msg);
                     break;
                 }
+                // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
+                // keeps a future variant from breaking this crate's build.
+                _ => {}
             }
         }
         if let Some(msg) = stream_error {

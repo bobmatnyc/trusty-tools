@@ -220,6 +220,9 @@ where
                 break;
             }
             ChatEvent::Done => break,
+            // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
+            // keeps a future variant from breaking this crate's build.
+            _ => {}
         }
     }
 
