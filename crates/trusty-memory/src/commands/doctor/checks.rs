@@ -27,8 +27,11 @@ use super::CheckResult;
 /// measuring its own impatience rather than the daemon's health. 10 s is
 /// comfortably above the observed worst case while still bounding the check.
 /// The budget is only half the fix: a timeout now yields
-/// [`super::CheckStatus::Unknown`] instead of a false failure.
-/// Test: `slow_but_serving_daemon_is_not_reported_unreachable`.
+/// [`super::CheckStatus::Unknown`] instead of a false failure. The
+/// slow-but-serving case is covered end-to-end against a real listener by
+/// `trusty-mpm`'s `memory_slow_but_serving_daemon_is_ok`, which exercises the
+/// same timeout/refusal split from the `tm doctor` side.
+/// Test: `check_daemon_health_fails_cleanly_with_stale_addr_and_no_listener`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Verify the fastembed model cache exists and is readable.
@@ -301,7 +304,9 @@ pub async fn check_daemon_health() -> CheckResult {
 /// the workers), and `Pass` only when the daemon positively reported a healthy
 /// worker pool.
 /// Test: `wedged_body_is_fail`, `warming_body_is_warn`,
-/// `unparseable_body_is_unknown`, `healthy_body_is_pass`.
+/// `indeterminate_probe_renders_as_unknown_not_pass`,
+/// `body_without_worker_block_is_unknown`, `healthy_body_is_pass`,
+/// `degraded_body_is_warn`.
 pub(super) fn interpret_health_body(
     label: String,
     url: &str,
