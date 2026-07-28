@@ -24,9 +24,28 @@
    * live-discovered MCP tool with no authored manifest) is badged as such; and
    * an allow-pattern that resolved to nothing is shown with its reason instead
    * of being dropped.
+   *
+   * #4024 — function skills render as GROUPS. The owner's directive is that
+   * skills be organized by function, so a `kind: 'function'` bundle is a group
+   * header over its member cards rather than a card of its own. Three rules keep
+   * it honest:
+   *   - The tri-state is rendered as a tri-state. A header says "granted" only
+   *     when `granted_state === 'all'`; `some` reads "partial" with the counts,
+   *     `none` reads "not granted". A bundle is never claimed as granted because
+   *     it was named.
+   *   - Nothing about membership or grant state is derived here. Both come from
+   *     `groups[]`, which the route builds from the SAME computation as the
+   *     cards — PR #3964 deleted `synthesizeSkills` precisely so the pane cannot
+   *     drift from the enforcement path, and re-deriving would reintroduce it.
+   *   - The counts do not move. A bundle is not a capability (S-16), so the
+   *     "N of M known skills granted" footer still counts leaves only, matching
+   *     the server's `granted_count`. A member is shown INSIDE its group instead
+   *     of in the flat kind buckets, so it renders once, not twice.
    * Test: `AgentConfigSkills.test.ts`.
    */
-  import type { AgentSkills, AgentSkill } from '../lib/agentConfig';
+  import type { AgentSkills, AgentSkill, AgentSkillGroup } from '../lib/agentConfig';
+  import { providerChip } from '../lib/agentConfig';
+  import AgentSkillCard from './AgentSkillCard.svelte';
 
   /** Loaded by the shell from `GET /api/agents/:name/skills`; `null` while loading. */
   export let data: AgentSkills | null = null;
@@ -43,42 +62,62 @@
   // #4022: a `function` card is a BUNDLE — a group header over its member
   // cards, not a capability of its own. It is excluded from both counts for the
   // same reason the server excludes it from `granted_count`: granting
-  // `ticketing` adds ten capabilities, and counting the header as an eleventh
-  // would print "11 of N" over ten rendered cards. Rendering the group itself is
-  // #4024's ticket; until then a bundle is simply not shown.
+  // `ticketing` adds twelve capabilities, and counting the header as a
+  // thirteenth would print "13 of N" over twelve rendered cards. #4024 renders
+  // the header itself, from `groups[]` — never from these cards.
   $: leaves = all.filter((s) => s.kind !== 'function');
   $: granted = leaves.filter((s) => s.granted);
   // #3987: scope grants that can match nothing. Defaulted like every array
   // above so an older sidecar (which has no such field) renders the rest of
   // the pane rather than throwing.
   $: deadScopes = data?.dead_scope_patterns ?? [];
-  $: actions = granted.filter((s) => s.kind === 'action');
-  $: knowledge = granted.filter((s) => s.kind === 'knowledge');
-  $: system = granted.filter((s) => s.kind === 'system');
+  // #4024: the function tier. `groups` is the route's index over the
+  // `kind: 'function'` cards; `byId` resolves a member id back to its card so a
+  // group renders REAL cards rather than a second, thinner rendering of them.
+  $: groups = data?.groups ?? [];
+  $: byId = new Map(all.map((s) => [s.id, s]));
+  // A member shown inside its group is removed from the flat buckets: one card,
+  // one place. Membership is read from the group (what the bundle declares), not
+  // inferred from the card, so an ungranted member is pulled out too — it is not
+  // listed anywhere, exactly as an ungranted leaf is not.
+  $: groupedIds = new Set(groups.flatMap((g) => g.members));
+  $: ungrouped = granted.filter((s) => !groupedIds.has(s.id));
+  $: actions = ungrouped.filter((s) => s.kind === 'action');
+  $: knowledge = ungrouped.filter((s) => s.kind === 'knowledge');
+  $: system = ungrouped.filter((s) => s.kind === 'system');
   $: catalogSize = leaves.length;
 
-  /** Credential line for a card, or `null` when the skill needs none. */
-  function credential(skill: AgentSkill): { label: string; tone: string; title: string } | null {
-    const p = skill.provider;
-    if (!p) return null;
-    if (p.configured === true)
-      return { label: `${p.provider} configured`, tone: 'ok', title: p.requirement };
-    if (p.configured === false)
-      return {
-        label: `${p.provider} NOT configured`,
-        tone: 'bad',
-        title: `${p.requirement} Set ${p.env_var}.`,
-      };
-    return { label: `${p.provider} — not verified`, tone: 'unknown', title: p.requirement };
+  /**
+   * The group header's grant word, its tone, and the counts behind it.
+   *
+   * Why: The one place the tri-state could be flattened back into a boolean, so
+   * it is the one place worth stating: "granted" is reserved for `all`. `some`
+   * says "partial" and shows both numbers, because "7 of 12" is the fact the
+   * user needs and "granted" would be a claim about five skills this agent does
+   * not hold.
+   */
+  function groupState(g: AgentSkillGroup): { word: string; tone: string; counts: string } {
+    const counts = `${g.granted_members.length} of ${g.members.length} skills`;
+    if (g.granted_state === 'all') return { word: 'granted', tone: 'ok', counts };
+    if (g.granted_state === 'some') return { word: 'partial', tone: 'warn', counts };
+    return { word: 'not granted', tone: 'off', counts };
+  }
+
+  /** The member cards a group renders — granted only, in declared order. */
+  function grantedCards(g: AgentSkillGroup): AgentSkill[] {
+    return g.granted_members
+      .map((id) => byId.get(id))
+      .filter((s): s is AgentSkill => s !== undefined);
   }
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
   <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
     What this agent can do. Each card below is one skill wrapping exactly one tool, named for what
-    invoking it accomplishes. A grant may also name a <em>function skill</em> — a bundle such as
-    <code class="font-mono">ticketing</code> that grants all of its member skills at once; its
-    members appear here as their own cards. Edit the grants in
+    invoking it accomplishes. Skills that belong to a <em>function skill</em> — a bundle such as
+    <code class="font-mono">ticketing</code> that grants all of its members at once — are shown
+    under that function; a function reads <em>granted</em> only when every one of its members is.
+    Edit the grants in
     <code class="font-mono">agent.toml</code> —
     <code class="font-mono">[skills].allow</code> (skill ids) or
     <code class="font-mono">[tools].allow</code> (tool globs); the two are unioned, so neither
@@ -112,63 +151,96 @@
       </p>
     {/if}
 
-    {#each [{ label: 'Actions', items: actions }, { label: 'Knowledge', items: knowledge }, { label: 'System', items: system }] as group (group.label)}
-      {#if group.items.length > 0}
-        <h4 class="mt-1 font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
-          {group.label} ({group.items.length})
-        </h4>
-        {#each group.items as skill (skill.id)}
-          <div class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">
-            <div class="flex items-baseline justify-between gap-2">
+    <!--
+      #4024: the function tier, rendered first because it is the organising
+      layer the owner asked for — "skills organized by function". Each group is
+      collapsed by default (a header is a summary, not a wall of cards) and its
+      grant word comes straight from the route's tri-state.
+    -->
+    {#if groups.length > 0}
+      <h4 class="mt-1 font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
+        Functions ({groups.length})
+      </h4>
+      {#each groups as g (g.id)}
+        {@const state = groupState(g)}
+        {@const cards = grantedCards(g)}
+        <details class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">
+          <summary class="cursor-pointer list-none">
+            <span class="flex flex-wrap items-baseline justify-between gap-2">
               <span class="text-xs font-semibold text-foundry-light-text dark:text-foundry-text">
-                {skill.name}
+                {g.name}
               </span>
-              {#if skill.origin.kind === 'derived'}
-                <span
-                  class="shrink-0 rounded-md bg-foundry-amber/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-foundry-amber"
-                  title="No manifest names this tool — the card was derived from the tool identifier"
-                >
-                  derived
-                </span>
-              {/if}
-            </div>
-            {#if skill.description}
-              <p class="mt-0.5 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
-                {skill.description}
-              </p>
-            {:else}
-              <p class="mt-0.5 text-[11px] italic text-foundry-light-muted dark:text-foundry-text/40">
-                No description authored for this skill.
-              </p>
-            {/if}
-            <div class="mt-1.5 flex flex-wrap items-center gap-1">
-              {#each skill.tools as tool (tool)}
-                <span
-                  class="rounded border border-foundry-light-border dark:border-foundry-border px-1.5 py-0.5 font-mono text-[10px] text-foundry-light-text dark:text-foundry-text"
-                  title="The tool this skill wraps"
-                >
-                  {tool}
-                </span>
-              {/each}
-              {#if skill.tools.length === 0}
-                <span class="font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
-                  guidance only — no tool
-                </span>
-              {/if}
-              {#if credential(skill)}
-                {@const c = credential(skill)}
+              <span
+                class="shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide {state.tone ===
+                'ok'
+                  ? 'bg-foundry-green/15 text-foundry-green'
+                  : state.tone === 'warn'
+                    ? 'bg-foundry-amber/15 text-foundry-amber'
+                    : 'text-foundry-light-muted dark:text-foundry-text/40'}"
+                title="A bundle is reported granted only when EVERY member skill is granted"
+              >
+                {state.word} — {state.counts}
+              </span>
+            </span>
+          </summary>
+          <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
+            {g.description}
+          </p>
+          <!--
+            The bundle's credential requirements, as a SET. Two members needing
+            two different credentials render as two chips — a divergence is
+            shown, never averaged into one verdict (#4024, DOC-57 S-16).
+          -->
+          {#if (g.providers ?? []).length > 0}
+            <div class="mt-1 flex flex-wrap items-center gap-1">
+              {#each g.providers ?? [] as p (p.provider + p.requirement)}
+                {@const c = providerChip(p)}
                 <span
                   class="rounded px-1.5 py-0.5 font-mono text-[10px]"
-                  class:text-foundry-green={c?.tone === 'ok'}
-                  class:text-foundry-red={c?.tone === 'bad'}
-                  class:text-foundry-light-muted={c?.tone === 'unknown'}
-                  title={c?.title}
+                  class:text-foundry-green={c.tone === 'ok'}
+                  class:text-foundry-red={c.tone === 'bad'}
+                  class:text-foundry-light-muted={c.tone === 'unknown'}
+                  title={c.title}
                 >
-                  {c?.label}
+                  {c.label}
                 </span>
-              {/if}
+              {/each}
             </div>
+          {/if}
+          <div class="mt-1.5 flex flex-col gap-2">
+            {#each cards as skill (skill.id)}
+              <AgentSkillCard {skill} />
+            {/each}
           </div>
+          <!--
+            Ungranted members are counted, not listed — the same policy the flat
+            buckets follow. Saying how many are missing is what keeps "partial"
+            from being a shrug.
+          -->
+          {#if g.members.length > g.granted_members.length}
+            <p class="mt-1.5 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
+              {g.members.length - g.granted_members.length} member skill{g.members.length -
+                g.granted_members.length ===
+              1
+                ? ''
+                : 's'} in this function {g.members.length - g.granted_members.length === 1
+                ? 'is'
+                : 'are'} not granted. Grant the whole function with
+              <code class="font-mono">{g.id}</code> in
+              <code class="font-mono">[skills].allow</code>.
+            </p>
+          {/if}
+        </details>
+      {/each}
+    {/if}
+
+    {#each [{ label: 'Actions', items: actions }, { label: 'Knowledge', items: knowledge }, { label: 'System', items: system }] as bucket (bucket.label)}
+      {#if bucket.items.length > 0}
+        <h4 class="mt-1 font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
+          {bucket.label} ({bucket.items.length})
+        </h4>
+        {#each bucket.items as skill (skill.id)}
+          <AgentSkillCard {skill} />
         {/each}
       {/if}
     {/each}

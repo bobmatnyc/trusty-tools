@@ -371,6 +371,15 @@ export interface AgentSkillGroup {
   members: string[];
   granted_members: string[];
   granted_state: 'all' | 'some' | 'none';
+  /**
+   * #4024: the DISTINCT credential requirements across the members — a SET, not
+   * a rolled-up verdict. A bundle has no `provider` of its own, and its members
+   * need not agree; render every entry, so two members needing two different
+   * credentials show as two chips rather than one averaged claim. Empty means
+   * "no member states a requirement", never "verified". Optional so an older
+   * sidecar (pre-#4024) renders the group rather than throwing.
+   */
+  providers?: AgentSkillProvider[];
 }
 
 /**
@@ -387,6 +396,34 @@ export interface AgentSkillProvider {
   requirement: string;
   env_var: string | null;
   configured: boolean | null;
+}
+
+/**
+ * Render one credential requirement as a chip label + tone (#4024).
+ *
+ * Why: Both a leaf card and a function-skill group header state credentials, and
+ * they must state them IDENTICALLY — a group that renders "configured" where its
+ * member card says "not verified" is the display-layer form of the drift the
+ * route's single-computation rule exists to prevent. One function, two call
+ * sites. It is also where `configured: null` is pinned to "not verified" rather
+ * than to a green chip nobody checked (DOC-57 S-11b).
+ * What: `{ label, tone, title }`; `tone` is `ok` | `bad` | `unknown`.
+ * Test: `agentConfig.test.ts`, `AgentConfigSkills.test.ts`.
+ */
+export function providerChip(p: AgentSkillProvider): {
+  label: string;
+  tone: 'ok' | 'bad' | 'unknown';
+  title: string;
+} {
+  if (p.configured === true)
+    return { label: `${p.provider} configured`, tone: 'ok', title: p.requirement };
+  if (p.configured === false)
+    return {
+      label: `${p.provider} NOT configured`,
+      tone: 'bad',
+      title: `${p.requirement} Set ${p.env_var}.`,
+    };
+  return { label: `${p.provider} — not verified`, tone: 'unknown', title: p.requirement };
 }
 
 /** `GET /api/agents/:name/skills`'s wire shape. */
