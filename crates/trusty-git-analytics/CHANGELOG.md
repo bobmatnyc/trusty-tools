@@ -7,6 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [2.10.0] — 2026-07-27
+
+MINOR, not patch. The JIRA ingestion work (#3966, #4084) landed on `main`
+without a version bump while 2.9.4 was already live on crates.io, so the
+version-parity guard (#3366) went red: 11 files added and 9 modified under a
+published version number. The drift is purely additive but it is *public API*,
+not internals — `tga` auto-detects `src/lib.rs` as a library target, so these
+are real SemVer-relevant additions:
+
+- `collect::errors::CollectError` gained `Throttled`, `IncompleteChangelog`
+  and `PagingBudgetExceeded`, and became `#[non_exhaustive]`.
+- `collect::jira` gained public modules `http`, `jql_time`, `model`, `paging`,
+  `retry`, `sync`, and re-exports `ChangelogIssue`, `ChangelogWalk`,
+  `JiraComment`, `JiraTransition`, `RetryPolicy`.
+- `core::db` gained the public `jira_facts` module and its re-exports.
+- `commands` gained the public `jira` module; `commands::args` gained
+  `JiraSubcommandArgs` / `JiraSubcommand`.
+- `core::config::JiraConfig` gained a `timezone` field.
+
+Nothing was removed and no existing public signature changed, so this is not a
+major bump. The one published consumer, `trusty-review` (optional `profile`
+feature), only constructs `CollectError` through `#[from]` and never matches on
+it exhaustively, so `#[non_exhaustive]` costs it nothing.
+
+No crates are published by this change.
+
 ### Added
 
 - JIRA changelog + comment extraction client, covering issue transition history and per-comment detail (closes [#3966](https://github.com/bobmatnyc/trusty-tools/issues/3966)).
