@@ -532,13 +532,16 @@ fn format_health(report: &HealthReport) -> String {
 /// The emoji icon for a doctor [`CheckStatus`](crate::core::doctor::CheckStatus).
 ///
 /// Why: the `/doctor` message marks each check with a glanceable status symbol.
-/// What: `Ok → ✅`, `Warn → ⚠️`, `Fail → ❌`.
+/// What: `Ok → ✅`, `Warn → ⚠️`, `Unknown → ❔`, `Fail → ❌`.
 /// Test: covered by `format_doctor_report_lists_each_check`.
 fn status_icon(status: crate::core::doctor::CheckStatus) -> &'static str {
     use crate::core::doctor::CheckStatus;
     match status {
         CheckStatus::Ok => "✅",
         CheckStatus::Warn => "⚠️",
+        // Never ✅ (issue #4005): an indeterminate check must not read as
+        // healthy at a glance.
+        CheckStatus::Unknown => "❔",
         CheckStatus::Fail => "❌",
     }
 }
@@ -546,13 +549,15 @@ fn status_icon(status: crate::core::doctor::CheckStatus) -> &'static str {
 /// A one-word label for a doctor [`CheckStatus`](crate::core::doctor::CheckStatus).
 ///
 /// Why: the overall verdict reads better with a word than a bare icon.
-/// What: `Ok → "healthy"`, `Warn → "warnings"`, `Fail → "failed"`.
+/// What: `Ok → "healthy"`, `Warn → "warnings"`, `Unknown → "undetermined"`,
+/// `Fail → "failed"`.
 /// Test: covered by `format_doctor_report_lists_each_check`.
 fn status_word(status: crate::core::doctor::CheckStatus) -> &'static str {
     use crate::core::doctor::CheckStatus;
     match status {
         CheckStatus::Ok => "healthy",
         CheckStatus::Warn => "warnings",
+        CheckStatus::Unknown => "undetermined",
         CheckStatus::Fail => "failed",
     }
 }

@@ -288,10 +288,22 @@ pub(crate) fn parse_room(s: Option<&str>) -> RoomType {
 }
 
 /// Resolve (or lazily open) the palace handle for a tool call.
+///
+/// Why the liveness guard (issue #4001): this is the single choke point every
+/// `memory_recall` / `memory_remember` passes through, and it is exactly where
+/// the #3992 wedge occurred — `open_palace` serialises on a per-palace mutex
+/// and, on a miss, drops into `concurrent_open`'s redb retry/backoff loop.
+/// Registering the operation here is what lets `/health` (and therefore both
+/// doctors) observe that work has stopped moving. The guard is RAII, so the
+/// `?` on the line below releases it just as reliably as the success path.
+/// What: unchanged behaviour, plus a [`crate::worker_liveness`] registration
+/// held for the duration of the open.
+/// Test: `worker_liveness::tests`, `web::tests::health_tests`.
 pub(crate) fn open_palace_handle(
     state: &AppState,
     palace_id: &str,
 ) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
+    let _tracked = state.worker_liveness.track();
     let pid = PalaceId::new(palace_id);
     state
         .registry

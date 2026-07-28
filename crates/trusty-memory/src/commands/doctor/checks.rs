@@ -15,6 +15,22 @@ use std::time::Duration;
 
 use super::CheckResult;
 
+/// Per-request budget for the `/health` probe.
+///
+/// Why (issue #4005): the old budget was 2 s, and on 2026-07-26 that produced
+/// a hard "unreachable" verdict against a daemon whose MCP surface was
+/// verifiably serving `memory_recall` / `memory_remember` in the same minutes.
+/// The default `/health` handler is cheap but not free — it samples process
+/// RSS/CPU through a `tokio::Mutex` and enumerates the process's open file
+/// descriptors, neither of which is on the MCP request path. Under load those
+/// can exceed 2 s while ordinary MCP calls sail through, so the probe was
+/// measuring its own impatience rather than the daemon's health. 10 s is
+/// comfortably above the observed worst case while still bounding the check.
+/// The budget is only half the fix: a timeout now yields
+/// [`super::CheckStatus::Unknown`] instead of a false failure.
+/// Test: `slow_but_serving_daemon_is_not_reported_unreachable`.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Verify the fastembed model cache exists and is readable.
 ///
 /// Why: GH #58/#62 — when the daemon can't reach a writable cache path it
@@ -143,13 +159,14 @@ pub async fn check_daemon_health() -> CheckResult {
     let label = "HTTP daemon".to_string();
 
     // Build a reusable reqwest client for the probes below.
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => return CheckResult::fail(label, format!("could not build HTTP client: {e}")),
     };
+
+    // Issue #4005: set when any probe times out (as opposed to being refused).
+    // A timeout means we learned nothing; a refusal means nothing is there.
+    let mut timed_out = false;
 
     // Primary probe: use the recorded addr file when present.
     let recorded_url = match trusty_common::read_daemon_addr("trusty-memory") {
@@ -174,7 +191,13 @@ pub async fn check_daemon_health() -> CheckResult {
         let url = format!("{base}/health");
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                return CheckResult::pass(label, format!("{} → {}", url, resp.status()));
+                let status = resp.status();
+                // Issue #4001: a 2xx proves the LISTENER is alive, nothing
+                // more. Read what the daemon actually reported about its
+                // worker pool before calling this a pass — during #3992 this
+                // exact branch returned Pass while every worker was parked.
+                let body = resp.json::<serde_json::Value>().await.ok();
+                return interpret_health_body(label, &url, status.as_u16(), body.as_ref());
             }
             Ok(resp) => {
                 // Non-2xx from the recorded addr: continue to fallback.
@@ -183,11 +206,18 @@ pub async fn check_daemon_health() -> CheckResult {
                     resp.status()
                 );
             }
-            Err(_) => {
-                // Connection refused or timeout: recorded addr is stale.
-                // Continue to default-port fallback below.
+            Err(e) => {
+                // Issue #4005: a TIMEOUT is not the same as a refusal. A
+                // refused connection proves nothing is listening; a timeout
+                // proves only that the daemon did not answer within OUR
+                // budget, which a busy-but-healthy daemon can miss. Remember
+                // which one happened so the terminal verdict below can be
+                // honest rather than defaulting to "unreachable".
+                if e.is_timeout() {
+                    timed_out = true;
+                }
                 tracing::debug!(
-                    "doctor: recorded addr {url} unreachable (stale?); trying fallback ports"
+                    "doctor: recorded addr {url} did not answer ({e}); trying fallback ports"
                 );
             }
         }
@@ -203,29 +233,48 @@ pub async fn check_daemon_health() -> CheckResult {
         let url = format!("http://127.0.0.1:{port}/health");
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let note = if recorded_url.is_some() {
-                    format!(
-                        "{url} → {} (addr file was stale — daemon is live on fallback port {port})",
-                        resp.status()
-                    )
+                let status = resp.status();
+                let origin = if recorded_url.is_some() {
+                    "addr file was stale — daemon is live on fallback port"
                 } else {
-                    format!(
-                        "{url} → {} (no addr file; found daemon on default port {port})",
-                        resp.status()
-                    )
+                    "no addr file; found daemon on default port"
                 };
-                return CheckResult::pass(label, note);
+                let body = resp.json::<serde_json::Value>().await.ok();
+                let note_url = format!("{url} ({origin} {port})");
+                return interpret_health_body(label, &note_url, status.as_u16(), body.as_ref());
+            }
+            Err(e) if e.is_timeout() => {
+                timed_out = true;
+                continue;
             }
             _ => continue,
         }
     }
 
-    // All probes failed.
+    // Every probe came back empty. Issue #4005: distinguish "nothing is
+    // listening anywhere" (a real, actionable failure) from "something was
+    // listening but never answered in time" (we simply do not know). Only the
+    // former justifies telling the operator to start the daemon — the latter
+    // used to produce that same advice and send them down the wrong path while
+    // a perfectly healthy daemon served MCP traffic beside them.
+    if timed_out {
+        return CheckResult::unknown(
+            label,
+            format!(
+                "no /health response within {}s on the recorded address or ports 7070-7079, \
+                 but at least one probe TIMED OUT rather than being refused — the daemon may be \
+                 alive and slow. Could not determine health. Re-run when load subsides, or check \
+                 the MCP surface directly before restarting anything.",
+                PROBE_TIMEOUT.as_secs()
+            ),
+        );
+    }
+
     if recorded_url.is_some() {
         CheckResult::fail(
             label,
-            "recorded address unreachable and no daemon found on default ports 7070-7079 \
-             — start with `trusty-memory service start`"
+            "recorded address unreachable (connection refused) and no daemon found on default \
+             ports 7070-7079 — start with `trusty-memory service start`"
                 .to_string(),
         )
     } else {
@@ -236,6 +285,117 @@ pub async fn check_daemon_health() -> CheckResult {
                 .to_string(),
         )
     }
+}
+
+/// Turn a 2xx `/health` payload into a verdict (issues #4001, #4005).
+///
+/// Why: this function is the fix's thesis in one place. A 2xx from `/health`
+/// proves that a listener accepted a socket and returned bytes — it does not
+/// prove the daemon is doing work. Doctor used to stop at the status code,
+/// which is how #3992 stayed green for the length of an incident. The body now
+/// carries an observation of the worker pool, and this maps that observation
+/// to a status, keeping "observed healthy" separate from "could not determine".
+/// What: `Fail` when the daemon reports a wedged worker pool, `Warn` when it
+/// reports `degraded` or is still warming up, `Unknown` when the body is
+/// missing or unparseable (a 2xx with no readable body tells us nothing about
+/// the workers), and `Pass` only when the daemon positively reported a healthy
+/// worker pool.
+/// Test: `wedged_body_is_fail`, `warming_body_is_warn`,
+/// `unparseable_body_is_unknown`, `healthy_body_is_pass`.
+pub(super) fn interpret_health_body(
+    label: String,
+    url: &str,
+    status: u16,
+    body: Option<&serde_json::Value>,
+) -> CheckResult {
+    let Some(body) = body else {
+        return CheckResult::unknown(
+            label,
+            format!(
+                "{url} → {status}, but the response body could not be read or parsed. The \
+                 listener is up; whether its workers are making progress is UNKNOWN."
+            ),
+        );
+    };
+
+    // Worker-pool observation (issue #4001) — the signal that would have
+    // caught #3992. Checked first: a wedge outranks every other reading.
+    let worker = body.get("worker");
+    let wedged = worker
+        .and_then(|w| w.get("wedged"))
+        .and_then(serde_json::Value::as_bool);
+    let oldest = worker
+        .and_then(|w| w.get("oldest_age_secs"))
+        .and_then(serde_json::Value::as_u64);
+    let in_flight = worker
+        .and_then(|w| w.get("in_flight"))
+        .and_then(serde_json::Value::as_u64);
+
+    match wedged {
+        Some(true) => {
+            return CheckResult::fail(
+                label,
+                format!(
+                    "{url} → {status} BUT the daemon reports a WEDGED worker pool: oldest \
+                     in-flight palace operation has been running {}s with {} in flight. The \
+                     HTTP listener answering does not mean writes are progressing (issue \
+                     #3992). Inspect with a thread sample before restarting.",
+                    oldest.unwrap_or_default(),
+                    in_flight.unwrap_or_default()
+                ),
+            );
+        }
+        None => {
+            // No `worker` block: an older daemon build. Say so rather than
+            // silently reporting a pass we cannot actually support.
+            return CheckResult::unknown(
+                label,
+                format!(
+                    "{url} → {status}, but this daemon does not report worker-pool occupancy \
+                     (pre-#4001 build). Liveness is confirmed; whether workers are making \
+                     progress is UNKNOWN. Upgrade the daemon to get a real answer."
+                ),
+            );
+        }
+        Some(false) => {}
+    }
+
+    let daemon_state = body.get("daemon_state").and_then(|v| v.as_str());
+    let reported = body.get("status").and_then(|v| v.as_str());
+
+    // Issue #4005: a warming daemon is a normal post-restart state, not a
+    // failure. It is also not fully healthy, so it warns rather than passes.
+    if daemon_state == Some("warming") {
+        return CheckResult::warn(
+            label,
+            format!(
+                "{url} → {status}, daemon is WARMING UP (embedder still initialising). This is \
+                 normal shortly after a restart — recall falls back to the non-embedder path \
+                 until it finishes."
+            ),
+        );
+    }
+
+    if reported == Some("degraded") {
+        let detail = body
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no detail reported");
+        return CheckResult::warn(
+            label,
+            format!("{url} → {status}, daemon reports DEGRADED: {detail}"),
+        );
+    }
+
+    let occupancy = match (in_flight, oldest) {
+        (Some(n), Some(secs)) => format!(", {n} in flight, oldest {secs}s"),
+        (Some(n), None) => format!(", {n} in flight"),
+        _ => String::new(),
+    };
+    CheckResult::pass(
+        label,
+        format!("{url} → {status}, workers progressing{occupancy}"),
+    )
 }
 
 /// Scan the data directory for stray `*.lock` files left over from a

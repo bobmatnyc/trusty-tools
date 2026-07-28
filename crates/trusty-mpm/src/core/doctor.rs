@@ -28,6 +28,19 @@ pub enum CheckStatus {
     Ok,
     /// The probe found a degraded-but-usable condition worth flagging.
     Warn,
+    /// The probe could not determine the component's state (issue #4005).
+    ///
+    /// Why: a probe that times out has learned nothing. On 2026-07-26 the
+    /// memory probe missed its 2 s budget and reported `Fail` —
+    /// "trusty-memory unreachable at 127.0.0.1:7070" — while MCP
+    /// `memory_recall` / `memory_remember` calls against that same daemon
+    /// succeeded in the same minutes. Reporting that as `Fail` sends the
+    /// operator to restart a healthy daemon; reporting it as `Ok` would hide a
+    /// real outage. Both are dishonest, so "could not determine" gets its own
+    /// state. It ranks ABOVE `Warn` because an unknown is strictly less
+    /// trustworthy than a known-but-minor problem, and it must never render as
+    /// healthy.
+    Unknown,
     /// The probe failed — the component is broken or unreachable.
     Fail,
 }
@@ -37,13 +50,18 @@ impl CheckStatus {
     ///
     /// Why: the aggregate report status is the *worst* of every check; ranking
     /// the variants lets [`worst`](Self::worst) compare them with a plain `max`.
-    /// What: `Ok = 0`, `Warn = 1`, `Fail = 2`.
-    /// Test: `worst_picks_the_most_severe`.
+    /// What: `Ok = 0`, `Warn = 1`, `Unknown = 2`, `Fail = 3`.
+    /// Test: `worst_picks_the_most_severe`, `unknown_never_aggregates_to_ok`.
     fn rank(self) -> u8 {
         match self {
             CheckStatus::Ok => 0,
             CheckStatus::Warn => 1,
-            CheckStatus::Fail => 2,
+            // Above Warn (issue #4005): an unknown is less trustworthy than a
+            // known-but-minor problem. Critically, ranking it above Ok is what
+            // guarantees a single indeterminate check can never leave the
+            // aggregate report reading healthy.
+            CheckStatus::Unknown => 2,
+            CheckStatus::Fail => 3,
         }
     }
 

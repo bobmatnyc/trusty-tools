@@ -117,6 +117,126 @@ async fn health_endpoint_cheap_by_default() {
     );
 }
 
+// ---- Issue #4001: /health must observe the worker pool ----
+
+/// Why (issue #4001): doctor cannot report what `/health` never tells it. An
+/// idle daemon must publish a worker block so an out-of-process probe can see
+/// that it positively observed zero outstanding work — as opposed to a
+/// pre-#4001 daemon, where the absence of the block means "unknown".
+/// What: asserts the cheap path carries `worker.in_flight`/`worker.wedged`,
+/// and omits `oldest_age_secs` when idle.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_idle_worker_pool() {
+    let state = test_state();
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["worker"]["in_flight"], 0, "idle pool; got {v:?}");
+    assert_eq!(v["worker"]["wedged"], false, "idle pool; got {v:?}");
+    assert!(
+        v["worker"].get("oldest_age_secs").is_none(),
+        "an idle pool has no age to report; got {v:?}"
+    );
+}
+
+/// Why (issue #4001): THE regression lock. During the #3992 incident the HTTP
+/// listener answered normally while six threads sat parked and a
+/// `memory_remember` had been hung ~1800 s, and `/health` reported `"ok"` —
+/// which is what let both doctors report HEALTHY. Here the listener is equally
+/// live; the only difference is that an operation has been outstanding past
+/// the wedge threshold. `/health` must say so.
+/// What: registers a tracked operation and drives this daemon's wedge
+/// threshold to zero so the test is deterministic and instant (no sleeping for
+/// minutes). The threshold is per-`AppState`, not an env var, so this test
+/// cannot race the sibling test below.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_wedged_worker_pool() {
+    let mut state = test_state();
+    state.wedge_threshold = std::time::Duration::ZERO;
+    // Hold an in-flight operation open across the request, exactly as a
+    // wedged `open_palace_handle` would.
+    let _stuck = state.worker_liveness.track();
+    // Let at least one millisecond elapse so the age strictly exceeds zero.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let app = router().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(
+        v["worker"]["wedged"], true,
+        "a stuck operation past the threshold must read as wedged; got {v:?}"
+    );
+    assert_eq!(
+        v["status"], "wedged",
+        "top-level status must NOT be ok while workers are stuck; got {v:?}"
+    );
+    assert_ne!(
+        v["status"], "ok",
+        "this is the #3992 false positive; got {v:?}"
+    );
+    assert_eq!(v["worker"]["in_flight"], 1, "got {v:?}");
+    assert!(
+        v["detail"].as_str().unwrap_or_default().contains("wedged")
+            || v["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not making progress"),
+        "detail must explain the wedge; got {v:?}"
+    );
+}
+
+/// Why (issue #4001): the wedge signal must clear on its own. If a completed
+/// operation left the gauge tripped, the fix would trade a false positive for
+/// a sticky one and operators would learn to ignore it.
+/// What: tracks and drops an operation, then asserts `/health` is back to ok.
+/// Test: this test.
+#[tokio::test]
+async fn health_wedge_signal_clears_when_work_completes() {
+    let mut state = test_state();
+    state.wedge_threshold = std::time::Duration::ZERO;
+    {
+        let _stuck = state.worker_liveness.track();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    } // operation completes here
+
+    let app = router().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(v["worker"]["wedged"], false, "got {v:?}");
+    assert_eq!(v["status"], "ok", "got {v:?}");
+}
+
 /// Why: the fd-exhaustion gauge must appear in the `/health` response on
 /// Unix platforms so operators can monitor fd consumption vs. the ceiling.
 /// What: drives `/health` through the router and asserts that `open_fds`

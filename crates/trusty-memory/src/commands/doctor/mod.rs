@@ -48,6 +48,20 @@ pub(super) enum CheckStatus {
     Pass,
     Warn,
     Fail,
+    /// The probe could not determine the answer (issue #4005).
+    ///
+    /// Why: this is the missing third state, and the whole reason #4005 and
+    /// #4001 are the same bug in opposite directions. A probe that times out
+    /// has learned NOTHING — the daemon may be perfectly healthy and merely
+    /// slow (which is exactly what happened on 2026-07-26, when `/health`
+    /// missed a 2 s budget while MCP calls against the same daemon succeeded).
+    /// Rendering that as `Fail` is a false negative; rendering it as `Pass`
+    /// would be a false positive. Neither is honest, so it gets its own state.
+    /// The rule this variant encodes: a health check must report what it
+    /// actually observed, and "could not determine" must never render as
+    /// healthy.
+    /// Test: `indeterminate_probe_renders_as_unknown_not_pass`.
+    Unknown,
 }
 
 /// A single doctor check result.
@@ -87,16 +101,35 @@ impl CheckResult {
         }
     }
 
+    /// Build an "could not determine" result (issue #4005).
+    ///
+    /// Why: see [`CheckStatus::Unknown`]. Callers reach for this when the probe
+    /// itself failed to produce evidence — a timeout, an unparseable body —
+    /// rather than when it produced evidence of a problem.
+    /// What: a [`CheckStatus::Unknown`] result carrying the reason.
+    /// Test: `indeterminate_probe_renders_as_unknown_not_pass`.
+    pub(super) fn unknown(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            status: CheckStatus::Unknown,
+            label: label.into(),
+            detail: Some(detail.into()),
+        }
+    }
+
     pub(super) fn print(&self) {
         let glyph = match self.status {
             CheckStatus::Pass => "✅".to_string(),
             CheckStatus::Warn => "⚠️ ".to_string(),
             CheckStatus::Fail => "❌".to_string(),
+            // Deliberately NOT a green/✅ glyph: an indeterminate probe must
+            // never read as healthy at a glance (issue #4005).
+            CheckStatus::Unknown => "❔".to_string(),
         };
         let label = match self.status {
             CheckStatus::Pass => self.label.green().to_string(),
             CheckStatus::Warn => self.label.yellow().to_string(),
             CheckStatus::Fail => self.label.red().to_string(),
+            CheckStatus::Unknown => self.label.yellow().to_string(),
         };
         match &self.detail {
             Some(d) => println!("{glyph} {label} — {}", d.dimmed()),
@@ -257,25 +290,23 @@ pub async fn handle_doctor() -> Result<()> {
         .iter()
         .filter(|r| r.status == CheckStatus::Warn)
         .count();
+    let unknown = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Unknown)
+        .count();
+
+    // Issue #4005: indeterminate checks are reported in their own column
+    // rather than being folded into `passed`. Folding them in is what let a
+    // probe that learned nothing contribute to a healthy-looking tally.
+    let summary =
+        format!("{passed} passed, {warned} warnings, {unknown} undetermined, {failed} failed.");
 
     println!();
     if failed == 0 {
-        println!(
-            "{} {} passed, {} warnings, {} failed.",
-            "✓".green(),
-            passed,
-            warned,
-            failed
-        );
+        println!("{} {summary}", "✓".green());
         Ok(())
     } else {
-        eprintln!(
-            "{} {} passed, {} warnings, {} failed.",
-            "✗".red(),
-            passed,
-            warned,
-            failed
-        );
+        eprintln!("{} {summary}", "✗".red());
         std::process::exit(1);
     }
 }
@@ -553,11 +584,19 @@ mod tests {
         drop(_guard);
 
         // With a stale addr AND no daemon on 7070-7079 (except possibly the
-        // live daemon under test), result must be Fail or Pass.
+        // live daemon under test), result must be Fail, Pass, or — since
+        // issue #4001 — Unknown. Unknown is the honest answer when the
+        // fallback DOES find a live daemon that predates the worker-occupancy
+        // block: liveness is confirmed, but progress is unobservable, and this
+        // check may no longer claim a pass it cannot support.
         assert!(
-            result.status == CheckStatus::Fail || result.status == CheckStatus::Pass,
-            "unexpected status {:?}; expected Fail (stale addr, no listener) \
-             or Pass (fallback found live daemon)",
+            matches!(
+                result.status,
+                CheckStatus::Fail | CheckStatus::Pass | CheckStatus::Unknown
+            ),
+            "unexpected status {:?}; expected Fail (stale addr, no listener), \
+             Pass (fallback found a live #4001-aware daemon), or Unknown \
+             (fallback found a live pre-#4001 daemon)",
             result.status,
         );
         if result.status == CheckStatus::Fail {
@@ -596,9 +635,14 @@ mod tests {
         }
         drop(_guard);
 
-        // Either Fail (no daemon found anywhere) or Pass (live daemon on 7070).
+        // Fail (no daemon found anywhere), Pass (live #4001-aware daemon on
+        // 7070), or Unknown (live pre-#4001 daemon on 7070 — liveness
+        // confirmed, worker progress unobservable).
         assert!(
-            result.status == CheckStatus::Fail || result.status == CheckStatus::Pass,
+            matches!(
+                result.status,
+                CheckStatus::Fail | CheckStatus::Pass | CheckStatus::Unknown
+            ),
             "unexpected status: {:?}",
             result.status
         );
@@ -609,5 +653,105 @@ mod tests {
                 "detail must hint at the absence: {detail:?}"
             );
         }
+    }
+
+    // ---- Issues #4001 / #4005: interpret what the daemon reported ----
+
+    use super::checks::interpret_health_body;
+
+    fn interpret(body: serde_json::Value) -> CheckResult {
+        interpret_health_body(
+            "HTTP daemon".to_string(),
+            "http://x/health",
+            200,
+            Some(&body),
+        )
+    }
+
+    /// Why (issue #4001): `trusty-memory doctor` reported HEALTHY throughout
+    /// the #3992 hang because a 2xx was the entire test. A daemon reporting a
+    /// wedged pool must fail even though the HTTP layer is perfectly fine.
+    /// What: asserts `Fail` plus a message naming the wedge and its age.
+    /// Test: itself.
+    #[test]
+    fn wedged_body_is_fail() {
+        let r = interpret(serde_json::json!({
+            "status": "ok",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 6, "oldest_age_secs": 1800, "wedged": true},
+        }));
+        assert_eq!(r.status, CheckStatus::Fail);
+        let d = r.detail.as_deref().unwrap_or("");
+        assert!(d.contains("WEDGED"), "must name the wedge: {d}");
+        assert!(d.contains("1800"), "must carry the observed age: {d}");
+    }
+
+    /// Why (issue #4005): post-restart warm-up is a normal transient state.
+    /// Reporting it as a hard failure is the false negative; reporting it as a
+    /// clean pass would hide that recall is on its fallback path.
+    /// What: asserts `Warn`.
+    /// Test: itself.
+    #[test]
+    fn warming_body_is_warn() {
+        let r = interpret(serde_json::json!({
+            "status": "ok",
+            "daemon_state": "warming",
+            "worker": {"in_flight": 0, "wedged": false},
+        }));
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.as_deref().unwrap_or("").contains("WARMING"));
+    }
+
+    /// Why (the unifying principle): doctor must never claim health it did not
+    /// observe. A 2xx whose body cannot be read tells us the listener is up
+    /// and nothing else.
+    /// What: asserts an absent body is `Unknown`, explicitly not `Pass`.
+    /// Test: itself.
+    #[test]
+    fn indeterminate_probe_renders_as_unknown_not_pass() {
+        let r = interpret_health_body("HTTP daemon".to_string(), "http://x/health", 200, None);
+        assert_eq!(r.status, CheckStatus::Unknown);
+        assert_ne!(r.status, CheckStatus::Pass, "unknown must never be healthy");
+        assert!(r.detail.as_deref().unwrap_or("").contains("UNKNOWN"));
+    }
+
+    /// Why (issue #4001, forward-compatibility): a daemon predating the worker
+    /// block gives doctor no observation to base a pass on.
+    /// What: asserts a body with no `worker` key is `Unknown`.
+    /// Test: itself.
+    #[test]
+    fn body_without_worker_block_is_unknown() {
+        let r = interpret(serde_json::json!({"status": "ok", "daemon_state": "ready"}));
+        assert_eq!(r.status, CheckStatus::Unknown);
+    }
+
+    /// Why: the fix must still let a genuinely healthy daemon pass, or it
+    /// would trade one false verdict for another.
+    /// What: asserts a ready daemon with a quiet pool is `Pass`.
+    /// Test: itself.
+    #[test]
+    fn healthy_body_is_pass() {
+        let r = interpret(serde_json::json!({
+            "status": "ok",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 2, "oldest_age_secs": 1, "wedged": false},
+        }));
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    /// Why (issue #71 preserved): the deep-probe degraded signal must survive
+    /// the new worker-block logic rather than being masked by it.
+    /// What: asserts a degraded round-trip still warns.
+    /// Test: itself.
+    #[test]
+    fn degraded_body_is_warn() {
+        let r = interpret(serde_json::json!({
+            "status": "degraded",
+            "detail": "store failed: disk full",
+            "daemon_state": "ready",
+            "worker": {"in_flight": 0, "wedged": false},
+        }));
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.as_deref().unwrap_or("").contains("disk full"));
     }
 }
