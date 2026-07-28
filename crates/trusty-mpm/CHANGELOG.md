@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [1.2.3] — 2026-07-28
+
+PATCH: merge-and-local-install only, no crates.io publish.
+
 ### Fixed
 
 - **`tm launch`, `tm connect`, and `tm meta launch` deployed agents to a tier
@@ -67,7 +72,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Without this they would have kept removing the registration while leaving the
   index data behind forever: the workspace each one describes is a disposable
   worktree that is about to be deleted, so nothing will ever re-register at
-  that root and the preserved data would be unreachable garbage.
+  that root and the preserved data would be unreachable garbage. The same PR
+  ([#4218](https://github.com/bobmatnyc/trusty-tools/pull/4218)) also closes
+  [#4110](https://github.com/bobmatnyc/trusty-tools/issues/4110) — see the
+  bundled-fixes entry below for that half of the change.
+
+- **Bundled from `main`: trusty-search P0 corpus quarantine + stage-status fix**
+  ([#4122](https://github.com/bobmatnyc/trusty-tools/issues/4122),
+  [#4110](https://github.com/bobmatnyc/trusty-tools/issues/4110)): this
+  release is merge-and-local-install only (no crates.io publish), so a local
+  install built from this commit also picks up two trusty-search fixes that
+  landed on `main` alongside this bump. Neither touches trusty-mpm's own
+  source; both are called out here because this version bump is the vehicle
+  that carries them to the operator's next restart.
+
+  An index whose durable corpus failed to open at load time is now
+  write-quarantined (#4122): ordinary incremental writes (watcher, boot-time
+  reconciler, `POST /indexes/{id}/index-file`) now refuse rather than silently
+  building a fresh, partial corpus over the never-opened original — the shape
+  that took one production index from 0 to 1,334 chunks of wrong content
+  before coming back "healthy" on the next restart. The quarantine lifts
+  automatically once a subsequent restart's `CorpusStore::open` succeeds.
+
+  `POST /indexes/:id` no longer discards the outcome of the restore it just
+  performed (#4110): `search_capabilities` is now derived from the actual
+  post-restore stages via `derive_warm_boot_stages` (the same classifier
+  warm-boot and lazy-restore already use), so a fully intact index no longer
+  comes back advertising no vector lane — previously that meant semantic
+  search hard-errored and `search_all` silently degraded to BM25-only until
+  the next daemon restart.
 
 ---
 ## [1.2.0] — 2026-07-27
