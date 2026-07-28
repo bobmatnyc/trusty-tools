@@ -43,6 +43,7 @@ mod ingest;
 pub(crate) mod migrations;
 mod persist;
 mod persist_hnsw;
+mod quarantine;
 mod search;
 pub mod typeahead;
 mod types;
@@ -322,7 +323,28 @@ pub struct CodeIndexer {
     /// from a legitimately empty, freshly-created index.  This flag lets the
     /// classifier emit `StageStatus::Failed` with an actionable message instead
     /// of the misleading `InProgress` / "walking" state (closes #1158).
+    ///
+    /// Issue #4122: this flag is ALSO the write-quarantine predicate. While it
+    /// is `true` the index refuses every incremental/watcher write (see
+    /// `indexer::quarantine`), because building a fresh corpus on top of an
+    /// unopened one permanently destroys the original. Cleared by
+    /// [`Self::set_corpus_store`] when a corpus open finally succeeds, so the
+    /// quarantine is recoverable rather than terminal.
     pub corpus_open_failed: bool,
+
+    /// Issue #4122: monotonic count of incremental writes refused because
+    /// [`Self::corpus_open_failed`] was set.
+    ///
+    /// Why: the refusal needs an observable surface that is not a log line —
+    /// tests need a deterministic condition to await instead of a sleep, and
+    /// operators need "how many saves were dropped?" answered numerically.
+    /// What: bumped by `refuse_incremental_write`, reset to 0 by
+    /// `clear_corpus_open_failure`. Read via
+    /// [`Self::refused_incremental_writes`]. Atomic because `index_file`
+    /// takes `&self`.
+    /// Test: `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`
+    /// in `tests/corpus_open_quarantine_4122.rs`.
+    pub(super) incremental_writes_refused: AtomicU64,
 
     /// Issue #2922: `true` when a persisted HNSW snapshot existed on disk at
     /// warm-boot/lazy-load time but could NOT be restored (missing/corrupt
@@ -463,6 +485,7 @@ impl CodeIndexer {
             lane_degraded: Arc::new(AtomicBool::new(false)),
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
+            incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
         }
@@ -702,10 +725,16 @@ impl CodeIndexer {
     /// Why: the daemon resolves one `index.redb` per index and wires it in
     /// before warm-boot.
     /// What: stores the `Arc` so both the ingest commit path and the
-    /// fire-and-forget persist task can reach it.
-    /// Test: `tests::test_corpus_store_roundtrip`.
+    /// fire-and-forget persist task can reach it. Issue #4122: a successful
+    /// open is exactly the event that makes writes safe again, so this also
+    /// lifts any active write quarantine via `clear_corpus_open_failure`
+    /// (a no-op on the healthy-boot path, where the flag is already `false`).
+    /// Test: `tests::test_corpus_store_roundtrip`;
+    /// `successful_reopen_lifts_quarantine_and_leaves_corpus_intact` in
+    /// `tests/corpus_open_quarantine_4122.rs` covers the recovery transition.
     pub fn set_corpus_store(&mut self, corpus: Arc<crate::core::corpus::CorpusStore>) {
         self.corpus = Some(corpus);
+        self.clear_corpus_open_failure();
     }
 
     /// Swap in a new durable corpus store, returning the one it replaced
