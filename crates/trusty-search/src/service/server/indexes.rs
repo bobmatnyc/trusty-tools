@@ -523,34 +523,89 @@ pub(super) async fn create_index_handler(
     // Issue #75: capture the current git HEAD SHA at registration; the search
     // response uses it to flag stale results when the working tree advances.
     let indexed_head_sha = crate::core::git::head_sha(&req.root_path);
-    // Issue #109, Phase 1: pre-mark semantic + graph as `Skipped` for
-    // lexical-only indexes so the search handler never tries the HNSW lane.
-    // Issue #313: pre-mark graph as `Skipped` for skip_kg indexes.
-    // Issue #2984 Phase 1: `skip_vector` pre-marks semantic as `Skipped`,
-    // independently of `skip_kg`'s graph gate — the two compose freely so
-    // every quadrant (both on, KG-only, vector-only, both off via
-    // `lexical_only`) is reachable from create time.
-    let stages = if lexical_only {
-        crate::core::registry::IndexStages {
-            lexical: crate::core::registry::StageState::pending(),
-            semantic: crate::core::registry::StageState::skipped(),
-            graph: crate::core::registry::StageState::skipped(),
-        }
-    } else {
-        crate::core::registry::IndexStages {
-            lexical: crate::core::registry::StageState::pending(),
-            semantic: if skip_vector {
-                crate::core::registry::StageState::skipped()
-            } else {
-                crate::core::registry::StageState::pending()
-            },
-            graph: if skip_kg {
-                crate::core::registry::StageState::skipped()
-            } else {
-                crate::core::registry::StageState::pending()
-            },
-        }
-    };
+    // Issue #4110: derive the stage state from what `build_indexer_from_entry`
+    // ACTUALLY restored, instead of asserting `Pending` and ignoring the
+    // outcome.
+    //
+    // Why: `POST /indexes` doubles as the "adopt an existing colocated corpus"
+    // door — the builder above synchronously restores the redb corpus, the
+    // HNSW snapshot and the symbol graph for `id` (the issue #85
+    // warm-restore-on-create path). Hardcoding `pending()` threw that result
+    // away, so a fully-intact index came up advertising no semantic lane:
+    // `search_capabilities` is computed from `stages`, so semantic search
+    // hard-errored with "requires Stage 2 (embeddings), which is not yet
+    // ready" and `search_all` silently degraded to BM25-only — every hit
+    // reporting `match_reason="bm25"`, indistinguishable from a genuinely dead
+    // vector lane. Only a daemon restart cleared it, because the warm-boot
+    // path (`commands/start_restore.rs`) already classified correctly.
+    // What: reuse `derive_warm_boot_stages` — the same pure classifier
+    // warm-boot and lazy-restore use — over the same signals read the same
+    // way, so registration and warm-boot can no longer disagree about an
+    // identical on-disk state. The `skip_*` / `lexical_only` config gates are
+    // honoured inside the classifier (config intent wins over on-disk state),
+    // so the pre-marking this replaces is preserved. `corpus_open_failed` is
+    // read rather than hardcoded `false` so the classifier's input contract is
+    // satisfied honestly — but note this is safe ONLY because the #2336 check
+    // above already 500s on that flag, so it is always `false` by the time we
+    // get here. It is NOT defensive: if that guard were moved or removed, the
+    // classifier's rule 1 would return lexical `Failed`, and the
+    // `restore_chunk_count == 0` override below would immediately clobber it
+    // back to `Pending` (a failed open reports 0 chunks), reporting a broken
+    // index as a healthy brand-new one. Moving that guard requires teaching
+    // the override to exempt `corpus_open_failed`.
+    // A genuinely brand-new index restores nothing: `chunk_count == 0` and no
+    // snapshot ⇒ semantic/graph `Pending` exactly as before.
+    let restore_chunk_count = indexer
+        .corpus_store()
+        .and_then(|c| c.chunk_count().ok())
+        .unwrap_or(0);
+    // Issue #2922: file existence alone is not proof the snapshot loaded —
+    // `hnsw_load_failed` catches the truncated/corrupt case that would
+    // otherwise report `semantic: ready` over an empty in-memory store.
+    let restore_hnsw_ready = !indexer.hnsw_load_failed
+        && crate::service::persistence::hnsw_path_for_entry(&init_entry)
+            .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
+            .unwrap_or(false);
+    let restore_graph_nodes = indexer.snapshot_symbol_graph().await.node_count();
+    let mut stages = crate::service::warm_boot::derive_warm_boot_stages(
+        crate::service::warm_boot::WarmBootInputs {
+            chunk_count: restore_chunk_count,
+            hnsw_snapshot_ready: restore_hnsw_ready,
+            graph_node_count: restore_graph_nodes,
+            lexical_only,
+            skip_kg,
+            skip_vector,
+            corpus_open_failed: indexer.corpus_open_failed,
+        },
+    );
+    // The one deliberate divergence from warm-boot's classification. With no
+    // corpus restored, `derive_warm_boot_stages` calls lexical `InProgress`
+    // ("registered, empty, a catch-up will populate it") — right for a
+    // restart, wrong here: at registration nothing has started yet.
+    // `IndexStages::lifecycle_status` maps `InProgress` → "walking" and
+    // `Pending` → "created", so adopting it verbatim would make every
+    // brand-new index report "walking" before its first walk ever ran. Only
+    // the lexical stage is corrected; semantic/graph already agree (nothing
+    // restored ⇒ `Pending`), which is what keeps a failed/absent restore
+    // reporting `Pending` rather than a false-ready.
+    if restore_chunk_count == 0 {
+        stages.lexical = crate::core::registry::StageState::pending();
+    }
+    tracing::info!(
+        "create_index: '{}' registered — restored chunks={} hnsw_snapshot={} graph_nodes={} \
+         lexical_only={} skip_kg={} skip_vector={} → stages(lexical={:?}, semantic={:?}, \
+         graph={:?}) (issue #4110)",
+        req.id,
+        restore_chunk_count,
+        restore_hnsw_ready,
+        restore_graph_nodes,
+        lexical_only,
+        skip_kg,
+        skip_vector,
+        stages.lexical.status,
+        stages.semantic.status,
+        stages.graph.status,
+    );
     let handle = IndexHandle {
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
