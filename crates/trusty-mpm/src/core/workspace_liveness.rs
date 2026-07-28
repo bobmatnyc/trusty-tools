@@ -36,6 +36,17 @@
 //!    failure than the bug being fixed, and is the over-refusal trap PR #4202's
 //!    first round fell into.
 //!
+//!    THIS PROPERTY IS A PROPERTY OF EVERY STAT THIS MODULE PERFORMS, INCLUDING
+//!    THE FIRST. The reflex spelling of the existence check, `path.is_dir()`,
+//!    silently breaks it: `is_dir()` returns `false` for EACCES, ENOTDIR and a
+//!    hung mount just as it does for a genuinely missing path, so a live
+//!    worktree behind an unreadable parent directory would be classified dead.
+//!    Both stats here therefore go through `metadata`/`symlink_metadata` and
+//!    match on [`std::io::ErrorKind`], and ONLY `NotFound` — never a failure to
+//!    look — may produce a dead verdict. Convenience predicates on [`Path`]
+//!    that fold `Result` into `bool` (`is_dir`, `exists`, `is_file`) must not
+//!    be reintroduced into this decision.
+//!
 //! What: [`WorkspaceLiveness`] — a four-valued classification with the
 //! dead/not-dead decision encoded in [`WorkspaceLiveness::is_dead`] so no caller
 //! has to re-derive it — and [`workspace_liveness`], which computes it.
@@ -43,7 +54,9 @@
 //! `liveness_accepts_clone_git_directory`,
 //! `liveness_reports_gutted_worktree_missing_git`,
 //! `liveness_never_requires_git_for_unowned_non_worktree_path`,
-//! `liveness_reports_absent_directory`, `liveness_indeterminate_is_never_dead`.
+//! `liveness_reports_absent_directory`, `liveness_indeterminate_is_never_dead`,
+//! `liveness_unreadable_parent_is_indeterminate_never_dead`,
+//! `liveness_reports_non_directory_as_absent`.
 
 use std::path::Path;
 
@@ -66,7 +79,9 @@ use crate::session_manager::decommission::is_session_worktree;
 pub enum WorkspaceLiveness {
     /// Nothing observed suggests this workspace is dead — act on it.
     Live,
-    /// The path does not exist, or exists but is not a directory.
+    /// The path was DEFINITELY observed to be gone (`NotFound`), or was
+    /// successfully stat'd and is not a directory. A path that could not be
+    /// stat'd at all is [`Self::Indeterminate`], never this.
     Absent,
     /// The directory node survives but its git checkout has been stripped
     /// (#4204). Positive evidence of death.
@@ -116,10 +131,13 @@ impl std::fmt::Display for WorkspaceLiveness {
 ///
 /// Why: see the module doc — this is the single #4204 predicate replacing the
 /// bare `is_dir()` check at both offending call sites.
-/// What, in order: (1) `path.is_dir()` — preserved verbatim from the code this
-/// replaces, so the pre-existing "gone / not a directory" skip keeps its exact
-/// semantics and this change adds no new abort paths; a `false` here is
-/// [`WorkspaceLiveness::Absent`]. (2) THE EXPECTATION RULE — a missing `.git`
+/// What, in order: (1) `metadata(path)` — NOT `path.is_dir()`, which maps every
+/// I/O error to `false` and would therefore report a live-but-unreadable
+/// workspace as [`WorkspaceLiveness::Absent`], i.e. dead. Only a definite
+/// observation is death here: a successful stat of a non-directory, or
+/// `NotFound`. Any other error kind is [`WorkspaceLiveness::Indeterminate`].
+/// `metadata` follows symlinks just as `is_dir()` did, so a symlinked workspace
+/// is unaffected. (2) THE EXPECTATION RULE — a missing `.git`
 /// is evidence of death only where one is owed, which is true iff
 /// `workspace_owned || is_session_worktree(path)`: `workspace_owned` means
 /// `WorkspaceProvisioner::provision_in` created this directory (it takes a
@@ -146,10 +164,25 @@ impl std::fmt::Display for WorkspaceLiveness {
 /// `liveness_accepts_clone_git_directory`,
 /// `liveness_reports_gutted_worktree_missing_git`,
 /// `liveness_never_requires_git_for_unowned_non_worktree_path`,
-/// `liveness_reports_absent_directory`.
+/// `liveness_reports_absent_directory`,
+/// `liveness_unreadable_parent_is_indeterminate_never_dead`,
+/// `liveness_reports_non_directory_as_absent`.
 pub fn workspace_liveness(path: &Path, workspace_owned: bool) -> WorkspaceLiveness {
-    if !path.is_dir() {
-        return WorkspaceLiveness::Absent;
+    // NOT `path.is_dir()`. `Path::is_dir()` maps EVERY error — EACCES on a
+    // parent component, a stalled network mount, ENOTDIR — to `false`, and
+    // `false` here means `Absent`, which `is_dead()` reports as death. That is
+    // the same swallow-the-error defect as the `canonicalize().ok()` one this
+    // guard's predecessor was rejected for, merely moved one call earlier: a
+    // LIVE worktree behind a directory the process cannot traverse would
+    // classify as dead. `metadata` follows symlinks exactly as `is_dir()` did,
+    // so a symlinked workspace keeps its previous verdict.
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_dir() => {}
+        // A definite observation: something is there, but it is not a
+        // directory, so there is no workspace to serve. Pre-#4204 behavior.
+        Ok(_) => return WorkspaceLiveness::Absent,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WorkspaceLiveness::Absent,
+        Err(e) => return WorkspaceLiveness::Indeterminate(format!("cannot stat workspace: {e}")),
     }
 
     if !(workspace_owned || is_session_worktree(path)) {
@@ -248,6 +281,71 @@ mod tests {
         let gone = base.path().join("never-existed");
 
         let liveness = workspace_liveness(&gone, true);
+        assert_eq!(liveness, WorkspaceLiveness::Absent);
+        assert!(liveness.is_dead());
+    }
+
+    /// THE CRITIC'S PROBE (PR #4209 review, HIGH). A genuinely LIVE linked
+    /// worktree — `.git` pointer file present and all — sitting behind a parent
+    /// directory the process cannot traverse must NOT be classified dead.
+    ///
+    /// This is the exact case `path.is_dir()` got wrong: it answers `false` for
+    /// EACCES identically to how it answers `false` for a missing path, so the
+    /// original first branch returned `Absent`, whose `is_dead()` is `true`.
+    /// With the `is_dir()` gate restored in place of the `metadata` match, this
+    /// test fails on the first assertion with `Absent`/`is_dead=true`.
+    #[cfg(unix)]
+    #[test]
+    fn liveness_unreadable_parent_is_indeterminate_never_dead() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = TempDir::new().unwrap();
+        let wt = worktree_shaped(&base, "f443c12d-2fb6-4ce1-9f70-2e7695306e47");
+        fs::write(
+            wt.join(".git"),
+            "gitdir: /repo/.base/.git/worktrees/f443c12d\n",
+        )
+        .unwrap();
+        let parent = wt.parent().unwrap().to_path_buf();
+        let restore = fs::metadata(&parent).unwrap().permissions();
+
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root traverses regardless of mode, so the probe cannot be staged;
+        // assert nothing rather than assert something false.
+        let staged = fs::metadata(&wt).is_err();
+        let liveness = workspace_liveness(&wt, true);
+        // Restore BEFORE asserting so a failure still leaves a removable
+        // TempDir behind.
+        fs::set_permissions(&parent, restore).unwrap();
+
+        if !staged {
+            eprintln!("skipped: running privileged, EACCES could not be staged");
+            return;
+        }
+        assert!(
+            !liveness.is_dead(),
+            "a LIVE worktree that merely could not be stat'd must never be \
+             treated as dead — got {liveness:?}"
+        );
+        assert!(
+            matches!(liveness, WorkspaceLiveness::Indeterminate(_)),
+            "an unreadable path is an absence of evidence, not evidence of \
+             absence — got {liveness:?}"
+        );
+        // And the workspace really was alive all along.
+        assert_eq!(workspace_liveness(&wt, true), WorkspaceLiveness::Live);
+    }
+
+    #[test]
+    fn liveness_reports_non_directory_as_absent() {
+        // The other half of the first branch: a successful stat that finds a
+        // FILE is a definite observation, so it stays `Absent` — this is not
+        // collateral damage from making unreadable paths Indeterminate.
+        let base = TempDir::new().unwrap();
+        let file = base.path().join("not-a-dir");
+        fs::write(&file, "x").unwrap();
+
+        let liveness = workspace_liveness(&file, true);
         assert_eq!(liveness, WorkspaceLiveness::Absent);
         assert!(liveness.is_dead());
     }
