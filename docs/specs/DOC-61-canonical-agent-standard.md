@@ -8,6 +8,7 @@ spec_refs: []
 **Spec ID:** `SPEC-AGENTSTD-01~draft`
 **Subsystem:** cross-crate — trusty-mpm (source model owner today), trusty-code (per-product builder, prospective), trusty-agents (assistant/sub-agent split, `agents::config`)
 **Owner:** Architecture / Technical Leadership
+**Last-updated:** 2026-07-28
 **DOC-N claim:** `DOC-61`, scan-before-claim per DOC-38 §4.1. `DOC-60` is left open — a bus-messaging spec is being authored concurrently by another agent in this same review round and is expected to claim it; this document deliberately claims one number past it to avoid a collision. `DOC-42` is explicitly NOT reused: it is currently claimed by `docs/specs/agent-bundled-skills.md` (retiring) and is reserved for ADR-0016's Engineering Lead / Virtual Twin architecture (PR #3006) per owner instruction. See docs/specs/README.md's "next free DOC-N" note for the full collision ledger (DOC-42, DOC-46 both currently double-booked, neither touched by this document).
 
 ## 1. Executive Summary {#SPEC-AGENTSTD-01~draft}
