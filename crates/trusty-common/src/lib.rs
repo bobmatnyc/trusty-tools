@@ -456,9 +456,9 @@ pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
 /// compute the identical id — the same single-source-of-truth rule `index_id`
 /// was hoisted here for (#1373). Unconditional (not feature-gated) because an
 /// identity that varies with a feature flag is worse than none.
-/// What: exposes [`project_index_id::ProjectIdentity`] (origin + root + gh user,
+/// What: exposes [`project_index_id::ProjectIdentity`] (origin + root + operator,
 /// with a pure `index_id()`), [`project_index_id::derive_project_index_id`], and
-/// [`project_index_id::resolve_gh_user`]. Derivation only — deliberately wired
+/// [`project_index_id::resolve_operator_identity`]. Derivation only — wired
 /// into no resolution path; registry reconciliation and migration of existing
 /// indexes are separate slices of #4207.
 /// Test: `cargo test -p trusty-common -- project_index_id`.

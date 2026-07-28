@@ -10,8 +10,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **`project_index_id` — project-derived trusty-search index identity (#4207).**
-  New `ProjectIdentity` (origin + root + gh user) with a pure, deterministic
-  `index_id()`, plus `derive_project_index_id()` and `resolve_gh_user()`. Unlike
+  New `ProjectIdentity` (origin + root + operator) with a pure, deterministic
+  `index_id()`, plus `derive_project_index_id()` and
+  `resolve_operator_identity()`. Unlike
   the basename rule in `index_id` (which collides for unrelated checkouts sharing
   a directory name) and the session-worktree UUID (which binds service identity to
   ephemeral writer isolation), this id *partitions*: the canonical content-tree
@@ -20,6 +21,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   into `ensure_project_indexed`, `trusty-search serve`, or the daemon's resolution
   path; registry reconciliation and migration of existing indexes are separate
   slices of #4207. No behaviour change for any existing caller.
+
+  Derivation is hermetic: it reads no environment variable, so two callers on one
+  tree (e.g. the launchd daemon and a shell CLI) cannot derive different ids. The
+  `index_id()` docs enumerate exactly which inputs are mutable — `origin` moves on
+  the first commit, on `git remote add origin`, and on a new root commit — each
+  pinned by a test, so the migration slice inherits a true guarantee rather than an
+  assumption of permanence.
 
 ---
 ## [0.27.0] — 2026-07-27

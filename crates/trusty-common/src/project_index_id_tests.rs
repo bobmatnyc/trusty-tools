@@ -4,14 +4,22 @@
 //! `project_index_id.rs`, the pattern `search_index_tests.rs` already uses in
 //! this crate) so the derivation module stays inside the 500-SLOC production
 //! cap while the collision suite can be as exhaustive as the design demands.
-//! The cases below are not generic coverage — each one is a specific way
-//! #4063's grouping-key-as-partitioning-key approach was proven to collide.
+//! The cases below are not generic coverage — each one is either a specific way
+//! #4063's grouping-key-as-partitioning-key approach was proven to collide, or
+//! a pinned drift case the migration slice will inherit.
 //!
 //! What: real synthetic git topologies (`git init`, `git clone`,
-//! `git worktree add` in temp dirs) for the cases that depend on git
-//! behaviour, and direct construction of [`ProjectIdentity`] for the cases
-//! that are pure. Nothing here touches a live daemon, the index registry, or
-//! any currently-registered index.
+//! `git worktree add` in temp dirs) for the cases that depend on git behaviour,
+//! and direct construction of [`ProjectIdentity`] for the cases that are pure.
+//! Nothing here touches a live daemon, the index registry, or any
+//! currently-registered index.
+//!
+//! **No test in this file may pass vacuously.** An earlier revision let six
+//! git-topology tests `return` — reporting `ok` — whenever any git step failed,
+//! including the two that carry the entire partitioning guarantee. A guard that
+//! can silently not-run is not a guard. [`git`] therefore panics on a failed
+//! spawn or a non-zero exit, so a runner with no git, or with a hostile
+//! `safe.directory` / hook / signing configuration, goes RED rather than green.
 //!
 //! Test: this file.
 
@@ -19,52 +27,71 @@ use super::*;
 use crate::github_path::GithubPath;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers — every one of these fails loudly; none skip.
 // ---------------------------------------------------------------------------
 
-/// Run a git subcommand in `dir`, reporting whether it succeeded.
-fn git_ok(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
+/// Run a git subcommand in `dir`, panicking with full context on any failure.
+///
+/// Why: see the "no test may pass vacuously" note above. Returns stdout so
+/// callers can assert on it.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or_else(|e| {
+            panic!(
+                "git {args:?} in {dir:?} could not spawn: {e}. These tests guard \
+                 the #4207 partitioning key and must never pass without running."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "git {args:?} in {dir:?} exited {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Initialise a committed git repo at `dir` with `origin` pointing at `url`.
+/// Create `dir` and `git init` it with a deterministic, signing-free identity.
 ///
-/// Returns `false` when git is unusable on this runner, so callers can skip
-/// cleanly rather than fail (matching `repo_identity`'s existing convention).
-fn init_repo(dir: &Path, url: &str) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    if !git_ok(dir, &["-c", "init.defaultBranch=main", "init"]) {
-        return false;
-    }
-    let _ = git_ok(dir, &["config", "user.email", "t@t.test"]);
-    let _ = git_ok(dir, &["config", "user.name", "t"]);
-    if std::fs::write(dir.join("README.md"), "hi").is_err() {
-        return false;
-    }
-    let _ = git_ok(dir, &["add", "."]);
-    if !git_ok(dir, &["commit", "-m", "init"]) {
-        return false;
-    }
-    git_ok(dir, &["remote", "add", "origin", url])
+/// `commit.gpgsign=false` is forced per-repo so a developer's global signing
+/// config cannot fail these tests for an unrelated reason — they fail loudly
+/// now, so every avoidable environmental failure must be designed out rather
+/// than skipped around.
+fn init_empty_repo(dir: &Path) {
+    std::fs::create_dir_all(dir).expect("create repo dir");
+    git(dir, &["-c", "init.defaultBranch=main", "init"]);
+    git(dir, &["config", "user.email", "t@t.test"]);
+    git(dir, &["config", "user.name", "t"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
+}
+
+/// Write `name` into `dir` and commit it.
+fn commit_file(dir: &Path, name: &str, body: &str) {
+    std::fs::write(dir.join(name), body).expect("write file");
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-m", "commit"]);
+}
+
+/// Initialise a committed repo at `dir` whose `origin` points at `url`.
+fn init_repo(dir: &Path, url: &str) {
+    init_empty_repo(dir);
+    commit_file(dir, "README.md", "hi");
+    git(dir, &["remote", "add", "origin", url]);
 }
 
 /// A pure identity with every field supplied — no filesystem, no git.
-fn identity(owner: &str, repo: &str, root: &str, gh_user: Option<&str>) -> ProjectIdentity {
+fn identity(owner: &str, repo: &str, root: &str, operator: Option<&str>) -> ProjectIdentity {
     ProjectIdentity {
         origin: Some(RepoIdentity::GitHub(GithubPath {
             owner: owner.into(),
             repo: repo.into(),
         })),
         root: PathBuf::from(root),
-        gh_user: gh_user.map(str::to_string),
+        operator: operator.map(str::to_string),
     }
 }
 
@@ -86,17 +113,15 @@ fn identity(owner: &str, repo: &str, root: &str, gh_user: Option<&str>) -> Proje
 fn sibling_clones_of_same_repo_derive_distinct_ids() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let upstream = tmp.path().join("origin.git");
-    if std::fs::create_dir_all(&upstream).is_err() || !git_ok(&upstream, &["init", "--bare"]) {
-        return; // no usable git on this runner
-    }
+    std::fs::create_dir_all(&upstream).expect("create upstream dir");
+    git(&upstream, &["init", "--bare"]);
     let upstream_url = upstream.to_string_lossy().into_owned();
+
     let seed = tmp.path().join("seed");
-    if !init_repo(&seed, &upstream_url) {
-        return;
-    }
-    if !git_ok(&seed, &["push", "origin", "HEAD:refs/heads/main"]) {
-        return;
-    }
+    init_empty_repo(&seed);
+    commit_file(&seed, "README.md", "hi");
+    git(&seed, &["remote", "add", "origin", &upstream_url]);
+    git(&seed, &["push", "origin", "HEAD:refs/heads/main"]);
 
     // Two real clones at different paths, both re-pointed at the same GitHub
     // origin — exactly the topology proven to collide on #4063.
@@ -104,23 +129,16 @@ fn sibling_clones_of_same_repo_derive_distinct_ids() {
     let b = tmp.path().join("widget-review");
     for dest in [&a, &b] {
         let dest_arg = dest.to_string_lossy().into_owned();
-        let ok = Command::new("git")
-            .args(["clone", &upstream_url, &dest_arg])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !ok {
-            return;
-        }
-        assert!(git_ok(
+        git(tmp.path(), &["clone", &upstream_url, &dest_arg]);
+        git(
             dest,
             &[
                 "remote",
                 "set-url",
                 "origin",
-                "git@github.com:acme/widget.git"
-            ]
-        ));
+                "git@github.com:acme/widget.git",
+            ],
+        );
     }
 
     // The grouping key DOES collide — this is what made #4063's approach unsafe.
@@ -153,16 +171,13 @@ fn sibling_clones_of_same_repo_derive_distinct_ids() {
 fn linked_worktrees_of_same_repo_derive_distinct_ids() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let main = tmp.path().join("repo");
-    if !init_repo(&main, "git@github.com:acme/widget.git") {
-        return;
-    }
+    init_repo(&main, "git@github.com:acme/widget.git");
+
     let wt_a = tmp.path().join("wt-a");
     let wt_b = tmp.path().join("wt-b");
     for (dir, branch) in [(&wt_a, "feat-a"), (&wt_b, "feat-b")] {
         let dir_arg = dir.to_string_lossy().into_owned();
-        if !git_ok(&main, &["worktree", "add", "-b", branch, &dir_arg]) {
-            return;
-        }
+        git(&main, &["worktree", "add", "-b", branch, &dir_arg]);
     }
 
     // Precondition: all three facets share the grouping key.
@@ -182,17 +197,17 @@ fn linked_worktrees_of_same_repo_derive_distinct_ids() {
     assert_ne!(ids[1], ids[2], "worktree A vs worktree B: {ids:?}");
 }
 
-/// Why: the account is the third component of the #4207 identity triple. Two
-/// checkouts that agree on origin and root but are operated by different GitHub
+/// Why: the operator is the third component of the #4207 identity triple. Two
+/// checkouts that agree on origin and root but are operated by different
 /// accounts must not share an index.
 /// Test: itself.
 #[test]
-fn different_gh_users_derive_distinct_ids() {
+fn different_operators_derive_distinct_ids() {
     let one = identity("acme", "widget", "/srv/widget", Some("a@example.test"));
     let two = identity("acme", "widget", "/srv/widget", Some("b@example.test"));
     assert_ne!(one.index_id(), two.index_id());
 
-    // An unresolved account must also be distinct from any resolved one — the
+    // An unresolved operator must also be distinct from any resolved one — the
     // presence tag in the digest preimage is what guarantees this.
     let none = identity("acme", "widget", "/srv/widget", None);
     assert_ne!(none.index_id(), one.index_id());
@@ -208,12 +223,12 @@ fn unrelated_projects_sharing_a_basename_derive_distinct_ids() {
     let a = ProjectIdentity {
         origin: None,
         root: PathBuf::from("/srv/alpha/docs"),
-        gh_user: None,
+        operator: None,
     };
     let b = ProjectIdentity {
         origin: None,
         root: PathBuf::from("/srv/beta/docs"),
-        gh_user: None,
+        operator: None,
     };
     assert_ne!(a.index_id(), b.index_id());
     // Both keep the readable label; only the digest separates them.
@@ -235,19 +250,118 @@ fn label_ambiguity_does_not_collide() {
 }
 
 // ---------------------------------------------------------------------------
+// Pinned DRIFT cases — one tree deriving different ids over time (PR #4262 HIGH)
+//
+// These are not bugs being fixed; they are known, accepted consequences of
+// deriving identity partly from mutable git state, pinned here so the migration
+// slice inherits a TRUE guarantee instead of a surprise. Each corresponds to a
+// row in the `Known limitation` table on `ProjectIdentity::index_id`. If one of
+// these ever starts asserting equality, the derivation changed and that table
+// is stale.
+// ---------------------------------------------------------------------------
+
+/// Why: a fresh `git init` has no remote AND no commits, so `origin` is `None`;
+/// the first commit gives `RepoIdentity` a root-commit hash to return. An index
+/// registered in that window is orphaned by the first commit.
+/// Test: itself.
+#[test]
+fn id_changes_when_first_commit_lands() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("nocommit");
+    init_empty_repo(&repo);
+
+    let before = ProjectIdentity::derive(&repo);
+    assert_eq!(before.origin, None, "no commits, no remote ⇒ no origin");
+
+    commit_file(&repo, "README.md", "hi");
+    let after = ProjectIdentity::derive(&repo);
+    assert!(
+        matches!(after.origin, Some(RepoIdentity::ContentHash(_))),
+        "first commit must yield a content-hash origin, got {:?}",
+        after.origin
+    );
+    assert_ne!(
+        before.index_id(),
+        after.index_id(),
+        "KNOWN DRIFT: the first commit re-derives the id for the same tree"
+    );
+}
+
+/// Why: the everyday `git init` → work → `gh repo create` sequence. It moves
+/// `origin` from `ContentHash` to `GitHub`, changing BOTH the label and the
+/// digest — so an index registered before the remote exists is silently
+/// orphaned the moment it is added, with no self-heal. This is the single most
+/// important row of the drift table for the migration slice.
+/// Test: itself.
+#[test]
+fn id_changes_when_origin_remote_is_added() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("nocommit");
+    init_empty_repo(&repo);
+    commit_file(&repo, "README.md", "hi");
+
+    let before = ProjectIdentity::derive(&repo);
+    assert!(matches!(before.origin, Some(RepoIdentity::ContentHash(_))));
+
+    git(
+        &repo,
+        &["remote", "add", "origin", "git@github.com:acme/widget.git"],
+    );
+    let after = ProjectIdentity::derive(&repo);
+    assert!(matches!(after.origin, Some(RepoIdentity::GitHub(_))));
+
+    assert_ne!(
+        before.index_id(),
+        after.index_id(),
+        "KNOWN DRIFT: adding the origin remote re-derives the id"
+    );
+    // The label changes too, not merely the digest.
+    assert!(before.index_id().starts_with("nocommit-"));
+    assert!(after.index_id().starts_with("acme-widget-"));
+}
+
+/// Why: for a remoteless repo the origin is the FIRST root-commit sha, so a new
+/// root commit (`git checkout --orphan`) moves it. Narrower than the two rows
+/// above — it needs a remoteless repo — but pinned for completeness.
+/// Test: itself.
+#[test]
+fn id_changes_on_orphan_root_commit() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("orphan");
+    init_empty_repo(&repo);
+    commit_file(&repo, "README.md", "hi");
+
+    let before = ProjectIdentity::derive(&repo);
+    git(&repo, &["checkout", "--orphan", "second-root"]);
+    commit_file(&repo, "OTHER.md", "other");
+    let after = ProjectIdentity::derive(&repo);
+
+    assert_ne!(
+        before.origin, after.origin,
+        "precondition: the root commit must actually have moved"
+    );
+    assert_ne!(
+        before.index_id(),
+        after.index_id(),
+        "KNOWN DRIFT: a new root commit re-derives the id for a remoteless repo"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Stability, degradation, and format
 // ---------------------------------------------------------------------------
 
-/// Why: an index id that changes between runs orphans the index it names. The
-/// derivation must be reproducible for an unchanged project.
+/// Why: an index id that changes between runs orphans the index it names. For an
+/// UNCHANGED project the derivation must be reproducible — the drift tests above
+/// enumerate exactly which changes are allowed to move it, and this pins that
+/// nothing else does.
 /// Test: itself.
 #[test]
 fn derivation_is_deterministic_across_calls() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let repo = tmp.path().join("repo");
-    if !init_repo(&repo, "git@github.com:acme/widget.git") {
-        return;
-    }
+    init_repo(&repo, "git@github.com:acme/widget.git");
+
     let first = derive_project_index_id(&repo);
     let second = derive_project_index_id(&repo);
     assert_eq!(first, second);
@@ -259,8 +373,9 @@ fn derivation_is_deterministic_across_calls() {
 
 /// Why: the id rule is a stored contract — every already-registered index is
 /// named by it. A golden value turns an accidental change to the framing, the
-/// hash, or the field order into a test failure instead of a silent mass
-/// orphaning. Update it ONLY together with `SCHEME_VERSION` and a migration.
+/// hash, the field order, or `SCHEME_VERSION` into a test failure instead of a
+/// silent mass orphaning. Update it ONLY together with `SCHEME_VERSION` and a
+/// migration.
 /// Test: itself.
 #[test]
 fn index_id_is_pinned_for_a_known_input() {
@@ -291,22 +406,21 @@ fn directory_without_git_origin_derives_stable_id() {
     assert_eq!(derive_project_index_id(&plain), id, "must be reproducible");
 }
 
-/// Why: two paths naming ONE content tree (a symlink and its target) must derive
-/// one id — otherwise a caller reaching the project through a symlinked path
-/// would create a second index over identical content.
+/// Why: two paths naming ONE content tree via a SYMLINK must derive one id —
+/// otherwise a caller reaching the project through a symlinked path would create
+/// a second index over identical content. Note the deliberately narrow scope:
+/// `canonicalize` does NOT resolve macOS firmlinks or Linux bind mounts, which
+/// [`ProjectIdentity::derive`] documents as a known limitation.
 /// Test: itself.
 #[cfg(unix)]
 #[test]
 fn symlinked_root_derives_same_id_as_real_root() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let real = tmp.path().join("repo");
-    if !init_repo(&real, "git@github.com:acme/widget.git") {
-        return;
-    }
+    init_repo(&real, "git@github.com:acme/widget.git");
+
     let link = tmp.path().join("repo-link");
-    if std::os::unix::fs::symlink(&real, &link).is_err() {
-        return;
-    }
+    std::os::unix::fs::symlink(&real, &link).expect("create symlink");
     assert_eq!(
         derive_project_index_id(&link),
         derive_project_index_id(&real)
@@ -345,7 +459,7 @@ fn empty_label_falls_back_to_placeholder() {
     let ident = ProjectIdentity {
         origin: None,
         root: PathBuf::from("/"),
-        gh_user: None,
+        operator: None,
     };
     assert_eq!(ident.label(), FALLBACK_LABEL);
     assert!(ident.index_id().starts_with("project-"));
@@ -353,7 +467,7 @@ fn empty_label_falls_back_to_placeholder() {
     let unicode = ProjectIdentity {
         origin: None,
         root: PathBuf::from("/srv/プロジェクト"),
-        gh_user: None,
+        operator: None,
     };
     assert!(unicode.index_id().starts_with("project-"));
     // Distinct roots still partition even when both fall back to the label.
@@ -389,25 +503,59 @@ fn digest_is_stable_for_identical_inputs() {
 }
 
 /// Why: per-account checkouts are configured with a repo-local `user.email`
-/// override, so the account component must honour git's repo-local-over-global
+/// override, so the operator component must honour git's repo-local-over-global
 /// precedence rather than reading only the global identity.
 /// Test: itself.
 #[test]
-fn resolve_gh_user_reads_repo_local_git_identity() {
-    if std::env::var("TRUSTY_GH_USER").is_ok() {
-        return; // an explicit override is in effect; the git path is shadowed
-    }
+fn resolve_operator_identity_prefers_repo_local_git_identity() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let repo = tmp.path().join("repo");
-    if !init_repo(&repo, "git@github.com:acme/widget.git") {
-        return;
-    }
-    assert!(git_ok(
-        &repo,
-        &["config", "user.email", "local@example.test"]
-    ));
+    init_repo(&repo, "git@github.com:acme/widget.git");
+
+    git(&repo, &["config", "user.email", "local@example.test"]);
     assert_eq!(
-        resolve_gh_user(&repo),
+        resolve_operator_identity(&repo),
         Some("local@example.test".to_string())
+    );
+}
+
+/// Why: an earlier revision honoured a `TRUSTY_GH_USER` environment override,
+/// which let two live callers on the SAME tree at the SAME instant derive
+/// different ids purely from differing process environments (the trusty-mpm
+/// daemon's launchd env vs a `tm` CLI's shell env) — re-creating the #1373
+/// "callers silently diverge" failure this module exists to prevent. The
+/// override was REMOVED rather than merely tested; this pins that it is gone, so
+/// a future convenience re-adding an env read fails here instead of silently
+/// re-partitioning one tree into two indexes.
+///
+/// Asserted against the source text rather than by setting the variable:
+/// `std::env::set_var` is process-global (and `unsafe` in edition 2024), so a
+/// test that set it would corrupt every other test running in parallel.
+/// Test: itself.
+#[test]
+fn resolve_operator_identity_ignores_ambient_env_override() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    init_repo(&repo, "git@github.com:acme/widget.git");
+    git(&repo, &["config", "user.email", "local@example.test"]);
+    assert_eq!(
+        resolve_operator_identity(&repo),
+        Some("local@example.test".to_string()),
+        "the git identity is the only operator source"
+    );
+
+    // The production module must contain no environment read at all — an env
+    // lookup is exactly the non-hermetic branch that was removed.
+    let src = include_str!("project_index_id.rs");
+    let reads_env = src
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && !t.starts_with("*")
+        })
+        .any(|l| l.contains("env::var") || l.contains("env!("));
+    assert!(
+        !reads_env,
+        "derivation must stay hermetic: no environment reads in project_index_id.rs"
     );
 }

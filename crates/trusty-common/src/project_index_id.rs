@@ -28,7 +28,9 @@
 //!
 //! What: [`ProjectIdentity`] is the three-part identity the owner specified on
 //! #4207 — origin (which repository), root (which content tree of it), and
-//! gh user (which account operates it). [`ProjectIdentity::derive`] is the one
+//! operator (which account operates it — the triple's "gh user", realised
+//! offline as git's configured `user.email`, not a GitHub login).
+//! [`ProjectIdentity::derive`] is the one
 //! I/O entry point (git shell-outs + one `canonicalize`);
 //! [`ProjectIdentity::index_id`] is a pure, dependency-free function over
 //! those three fields, so every collision case is testable without a daemon,
@@ -54,8 +56,9 @@
 //!
 //! Test: `cargo test -p trusty-common -- project_index_id` — the sibling
 //! `project_index_id_tests.rs` covers sibling clones, linked worktrees,
-//! differing gh users, remoteless directories, symlinked roots, determinism,
-//! and the id charset.
+//! differing operators, remoteless directories, symlinked roots, determinism,
+//! the id charset, and the origin/operator drift cases enumerated in
+//! [`ProjectIdentity::index_id`]'s `Known limitation` block.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,10 +69,15 @@ use crate::slug::slugify_string;
 /// Version tag mixed into every digest preimage.
 ///
 /// Why: the derivation rule will eventually change (a new component, a
-/// different framing). Mixing a version tag in means a future `v2` produces a
-/// wholly different id space rather than silently re-pointing existing ids at
-/// new content, so the migration slice can tell the two apart.
-/// What: the literal `"v1"`.
+/// different framing). Mixing a version tag into the digest preimage means a
+/// future `v2` can never re-point an ALREADY-REGISTERED id at different
+/// content — every id moves wholesale into a disjoint space. That is the
+/// property the migration slice actually needs.
+/// What: the literal `"v1"`. Note what this does NOT give you: the emitted id
+/// carries no version marker, so a v1 id and a v2 id are indistinguishable by
+/// inspection. A migration that must classify ids has to track the scheme
+/// out-of-band (or a future version must emit the tag in the id itself).
+/// Test: `index_id_is_pinned_for_a_known_input` fails if this value changes.
 const SCHEME_VERSION: &str = "v1";
 
 /// Maximum length of the human-readable label prefix of an index id.
@@ -97,22 +105,34 @@ const FALLBACK_LABEL: &str = "project";
 /// without any live daemon or registry state.
 /// What: `origin` is the repo-level GROUPING key ([`RepoIdentity`], `None`
 /// outside a git repo); `root` is the canonical absolute content-tree root and
-/// is the component that makes the derived id a PARTITIONING key; `gh_user` is
+/// is the component that makes the derived id a PARTITIONING key; `operator` is
 /// the account operating this checkout. All three are hashed; only `origin`
 /// (or the root basename) contributes to the readable label.
+///
+/// Only `root` is immutable for the life of a content tree. `origin` and
+/// `operator` are both mutable git state — see the `Known limitation` block on
+/// [`Self::index_id`] for the enumerated drift cases and what they cost.
 /// Test: `sibling_clones_of_same_repo_derive_distinct_ids`,
 /// `linked_worktrees_of_same_repo_derive_distinct_ids`,
-/// `different_gh_users_derive_distinct_ids`.
+/// `different_operators_derive_distinct_ids`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectIdentity {
     /// Repo-level grouping key from the git origin remote, `None` outside a
     /// git repo. Deliberately NOT sufficient on its own to identify an index.
+    /// MUTABLE: `git remote add origin` and the first commit both change it.
     pub origin: Option<RepoIdentity>,
     /// Canonical absolute root of THIS content tree (a clone root, or a linked
-    /// worktree root — each is its own tree). The partitioning component.
+    /// worktree root — each is its own tree). The partitioning component, and
+    /// the only component that does not move under ordinary git operations.
     pub root: PathBuf,
-    /// The account operating this checkout, `None` when unresolvable offline.
-    pub gh_user: Option<String>,
+    /// The #4207 identity triple's "gh user" component, realised offline as
+    /// git's configured operator identity.
+    ///
+    /// VALUE SHAPE: this is a `git config user.email` value (e.g.
+    /// `bob@example.com`), NOT a GitHub login. Do not compare it against
+    /// `gh api user`. `None` when git resolves no identity. See
+    /// [`resolve_operator_identity`] for precedence and stability caveats.
+    pub operator: Option<String>,
 }
 
 impl ProjectIdentity {
@@ -122,15 +142,22 @@ impl ProjectIdentity {
     /// computed (trusty-mpm at session launch, trusty-search's `detect_project`,
     /// trusty-review's report enrichment) or the callers silently diverge — the
     /// same failure mode `index_id` was centralised here to prevent (#1373).
-    /// What: canonicalises `start` (resolving symlinks, so two paths naming one
-    /// tree derive one id), walks to the enclosing git root via
-    /// [`crate::index_id::resolve_project_root`] — which lands on the *linked
-    /// worktree* root for a worktree, because its `.git` is a file there, so
-    /// each worktree is correctly treated as its own content tree — then reads
-    /// the origin via [`RepoIdentity::derive`] and the account via
-    /// [`resolve_gh_user`]. Best-effort and offline: every component degrades to
-    /// `None` rather than failing, and `canonicalize` falls back to the input
-    /// path when it cannot resolve. No network, no daemon, no registry.
+    /// What: canonicalises `start` — which resolves **symlinks**, so a symlinked
+    /// path and its target derive one id — then walks to the enclosing git root
+    /// via [`crate::index_id::resolve_project_root`], which lands on the *linked
+    /// worktree* root for a worktree because its `.git` is a file there, so each
+    /// worktree is correctly treated as its own content tree. Finally reads the
+    /// origin via [`RepoIdentity::derive`] and the operator via
+    /// [`resolve_operator_identity`]. Best-effort and offline: every component
+    /// degrades to `None` rather than failing, and `canonicalize` falls back to
+    /// the input path when it cannot resolve. No network, no daemon, no registry.
+    ///
+    /// Known limitation — canonicalisation resolves symlinks ONLY. macOS
+    /// firmlinks and Linux bind mounts are NOT resolved (`/Users/x` and
+    /// `/System/Volumes/Data/Users/x` each canonicalise to themselves), so one
+    /// content tree reached through both derives two ids and therefore two
+    /// indexes over identical content. This is inherent to any path-based
+    /// partitioning key, not specific to this derivation.
     /// Test: `derivation_is_deterministic_across_calls`,
     /// `directory_without_git_origin_derives_stable_id`,
     /// `symlinked_root_derives_same_id_as_real_root`.
@@ -141,7 +168,7 @@ impl ProjectIdentity {
         let root = crate::index_id::resolve_project_root(&canonical_start);
         ProjectIdentity {
             origin: RepoIdentity::derive(&root),
-            gh_user: resolve_gh_user(&root),
+            operator: resolve_operator_identity(&root),
             root,
         }
     }
@@ -161,13 +188,42 @@ impl ProjectIdentity {
     /// two projects sharing a label still get different ids. Pure — no I/O, no
     /// global state, no daemon lookup — which is what makes the collision cases
     /// testable and keeps resolution independent of mutable live state.
-    /// Guarantees: non-empty; a single URL path segment matching
-    /// `[a-z0-9][a-z0-9-]*`; stable across processes, machines with the same
-    /// three inputs, and daemon restarts.
-    /// Known limitation: `root` is machine-local, so the same repo cloned on
-    /// two machines derives two ids. That is correct for a partitioning key —
-    /// each machine holds its own physical index — and is why "stable across
-    /// machines" holds only for identical inputs.
+    /// Guarantees (exactly these, and no more): non-empty; a single URL path
+    /// segment matching `[a-z0-9][a-z0-9-]*`; and a pure function of the three
+    /// fields — identical fields yield an identical id in every process, on
+    /// every machine, across daemon restarts, forever. Stability of the *id for
+    /// a given project* is therefore only as strong as the stability of the
+    /// three inputs, and two of them move. Read the next block before assuming
+    /// permanence.
+    ///
+    /// **Known limitation — which inputs are mutable, and what changes an id.**
+    /// Only `root` is fixed for the life of a content tree. Both other
+    /// components are live git/user state, so ordinary actions re-derive a
+    /// different id for the SAME tree. Each row is pinned by a test:
+    ///
+    /// | Action | Component | Test |
+    /// |---|---|---|
+    /// | The repo's first commit (`None` → `ContentHash`) | `origin` | `id_changes_when_first_commit_lands` |
+    /// | `git remote add origin …` (`ContentHash` → `GitHub`) | `origin` | `id_changes_when_origin_remote_is_added` |
+    /// | A new root commit (`git checkout --orphan`) on a remoteless repo | `origin` | `id_changes_on_orphan_root_commit` |
+    /// | Changing the configured `user.email` | `operator` | `different_operators_derive_distinct_ids` |
+    ///
+    /// Row 2 is the everyday `git init` → work → `gh repo create` sequence. It
+    /// changes both the label and the digest, so under a
+    /// one-`root_path`-per-id registry an index registered before the remote is
+    /// added is ORPHANED the moment it is added, with no self-heal — the same
+    /// silent-orphan shape this module's header warns the migration slice about.
+    /// This is a strictly weaker hazard than the #4063 failure (one tree
+    /// deriving two ids over time wastes an index; two trees deriving one id
+    /// merges unrelated codebases), and it cannot bite while the module has no
+    /// call sites — but the wiring slice MUST NOT read this function as
+    /// permanent. Recommended shape for that slice: reconcile on `root`, which
+    /// is the only component that does not move, and treat an origin/operator
+    /// change as an alias-and-carry-forward rather than a new index.
+    ///
+    /// Also machine-local: `root` is an absolute path, so the same repo cloned
+    /// on two machines derives two ids. That is correct for a partitioning key
+    /// — each machine holds its own physical index.
     /// Test: `index_id_is_a_single_url_safe_segment`,
     /// `label_ambiguity_does_not_collide`, `empty_label_falls_back_to_placeholder`,
     /// `index_id_is_pinned_for_a_known_input`,
@@ -219,8 +275,8 @@ impl ProjectIdentity {
     /// two different field tuples impossible to encode identically.
     /// What: length-framed `<len>:<bytes>` records for the scheme version, the
     /// origin's canonical form (`+`/`-` presence tag), the root path's raw
-    /// bytes (not lossy UTF-8, so non-UTF-8 paths stay distinct), and the gh
-    /// user, run through [`fnv1a_64`].
+    /// bytes (not lossy UTF-8, so non-UTF-8 paths stay distinct), and the
+    /// operator, run through [`fnv1a_64`].
     /// Test: `label_ambiguity_does_not_collide`,
     /// `unrelated_projects_sharing_a_basename_derive_distinct_ids`.
     fn digest(&self) -> u64 {
@@ -228,7 +284,7 @@ impl ProjectIdentity {
         push_field(&mut buf, SCHEME_VERSION.as_bytes());
         push_opt(&mut buf, self.origin.as_ref().map(|o| o.canonical()));
         push_field(&mut buf, &path_bytes(&self.root));
-        push_opt(&mut buf, self.gh_user.clone());
+        push_opt(&mut buf, self.operator.clone());
         fnv1a_64(&buf)
     }
 }
@@ -248,27 +304,38 @@ pub fn derive_project_index_id(start: &Path) -> String {
     ProjectIdentity::derive(start).index_id()
 }
 
-/// Resolve the GitHub account operating the checkout at `root`, offline.
+/// Resolve the operator identity for the checkout at `root`, offline.
 ///
 /// Why: #4207 specifies the account as an identity component, but the id must be
 /// derivable with no network — `gh api user` would make every derivation a round
 /// trip and a flake. Git's own configured identity is the offline signal that
 /// actually varies per account, and a repo-local `user.email` override is
 /// precisely how a second account's checkout is configured in practice.
-/// What: `TRUSTY_GH_USER` when set and non-empty (an explicit ops/test
-/// override), else `git -C <root> config --get user.email`, which already
-/// applies git's repo-local-over-global precedence. `None` when neither
-/// resolves. Stability caveat for the migration slice: changing the configured
-/// identity changes the derived id, so migration must alias rather than assume
-/// permanence.
-/// Test: `resolve_gh_user_reads_repo_local_git_identity`.
-pub fn resolve_gh_user(root: &Path) -> Option<String> {
-    if let Ok(v) = std::env::var("TRUSTY_GH_USER") {
-        let v = v.trim().to_string();
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
+///
+/// **Deliberately reads NO environment variable.** An earlier revision honoured
+/// a `TRUSTY_GH_USER` override; it was removed rather than merely tested,
+/// because it made derivation non-hermetic in the one way that matters here —
+/// two live callers on the SAME tree at the SAME instant deriving different ids
+/// purely from differing process environments. The trusty-mpm daemon (launchd
+/// plist env) and a `tm` CLI (shell env) are exactly that pair, so the override
+/// would have re-created the "callers silently diverge" failure (#1373) that is
+/// this module's whole reason to exist. Covering both branches with tests would
+/// have pinned the divergence, not removed it. Eliminating the branch removes
+/// the failure class.
+/// What: `git -C <root> config --get user.email`, which already applies git's
+/// repo-local-over-global precedence. `None` when git resolves no identity or is
+/// unavailable. Returns a git email address, NOT a GitHub login.
+///
+/// Residual non-hermeticity, disclosed rather than claimed away: git's own
+/// config resolution still depends on `HOME` / `GIT_CONFIG_GLOBAL`, so callers
+/// running under materially different environments can still disagree when the
+/// repo sets no local `user.email`; and `--get` on a multi-valued key returns
+/// the LAST entry. The wiring slice must therefore guarantee uniform
+/// environment inheritance across daemon and CLI — a partial rollout partitions
+/// one tree into two indexes.
+/// Test: `resolve_operator_identity_prefers_repo_local_git_identity`,
+/// `resolve_operator_identity_ignores_ambient_env_override`.
+pub fn resolve_operator_identity(root: &Path) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
