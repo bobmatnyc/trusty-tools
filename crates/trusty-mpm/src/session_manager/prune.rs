@@ -368,200 +368,51 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
     }
 }
 
-/// Enumerate orphaned per-session worktree directories under `repos_root` (#1840).
+/// Enumerate orphaned worktree reclaim candidates under `repos_root` (#1840,
+/// rebuilt git-native #4207 slice 1).
 ///
-/// Why: extracted from `SessionManager::prune_orphaned_worktrees` so the
-/// walk logic can be tested independently of the full session-manager setup,
-/// and reused by the `doctor.rs` worktree health probe without duplicating the
-/// filesystem walk.
-/// What: walks all FIVE known worktree-store locations under each
-/// `<repos_root>/<owner>/<repo>/`:
-/// 1. the in-project shape (`.worktrees/<name>`, added #1840);
-/// 2. the clone-based shared-base-checkout shape
-///    (`.base/.worktrees/<session-id>`, added #3649);
-/// 3. Claude Code's native `isolation: "worktree"` agent shape at the repo
-///    root (`.claude/worktrees/<name>`, added #3971);
-/// 4. the SAME Claude Code agent shape, but created while working directly
-///    inside the bare `.base` clone checkout itself
-///    (`.base/.claude/worktrees/<name>`, added #3971 follow-up — the #3971
-///    fix covered only location 3, so this sibling location, and location 5
-///    below, were still invisible even after that fix landed; confirmed live
-///    on this machine with 29 real entries);
-/// 5. the SAME Claude Code agent shape again, but nested inside a per-session
-///    checkout (`.base/.worktrees/<session-id>/.claude/worktrees/<name>`,
-///    added #3971 follow-up — this is the exact shape this repo's own
-///    trusty-mpm sessions produce when a Claude Code agent spawns a nested
-///    worktree from within its own session checkout). Enumerated by listing
-///    each `.base/.worktrees` session leaf (via [`list_immediate_dirs`]) and
-///    probing it for a nested `.claude/worktrees`, since the session-id
-///    directory name is not known in advance.
+/// Why: this function used to WALK the filesystem, probing five hard-coded
+/// location shapes under each `<repos_root>/<owner>/<repo>/`. Every shape was
+/// added by a bug report about a location the previous shape list had missed
+/// (#3649, #3971, and the #3971 follow-up), and the list could never be
+/// complete because nothing stops a worktree from being registered anywhere on
+/// disk. Worse, the walk found DIRECTORIES, not worktrees, so it had no idea
+/// which checkout owned any of them — the grandparent guess that filled that
+/// gap left fourteen worktrees physically inside `.base` but registered to the
+/// parent repo permanently unreclaimable (#4207). Git maintains the registry;
+/// deriving from it deletes the whole category of missed-location bug.
+/// What: delegates discovery to
+/// [`super::worktree_registry::enumerate_registered_worktrees`] — every
+/// worktree git itself registers, wherever it lives — then removes any whose
+/// path is in `active_set`. Candidates come back canonicalized (so the
+/// active-set comparison is symlink-safe), sorted, and de-duplicated. A
+/// non-existent or unreadable `repos_root` yields an empty vec.
 ///
-/// Any leaf directory whose canonicalized path is NOT in `active_set` is
-/// collected as an orphan CANDIDATE — the caller (`prune_orphaned_worktrees`)
-/// still applies the #3649 ownership-sentinel gate before ever deleting
-/// anything, so a candidate discovered here is never auto-deleted unless it
-/// also carries a trusty-mpm ownership sentinel naming a provably-ownerless
-/// owner (see that function's doc); locations 3-5 are all Claude-Code-created
-/// and so never carry that sentinel, landing in `owner_unknown` (report-only)
-/// rather than being deleted. Using a `HashSet` with canonicalized paths
-/// avoids O(n×m) linear scan and correctly handles symlinked workspace
-/// paths. A non-existent or unreadable `repos_root` returns an empty vec.
+/// A candidate here is still only a CANDIDATE: `prune_orphaned_worktrees`
+/// applies the #3649 ownership-sentinel gate and the #4091 dirty-tree gate
+/// before anything is deleted, so a Claude-Code-created worktree (which never
+/// carries trusty-mpm's sentinel) lands in `owner_unknown` and is reported,
+/// never removed.
 ///
-/// Deliberately explicit rather than a generic recursive walk: each location
-/// is a specific, named join reusing the shared [`scan_worktree_shape`]
-/// leaf-collection logic, matching the style already established by
-/// locations 1-2 and keeping every location individually testable. A blind
-/// recursive walk of a whole checkout's source tree (crates/, node_modules/,
-/// target/, …) would be pathological on a repo this size; this walk only
-/// ever touches the fixed, known worktree-bookkeeping directory names
-/// (`.worktrees`, `.base`, `.claude`), never a checkout's actual source
-/// files.
+/// SCOPE NOTE (#4207): a directory that git does NOT register — a husk left
+/// behind by a half-finished removal, for instance — is no longer enumerated.
+/// It was already unreclaimable before this change, because
+/// `git_worktree_list_agrees` refused every such path; the difference is that
+/// it is now also absent from the report. Reclaiming unregistered husks is a
+/// separate concern (#3715), deliberately not smuggled in here.
 /// Test: `prune_orphaned_worktrees_spares_active`,
 ///       `prune_orphaned_worktrees_removes_orphan`,
-///       `find_orphaned_worktrees_covers_base_worktrees_shape` (#3649),
-///       `find_orphaned_worktrees_covers_claude_worktrees_shape`,
-///       `find_orphaned_worktrees_spares_live_claude_worktree`,
-///       `prune_orphaned_worktrees_never_deletes_claude_native_worktree` (#3971),
-///       `find_orphaned_worktrees_covers_base_claude_worktrees_shape`,
-///       `find_orphaned_worktrees_covers_nested_session_claude_worktrees_shape`
-///       (#3971 follow-up).
+///       `find_orphaned_worktrees_discovers_worktree_at_unwalked_location`
+///       (#4207 — fails against the five-shape walk),
+///       `find_orphaned_worktrees_ignores_plain_directory`.
 pub(crate) fn find_orphaned_worktrees(
     repos_root: &std::path::Path,
     active_set: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
-    let mut orphans = Vec::new();
-    let Ok(owner_entries) = std::fs::read_dir(repos_root) else {
-        return orphans;
-    };
-    for owner_entry in owner_entries.flatten() {
-        let owner_path = owner_entry.path();
-        if !owner_path.is_dir() {
-            continue;
-        }
-        let Ok(repo_entries) = std::fs::read_dir(&owner_path) else {
-            continue;
-        };
-        for repo_entry in repo_entries.flatten() {
-            let repo_path = repo_entry.path();
-            // Location 1 (#1840): in-project worktrees at `<repo>/.worktrees/<name>`.
-            scan_worktree_shape(&repo_path.join(".worktrees"), active_set, &mut orphans);
-            // Location 2 (#3649): clone-based shared-base-checkout worktrees at
-            // `<repo>/.base/.worktrees/<session-id>` (see
-            // `provisioner::workspace::WorkspaceProvisioner::provision_in`).
-            let base_worktrees = repo_path.join(".base").join(".worktrees");
-            scan_worktree_shape(&base_worktrees, active_set, &mut orphans);
-            // Location 3 (#3971): Claude Code's native `isolation: "worktree"`
-            // agent worktrees at `<repo>/.claude/worktrees/<name>` — never
-            // created by trusty-mpm, so these candidates never carry the
-            // `.trusty-mpm-worktree` sentinel and are gated to owner-unknown
-            // (report-only) by `prune_orphaned_worktrees`'s existing #3649
-            // ownership check, not auto-deleted.
-            scan_worktree_shape(
-                &repo_path.join(".claude").join("worktrees"),
-                active_set,
-                &mut orphans,
-            );
-            // Location 4 (#3971 follow-up): the same Claude Code agent shape,
-            // created while working directly inside the bare `.base` clone
-            // checkout, at `<repo>/.base/.claude/worktrees/<name>`.
-            scan_worktree_shape(
-                &repo_path.join(".base").join(".claude").join("worktrees"),
-                active_set,
-                &mut orphans,
-            );
-            // Location 5 (#3971 follow-up): the same Claude Code agent shape
-            // again, nested inside a per-session checkout, at
-            // `<repo>/.base/.worktrees/<session-id>/.claude/worktrees/<name>`.
-            // The session-id leaf name is not known in advance, so list each
-            // leaf under `.base/.worktrees` (location 2's own directory) and
-            // probe it for a nested `.claude/worktrees`.
-            for session_leaf in list_immediate_dirs(&base_worktrees) {
-                scan_worktree_shape(
-                    &session_leaf.join(".claude").join("worktrees"),
-                    active_set,
-                    &mut orphans,
-                );
-            }
-        }
-    }
-    // #4118: `read_dir` order is filesystem-dependent, so two runs of the same
-    // sweep could remove the same worktrees in different orders — which makes a
-    // dry-run preview a poor predictor of the real run and makes any ordering
-    // bug unreproducible. Sorting costs nothing at this scale.
-    orphans.sort();
-    orphans
-}
-
-/// List the immediate child directories of `dir`, ignoring unreadable
-/// entries (#3971 follow-up).
-///
-/// Why: [`find_orphaned_worktrees`]'s location 5 needs to enumerate each
-/// `.base/.worktrees/<session-id>` leaf so it can probe each one for a
-/// nested `.claude/worktrees`, but the session-id names are not known in
-/// advance. Unlike [`scan_worktree_shape`], this does NOT filter against an
-/// `active_set` or collect orphans itself — it exists purely to enumerate
-/// CONTAINER directories for the caller to recurse into, keeping the
-/// active-set/orphan-candidate logic owned by exactly one function
-/// ([`scan_worktree_shape`]).
-/// What: returns every directory entry directly under `dir`; a non-existent
-/// or unreadable `dir` (including the common case of a repo with no
-/// `.base/.worktrees` at all) returns an empty vec, mirroring
-/// [`scan_worktree_shape`]'s own tolerant-missing-directory behavior.
-/// Test: `find_orphaned_worktrees_covers_nested_session_claude_worktrees_shape`.
-fn list_immediate_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
+    super::worktree_registry::enumerate_registered_worktrees(repos_root)
+        .into_iter()
+        .filter(|candidate| !active_set.contains(candidate))
         .collect()
-}
-
-/// Scan one `.worktrees`-shaped directory for leaf dirs not in `active_set`,
-/// appending any found to `orphans` (#3649 extraction — shared by both
-/// worktree-store shapes [`find_orphaned_worktrees`] walks).
-///
-/// Why: `find_orphaned_worktrees` originally inlined this loop for the single
-/// in-project shape it knew about; #3649 adds a second shape
-/// (`.base/.worktrees`) that must apply the IDENTICAL leaf-dir/canonicalize/
-/// active-set logic, so the loop body is extracted rather than duplicated.
-/// What: no-ops if `wt_dir` is not a directory; otherwise lists its immediate
-/// children, skips non-directories and paths that fail to canonicalize (#1845
-/// item 8 — a dangling symlink or deletion race must not be misclassified),
-/// and appends every canonicalized-but-not-active leaf to `orphans`.
-/// Test: `prune_orphaned_worktrees_collects_orphan`,
-///       `find_orphaned_worktrees_covers_base_worktrees_shape` (#3649).
-fn scan_worktree_shape(
-    wt_dir: &std::path::Path,
-    active_set: &std::collections::HashSet<std::path::PathBuf>,
-    orphans: &mut Vec<std::path::PathBuf>,
-) {
-    if !wt_dir.is_dir() {
-        return;
-    }
-    let Ok(wt_entries) = std::fs::read_dir(wt_dir) else {
-        return;
-    };
-    for wt_entry in wt_entries.flatten() {
-        let wt_path = wt_entry.path();
-        if !wt_path.is_dir() {
-            continue;
-        }
-        // Item 8 (#1845): skip if the path cannot be canonicalized.
-        // A dangling symlink or a deletion race makes the path
-        // unresolvable; we cannot safely compare it against the active
-        // set, so we leave it untouched rather than risk misclassifying
-        // a live-but-partially-deleted worktree as an orphan.
-        let canonical_wt = match std::fs::canonicalize(&wt_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if !active_set.contains(&canonical_wt) {
-            orphans.push(wt_path);
-        }
-    }
 }
 
 /// Outcome of an orphaned-worktree sweep (#3649): which candidates were (or

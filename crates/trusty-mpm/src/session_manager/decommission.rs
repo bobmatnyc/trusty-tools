@@ -104,8 +104,9 @@ pub(crate) fn is_session_worktree(path: &Path) -> bool {
 /// `git worktree list` and `git branch` output. `git worktree remove --force`
 /// prunes both the directory AND the ref atomically, restoring a clean state.
 /// What: runs `git -C <repo-root> worktree remove --force <path>` where
-/// `<repo-root>` is the grandparent of the worktree directory
-/// (`path` → `.worktrees` → `<repo-root>`). Also runs
+/// `<repo-root>` is the checkout git itself reports as owning `path`'s
+/// worktree registry ([`super::worktree_registry::registry_root_for`], #4207 —
+/// previously guessed as the grandparent directory). Also runs
 /// `git -C <repo-root> worktree prune` and
 /// `git -C <repo-root> branch -D session/<leaf>` on success to clear stale git
 /// refs and the session branch, where `<leaf>` is the last component of `path`
@@ -158,18 +159,30 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
         );
     }
 
-    // The repo root is the grandparent of the worktree dir:
-    // <repo-root>/.worktrees/<session-id>/ → grandparent = <repo-root>
-    let repo_root = match path.parent().and_then(|p| p.parent()) {
+    // #4207: ask git which checkout owns this worktree's registry instead of
+    // guessing that it is the grandparent directory. The grandparent rule held
+    // only for the two shapes it was written against; a worktree registered to
+    // the parent repo but living under `.base/.worktrees/` resolved to `.base`,
+    // which disowns it, so `git worktree remove` there could never succeed.
+    let repo_root = match super::worktree_registry::registry_root_for(path) {
         Some(r) => r,
         None => {
+            // No git registry claims this path — it is a plain directory, not a
+            // worktree. The sentinel gate above already established trusty-mpm
+            // owns it, so remove the directory directly rather than refusing.
             warn!(
                 path = %path.display(),
-                "decommission: cannot determine repo root from worktree path — skipping git removal"
+                "decommission: no git repository owns this path — removing the \
+                 directory directly (no worktree ref to prune)"
             );
-            return false;
+            if let Err(e) = std::fs::remove_dir_all(path) {
+                warn!(path = %path.display(), "decommission: remove_dir_all failed: {e}");
+                return false;
+            }
+            return true;
         }
     };
+    let repo_root = repo_root.as_path();
     // Step 1: git worktree remove --force <path> (run from repo root).
     // Pass repo_root as an OsStr-safe Path arg to avoid lossy UTF-8 coercion (#1840).
     let out = std::process::Command::new("git")
