@@ -204,12 +204,12 @@ pub(crate) async fn launch(
     // 7c. Deploy the `.claude` framework into the worktree (best-effort).
     //     Non-fatal: a deploy failure never aborts the session — the operator can
     //     run `tm install` / `tm catalog sync` to populate agents manually.
-    //     #4203: the destination is the worktree (the harness cwd, set at step
-    //     12), NOT `$HOME` — see [`session_framework_paths`].
+    //     #4203: deploy through the isolated seam so the roster lands in the
+    //     worktree (the harness cwd, set at step 12) rather than `$HOME` — the
+    //     `claude` spawned at step 13 carries `--setting-sources project,local`
+    //     and would never read a `$HOME/.claude` deploy.
     {
-        let fw = session_framework_paths(&managed_path);
-        match trusty_mpm::core::session_launch::prepare_session_with_repo_url(
-            &fw,
+        match trusty_mpm::core::session_launch::prepare_isolated_session(
             &managed_path,
             Some(&origin_url),
         ) {
@@ -469,10 +469,11 @@ pub(crate) async fn connect(
     //     under `path` — so a repo with no GitHub remote or with uncommitted
     //     changes still launches. Best-effort: a prep failure is logged and
     //     never aborts the connect.
-    //     #4203: the destination is the live checkout (the harness cwd, set at
-    //     step 4), NOT `$HOME` — see [`session_framework_paths`].
-    let fw = session_framework_paths(&path);
-    match trusty_mpm::core::session_launch::prepare_session(&fw, &path) {
+    //     #4203: deploy through the isolated seam so the roster lands in the
+    //     live checkout (the harness cwd, set at step 4) rather than `$HOME` —
+    //     the `claude` spawned at step 5 carries `--setting-sources
+    //     project,local` and would never read a `$HOME/.claude` deploy.
+    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None) {
         Ok(report) => {
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());
@@ -595,33 +596,6 @@ pub(crate) async fn connect(
         g.disarm();
     }
     Ok(())
-}
-
-/// Resolve the [`FrameworkPaths`](trusty_mpm::core::paths::FrameworkPaths) a
-/// CLI-spawned session deploys its `.claude` payload through.
-///
-/// Why (issue #4203): both `launch` and `connect` used
-/// `FrameworkPaths::default()`, which resolves against `dirs::home_dir()` and
-/// therefore deploys the agent roster into `$HOME/.claude/agents` — the `user`
-/// tier. Both then spawn `claude` carrying
-/// [`SETTING_SOURCES_FLAG`](trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG)
-/// (`--setting-sources project,local`), which EXCLUDES `user`. The deployed
-/// tier and the loaded tiers did not intersect, so no tm-deployed agent was
-/// ever visible to either CLI session. This is the same defect the daemon's
-/// `spawn_managed_inproject` already fixed for its own in-project spawn
-/// (issue #1931, `daemon/managed_routes/lifecycle.rs`), applied to the two CLI
-/// paths that never received the equivalent change.
-/// What: `FrameworkPaths::for_managed_workspace(harness_cwd)` — deploy
-/// DESTINATIONS become `<harness_cwd>/.claude/{agents,skills}` (read by the
-/// `project`/`local` tiers) while the framework SOURCE paths keep resolving
-/// from the home-relative install root, exactly as #1931 guarantees. Callers
-/// must pass the cwd the tmux pane is rooted at: the managed worktree for
-/// `launch`, the live checkout for `connect`.
-/// Test: `launch_and_connect_deploy_into_a_tier_setting_sources_loads`.
-pub(crate) fn session_framework_paths(
-    harness_cwd: &std::path::Path,
-) -> trusty_mpm::core::paths::FrameworkPaths {
-    trusty_mpm::core::paths::FrameworkPaths::for_managed_workspace(harness_cwd)
 }
 
 /// Compose the `claude` invocation `connect` sends to a freshly-created tmux pane.
