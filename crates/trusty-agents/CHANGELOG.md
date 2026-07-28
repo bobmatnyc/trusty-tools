@@ -37,6 +37,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **The chat's "waiting on the agent" indicator now lives inside the reply
+  bubble.** The spinner used to render as a separate element below the message
+  list, left-aligned under the bubble it belonged to and visually detached from
+  it. It now renders in the bubble's own body — standing in for the `…`
+  placeholder while the reply is empty, then trailing the streamed text like a
+  caret — and the in-flight bubble carries a pulsing green ring (Foundry's
+  `--trusty-success`, so it themes correctly in light and dark). Both the
+  spinner and the ring are driven by the same `isRunning` + `activeTaskId`
+  pair, so they cannot disagree, and both clear on completion, error, and
+  cancellation. Users with `prefers-reduced-motion: reduce` get the same green
+  ring, static rather than pulsing.
+
 - **The `ticketing` function skill now also bundles the two read-only git
   inspection skills (#4024)** — `git_search_commits` and `git_branches` — so
   git and ticketing are granted as one unit. Git *mutation* skills (commit,
