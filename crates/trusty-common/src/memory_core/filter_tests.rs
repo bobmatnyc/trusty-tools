@@ -933,3 +933,100 @@ fn colon_bearing_credential_is_flagged() {
         cfg.apply(&content, false)
     );
 }
+
+// ---- Issue #2800: slash-separated issue/PR-number lists ----
+
+/// Why (issue #2800, observed live twice): a PM session checkpoint enumerating
+/// PRs as `#2763/#2774/#2780/#2782/#2790` was rejected as a secret. The token
+/// carries no letters at all, but the `/` separators set `has_b64_sym` and the
+/// digits set `has_digit`, so the base64-blob branch of `looks_like_secret`
+/// fired. `is_structural_token`'s slash-path branch does not rescue it because
+/// the `#` in each segment fails `is_word_segment`.
+/// What: asserts the EXACT token from the issue body passes both the token
+/// predicate and the end-to-end gate, in the prose shape it was written in.
+/// Test: itself.
+#[test]
+fn slash_separated_pr_number_list_not_flagged() {
+    let tok = "#2763/#2774/#2780/#2782/#2790";
+    assert!(
+        !looks_like_secret(tok),
+        "slash-separated PR-number list must NOT be flagged as secret: {tok}"
+    );
+    // `find_secret_token` trims the leading `#`, yielding the 28-char token
+    // quoted in the issue's rejection message — cover that shape too.
+    let content = format!("Merged {tok} closing the eviction epic");
+    assert!(
+        find_secret_token(&content).is_none(),
+        "PR-number list in prose must NOT be flagged; got {:?}",
+        find_secret_token(&content)
+    );
+    let cfg = FilterConfig::default();
+    assert!(
+        cfg.apply(&content, true).is_ok(),
+        "gate must ACCEPT the PR-number list; got {:?}",
+        cfg.apply(&content, true)
+    );
+}
+
+/// Why (issue #2800): the digit/separator exemption must be a keyhole, not a
+/// hole. Anything with an alphabetic character is outside the exemption, so
+/// every real-credential shape the module already blocks must still be blocked
+/// — including ones that sit next to a PR-number list in the same content, and
+/// including the adversarial case of a credential that is *mostly* digits and
+/// slashes with only a few letters smuggled in.
+/// What: asserts known-prefix, base64-blob, connection-string, and
+/// digits-plus-letters credentials all remain flagged after the exemption.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_2800_exemption() {
+    let cfg = FilterConfig::default();
+
+    // 1. Known-prefix credential sharing content with an allowlisted PR list —
+    //    the exemption must not shadow other tokens in the same memory.
+    let mixed = "Checkpoint #2763/#2774/#2780/#2782/#2790 deploy key \
+                 sk-abcdefghijklmnopqrstuvwxyz01234567890123"; // pragma: allowlist secret
+    assert!(
+        matches!(
+            cfg.apply(mixed, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "known-prefix credential must still be rejected beside a PR list; got {:?}",
+        cfg.apply(mixed, false)
+    );
+
+    // 2. LOAD-BEARING: a token that is `#`/digit/slash-shaped EXCEPT for a
+    //    smuggled alphabetic segment. One letter must take it out of the
+    //    exemption and back onto the normal heuristic path. If the exemption
+    //    were written as "contains only digits and separators, ignoring
+    //    letters" — or applied before the charset was fully checked — this is
+    //    the token that would slip through.
+    let sneaky = "#2763/#2774/#abcd/#2782/#2790"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(sneaky),
+        "a `#`/digit/slash token containing letters must NOT be exempted: {sneaky}"
+    );
+
+    // 3. LOAD-BEARING: `+` is the unambiguous base64 indicator. It is outside
+    //    the exemption charset, so a digit-and-slash token carrying one must
+    //    stay flagged even though it has no letters at all.
+    let with_plus = "1234/5678/9012+3456/7890/1234"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(with_plus),
+        "`+` (base64 indicator) must defeat the exemption: {with_plus}"
+    );
+
+    // 4. Base64 blob with `=` padding — the same `has_b64_sym` branch the
+    //    exemption short-circuits. Letters present, so still flagged.
+    let b64 = "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4="; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(b64),
+        "padded base64 blob must still be flagged: {b64}"
+    );
+
+    // 5. Connection string — `/`-bearing and digit-bearing, letters present.
+    let conn = "postgres://user:pass@host/dbname12345678901234567890"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(conn),
+        "connection-string-shaped token must still be flagged: {conn}"
+    );
+}
