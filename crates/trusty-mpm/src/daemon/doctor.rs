@@ -384,15 +384,17 @@ fn build_gh_account_check(active: Option<String>, accounts: Vec<String>) -> Doct
 /// What: builds a canonicalized active-path set, then spawns a blocking task
 /// that asks GIT for the worktrees of each managed project (#4207 — this is no
 /// longer a filesystem walk of `.worktrees/`, and a candidate is no longer "any
-/// leaf directory"): every git-registered worktree that is a strict descendant
-/// of the project whose registry named it, minus the active set, is counted as
-/// an orphan. Reports `Ok` (no orphans), `Warn` (orphans found), or `Ok`
-/// (repos_root absent / unconfigured).
+/// leaf directory"): a git-registered worktree counts as an orphan when it is
+/// not main/bare/prunable/locked, IS a strict descendant of the project whose
+/// registry named it, and is absent from the active set. Reports `Ok` (no
+/// orphans), `Warn` (orphans found), or `Ok` (repos_root absent /
+/// unconfigured).
 ///
 /// Note this probe is REPORT-ONLY — it counts, it never removes — so it
-/// deliberately reports candidates that the reclaim path would refuse to
-/// delete (owner-unknown, dirty). A directory git does not register is not
-/// counted at all; reclaiming unregistered husks is #3715, still open.
+/// deliberately reports candidates the reclaim path would refuse to delete
+/// (owner-unknown, dirty). Conversely a directory git does not register is not
+/// counted at all, so an unregistered husk is invisible here; reclaiming those
+/// is a separate open concern, deliberately out of scope for #4207.
 /// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
 async fn check_worktrees(
     repos_root: Option<&Path>,
@@ -422,8 +424,9 @@ async fn check_worktrees(
         .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
         .collect();
 
-    // Delegate the blocking filesystem walk to spawn_blocking so the async
-    // executor is not stalled on directory I/O (#1840 F).
+    // Delegate the blocking scan to spawn_blocking so the async executor is not
+    // stalled (#1840 F). Since #4207 what blocks is not directory I/O but the
+    // git subprocesses `find_orphaned_worktrees` spawns per managed project.
     let orphans = tokio::task::spawn_blocking(move || {
         crate::session_manager::prune::find_orphaned_worktrees(&root, &active_set)
     })
