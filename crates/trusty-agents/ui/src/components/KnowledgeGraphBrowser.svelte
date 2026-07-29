@@ -39,6 +39,7 @@
    * copy rather than a shared spinner or empty list.
    */
   import { AlertCircle, ArrowLeft, Loader2, Network, X } from 'lucide-svelte';
+  import { onMount } from 'svelte';
   import {
     fetchKgAll,
     fetchKgCount,
@@ -225,6 +226,13 @@
     event.preventDefault();
     onClose();
   }
+
+  // Move focus into the slide-over on open, mirroring `AgentConfigOverlay` —
+  // otherwise a keyboard user is left focused on the (now covered) button
+  // that opened it.
+  onMount(() => {
+    container?.focus();
+  });
 </script>
 
 <svelte:window on:keydown={onKeydown} />

@@ -19,6 +19,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   posture `GET /api/agents/:name/stores` already has — so the Knowledge Graph
   browser renders an empty state instead of an error. Assert and delete are
   deliberately not proxied; editability is a separate ticket.
+- **Knowledge Graph browser — the UI leg of #4290.** A "Knowledge Graph"
+  button beside the Assistant selector in `ChatHeader` opens a dedicated
+  slide-over (`KnowledgeGraphBrowser.svelte`) over the active agent's one
+  bound palace: a filterable/sortable subject list with count badges,
+  drill-down into a subject's triples, and a paginated "all triples" mode —
+  porting `trusty-memory`'s `KG.svelte` interaction pattern into this app's
+  Foundry/Tailwind idiom (single palace, no picker). Read-only v1, hidden
+  entirely for Concierge (no `agent.toml`/`[[stores]]` binding). Renders six
+  explicit states rather than a generic spinner or empty list: loading,
+  connected with data, connected with a genuinely empty graph, `connected:
+  false` with its `reason`, a `config_error` surfaced alongside that, and the
+  fetch-helper's 404/network-error path. New `lib/kg.ts` client following
+  `fetchAgentStores`'s null-on-404/throw idiom; the SPA still never calls
+  trusty-memory directly.
 
 ### Changed
 
