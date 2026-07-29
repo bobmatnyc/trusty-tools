@@ -432,11 +432,18 @@ pub(crate) fn derive_project(
 /// What: short-circuits to `None` when not inside tmux (nothing to guard
 /// against) or when the daemon is unreachable/errors (fail-open — matches
 /// every other daemon round-trip in this file, which falls through to the
-/// picker/autostart rather than blocking on a down daemon). Uses a 2-second
-/// timeout, matching the `guided_inplace` probe convention.
+/// picker/autostart rather than blocking on a down daemon). The fetch goes
+/// through [`guard_managed_sessions`], which (#4335) asks for the SLIM listing
+/// — the guard never reads `stale_assets` — allows 8 seconds rather than 2,
+/// and LOGS the failure arm instead of discarding it. Before that, a cold
+/// daemon's per-session staleness pass regularly blew the 2s bound and the
+/// guard silently no-opped, so bare `tm` after a backgrounded Claude Code fell
+/// to the picker and dead-ended on the #2678 refusal until a second run.
 /// Test: the pure decision is `nested_managed_match_*` in
-/// `tests_behavior_c_tests.rs`; this I/O wrapper is exercised by manual smoke
-/// tests and the e2e suite (requires a live daemon + tmux).
+/// `tests_behavior_c_tests.rs`; the fail-open arm is
+/// `guard_managed_sessions_returns_none_when_the_list_call_errors`; the rest of
+/// this I/O wrapper is exercised by manual smoke tests and the e2e suite
+/// (requires a live daemon + tmux).
 async fn nested_session_guard(
     client: &reqwest::Client,
     url: &str,
@@ -452,7 +459,8 @@ async fn nested_session_guard(
     // check) so it can also break a duplicate-name tie in `nested_managed_match`
     // itself — see that function's doc.
     let current_pane_id = super::tmux_attach::current_tmux_pane_id();
-    let all = list_all_managed_sessions(client, url).await.ok()?;
+    // #4335: fail-open, but LOUDLY — see `guard_managed_sessions`.
+    let all = guard_managed_sessions(client, url).await?;
     nested_managed_match(
         current_session_name.as_deref(),
         env_session_id.as_deref(),
@@ -592,22 +600,72 @@ pub(crate) fn inplace_self_relaunch_hint(
 /// Why: [`nested_session_guard`] must find a match even when the record's
 /// `source_id` is missing (#2157 item 5's failure mode), so it cannot reuse the
 /// source_id-filtered picker fetch ([`super::session_picker::fetch_live_sessions`]).
-/// What: GETs the managed-list endpoint with no `?source_id=` query and a
-/// 2-second timeout so a hung daemon cannot add a long stall to every bare
-/// `tm` invocation made from inside tmux.
-/// Test: I/O path; requires a live daemon.
+/// What: GETs the managed-list endpoint with no `?source_id=` query, with
+/// `?slim=true` and an 8-second timeout (#4335 — both explained below).
+///
+/// `?slim=true` (#4335, folds into #4322): the guard reads `name`, `pane_id`,
+/// `state`, and `id` — never `stale_assets`. That flag is the most expensive
+/// thing the endpoint computes (a filesystem-bound catalog compose plus a
+/// per-session manifest/on-disk comparison), so the guard was paying for a
+/// field it discards. Opting out is the actual fix; the timeout below is the
+/// belt to its braces.
+///
+/// The timeout is 8s, not the 2s this shared the `guided_inplace` probe
+/// convention with. On a COLD daemon the per-session `stale_assets` pass over
+/// a large fleet exceeded 2s, the request was cancelled, and the guard's
+/// `.ok()?` swallowed it without a single log line — so bare `tm` after a
+/// backgrounded Claude Code fell through to the picker and dead-ended on the
+/// #2678 switch-client refusal, while a second invocation (warm daemon) worked.
+/// A guard that silently stops guarding is worse than a slow one: the 2s bound
+/// existed to keep a HUNG daemon from stalling bare `tm`, and 8s still bounds
+/// that while clearing a cold-start listing.
+/// Test: I/O path; the fail-open decision is
+/// `guard_managed_sessions_returns_none_when_the_list_call_errors`.
 async fn list_all_managed_sessions(
     client: &reqwest::Client,
     url: &str,
 ) -> anyhow::Result<Vec<trusty_mpm::client::ManagedSessionSummary>> {
     let resp = client
-        .get(format!("{url}/api/v1/sessions/managed"))
-        .timeout(std::time::Duration::from_secs(2))
+        .get(format!("{url}/api/v1/sessions/managed?slim=true"))
+        .timeout(std::time::Duration::from_secs(8))
         .send()
         .await?
         .error_for_status()?;
     let body: trusty_mpm::client::ManagedListResponse = resp.json().await?;
     Ok(body.sessions)
+}
+
+/// [`list_all_managed_sessions`] for [`nested_session_guard`], with the
+/// fail-open arm LOGGED rather than silently swallowed (#4335).
+///
+/// Why: the guard used a bare `.ok()?`, so every failure mode — timeout,
+/// daemon down, malformed body — produced the identical observable behaviour
+/// as "no sessions matched": the guard no-opped and the flow fell through to
+/// the picker. #4335 took a live repro plus a code read to establish that the
+/// guard had not run at all, because there was nothing in any log to say so.
+/// One `tracing::debug!` on the error arm makes the difference between "guard
+/// ran, found nothing" and "guard never ran" visible under `RUST_LOG=debug`.
+/// What: `Some(sessions)` on success; `None` after logging the error. Keeps
+/// the fail-open contract — a down daemon must not block bare `tm` — but stops
+/// it from being invisible.
+/// Test: `guard_managed_sessions_returns_none_when_the_list_call_errors`,
+/// `guard_managed_sessions_returns_sessions_on_success`.
+pub(crate) async fn guard_managed_sessions(
+    client: &reqwest::Client,
+    url: &str,
+) -> Option<Vec<trusty_mpm::client::ManagedSessionSummary>> {
+    match list_all_managed_sessions(client, url).await {
+        Ok(sessions) => Some(sessions),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "tm: nested-session guard: managed-session list failed — guard SKIPPED \
+                 (falling through to the ordinary guided default). A cold daemon that \
+                 exceeds the timeout lands here (#4335)."
+            );
+            None
+        }
+    }
 }
 
 // ── Display / TTY-gate helpers ────────────────────────────────────────────────
