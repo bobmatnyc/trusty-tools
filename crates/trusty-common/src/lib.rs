@@ -444,6 +444,27 @@ pub use slug::slugify_string;
 pub mod index_id;
 pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
 
+/// Project-derived trusty-search index identity — the PARTITIONING key
+/// (epic #4207; supersedes the approach closed as won't-do in #4063).
+///
+/// Why: [`index_id::derive_index_id`]'s bare basename collides for unrelated
+/// checkouts sharing a directory name, and a tm session gets its worktree UUID
+/// as the id — so service identity is bound to ephemeral writer isolation and
+/// BASE_PM's "pass the project name" instruction 404s. Both need ONE id derived
+/// from the PROJECT. It lives here, beside `index_id`/`repo_identity`/`slug`,
+/// because trusty-mpm, trusty-search, trusty-review and trusty-code must all
+/// compute the identical id — the same single-source-of-truth rule `index_id`
+/// was hoisted here for (#1373). Unconditional (not feature-gated) because an
+/// identity that varies with a feature flag is worse than none.
+/// What: exposes [`project_index_id::ProjectIdentity`] (origin + root + operator,
+/// with a pure `index_id()`), [`project_index_id::derive_project_index_id`], and
+/// [`project_index_id::resolve_operator_identity`]. Derivation only — wired
+/// into no resolution path; registry reconciliation and migration of existing
+/// indexes are separate slices of #4207.
+/// Test: `cargo test -p trusty-common -- project_index_id`.
+pub mod project_index_id;
+pub use project_index_id::{ProjectIdentity, derive_project_index_id};
+
 /// Shared best-effort trusty-search "ensure this project is indexed" helper
 /// (issues #1373 / #1908), gated behind the `search-index` feature.
 ///
