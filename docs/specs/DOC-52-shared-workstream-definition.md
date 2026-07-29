@@ -13,10 +13,10 @@ spec_refs:
 
 # DOC-52 — Shared Workstream Definition: Cross-Harness Session Binding and Resource Governance
 
-**Status:** Draft (Rev 1)
+**Status:** Draft (Rev 2)
 **Subsystem:** trusty-tools — cross-harness (trusty-mpm, trusty-code, trusty-agents) workstream semantics and lifecycle
 **Owner:** Engineering (trusty-mpm, trusty-code, trusty-agents coordination)
-**Last-updated:** 2026-07-22 (Rev 1: owner-approved 1:1 session binding, resource caps, scope-overlap rules)
+**Last-updated:** 2026-07-29 (Rev 2: product-owner canonical definition; repo-size-scaled concurrency replaces the fixed per-project cap; exclusive file ownership made explicit. Rev 1: owner-approved 1:1 session binding, resource caps, scope-overlap rules)
 **Spec ID:** `SPEC-SHAREDWS-01~draft` … `SPEC-SHAREDWS-04~draft` (DOC-52)
 **Builds on:**
 - [`docs/specs/DOC-48-tcode-workstreams.md`](./DOC-48-tcode-workstreams.md) — the daemon-scoped, single-active workstream model for trusty-code (foundation)
@@ -26,6 +26,7 @@ spec_refs:
 - Issue #3649 (session-owned worktrees) and #2919 (auto-reclamation) — resource lifecycle tied to workstream/session ownership
 
 **Supersedes/Clarifies:**
+- The 2026-07-29 product-owner definition (§1.2) is the **canonical wording** for "workstream" across this repository's docs. It supersedes prior informal phrasings in this document and elsewhere; the invariants in §2–§4 are its detailed elaboration, not a competing definition.
 - DOC-48 §2.1 and §4.1 (session-binding model) — **OVERRIDES** DOC-48's append-only `session_ids: Vec<SessionId>` (which permits many sessions per workstream over time, per DOC-48 §2.1 line 81 and Phase C++ code) with a stricter 1:1 invariant per the 2026-07-22 owner decision, effective for new workstreams going forward. Persisted schema compatibility: keep the `session_ids: Vec` field shape; new workstreams enforce `len(session_ids) == 1`; existing arrays with >1 entries are grandfathered as historical lineage (read-only, never migrated destructively).
 - DOC-39 §3.1 ("an infinite thread") — clarifies boundary conditions: when a workstream closes, its session is terminal; a closed workstream is NOT reopened (new work creates a new workstream)
 
@@ -55,7 +56,20 @@ DOC-48 §1.2 and §2.1 establish that **workstreams are NOT sessions** (DOC-48 �
 
 This spec is the normative statement of that decision for both trusty-mpm and trusty-code.
 
-### 1.2 Scope — the shared concept
+### 1.2 Canonical definition (product owner, 2026-07-29)
+
+> A **workstream** is a continuous body of work scoped around a set of files — a single body of files in a single repo — which can be joined at any time but is driven by a single PM.
+
+This is the canonical, repository-wide definition of "workstream." It supersedes older, less precise phrasings (including this document's own Rev 1 framing and DOC-48's). Unpacked, clause by clause:
+
+- **Single repo, single set of files.** A workstream's scope is one body of files in one repository: one branch, one worktree (see §1.3, §3.2). It does not span repos or projects (§5).
+- **Joined at any time.** Connect semantics, not create semantics: any number of clients/connections may join an active workstream at any time; any connection can propel it (drive input); resulting state mirrors across all joined connections. Connections never own the workstream (§2.2).
+- **Driven by a single PM.** Exactly one PM session binds to the workstream at any instant (§2.1). The session is the workstream's persistent runtime substrate, not a separate layer alongside it.
+- **Not explicitly created; open until closed.** A workstream is not created by an operator's explicit "new workstream" action — it is inferred from work starting (the first task or first commit establishes it, §3.2). It stays open until closed: branch merged, worktree cleaned up, session decommissioned (§2.3, §3.4).
+- **Concurrency scales with repo size.** How many workstreams a repo can carry open at once is a function of the repo's size (file count, worktree/build footprint), not a fixed number applied uniformly across projects (§3.1, revised in this Rev).
+- **Exclusive file ownership, for a workstream's substantive file set.** Any file in a workstream's *owned* scope — the source, docs, and config it's actually driving change through — belongs to exactly one workstream at a time; two workstreams never concurrently own edits to the same owned file, though a file may change hands between workstreams over time (never simultaneously). This excludes a fixed class of shared coordination files (lockfiles, per-crate CHANGELOGs, generated artifacts) that are cross-workstream by necessity and merge-ordered rather than exclusively owned — see §3.2's exemption list, which is part of this invariant's definition, not an exception to it.
+
+### 1.3 Scope — the shared concept
 
 **This spec defines workstream as a shared concept** used identically by trusty-mpm and trusty-code. The invariants and resource rules below apply to both:
 
@@ -75,7 +89,7 @@ Both harnesses may implement these invariants differently (different storage lay
 
 **Invariant:** Exactly ONE session binds to each workstream at any instant. The binding is immutable over the session's lifetime.
 
-- **Creation:** When a workstream is created (explicitly or implicitly per DOC-48 §8 Phase C++), exactly one session is minted and bound to it. The session's lifetime is tied to the workstream's.
+- **Creation:** A workstream is never explicitly created by an operator command — it is inferred from work starting (the first task or first commit, per DOC-48 §8 Phase C++'s implicit-inference model; see §1.2, §3.2). Once inferred, exactly one session is minted and bound to it; the session's lifetime is tied to the workstream's. An operator may still name or label the already-inferred workstream after the fact — that is labeling, not creation.
 - **No rebinding:** A session never changes its workstream binding. If a user closes a workstream and later wants to open new work, they create a NEW workstream (and a new session binds to it).
 - **No sharing:** Multiple sessions NEVER bind to one workstream. At any instant, there is one session per workstream, and one workstream per session (with the exception of orphaned closed workstreams, which accept no new sessions by definition).
 - **Closure:** When a workstream closes, its session is also terminal. The session may accept trailing turns (to drain a backlog or allow a graceful shutdown message), but it cannot transition to a new workstream.
@@ -95,7 +109,7 @@ A workstream and its session share a lifecycle:
 
 | Phase | Action | Meaning |
 |-------|--------|---------|
-| **Creation** | Workstream is minted (explicitly or implicitly) | One session is bound to it; both enter `active` state if immediately activated, or `idle` if deferred |
+| **Creation** | Workstream is inferred from work starting — never explicitly created; may be named/labeled after the fact | One session is bound to it; both enter `active` state if immediately activated, or `idle` if deferred |
 | **Active work** | Session accumulates turns; workstream tracks session activity | Session may receive turns; workstream state reflects this |
 | **Closure** | Workstream is explicitly closed (via `workstream.close` in tcode, or branch merged in tm) | Session is marked terminal; accepts no new turns (may drain backlog); both are considered closed |
 | **Closed state** | No new work accepted | Neither the workstream nor its session accepts new turns. Historical review only. |
@@ -117,20 +131,23 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 **ID:** SPEC-SHAREDWS-03~draft
 **Status:** Draft
 
-### 3.1 Concurrency caps on OPEN workstreams
+### 3.1 Concurrency caps on OPEN workstreams — scaled to repo size
 
-**Default:** 3 open workstreams per project; 8 open workstreams per machine. Configurable per project or globally.
+**The number of concurrent open workstreams a repo supports is a factor of the repo's size, not a fixed number applied uniformly across projects** (product-owner decision, 2026-07-29, superseding the earlier flat per-project default, Rev 1). A small single-crate repo and a large monorepo do not carry the same safe concurrency; the cap is computed from repo-size signals (file count, worktree/build footprint such as the ~14 GB average Rust `target/` cost below) rather than hardcoded. Machine-wide and per-project quotas remain configurable overrides on top of the computed value.
 
-**Rationale:** A worktree with a Rust target/ directory costs ~14 GB on average. An uncontrolled proliferation of open workstreams can exhaust disk space (a 1.1 TB leak occurred 2026-07-21 from orphaned worktrees). Concurrency caps force intentional closure (merging and cleanup) before opening new work.
+**Rationale:** A worktree with a Rust target/ directory costs ~14 GB on average. An uncontrolled proliferation of open workstreams can exhaust disk space (a 1.1 TB leak occurred 2026-07-21 from orphaned worktrees). Concurrency caps force intentional closure (merging and cleanup) before opening new work; sizing the cap to the repo means small repos aren't over-restricted and large repos aren't under-protected.
 
 **Behavior:**
-- When a workstream is opened (activated or created if not yet active) and the cap would be exceeded, the operation is REFUSED by default.
+- When a workstream is opened (activated or created if not yet active) and the computed cap would be exceeded, the operation is REFUSED by default.
 - Optional override: user may explicitly pass `--force` to override the refusal and open the workstream anyway. This is a deliberate, visible choice (not silent).
 - Per-project disk quota (optional, not in Phase 1): a secondary refusal gate based on projected worktree + target usage (default ~100 GB).
+- **Implementation note (sizing function unspecified):** this spec commits to the repo-size-scaling *principle*; the exact function mapping repo-size signals to a cap number is implementation scope (see §5, §8).
 
 ### 3.2 Scope declaration and overlap gate
 
 **Every workstream carries a scope** — a set of path globs (in a monorepo: crate names, package paths, or directory patterns). The scope is inferred from the driving issue or first commits and is refinable by the operator.
+
+**Exclusive file ownership (product-owner decision, 2026-07-29):** any file in a workstream's *owned* scope — the substantive source, docs, and config it's driving change through — belongs to exactly one workstream at a time. Two workstreams never concurrently own edits to the same owned file. A file MAY change hands between workstreams over time (e.g. workstream A closes, and a later workstream B then edits the same file) — the invariant is about concurrent ownership, not permanent assignment. **"Owned" excludes the exempt class defined below** (shared coordination files: lockfiles, per-crate CHANGELOGs, generated artifacts) — those remain cross-workstream by necessity and are merge-ordered (§3.3) rather than exclusively owned or refused. The overlap gate is the mechanism that enforces the invariant, over owned scope, at the scope-declaration level.
 
 **Scope inference:** The workstream's first task or the first commit determines the initial scope. For example, if the first commit touches `crates/trusty-search/src/`, the scope is inferred as `crates/trusty-search/**`. If multiple crates are touched, the scope is the union.
 
@@ -186,9 +203,9 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 ### AC-2: Resource governance
 
-**AC-2.1** Concurrency caps (default 3 per project, 8 per machine) are enforced. Opening a workstream beyond the cap is refused unless `--force` is passed.
+**AC-2.1** Concurrency caps are scaled to repo size (not a fixed number applied uniformly across projects). Opening a workstream beyond the computed cap is refused unless `--force` is passed.
 
-**AC-2.2** Scope declaration is inferred at workstream creation and is refinable. Scope overlap between OPEN workstreams is detected and refused by default; override requires explicit `--accept-conflict={id}`.
+**AC-2.2** Scope declaration is inferred at workstream creation and is refinable. Scope overlap between OPEN workstreams is detected and refused by default; override requires explicit `--accept-conflict={id}`. This enforces exclusive file ownership: no two OPEN workstreams concurrently own edits to the same owned file (the exempt coordination-file class in AC-2.3 is excluded from this invariant by definition, not by exception).
 
 **AC-2.3** Expected-conflict files (root Cargo.toml, lockfiles, CHANGELOG) are exempt from overlap gate. Touching them widens scope with confirmation.
 
@@ -238,7 +255,7 @@ Alice is working on trusty-mpm (Project A) and trusty-code (Project B) concurren
 - **Workstream A-1:** "Feature X for trusty-mpm" — opens a session, binds exactly one session to it. Alice opens a GUI tab and a CLI connection; both connect to the same session and see the same state.
 - **Workstream B-1:** "Feature Y for trusty-code" — opens a session, binds exactly one session to it. Alice switches tabs; the active workstream changes.
 - **Closure:** Alice merges Feature X. Workstream A-1 closes, its session is marked terminal, the worktree is reclaimed. Alice creates **Workstream A-2** (not A-1 reopened) for the next task.
-- **Concurrency:** Alice has 2 open workstreams (A-1 is still open until merged; B-1 is open). The cap is 3 per project, so A-2 opens freely. If she opens A-3 while A-1 is still open, A-1 and A-2 are live, the cap would be exceeded: refused unless `--force`.
+- **Concurrency:** Alice has 2 open workstreams (A-1 is still open until merged; B-1 is open). Project A's computed cap (scaled to its size) allows 3 concurrent workstreams, so A-2 opens freely. If she opens A-3 while A-1 is still open, A-1 and A-2 are live, the computed cap would be exceeded: refused unless `--force`.
 
 ### Example 2: Scope overlap detection
 

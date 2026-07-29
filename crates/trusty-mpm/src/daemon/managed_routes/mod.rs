@@ -574,8 +574,14 @@ pub async fn adopt_existing_session(
 /// count of stopped/errored sessions. Numbering is observed against the FULL,
 /// unfiltered record set BEFORE the `source_id` filter is applied — otherwise
 /// a session outside the current filter would go unobserved and receive a
-/// fresh number the next time it IS listed.
+/// fresh number the next time it IS listed. The optional `?slim=true` (or
+/// `slim=1`) query parameter (#4335, folds into #4322) skips the expensive
+/// per-session `stale_assets` probe for callers that never read that flag —
+/// every `stale_assets` then reports its `false` default, meaning "not
+/// computed", so only such a caller may pass it. Anything else (absent,
+/// `slim=false`, malformed) keeps the full probe.
 /// Test: list handler test; list-with-source-id-filter test;
+/// `checked_summaries_slim_skips_stale_assets_probe`;
 /// `list_marks_dead_stopped_session_unresumable`,
 /// `list_leaves_live_and_healthy_stopped_sessions_unmarked`,
 /// `list_assigns_stable_slot_numbers_and_tombstones_deleted_one` (integration
@@ -594,9 +600,13 @@ pub async fn list_managed_sessions(
     // `state`/`attached` reconciliation (#3302/#3531 — a running/attached
     // session must never read `(stopped)`) to the surviving rows, fail-closed
     // on a tmux probe error (see `reconcile_against_tmux`).
+    // #4335: `?slim=true` opts OUT of the expensive per-session `stale_assets`
+    // probe for callers that never read the flag (the nested-session guard).
+    // Absent/malformed → the full probe, so no existing client changes shape.
+    let slim = q.get("slim").is_some_and(|v| v == "true" || v == "1");
     let all_records = mgr.list().await;
     let numbered = mgr.numbered_snapshot(&all_records).await;
-    let sessions = numbered_summaries(numbered, mgr.tmux.as_ref(), sid_filter).await;
+    let sessions = numbered_summaries(numbered, mgr.tmux.as_ref(), sid_filter, !slim).await;
     Json(ListSessionsResponse { sessions })
 }
 

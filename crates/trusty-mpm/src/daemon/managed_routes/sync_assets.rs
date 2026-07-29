@@ -115,9 +115,13 @@ pub struct SyncAllAssetsResponse {
 ///
 /// Why: shared by both routes below so the per-session and fleet-wide paths
 /// can never disagree on which sessions `sync-assets` applies to — the same
-/// state set `summary.rs`'s private `probe_staleness_for` gates the
+/// state set `summary.rs`'s private `staleness_meaningful_for` gates the
 /// `stale_assets` marker on (a `Provisioning` session has not deployed yet,
-/// and a `Decommissioned` one has no workspace left).
+/// and a `Decommissioned` one has no workspace left) — so "we can tell you
+/// it's stale" and "we can fix it" can never disagree. Note the FLEET LIST
+/// path additionally skips `Stopped` for latency (#4322,
+/// `summary::probe_staleness_in_list`); that is a display-side decision only
+/// and deliberately does NOT narrow what `sync-assets` will act on.
 /// What: `true` for `Active`, `Stopped`, and `Errored`.
 /// Test: `sync_all_route_skips_provisioning_and_decommissioned`.
 fn syncable(state: &ManagedSessionState) -> bool {

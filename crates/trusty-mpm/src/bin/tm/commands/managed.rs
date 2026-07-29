@@ -200,7 +200,9 @@ pub(crate) async fn session_ls(
 /// actionable remedy is `tm session rm`. It also appends `[stale-assets]`
 /// (#2444) when the server-computed `stale_assets` flag is set — the
 /// session's deployed agents/skills have drifted from the catalog; the remedy
-/// is `tm sessions sync-assets <id>`.
+/// is `tm sessions sync-assets <id>` — or `[assets ?]` (#4322) when the daemon
+/// skipped the probe for that row (`stopped` sessions), so the operator reads
+/// "undetermined" rather than mistaking a missing marker for "assets fresh".
 /// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
 /// table bytes are exercised by `tests/session_manager_mvp.rs`;
 /// `format_state_column_appends_dead_marker` and
@@ -257,7 +259,8 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
         } else {
             s.state.as_str()
         };
-        let state = format_state_column(base_state, s.unresumable, s.stale_assets);
+        let unchecked = s.stale_assets_unchecked;
+        let state = format_state_column(base_state, s.unresumable, s.stale_assets, unchecked);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
             "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  {}{}",
@@ -290,15 +293,23 @@ fn format_tombstone_row(slot: u32) -> String {
 /// What: renders the base state (`deleted` → the `--deleted--` marker, #2012;
 /// every other state verbatim), then appends `" [dead]"` when `unresumable` is
 /// `true` (the session is `stopped`/`errored` with no workdir candidate left on
-/// disk, so a resume is guaranteed to fail), and/or `" [stale-assets]"` when
-/// `stale_assets` is `true` (the session's deployed agents/skills have drifted
-/// from the catalog — `tm sessions sync-assets <id>` fixes it). Markers can
-/// appear together.
+/// disk, so a resume is guaranteed to fail), and `" [stale-assets]"` when
+/// `stale` (the summary's `stale_assets`) is `true` — the session's deployed
+/// agents/skills have drifted from the catalog and `tm sessions sync-assets
+/// <id>` fixes it — or `" [assets ?]"` when `unchecked` (the summary's
+/// `stale_assets_unchecked`) is `true` (#4322: the daemon
+/// did not probe this row — the list path skips `stopped` sessions — so
+/// staleness is UNDETERMINED, not known-fresh; `tm sessions sync-assets <id>`
+/// is still the remedy, and resuming the session determines it). The two asset
+/// markers are mutually exclusive — an unprobed row has no verdict to report —
+/// so a stale verdict always wins if both flags somehow arrive set. Markers can
+/// otherwise appear together.
 /// Test: `format_state_column_appends_dead_marker`,
 /// `format_state_column_appends_stale_assets_marker`,
+/// `format_state_column_appends_unchecked_assets_marker`,
 /// `format_state_column_leaves_healthy_state_unchanged`,
 /// `format_state_column_renders_deleted_marker`.
-fn format_state_column(state: &str, unresumable: bool, stale_assets: bool) -> String {
+fn format_state_column(state: &str, unresumable: bool, stale: bool, unchecked: bool) -> String {
     // A `deleted` record (soft-deleted via `tm sessions delete`) renders as the
     // `--deleted--` marker so the master list REFLECTS the deletion instead of
     // the row silently vanishing (#2012 marker).
@@ -310,8 +321,10 @@ fn format_state_column(state: &str, unresumable: bool, stale_assets: bool) -> St
     if unresumable {
         out.push_str(" [dead]");
     }
-    if stale_assets {
+    if stale {
         out.push_str(" [stale-assets]");
+    } else if unchecked {
+        out.push_str(" [assets ?]");
     }
     out
 }

@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
-use super::summary::{reconcile_against_tmux, reconcile_live_state};
+use super::summary::checked_summaries_with;
+use super::summary::{reconcile_against_tmux, reconcile_live_state, stale_assets_for_many};
 use super::{checked_summaries, record_to_json, record_to_summary};
 use crate::session_manager::{
     InjectionStatus, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
@@ -494,6 +495,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,
@@ -533,6 +535,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,
@@ -763,6 +766,254 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     assert!(
         !summaries[1].stale_assets,
         "a Provisioning session must never be probed — it has not deployed yet"
+    );
+    assert!(
+        !summaries[0].stale_assets_unchecked && !summaries[1].stale_assets_unchecked,
+        "neither an Active (probed) nor a Provisioning (nothing to check) row \
+         may claim an UNDETERMINED asset verdict"
+    );
+}
+
+/// Deploy `stem`.md into `workspace`'s `.claude/agents` from the (fake-home)
+/// bundled source, then drift the catalog underneath it — leaving that
+/// workspace GENUINELY stale relative to the catalog.
+///
+/// Why: three staleness tests below need the identical "deployed at v1,
+/// catalog moved to v2" setup; sharing it keeps them asserting about the
+/// PROBE rather than re-deriving the fixture, and guarantees the stopped-vs-
+/// on-demand pair below compare the exact same on-disk condition.
+fn deploy_then_drift_catalog(workspace: &std::path::Path) {
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+    std::fs::create_dir_all(workspace).unwrap();
+    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workspace);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &session_fw.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+}
+
+/// Issue #4322: the FLEET LIST path must not probe `Stopped` sessions — that
+/// probe is ~95 filesystem reads per session and dominated cold `tm ls`
+/// latency, while telling the operator nothing actionable until resume.
+///
+/// This pins BOTH halves of the contract, because either alone would be a
+/// silent regression:
+///   1. a genuinely stale STOPPED session is NOT flagged `stale_assets` by
+///      `checked_summaries` (proving the probe really was skipped — this
+///      assertion FAILS if `probe_staleness_in_list` is reverted to include
+///      `Stopped`), and
+///   2. that row carries `stale_assets_unchecked`, so its `stale_assets:
+///      false` can never be read as a "checked, and fresh" verdict.
+/// The companion `record_to_summary_checked_still_flags_stale_stopped_session`
+/// proves the SIGNAL itself was not deleted — the same record, fetched
+/// individually (the resume path), still reports stale.
+#[tokio::test]
+#[serial_test::serial]
+async fn checked_summaries_does_not_probe_stopped_sessions() {
+    let (home, _guard) = fake_home();
+    let workspace = home.path().join("stopped-drifted");
+    deploy_then_drift_catalog(&workspace);
+
+    let mut stopped = make_record(None);
+    stopped.state = ManagedSessionState::Stopped;
+    stopped.workspace_path = Some(workspace);
+
+    let summaries = checked_summaries(std::slice::from_ref(&stopped)).await;
+
+    assert!(
+        !summaries[0].stale_assets,
+        "the fleet list must NOT probe a Stopped session — a `true` here means \
+         the per-session filesystem probe ran anyway (#4322 regression)"
+    );
+    assert!(
+        summaries[0].stale_assets_unchecked,
+        "an unprobed Stopped row must advertise that its asset verdict is \
+         UNDETERMINED — absence of `[stale-assets]` must never read as 'fresh'"
+    );
+}
+
+/// Issue #4322 anti-regression pin: parallelizing the staleness fan-out must
+/// NOT reinstate the per-session catalog recompose #2444's review removed.
+///
+/// The guard is structural rather than a call counter: `staleness_inputs`
+/// resolves the SHARED catalog half sequentially and hands each session an
+/// `Arc` to it, and the spawned tasks only ever borrow that `Arc`. So proving
+/// that every session resolving the same `(agent_source, skill_source)` pair
+/// receives a POINTER-EQUAL handle proves there is exactly one compute per
+/// group — and that no second one exists for a spawned task to perform. Move
+/// `CatalogHashes::compute` inside the fan-out and this fails immediately.
+#[tokio::test]
+#[serial_test::serial]
+async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
+    let (home, _guard) = fake_home();
+    let records: Vec<SessionRecord> = (0..3)
+        .map(|i| {
+            let ws = home.path().join(format!("shared-catalog-{i}"));
+            std::fs::create_dir_all(&ws).unwrap();
+            let mut r = make_record(None);
+            r.state = ManagedSessionState::Active;
+            r.workspace_path = Some(ws);
+            r
+        })
+        .collect();
+
+    let inputs = super::summary::staleness_inputs(records);
+
+    assert_eq!(inputs.len(), 3, "one input per record, in input order");
+    assert!(
+        std::sync::Arc::ptr_eq(&inputs[0].3, &inputs[1].3)
+            && std::sync::Arc::ptr_eq(&inputs[0].3, &inputs[2].3),
+        "every session resolving the SAME catalog source pair must share ONE \
+         computed CatalogHashes — a distinct Arc per session means the catalog \
+         was recomposed per session (#2444 regression)"
+    );
+}
+
+/// Issue #4326 review, HIGH (empirically proven): the pin above only ever
+/// called [`super::summary::staleness_inputs`] directly — it never exercised
+/// [`stale_assets_for_many`], the function `checked_summaries` (and therefore
+/// `tm ls`) actually calls. The critic proved this gap by moving
+/// `CatalogHashes::compute` INSIDE `stale_assets_for_many`'s per-session
+/// `JoinSet::spawn_blocking` fan-out — reinstating the exact #2444 per-session
+/// recompose — and every existing test, including the pin above, stayed
+/// green.
+///
+/// Why this test closes the gap: it calls `stale_assets_for_many` itself (the
+/// real hot path) with three records that all resolve to the SAME
+/// `(agent_source, skill_source)` pair (the shared default, anchored at this
+/// test's `fake_home()`-scoped `$HOME`), and asserts via
+/// [`crate::core::update_check::compute_calls_for`] — a call LOG keyed by the
+/// exact catalog paths, not a bare counter, so unrelated tests reaching
+/// `CatalogHashes::compute` through their own unrelated temp paths can never
+/// pollute this assertion — that `compute` ran EXACTLY ONCE for that pair.
+/// Reinstating the per-session compose inside the fan-out (the critic's
+/// mutation) makes this assert `3`, not `1`, and fail.
+/// What: resets the log, resolves this test's own catalog source pair via
+/// `FrameworkPaths::default()` (identical resolution `staleness_inputs` uses
+/// internally), runs the real fan-out, and asserts one compute for that pair.
+/// Test: this function; mutation-verified per the PR report (temporarily
+/// reinstating the per-task compute reproduces the critic's failure, then
+/// reverted).
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_assets_for_many_computes_catalog_exactly_once_per_source_pair() {
+    let (home, _guard) = fake_home();
+    crate::core::update_check::reset_compute_call_log();
+
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let agent_source = fw.agent_source_dir();
+    let skill_source = fw.skill_source_dir();
+
+    let records: Vec<SessionRecord> = (0..3)
+        .map(|i| {
+            let ws = home.path().join(format!("hot-path-shared-catalog-{i}"));
+            std::fs::create_dir_all(&ws).unwrap();
+            let mut r = make_record(None);
+            r.state = ManagedSessionState::Active;
+            r.workspace_path = Some(ws);
+            r
+        })
+        .collect();
+
+    let result = stale_assets_for_many(records).await;
+
+    assert_eq!(result.len(), 3, "every record gets a result");
+    assert_eq!(
+        crate::core::update_check::compute_calls_for(&agent_source, &skill_source),
+        1,
+        "three sessions sharing one (agent_source, skill_source) pair must \
+         share exactly ONE CatalogHashes::compute — more than one means the \
+         per-session recompose #2444's review removed was reinstated inside \
+         the fan-out (#4326 review HIGH)"
+    );
+}
+
+/// Issue #4322 correctness gate: skipping the probe on the LIST path must not
+/// delete the SIGNAL. The single-session fetch (`GET …/managed/{id}`, which
+/// `tm session resume` reads — the exact moment a stopped session's drift
+/// becomes actionable) must still flag the very same genuinely-stale STOPPED
+/// record its list row leaves undetermined.
+#[tokio::test]
+#[serial_test::serial]
+async fn record_to_summary_checked_still_flags_stale_stopped_session() {
+    let (home, _guard) = fake_home();
+    let workspace = home.path().join("stopped-drifted-on-demand");
+    deploy_then_drift_catalog(&workspace);
+
+    let mut stopped = make_record(None);
+    stopped.state = ManagedSessionState::Stopped;
+    stopped.workspace_path = Some(workspace);
+
+    let summary = super::summary::record_to_summary_checked(&stopped).await;
+
+    assert!(
+        summary.stale_assets,
+        "the on-demand single-session path must still detect a Stopped \
+         session's deployed-asset drift — a fast `tm ls` that never detects \
+         staleness anywhere is a regression, not a fix"
+    );
+    assert!(
+        !summary.stale_assets_unchecked,
+        "the on-demand path DID check, so its verdict is authoritative"
+    );
+}
+
+/// Issue #4335: `?slim=true` must actually SKIP the asset-staleness probe.
+///
+/// Why: asserting only that a slim listing reports `stale_assets: false` is
+/// vacuous — `false` is also the value a session with current assets gets.
+/// This builds the exact fixture
+/// `checked_summaries_flags_stale_assets_only_for_relevant_states` uses to
+/// produce a genuine `true`, then shows the slim path reports `false` for it.
+/// The difference can only come from the probe not running, which is the whole
+/// point of the flag: the guard's cold-daemon timeout was that probe's cost.
+#[tokio::test]
+#[serial_test::serial]
+async fn checked_summaries_slim_skips_stale_assets_probe() {
+    let (home, _guard) = fake_home();
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &session_fw.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+
+    let mut active = make_record(None);
+    active.state = ManagedSessionState::Active;
+    active.workspace_path = Some(workspace);
+    let records = vec![active];
+
+    // Control: the full probe SEES the drift.
+    let full = checked_summaries_with(&records, true).await;
+    assert!(
+        full[0].stale_assets,
+        "fixture must genuinely be stale, else the slim assertion below is vacuous"
+    );
+
+    // Slim: same records, probe skipped, flag left at its default.
+    let slim = checked_summaries_with(&records, false).await;
+    assert!(
+        !slim[0].stale_assets,
+        "slim mode must skip the staleness probe entirely (#4335)"
+    );
+    assert_eq!(
+        slim[0].id, full[0].id,
+        "slim mode must still return every session — only the probe is skipped"
     );
 }
 
