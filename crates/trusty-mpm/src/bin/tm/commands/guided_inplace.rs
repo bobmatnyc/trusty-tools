@@ -605,9 +605,9 @@ pub(crate) async fn run_inplace_relaunch(
 /// the tmux-pane spawn/resume paths so an in-place relaunch does not silently
 /// drop back into the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop the token
 /// exists to bypass. Pure — builds and returns, never spawns.
-/// Test: `inplace_exec_command_carries_isolation_flags`,
-/// `inplace_exec_command_carries_prompt_file_and_resume_selection`,
-/// `inplace_exec_command_scrubs_api_key_and_sets_config_dir`.
+/// Test: `inplace_exec_command_forwards_every_arg_in_order`,
+/// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
+/// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
     cwd: &std::path::Path,
