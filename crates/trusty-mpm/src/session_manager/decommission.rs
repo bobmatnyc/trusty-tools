@@ -539,9 +539,20 @@ impl SessionManager {
             search_gc::delete_search_index_best_effort(&index_id).await;
         }
 
-        // Tombstone: clear workspace_path, mark Decommissioned, persist.
-        record.workspace_path = None;
-        record.workspace_owned = false;
+        // Tombstone: mark Decommissioned, persist. `workspace_path`/
+        // `workspace_owned` are cleared ONLY when nothing is left on disk —
+        // every "skip removal" branch above (the dirty-worktree refusal,
+        // unowned/local-path, the containment guard) deliberately leaves real
+        // content in place, and blanking the pointer here would strand that
+        // retained directory with nothing but the transient warn! log line
+        // above as a trail back to it (#4344 review). A record whose
+        // workspace really was removed (or was already absent) still nulls
+        // both fields exactly as before.
+        let workspace_still_on_disk = record.workspace_path.as_deref().is_some_and(|p| p.exists());
+        if !workspace_still_on_disk {
+            record.workspace_path = None;
+            record.workspace_owned = false;
+        }
         record.state = ManagedSessionState::Decommissioned;
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");

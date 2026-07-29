@@ -236,7 +236,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `worktree_safety::inspect_dirt` check the orphan-worktree sweep uses (the
   #4091 dirty-worktree guard): a dirty candidate is now refused and reported,
   and the session record still tombstones to `Decommissioned` so the skip is
-  never silent.
+  never silent. Two follow-ups close the gap between that refusal and where
+  an operator would actually see it: (1) the tombstone no longer nulls
+  `workspace_path` when nothing was removed — every "skip removal" branch in
+  `decommission` leaves real content in place, and blanking the pointer would
+  strand it with nothing but a transient log line as a trail back to it; (2)
+  `tm sessions prune --state stopped` (and the underlying `PruneAction`) now
+  has a distinct `decommissioned_worktree_retained` outcome, with the
+  retained path echoed back, instead of printing the same `decommissioned`
+  line whether or not the worktree was actually deleted.
 - The per-project worktree opt-out is no longer silently conditional on the
   daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
   `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),

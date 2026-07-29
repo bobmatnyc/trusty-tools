@@ -244,7 +244,10 @@ fn push_to_bare_remote(repo: &std::path::Path) {
 /// Asserts: (1) `workspace_removed` is `false`; (2) the record still
 /// tombstones to `Decommissioned` (consistent with every other "skip
 /// removal" branch in `decommission_with_root`); (3) the worktree directory
-/// AND the untracked file both survive on disk.
+/// AND the untracked file both survive on disk; (4) the tombstone record
+/// KEEPS `workspace_path` pointing at the retained directory (#4344 review) —
+/// nulling it here would strand the retained work with nothing but a
+/// transient warn! log line as a trail back to it.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_decommission_refuses_dirty_worktree() {
@@ -303,5 +306,106 @@ async fn manager_decommission_refuses_dirty_worktree() {
     assert!(
         worktree_path.join("uncommitted-work.txt").exists(),
         "the uncommitted file itself must survive the refused decommission"
+    );
+    assert_eq!(
+        tombstone.workspace_path.as_deref(),
+        Some(worktree_path.as_path()),
+        "workspace_path must survive on the tombstone when removal was refused \
+         (#4344 review) — it is the only durable pointer back to the retained work"
+    );
+}
+
+/// `tm sessions prune --state stopped` (via `prune_managed`) surfaces a
+/// dirty-worktree refusal through its own report, instead of printing the
+/// same `decommissioned` line whether or not the worktree was actually
+/// removed (#4344 review).
+///
+/// Why: `prune_managed` discarded the `bool` half of `decommission`'s
+/// `(SessionRecord, bool)` return, and `PruneAction` had no variant for
+/// "refused, worktree retained" — so `tm sessions prune --state stopped`
+/// gave no visible signal, at the ONE surface an operator actually reads,
+/// that a worktree was silently kept dirty on disk instead of removed.
+/// What: seeds a `Stopped` record (via the real `stop()` teardown, mirroring
+/// how a genuinely stopped session gets there) pointing at a real,
+/// dirtied in-project worktree, runs
+/// `prune_managed(PruneFilter::Stopped, …)`, and asserts the single
+/// returned row is `PruneAction::DecommissionedWorktreeRetained` with
+/// `retained_workspace_path` set to the worktree's path — plus the usual
+/// on-disk survival assertions.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_reports_dirty_worktree_retained() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake)
+        .await
+        .expect("manager");
+
+    let fixture = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let session_name = "test-session-prune-dirty";
+    let worktree_path = fixture.add_worktree(session_name);
+    std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
+    std::fs::write(
+        worktree_path.join("uncommitted-work.txt"),
+        b"unsaved work\n",
+    )
+    .expect("write uncommitted file");
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(worktree_path.clone()),
+            None,
+            Some(worktree_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false, // owned: false — in-project worktree, not a full clone
+        )
+        .await
+        .expect("create");
+
+    // Transition to Stopped exactly like a real "runtime exited" session —
+    // `prune --state stopped` only ever targets genuinely Stopped records.
+    mgr.stop(&record.id).await.expect("stop");
+
+    let outcome = mgr
+        .prune_managed(
+            crate::session_manager::PruneFilter::Stopped,
+            false,
+            false,
+            None,
+        )
+        .await
+        .expect("prune stopped");
+
+    assert_eq!(
+        outcome.count(),
+        1,
+        "the dirty stopped session is the only candidate"
+    );
+    let pruned = &outcome.sessions[0];
+    assert_eq!(
+        pruned.action,
+        crate::session_manager::PruneAction::DecommissionedWorktreeRetained,
+        "a dirty in-project worktree must report as retained, not a plain decommission; got {:?}",
+        pruned.action
+    );
+    assert_eq!(
+        pruned.retained_workspace_path.as_deref(),
+        Some(worktree_path.as_path()),
+        "the prune report must echo back WHERE the retained work lives"
+    );
+
+    // The usual on-disk guarantees still hold at the prune surface too.
+    assert!(
+        worktree_path.exists(),
+        "the dirty worktree must survive a prune sweep"
+    );
+    assert!(
+        worktree_path.join("uncommitted-work.txt").exists(),
+        "the uncommitted file must survive a prune sweep"
     );
 }
