@@ -126,16 +126,22 @@ pub async fn prune_worktrees_route(
     // recorded it as `state: "stopped"`, holding 12 modified tracked files,
     // 31 untracked files, and 1 unpushed commit.
     //
-    // What narrowing this set would cost: such a worktree stops being spared
-    // and becomes an orphan CANDIDATE. Everything after that is a gate that
-    // can be open — the #3649 ownership sentinel is the last one, and in the
-    // measured case it was ZERO BYTES (`worktree_ownership::read_sentinel_owner`
-    // correctly maps that to `SentinelOwner::Unknown`, which spares it — but a
-    // well-formed sentinel naming a purged owner does not). This set is what
-    // keeps a live-but-mislabelled worktree off the candidate list at all.
+    // What narrowing this set costs, measured rather than assumed (#4288):
+    // such a worktree stops being spared and becomes an orphan CANDIDATE, so
+    // this route's DRY-RUN preview reports a live worktree as reclaimable —
+    // a false report an operator may then act on. It does NOT by itself delete
+    // anything: the real (`dry_run: false`) path re-reads the store for
+    // `prune_orphaned_worktrees`'s Phase 2 `fresh_active` snapshot, itself
+    // deliberately unfiltered, and that second read still spares the candidate
+    // immediately before deletion. The two reads are defense-in-depth; data
+    // loss needs BOTH narrowed. Do not read that as permission to narrow one
+    // "because the other covers it" — that argument applied twice is exactly
+    // how a pair of independent boundaries collapses into none.
     //
     // Pinned by `prune_spares_a_stopped_records_workspace` in this file's test
-    // module — if you broke that test, this comment is what you tripped.
+    // module (which fails on the dry-run preview alone), and end-to-end on the
+    // automatic GC path by `reap_spares_a_stopped_records_workspace` in
+    // `session_manager::reap_orphaned_worktrees_tests`.
     let active_workspace_paths: Vec<std::path::PathBuf> = records
         .iter()
         .filter_map(|r| r.workspace_path.clone())
