@@ -34,7 +34,7 @@
 //! target. Two rules govern it, both enforced here rather than at the caller:
 //!
 //! - **#4026, fail-closed allow-set.** A named specialist is resolved through
-//!   `cross_product::SubagentAllowSet` — the intersection of the bridge's own
+//!   `subagent_allow::SubagentAllowSet` — the intersection of the bridge's own
 //!   `NON_CODING_TARGETS` floor with the calling agent's `[subagents].allowed`
 //!   config. The default is EMPTY: omitting `with_allow_set` disables named
 //!   targeting entirely. A denial returns before `backend.run`, so nothing is
@@ -59,9 +59,10 @@ use serde_json::{Value, json};
 use crate::intent::route::{BridgeRoute, route_task};
 use crate::rbac::ServiceTier;
 use crate::tools::cross_product::{
-    CallerAuthority, HandoffContext, ProposalEnvelope, SubagentAllowSet,
+    CallerAuthority, HandoffContext, NON_CODING_TARGETS, ProposalEnvelope,
 };
 use crate::tools::pm_bridge_backend::PmBridgeBackend;
+use crate::tools::subagent_allow::SubagentAllowSet;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// Envelope `origin_agent` used when a registration site names none.
@@ -102,7 +103,7 @@ impl PmBridgeTool {
             restricted: Vec::new(),
             // #4026: EMPTY allow-set by default — constructing the tool grants
             // no cross-product reach whatsoever.
-            allow_set: SubagentAllowSet::empty(),
+            allow_set: SubagentAllowSet::empty_over(NON_CODING_TARGETS),
             origin_agent: DEFAULT_ORIGIN_AGENT.to_string(),
             caller_authority: CallerAuthority::Standard,
         }

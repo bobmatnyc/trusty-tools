@@ -15,19 +15,25 @@
 //! runs in a DIFFERENT PRODUCT that has no `user_authority` concept at all,
 //! so by construction its output can only ever be a proposal.
 //! What: [`NON_CODING_TARGETS`] is the hard, bridge-owned floor of reachable
-//! specialist names; [`SubagentAllowSet`] intersects it with the calling
-//! agent's own `[subagents].allowed` config list
-//! (`crate::agents::config::SubagentsConfig`) and resolves a requested name
-//! or returns a [`TargetDenied`] reason. [`HandoffContext`] is the minimal
+//! specialist names; [`crate::tools::subagent_allow::SubagentAllowSet`]
+//! intersects it with the calling agent's own `[subagents].allowed` config
+//! list (`crate::agents::config::SubagentsConfig`) and resolves a requested
+//! name or returns a [`crate::tools::subagent_allow::TargetDenied`] reason.
+//! That allow-set USED to live in this module; ADR-0024 decision 4 gave the
+//! in-process `delegate_to_agent` path the same floor-narrowing shape over a
+//! DIFFERENT name vocabulary, so the gate moved to `tools::subagent_allow` and
+//! became floor-parameterized rather than being copied. This module keeps the
+//! bridge's own floor and its wire types. [`HandoffContext`] is the minimal
 //! #2809-SHAPED outbound payload (`summary`/`relevant_state`/`constraints`,
 //! 4 KiB serialized cap) — a local copy of that shape per the owner's OQ-6
 //! ruling, with NO dependency on epic #2809 landing. [`ProposalEnvelope`] is
 //! the inbound wrapper: origin agent, target agent, the CALLER's authority
 //! tier, and a [`Disposition`] marker that this bridge always sets to
 //! `Proposal`.
-//! Test: `cross_product_tests` — empty-default pin, allow-set fail-closed
-//! rejection, non-coding floor beating a permissive config, envelope shape
-//! and always-`Proposal` disposition, and the 4 KiB handoff cap.
+//! Test: `cross_product_tests` — envelope shape and always-`Proposal`
+//! disposition, and the 4 KiB handoff cap. The allow-set's own coverage
+//! (empty-default pin, fail-closed rejection, floor-beats-config) moved with
+//! it to `subagent_allow_tests`.
 
 use serde::{Deserialize, Serialize};
 
@@ -61,138 +67,6 @@ pub const HANDOFF_MAX_BYTES: usize = 4096;
 /// Test: `non_coding_floor_rejects_a_coding_target_even_when_config_allows_it`,
 /// `allow_set_accepts_a_named_non_coding_target`.
 pub const NON_CODING_TARGETS: &[&str] = &["research", "ticketing"];
-
-/// Why a requested cross-product target was refused.
-///
-/// Why: the bridge must fail CLOSED with a clear, caller-actionable reason and
-/// without dispatching anything — but it must not enumerate the roster back to
-/// a black-boxed persona (the #3052 PR A CRITICAL-2 rule `delegate_to_agent`
-/// already follows). A small reason enum keeps the caller-facing string in one
-/// place instead of scattered format strings.
-/// What: three variants covering the three ways resolution fails.
-/// Test: `blank_target_is_rejected`, `empty_default_allow_set_denies_everything`,
-/// `non_coding_floor_rejects_a_coding_target_even_when_config_allows_it`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TargetDenied {
-    /// The requested name was blank/whitespace-only.
-    Blank,
-    /// The name is not in [`NON_CODING_TARGETS`] — the bridge's hard floor.
-    NotNonCoding(String),
-    /// The name passed the floor but the caller's `[subagents].allowed` list
-    /// does not grant it (this includes the EMPTY default — see
-    /// [`SubagentAllowSet::empty`]).
-    NotGranted(String),
-}
-
-impl std::fmt::Display for TargetDenied {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TargetDenied::Blank => write!(f, "specialist name must not be empty"),
-            // Both denials render the SAME generic text on purpose: the
-            // difference between "not a permitted kind of specialist" and "not
-            // granted to you" would let a caller probe the floor list.
-            TargetDenied::NotNonCoding(name) | TargetDenied::NotGranted(name) => {
-                write!(f, "specialist '{name}' is not available to this agent")
-            }
-        }
-    }
-}
-
-/// The fail-closed set of cross-product specialist names one calling agent may
-/// target through the bridge (#4026).
-///
-/// Why: see the module docs. Constructed once at tool-registration time from
-/// the calling agent's config so `execute()` never consults anything the LLM
-/// can influence mid-turn.
-/// What: `granted` holds the caller's configured names, already trimmed and
-/// lowercased. [`SubagentAllowSet::resolve`] requires membership in BOTH
-/// `granted` and [`NON_CODING_TARGETS`]. The default ([`Self::empty`]) grants
-/// nothing — an absent `[subagents]` section is NOT a silent capability grant.
-/// Test: `empty_default_allow_set_denies_everything`,
-/// `allow_set_accepts_a_named_non_coding_target`.
-#[derive(Debug, Clone, Default)]
-pub struct SubagentAllowSet {
-    granted: Vec<String>,
-}
-
-impl SubagentAllowSet {
-    /// The empty allow-set — the DEFAULT, granting nothing.
-    ///
-    /// Why: an absent `[subagents]` section must not widen capability. This is
-    /// the pinned posture for the whole feature: named cross-product targeting
-    /// is off until an agent's config explicitly turns it on, mirroring
-    /// `[tools].allow`/`[skills].allow`'s deny-by-default stance.
-    /// What: an allow-set with no granted names; every `resolve` returns
-    /// [`TargetDenied::NotGranted`].
-    /// Test: `empty_default_allow_set_denies_everything`,
-    /// `default_impl_is_the_empty_allow_set`.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Build from a caller's configured `[subagents].allowed` list.
-    ///
-    /// Why: OQ-3's ruling makes the config list the source of truth for now,
-    /// with #4030's runtime-built domain authority feeding the same set later
-    /// — so this constructor is the single seam that will gain that second
-    /// source without touching the bridge or the tool.
-    /// What: `None` (absent section) yields [`Self::empty`]. Names are
-    /// trimmed, lowercased, and de-duplicated; blank entries are dropped. No
-    /// glob dialect — exact names only, matching `[skills].allow`'s
-    /// literal-ids-only invariant.
-    /// Test: `from_allowed_none_is_empty`, `from_allowed_normalizes_entries`.
-    pub fn from_allowed(allowed: Option<&[String]>) -> Self {
-        let Some(list) = allowed else {
-            return Self::empty();
-        };
-        let mut granted: Vec<String> = Vec::new();
-        for raw in list {
-            let name = raw.trim().to_ascii_lowercase();
-            if name.is_empty() || granted.contains(&name) {
-                continue;
-            }
-            granted.push(name);
-        }
-        Self { granted }
-    }
-
-    /// Whether this allow-set grants nothing (the default posture).
-    ///
-    /// Why: the tool layer uses this to decide whether to advertise the
-    /// specialist parameter at all — an agent with no grants should not be
-    /// invited to guess names.
-    /// What: true iff no name is granted.
-    /// Test: `empty_default_allow_set_denies_everything`.
-    pub fn is_empty(&self) -> bool {
-        self.granted.is_empty()
-    }
-
-    /// Resolve a caller-requested specialist name, fail-closed.
-    ///
-    /// Why: THE enforcement point (OQ-7). Nothing is dispatched unless this
-    /// returns `Ok`; both the non-coding floor and the caller's own grant list
-    /// must admit the name.
-    /// What: trims/lowercases `requested`, then requires membership in
-    /// [`NON_CODING_TARGETS`] first (the bridge's own floor, checked BEFORE
-    /// config so a permissive config can never widen it) and in `granted`
-    /// second. Returns the normalized name on success.
-    /// Test: `allow_set_accepts_a_named_non_coding_target`,
-    /// `non_coding_floor_rejects_a_coding_target_even_when_config_allows_it`,
-    /// `blank_target_is_rejected`.
-    pub fn resolve(&self, requested: &str) -> Result<String, TargetDenied> {
-        let name = requested.trim().to_ascii_lowercase();
-        if name.is_empty() {
-            return Err(TargetDenied::Blank);
-        }
-        if !NON_CODING_TARGETS.contains(&name.as_str()) {
-            return Err(TargetDenied::NotNonCoding(name));
-        }
-        if !self.granted.contains(&name) {
-            return Err(TargetDenied::NotGranted(name));
-        }
-        Ok(name)
-    }
-}
 
 /// Minimal, #2809-SHAPED outbound handoff payload (#4028, OQ-6).
 ///

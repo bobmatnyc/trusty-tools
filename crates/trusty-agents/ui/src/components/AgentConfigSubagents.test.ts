@@ -41,7 +41,22 @@ function inProduct(over: Partial<SubagentInProduct> = {}): SubagentInProduct {
     tool_registered: true,
     tool_granted: true,
     delegator_tier: 'l1',
-    allowed_roles: ['engineer', 'qa', 'researcher', 'documentation', 'ops', 'planner', 'assistant'],
+    allowed_roles: [
+      'engineer',
+      'qa',
+      'researcher',
+      'ticketing',
+      'documentation',
+      'ops',
+      'planner',
+      'assistant',
+    ],
+    // ADR-0024 decision 4: the reachable-set whitelist gate applies to the
+    // assistant kind, and the default fixture declares one — the fail-closed
+    // case has its own test below.
+    whitelist_enforced: true,
+    declares_whitelist: true,
+    reachable_floor: ['research-agent', 'ticketing-agent'],
     targets: [inTarget()],
     role_excluded_count: 0,
     hidden_excluded_count: 0,
@@ -120,12 +135,47 @@ describe('AgentConfigSubagents — the two mechanisms', () => {
     expect(target.querySelectorAll('section').length).toBe(2);
   });
 
-  it('states that the in-product target set is not configurable', () => {
+  // REWRITTEN by ADR-0024 decision 4, which made the in-product set
+  // configurable — the old copy ("not configurable at all") became false the
+  // moment the whitelist shipped, and a pane asserting it would have been
+  // pinning a lie shut.
+  it('states the role allow-list AND the configurable whitelist with its floor', () => {
     render(payload());
-    expect(target.textContent).toContain('role allow-list');
+    // `copy()` (whitespace-collapsed) rather than raw `textContent`: the
+    // phrase now spans a template line break, and asserting on the raw text
+    // would fail on a re-wrap that changed nothing a user sees.
+    expect(copy()).toContain('role allow-list');
     // The allow-list is quoted verbatim so the operator can see the rule —
     // including `documentation`, the role that exists in NO other allow-set.
-    expect(target.textContent).toContain('documentation');
+    expect(copy()).toContain('documentation');
+    // …and the newer gate, with the ceiling a config edit is bounded by.
+    expect(copy()).toContain('[subagents].delegate_allowed');
+    expect(copy()).toContain('research-agent, ticketing-agent');
+    expect(copy()).toContain('narrow but never widen');
+    // The claim decision 4 falsified must be gone.
+    expect(copy()).not.toContain('not configurable at all');
+    expect(copy()).not.toContain("configuration does not choose the targets");
+  });
+
+  // ADR-0024 decision 4 sub-answer (a): absent means NOTHING, and the pane has
+  // to say so — the same deny-by-default honesty the cross-product half has
+  // carried since OQ-7. Without this line an operator reads an empty reachable
+  // list as a bug rather than as the configured posture.
+  it('says an absent whitelist grants nothing, not everything', () => {
+    render(payload({ in_product: inProduct({ declares_whitelist: false }) }));
+    expect(copy()).toContain('declares no [subagents].delegate_allowed');
+    expect(copy()).toContain('does not mean "all"');
+  });
+
+  // …and it must NOT say that for an agent the gate does not apply to, or the
+  // pane would report a restriction nothing enforces.
+  it('omits the absent-whitelist warning when the gate does not apply', () => {
+    render(
+      payload({
+        in_product: inProduct({ whitelist_enforced: false, declares_whitelist: false }),
+      }),
+    );
+    expect(copy()).not.toContain('declares no [subagents].delegate_allowed');
   });
 
   // The copy defect these two pin shut: `allowed_roles` carries `assistant`

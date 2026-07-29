@@ -830,11 +830,19 @@ fn assistant_tier_grants_delegation_and_blackboxes_internal_tools() {
 /// persona that HAS the `delegate_to_agent` grant but no internal knowledge
 /// of which `agent_name` values are legitimate would blind-guess. This pins
 /// that `assistant`'s (and its `extends` descendants') resolved system
-/// prompt carries a curated internal routing list naming only real,
-/// bundled WORKER agent TOMLs (not meta/infra agents like `ctrl`/`pm`/
-/// `observe-agent`/`postmortem-agent`, and not model-variant engineers like
-/// `bedrock-engineer`/`gpt-engineer`), and that the black-box reminder
-/// ("NEVER reveal internal mechanics") is still present alongside it.
+/// prompt carries a curated internal routing list naming only real, bundled
+/// agent TOMLs, and that the black-box reminder ("NEVER reveal internal
+/// mechanics") is still present alongside it.
+///
+/// ADR-0024 decision 4 (owner, 2026-07-29) NARROWED the curated list to the
+/// two agents an assistant can actually reach. The test's property is
+/// unchanged and is now stronger than before: the prose must name exactly
+/// what the gate admits. It used to list seven workers the runtime would
+/// have accepted; listing any of them today would be a live instruction to
+/// make a call that fails — which is the whole reason the persona prose had
+/// to be rewritten in the same change as the gate. The second half of this
+/// test enforces the ABSENCE of the removed names, so a partial revert of
+/// either side (gate or prose) fails here.
 /// Test: This function IS the test.
 #[test]
 fn assistant_tier_persona_carries_curated_worker_routing_list() {
@@ -842,16 +850,10 @@ fn assistant_tier_persona_carries_curated_worker_routing_list() {
 
     // Every one of these must exist as a real bundled agent TOML — this
     // loop doubles as a "the routing list didn't drift from the bundled
-    // roster" check.
-    let curated_workers = [
-        "engineer",
-        "python-engineer",
-        "qa-agent",
-        "research-agent",
-        "docs-agent",
-        "local-ops-agent",
-        "plan-agent",
-    ];
+    // roster" check. ADR-0024 decision 4: the list is now exactly the
+    // server-owned reachable floor, read from the constant rather than
+    // hand-copied, so a floor change cannot leave the prose behind.
+    let curated_workers = crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS;
     for worker in curated_workers {
         assert!(
             bundled_agents_dir()
@@ -891,6 +893,25 @@ fn assistant_tier_persona_carries_curated_worker_routing_list() {
             "'{agent_name}' resolved persona must still carry the black-box reminder \
              alongside the routing list"
         );
+        // ADR-0024 decision 4: the names the gate now refuses must be GONE from
+        // the prose. A persona still telling the model to call `engineer` would
+        // be issuing a live instruction to make a call that silently fails —
+        // the exact "dead instruction" failure the owner required this change to
+        // avoid, and the reason the prose rewrite was not optional.
+        for removed in [
+            "`engineer`",
+            "`python-engineer`",
+            "`qa-agent`",
+            "`docs-agent`",
+            "`local-ops-agent`",
+            "`plan-agent`",
+        ] {
+            assert!(
+                !body.contains(removed),
+                "'{agent_name}' persona still routes to {removed}, which the reachable-set \
+                 gate refuses (ADR-0024 decision 4)"
+            );
+        }
     }
 }
 
@@ -1981,4 +2002,107 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
         "the assistant-kind population is fixed by role, not by a guessed \
          filename list; a new one must be a reviewed addition"
     );
+}
+
+/// ADR-0024 decision 4 sub-answer (a), the MIGRATION half: every bundled
+/// assistant persona ships a seeded `[subagents].delegate_allowed`.
+///
+/// Why: the ratified default is fail-closed — an absent whitelist reaches
+/// nothing — which on its own would drop every shipped persona from ~18
+/// role-eligible targets to zero on rollout, with no migration. The seed is
+/// what makes fail-closed safe to ship. Without a test the seed is a one-time
+/// edit that a later persona addition silently forgets, and the symptom (an
+/// assistant that quietly cannot delegate) is exactly the kind that surfaces
+/// only in production. Both the directory PACKAGE and the flat `extends`-shadow
+/// fallback are checked for the three personas that ship both, because the
+/// shadow is what loads when the `extends` chain fails to resolve — a seed on
+/// only one of the pair is a half-migration.
+/// What: the resolved config for each shipped assistant declares a whitelist,
+/// and it resolves to exactly the server-owned floor. Read from the constant
+/// rather than a literal so a floor change fails here rather than drifting.
+/// Test: This function IS the test.
+#[test]
+fn bundled_assistant_personas_seed_the_reachable_subagent_whitelist() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    let expected: Vec<String> = crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+
+    for agent_name in [
+        "assistant",
+        "izzie",
+        "cto-assistant",
+        "ctrl",
+        "personal-assistant",
+    ] {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+        assert_eq!(
+            cfg.subagents.delegate_allowed.as_ref(),
+            Some(&expected),
+            "'{agent_name}' must ship the seeded reachable-sub-agent whitelist \
+             (ADR-0024 decision 4); an absent one reaches NOTHING"
+        );
+    }
+
+    // The flat `extends`-shadow fallbacks carry the same seed. These are the
+    // files that load when the `extends` chain does not resolve, so a seed on
+    // the package alone leaves the fallback path silently un-migrated.
+    for shadow in ["izzie.toml", "cto-assistant.toml", "ctrl.toml"] {
+        let raw = std::fs::read_to_string(bundled_agents_dir().join(shadow))
+            .unwrap_or_else(|e| panic!("{shadow} must exist: {e}"));
+        let parsed: AgentConfig =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{shadow} must parse: {e}"));
+        assert_eq!(
+            parsed.subagents.delegate_allowed.as_ref(),
+            Some(&expected),
+            "the flat shadow {shadow} must carry the same seed as its package"
+        );
+    }
+}
+
+/// The names on the server-owned reachable floor are real bundled agents.
+///
+/// Why: the floor is a `const` of NAMES, and `delegate_to_agent` resolves those
+/// names through `AgentConfig::by_name_in`. A typo, or a rename of the agent
+/// file, would leave a floor entry that can never resolve — a whitelist that
+/// grants a name nothing can reach. This is the same "the curated list did not
+/// drift from the bundled roster" check
+/// `assistant_tier_persona_carries_curated_worker_routing_list` performs for the
+/// prose, applied to the constant the prose now mirrors.
+/// What: each floor name has a bundled TOML, and its role is role-eligible —
+/// because a role missing from `ASSISTANT_ALLOWED_DELEGATE_ROLES` makes the
+/// whitelist entry unreachable no matter what the whitelist says.
+/// Test: This function IS the test.
+#[test]
+fn assistant_reachable_floor_names_resolve_in_the_bundled_roster() {
+    for name in crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS {
+        let path = bundled_agents_dir().join(format!("{name}.toml"));
+        assert!(
+            path.is_file(),
+            "reachable-floor entry '{name}' has no bundled agent TOML at {}",
+            path.display()
+        );
+        let raw = std::fs::read_to_string(&path).expect("readable");
+        let parsed: AgentConfig =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{name}.toml must parse: {e}"));
+        assert!(
+            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+                .contains(&parsed.agent.role.as_str()),
+            "'{name}' declares role '{}', which is not role-eligible — the whitelist \
+             could never reach it",
+            parsed.agent.role
+        );
+    }
 }

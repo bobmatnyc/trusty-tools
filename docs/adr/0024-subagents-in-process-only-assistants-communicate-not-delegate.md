@@ -3,11 +3,15 @@
 - **Status:** Proposed — **partially ratified and partially implemented.** The
   L0-assistant clause (Context §1 item 3 / Decision clause 2, "every assistant
   is tier L0") and its kind-primary corollary (Decision clause 6) are RATIFIED
-  by the owner (2026-07-28) and IMPLEMENTED. Every other clause remains
-  Proposed. See "Implementation status" below for the clause-by-clause table —
-  read that, not this one-line summary, before assuming any clause has landed.
+  by the owner (2026-07-28) and IMPLEMENTED. The EDITABLE CONFIG WHITELIST
+  (Context §1 item 2 / Decision clause 4) is RATIFIED by the owner (2026-07-29),
+  together with both of the owner-ratify sub-questions it raised, and is
+  IMPLEMENTED. Every other clause remains Proposed. See "Implementation status"
+  below for the clause-by-clause table — read that, not this one-line summary,
+  before assuming any clause has landed.
 - **Date:** 2026-07-28 (ratification of the L0-assistant clause recorded
-  2026-07-28)
+  2026-07-28; ratification of the editable-whitelist clause recorded
+  2026-07-29)
 - **Scope:** crate `trusty-agents` (the `delegate_to_agent` / `dispatch_task` boundary; the L0/L1 tier model, #4167/#4200; touches the `trusty-code` cross-product bridge target and the Sub-agents API/pane, `#4029`/`#4211`)
 - **Reversibility Cost:** High — reverses/re-scopes shipped, tested, owner-directed machinery from epic #4021 (#4026/#4027/#4028/#4211, merged within 48 hours of this ADR), INVERTS the population assignment of the L0/L1 tier model merged the SAME DAY as this decision (PR #4200, squash `ada4d351`), and requires new, currently nonexistent machinery (an editable sub-agent whitelist, an assistant-to-assistant messaging primitive, and a tool-call-counted skill/delegate router)
 - **Decision Drivers:** Product framing clarity (the Sub-agents pane could not honestly present a name that means two different things), the owner's rejection of a UI-only fix, the owner's explicit generalization of the YOLO risk posture to every assistant, a documentation gap (DOC-57 does not yet cover Sub-agents at all, #4182), the owner's own PM/trusty-mpm prior art as an explicit analogy with an owner-named limit, and — underlying all of the above — the owner's virtual-twin authority principle (see "Rationale" below): each assistant must take authority over its own actions, and that authority is not transferable between assistants
@@ -328,7 +332,7 @@ table is keyed by CONTENT so a reader cannot pick the wrong "decision 3".
 | Sub-agents are always in-process | 1 | 1 | yes | yes (pre-existing — see "Is 'sub-agents never delegate' enforced") |
 | **Every assistant is tier L0** | **3** | **2** | **yes, 2026-07-28** | **yes — this PR** |
 | Sub-agent = tier L1, single-edge leaf | 4 | 3 | yes | yes (L1 is the derived default for every non-assistant role) |
-| Reachable sub-agent set is an EDITABLE CONFIG WHITELIST | 2 | 4 | **NO** | **NO** — not in this PR, not designed; the two owner-ratify questions it raises ("The absent-whitelist default is a breaking change", "'Editable' means the GUI starts writing agent config") are both still open |
+| Reachable sub-agent set is an EDITABLE CONFIG WHITELIST | 2 | 4 | **yes, 2026-07-29** | **yes** — `[subagents].delegate_allowed` over the `ASSISTANT_REACHABLE_SUBAGENTS` floor; both owner-ratify sub-questions answered (fail-closed + seeded default; server-side floor on writes). See "What the editable-whitelist clause's implementation actually did" |
 | 3-tool-call skill-vs-delegate routing | (5th quote) | 5 | yes | **NO** — the a-priori-vs-reactive question below is unanswered |
 | Delegation authority is governed by KIND, not tier order | — | 6 | yes | yes (PR #4240 — `agents::delegation`, and the `execute()` choke point) |
 | Assistant-to-assistant COMMUNICATION primitive | 1 | — | yes | **NO** — nothing implements it; see "'Communicate' has to be built, not renamed" |
@@ -430,13 +434,123 @@ consumer in the workspace, and confirmed by the test suite:
 
 ### Explicitly NOT in this implementation
 
-The editable config whitelist (Context §1 item 2 / Decision clause 4) is **not
-ratified and not built**. Neither is the assistant-to-assistant communication
-primitive, nor the 3-tool-call routing rule. The `ASSISTANT_ALLOWED_DELEGATE
-_ROLES` constant still contains `assistant` and is unchanged — the peer edge is
-refused by the kind gate at `execute()`, not by removing that entry, which the
+**Read this section as of the L0-assistant PR; the whitelist paragraph is
+superseded — see the section after it.** The editable config whitelist
+(Context §1 item 2 / Decision clause 4) is **not ratified and not built**.
+Neither is the assistant-to-assistant communication primitive, nor the
+3-tool-call routing rule. The `ASSISTANT_ALLOWED_DELEGATE_ROLES` constant still
+contains `assistant` and is unchanged — the peer edge is refused by the kind
+gate at `execute()`, not by removing that entry, which the
 "`ASSISTANT_TIER_ROLE` in the allowlist" consequence below explains must not
 happen until the lateral communication mechanism exists.
+
+> **SUPERSEDED IN PART, 2026-07-29.** The editable config whitelist IS now
+> ratified and built (see the next section). The rest of this paragraph still
+> holds: the communication primitive and the 3-tool-call rule remain unbuilt,
+> and `ASSISTANT_ALLOWED_DELEGATE_ROLES` still contains `assistant` for exactly
+> the stated reason. That constant DID gain one entry in the whitelist change —
+> `ticketing`, so `ticketing-agent` is role-eligible at all — which is a
+> widening of the COARSE pre-filter, not of the reachable set; the whitelist is
+> now the binding gate. Left unedited above per this document's convention of
+> annotating the historical record rather than overwriting it.
+
+### What the editable-whitelist clause's implementation actually did
+
+**The reachable set is a per-agent config list bounded by a server-owned
+floor — the same two-layer shape the cross-product bridge already used, with
+the machinery SHARED rather than copied.** `SubagentAllowSet` (written for
+#4026's `dispatch_task` floor) moved from `tools::cross_product` to
+`tools::subagent_allow` and became floor-parameterized; both mechanisms now
+call the same `resolve()`. The alternative — a second, parallel implementation
+for the in-process path — was rejected under the crate's "no second copy of any
+gate" principle (`api::server::agent_subagents`'s module doc): a second copy is
+how the reporting surface and the enforcement point drift apart, which is the
+class of defect #4201 and #4235 both were.
+
+**The floor is NAMES, not roles, and it is not the whitelist.** The new
+constant is `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS =
+["research-agent", "ticketing-agent"]`. Decision 4 says the reachable set must
+not be a hand-authored Rust constant, and this is not it: it is the CEILING the
+editable list is bounded by, the exact counterpart of `NON_CODING_TARGETS` for
+the other mechanism. The editable list is `[subagents].delegate_allowed` in
+each agent's TOML. Names rather than roles because that is the vocabulary
+`delegate_to_agent`'s `agent_name` parameter takes; the two mechanisms keep
+separate floors because `research` (a trusty-code specialist) and
+`research-agent` (a trusty-agents roster entry) are different things.
+
+**A NEW key in `[subagents]`, not a reinterpretation of the existing one.**
+The "cross-product bridge is no longer a 'sub-agent' mechanism" consequence
+below notes that renaming the cross-product section would free `[subagents]`
+for this whitelist. That rename is a SEPARATE, unratified decision, so this
+change took the additive key (`delegate_allowed`, alongside the existing
+`allowed`) and left the rename to it.
+
+**Sub-question 1 — the absent-whitelist default — answered: fail-closed WITH a
+seeded default (option (a)).** An absent list reaches nothing, matching the
+cross-product precedent exactly and avoiding option (b)'s two-different-
+absent-semantics split. The migration option (a) called for shipped: all eight
+bundled assistant files carry `[subagents].delegate_allowed = ["research-agent",
+"ticketing-agent"]` — the four packages (`assistant/`, `izzie/`,
+`cto-assistant/`, `ctrl/`) AND the four flat files (`izzie.toml`,
+`cto-assistant.toml`, `ctrl.toml`, `personal-assistant.toml`). The flat
+`extends`-shadow fallbacks are seeded too, because they are what loads when the
+`extends` chain does not resolve; a seed on the package alone is a
+half-migration. `bundled_assistant_personas_seed_the_reachable_subagent_whitelist`
+pins all eight so a persona added later cannot silently ship without one.
+
+**Sub-question 2 — can a write widen past a floor — answered: no, enforced
+server-side.** `PATCH /api/agents/:name` gained
+`subagents_delegate_allowed`, and unlike its `tools_allow` neighbour it
+validates: `subagent_allow::narrow_to_floor` checks every entry against the
+floor BEFORE the file is touched, and a widening request is a `400` naming the
+offenders with nothing written. Two layers, not one — a config that reached
+disk some other way is still refused at dispatch by `resolve()`, which
+re-checks the same floor. `tools_allow`'s own unvalidated behaviour is
+deliberately unchanged: auditing it against a capability ceiling is separate,
+unratified work, and tightening it silently inside this change would be an
+unreviewed break for every existing GUI edit.
+
+**The gates stay independent; they were not collapsed.** Reachability is
+`!(kind_blocked || tier_blocked || !whitelisted)`. The conformance checklist
+above is explicit that the kind exclusion must remain "a property of the CODE,
+not of the data an operator is trusted to curate correctly" — which only holds
+while the kind predicate and the whitelist are separate conjuncts. The
+whitelist gate is also SCOPED to the assistant population (it runs when the
+delegator declares the assistant kind, or opts into the role allowlist, which
+only assistant-tier construction sites do), so `pm`/`ctrl`-as-orchestrator
+delegation is byte-identical to before.
+
+**Agent definitions were NOT removed — only reachability changed.** Every
+engineer, QA, docs, planning and ops agent is still in the catalog, still
+dispatchable by `pm`, still listed by the roster. What changed is that an
+ASSISTANT no longer reaches them.
+
+**The persona prose had to be rewritten in the same change, and that was not
+optional.** `.trusty-agents/agents/assistant/persona.md` instructed the model
+to delegate by exact name to `engineer`, `python-engineer`, `qa-agent`,
+`docs-agent`, `local-ops-agent` and `plan-agent`; `personal-assistant.toml`
+told it to "bring in an engineering specialist… never frame it as something you
+can't do"; `ctrl/persona.md`, `ctrl.toml`, `izzie.toml` and
+`cto-assistant.toml` carried the same lists. Every one of those became a live
+instruction to make a call the gate now refuses. Deleting them would have left
+a hole, so each site was rewritten to state what the persona CAN reach and what
+to do when asked for coding work (say so plainly, do the part it can, offer a
+ticket). `assistant_tier_persona_carries_curated_worker_routing_list` now
+asserts both halves — the two reachable names are present AND the six removed
+ones are absent — so a partial revert of either the gate or the prose fails a
+test.
+
+**The skills surface lost ticketing entirely (owner, same session).** The
+`function_skill("ticketing", …)` row and the twelve leaf ticket/CI skill rows
+were deleted, and `cto-assistant`'s four direct ticket-tool grants
+(`ticket_search`, `list_tickets`, `get_ticket`, `create_ticket`) were dropped
+from both its package and its shadow. Ticketing is reachable as a SUB-AGENT
+only. The ticketing TOOLS are untouched and still granted to
+`ticketing-agent.toml`; the two authored assets
+`.trusty-agents/skills/ticketing-epic.md` and `ticketing-ticket.md` are a
+different subsystem — that sub-agent's own domain knowledge, injected into its
+system prompt — and were PRESERVED. `every_tool_declared_in_source_has_a_skill`
+gained one closed, documented exception list rather than being widened.
 
 ## Rationale: The Virtual-Twin Authority Principle
 
@@ -823,6 +937,12 @@ not.
 
 ### The absent-whitelist default is a breaking change for every existing assistant (new, owner-ratify)
 
+> **RESOLVED 2026-07-29 — the owner ratified option (a).** Fail-closed when
+> absent, WITH a seeded default shipped in every bundled assistant persona so
+> nothing drops to zero reachable targets on rollout. The analysis below is
+> retained unedited as the record of what was weighed; see "What the
+> editable-whitelist clause's implementation actually did" for what shipped.
+
 Today, in-process reachability for an assistant-tier caller is an
 UNFILTERED SCAN: every agent in `agents::agents_dir_candidates()` whose
 `role` is in `ASSISTANT_ALLOWED_DELEGATE_ROLES` is a target, no per-agent
@@ -867,6 +987,13 @@ silent capability loss of doing nothing and the semantic split of Option
 (b).
 
 ### "Editable" means the GUI starts writing agent config — can a write widen past a floor? (new, owner-ratify)
+
+> **RESOLVED 2026-07-29 — the owner ratified the recommendation below.** The
+> write path enforces a server-side floor: `PATCH /api/agents/:name`'s new
+> `subagents_delegate_allowed` field runs `subagent_allow::narrow_to_floor`
+> before touching the file and rejects a widening request outright. The
+> `tools_allow` audit this section describes is NOT part of that change and
+> remains open. The analysis below is retained unedited.
 
 The nearest existing precedent for a GUI-driven agent-config write is
 `PATCH /api/agents/:name` (`agent_patch.rs:159-170`), specifically its

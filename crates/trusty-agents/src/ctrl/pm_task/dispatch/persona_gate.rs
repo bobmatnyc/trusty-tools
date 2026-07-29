@@ -73,16 +73,30 @@ pub(super) fn build_persona_delegate_tool(
     session_id: String,
     persona_role: &str,
     declared_tier: crate::agents::AgentTier,
+    declared_subagents: Option<&[String]>,
 ) -> DelegateToAgentTool {
     // #3737: thread the session id so a persona that delegates onward
     // attributes the answer to the specialist that produced it.
     let tool = DelegateToAgentTool::new(runner)
         .with_config_dir(config_dir)
         .with_session_id(session_id);
+    // ADR-0024 decision 4: the editable reachable-set whitelist, over the
+    // server-owned floor. Built for BOTH branches so the builder call always
+    // carries a complete delegator identity; it is inert on the non-assistant
+    // branch, where `execute` does not apply the whitelist at all (that branch
+    // also declines the role allowlist, which is the other trigger).
+    let reachable = crate::tools::subagent_allow::SubagentAllowSet::over(
+        crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+        declared_subagents,
+    );
     if !crate::agents::delegation::is_assistant_kind(persona_role) {
-        return tool.with_delegator(persona_role, crate::agents::AgentTier::L0Orchestration);
+        return tool.with_delegator(
+            persona_role,
+            crate::agents::AgentTier::L0Orchestration,
+            reachable,
+        );
     }
-    tool.with_delegator(persona_role, declared_tier)
+    tool.with_delegator(persona_role, declared_tier, reachable)
         // #4201: the allowlist this path was missing — see the fn doc.
         .with_allowed_target_roles(
             crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES

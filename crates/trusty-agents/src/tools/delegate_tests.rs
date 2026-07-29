@@ -255,6 +255,44 @@ async fn delegate_rejects_agent_absent_from_all_config_dirs() {
     assert!(runner.invoked.lock().unwrap().is_empty());
 }
 
+/// The reachable-set whitelist these tests hand `with_delegator` when the
+/// property under test is NOT the whitelist (ADR-0024 decision 4).
+///
+/// Why: decision 4 added a third, independent gate to the same choke point.
+/// Every pre-existing kind/tier/role test would otherwise be refused by the
+/// NEW gate before reaching the one it is named for, silently turning a suite
+/// of specific security assertions into one blunt "everything is denied".
+/// Seeding the WHOLE server-owned floor keeps each test isolated to its own
+/// axis; the whitelist's own behaviour is pinned by the three tests named on
+/// `DelegateToAgentTool::reachable_subagents`.
+/// What: a `SubagentAllowSet` granting every floor name.
+/// Test: used by `delegate_l0_to_l1_succeeds` and its siblings; the value
+/// itself is pinned by `delegate_assistant_reaches_a_whitelisted_sub_agent`.
+fn seeded_floor() -> crate::tools::subagent_allow::SubagentAllowSet {
+    let seed: Vec<String> = crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    crate::tools::subagent_allow::SubagentAllowSet::over(
+        crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+        Some(&seed),
+    )
+}
+
+/// The fail-closed empty whitelist — an agent that declares none.
+///
+/// Why: the `pm`/`ctrl`-as-orchestrator call sites pass exactly this, and it
+/// must be harmless for them (the gate is scoped to the assistant population).
+/// A test that handed them a seeded set would not prove that.
+/// What: `SubagentAllowSet::empty_over` the in-process floor.
+/// Test: `delegate_kind_gate_does_not_touch_orchestrator_sources`,
+/// `delegate_assistant_absent_whitelist_reaches_nothing`.
+fn no_whitelist() -> crate::tools::subagent_allow::SubagentAllowSet {
+    crate::tools::subagent_allow::SubagentAllowSet::empty_over(
+        crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+    )
+}
+
 /// Writes a minimal, fully-parseable agent TOML with the given `role` —
 /// the shape `AgentConfig::by_name_in` (used by the role gate) actually
 /// requires, unlike the bare `[agent]\nname = "..."` fixtures the
@@ -371,31 +409,45 @@ async fn delegate_assistant_role_gate_rejects_controller_role() {
     assert!(runner.invoked.lock().unwrap().is_empty());
 }
 
-/// The positive case: a worker role (`engineer`) IS in the allowlist and
-/// must still reach the runner — the role gate must not become a
-/// blanket denial.
+/// The positive case: a role-eligible sub-agent that is ALSO on this
+/// delegator's reachable-set whitelist must still reach the runner — neither
+/// gate may become a blanket denial.
+///
+/// REWRITTEN by ADR-0024 decision 4 rather than patched to pass. The old body
+/// asserted that `engineer` reaches the runner, which is precisely the
+/// behaviour the owner removed ("NO coding agents"); patching it would have
+/// preserved a test asserting the pre-decision contract under a name that
+/// reads like it still holds. The role gate's positive case is now
+/// demonstrated on a floor member, with the whitelist seeded — an unseeded
+/// delegator reaches nothing by design.
+/// Test: this function IS the test.
 #[tokio::test]
 async fn delegate_assistant_role_gate_allows_worker_role() {
     let dir = tempfile::tempdir().unwrap();
-    write_agent_toml_with_role(dir.path(), "engineer", "engineer");
+    write_agent_toml_with_role(dir.path(), "research-agent", "researcher");
 
     let runner = Arc::new(RecordingRunner {
         invoked: std::sync::Mutex::new(Vec::new()),
     });
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_allowed_target_roles(vec!["engineer".to_string(), "assistant".to_string()]);
+        .with_allowed_target_roles(vec!["researcher".to_string(), "assistant".to_string()])
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
 
     let result = tool
         .execute(json!({
-            "agent_name": "engineer",
-            "task": "run cargo check"
+            "agent_name": "research-agent",
+            "task": "investigate the failing build"
         }))
         .await;
 
     assert!(
         !result.is_error(),
-        "worker role must pass the gate: {}",
+        "a role-eligible, whitelisted sub-agent must pass both gates: {}",
         result.content()
     );
     assert_eq!(runner.invoked.lock().unwrap().len(), 1);
@@ -431,7 +483,11 @@ async fn delegate_peer_assistant_is_refused_despite_role_allowlist() {
         // The allowlist DOES admit role `assistant` — the kind rule must
         // refuse the edge regardless.
         .with_allowed_target_roles(vec!["engineer".to_string(), "assistant".to_string()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
 
     let result = tool
         .execute(json!({
@@ -588,7 +644,11 @@ async fn delegate_l1_to_l0_is_refused() {
     });
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
 
     let result = tool
         .execute(json!({
@@ -622,18 +682,27 @@ async fn delegate_l1_to_l0_is_refused() {
 #[tokio::test]
 async fn delegate_l0_to_l1_succeeds() {
     let dir = tempfile::tempdir().unwrap();
-    write_agent_toml_with_role(dir.path(), "engineer", "engineer");
+    // ADR-0024 decision 4: the fixture keeps role `engineer` (the axis this
+    // test is NOT about) but takes a floor NAME, so the newer whitelist gate
+    // admits it and the tier gate stays the only thing under test. Name and
+    // role are independent axes precisely because the two gates read different
+    // fields.
+    write_agent_toml_with_role(dir.path(), "research-agent", "engineer");
 
     let runner = Arc::new(RecordingRunner {
         invoked: std::sync::Mutex::new(Vec::new()),
     });
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_delegator("assistant", crate::agents::AgentTier::L0Orchestration);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L0Orchestration,
+            seeded_floor(),
+        );
 
     let result = tool
         .execute(json!({
-            "agent_name": "engineer",
+            "agent_name": "research-agent",
             "task": "run cargo check"
         }))
         .await;
@@ -664,8 +733,11 @@ fn delegator_identity_defaults_to_none_on_construction() {
     assert_eq!(bare.delegator_tier, None);
     assert_eq!(bare.delegator_role, None);
 
-    let declared = DelegateToAgentTool::new(runner)
-        .with_delegator("assistant", crate::agents::AgentTier::L0Orchestration);
+    let declared = DelegateToAgentTool::new(runner).with_delegator(
+        "assistant",
+        crate::agents::AgentTier::L0Orchestration,
+        seeded_floor(),
+    );
     assert_eq!(
         declared.delegator_tier,
         Some(crate::agents::AgentTier::L0Orchestration)
@@ -680,18 +752,29 @@ fn delegator_identity_defaults_to_none_on_construction() {
 #[tokio::test]
 async fn delegate_malformed_target_tier_resolves_l1_and_is_not_tier_blocked() {
     let dir = tempfile::tempdir().unwrap();
-    write_agent_toml_with_role_and_tier(dir.path(), "engineer", "engineer", Some("bogus-value"));
+    // Floor NAME, `engineer` role — see `delegate_l0_to_l1_succeeds` for why
+    // the two axes are separated here.
+    write_agent_toml_with_role_and_tier(
+        dir.path(),
+        "research-agent",
+        "engineer",
+        Some("bogus-value"),
+    );
 
     let runner = Arc::new(RecordingRunner {
         invoked: std::sync::Mutex::new(Vec::new()),
     });
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard)
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        )
         .with_allowed_target_roles(vec!["engineer".to_string()]);
 
     let result = tool
-        .execute(json!({ "agent_name": "engineer", "task": "run cargo check" }))
+        .execute(json!({ "agent_name": "research-agent", "task": "run cargo check" }))
         .await;
 
     assert!(
@@ -727,7 +810,11 @@ async fn delegate_tier_gate_applies_even_without_role_allowlist() {
     // No `.with_allowed_target_roles(...)` call at all.
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
 
     let result = tool
         .execute(json!({
@@ -776,7 +863,11 @@ async fn delegate_multi_hop_assistant_hop_is_refused() {
     let hop1_tool = DelegateToAgentTool::new(hop1_runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
         .with_allowed_target_roles(vec!["assistant".to_string()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
     let hop1_result = hop1_tool
         .execute(json!({ "agent_name": "izzie", "task": "hand off to izzie" }))
         .await;
@@ -798,7 +889,11 @@ async fn delegate_multi_hop_assistant_hop_is_refused() {
     let hop2_tool = DelegateToAgentTool::new(hop2_runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
         .with_allowed_target_roles(vec!["engineer".to_string()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
     let hop2_result = hop2_tool
         .execute(json!({
             "agent_name": "orchestration-worker",
@@ -919,7 +1014,11 @@ async fn delegate_assistant_to_assistant_is_refused() {
     });
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L1Standard,
+            seeded_floor(),
+        );
 
     let result = tool
         .execute(json!({ "agent_name": "izzie", "task": "look into this for me" }))
@@ -971,7 +1070,7 @@ async fn delegate_assistant_to_assistant_is_refused_at_every_tier_pairing() {
         });
         let tool = DelegateToAgentTool::new(runner.clone())
             .with_config_dirs(vec![dir.path().to_path_buf()])
-            .with_delegator("assistant", delegator_tier);
+            .with_delegator("assistant", delegator_tier, seeded_floor());
 
         let result = tool
             .execute(json!({ "agent_name": "peer", "task": "peer work" }))
@@ -990,6 +1089,199 @@ async fn delegate_assistant_to_assistant_is_refused_at_every_tier_pairing() {
     }
 }
 
+// ============================================================================
+// ADR-0024 decision 4 — the editable reachable-sub-agent whitelist.
+//
+// Three properties, in the order they matter: the seeded default WORKS (a
+// whitelist that denies everything is not a feature), an ABSENT whitelist
+// reaches nothing (the ratified fail-closed answer), and a whitelist CANNOT
+// widen past the server-owned floor (the security-relevant one — the last
+// line of defence behind the write-path check in `narrow_to_floor`). All three
+// drive the REAL `execute()` choke point against a recording runner, so an
+// empty invocation log is the proof a gate refused before spawn.
+// ============================================================================
+
+/// The seeded default resolves: an assistant whose config lists a floor member
+/// reaches it.
+///
+/// Why: decision 4's fail-closed posture is only safe because the bundled
+/// personas ship a seed. If the seeded value did not actually resolve, every
+/// assistant in the product would silently lose delegation and the two
+/// fail-closed tests below would still pass — they would just be describing a
+/// dead mechanism.
+/// What: `[subagents].delegate_allowed = ["research-agent"]` reaches the
+/// runner exactly once.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delegate_assistant_reaches_a_whitelisted_sub_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role(dir.path(), "research-agent", "researcher");
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(
+            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+                .iter()
+                .map(|r| (*r).to_string())
+                .collect(),
+        )
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L0Orchestration,
+            crate::tools::subagent_allow::SubagentAllowSet::over(
+                crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+                Some(&["research-agent".to_string()]),
+            ),
+        );
+
+    let result = tool
+        .execute(json!({ "agent_name": "research-agent", "task": "investigate" }))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "a whitelisted floor member must be reachable: {}",
+        result.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+}
+
+/// ADR-0024 decision 4 sub-answer (a): an ABSENT whitelist reaches NOTHING —
+/// not a floor member, not anything.
+///
+/// Why: the owner ratified fail-closed over the alternative of grandfathering
+/// the legacy role-scan for an absent section, which would have created two
+/// different absent-semantics for one config shape. This test is what stops a
+/// future "helpful" default from quietly restoring the scan: it fails the
+/// moment absent starts meaning anything other than empty.
+/// What: the same floor member as the test above, with no declared list, is
+/// refused before the runner.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delegate_assistant_absent_whitelist_reaches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role(dir.path(), "research-agent", "researcher");
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(vec!["researcher".to_string()])
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L0Orchestration,
+            no_whitelist(),
+        );
+
+    let result = tool
+        .execute(json!({ "agent_name": "research-agent", "task": "investigate" }))
+        .await;
+
+    assert!(
+        result.is_error(),
+        "an absent whitelist must deny even a floor member (fail-closed)"
+    );
+    assert!(
+        runner.invoked.lock().unwrap().is_empty(),
+        "runner must never be reached: {}",
+        result.content()
+    );
+}
+
+/// THE security test for ADR-0024 decision 4: a whitelist CANNOT widen past
+/// the server-owned floor.
+///
+/// Why: "editable" means the value is operator- and GUI-writable, so the
+/// interesting question is not what a correct config does but what a hostile
+/// or mistaken one does. The owner's ratified sub-answer (b) puts a floor on
+/// the WRITE path (`narrow_to_floor`, pinned by
+/// `narrow_to_floor_rejects_a_widening`); this test pins the layer BEHIND it —
+/// a config that reached disk some other way (a hand edit, a restored backup,
+/// a future write path that forgets the check) still cannot make a coding or
+/// orchestration agent reachable. Two independent layers, per the same
+/// two-layers-not-one rule OQ-7 established for the bridge.
+/// What: a maximally permissive `delegate_allowed` naming `engineer`, `pm`,
+/// `ctrl`, `docs-agent` and `plan-agent` — all role-eligible or worse — makes
+/// none of them reachable, and the runner is never invoked. `research-agent`,
+/// declared in the same list, still resolves, proving the refusal is per-name
+/// and not a blanket denial that would make this test vacuous.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delegate_assistant_whitelist_cannot_widen_past_the_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, role) in [
+        ("engineer", "engineer"),
+        ("docs-agent", "documentation"),
+        ("plan-agent", "planner"),
+        ("pm", "orchestrator"),
+        ("ctrl", "controller"),
+        ("research-agent", "researcher"),
+    ] {
+        write_agent_toml_with_role(dir.path(), name, role);
+    }
+    let permissive: Vec<String> = [
+        "engineer",
+        "docs-agent",
+        "plan-agent",
+        "pm",
+        "ctrl",
+        "research-agent",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(
+            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+                .iter()
+                .map(|r| (*r).to_string())
+                .collect(),
+        )
+        .with_delegator(
+            "assistant",
+            crate::agents::AgentTier::L0Orchestration,
+            crate::tools::subagent_allow::SubagentAllowSet::over(
+                crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+                Some(&permissive),
+            ),
+        );
+
+    for widened in ["engineer", "docs-agent", "plan-agent", "pm", "ctrl"] {
+        let result = tool
+            .execute(json!({ "agent_name": widened, "task": "escalate" }))
+            .await;
+        assert!(
+            result.is_error(),
+            "a config naming '{widened}' must NOT make it reachable — the floor is \
+             server-owned and config can only narrow it"
+        );
+        assert!(
+            runner.invoked.lock().unwrap().is_empty(),
+            "runner must never be reached for '{widened}'"
+        );
+    }
+
+    // Non-vacuous: the one floor member in the same permissive list works.
+    let ok = tool
+        .execute(json!({ "agent_name": "research-agent", "task": "investigate" }))
+        .await;
+    assert!(
+        !ok.is_error(),
+        "floor member must still resolve: {}",
+        ok.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+}
+
 /// The permitted edge must stay permitted: assistant -> sub-agent.
 ///
 /// Why: a rule that refused everything would be a worse regression than the
@@ -1001,12 +1293,8 @@ async fn delegate_assistant_to_assistant_is_refused_at_every_tier_pairing() {
 #[tokio::test]
 async fn delegate_assistant_to_sub_agent_still_succeeds() {
     for (name, role) in [
-        ("engineer", "engineer"),
-        ("qa-agent", "qa"),
         ("research-agent", "researcher"),
-        ("docs-agent", "documentation"),
-        ("local-ops-agent", "ops"),
-        ("plan-agent", "planner"),
+        ("ticketing-agent", "ticketing"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         write_agent_toml_with_role(dir.path(), name, role);
@@ -1016,7 +1304,11 @@ async fn delegate_assistant_to_sub_agent_still_succeeds() {
         });
         let tool = DelegateToAgentTool::new(runner.clone())
             .with_config_dirs(vec![dir.path().to_path_buf()])
-            .with_delegator("assistant", crate::agents::AgentTier::L1Standard);
+            .with_delegator(
+                "assistant",
+                crate::agents::AgentTier::L1Standard,
+                seeded_floor(),
+            );
 
         let result = tool
             .execute(json!({ "agent_name": name, "task": "do the specialist work" }))
@@ -1054,7 +1346,11 @@ async fn delegate_kind_gate_does_not_touch_orchestrator_sources() {
     });
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
-        .with_delegator("orchestrator", crate::agents::AgentTier::L0Orchestration);
+        .with_delegator(
+            "orchestrator",
+            crate::agents::AgentTier::L0Orchestration,
+            no_whitelist(),
+        );
 
     let result = tool
         .execute(json!({ "agent_name": "izzie", "task": "orchestrator hand-off" }))
@@ -1068,25 +1364,30 @@ async fn delegate_kind_gate_does_not_touch_orchestrator_sources() {
     assert_eq!(runner.invoked.lock().unwrap().len(), 1);
 }
 
-/// A delegator that declares no identity at all leaves the KIND gate a no-op.
+/// A role-gated delegator that declares NO identity gets the reachable-set
+/// gate anyway, fail-closed — and the KIND gate still does not run.
 ///
-/// Why: `runtime::pm_mode::run_pm` constructs the tool with neither identity
-/// nor `config_dirs`; pinning the `None` semantics here documents that the
-/// kind predicate is opt-in ON IDENTITY (not on policy) and that nothing
-/// changed for that site.
-/// What: no `with_delegator` call, SUB-AGENT target, still reaches the runner.
-///
-/// ADR-0024 decision 3: the target is now `engineer`, not an assistant. An
-/// assistant target derives tier L0, and an undeclared delegator identity
-/// fails closed to `L1Standard` — so an assistant target would be refused by
-/// the TIER gate and this test would prove nothing about the kind gate being
-/// a no-op. That fail-closed refusal is real and is pinned separately by
-/// `delegate_without_declared_identity_is_tier_blocked_from_an_assistant`.
+/// Why: REWRITTEN by ADR-0024 decision 4 (was
+/// `delegate_without_declared_identity_skips_the_kind_gate`, which asserted
+/// that such a caller reaches the runner). Decision 4 makes
+/// `with_allowed_target_roles` a belt-and-suspenders trigger for the
+/// reachable-set whitelist — a caller that opts into role-gating IS an
+/// assistant-tier caller by construction, and the population that cares enough
+/// to role-gate must never silently skip the newest gate, exactly the rule
+/// `delegate_role_gate_without_declared_tier_fails_closed_to_l1` already
+/// encodes for tier. Patching the old assertion to keep passing would have
+/// pinned the opposite contract. The `pm_mode::run_pm` shape this test used to
+/// stand in for is unaffected and is pinned by
+/// `no_tier_and_no_role_gate_preserves_cheap_existence_check` — that site
+/// attaches no `config_dirs`, so it never enters this block at all.
+/// What: refused, and refused by the REACHABLE-SET rule rather than the kind
+/// rule — which is the surviving half of the original assertion, since a kind
+/// refusal would prove `delegator_role: None` had started matching something.
 /// Test: this function IS the test.
 #[tokio::test]
-async fn delegate_without_declared_identity_skips_the_kind_gate() {
+async fn delegate_role_gated_without_declared_identity_fails_closed_on_the_reachable_set() {
     let dir = tempfile::tempdir().unwrap();
-    write_agent_toml_with_role(dir.path(), "engineer", "engineer");
+    write_agent_toml_with_role(dir.path(), "research-agent", "engineer");
 
     let runner = Arc::new(RecordingRunner {
         invoked: std::sync::Mutex::new(Vec::new()),
@@ -1096,15 +1397,28 @@ async fn delegate_without_declared_identity_skips_the_kind_gate() {
         .with_allowed_target_roles(vec!["engineer".to_string()]);
 
     let result = tool
-        .execute(json!({ "agent_name": "engineer", "task": "undeclared caller" }))
+        .execute(json!({ "agent_name": "research-agent", "task": "undeclared caller" }))
         .await;
 
     assert!(
-        !result.is_error(),
-        "an undeclared delegator identity must leave the kind gate a no-op: {}",
+        result.is_error(),
+        "a role-gated caller with no declared whitelist must fail closed: {}",
         result.content()
     );
-    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+    assert!(
+        result.content().contains("available to you"),
+        "the refusal must come from the reachable-set rule, got: {}",
+        result.content()
+    );
+    assert!(
+        !result.content().contains("peer assistant"),
+        "an undeclared delegator identity must leave the KIND gate a no-op, got: {}",
+        result.content()
+    );
+    assert!(
+        runner.invoked.lock().unwrap().is_empty(),
+        "runner must never be reached when the reachable-set gate refuses"
+    );
 }
 
 /// ADR-0024 decision 3, the one enforcement-point behavior change: an

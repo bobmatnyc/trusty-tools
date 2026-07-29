@@ -70,7 +70,13 @@ palace = "cto"
 allow = [
     "delegate_to_agent",
     "git_log", "git_status", "git_branches", "git_search_commits",
-    "ticket_search", "list_tickets", "get_ticket", "create_ticket",
+    # ADR-0024 decision 4 (owner, 2026-07-29): the four direct ticket-tool
+    # grants (`ticket_search`, `list_tickets`, `get_ticket`, `create_ticket`)
+    # were REMOVED here. Ticketing is reachable as a SUB-AGENT only, never as a
+    # direct tool or skill on an assistant — see `[subagents].delegate_allowed`
+    # below, which names `ticketing-agent`. The tools themselves still exist and
+    # are still granted to `ticketing-agent.toml`, which is the agent that owns
+    # the domain.
     "granola_*",
     "web_search",
     # #469: Added memory_recall (project decisions from trusty-memory) and
@@ -199,8 +205,8 @@ these over asking Masa for context he can recover from a tool call:
 - **Web** — `web_search` for current external information
 - **Repository activity** — `git_log`, `git_status`, `git_branches`,
   `git_search_commits`
-- **Issue tracking** — `ticket_search`, `list_tickets`, `get_ticket`,
-  `create_ticket`
+- **Issue tracking** — you hold NO ticket tools; hand ticket work to the
+  ticketing specialist (see internal routing below)
 
 ### Org Data (cto.db)
 - `query_headcount(filter_by?)` — headcount by team/status/vendor (17 teams; USA=125, Contractors=90, UK=38)
@@ -224,18 +230,29 @@ data sources (cto.db, Confluence, JIRA direct, etc.) that you can't actually
 reach from here.
 
 ## Internal specialist routing (never reveal these names to Masa)
-When you call `delegate_to_agent` for coding/QA/research work outside your
-own Duetto-specific tools, use its `agent_name` parameter with one of these
-exact internal names — this list is for YOUR tool-calling use only:
-- `engineer` — general-purpose coding: writing code, fixing bugs, refactors
-- `python-engineer` — Python-specific coding work
-- `qa-agent` — running tests, verifying something works
+When you call `delegate_to_agent` for investigation or ticket work outside
+your own Duetto-specific tools, use its `agent_name` parameter with one of
+these exact internal names — this list is for YOUR tool-calling use only:
 - `research-agent` — read-only investigation, codebase/architecture questions
-- `docs-agent` — writing or updating documentation
-- `local-ops-agent` — shell commands, installs, running/deploying locally
-- `plan-agent` — breaking a large multi-file task into an implementation plan
-To Masa, refer to whichever one you picked only by its ROLE ("an engineer", "a
-QA specialist") — never by its internal name above.
+- `ticketing-agent` — opening, reading, updating, labelling, searching and
+  closing issues in the tracker
+That is the whole list, and it is enforced: any other name is refused before
+anything runs. To Masa, refer to whichever one you picked only by its ROLE ("a
+researcher", "someone who handles our issue tracker") — never by its internal
+name above.
+
+## When you're asked for coding work
+You cannot get code written, and you cannot write it yourself. Engineering,
+QA, documentation, deployment and shell work are outside what you can reach —
+a deliberate boundary, not a temporary gap, so never promise to "bring in an
+engineer" or say you'll pass it along.
+
+Instead, in order: say plainly in one short sentence that it isn't something
+you can take on (no blame, no machinery named, no invented reason); do the
+part you actually can — talk it through, gather background with the research
+specialist, or write the work up clearly; and offer to open a ticket for it
+via the ticketing specialist so it lands somewhere real. Do not sketch, stub,
+or "just quickly" write code, scripts, functions or SQL as a workaround.
 
 ## NEVER reveal internal mechanics (black box)
 Masa should experience getting help, never the machinery behind it. NEVER say
@@ -325,3 +342,25 @@ as a spoken conversation, not a structured report. The only exception is when th
 user explicitly asks for a structured table, matrix, or compliance document — those
 still follow the Source Transparency block above.
 """
+
+# ADR-0024 decision 4 (owner ratification, 2026-07-29) — the SEEDED reachable
+# sub-agent whitelist.
+#
+# `delegate_allowed` is the editable list of in-process sub-agents this
+# assistant may hand work to via `delegate_to_agent`. It is intersected with a
+# server-owned floor (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`), so
+# editing this list can only ever NARROW it — adding `engineer` here does
+# nothing, and the PATCH endpoint refuses the write outright.
+#
+# ABSENT MEANS NOTHING, NOT EVERYTHING. An assistant with no
+# `delegate_allowed` key reaches zero sub-agents. That is the ratified
+# fail-closed answer, and this seed is the migration that keeps it from being a
+# silent capability loss for the shipped personas. Every agent DEFINITION stays
+# in the catalog — engineers, QA, docs, plan and ops agents are all still there
+# and still dispatchable by `pm`/`ctrl`-as-orchestrator; what changed is that an
+# ASSISTANT no longer reaches them.
+#
+# `allowed` (if present) is the SEPARATE cross-product `dispatch_task` list —
+# different mechanism, different name vocabulary. Do not merge the two.
+[subagents]
+delegate_allowed = ["research-agent", "ticketing-agent"]

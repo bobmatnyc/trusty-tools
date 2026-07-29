@@ -173,11 +173,14 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 ///     identity). A child can still set `display_name` even when the base has
 ///     none (the reverse case);
 ///   - list fields (`tools.allowed`, `tools.allow`, `tools.scopes`,
+///     `skills.allow`, `subagents.allowed`, `subagents.delegate_allowed`,
 ///     `system_prompt.skills`, and every `capabilities` sub-list): UNION,
 ///     de-duplicated in first-seen base-first order;
 ///   - prose (`system_prompt.content`): base body then child body, joined by a
 ///     blank line, matching `compose_agent`'s `bodies.join("\n\n")`.
-/// `extends` itself is cleared (never inherited). The `user_authority` field is
+/// `extends` itself is cleared (never inherited). ADR-0024 decision 4 added
+/// `[subagents]` to the union set — see the inline comment for the silent-drop
+/// bug that fixes. The `user_authority` field is
 /// deliberately excluded from inheritance — see the stub note in the body.
 /// The provider `adapter` is left as the base's here and recomputed by the
 /// loader after model resolution.
@@ -189,7 +192,8 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// `extends_llm_child_inherits_when_omitted`,
 /// `extends_tier_child_inherits_l0_from_base_when_omitted`,
 /// `extends_tier_child_can_downgrade_l0_base_to_l1`,
-/// `extends_tier_omitted_everywhere_resolves_l1`.
+/// `extends_tier_omitted_everywhere_resolves_l1`,
+/// `extends_unions_the_subagent_whitelist`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // #3936: the base's own contribution to the `permissions.scopes`
     // accumulator, captured BEFORE `base` moves into `merged` below.
@@ -361,6 +365,22 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // the same reason — an overlay ADDS capability to its base and must never
     // silently remove what the base granted.
     merged.skills.allow = union_opt_vec(merged.skills.allow, child.skills.allow);
+
+    // `[subagents]` (#4026 `allowed`, ADR-0024 decision 4 `delegate_allowed`):
+    // base-first UNION, the §2.5 list rule, for the same reason as
+    // `[skills].allow`. Until decision 4 neither key was merged AT ALL — the
+    // base's value survived because `merged` starts as `base`, and a CHILD's
+    // declaration was silently discarded. That was harmless while nothing in
+    // the roster declared `[subagents]`; it is not harmless for a whitelist the
+    // owner ratified as EDITABLE, because a personalization overlay declaring
+    // its own reachable set would have had it dropped on the floor. Union
+    // cannot widen past the server-owned floor: `SubagentAllowSet::resolve`
+    // intersects the merged list with the floor at every dispatch.
+    merged.subagents.allowed = union_opt_vec(merged.subagents.allowed, child.subagents.allowed);
+    merged.subagents.delegate_allowed = union_opt_vec(
+        merged.subagents.delegate_allowed,
+        child.subagents.delegate_allowed,
+    );
 
     // `[permissions]` (#3936, DOC-57 §2.3 + §7.2):
     //

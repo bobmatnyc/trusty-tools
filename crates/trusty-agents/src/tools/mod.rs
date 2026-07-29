@@ -43,6 +43,7 @@ pub mod session_state;
 pub mod shell;
 pub mod shell_exec;
 pub mod skill_loader;
+pub mod subagent_allow;
 pub mod system_status;
 pub mod timer;
 pub mod tm_tools;

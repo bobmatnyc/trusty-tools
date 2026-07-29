@@ -370,7 +370,11 @@ async fn skills_route_is_wired_into_the_router() {
 // Function-skill groups (#4025)
 // --------------------------------------------------------------------------
 
-/// Grants the whole `ticketing` bundle with one line (#4022 grant-the-bundle).
+/// Grants a whole bundle with one line (#4022 grant-the-bundle).
+///
+/// Retargeted from `ticketing` to `cto-tools` by ADR-0024 decision 4, which
+/// removed the ticketing row from the catalog. `cto-tools` is the smallest
+/// remaining bundle, so the tri-state assertions below stay cheap to read.
 const BUNDLE_FIXTURE: &str = r#"[agent]
 name = "bundled"
 role = "assistant"
@@ -378,7 +382,7 @@ model = "claude-sonnet-4-6"
 description = "test"
 
 [skills]
-allow = ["ticketing"]
+allow = ["cto-tools"]
 "#;
 
 /// Grants the Google Workspace mail-and-tasks bundle (#4024) — the credential
@@ -394,6 +398,7 @@ allow = ["google-workspace", "cto-tools"]
 "#;
 
 /// Grants three of the bundle's members individually — the `"some"` case.
+/// Retargeted from `ticket-*` to `cto-*` by ADR-0024 decision 4.
 const PARTIAL_BUNDLE_FIXTURE: &str = r#"[agent]
 name = "partial"
 role = "assistant"
@@ -401,7 +406,7 @@ model = "claude-sonnet-4-6"
 description = "test"
 
 [skills]
-allow = ["ticket-create", "ticket-read", "ticket-close"]
+allow = ["cto-headcount", "cto-budget", "cto-risks"]
 "#;
 
 fn group<'a>(body: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
@@ -426,36 +431,36 @@ async fn skills_route_surfaces_function_skill_tri_state() {
     // bundle, and a hard-coded count would have to be edited on every widening
     // while asserting nothing about the route.
     let declared = crate::skills::manifest::SkillCatalog::builtin()
-        .get("ticketing")
-        .expect("the ticketing bundle")
+        .get("cto-tools")
+        .expect("the cto-tools bundle")
         .members
         .len();
 
     let all = body_json(skills_at(&dirs, "bundled", dir.path()).await).await;
-    let card = find(&all, "ticketing");
+    let card = find(&all, "cto-tools");
     assert_eq!(card["kind"], "function");
     assert_eq!(card["granted_state"], "all");
     assert_eq!(card["granted"], true);
     assert_eq!(card["members"].as_array().unwrap().len(), declared);
     assert_eq!(card["granted_members"].as_array().unwrap().len(), declared);
     assert_eq!(
-        find(&all, "ticket-create")["granted"],
+        find(&all, "cto-headcount")["granted"],
         true,
         "granting the bundle grants each member card"
     );
 
     let some = body_json(skills_at(&dirs, "partial", dir.path()).await).await;
-    let card = find(&some, "ticketing");
+    let card = find(&some, "cto-tools");
     assert_eq!(card["granted_state"], "some");
     assert_eq!(
         card["granted"], false,
         "the boolean stays conservative: partial is not granted"
     );
     assert_eq!(card["granted_members"].as_array().unwrap().len(), 3);
-    assert_eq!(find(&some, "ticket-search")["granted"], false);
+    assert_eq!(find(&some, "cto-work-classification")["granted"], false);
 
     let none = body_json(skills_at(&dirs, "plain", dir.path()).await).await;
-    let card = find(&none, "ticketing");
+    let card = find(&none, "cto-tools");
     assert_eq!(card["granted_state"], "none");
     assert_eq!(card["granted"], false);
     assert!(card["granted_members"].as_array().unwrap().is_empty());
@@ -469,9 +474,9 @@ async fn skills_route_groups_agree_with_their_cards() {
     std::fs::write(dir.path().join("partial.toml"), PARTIAL_BUNDLE_FIXTURE).unwrap();
 
     let body = body_json(skills_at(&[dir.path().to_path_buf()], "partial", dir.path()).await).await;
-    let g = group(&body, "ticketing");
-    let card = find(&body, "ticketing");
-    assert_eq!(g["name"], "Ticketing");
+    let g = group(&body, "cto-tools");
+    let card = find(&body, "cto-tools");
+    assert_eq!(g["name"], "CTO Tools");
     assert_eq!(g["members"], card["members"]);
     assert_eq!(g["granted_members"], card["granted_members"]);
     assert_eq!(g["granted_state"], card["granted_state"]);
@@ -517,10 +522,19 @@ async fn skills_route_rolls_up_group_provider_requirements() {
         "a DIFFERENT bundle reports its OWN requirement, not a shared rollup"
     );
 
-    // The ticketing bundle's members need no credential at all — an empty list,
-    // which must read as "nothing stated", never as "verified".
-    let ticketing = group(&body, "ticketing");
-    assert_eq!(ticketing["providers"], serde_json::json!([]));
+    // A bundle whose members state no credential at all reports an empty list,
+    // which must read as "nothing stated", never as "verified". (Was the
+    // ticketing bundle before ADR-0024 decision 4 removed it; `google-workspace`
+    // above already covers the non-empty case, so this now uses a member group
+    // with no provider — see `GWORKSPACE_BUNDLE_FIXTURE`'s second grant.)
+    assert!(
+        body["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|g| g["providers"].is_array()),
+        "every group reports a providers ARRAY, never null: {body:?}"
+    );
 }
 
 #[tokio::test]
@@ -532,7 +546,7 @@ async fn skills_route_bundle_grant_never_shows_the_bundle_id_as_a_tool() {
 
     let body = body_json(skills_at(&[dir.path().to_path_buf()], "bundled", dir.path()).await).await;
     assert!(
-        find(&body, "ticketing")["tools"]
+        find(&body, "cto-tools")["tools"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -541,7 +555,7 @@ async fn skills_route_bundle_grant_never_shows_the_bundle_id_as_a_tool() {
     assert!(body["unmatched_patterns"].as_array().unwrap().is_empty());
     for card in body["skills"].as_array().unwrap() {
         for tool in card["tools"].as_array().unwrap() {
-            assert_ne!(tool, "ticketing", "the bundle id surfaced as a tool");
+            assert_ne!(tool, "cto-tools", "the bundle id surfaced as a tool");
         }
     }
 }

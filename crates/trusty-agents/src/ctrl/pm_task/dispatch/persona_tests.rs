@@ -905,6 +905,35 @@ async fn persona_delegate_attempt(
     target_role: &str,
     persona_role: &str,
 ) -> (bool, String, usize) {
+    // ADR-0024 decision 4: seed the persona's reachable-set whitelist with the
+    // WHOLE server-owned floor, so these role/kind/tier tests exercise the gate
+    // they are named for rather than tripping the newer whitelist first. The
+    // whitelist's own coverage lives in the two tests below it.
+    let seed: Vec<String> = crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    persona_delegate_attempt_with_whitelist(target_name, target_role, persona_role, Some(&seed))
+        .await
+}
+
+/// `persona_delegate_attempt` with an explicit reachable-set whitelist
+/// (ADR-0024 decision 4).
+///
+/// Why: the whitelist is the gate a call-site regression would silently drop,
+/// so — exactly like the role allowlist #4201 filed — it must be driven through
+/// the REAL `build_persona_delegate_tool`, with the whitelist value varied,
+/// rather than asserted on a rebuilt tool.
+/// What: same return shape; `whitelist` of `None` is the fail-closed
+/// "persona declares no `[subagents].delegate_allowed`" case.
+/// Test: `persona_delegate_tool_refuses_a_target_outside_the_whitelist`,
+/// `persona_delegate_tool_fails_closed_without_a_whitelist`.
+async fn persona_delegate_attempt_with_whitelist(
+    target_name: &str,
+    target_role: &str,
+    persona_role: &str,
+    whitelist: Option<&[String]>,
+) -> (bool, String, usize) {
     let dir = tempfile::tempdir().expect("tempdir");
     seed_agent_with_role(dir.path(), target_name, target_role);
 
@@ -920,6 +949,7 @@ async fn persona_delegate_attempt(
         // known-gap note: no bundled agent declares `tier = "l0"`, which is
         // precisely why the tier gate cannot cover for the role allowlist.
         crate::agents::AgentTier::L1Standard,
+        whitelist,
     );
 
     let result = tool
@@ -986,20 +1016,80 @@ async fn persona_delegate_tool_refuses_controller_role_target() {
     assert_eq!(spawned, 0, "runner must never be reached: {msg}");
 }
 
-/// The gate must not become a blanket denial: a worker role IS allowlisted
-/// and must still spawn.
+/// The gate must not become a blanket denial: a sub-agent that is BOTH
+/// role-eligible and on the reachable-set whitelist must still spawn.
 ///
 /// Why: a refusal-only test would pass against a gate that broke every
 /// delegation, which would be a worse regression than the hole it closed.
-/// What: `engineer` (role `engineer`, in the allowlist) reaches the runner.
+/// REWRITTEN by ADR-0024 decision 4 rather than patched: the old positive case
+/// was `engineer`, and after decision 4 no coding agent is reachable from an
+/// assistant at all, so a test asserting `engineer` spawns would have been
+/// asserting the exact behaviour the owner removed. The positive case is now a
+/// floor member.
+/// What: `research-agent` (role `researcher`, on the floor, whitelisted by the
+/// helper's seed) reaches the runner.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn persona_delegate_tool_allows_worker_role_target() {
     let (is_error, msg, spawned) =
-        persona_delegate_attempt("engineer", "engineer", "assistant").await;
+        persona_delegate_attempt("research-agent", "researcher", "assistant").await;
 
-    assert!(!is_error, "allowlisted worker role must pass: {msg}");
+    assert!(
+        !is_error,
+        "a whitelisted, role-eligible sub-agent must pass: {msg}"
+    );
     assert_eq!(spawned, 1, "runner must be reached exactly once");
+}
+
+/// ADR-0024 decision 4 on the PERSONA dispatch path: a role-eligible sub-agent
+/// that is NOT on this persona's reachable-set whitelist is refused.
+///
+/// Why: the same #3745-item-C discipline the peer-assistant test cites — a
+/// capability model that holds on one dispatch path only is a bug that surfaces
+/// as "it works in chat". `docs-agent` is deliberately chosen: its role
+/// (`documentation`) is in `ASSISTANT_ALLOWED_DELEGATE_ROLES` and in no other
+/// allow-set, so ONLY the whitelist can be what refuses it here.
+/// What: refused before the runner, with a message that names no other roster
+/// entry.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_refuses_a_target_outside_the_whitelist() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt("docs-agent", "documentation", "assistant").await;
+
+    assert!(
+        is_error,
+        "a role-eligible agent outside the whitelist must be refused"
+    );
+    assert_eq!(spawned, 0, "runner must never be reached: {msg}");
+    assert!(
+        msg.contains("available to you"),
+        "the refusal must explain the reachable-set rule, got: {msg}"
+    );
+}
+
+/// ADR-0024 decision 4 sub-answer (a), on the persona path: an assistant whose
+/// config declares NO whitelist reaches NOTHING — not even a floor member.
+///
+/// Why: fail-closed was the ratified answer, and the seeded bundled-persona
+/// defaults are what keep it from being a silent capability loss. Pinning the
+/// fail-closed half here means a future edit that "helpfully" defaults an
+/// absent list to the full floor breaks a test instead of quietly widening
+/// every custom persona in the field.
+/// What: `research-agent` — on the floor, role-eligible — is refused when the
+/// persona declares no `[subagents].delegate_allowed`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_delegate_tool_fails_closed_without_a_whitelist() {
+    let (is_error, msg, spawned) =
+        persona_delegate_attempt_with_whitelist("research-agent", "researcher", "assistant", None)
+            .await;
+
+    assert!(
+        is_error,
+        "an absent whitelist must reach nothing, including a floor member"
+    );
+    assert_eq!(spawned, 0, "runner must never be reached: {msg}");
 }
 
 /// CONVERTED by ADR-0024 (was `persona_delegate_tool_allows_peer_assistant_

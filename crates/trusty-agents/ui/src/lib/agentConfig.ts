@@ -475,11 +475,12 @@ export async function fetchAgentSkills(name: string): Promise<AgentSkills | null
  * (#4029) — a trusty-agents agent this agent may hand a task to via
  * `delegate_to_agent`.
  *
- * `reachable` already accounts for BOTH refusals the server applies —
+ * `reachable` already accounts for ALL THREE refusals the server applies —
  * ADR-0024's delegation KIND rule (assistant → assistant is refused, read from
- * roles, not tiers) and #4169's one-directional L0/L1 tier gate — so a pane
- * must render `reachable === false` as DENIED with its `reason` and must never
- * present the card as callable. The server refuses to list targets the gate
+ * roles, not tiers), #4169's one-directional L0/L1 tier gate, and ADR-0024
+ * decision 4's per-agent reachable-set whitelist — so a pane must render
+ * `reachable === false` as DENIED with its `reason` and must never present the
+ * card as callable. The server refuses to list targets the gate
  * would refuse; a card that arrives unreachable is one the operator needs an
  * explanation for, not one to hide.
  */
@@ -521,6 +522,29 @@ export interface SubagentInProduct {
    * `targets[].reachable`, which is the only field that carries both gates.
    */
   allowed_roles: string[];
+  /**
+   * ADR-0024 decision 4: whether the reachable-set whitelist gate applies to
+   * THIS agent. It applies to the assistant kind and to nobody else — `pm`/
+   * `ctrl`-as-orchestrator delegate through separately-trusted paths the rule
+   * does not revisit. False here means `reachable` carries only the kind and
+   * tier gates.
+   */
+  whitelist_enforced: boolean;
+  /**
+   * Whether this agent declares `[subagents].delegate_allowed` at all. `false`
+   * does NOT mean "everything" — it means NOTHING is reachable (fail-closed,
+   * the owner's ratified default). A pane must say so explicitly, exactly as
+   * the cross-product half already does for `declares_allowed`.
+   */
+  declares_whitelist: boolean;
+  /**
+   * `ASSISTANT_REACHABLE_SUBAGENTS` — the server-owned floor the editable
+   * whitelist narrows. Reported even when `whitelist_enforced` is false, so a
+   * pane can state the ceiling for any viewer. Configuration can narrow this,
+   * never widen it: a write naming anything outside it is refused by
+   * `PATCH /api/agents/:name` and, behind that, by the dispatch gate.
+   */
+  reachable_floor: string[];
   targets: SubagentInProductTarget[];
   /** Roster entries excluded by the role allowlist — counted, never named. */
   role_excluded_count: number;

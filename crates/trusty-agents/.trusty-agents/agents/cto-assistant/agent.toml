@@ -74,9 +74,13 @@ palace = "cto"
 allow = [
     # #255: branch listing + commit search beyond the base's git_log/git_status.
     "git_branches", "git_search_commits",
-    # #255/#246: native ticketing surface (verb_noun shape, except
-    # `ticket_search` which is the cross-text search tool).
-    "ticket_search", "list_tickets", "get_ticket", "create_ticket",
+    # ADR-0024 decision 4 (owner, 2026-07-29): the four direct ticket-tool
+    # grants (`ticket_search`, `list_tickets`, `get_ticket`, `create_ticket`)
+    # were REMOVED here. Ticketing is reachable as a SUB-AGENT only, never as a
+    # direct tool or skill on an assistant — see `[subagents].delegate_allowed`
+    # below, which names `ticketing-agent`. The tools themselves still exist and
+    # are still granted to `ticketing-agent.toml`, which is the agent that owns
+    # the domain.
     # #469: memory_recall (project decisions from trusty-memory) and
     # vector_search (semantic code/doc search).
     "memory_recall",
@@ -153,3 +157,25 @@ skills = [
     "cto-bob-voice",
     "izzie-metro-north",
 ]
+
+# ADR-0024 decision 4 (owner ratification, 2026-07-29) — the SEEDED reachable
+# sub-agent whitelist.
+#
+# `delegate_allowed` is the editable list of in-process sub-agents this
+# assistant may hand work to via `delegate_to_agent`. It is intersected with a
+# server-owned floor (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`), so
+# editing this list can only ever NARROW it — adding `engineer` here does
+# nothing, and the PATCH endpoint refuses the write outright.
+#
+# ABSENT MEANS NOTHING, NOT EVERYTHING. An assistant with no
+# `delegate_allowed` key reaches zero sub-agents. That is the ratified
+# fail-closed answer, and this seed is the migration that keeps it from being a
+# silent capability loss for the shipped personas. Every agent DEFINITION stays
+# in the catalog — engineers, QA, docs, plan and ops agents are all still there
+# and still dispatchable by `pm`/`ctrl`-as-orchestrator; what changed is that an
+# ASSISTANT no longer reaches them.
+#
+# `allowed` (if present) is the SEPARATE cross-product `dispatch_task` list —
+# different mechanism, different name vocabulary. Do not merge the two.
+[subagents]
+delegate_allowed = ["research-agent", "ticketing-agent"]

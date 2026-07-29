@@ -627,7 +627,8 @@ content = "base"
     let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
     assert!(cfg.subagents.allowed.is_none());
     assert!(
-        crate::tools::cross_product::SubagentAllowSet::from_allowed(
+        crate::tools::subagent_allow::SubagentAllowSet::over(
+            crate::tools::cross_product::NON_CODING_TARGETS,
             cfg.subagents.allowed.as_deref()
         )
         .is_empty(),
@@ -668,6 +669,48 @@ allowed = ["research", "ticketing"]
     assert_eq!(
         cfg.tools.allow.as_deref(),
         Some(&["git_log".to_string()][..])
+    );
+}
+
+/// ADR-0024 decision 4: `[subagents] delegate_allowed = [...]` parses, and is
+/// kept SEPARATE from the cross-product `allowed` key.
+///
+/// Why: the two mechanisms take different names for different things
+/// (`research` is a trusty-code specialist, `research-agent` a trusty-agents
+/// roster entry). A single flattened key would make one config line mean two
+/// capabilities, which is exactly what the API payload keeps apart.
+/// What: both keys parse independently; declaring one leaves the other `None`.
+/// Test: this function IS the test.
+#[test]
+fn subagents_config_parses_delegate_allowed() {
+    let toml_str = r#"
+[agent]
+name = "seeded"
+role = "assistant"
+model = "m"
+description = "d"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[subagents]
+delegate_allowed = ["research-agent", "ticketing-agent"]
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert_eq!(
+        cfg.subagents.delegate_allowed,
+        Some(vec![
+            "research-agent".to_string(),
+            "ticketing-agent".to_string()
+        ])
+    );
+    assert!(
+        cfg.subagents.allowed.is_none(),
+        "the cross-product key must stay independent"
     );
 }
 

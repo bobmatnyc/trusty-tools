@@ -8,10 +8,11 @@
    *
    * The two are not variants of one thing and this pane never merges them:
    * `delegate_to_agent` is in-product (trusty-agents → trusty-agents), its
-   * target set a HARDCODED role allowlist crossed with the resolvable roster,
-   * then narrowed by ADR-0024's delegation KIND rule (an assistant never
-   * delegates to a peer assistant) and by #4169's L0/L1 tier gate — no
-   * per-agent config at all;
+   * target set a role allowlist crossed with the resolvable roster, then
+   * narrowed by ADR-0024's delegation KIND rule (an assistant never delegates
+   * to a peer assistant), by #4169's L0/L1 tier gate, and — since ADR-0024
+   * decision 4 — by a per-agent `[subagents].delegate_allowed` whitelist
+   * bounded by a server-owned floor;
    * `dispatch_task` is cross-product (trusty-agents → trusty-code), the one
    * with a real `[subagents].allowed` binding, intersected fail-closed with
    * the bridge's own `NON_CODING_TARGETS` floor (OQ-7). Their target
@@ -20,10 +21,14 @@
    * which enforcement layer applies to a given name.
    *
    * What: two labelled groups over `GET /api/agents/:name/subagents`, which
-   * resolves both through the SAME code the enforcement points call. Read-only,
-   * matching every other read-only section (DOC-57 §7.2's PM-4 rationale
-   * applies at least as strongly here: delegation reach is the escalation
-   * surface #3555 and #4169 exist to close).
+   * resolves both through the SAME code the enforcement points call. Read-only
+   * IN THIS PANE, matching every other read-only section (DOC-57 §7.2's PM-4
+   * rationale applies at least as strongly here: delegation reach is the
+   * escalation surface #3555 and #4169 exist to close). ADR-0024 decision 4
+   * made the in-product set editable in CONFIG (and via
+   * `PATCH /api/agents/:name`, which enforces the floor server-side); this pane
+   * still only reports, so the copy says "edit agent.toml" rather than offering
+   * a control.
    *
    * Honesty rules, mirroring the sibling panes: `tool_registered` and
    * `tool_granted` render separately (registered ≠ granted); an unreachable
@@ -80,11 +85,10 @@
   <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
     Who this agent can hand work to. Two independent mechanisms with two different
     enforcement layers — they are shown separately because a name reachable through one is not
-    reachable through the other. Read-only; edit
-    <code class="font-mono">[subagents]</code> in <code class="font-mono">agent.toml</code>. The
-    in-product target set is not configurable at all — it is a fixed role allow-list, minus every
-    peer assistant (assistants do not delegate to one another), minus whatever the L0/L1 gate
-    blocks.
+    reachable through the other. Read-only here; edit
+    <code class="font-mono">[subagents]</code> in <code class="font-mono">agent.toml</code>. Both
+    halves are configurable and both are bounded by a server-owned floor: configuration can only
+    ever narrow a floor, never widen it.
   </p>
 
   {#if error}
@@ -114,16 +118,29 @@
         </span>
       </div>
       <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/50">
-        Another trusty-agents agent, run in-process. This agent's configuration does not choose the
-        targets. A target's role must first appear in the role allow-list
+        Another trusty-agents agent, run in-process. A target's role must first appear in the role
+        allow-list
         <span class="font-mono">({(inProduct?.allowed_roles ?? []).join(', ')})</span>, but
-        eligibility is not reachability: the delegation kind rule then refuses every
-        <span class="font-mono">assistant</span> target — assistants communicate with each other
-        rather than delegating to one another (ADR-0024) — so what an assistant can actually
-        delegate to is the SUB-AGENT roles in that list, never a peer assistant. The
-        one-directional L0/L1 tier gate narrows it further. This agent's own tier is
+        eligibility is not reachability. Three further gates apply, all of them narrowing: the
+        delegation kind rule refuses every <span class="font-mono">assistant</span> target —
+        assistants communicate with each other rather than delegating to one another (ADR-0024), so
+        what an assistant reaches is never a peer assistant;
+        the one-directional L0/L1 tier gate refuses an orchestration-tier target for a
+        standard-tier delegator; and this agent's own
+        <code class="font-mono">[subagents].delegate_allowed</code> whitelist must name the target,
+        intersected with the server-owned floor
+        <span class="font-mono">({(inProduct?.reachable_floor ?? []).join(', ')})</span>, which
+        configuration can narrow but never widen. This agent's own tier is
         <code class="font-mono">{inProduct?.delegator_tier ?? 'l1'}</code>.
       </p>
+
+      {#if inProduct?.whitelist_enforced && !inProduct?.declares_whitelist}
+        <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
+          This agent declares no <code class="font-mono">[subagents].delegate_allowed</code>.
+          Absent grants <strong>nothing</strong> — it does not mean "all" (ADR-0024 decision 4,
+          fail-closed).
+        </p>
+      {/if}
 
       {#if !inProduct?.tool_registered}
         <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">

@@ -19,10 +19,16 @@
 //!   applied to whatever resolves out of `agents::agents_dir_candidates()`,
 //!   further narrowed by ADR-0024's delegation KIND rule
 //!   (`agents::delegation::kind_refuses_delegation` — assistant → assistant is
-//!   refused) and by #4169's one-directional L0/L1 tier gate. Role
-//!   eligibility is therefore NOT reachability, and `allowed_roles` below is
-//!   the coarse pre-kind-gate list, not the answer. The role `documentation`
-//!   exists ONLY here — it is in no other allow-set in the codebase.
+//!   refused), by #4169's one-directional L0/L1 tier gate, and — since
+//!   ADR-0024 decision 4 (ratified 2026-07-29) — by a per-agent, NAME-based
+//!   reachable-set whitelist: `[subagents].delegate_allowed`, intersected with
+//!   `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS` by the same
+//!   `SubagentAllowSet` the cross-product half uses. So this mechanism DOES
+//!   have a per-agent config binding now; what it does not have is a config
+//!   that can widen. Role eligibility is still NOT reachability, and
+//!   `allowed_roles` below is the coarse pre-kind-gate list, not the answer.
+//!   The role `documentation` exists ONLY here — it is in no other allow-set
+//!   in the codebase.
 //! - **`cross_product`** — `dispatch_task` (`crate::tools::pm_bridge`),
 //!   trusty-agents → trusty-code, out-of-process specialist dispatch. This one
 //!   DOES have a per-agent TOML binding: the optional `[subagents]` section
@@ -40,8 +46,9 @@
 //!   OQ-7 requirement stated in #4029), and, for the in-product half, the same
 //!   `AgentConfig::by_name_in` resolution + `ASSISTANT_ALLOWED_DELEGATE_ROLES`
 //!   membership + `agents::delegation::kind_refuses_delegation` call +
-//!   `AgentInfo::tier()` comparison that `DelegateToAgentTool::execute`'s
-//!   pre-flight check performs, in that order.
+//!   `AgentInfo::tier()` comparison + `SubagentAllowSet::resolve` over the
+//!   in-process floor that `DelegateToAgentTool::execute`'s pre-flight check
+//!   performs, in that order.
 //! - **The prose must be predictive, not just the cards.** Any user-visible
 //!   copy describing this mechanism states the EFFECTIVE rule — role-eligible
 //!   MINUS kind-refused — and names peer assistants as refused. Quoting
@@ -98,7 +105,8 @@ use crate::agents::{AgentConfig, AgentTier};
 use crate::ctrl::pm_task::match_any_glob;
 use crate::runtime::tool_registry::{ASSISTANT_ALLOWED_DELEGATE_ROLES, ASSISTANT_TIER_ROLE};
 use crate::skills::manifest::{SkillCatalog, effective_tool_patterns};
-use crate::tools::cross_product::{NON_CODING_TARGETS, SubagentAllowSet, TargetDenied};
+use crate::tools::cross_product::NON_CODING_TARGETS;
+use crate::tools::subagent_allow::{SubagentAllowSet, TargetDenied};
 
 /// The in-product delegation tool this section reports on.
 const DELEGATE_TOOL: &str = "delegate_to_agent";
@@ -259,12 +267,18 @@ pub(super) async fn subagents_at(
 /// candidate never reaches the role check, and `role_excluded_count` keeps its
 /// pre-#4235 meaning of "role not in the allowlist" unchanged.
 /// What: `{mechanism, tool, tool_registered, tool_granted, delegator_tier,
-/// allowed_roles, targets, role_excluded_count, hidden_excluded_count,
-/// unresolved}`. `targets` carries only non-hidden, role-eligible agents (see
-/// the module doc's no-roster-dump rule), each with `reachable` plus a `reason`
-/// when refused. The agent itself is excluded: self-delegation is not a
-/// configuration surface.
+/// allowed_roles, whitelist_enforced, declares_whitelist, reachable_floor,
+/// targets, role_excluded_count, hidden_excluded_count, unresolved}`.
+/// `targets` carries only non-hidden, role-eligible agents (see the module
+/// doc's no-roster-dump rule), each with `reachable` plus a `reason` when
+/// refused. `reachable_floor` is the server-owned ceiling
+/// `[subagents].delegate_allowed` narrows (ADR-0024 decision 4); it is
+/// reported even when `whitelist_enforced` is false, because a pane must be
+/// able to state the ceiling for an agent that is not gated by it. The agent
+/// itself is excluded: self-delegation is not a configuration surface.
 /// Test: `subagents_route_reports_both_mechanisms_for_an_assistant`,
+/// `subagents_route_reports_a_non_whitelisted_target_as_unreachable`,
+/// `subagents_route_absent_whitelist_makes_every_target_unreachable`,
 /// `subagents_route_hides_l0_target_from_l1_delegator`,
 /// `subagents_route_shows_l0_target_to_l0_delegator`,
 /// `subagents_route_reports_tool_not_registered_for_a_worker_role`,
@@ -278,6 +292,16 @@ async fn in_product_surface(
     tool_granted: bool,
 ) -> Value {
     let delegator_tier = cfg.agent.tier();
+    // ADR-0024 decision 4, mirrored — not re-derived. `whitelist_applies`
+    // repeats `execute`'s own scoping (the gate runs for the assistant kind and
+    // for nobody else), and `whitelist` is the SAME `SubagentAllowSet` over the
+    // SAME floor the registry hands the tool, so a target this pane calls
+    // reachable is one the gate admits.
+    let whitelist_applies = crate::agents::delegation::is_assistant_kind(&cfg.agent.role);
+    let whitelist = SubagentAllowSet::over(
+        crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+        cfg.subagents.delegate_allowed.as_deref(),
+    );
     let mut targets: Vec<Value> = Vec::new();
     let mut unresolved: Vec<Value> = Vec::new();
     let mut role_excluded_count: usize = 0;
@@ -330,12 +354,21 @@ async fn in_product_surface(
                     &cfg.agent.role,
                     &target.agent.role,
                 );
+                // ADR-0024 decision 4: the name-level whitelist, checked
+                // through `SubagentAllowSet::resolve` itself. Deliberately a
+                // THIRD, independent conjunct rather than a replacement for
+                // either gate above — the ADR's conformance checklist requires
+                // the kind exclusion to stay a property of the code even when a
+                // whitelist is misconfigured, which only holds while the two
+                // are computed separately.
+                let whitelist_blocked =
+                    whitelist_applies && whitelist.resolve(&target.agent.name).is_err();
                 targets.push(json!({
                     "name": target.agent.name,
                     "display_name": target.agent.display_label(),
                     "role": target.agent.role,
                     "tier": target_tier.wire_label(),
-                    "reachable": !(kind_blocked || tier_blocked),
+                    "reachable": !(kind_blocked || tier_blocked || whitelist_blocked),
                     "reason": if kind_blocked {
                         Some(
                             "refused by the delegation kind rule: this target is a peer \
@@ -351,6 +384,15 @@ async fn in_product_surface(
                              (#4169) — privilege cannot be acquired via delegation",
                             delegator_tier.wire_label(),
                         ))
+                    } else if whitelist_blocked {
+                        Some(
+                            "not in this agent's reachable sub-agent set: \
+                             [subagents].delegate_allowed in agent.toml lists the sub-agents \
+                             it may delegate to, and an absent list reaches nothing \
+                             (ADR-0024 decision 4, fail-closed). The list can only ever \
+                             narrow the server-owned floor below, never widen it."
+                                .to_string(),
+                        )
                     } else {
                         None
                     },
@@ -384,6 +426,13 @@ async fn in_product_surface(
         "tool_granted": tool_granted,
         "delegator_tier": delegator_tier.wire_label(),
         "allowed_roles": ASSISTANT_ALLOWED_DELEGATE_ROLES,
+        // ADR-0024 decision 4: the editable whitelist and the floor it narrows,
+        // reported so the pane can state the rule it actually enforces instead
+        // of the pre-#4296 "not configurable at all". `whitelist_enforced` is
+        // `execute`'s own scoping, not a display toggle.
+        "whitelist_enforced": whitelist_applies,
+        "declares_whitelist": cfg.subagents.delegate_allowed.is_some(),
+        "reachable_floor": crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
         "targets": targets,
         "role_excluded_count": role_excluded_count,
         // #4235: hidden candidates are counted here and NOT in
@@ -425,7 +474,7 @@ async fn in_product_surface(
 /// `subagents_route_cross_product_denies_everything_without_the_section`,
 /// `subagents_route_cross_product_grants_a_declared_floor_target`.
 fn cross_product_surface(declared: Option<&[String]>, tool_granted: bool) -> Value {
-    let allow_set = SubagentAllowSet::from_allowed(declared);
+    let allow_set = SubagentAllowSet::over(NON_CODING_TARGETS, declared);
 
     let targets: Vec<Value> = NON_CODING_TARGETS
         .iter()
@@ -498,6 +547,11 @@ fn empty_in_product() -> Value {
         "tool_granted": false,
         "delegator_tier": AgentTier::default().wire_label(),
         "allowed_roles": ASSISTANT_ALLOWED_DELEGATE_ROLES,
+        // Keep the degraded payload's key set identical to the real one — a
+        // pane reading these blanks out on a config error otherwise.
+        "whitelist_enforced": false,
+        "declares_whitelist": false,
+        "reachable_floor": crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
         "targets": Vec::<Value>::new(),
         "role_excluded_count": 0,
         // #4235: keep the degraded payload's key set identical to the real
@@ -626,19 +680,33 @@ mod unit_tests {
         );
     }
 
-    /// `documentation` is in `ASSISTANT_ALLOWED_DELEGATE_ROLES` and in NO other
-    /// allow-set in the codebase — in particular it is not a cross-product
-    /// target. If the two halves were ever flattened this assertion is the one
-    /// that breaks, which is why the payload keeps them apart.
+    /// The two mechanisms' TARGET vocabularies are disjoint — if they were ever
+    /// flattened, this assertion is the one that breaks, which is why the
+    /// payload keeps them apart.
+    ///
+    /// REWRITTEN by ADR-0024 decision 4. The old body compared the in-product
+    /// ROLE list against the cross-product NAME floor and asserted no overlap;
+    /// decision 4 added the role `ticketing` to the role list (so the bundled
+    /// `ticketing-agent` is role-eligible at all), which collides textually
+    /// with the cross-product specialist NAMED `ticketing` while meaning
+    /// something entirely different. Comparing a role list to a name list was
+    /// always the wrong comparison — it happened to hold. The assertion now
+    /// compares like with like: the two NAME floors, which genuinely must not
+    /// overlap, plus the surviving half of the original claim about
+    /// `documentation`.
     #[test]
     fn the_two_mechanisms_have_a_disjoint_target_vocabulary() {
+        // `documentation` is an in-product ROLE and nothing else.
         assert!(ASSISTANT_ALLOWED_DELEGATE_ROLES.contains(&"documentation"));
         assert!(!NON_CODING_TARGETS.contains(&"documentation"));
-        for floor in NON_CODING_TARGETS {
+        // The two NAME vocabularies — the comparison that is actually
+        // meaningful, since both halves of the payload key their target cards
+        // on names.
+        for floor in crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS {
             assert!(
-                !ASSISTANT_ALLOWED_DELEGATE_ROLES.contains(floor),
-                "{floor} appears in both allow-sets; the payload's kind labelling \
-                 would become ambiguous"
+                !NON_CODING_TARGETS.contains(floor),
+                "{floor} appears on both target floors; the payload's kind \
+                 labelling would become ambiguous"
             );
         }
     }
