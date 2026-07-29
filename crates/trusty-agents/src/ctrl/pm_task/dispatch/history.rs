@@ -380,18 +380,50 @@ pub async fn run_pm_task_with_history(
         return Ok(content);
     }
 
-    let runner: Arc<dyn AgentRunner> =
-        Arc::new(SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())));
+    // Security fix (delegate_to_agent injection-to-RCE path, item 3, #4126):
+    // this THIRD dispatch path (backing the REPL, Slack, Telegram, and the
+    // API server, and `ctrl.toml` is the standalone-mode default) built its
+    // `DelegateToAgentTool` with NO taint and NO `allowed_target_roles` at
+    // all — `pm_cfg` resolves to `ctrl.toml`, which declares
+    // `role = "assistant"` (deliberately, per #3812, for role-filtered
+    // picker grouping), the SAME role value the OTHER two dispatch paths
+    // (`runtime::subagent_mode`, `persona.rs`) treat as "holds live
+    // external-content tools (web_search here), must never produce an
+    // unrestricted delegate_to_agent spawn." See `ctrl_delegate_posture`.
+    let inbound_taint = crate::runtime::tool_registry::parse_delegation_taint_env(
+        std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
+    );
+    let (delegation_taint, allowed_target_roles, delegator_tier) = ctrl_delegate_posture(
+        &pm_cfg.agent.role,
+        pm_cfg.tools.allow.as_deref(),
+        inbound_taint.as_deref(),
+        pm_cfg.agent.tier(),
+    );
+    let runner: Arc<dyn AgentRunner> = Arc::new(
+        SubprocessAgentRunner::new()
+            .with_config_dir(Some(config_dir.clone()))
+            .with_delegation_taint(delegation_taint),
+    );
 
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(
-        // #3737: thread the task's session id so a successful delegation emits
-        // `AgentSpawned` and the API server can attribute the answer to the
-        // specialist that produced it (chat-bubble responder attribution).
-        DelegateToAgentTool::new(runner)
-            .with_config_dir(config_dir.clone())
-            .with_session_id(sid.clone()),
-    ));
+    // #3737: thread the task's session id so a successful delegation emits
+    // `AgentSpawned` and the API server can attribute the answer to the
+    // specialist that produced it (chat-bubble responder attribution).
+    // ADR-0024: the delegator's IDENTITY (role = KIND, plus tier) is declared
+    // in one call, so this path gets the kind predicate and the tier gate
+    // together and cannot acquire one without the other. `pm_cfg.agent.role`
+    // verbatim: for `ctrl.toml` that is `assistant` (#3812) and the kind
+    // predicate applies; for a resolved `pm.toml` it is `orchestrator`, which
+    // the predicate ignores by design (ADR-0024 predicate 1's scope caveat),
+    // so orchestrator delegation is unchanged.
+    let mut delegate_tool = DelegateToAgentTool::new(runner)
+        .with_config_dir(config_dir.clone())
+        .with_session_id(sid.clone())
+        .with_delegator(pm_cfg.agent.role.clone(), delegator_tier);
+    if let Some(roles) = allowed_target_roles {
+        delegate_tool = delegate_tool.with_allowed_target_roles(roles);
+    }
+    registry.register(Arc::new(delegate_tool));
     // #3052 PR B (lane 3): the opaque tm<->tcode bridge, distinct from lane 2
     // (`delegate_to_agent` above). RBAC-locked to deny ReadOnly + Analytics.
     // #4026/#4028: the caller's `[subagents].allowed` list is resolved into the
@@ -513,6 +545,71 @@ pub async fn run_pm_task_with_history(
         text: events::preview(&content, 240),
     });
     Ok(content)
+}
+
+/// Compute the delegation-taint and role-allowlist posture
+/// `run_pm_task_with_history` applies to the `DelegateToAgentTool` it builds
+/// (security fix — item 3, #4126).
+///
+/// Why: Pulled out of the ~500-line dispatch body specifically so this
+/// fail-closed / role-gate behavior is unit-testable without a live LLM call
+/// — mirrors why `runtime::tool_registry::scope_for_delegation` and
+/// `compose_delegation_taint` are pure functions rather than inlined at
+/// their call sites. This was the THIRD `delegate_to_agent` construction
+/// site (besides `runtime::subagent_mode`/`runtime::tool_registry` and
+/// `ctrl::pm_task::dispatch::persona`) and, until this fix, the only one
+/// with no taint and no `allowed_target_roles` at all — even though
+/// `resolve_agent_config` can resolve `ctrl.toml`, which declares
+/// `role = "assistant"` (#3812).
+/// What: `role != "assistant"` (e.g. a resolved `pm.toml`, `role =
+/// "orchestrator"`) returns `(None, None, AgentTier::L0Orchestration)` —
+/// completely unaffected on the taint/role front; `pm` is the trusted
+/// orchestrator, not a sandboxed persona, and this dispatch path must keep
+/// working exactly as before for it. The THIRD element is deliberately
+/// `AgentTier::L0Orchestration` here too (#4169, epic #4167) — not because
+/// `pm`/`ctrl`-as-orchestrator IS an L0 persona, but because it sits
+/// OUTSIDE the L0/L1 persona tier model entirely (already fully trusted,
+/// already unrestricted) and must not be newly blocked from reaching a
+/// future L0 persona by a gate that was never meant to restrict it; see
+/// `DelegateToAgentTool::delegator_tier`'s doc comment for the same pattern.
+/// `role == "assistant"` returns `(Some(taint), Some(roles),
+/// declared_tier)`: `taint` is
+/// `compose_delegation_taint(native_allow, inbound_taint).unwrap_or_default()`
+/// — ALWAYS `Some`, even when empty, matching
+/// `build_assistant_tier_registry`'s fail-closed convention (an absent
+/// `[tools].allow` on `ctrl.toml` narrows to deny-all, never skips tainting);
+/// `roles` is always `ASSISTANT_ALLOWED_DELEGATE_ROLES` — the same
+/// worker + peer-assistant allowlist `build_assistant_tier_registry` uses,
+/// deliberately excluding `orchestrator`/`controller`/`observer`/`analysis`;
+/// `declared_tier` is `pm_cfg.agent.tier()` verbatim (fail-closed to
+/// `L1Standard` for every persona shipped before #4168).
+/// Test: `ctrl_delegate_posture_orchestrator_role_is_unrestricted`,
+/// `ctrl_delegate_posture_assistant_role_fails_closed_without_allow`,
+/// `ctrl_delegate_posture_assistant_role_forwards_native_allow`,
+/// `ctrl_delegate_posture_assistant_role_always_gates_target_roles`,
+/// `ctrl_delegate_posture_orchestrator_role_reports_l0_tier`,
+/// `ctrl_delegate_posture_assistant_role_reports_its_declared_tier`.
+fn ctrl_delegate_posture(
+    role: &str,
+    native_allow: Option<&[String]>,
+    inbound_taint: Option<&[String]>,
+    declared_tier: crate::agents::AgentTier,
+) -> (
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+    crate::agents::AgentTier,
+) {
+    if role != "assistant" {
+        return (None, None, crate::agents::AgentTier::L0Orchestration);
+    }
+    let taint =
+        crate::runtime::tool_registry::compose_delegation_taint(native_allow, inbound_taint)
+            .unwrap_or_default();
+    let roles = crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    (Some(taint), Some(roles), declared_tier)
 }
 
 /// Compute `chat_with_tools_gated`'s `allowed_tools` argument from an

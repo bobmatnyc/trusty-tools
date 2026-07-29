@@ -153,6 +153,16 @@ pub struct DaemonState {
     pub(super) session_manager_agent: Arc<crate::core::sm::SessionManagerAgent>,
     /// Append-only JSONL logger for every overseer decision.
     pub(super) audit: Arc<AuditLogger>,
+    /// The peer message bus (DOC-60 §5.3).
+    ///
+    /// Why: DOC-60 §4 hosts the assistant-to-assistant bus in this daemon, so
+    /// the instance registry and the per-instance delivery channels must live
+    /// on shared daemon state for the HTTP handlers to reach them.
+    /// What: the [`PeerBus`](crate::daemon::bus::PeerBus), constructed against
+    /// this daemon's `logs/` directory so its durable §9 stream lands beside
+    /// the overseer one.
+    /// Test: `crate::daemon::bus::tests`.
+    pub(super) bus: Arc<crate::daemon::bus::PeerBus>,
     /// The Telegram chat id paired with this daemon, when one has confirmed a
     /// pairing code.
     ///
@@ -420,6 +430,7 @@ impl DaemonState {
             llm: build.llm,
             session_manager_agent: build_session_manager_agent(&root),
             audit: make_audit_logger(&root),
+            bus: Arc::new(crate::daemon::bus::PeerBus::new(&root.join("logs"))),
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root: root,
@@ -488,6 +499,9 @@ impl DaemonState {
             llm: build.llm,
             session_manager_agent: build_session_manager_agent(&framework_root),
             audit: make_audit_logger(&framework_root),
+            bus: Arc::new(crate::daemon::bus::PeerBus::new(
+                &framework_root.join("logs"),
+            )),
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root,
@@ -874,7 +888,10 @@ impl DaemonState {
         let sm = self.session_manager().await;
         self.project_registry
             .get_or_init(|| async {
-                let data_dir = self.framework_root.join("project-registry");
+                // #4300: one shared helper names this directory so the
+                // out-of-process `tm` CLI reader can never point at a
+                // different file than the daemon writes.
+                let data_dir = crate::project::registry_data_dir_under(&self.framework_root);
                 let registry = match crate::project::ProjectRegistry::load(&data_dir).await {
                     Ok(r) => r,
                     Err(e) => {

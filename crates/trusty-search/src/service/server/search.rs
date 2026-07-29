@@ -8,10 +8,11 @@
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::core::{classifier::QueryClassifier, indexer::SearchQuery, registry::IndexId};
@@ -29,13 +30,57 @@ use super::status::index_disk_and_mtime;
 // through the `search` path without knowing about `search_global`.
 pub(super) use super::search_global::global_search_handler;
 
+/// Query parameters for `DELETE /indexes/{id}` (issue #4123).
+///
+/// Why: before #4123 the handler hardcoded `delete_data=true`, so the HTTP
+/// surface had NO way to deregister an index while keeping its on-disk data.
+/// Registry hygiene (removing stale entries — issues #4094, #4095) therefore
+/// could not be done through the API at all: a mis-typed id destroyed a real
+/// corpus. An operator clearing 49 stale entries had to stop the daemon and
+/// hand-edit `indexes.toml` instead. Two callers had ALREADY documented the
+/// safe semantics that did not exist — the UI's confirm dialog ("On-disk data
+/// is preserved.", `ui/src/lib/views/Indexes.svelte`) and `trusty-search index
+/// remove`'s help ("The on-disk redb / HNSW snapshot is preserved") — so
+/// `false` restores the contract the product already advertised.
+/// What: a single optional `delete_data` flag, absent ⇒ `false` (deregister
+/// only). Destroying data is now strictly opt-in via `?delete_data=true`. An
+/// unparseable value (e.g. `?delete_data=maybe`) is rejected by axum's `Query`
+/// extractor with `400` rather than silently defaulting either way — a
+/// destructive toggle must never be guessed at.
+/// Test: `delete_index_without_param_preserves_data`,
+/// `delete_index_with_delete_data_true_destroys_data`.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct DeleteIndexParams {
+    /// Opt in to destroying the on-disk data directory alongside the
+    /// registration. Defaults to `false` — see the type's `Why`.
+    #[serde(default)]
+    delete_data: bool,
+}
+
+/// `DELETE /indexes/{id}` — deregister an index, optionally destroying its data.
+///
+/// Why: see [`DeleteIndexParams`]. BREAKING (issue #4123): a bare `DELETE` no
+/// longer deletes on-disk data. Callers that genuinely want the disk reclaimed
+/// must now pass `?delete_data=true`.
+/// What: delegates to [`unregister_index`] — the same function the
+/// orphan-reaper already drives with `delete_data=false` — and echoes
+/// `data_deleted` so a caller can confirm which of the two semantics ran
+/// instead of inferring it from the request it sent.
+/// Test: `delete_index_without_param_preserves_data`,
+/// `delete_index_with_delete_data_true_destroys_data`.
 pub(super) async fn delete_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
+    Query(params): Query<DeleteIndexParams>,
 ) -> Json<serde_json::Value> {
-    // The interactive DELETE also destroys the on-disk footprint (delete_data).
-    let removed = unregister_index(&state, &id, /*delete_data=*/ true).await;
-    Json(serde_json::json!({ "id": id, "removed": removed }))
+    let removed = unregister_index(&state, &id, params.delete_data).await;
+    Json(serde_json::json!({
+        "id": id,
+        "removed": removed,
+        // Only meaningful when something was actually removed: an unknown id
+        // deletes nothing regardless of the flag.
+        "data_deleted": removed && params.delete_data,
+    }))
 }
 
 /// Fully unregister an index from the running daemon.
@@ -44,9 +89,11 @@ pub(super) async fn delete_index_handler(
 /// automatic orphan-reaper ticker (orphan self-heal). Both must drop the
 /// in-memory registration, stop its filesystem watcher, and rewrite
 /// `indexes.toml` + `roots.toml` so the index cannot resurrect on the next
-/// warm-boot. The two callers differ only in whether the on-disk *data*
-/// directory is destroyed — the reaper passes `delete_data=false` so a
-/// false-positive orphan detection can never delete real index data.
+/// warm-boot. The callers differ only in whether the on-disk *data* directory
+/// is destroyed — the reaper passes `delete_data=false` so a false-positive
+/// orphan detection can never delete real index data, and since issue #4123
+/// the HTTP handler passes the request's `?delete_data` flag (default `false`,
+/// i.e. the same safe semantics the reaper has always used).
 /// What: atomically removes the handle from the registry (capturing its
 /// `root_path` in the same `remove` so a concurrent PATCH cannot make it stale
 /// — issue #1090/#1097), stops the watcher (issue #1621), deletes the registry

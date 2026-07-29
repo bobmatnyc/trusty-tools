@@ -14,6 +14,8 @@ import {
   fetchAgentStores,
   matchesToolGlob,
   fetchAgentSkills,
+  fetchAgentSubagents,
+  providerChip,
   type AgentStores,
 } from './agentConfig';
 
@@ -175,6 +177,77 @@ describe('fetchAgentSkills', () => {
   });
 });
 
+describe('fetchAgentSubagents', () => {
+  // #4029: same 404→null contract as `fetchAgentSkills`/`fetchAgentStores`, so
+  // a stale roster selection darkens one pane rather than throwing at the shell.
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it('returns null on 404 rather than throwing', async () => {
+    globalThis.fetch = (async () =>
+      new Response('{}', { status: 404 })) as unknown as typeof fetch;
+    await expect(fetchAgentSubagents('ghost')).resolves.toBeNull();
+  });
+
+  it('parses both mechanisms without flattening them', async () => {
+    const body = {
+      resolved: true,
+      in_product: {
+        mechanism: 'in_product',
+        tool: 'delegate_to_agent',
+        tool_registered: true,
+        tool_granted: true,
+        delegator_tier: 'l1',
+        allowed_roles: ['engineer', 'documentation'],
+        targets: [
+          {
+            name: 'docs-agent',
+            display_name: 'Docs',
+            role: 'documentation',
+            tier: 'l1',
+            reachable: true,
+            reason: null,
+          },
+        ],
+        role_excluded_count: 3,
+        hidden_excluded_count: 0,
+        unresolved: [],
+      },
+      cross_product: {
+        mechanism: 'cross_product',
+        tool: 'dispatch_task',
+        tool_granted: false,
+        declares_allowed: false,
+        bridge_floor: ['research', 'ticketing'],
+        targets: [
+          { name: 'research', granted: false, reason: 'fail-closed' },
+          { name: 'ticketing', granted: false, reason: 'fail-closed' },
+        ],
+        rejected: [],
+      },
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    const got = await fetchAgentSubagents('assistant');
+    // The two halves stay distinct — `documentation` is an in-product role and
+    // is in NO cross-product list, which is exactly why they are not merged.
+    expect(got?.in_product.targets[0].role).toBe('documentation');
+    expect(got?.cross_product.bridge_floor).toEqual(['research', 'ticketing']);
+    expect(got?.cross_product.targets.every((t) => !t.granted)).toBe(true);
+  });
+
+  it('throws on a non-404 failure so the pane can say the route is down', async () => {
+    globalThis.fetch = (async () =>
+      new Response('{}', { status: 503 })) as unknown as typeof fetch;
+    await expect(fetchAgentSubagents('izzie')).rejects.toThrow('503');
+  });
+});
+
 describe('KNOWLEDGE_MCP_ENDPOINTS', () => {
   it('reports the shipped defaults, with a reason iff disabled, never fabricated (C-03.2)', () => {
     const byName = Object.fromEntries(KNOWLEDGE_MCP_ENDPOINTS.map((e) => [e.name, e]));
@@ -201,5 +274,45 @@ describe('STORE_BOUND_KNOWLEDGE_TOOLS', () => {
     // taxonomy that same section warns against; classification belongs to
     // `kind = "knowledge"` manifests (#3933).
     expect([...STORE_BOUND_KNOWLEDGE_TOOLS]).toEqual(['vector_search']);
+  });
+});
+
+describe('providerChip (#4024)', () => {
+  // The chip is shared by a leaf card and a function-skill group header, so it
+  // is the one place a credential could be claimed in one and denied in the
+  // other. `configured: null` — an OAuth grant nobody verified — must read as
+  // "not verified", never as a green check (DOC-57 S-11b).
+  it('never renders an unverified credential as configured', () => {
+    const chip = providerChip({
+      provider: 'Google Workspace',
+      requirement: 'An authorized Google account profile.',
+      env_var: null,
+      configured: null,
+    });
+    expect(chip.tone).toBe('unknown');
+    expect(chip.label).toBe('Google Workspace \u2014 not verified');
+  });
+
+  it('states the variable to set when an env-backed credential is absent', () => {
+    const chip = providerChip({
+      provider: 'MTA',
+      requirement: 'An MTA developer API key.',
+      env_var: 'MTA_API_KEY',
+      configured: false,
+    });
+    expect(chip.tone).toBe('bad');
+    expect(chip.label).toBe('MTA NOT configured');
+    expect(chip.title).toContain('Set MTA_API_KEY.');
+  });
+
+  it('reports configured only from evidence', () => {
+    const chip = providerChip({
+      provider: 'Brave Search',
+      requirement: 'A Brave Search API key.',
+      env_var: 'BRAVE_API_KEY',
+      configured: true,
+    });
+    expect(chip.tone).toBe('ok');
+    expect(chip.label).toBe('Brave Search configured');
   });
 });

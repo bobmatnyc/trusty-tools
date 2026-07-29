@@ -73,6 +73,13 @@ use doctor_tcc::check_tcc_taint;
 mod doctor_scaffold_tracking;
 use doctor_scaffold_tracking::check_scaffold_tracking;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #2867 —
+// the cross-branch push-guard coverage probe, which is what makes an
+// unprotected already-provisioned base clone discoverable at all).
+#[path = "doctor_push_guard.rs"]
+mod doctor_push_guard;
+use doctor_push_guard::check_push_guard;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -127,8 +134,13 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// regenerated locally by tm, the precondition for a `git merge --ff-only`
 /// "would be overwritten" collision; reports the exact true-intersection
 /// paths plus a copy-pasteable `git rm -r --cached` remediation, never runs
-/// it itself) — folding the resulting twenty-one [`DoctorCheck`]s into a
-/// [`DoctorReport`] whose `overall` status is the worst of them.
+/// it itself), and the `push_guard` probe (issue #2867 — warns when
+/// `project_dir`'s clone has no trusty-mpm cross-branch `pre-push` guard, or
+/// carries an older revision of it, naming the `tm repair push-guard`
+/// retrofit; this is the only way a base clone provisioned BEFORE the guard
+/// shipped is discoverable as unprotected) — folding the resulting twenty-two
+/// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the
+/// worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -150,7 +162,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_twenty_one_checks`,
+/// Test: `run_doctor_produces_twenty_two_checks`,
 /// `agents_check_scopes_to_managed_workspace_when_project_given`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -204,6 +216,10 @@ pub async fn run_doctor(
     // `git merge --ff-only` "would be overwritten" collision. Warn-only;
     // never auto-modifies the git index.
     checks.push(check_scaffold_tracking(project_dir));
+    // Issue #2867: the push guard installs on the CLONE path only, so a base
+    // clone that predates it is silently unprotected. Warn-only, naming the
+    // `tm repair push-guard` retrofit; doctor never writes into a repository.
+    checks.push(check_push_guard(project_dir));
 
     DoctorReport::from_checks(checks)
 }
@@ -361,13 +377,24 @@ fn build_gh_account_check(active: Option<String>, accounts: Vec<String>) -> Doct
 /// that were decommissioned before this fix—or where `git worktree remove`
 /// failed—may leave stale `.worktrees/<session-id>/` directories on disk. This
 /// probe surfaces orphaned dirs so operators know to run
-/// `tm session prune --worktrees`. The filesystem walk is delegated to
+/// `tm session prune --worktrees`. Discovery is delegated to
 /// [`crate::session_manager::prune::find_orphaned_worktrees`] inside
-/// `spawn_blocking` so the async executor is not blocked by synchronous I/O.
+/// `spawn_blocking` so the async executor is not blocked by the synchronous
+/// git subprocesses it spawns.
 /// What: builds a canonicalized active-path set, then spawns a blocking task
-/// to walk `<repos_root>/<owner>/<repo>/.worktrees/`; any leaf directory not
-/// in the active set is counted as an orphan. Reports `Ok` (no orphans),
-/// `Warn` (orphans found), or `Ok` (repos_root absent / unconfigured).
+/// that asks GIT for the worktrees of each managed project (#4207 — this is no
+/// longer a filesystem walk of `.worktrees/`, and a candidate is no longer "any
+/// leaf directory"): a git-registered worktree counts as an orphan when it is
+/// not main/bare/prunable/locked, IS a strict descendant of the project whose
+/// registry named it, and is absent from the active set. Reports `Ok` (no
+/// orphans), `Warn` (orphans found), or `Ok` (repos_root absent /
+/// unconfigured).
+///
+/// Note this probe is REPORT-ONLY — it counts, it never removes — so it
+/// deliberately reports candidates the reclaim path would refuse to delete
+/// (owner-unknown, dirty). Conversely a directory git does not register is not
+/// counted at all, so an unregistered husk is invisible here; reclaiming those
+/// is a separate open concern, deliberately out of scope for #4207.
 /// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
 async fn check_worktrees(
     repos_root: Option<&Path>,
@@ -397,8 +424,9 @@ async fn check_worktrees(
         .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
         .collect();
 
-    // Delegate the blocking filesystem walk to spawn_blocking so the async
-    // executor is not stalled on directory I/O (#1840 F).
+    // Delegate the blocking scan to spawn_blocking so the async executor is not
+    // stalled (#1840 F). Since #4207 what blocks is not directory I/O but the
+    // git subprocesses `find_orphaned_worktrees` spawns per managed project.
     let orphans = tokio::task::spawn_blocking(move || {
         crate::session_manager::prune::find_orphaned_worktrees(&root, &active_set)
     })

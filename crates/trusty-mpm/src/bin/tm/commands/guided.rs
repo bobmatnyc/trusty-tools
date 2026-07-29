@@ -786,9 +786,17 @@ pub(crate) fn is_github_remote(url: &str) -> bool {
 /// (plain directory or bare repo). Bare repos (`--git-dir` succeeds but
 /// `--show-toplevel` does not) are treated as non-git — deploying into a bare
 /// repo has no live-checkout to protect.
+///
+/// `pub(crate)` since #4300: `managed_workspace::provision_for_launch` must
+/// resolve the repo root the SAME way this path does. `tm launch` has no
+/// `classify_cwd_project` pre-pass, so without a shared definition the two CLI
+/// entry points answered "which directory is this project?" differently and
+/// `tm launch` from a subdirectory deployed into that subdirectory.
 /// Test: `guided_fallback_blocks_github_git_from_subdirectory` calls
-/// `fallback_protected` from a nested subdir and asserts the protection fires.
-fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+/// `fallback_protected` from a nested subdir and asserts the protection fires;
+/// `provision_for_launch_from_subdirectory_targets_repo_root` covers the
+/// `tm launch` side.
+pub(crate) fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -1082,10 +1090,13 @@ pub(crate) fn managed_pane_settle_pending_message(id: &str) -> String {
 /// if cwd is inside a git working tree (at ANY depth), it is never written to.
 /// What: three-way dispatch on cwd:
 ///   (1) Inside a GitHub-backed git working tree → delegate to
-///       [`redirect_to_managed_clone`] which provisions (or reuses) the protected
+///       [`launch_protected_workspace`] which provisions (or reuses) the protected
 ///       base clone and per-session worktree, then calls `launch()` against THAT
 ///       workspace, never the live checkout. Uses the repo ROOT (not cwd) to
-///       read the origin remote — correct even from subdirectories.
+///       read the origin remote — correct even from subdirectories. #4300: a
+///       project registered with `worktree: false` (#3455) gets neither clone
+///       nor worktree and launches in the repo root instead, matching what the
+///       daemon's `spawn_managed_on_main` would have done had it been up.
 ///   (2) Inside a non-GitHub git working tree (non-GitHub remote or no remote)
 ///       → return an actionable `Err`; the live checkout is never touched.
 ///   (3) Not inside any git working tree (plain directory or bare repo) →
@@ -1161,8 +1172,9 @@ pub(crate) async fn fallback_protected(
     if let Some(ref raw_url) = origin_url
         && is_github_remote(raw_url)
     {
-        // GitHub project: redirect deploy to the protected managed clone.
-        return redirect_to_managed_clone(client, url, cwd, raw_url).await;
+        // GitHub project: redirect deploy to the protected managed clone
+        // (or, when the project opted out of worktrees, to the repo root).
+        return launch_protected_workspace(client, url, &git_root, raw_url).await;
     }
 
     // Non-GitHub remote or no remote: refuse to write to the live tree.
@@ -1179,84 +1191,41 @@ pub(crate) async fn fallback_protected(
     );
 }
 
-/// Redirect the guided-default fallback to the protected managed-clone workspace.
+/// Launch the guided-default fallback in the workspace this project is
+/// entitled to — the protected managed clone, or its own main checkout.
 ///
 /// Why: when the daemon is unreachable and the current directory is a GitHub-backed
 /// git project, framework files must go into the managed-clone workspace
 /// (`~/trusty-mpm-projects/<owner>/<repo>/.worktrees/<session-id>/`), never
-/// into the operator's live checkout (#1724, #1803).
-/// What: (1) parses `owner/repo` from `origin_url`; (2) ensures the protected
-/// base clone exists (`ensure_base_clone` is idempotent — returns immediately when
-/// the clone already exists); (3) creates a per-session git worktree inside the
-/// base clone; (4) calls `launch()` with the worktree path as the target directory.
-/// If any step fails (unparseable URL, clone error, worktree error), the function
-/// returns `Err` with an actionable message — the live checkout is never touched.
-/// Test: `guided_fallback_never_pollutes_github_git_checkout`.
-async fn redirect_to_managed_clone(
+/// into the operator's live checkout (#1724, #1803) — UNLESS the project is
+/// registered with `worktree: false` (#3455), which is the operator saying
+/// "run in my main checkout" and which the daemon honours via
+/// `spawn_managed_on_main`. Before #4300 this path never consulted that
+/// setting, so the opt-out silently held only while the daemon was up.
+/// What: delegates the whole decision to
+/// [`super::managed_workspace::provision_for_fallback`] — which reads the
+/// registry BEFORE `ensure_base_clone`, so an opted-out project gets neither a
+/// clone nor a worktree — then calls `launch()` against the resolved workspace.
+/// On any failure (unparseable URL, clone error, worktree error) it returns
+/// `Err` with an actionable message and the live checkout is never touched.
+/// Test: `guided_fallback_never_pollutes_github_git_checkout`,
+/// `guided_fallback_redirect_success_worktree_not_live_checkout`; the #4300
+/// opt-out cases live in `managed_workspace_tests.rs`.
+async fn launch_protected_workspace(
     client: &reqwest::Client,
     url: &str,
-    cwd: &std::path::Path,
+    git_root: &std::path::Path,
     origin_url: &str,
 ) -> anyhow::Result<()> {
-    use trusty_mpm::daemon::managed_routes::inproject;
-    use trusty_mpm::session_manager::ManagedSessionId;
+    let session_id = trusty_mpm::session_manager::ManagedSessionId::new();
+    let workspace = super::managed_workspace::provision_for_fallback(
+        &trusty_mpm::project::registry_data_dir(),
+        origin_url,
+        git_root,
+        &session_id,
+    )
+    .await?;
 
-    // Parse owner/repo from the GitHub remote URL.
-    let Some(gh) = trusty_common::github_path::parse_github_path(origin_url) else {
-        eprintln!(
-            "tm: cannot determine GitHub project from remote URL '{origin_url}'.\n\
-             Start the daemon first with `tm start`, then run `tm` again."
-        );
-        anyhow::bail!(
-            "daemon unreachable: cannot parse GitHub remote URL as owner/repo — run `tm start` first"
-        );
-    };
-
-    // Ensure the protected base clone exists. Idempotent: returns Ok immediately
-    // when the clone is already present; clones once on first invocation.
-    let base = inproject::base_clone_path(&gh.owner, &gh.repo);
-    eprintln!(
-        "tm: daemon unreachable — redirecting to protected managed clone\n\
-         tm: base clone: {}",
-        base.display()
-    );
-    if let Err(e) = inproject::ensure_base_clone(origin_url, &base) {
-        eprintln!(
-            "tm: could not set up base clone for {}/{}: {e}\n\
-             Start the daemon first with `tm start`, then run `tm` again.",
-            gh.owner, gh.repo
-        );
-        anyhow::bail!("failed to set up managed base clone: {e}");
-    }
-
-    // Create a per-session worktree branched from the base clone.
-    let session_id = ManagedSessionId::new();
-    // NOTE (#2032): this daemon-unreachable fallback path is NOT the managed
-    // SessionManager spawn flow — it has no session manager to resolve a
-    // semantic tmux name from, so it deliberately keeps the pre-#2032
-    // UUID-named worktree here. Only the daemon's `spawn_managed_inproject`
-    // path (`daemon::managed_routes::lifecycle`) uses the new semantic-name
-    // worktree layout.
-    let worktree =
-        match inproject::create_session_worktree(&base, &session_id.to_string(), &session_id) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!(
-                    "tm: could not create per-session worktree: {e}\n\
-                 Start the daemon first with `tm start`, then run `tm` again."
-                );
-                anyhow::bail!("failed to create session worktree: {e}");
-            }
-        };
-
-    eprintln!(
-        "tm: launching in protected workspace (live checkout at {} is untouched)\n\
-         tm: session worktree: {}",
-        cwd.display(),
-        worktree.display()
-    );
-
-    // Launch in the session worktree — not the live checkout.
-    let dir = worktree.to_string_lossy().to_string();
+    let dir = workspace.path().to_string_lossy().to_string();
     super::launch::launch(client, url, Some(dir), None).await
 }

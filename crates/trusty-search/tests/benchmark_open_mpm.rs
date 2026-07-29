@@ -289,7 +289,9 @@ async fn fetch_rss_mb(client: &Client) -> u64 {
 /// Test: asserts 200 on POST; transport errors panic.
 async fn register_index(client: &Client) {
     let _ = client
-        .delete(format!("{DAEMON_URL}/indexes/{INDEX_NAME}"))
+        .delete(format!(
+            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+        ))
         .send()
         .await;
 
@@ -427,7 +429,9 @@ async fn fetch_status(client: &Client) -> Value {
 /// Test: failures print, not panic (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
     let resp = client
-        .delete(format!("{DAEMON_URL}/indexes/{INDEX_NAME}"))
+        .delete(format!(
+            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+        ))
         .send()
         .await;
     match resp {

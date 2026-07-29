@@ -57,7 +57,7 @@ user's behalf.
 Some bugs (a skill's documented command no longer exists, a stale path in an
 instruction file, a UX gap the user reports directly) have no corresponding
 daemon-captured error event — `list_recent_errors` will not surface them.
-For these, delegate to the **Version Control** agent to file a `gh issue
+For these, delegate to the **Ticketing** agent to file a `gh issue
 create` against `bobmatnyc/trusty-tools` directly, using the same
 information standard below (title, labels, structured body). Apply the shipped
 issue defaults — `--assignee @me --label trusty-mpm --label ws/<session-name>`

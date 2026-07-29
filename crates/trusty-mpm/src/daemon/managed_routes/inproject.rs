@@ -304,6 +304,20 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     }
     info!(dest = %base_path.display(), "inproject: base clone complete");
     ensure_worktrees_gitignored(base_path)?;
+    // #2867: install the cross-branch push guard into this FRESHLY CLONED base.
+    // `$GIT_COMMON_DIR/hooks` is shared by every worktree of a base clone —
+    // provisioner-created and ad-hoc `git worktree add` alike (verified
+    // empirically; see `crate::core::push_guard`) — so one file installed at
+    // clone time protects every session this base will ever host, including the
+    // agent-created worktrees no trusty-mpm code path ever configures. Scoping
+    // the install to the fresh-clone path deliberately keeps it out of ALREADY
+    // PROVISIONED bases: those are shared by concurrent live sessions, and
+    // changing hook behaviour underneath them is an operator decision, not a
+    // side effect of a session launch. That decision has a supported path —
+    // `tm doctor`'s `push_guard` check reports an unprotected clone and
+    // `tm repair push-guard` retrofits it — so "not automatic" does not mean
+    // "not reachable".
+    crate::core::push_guard::install_and_log(base_path);
     Ok(())
 }
 
@@ -482,25 +496,142 @@ pub fn create_session_worktree(
 /// current` to this one worktree (via `extensions.worktreeConfig` +
 /// `--worktree` config) keeps push targeting `origin/session/<name>` while
 /// pull still tracks the default branch.
-/// What: (1) resolves the default branch via
+///
+/// ORDERING IS A SAFETY PROPERTY (#2867). `branch.<session>.merge =
+/// refs/heads/<default>` is a FOREIGN upstream: the session worktree does not
+/// own the default branch. It is only safe while `push.default = current` is
+/// actually in effect for this worktree — that is the single knob keeping a
+/// bare `git push` off the default branch. The push pin is therefore
+/// established and READ BACK FIRST, and the foreign upstream is written only
+/// once the pin is confirmed. When the pin cannot be confirmed (an old git
+/// without `extensions.worktreeConfig`, a read-only base config, a sandbox
+/// blocking the config write) the worktree is left with NO upstream at all:
+/// `git pull` then needs a one-off `git pull origin <default>`, which is a far
+/// cheaper failure than an armed worktree whose bare push lands on a branch it
+/// does not own — the exact shape that clobbered PR #2863's reviewed lineage.
+///
+/// What: (1) runs `git -C <base_path> config extensions.worktreeConfig true`
+/// to enable per-worktree config on the shared base repo (idempotent — safe to
+/// set on every call); (2) runs `git -C <worktree_path> config --worktree
+/// push.default current` so `git push` always targets the current (session)
+/// branch; (3) reads the EFFECTIVE `push.default` back from the worktree and
+/// aborts without setting any upstream unless it resolves to `current`; (4)
+/// resolves the default branch via
 /// [`super::inproject_hygiene::get_default_branch`], falling back to `"main"`
-/// when it cannot be determined; (2) runs `git -C <worktree_path> branch
-/// --set-upstream-to=origin/<default>` so `git pull` works; (3) runs `git -C
-/// <base_path> config extensions.worktreeConfig true` to enable per-worktree
-/// config on the shared base repo (idempotent — safe to set on every call);
-/// (4) runs `git -C <worktree_path> config --worktree push.default current`
-/// so `git push` always targets the current (session) branch, never the
-/// default branch. Every step is best-effort: a failure is logged via `warn!`
-/// and does NOT fail worktree creation — the worktree itself was already
-/// created successfully by the time this runs, and an operator can always set
-/// tracking manually as a fallback.
+/// when it cannot be determined, and runs `git -C <worktree_path> branch
+/// --set-upstream-to=origin/<default>` so `git pull` works. Every step is
+/// best-effort: a failure is logged via `warn!` and does NOT fail worktree
+/// creation — the worktree itself was already created successfully by the time
+/// this runs, and an operator can always set tracking manually as a fallback.
 /// Test: `create_session_worktree_sets_pull_upstream_and_worktree_scoped_push`
-/// (integration, real temp git repos with a bare `origin` remote).
+/// and `push_pin_detection_matches_effective_config` (real temp git repos with
+/// a bare `origin` remote).
+/// Does the effective `push.default` say a bare `git push` targets the current
+/// branch?
+///
+/// Note the deliberately narrow claim: this reports on `push.default` only. It
+/// is NOT a proof that no push can leave the current branch. A configured
+/// `remote.<name>.push` refspec bypasses `push.default` entirely, and the gate
+/// is equally satisfied by a GLOBAL `push.default = current` that trusty-mpm
+/// does not own and the user may change later, re-arming an upstream already
+/// written under it. The `pre-push` guard (`crate::core::push_guard`) is the
+/// backstop for both; this check only decides whether writing a foreign
+/// upstream is defensible in the first place.
+///
+/// Why: this is the precondition for [`configure_session_branch_tracking`] to
+/// be allowed to write a FOREIGN upstream (#2867). Checking the exit status of
+/// the `git config --worktree push.default current` write is not enough — it
+/// answers "did the write succeed", not "what will `git push` actually do".
+/// What: reads the EFFECTIVE `push.default` with `git config --get`, which
+/// resolves the whole config stack (system → global → local → `config.worktree`)
+/// exactly as `git push` will, and reports whether it is `current`. Any failure
+/// to read (git missing, not a repo, key unset) is reported as NOT pinned —
+/// the fail-safe direction.
+/// Test: `push_pin_detection_matches_effective_config`.
+fn push_is_pinned_to_current(worktree_path: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["config", "--get", "push.default"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "current")
+}
+
 fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
+    // Step 1: enable per-worktree config on the shared base repo (idempotent).
+    let enable_worktree_config = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["config", "extensions.worktreeConfig", "true"])
+        .output();
+    match enable_worktree_config {
+        Ok(out) if out.status.success() => {
+            info!(base = %base_path.display(), "inproject: extensions.worktreeConfig enabled on base clone");
+        }
+        Ok(out) => {
+            warn!(
+                base = %base_path.display(),
+                "inproject: git config extensions.worktreeConfig failed (non-fatal) ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!(
+                base = %base_path.display(),
+                "inproject: failed to spawn git config extensions.worktreeConfig (non-fatal): {e}"
+            );
+        }
+    }
+
+    // Step 2: scope push.default=current to THIS worktree only, so `git push`
+    // always targets `origin/session/<name>` and never the default branch.
+    let set_push_default = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["config", "--worktree", "push.default", "current"])
+        .output();
+    match set_push_default {
+        Ok(out) if out.status.success() => {
+            info!(
+                worktree = %worktree_path.display(),
+                "inproject: worktree-scoped push.default=current set (git push cannot target the default branch)"
+            );
+        }
+        Ok(out) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                "inproject: failed to set worktree-scoped push.default (non-fatal) ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                "inproject: git config --worktree push.default failed to spawn (non-fatal): {e}"
+            );
+        }
+    }
+
+    // Step 3 (#2867 gate): confirm the pin is EFFECTIVE before arming a
+    // foreign upstream.
+    if !push_is_pinned_to_current(worktree_path) {
+        warn!(
+            worktree = %worktree_path.display(),
+            "inproject: push.default is NOT pinned to `current`; refusing to set the \
+             session branch's upstream to the default branch (#2867). `git pull` in this \
+             worktree needs an explicit `git pull origin <default-branch>`."
+        );
+        return;
+    }
+
+    // Step 4: now that a bare `git push` provably cannot leave this branch,
+    // set upstream so `git pull` (and `git fetch` + merge) works.
     let default_branch = super::inproject_hygiene::get_default_branch(base_path)
         .unwrap_or_else(|| "main".to_string());
-
-    // Step 1: set upstream so `git pull` (and `git fetch` + merge) works.
     let upstream = format!("origin/{default_branch}");
     let set_upstream = std::process::Command::new("git")
         .arg("-C")
@@ -529,62 +660,6 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
             warn!(
                 worktree = %worktree_path.display(),
                 "inproject: git branch --set-upstream-to failed to spawn (non-fatal): {e}"
-            );
-        }
-    }
-
-    // Step 2: enable per-worktree config on the shared base repo (idempotent).
-    let enable_worktree_config = std::process::Command::new("git")
-        .arg("-C")
-        .arg(base_path)
-        .args(["config", "extensions.worktreeConfig", "true"])
-        .output();
-    match enable_worktree_config {
-        Ok(out) if out.status.success() => {
-            info!(base = %base_path.display(), "inproject: extensions.worktreeConfig enabled on base clone");
-        }
-        Ok(out) => {
-            warn!(
-                base = %base_path.display(),
-                "inproject: git config extensions.worktreeConfig failed (non-fatal) ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Err(e) => {
-            warn!(
-                base = %base_path.display(),
-                "inproject: failed to spawn git config extensions.worktreeConfig (non-fatal): {e}"
-            );
-        }
-    }
-
-    // Step 3: scope push.default=current to THIS worktree only, so `git push`
-    // always targets `origin/session/<name>` and never the default branch.
-    let set_push_default = std::process::Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .args(["config", "--worktree", "push.default", "current"])
-        .output();
-    match set_push_default {
-        Ok(out) if out.status.success() => {
-            info!(
-                worktree = %worktree_path.display(),
-                "inproject: worktree-scoped push.default=current set (git push cannot target the default branch)"
-            );
-        }
-        Ok(out) => {
-            warn!(
-                worktree = %worktree_path.display(),
-                "inproject: failed to set worktree-scoped push.default (non-fatal) ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Err(e) => {
-            warn!(
-                worktree = %worktree_path.display(),
-                "inproject: git config --worktree push.default failed to spawn (non-fatal): {e}"
             );
         }
     }

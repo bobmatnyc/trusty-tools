@@ -110,6 +110,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **The TUI's initial session-events connect could hang forever, bypassing the
+  reconnect budget (#3494).** `build_http_client()` sets `connect_timeout(5s)`,
+  which bounds only the TCP handshake — a daemon that accepts the connection but
+  never sends response headers (wedged, deadlocked, or slow-lorising) left
+  `pump_session_events`'s `GET /sessions/{id}/events` `.send().await` pending
+  indefinitely. `SESSION_STREAM_MAX_RECONNECTS` never applied, because that
+  budget only starts counting once `.send().await` resolves. A per-request
+  `.timeout(CONNECT_TIMEOUT)` (10s) now bounds connect-through-headers only; the
+  body read stays governed by `SSE_IDLE_TIMEOUT`. A timed-out connect surfaces as
+  an ordinary transport error, so it counts against the reconnect budget like
+  every other failure rather than being a silent-hang path of its own.
+
 - **`TurnCapExceeded` permanently un-resumed a session (#3888).** A
   session whose `task.run` call exhausted its per-call
   `AgentLoopConfig::max_turns` budget fell through

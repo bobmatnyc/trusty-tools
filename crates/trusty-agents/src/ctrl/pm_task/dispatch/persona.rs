@@ -16,8 +16,8 @@ use crate::agents::AgentConfig;
 use crate::llm;
 use crate::subprocess::SubprocessAgentRunner;
 use crate::tools::registry::dead_scope;
-use crate::tools::registry::scope::{Scope, ScopePattern, agent_can_use};
-use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
+use crate::tools::registry::scope::ScopePattern;
+use crate::tools::{AgentRunner, ToolRegistry};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
@@ -29,119 +29,12 @@ use super::super::super::handlers::{
     SetActiveProjectTool, StopTaskTool, register_ticketing_tools,
 };
 use super::super::super::state::ConversationTurn;
-use super::super::helpers::match_any_glob;
 use super::classification;
+use super::persona_gate::{
+    build_persona_delegate_tool, filter_persona_tool_names_for_tier, persona_allowed_tools,
+    persona_max_turns,
+};
 use super::persona_memory;
-
-/// Narrow a persona's full candidate tool-name list down to what it may
-/// actually reach on this turn (#3285).
-///
-/// Why: `run_pm_task_with_persona` now registers the FULL delegation/CTRL/
-/// filesystem/search/shell/MCP tool surface into every persona's registry —
-/// tool parity with the session path. Without a second, independent gate a
-/// persona would suddenly gain every tool the PM has, regardless of what its
-/// TOML declares. This function is that gate: it is the single place that
-/// decides which of the registered tools are actually advertised to the LLM,
-/// so it is pulled out as a pure function precisely so the allow/scope
-/// security property can be pinned by fast unit tests instead of only being
-/// exercised end-to-end.
-/// What: Keeps a name only when it matches at least one glob in `patterns`
-/// (a persona's `[tools].allow` list — see `match_any_glob`) AND is present
-/// in `allowed_by_tier` (the RBAC-tier filter derived from
-/// `registry.filter_tools_for_user`) AND, for tools that declare an OpenRPC
-/// scope (#3208; see `tool_scopes`), that scope is covered by at least one
-/// of the persona's own declared `[tools].scopes` patterns
-/// (`agent_scope_patterns`). A tool absent from `tool_scopes` (the trait
-/// default — every in-process tool) is not part of the scoped surface and
-/// passes this third gate unconditionally; a tool that DOES declare a scope
-/// is denied by default when `agent_scope_patterns` is empty (fail closed —
-/// `agent_can_use` denies all on an empty pattern list). Order-preserving;
-/// all three gates must pass independently, mirroring how
-/// `registry`+`allowed_tools` combine in `chat_with_tools_gated`.
-/// Test: `filter_persona_tool_names_respects_allow_globs`,
-/// `filter_persona_tool_names_new_delegation_tools_require_explicit_allow`,
-/// `filter_persona_tool_names_delegation_tools_surface_when_allowed`,
-/// `filter_persona_tool_names_respects_rbac_tier`,
-/// `filter_persona_tool_names_respects_declared_scopes`,
-/// `filter_persona_tool_names_denies_scoped_tool_when_agent_declares_no_scopes`.
-fn filter_persona_tool_names(
-    all_names: Vec<String>,
-    patterns: &[String],
-    allowed_by_tier: &std::collections::HashSet<String>,
-    tool_scopes: &std::collections::HashMap<String, String>,
-    agent_scope_patterns: &[ScopePattern],
-) -> Vec<String> {
-    all_names
-        .into_iter()
-        .filter(|name| {
-            match_any_glob(name, patterns)
-                && allowed_by_tier.contains(name)
-                && match tool_scopes.get(name) {
-                    Some(scope) => agent_can_use(agent_scope_patterns, &Scope::new(scope.clone())),
-                    None => true,
-                }
-        })
-        .collect()
-}
-
-/// Default `max_turns` ceiling for a tool-using persona chat turn when
-/// `[llm].persona_max_turns` is not set in the agent's TOML.
-///
-/// Why: named separately from the literal so the demo-day rationale (raised
-/// from a hardcoded 4 after a persona doing two sequential tool calls plus a
-/// summary exhausted that budget) is documented once, at the definition, not
-/// re-explained at every read site.
-const DEFAULT_PERSONA_TOOL_MAX_TURNS: u32 = 8;
-
-/// Effective `max_turns` ceiling for a persona chat turn.
-///
-/// Why: `run_pm_task_with_persona` is a separate call site from the general
-/// subagent tool loop (`agents::in_process_runner` et al., which already
-/// honor `LlmParams::max_turns`) — it hardcoded its own ceiling (2 turns with
-/// no tools, 4 with tools) since #254 and never consulted config at all. A
-/// persona running a couple of sequential tool calls (e.g. grep twice, then
-/// summarize) routinely exhausted the 4-turn budget and failed with
-/// `chat_with_tools exceeded max_turns`. Pulled into its own function
-/// (mirroring `filter_persona_tool_names` above) so the default-vs-override
-/// behavior is unit-testable without a live LLM call.
-/// What: No tools -> 2 (unchanged current behavior). With tools ->
-/// `llm.persona_max_turns` when set, else [`DEFAULT_PERSONA_TOOL_MAX_TURNS`]
-/// (8, raised from the prior hardcoded 4).
-/// Test: `persona_max_turns_no_tools_is_two`,
-/// `persona_max_turns_with_tools_defaults_to_eight`,
-/// `persona_max_turns_with_tools_honors_config_override`.
-fn persona_max_turns(has_tools: bool, llm: &crate::agents::LlmParams) -> u32 {
-    if !has_tools {
-        return 2;
-    }
-    llm.persona_max_turns
-        .unwrap_or(DEFAULT_PERSONA_TOOL_MAX_TURNS)
-}
-
-/// Compute the `allowed_tools` argument passed to `chat_with_tools_gated` for
-/// a persona whose surface is gated by a declared `[tools].allow` list
-/// (#3208 regression guard).
-///
-/// Why: `ToolRegistry::dispatch_gated`'s allowlist semantics treat `None` as
-/// "no restriction — every registered tool is callable", which is CORRECT
-/// for the coding-agent session path that never sets an allow list. A
-/// persona reaching this helper, however, has ALWAYS opted into restriction
-/// by declaring `[tools].allow` — the caller only reaches this branch in
-/// that case (see the `if let Some(patterns) = persona_cfg.tools.allow`
-/// split in `run_pm_task_with_persona`). If every candidate tool got
-/// filtered away (an allow-glob that matches nothing, or an RBAC tier / scope
-/// check that denies everything), collapsing that to `None` would silently
-/// REOPEN the persona's full registered tool surface — delegate_to_agent,
-/// run_bash, move_file, create_dir, and everything else registered above —
-/// the exact opposite of "deny by default". Always returning `Some(names)`,
-/// even when empty, keeps `dispatch_gated` denying every call in that case
-/// (an empty `Some` list matches nothing).
-/// What: Identity wrapper — deliberately never returns `None`.
-/// Test: `persona_allowed_tools_denies_dispatch_when_empty`,
-/// `persona_allowed_tools_permits_dispatch_when_non_empty`.
-fn persona_allowed_tools(names: Vec<String>) -> Option<Vec<String>> {
-    Some(names)
-}
 
 /// Run a single conversation turn against a persona agent (#254).
 ///
@@ -346,16 +239,68 @@ pub async fn run_pm_task_with_persona(
             // against `patterns` (the persona's `[tools].allow` globs), so
             // registering them here does not by itself grant access.
             let config_dir = project_path.join(".trusty-agents").join("agents");
-            let runner: Arc<dyn AgentRunner> =
-                Arc::new(SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())));
-            registry.register(Arc::new(
-                // #3737: thread the session id so a persona that delegates
-                // onward attributes the answer to the specialist that produced
-                // it (chat-bubble responder attribution).
-                DelegateToAgentTool::new(runner)
-                    .with_config_dir(config_dir.clone())
-                    .with_session_id(sid.clone()),
-            ));
+            // Security fix (delegate_to_agent injection-to-RCE path): this
+            // in-process persona-chat dispatch is the SECOND place (besides
+            // the `--direct`/`--agent` subprocess path handled in
+            // `runtime::subagent_mode`/`runtime::tool_registry`) that builds
+            // a `DelegateToAgentTool` for an assistant-tier persona holding
+            // live external-content tools (Gmail/Drive/web) plus
+            // `delegate_to_agent`. Tag the runner with THIS persona's own
+            // `[tools].allow` posture (`patterns`, already resolved above)
+            // whenever the persona's role is the assistant tier
+            // (`runtime::tool_registry::ASSISTANT_TIER_ROLE` — literal here
+            // because that constant is private to `runtime`, mirroring the
+            // existing `cfg.agent.role == "assistant"` comparison in
+            // `repl::agent_commands`) so whatever this persona spawns is
+            // narrowed to its own posture regardless of the spawned agent's
+            // declared role. Non-assistant-tier callers of this same chat
+            // path (if any) are unaffected — `None` is a byte-identical no-op.
+            // Security fix (multi-hop taint composition, item 1, #4126): this
+            // in-process persona-chat dispatch is always a fresh top-level
+            // turn today (the ONLY way an already-tainted delegation reaches
+            // this process is via a subprocess spawn, and every subprocess
+            // spawn -- `--agent <name>` -- runs through
+            // `runtime::subagent_mode::run_subagent` instead, never this
+            // function). Reading `TAGENT_DELEGATION_TAINT_ALLOW` here anyway
+            // and composing it via `compose_delegation_taint` (rather than
+            // forwarding `patterns` verbatim) means this call site can never
+            // silently widen past an inbound taint if that assumption ever
+            // stops holding, at zero behavioral cost today: no env var is set
+            // on this process, so `inbound_taint` is `None` and the result is
+            // byte-identical to the prior `Some(patterns.clone())`/`None`
+            // split.
+            let inbound_taint = crate::runtime::tool_registry::parse_delegation_taint_env(
+                std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
+            );
+            let delegation_taint = if persona_cfg.agent.role == "assistant" {
+                crate::runtime::tool_registry::compose_delegation_taint(
+                    Some(&patterns),
+                    inbound_taint.as_deref(),
+                )
+            } else {
+                None
+            };
+            let runner: Arc<dyn AgentRunner> = Arc::new(
+                SubprocessAgentRunner::new()
+                    .with_config_dir(Some(config_dir.clone()))
+                    .with_delegation_taint(delegation_taint),
+            );
+            // #4201: this path applied the #4169 L0/L1 tier gate but NOT the
+            // `ASSISTANT_ALLOWED_DELEGATE_ROLES` allowlist its sibling
+            // dispatch path applies (`history::ctrl_delegate_posture`), so an
+            // assistant-tier persona could delegate to `pm`/`ctrl`. Both gates
+            // now come from ONE place — `build_persona_delegate_tool`, which
+            // also owns the `role != "assistant"` (outside the tier model)
+            // branch this block used to compute inline, and which the
+            // regression tests drive directly so a call-site regression here
+            // cannot pass silently. See that function's doc comment.
+            registry.register(Arc::new(build_persona_delegate_tool(
+                runner,
+                config_dir.clone(),
+                sid.clone(),
+                &persona_cfg.agent.role,
+                persona_cfg.agent.tier(),
+            )));
             registry.register(Arc::new(AddProjectTool));
             registry.register(Arc::new(ListProjectsTool));
             registry.register(Arc::new(RemoveProjectTool));
@@ -460,6 +405,25 @@ pub async fn run_pm_task_with_persona(
                 registry.register(tool);
             }
 
+            // #4171 (epic #4167): L0-only read-only session-state tools, kept
+            // in sync with `runtime::tool_registry::build_assistant_tier_registry`
+            // (the #3745-item-C discipline: a capability model that holds on
+            // only one dispatch path is a bug that surfaces as "it works in
+            // chat"). CONDITIONAL, unlike every block above:
+            // `session_state_tools` returns an empty vector for any tier other
+            // than L0, so an L1 persona's registry never contains these
+            // executors and the duplicate-name `debug_assert!` in
+            // `ToolRegistry::register` can never fire against the
+            // trusty-mpm-proxied `session_list`/`session_status` registered
+            // higher up (different names by design — see
+            // `tools::session_state`).
+            for tool in crate::tools::session_state::session_state_tools(
+                project_path,
+                persona_cfg.agent.tier(),
+            ) {
+                registry.register(tool);
+            }
+
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
                     registry.register(std::sync::Arc::clone(tool));
@@ -512,16 +476,27 @@ pub async fn run_pm_task_with_persona(
                         .map(String::from)
                 })
                 .collect();
-            // #3208: agent-declared `[tools].scopes` enforcement. `tool_scopes`
-            // maps the (few) OpenRPC-registry-discovered tools to their scope
-            // string; `agent_scope_patterns` is this persona's own declared
-            // patterns. Native/in-process tools carry no scope and are
-            // unaffected — see `filter_persona_tool_names`.
+            // #3208: agent-declared scope enforcement. `tool_scopes` maps the
+            // (few) OpenRPC-registry-discovered tools to their scope string;
+            // `agent_scope_patterns` is this persona's own declared patterns.
+            // Native/in-process tools carry no scope and are unaffected — see
+            // `filter_persona_tool_names`.
+            //
+            // #3936: resolved via `agents::permissions::effective_scopes`
+            // rather than reading `persona_cfg.tools.scopes` directly, so
+            // `[permissions].scopes` (DOC-57 §7.2) is honoured with the SAME
+            // CC-9 precedence (`[permissions].scopes` wins over legacy
+            // `[tools].scopes` when a file declares both) the
+            // `/permissions` route reports — the ONE place this precedence
+            // is decided, so the route's `enforced: true` claim for a
+            // `[permissions].scopes`-only agent is never aspirational. Byte-
+            // identical to the pre-#3936 read when `[permissions]` is absent.
             let tool_scopes = registry.tool_scopes();
-            let agent_scope_patterns: Vec<ScopePattern> = persona_cfg
-                .tools
-                .scopes
-                .clone()
+            let agent_scope_patterns: Vec<ScopePattern> =
+                crate::agents::permissions::effective_scopes(
+                    &persona_cfg.tools,
+                    &persona_cfg.permissions,
+                )
                 .unwrap_or_default()
                 .into_iter()
                 .map(ScopePattern::new)
@@ -551,12 +526,27 @@ pub async fn run_pm_task_with_persona(
                     ),
                 ),
             );
-            let kept = filter_persona_tool_names(
+            // #4171 (epic #4167): `_for_tier` is `filter_persona_tool_names`
+            // plus the L0-only read-only session-state strip — a FOURTH,
+            // independent, DENY-ONLY gate keyed on the persona's TIER rather
+            // than on its declared allow/scope posture. It is applied to
+            // `kept` because that is the single value reaching BOTH the
+            // advertised schema list and `ToolRegistry::dispatch_gated` (via
+            // `persona_allowed_tools`). Deliberately NOT given the
+            // `role != "assistant"` escape the delegation gate has above:
+            // every persona reaching this path must declare `tier = "l0"` to
+            // keep a session-state name, and no shipped persona declares one
+            // today (pinned by
+            // `assistant_tier_grants_delegation_and_blackboxes_internal_tools`),
+            // so this strips nothing that currently works. See
+            // `persona_gate::filter_persona_tool_names_for_tier`.
+            let kept = filter_persona_tool_names_for_tier(
                 all_names,
                 &patterns,
                 &allowed_by_tier,
                 &tool_scopes,
                 &agent_scope_patterns,
+                persona_cfg.agent.tier(),
             );
             tracing::info!(
                 persona = %persona_name,

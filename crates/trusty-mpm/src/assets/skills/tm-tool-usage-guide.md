@@ -46,8 +46,8 @@ Before delegating to Research or reading any file:
 1. `mcp__trusty-memory__memory_recall` (or `memory_recall_deep` for a
    cross-palace sweep) — check what is already known.
 2. `mcp__trusty-search__search` (hybrid BM25+vector) or `search_semantic` /
-   `search_lexical` — pass `index_id` matching the project name (e.g.
-   `trusty-mpm`, `trusty-tools`). Use `search_all` when the scope spans
+   `search_lexical` — omit `index_id`; it defaults to this session's pinned
+   project index. Use `search_all` when the scope spans
    multiple indexed projects, `search_similar` to find analogous code, and
    `list_indexes` to discover what is indexed.
 3. Only if both are insufficient — delegate to Research.
@@ -70,7 +70,7 @@ is CB#2 / CB#10 in `tm-circuit-breaker`.
 
 **Example:**
 ```
-mcp__trusty-search__search(query="skill deploy no-op", index_id="trusty-mpm", limit=5)
+mcp__trusty-search__search(query="skill deploy no-op", limit=5)
 ```
 
 **Index Pinning (Automatic):** In managed sessions, your `.mcp.json` pinpoints

@@ -18,6 +18,29 @@
 use super::*;
 use tempfile::TempDir;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::standalone::load::tests::HomeGuard` and
+/// `session_launch::tests::EnvVarGuard`.
+///
+/// Why (#3965): [`validate_and_repair`] falls through to
+/// `session_launch::prepare_session_with_repo_url`, which seeds
+/// `$HOME/.claude.json` via the REAL process `$HOME` (`preseed_workspace_trust_home`),
+/// not via the `fw`/`workspace` parameters this function takes. Pairs with
+/// `#[serial_test::serial]` so this can never write into the operator's real
+/// `~/.claude.json` or race a sibling test doing the same.
+/// Test: used by `repair_closes_gaps_on_incomplete_workspace`.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
 /// Build a hermetic `FrameworkPaths` whose SOURCE dirs are seeded and
 /// whose `trusty_mpm_root` is forced to `None`, mirroring the pattern
 /// `doctor_fs_checks.rs` uses so the resolution never escapes the temp dir
@@ -414,12 +437,21 @@ fn repair_is_a_noop_on_already_complete_workspace() {
 }
 
 #[test]
+#[serial_test::serial]
 fn repair_closes_gaps_on_incomplete_workspace() {
     // Seed only the framework SOURCE roster (what `prepare_session_inner`
     // would deploy from) but leave the workspace `.claude/` entirely
     // unprovisioned — the exact "spawned with an incomplete payload"
     // scenario #2158 describes. The repair path must deploy everything
     // and leave the workspace complete.
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let fake_home = TempDir::new().unwrap();
+    let _home_guard = {
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        HomeGuard(prior)
+    };
     let tmp = TempDir::new().unwrap();
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();

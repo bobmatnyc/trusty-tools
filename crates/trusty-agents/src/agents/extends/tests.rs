@@ -575,6 +575,83 @@ search_indexes = ["apex"]
     assert!(merged.tools.search_indexes_enforced());
 }
 
+// --- `tier` merge (#4168, epic #4167 — L0/L1 orchestration model) ---------
+//
+// Same posture as `enforce_search_indexes` above: child-declares-wins,
+// child-omits-inherits. This is a PRIVILEGE boundary though, so each
+// direction (an L0 base's tier traveling to a silent child overlay, AND a
+// child explicitly downgrading it) is pinned separately.
+
+fn agent_with_tier(name: &str, extends: &str, tier_line: &str) -> AgentConfig {
+    cfg(&format!(
+        r#"
+[agent]
+name = "{name}"
+role = "agent"
+model = "m"
+description = "d"
+{extends}
+{tier_line}
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "x"
+"#
+    ))
+}
+
+#[test]
+fn extends_tier_child_inherits_l0_from_base_when_omitted() {
+    // An L0 base's tier travels to a child overlay that never redeclares
+    // `tier` — the same "hardened base stays hardened under a silent
+    // overlay" rule `enforce_search_indexes` follows, applied to a
+    // privilege boundary instead of a search-index posture.
+    let base = agent_with_tier("base", "", r#"tier = "orchestration""#);
+    let child = agent_with_tier("child", "extends = \"base\"", "");
+    let merged = merge_extends(base, child);
+    assert_eq!(
+        merged.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration,
+        "a child overlay that never declares its own tier must inherit the \
+         base's L0 tier, exactly like every other un-redeclared field"
+    );
+}
+
+#[test]
+fn extends_tier_child_can_downgrade_l0_base_to_l1() {
+    // A child that explicitly declares its own tier always wins — including
+    // downgrading an L0 base to L1.
+    let base = agent_with_tier("base", "", r#"tier = "orchestration""#);
+    let child = agent_with_tier("child", "extends = \"base\"", r#"tier = "l1""#);
+    let merged = merge_extends(base, child);
+    assert_eq!(merged.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn extends_tier_omitted_everywhere_resolves_l1() {
+    // Neither base nor child ever declares `tier` — the chain must resolve
+    // to the fail-closed default, never accidentally L0.
+    let base = agent_with_tier("base", "", "");
+    let child = agent_with_tier("child", "extends = \"base\"", "");
+    let merged = merge_extends(base, child);
+    assert_eq!(merged.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn extends_tier_child_can_declare_l0_over_l1_base() {
+    // The reverse direction: an L1 (or tier-less) base, and a child that
+    // explicitly opts INTO L0 — a deliberate, explicit declaration, which
+    // is the only way `tier()` ever resolves to L0.
+    let base = agent_with_tier("base", "", r#"tier = "l1""#);
+    let child = agent_with_tier("child", "extends = \"base\"", r#"tier = "orchestration""#);
+    let merged = merge_extends(base, child);
+    assert_eq!(
+        merged.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration
+    );
+}
+
 #[test]
 fn extends_unions_listener_bindings_by_name() {
     let base = cfg(r#"
@@ -747,19 +824,167 @@ tags = ["general", "personal"]
     assert_eq!(caps.tags, vec!["general", "personal"]);
 }
 
-/// TODO(#3075 / AUTH-2): once AUTH-1/#3074 adds the `user_authority` field to
-/// `AgentConfig`, this test must assert that a child's `user_authority` is
-/// NEVER inherited/unioned from the base through `extends` — even when the
-/// child extends the authority holder, the merged value is the child's own
-/// explicit setting (defaulting `false`). The exclusion hook is stubbed at the
-/// `merge_extends` merge site (see the `user_authority` comment there); the
-/// field does not exist yet, so this placeholder is `#[ignore]`d.
+/// #3936 (PM-3, DOC-41 §5.5): a child's `user_authority` is NEVER
+/// inherited/unioned from the base through `extends` — even when the child
+/// extends the authority holder, the merged value is always the child's own
+/// explicit setting (defaulting `false`).
 #[test]
-#[ignore = "user_authority field lands in AUTH-1/#3074; assertion filled by AUTH-2/#3075"]
 fn extends_does_not_inherit_user_authority() {
-    // Intentionally empty: see doc comment. When #3074 lands, build a base
-    // with user_authority = true and a child that omits it, then assert the
-    // merged config's user_authority is false (the child's own default).
+    let mut base = cfg(r#"
+[agent]
+name = "authority-holder"
+role = "assistant"
+model = "m1"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "base"
+"#);
+    base.permissions.user_authority = true;
+
+    // A child that OMITS `[permissions]` entirely must NOT inherit `true`.
+    let ch = child("overlay", "authority-holder", "child");
+    let merged = merge_extends(base.clone(), ch);
+    assert!(
+        !merged.permissions.user_authority,
+        "a child must never inherit user_authority=true from its base"
+    );
+
+    // A child that explicitly declares its OWN `user_authority = true` keeps
+    // its own explicit setting (this was never in question, but pins the
+    // "always the child's own value" framing rather than "always false").
+    let mut ch2 = child("overlay2", "authority-holder", "child2");
+    ch2.permissions.user_authority = true;
+    let merged2 = merge_extends(base, ch2);
+    assert!(merged2.permissions.user_authority);
+}
+
+/// #3936 (DOC-57 §2.3): `[permissions].scopes` unions base-first across the
+/// chain, same polarity as legacy `[tools].scopes`.
+#[test]
+fn extends_unions_permissions_scopes() {
+    let mut base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m1"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "base"
+"#);
+    base.permissions.scopes = Some(vec!["memory.read".to_string()]);
+
+    let mut ch = child("child", "base", "child");
+    ch.permissions.scopes = Some(vec!["google.gmail.*".to_string()]);
+
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.permissions.scopes,
+        Some(vec![
+            "memory.read".to_string(),
+            "google.gmail.*".to_string()
+        ])
+    );
+}
+
+/// #3936 (DOC-57 CC-9 + §2.3): a base declaring only legacy `[tools].scopes`
+/// and a child declaring only `[permissions].scopes` must UNION across the
+/// chain — the child's migration to the new key must not silently drop the
+/// base's un-migrated legacy grant.
+#[test]
+fn extends_permissions_scopes_union_survives_a_partially_migrated_chain() {
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m1"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "base"
+
+[tools]
+scopes = ["memory.read"]
+"#);
+
+    let mut ch = child("child", "base", "child");
+    ch.permissions.scopes = Some(vec!["google.gmail.*".to_string()]);
+
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.permissions.scopes,
+        Some(vec![
+            "memory.read".to_string(),
+            "google.gmail.*".to_string()
+        ]),
+        "the base's un-migrated [tools].scopes must survive the child's [permissions].scopes"
+    );
+}
+
+/// #3936 (DOC-57 §2.3): `[[permissions.grants]]` unions by `skill`; a child
+/// re-declaring the same skill overrides the base's mode for it.
+#[test]
+fn extends_permission_grants_union_by_skill() {
+    use crate::agents::{GrantMode, PermissionGrant};
+
+    let mut base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m1"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "base"
+"#);
+    base.permissions.grants = vec![
+        PermissionGrant {
+            skill: "gmail".to_string(),
+            mode: GrantMode::Ask,
+        },
+        PermissionGrant {
+            skill: "git-status".to_string(),
+            mode: GrantMode::Allow,
+        },
+    ];
+
+    let mut ch = child("child", "base", "child");
+    ch.permissions.grants = vec![PermissionGrant {
+        skill: "gmail".to_string(),
+        mode: GrantMode::Deny,
+    }];
+
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.permissions.grants.len(),
+        2,
+        "{:?}",
+        merged.permissions.grants
+    );
+    let gmail = merged
+        .permissions
+        .grants
+        .iter()
+        .find(|g| g.skill == "gmail")
+        .unwrap();
+    assert_eq!(gmail.mode, GrantMode::Deny, "child overrides base's mode");
+    assert!(
+        merged
+            .permissions
+            .grants
+            .iter()
+            .any(|g| g.skill == "git-status" && g.mode == GrantMode::Allow),
+        "an un-overridden base grant survives"
+    );
 }
 
 // --- resolve() walk tests -----------------------------------------------

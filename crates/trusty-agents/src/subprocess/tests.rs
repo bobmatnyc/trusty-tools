@@ -7,10 +7,89 @@
 //! Test: This module is itself the test coverage.
 
 use tokio::io::AsyncBufReadExt;
+use tokio::process::Command;
 
 use crate::ipc::{IpcMessage, parse_message};
+use crate::subprocess::spawn::apply_delegation_taint_env;
 #[cfg(unix)]
 use crate::test_env::{spawn_script, write_executable_script};
+
+/// Read back the value `apply_delegation_taint_env` (or any other
+/// `cmd.env(...)` call) set for `key` on a `tokio::process::Command`,
+/// without spawning it.
+///
+/// Why: `Command` does not expose a `get_env`-by-key lookup directly;
+/// `as_std().get_envs()` returns an iterator of every EXPLICITLY set
+/// var (inherited process env is not included), which is exactly the
+/// "what did we just tell the child to see" question these tests ask.
+fn get_env_on_command<'a>(cmd: &'a Command, key: &str) -> Option<&'a std::ffi::OsStr> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+        .and_then(|(_, v)| v)
+}
+
+/// Security fix (delegate_to_agent injection-to-RCE path, item 4, #4126):
+/// the `cmd.env("TAGENT_DELEGATION_TAINT_ALLOW", ...)` write in
+/// `apply_delegation_taint_env` had no direct test coverage at all before
+/// this — the doc comment on `SubprocessAgentRunner::with_delegation_taint`
+/// cited two tests (`delegation_taint_allow_env_set_when_configured`,
+/// `delegation_taint_allow_env_absent_by_default`) that did not exist
+/// anywhere in the repo (a "doc-comment pointer lint" CI failure). This is
+/// the REAL round trip: build an actual `Command`, apply the function, read
+/// the env var back off the `Command` object (never spawned).
+#[test]
+fn delegation_taint_allow_env_set_when_configured() {
+    let mut cmd = Command::new("true");
+    let patterns = vec!["web_search".to_string(), "delegate_to_agent".to_string()];
+
+    apply_delegation_taint_env(&mut cmd, Some(&patterns), "engineer");
+
+    let value = get_env_on_command(&cmd, "TAGENT_DELEGATION_TAINT_ALLOW")
+        .expect(
+            "TAGENT_DELEGATION_TAINT_ALLOW must be set on the Command when a taint is configured",
+        )
+        .to_str()
+        .expect("value must be valid UTF-8");
+    let decoded: Vec<String> = serde_json::from_str(value).expect("value must round-trip as JSON");
+    assert_eq!(decoded, patterns);
+}
+
+/// Companion to the test above: when the caller passes `None` (every
+/// non-assistant-tier / non-delegated spawn — still the overwhelming
+/// majority), NO env var is written at all, byte-identical to every spawn
+/// before this feature existed.
+#[test]
+fn delegation_taint_allow_env_absent_by_default() {
+    let mut cmd = Command::new("true");
+
+    apply_delegation_taint_env(&mut cmd, None, "engineer");
+
+    assert!(
+        get_env_on_command(&cmd, "TAGENT_DELEGATION_TAINT_ALLOW").is_none(),
+        "no taint configured must mean no TAGENT_DELEGATION_TAINT_ALLOW env var on the child Command at all"
+    );
+}
+
+/// `Some(vec![])` (an assistant-tier delegator with no resolvable
+/// `[tools].allow` of its own — the fail-closed case item 2/3 rely on) must
+/// still WRITE the env var — to the literal `"[]"` — rather than being
+/// treated the same as `None`. If this collapsed to "no var set", the child
+/// would see an absent env var and run completely untainted, silently
+/// reopening the exact hole the fail-closed default exists to close.
+#[test]
+fn delegation_taint_allow_env_empty_vec_still_sets_deny_all() {
+    let mut cmd = Command::new("true");
+    let empty: Vec<String> = Vec::new();
+
+    apply_delegation_taint_env(&mut cmd, Some(&empty), "engineer");
+
+    let value = get_env_on_command(&cmd, "TAGENT_DELEGATION_TAINT_ALLOW")
+        .expect("an empty (deny-all) taint must still set the env var")
+        .to_str()
+        .expect("value must be valid UTF-8");
+    assert_eq!(value, "[]");
+}
 
 /// #147: A subprocess that writes a valid IpcMessage::Result to stdout and
 /// then exits with code 1 must be treated as success by the rescue logic in

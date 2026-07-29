@@ -496,7 +496,11 @@ impl LlmClassifier for OpenRouterClassifier {
                 match event {
                     ChatEvent::Delta(d) => full_text.push_str(&d),
                     ChatEvent::Error(e) => stream_error = Some(e),
-                    ChatEvent::ToolCall(_) | ChatEvent::Done => {}
+                    // #3767: no usage-accounting consumer wired up here yet.
+                    ChatEvent::ToolCall(_) | ChatEvent::Done | ChatEvent::Usage(_) => {}
+                    // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
+                    // keeps a future variant from breaking this crate's build.
+                    _ => {}
                 }
             }
         });

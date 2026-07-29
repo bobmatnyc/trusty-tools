@@ -10,6 +10,7 @@
     updateMessageByTask,
     streamDeltaIntoTask,
     isRunning,
+    activeTaskId,
   } from '../stores/app';
   import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
@@ -192,8 +193,23 @@
           </div>
         </div>
       {:else if msg.role === 'assistant'}
+        <!-- Why: the waiting indicator belongs to the bubble it is waiting on,
+             so BOTH the in-bubble spinner and the pulsing green border read
+             from this one expression — they cannot disagree. `isRunning`
+             (stores/app.ts) is the authoritative "waiting on the agent" flag;
+             `activeTaskId` (same store, written in the same tick by
+             InputArea's submit) says WHICH bubble it belongs to. Both are
+             cleared on every terminal path — `task-complete` and `task-error`
+             above, and `session_cancelled` reaches the latter via
+             `lib/eventBridge.ts` — so a failed or cancelled task never leaves
+             a bubble pulsing.
+             Test: `ChatView.test.ts` (the spinner appears/clears with the
+             flag, inside the bubble). -->
+        {@const waiting = $isRunning && !!msg.taskId && msg.taskId === $activeTaskId}
         <div class="flex justify-start ml-4">
-          <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-teal bg-foundry-teal/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
+          <div
+            class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-teal bg-foundry-teal/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm {waiting ? 'waiting-bubble' : ''}"
+          >
             <!-- #3737: label each assistant bubble with the specific persona
                  that produced it (stamped on the message at send time), never
                  a generic "agent". `tracking-wide` is kept but `uppercase` is
@@ -203,7 +219,16 @@
               <ActionIcon name="agent" size={14} />
               <span>{msg.speaker ?? 'Assistant'}</span>
             </div>
-            <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
+            <!-- The spinner lives in the BODY, where the `…` placeholder used
+                 to be: while the reply is still empty it IS the body (so the
+                 bubble reads as "this message is being written" rather than
+                 showing a dead ellipsis next to a detached spinner), and once
+                 streamed text arrives it trails the last token like a caret.
+                 Kept on one source line — `whitespace-pre-wrap` would render
+                 the markup's own indentation as literal text. `role="status"`
+                 + `aria-label` carry the accessible busy name that the removed
+                 out-of-bubble element used to own. -->
+            <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}{#if waiting}<span class="ml-0.5 inline-flex align-middle text-foundry-light-success dark:text-foundry-success" role="status" aria-label="Assistant is responding"><Loader2 class="h-3 w-3 animate-spin" aria-hidden="true" /></span>{:else if !msg.content}…{/if}</p>
             <p class="mt-1 text-[10px] text-foundry-teal/70">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
@@ -285,20 +310,6 @@
         </div>
       </div>
     {/if}
-
-    {#if $isRunning}
-      <!-- Spinner only — no "Running…" text label (the animation is the sole
-           waiting indicator). `role="status"` + `aria-label` keep an accessible
-           name for the busy state now that the visible label is gone; the icon
-           is decorative. -->
-      <div
-        class="flex items-center justify-start text-foundry-teal"
-        role="status"
-        aria-label="Assistant is responding"
-      >
-        <Loader2 class="h-3 w-3 animate-spin" aria-hidden="true" />
-      </div>
-    {/if}
   </div>
 </div>
 
@@ -314,5 +325,42 @@
      Test: Inspect a recap message and verify even rows have a faint tint. */
   tbody tr.recap-row:nth-child(even) {
     background-color: var(--trusty-surface-hover);
+  }
+
+  /* Why: the in-flight assistant bubble gets a pulsing green ring so the
+     waiting state belongs to the message rather than floating beneath it.
+     Drawn with `outline`, not `border`: the bubble already carries a 4px teal
+     `border-l-4` and no other border, so overriding the border box would both
+     fight that utility's specificity and reflow the bubble every time a task
+     starts or ends. An outline follows `border-radius`, costs no layout, and
+     leaves the teal identity bar intact.
+     Green comes from `--color-success` (app.css), the Foundry
+     `--trusty-success` pair — #3F6F2A light / #8FBF6A dark — so it reads
+     correctly in both themes with no hardcoded hex here.
+     Test: send a message and watch the bubble ring pulse until the reply
+     lands (or errors/cancels), then stop. */
+  .waiting-bubble {
+    outline: 2px solid rgb(var(--color-success));
+    outline-offset: 1px;
+    animation: waiting-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes waiting-pulse {
+    0%,
+    100% {
+      outline-color: rgb(var(--color-success) / 0.95);
+    }
+    50% {
+      outline-color: rgb(var(--color-success) / 0.3);
+    }
+  }
+
+  /* Reduced motion: the ring still marks the bubble as waiting, it just
+     stops moving — a static green outline, not a removed one. */
+  @media (prefers-reduced-motion: reduce) {
+    .waiting-bubble {
+      animation: none;
+      outline-color: rgb(var(--color-success));
+    }
   }
 </style>

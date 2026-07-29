@@ -21,17 +21,25 @@ has this real priority order — verified against the agent source, not
 assumed:
 
 1. **Primary**: `mcp__mcp-ticketer__*` MCP tools, when configured.
-2. **Fallback**: `aitrackdown` CLI (`aitrackdown create issue/task`,
-   `aitrackdown transition`, `aitrackdown status tasks`) when no ticketing
-   MCP server is available.
+2. **GitHub Issues**: `gh issue create/edit/view/list/close` (or
+   `mcp__github__*`) when the project's tracker is GitHub — as it is for this
+   repo (see root `CLAUDE.md`): spec → issue → worktree branch → PR →
+   trusty-review gate → squash-merge.
+3. **Fallback**: `aitrackdown` CLI (`aitrackdown create issue/task`,
+   `aitrackdown transition`, `aitrackdown status tasks`) when neither of the
+   above is available.
 
-Separately, this repo's own convention (see root `CLAUDE.md`) defaults to
-**GitHub Issues** for the actual delivery chain: spec → issue → worktree
-branch → PR → trusty-review gate → squash-merge. When no dedicated ticketing
-MCP is configured, route GitHub issue operations to the **Version Control**
-agent (`gh issue create/view/list`, or `mcp__github__*` tools), not the
-`ticketing` agent's `mcp-ticketer`/`aitrackdown` path — they serve different
-scopes (external ticket-tracker vs. this repo's own GitHub issues).
+All three are the `ticketing` agent's paths — it is granted the full tool set,
+so `gh` is available to it whichever backend a project uses. Route **GitHub
+issue operations to `ticketing`**, not to Version Control. (Earlier revisions
+of this skill said the opposite, on the theory that `ticketing` only spoke
+`mcp-ticketer`/`aitrackdown` and so could not touch GitHub. That is no longer
+true and the split it created is retired.)
+
+**Version Control keeps git and PR mechanics** — branch, push, rebase,
+conflict resolution, merge, release, tag. The dividing line is bookkeeping
+vs. mechanics, not GitHub vs. external tracker: opening or editing a PR
+*body* is bookkeeping; pushing or merging that PR is version control.
 
 For lightweight, session-local task tracking that isn't a formal ticket at
 all, use `mcp__trusty-memory__task_add` / `task_list` / `task_complete`
@@ -57,7 +65,7 @@ PM: [presents results]
 ## Ask Before Creating
 
 If the user references a ticket/issue but no matching one is found:
-ticketing (or Version Control, for GitHub issues) MUST NOT auto-create.
+ticketing MUST NOT auto-create.
 Ask: "I didn't find an existing issue for [topic]. Create one, or did you
 mean a different one?" Auto-create only on explicit "create a
 ticket/issue for X."

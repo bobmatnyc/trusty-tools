@@ -7,7 +7,462 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
+  set is now documented as DELIBERATELY unfiltered by session state, and pinned
+  by a new regression test `prune_spares_a_stopped_records_workspace`
+  ([#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288),
+  [#4207](https://github.com/bobmatnyc/trusty-tools/issues/4207)). No behavior
+  change — the construction is untouched. A `SessionRecord`'s state is
+  bookkeeping, not a liveness signal (a session measured running in tmux was
+  recorded `stopped` while holding uncommitted and unpushed work), so the
+  inviting `.filter(|r| r.state == Active)` tidy-up would make a live worktree
+  an orphan candidate. The test drives the real route and fails if that filter
+  is ever added.
+- `session_manager::prune`: `prune_orphaned_worktrees`'s `active_workspace_paths`
+  parameter is renamed **`in_use_workspace_paths`** (and its `initial_active` /
+  `fresh_active` locals to `initial_in_use` / `fresh_in_use`). Rename only, no
+  behavior change: the old name is what made `.filter(|r| r.state == Active)`
+  read as a tidy-up rather than a data-loss bug.
+- `session_manager::prune`: `phase2_fresh_snapshot_spares_a_record_the_caller_set_missed`
+  closes a pre-existing coverage hole — the Phase 2 `fresh_in_use` re-read, the
+  last check between a reclaimable candidate and deletion, had ZERO executed
+  coverage. The one test that named it builds its worktree with no ownership
+  sentinel, so the #3649 gate skipped it before Phase 2 ever ran; filtering
+  Phase 2 by state broke nothing in the suite.
+- `session_manager::prune`: the same pin extended to the two remaining unfiltered
+  reads on the AUTOMATIC orphan-GC path — the active set built in
+  `reap_orphaned_worktrees` (what the daemon's sweep loop calls on a timer, with
+  `dry_run: false` hardcoded and no preview) and the Phase 2 `fresh_active`
+  snapshot inside `prune_orphaned_worktrees` that re-reads the store immediately
+  before deletion. Both are now commented, and
+  `reap_spares_a_stopped_records_workspace` asserts end-to-end that a `Stopped`
+  record's worktree survives a real, deleting sweep. Measured and documented:
+  these two reads are defense-in-depth — neither is load-bearing alone, and only
+  narrowing BOTH actually deletes a live worktree. No behavior change.
+
+- **PM instructions are authored per section** (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)): the four monolithic assets (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `BASE_PM.md`) are replaced by one markdown source per section under `src/assets/instructions/sections/`, and `core::bundled_pm_package` builds its blocks from those files instead of cutting the monoliths at runtime (the `split_asset` / `Cut` machinery is gone). `instruction_pipeline::pm_instructions()` and `base_pm()` reconstitute the two multi-section strings the legacy override assembly still needs, so a section edit reaches BOTH composers and a project with a `.trusty-mpm/` override can no longer be frozen on stale instructions. Every existing override file (`INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`, `PM_INSTRUCTIONS_DEPLOYED.md`) keeps resolving exactly as before.
+- **Delivered-prompt content changes** (same epic). The Memory and Search guidance is lifted out of the middle of the Core body into two self-contained sections with their own headings — they were two halves of one numbered list, which made their declared `project` tier a false claim (replacing Memory alone left Search opening on a bare `2.`); they are now genuinely independently overridable. `## Trusty Tool Priority (Non-Overridable)` moves to sit with the other non-overridable rules, so it now precedes the framework-guaranteed conventions instead of following them — position only, still inside the floor, wording unchanged. The workflow section gains a **Sprint, then Harden** doctrine (sprint to feature-complete with targeted tests and no CI iteration loops; harden with the full suite, critic and release gates before publishing), including the causal claim that slow release *causes* WIP, the hard line that going fast never licenses turning red green by deleting coverage, and the close-and-fold rule at 3+ review rounds.
+- `core::pm_prompt_golden_tests`: committed snapshots of the fully composed PM prompt for both the packaged and legacy composers. #4249's byte-equality-against-the-old-prompt gate cannot survive a deliberate content change, so these replace it: any future edit to a section source surfaces as a reviewable prose diff in the PR rather than landing invisibly. Regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`.
+
+- `core::instruction_overrides`: the DEFAULT PM prompt — the bundled-fallback
+  configuration every project without a `.trusty-mpm/` section override receives
+  — is now composed through the typed `InstructionPackage`
+  (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)) instead
+  of a four-asset string concatenation. The new `core::bundled_pm_package` cuts
+  `PM_INSTRUCTIONS.md` into Core/Memory/Search blocks and `BASE_PM.md` into the
+  three absorbed floor blocks *at runtime*, deriving each block's join from the
+  exact bytes it removed, so re-sectioning an asset cannot move a byte and the
+  eight-section taxonomy now describes the prompt that actually ships. The
+  composed prompt is byte-identical to the previous assembly, gated by
+  `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`, which
+  reports the first differing byte offset with surrounding context on failure.
+  Scope is the bundled fallback ONLY: an `AGENT_DELEGATION.md` override
+  (replaces the section, so never consumes the computed roster) and
+  `PM_INSTRUCTIONS_DEPLOYED.md` (opaque body, no delegation section) are
+  currently inexpressible in the schema and stay on the legacy path by design —
+  neither `RosterNotConsumed` nor `SectionWithoutBlocks` is weakened to
+  accommodate them. The gate is asserted through `resolve_pm_prompt` itself with
+  a project-tier agent deployed, so the composed branch is a property of the test
+  rather than of the machine's `~/.claude/agents`, and `resolve_pm_prompt` now
+  logs which composer produced the prompt — the two are byte-identical by
+  contract, so the delivered string alone cannot tell you. The gate injects a
+  fixed roster rather than scanning the agent tiers per side: those tiers are
+  machine-global mutable state that live `tm` sessions rewrite at launch, so
+  scanning twice made the gate itself intermittently red with a message
+  indistinguishable from a real prompt regression.
+
 ### Added
+
+- `daemon::bus`: the peer message bus foundation (DOC-60 §5.3) — the
+  daemon-side replacement for the assistant-to-assistant lane PR #4240 closed
+  under ADR-0024. Three pieces: the §11 **envelope schema** carrying all three
+  §6 identifiers (definition id, instance id, per-message caller identity), an
+  **instance registry** resolving `definition_id` → live `instance_id`, and a
+  **pub/sub HTTP surface** (`/api/v1/bus/instances`, `/publish`,
+  `/subscribe/{instance_id}`). Delivery is addressed per instance — each live
+  instance owns its channel — rather than broadcast-then-filtered, which is the
+  defect §2 identifies in the existing `/sessions/{id}/events` path. Both
+  addressing modes are supported: definition-addressed (§5.3 normative) and
+  direct **instance bypass**. A peer *request* is a distinct payload variant
+  from informational chat and carries an explicit accept/decline response, per
+  §5.3's normative decline-ability rule (ADR-0024's virtual-twin authority
+  principle). The durable §9 record rides the EXISTING `daemon::audit`
+  `AuditLogger` through a new `logs_dir/bus/` sibling stream — the logger gained
+  `for_stream` and a generic `log_record`, so there is no second JSONL writer.
+- **Instance-bypass failure mode: explicit error, never silent fallback.** When
+  a sender targets an `instance_id` that died between learning it and sending,
+  the bus returns `BusError::InstanceGone` (HTTP `410 Gone`) and does **not**
+  redirect to another live instance of the same definition — even when the
+  request also supplies a `definition_id`. A silent redirect would deliver to a
+  peer with no memory of the thread whose continuity motivated bypass in the
+  first place, and §4 requires failures reach the sender rather than being
+  dropped. `404` (definition has nothing running) and `409` (registered but no
+  subscriber) are separately distinguishable so a client can implement recovery
+  from the status alone.
+- **Caller identity is verified, not asserted.** `from` arrives client-asserted
+  over loopback HTTP, so the peer publish path (a) admits only
+  `kind: assistant_instance` senders, rejecting a `user`-kind publish with
+  `400`, and (b) resolves the claimed `instance_id` against a live registration
+  (`403 UnregisteredSender` when it does not resolve), then re-stamps
+  `definition_id` from the registry rather than trusting the caller's copy.
+  Without this, assistant A could publish to assistant B as `kind: "user"` and
+  B — which by §5.3's design cannot tell a lateral message from a user message
+  by shape — would read it as a user instruction and act on it, reconstituting
+  assistant-to-assistant delegation through the very bus ADR-0024 closed it
+  from. `403` is deliberately distinct from the recipient-side `410`: the fault
+  is the caller's own identity and the recovery is to register, not to
+  re-address.
+- The `edge` field is **derived** from the caller's kind (`CallerKind::peer_edge`,
+  a total match over the enum) rather than stamped as a constant, so §9 search
+  and §10 consolidation can actually tell the three §5 edges apart. Adding a
+  caller kind is a compile error until someone decides which edge it crosses.
+- **What the durable §9 log contains:** once a sender is verified, every
+  outcome is recorded — `Delivered` or `Dropped`. Requests rejected *before*
+  verification (malformed identity, disallowed caller kind, unverifiable
+  sender) are surfaced as `4xx` and leave no record: they never became
+  envelopes, and writing one would stamp an unverified — possibly forged —
+  identity into the log in the same shape as attributable traffic.
+- Instance ids are `<definition_id>~<8 hex>`, using an RFC 3986 *unreserved*
+  separator rather than DOC-60 §11's illustrative `#`: `#` is the URI fragment
+  delimiter, so a raw id in a path segment is truncated by conforming clients
+  before the request is sent. §11 self-declares as non-normative wire format.
+- Deferred, not built: the durable inbox and queue-not-spawn behavior (§7),
+  cross-project addressing (§12 Q4), retention policy (§12 Q1), and version-skew
+  negotiation (§12 Q2/Q5). Streaming token deltas stay on the existing per-crate
+  buses. The trusty-agents client and the peer-message tool are separate changes.
+
+- `core::instruction_package`: the sectioned-JSON instruction-package schema
+  ([#4184](https://github.com/bobmatnyc/trusty-tools/issues/4184), epic #4183) —
+  the eight-section taxonomy (Core, Memory, Search, Workflow, Agent Delegation
+  plus the absorbed BASE_PM floor sections Identity, Non-Overridable Rules,
+  Framework-Guaranteed Conventions), the `fixed | project | user`
+  customization-tier axis, an ordered block stream with explicit join literals,
+  structural validation, and a pure deterministic `compose`. The JSON Schema
+  ships as `assets/instructions/instruction-package.schema.json`. Types and
+  validation only — no instruction content is authored (#4185) and no build is
+  re-sourced (#4186); nothing in the session-launch path composes from it yet.
+  Every object in the package's deserialization path rejects unknown keys, and
+  the error names the offending key. Strictness is deliberate over
+  forward compatibility here: `validate` gates on `schema_version` before
+  inspecting any field, so lenient field handling could only ever matter for a
+  change that added a field while leaving the version at 1 — precisely the case
+  that must not be tolerated, since an older binary would then compose a prompt
+  missing the new field's effect and report success. Any field addition that can
+  change composed bytes must bump `SCHEMA_VERSION`. That version is now checked
+  *before* the package is deserialized, so a package from a later schema reports
+  the actionable "unsupported schema_version" rather than blaming one of its own
+  perfectly valid new keys. Floor blocks are
+  deliberately *not* constrained to canonical section order: `BASE_PM.md` places
+  `## Trusty Tool Priority` after `## Framework-Guaranteed Conventions`, so
+  requiring non-decreasing order would reject a faithful byte-identical lift of
+  that asset. A declared section must own at least one *non-optional* block.
+  Owning blocks is not the same as emitting: a section covered only by
+  `optional` blocks passed validation and still composed to nothing,
+  recreating the very silent-missing-section shape the coverage check exists
+  to prevent.
+
+### Fixed
+
+- The per-project worktree opt-out is no longer silently conditional on the
+  daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
+  `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),
+  [#3781](https://github.com/bobmatnyc/trusty-tools/pull/3781)) was consulted at
+  exactly one decision point, inside the daemon's spawn route. Both CLI paths
+  that provision worktrees in the `tm` process itself — `tm launch`, which never
+  asks the daemon, and the daemon-unreachable bare-`tm` fallback, which runs
+  *because* the daemon is down — created a base clone and a per-session worktree
+  regardless. Both now consult the registry BEFORE `ensure_base_clone`, matching
+  the daemon's deliberate ordering, so an opted-out project gets neither a clone
+  nor a worktree and runs in its own checkout exactly as `spawn_managed_on_main`
+  would have given it. The decision itself moved from the `pub(super)`
+  `daemon::managed_routes::launch_on_main::worktree_enabled_for_origin` to
+  `project::worktree_policy`, which serves the daemon in-process and the CLI
+  out-of-process off the same `projects.json`. The `unwrap_or(true)` default is
+  unchanged (unset or unregistered still means worktrees ON, and an unreadable
+  registry fails safe to ON), and #3455's warn-never-refuse concurrency
+  behaviour is untouched.
+- Bare `tm` now resumes a session whose runtime has died, instead of switching
+  the operator into a bare shell
+  ([#3873](https://github.com/bobmatnyc/trusty-tools/issues/3873)). The picker's
+  resume planner decided "this session is live" from tmux SESSION existence
+  alone, which cannot see the common case where the tmux pane survives but the
+  `claude` inside it exited and the pane fell back to a login shell. That
+  `(active, tmux up)` pair fell through to `Attach`, so the first `tm` did a
+  `switch-client` into an idle shell and nothing else — the operator had to type
+  `tm` a SECOND time, from inside that pane, before a runtime came back.
+  `guided_resume::plan_resume` takes a third input, `runtime_live`, and maps
+  `(active/provisioning, tmux up, runtime dead)` onto the existing
+  `ReconcileThenRestart` recovery (`/runtime-stop` → `/resume` → attach), so the
+  first invocation does the whole job. `runtime_live` is resolved by the new
+  `session_runtime_live`, which reuses the daemon reaper's own
+  `daemon::runtime_reap::session_has_live_pane` primitive — and through it
+  `pane_runtime_exited`, the same `is_idle_shell` allowlist, and the same
+  `ProcessTreeProbe` child gate — against a session-scoped `tmux list-panes`, so
+  the CLI and the reaper cannot drift apart and the fix works whether or not the
+  60s reaper is healthy.
+
+  The verdict is the ANY-PANE-LIVE question over the whole tmux session, not a
+  check of the record's stored `pane_id`: a managed session can be manually split
+  (#2463), and a session with one idle pane beside a live agent pane must never
+  reach the destructive branch. Fails OPEN throughout — a blank session name, a
+  failed `tmux` call, a listing that cannot be fully parsed, or a listing with no
+  pane attributable to the session all assume the runtime is live and preserve
+  the previous attach behavior. Parsing is strict (exactly three non-empty
+  tab-separated fields with a numeric pid) specifically so a missing or
+  unparseable pid cannot collapse the two-gate check down to `is_idle_shell`
+  alone: `has_live_child(None)` returns `false`, which is right for the daemon's
+  non-destructive reconcile (#2023 A) but not for a CLI path that drives a
+  session kill.
+
+  Known limitation, deliberately accepted: any-pane-live is also what bounds the
+  fix. A SPLIT session whose agent pane died but which still has some other pane
+  running a non-shell command (a `vim`, a `tail -f`) reads as live, so bare `tm`
+  still attaches into the idle agent pane there. #3873 is fixed for the
+  single-pane case and for splits whose panes are all idle shells, but not for a
+  split with an unrelated live process — narrowing the question back to one pane
+  would require per-pane runtime identity that the stored `pane_id` cannot supply
+  reliably enough to gate a session kill on.
+
+  Because that reconcile reaches `SessionManager::stop` →
+  `graceful_terminate_runtime` → `kill_session`, which is **session-scoped**, the
+  restart now discloses that it is about to destroy the whole tmux session — all
+  windows, panes, and scrollback — whenever tmux is live, matching what the plain
+  `Restart` branch already did for the same situation. Stopped/Errored records
+  (whose panes are idle shells too) keep taking the plain `Restart` path, and the
+  decommissioned/deleted tombstone refusal still runs first.
+
+  `commands::managed_tests`: `session_resume_headless_active_live_tmux_skips_restart_and_attach`
+  created its scratch tmux session with a bare `tmux new-session -d`, which lands
+  the pane on a login shell — since #3873 that is a DEAD runtime, so the fixture
+  no longer expressed the live-session case the test asserts about. It now runs
+  an explicit long-lived command, and a new counterpart
+  (`session_resume_headless_dead_runtime_reconciles_and_restarts`) drives the
+  dead-runtime shape end-to-end against a real daemon, proving the reconcile
+  actually reaches `/runtime-stop` + `/resume` rather than being a silent no-op.
+  Both wait for the pane's liveness reading to STABILISE (three agreeing probes)
+  before acting: a freshly created pane transiently reports a live child while
+  the shell initialises, which otherwise made both tests depend on the
+  developer's dotfiles. Their tmux names are now process-unique, since the two
+  bin targets can run concurrently and share the machine-global tmux namespace.
+
+- Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
+  The project-store upsert was an unsynchronised read-modify-write of the whole
+  file — two processes interleaving read/read/write/write silently dropped one
+  registration while both callers saw success, and because every writer shared
+  one fixed `projects.json.tmp` scratch path, overlapping writes could publish a
+  mangled document that no longer parsed. All mutations now run through
+  `ProjectStore::mutate`, which performs the whole cycle inside a cross-process
+  file lock and publishes atomically via `trusty_common::json_rmw`. `PATCH
+  /api/v1/projects/{name}` gets the same guarantee: its fetch→mutate→persist
+  runs under one held lock instead of two separate store calls. A failed lock is
+  an error, never an unsynchronised write.
+
+- Worktree discovery is derived from `git worktree list --porcelain` instead of
+  walking five hard-coded location shapes, so a session worktree is found
+  wherever it lives rather than only where someone remembered to look (#4207
+  slice 1).
+- The checkout that owns a worktree is now resolved with
+  `git rev-parse --git-common-dir` instead of being guessed as the candidate's
+  grandparent directory. Worktrees physically inside `.base/.worktrees/` but
+  registered to the parent repository were previously disowned by that guess
+  and were structurally unreclaimable — never deleted, never reportable (#4207,
+  underlying defect of #4204).
+- `tm session prune --worktrees` and the daemon orphan-GC no longer propose a
+  plain directory as a reclaim candidate. A directory git does not register is
+  not trusty-mpm's to remove.
+- Worktree reclamation is bounded by a structural containment rule: a candidate
+  must be a strict descendant of the managed project directory whose git
+  registry named it. Deriving discovery from git (above) widened what could be
+  proposed for deletion from five path shapes to anything registered anywhere
+  under the projects root — on this machine that admitted five of the
+  operator's own long-lived checkouts, leaving the ownership sentinel as the
+  only thing between enumeration and an unattended removal. Your own checkouts
+  and any worktree you park beside a managed project are now excluded by
+  position rather than by a list of names, so a new one is excluded the day you
+  create it. Location remains irrelevant *within* a project, so no reclaim
+  capability is lost (#4207).
+- A git-`locked` worktree is never enumerated for reclamation. Git itself
+  respects the lock — `git worktree remove --force` refuses it — but the
+  removal path treats that refusal as a generic git failure and falls back to
+  deleting the directory outright, which defeats the lock and strands git's
+  registry entry. Excluding locked worktrees from enumeration is the only place
+  `git worktree lock` is actually honoured (#4207).
+
+---
+## [1.2.3] — 2026-07-28
+
+PATCH: merge-and-local-install only, no crates.io publish.
+
+### Fixed
+
+- **`tm launch`, `tm connect`, and `tm meta launch` deployed agents to a tier
+  `--setting-sources` excludes, so no tm-deployed agent ever loaded**
+  ([#4203](https://github.com/bobmatnyc/trusty-tools/issues/4203)): all three
+  CLI paths built their `FrameworkPaths` with `default()`, which resolves
+  against `dirs::home_dir()` and writes the agent roster into
+  `$HOME/.claude/agents` — the `user` tier. All three then spawned `claude`
+  carrying `--setting-sources project,local`, a list that deliberately excludes
+  `user` (#1269). The deployed tier and the loaded tiers never intersected, so
+  every agent the launch step had just deployed was invisible to the session it
+  was deployed for, and nothing reported it: the deploy genuinely succeeded and
+  the load silently found nothing.
+
+  These paths now deploy through a new `session_launch::prepare_isolated_session`
+  entry point, which resolves the layout itself rather than accepting one from
+  the caller — the harness cwd is the deploy base, so `<cwd>/.claude/{agents,skills}`
+  lands in a tier the `project`/`local` sources read. Removing the parameter
+  removes the defect: there is no longer a wrong `FrameworkPaths` for a call
+  site to pass. This is the same correction the daemon's `spawn_managed_inproject`
+  already carried (#1931); the three CLI paths never received it. `tm session
+  start` is deliberately unchanged — it spawns a bare `claude` with no
+  `--setting-sources`, so it does read the user tier and `default()` is correct
+  there.
+
+  **Operator-visible change:** `tm connect` now writes the agent roster, skills,
+  and output styles into the `.claude/` directory of your **live checkout**
+  rather than `$HOME/.claude/`, so they will show up in `git status` for that
+  repo. The scaffolding paths are added to `.gitignore` automatically (#3427),
+  and existing hand-placed or committed `.claude/` content is never overwritten
+  — unmanaged files are skipped as user-owned, and managed files whose checksum
+  drifted are skipped with a warning.
+
+- **Two paths no longer write into a destroyed worktree**
+  ([#4204](https://github.com/bobmatnyc/trusty-tools/issues/4204)):
+  `tm install --reset-agents --reset-agents-workspaces` and the bare-`tm`
+  in-place relaunch both gated on `workspace_path.is_dir()` alone, which a
+  gutted worktree — `.git` and source tree stripped, directory node surviving —
+  passes. The sweep recomposed 45 agent files into such a husk and the relaunch
+  exec'd `claude` into it. Both now share one predicate,
+  `core::workspace_liveness::workspace_liveness`, which skips ONLY on positive
+  evidence of death: it accepts `.git` as a FILE (the `gitdir:` pointer every
+  linked worktree carries, so no legitimate managed workspace is refused),
+  requires a `.git` only where one is owed (a tm-provisioned workspace or a
+  `.worktrees/<id>` path), and — at EVERY stat it performs, including the
+  initial existence check — reports a filesystem it could not interrogate as
+  `Indeterminate`, explicitly not dead, so a permission failure, a symlink
+  loop, or a stalled network mount can never silently stop servicing a live
+  workspace. A gutted workspace, and a session record whose workspace has
+  vanished, are both now reported to the operator with a skip reason rather
+  than dropped silently.
+
+- **Session index GC would have silently stopped reclaiming trusty-search disk**
+  ([#4123](https://github.com/bobmatnyc/trusty-tools/issues/4123)):
+  trusty-search's `DELETE /indexes/:id` now preserves on-disk data unless
+  `?delete_data=true` is passed. Both index-GC call sites in `search_gc.rs` —
+  decommission teardown and the periodic orphan sweep — now opt in explicitly.
+  Without this they would have kept removing the registration while leaving the
+  index data behind forever: the workspace each one describes is a disposable
+  worktree that is about to be deleted, so nothing will ever re-register at
+  that root and the preserved data would be unreachable garbage. The same PR
+  ([#4218](https://github.com/bobmatnyc/trusty-tools/pull/4218)) also closes
+  [#4110](https://github.com/bobmatnyc/trusty-tools/issues/4110) — see the
+  bundled-fixes entry below for that half of the change.
+
+- **Bundled from `main`: trusty-search P0 corpus quarantine + stage-status fix**
+  ([#4122](https://github.com/bobmatnyc/trusty-tools/issues/4122),
+  [#4110](https://github.com/bobmatnyc/trusty-tools/issues/4110)): this
+  release is merge-and-local-install only (no crates.io publish), so a local
+  install built from this commit also picks up two trusty-search fixes that
+  landed on `main` alongside this bump. Neither touches trusty-mpm's own
+  source; both are called out here because this version bump is the vehicle
+  that carries them to the operator's next restart.
+
+  An index whose durable corpus failed to open at load time is now
+  write-quarantined (#4122): ordinary incremental writes (watcher, boot-time
+  reconciler, `POST /indexes/{id}/index-file`) now refuse rather than silently
+  building a fresh, partial corpus over the never-opened original — the shape
+  that took one production index from 0 to 1,334 chunks of wrong content
+  before coming back "healthy" on the next restart. The quarantine lifts
+  automatically once a subsequent restart's `CorpusStore::open` succeeds.
+
+  `POST /indexes/:id` no longer discards the outcome of the restore it just
+  performed (#4110): `search_capabilities` is now derived from the actual
+  post-restore stages via `derive_warm_boot_stages` (the same classifier
+  warm-boot and lazy-restore already use), so a fully intact index no longer
+  comes back advertising no vector lane — previously that meant semantic
+  search hard-errored and `search_all` silently degraded to BM25-only until
+  the next daemon restart.
+
+---
+## [1.2.0] — 2026-07-27
+
+MINOR: substantial new public library surface (`core::push_guard`,
+`core::claude_json_guard`, `control::delegation_tracker`,
+`core::worktree_safety`) plus the MCP-trust hardening chain. Two internal
+plumbing functions (`core::mcp_config::managed_mcp_server_names`,
+`core::standalone::trust_seed::preseed_managed_trust`) did gain parameters,
+which is technically MAJOR-shaped for a 1.x crate; no published crate depends
+on `trusty-mpm` as a library (verified against the published `trusty-code`
+0.2.0 and `trusty-agents-common` 0.3.0 manifests, neither of which declares
+it), and no in-workspace caller outside this crate references either symbol,
+so a 2.0.0 would signal a break that cannot reach anyone.
+
+### Added
+
+- **Cross-branch `git push` guard for every worktree of a managed base clone**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
+  `pre-push` hook now refuses any push that would OVERWRITE AN EXISTING remote
+  branch with the history of a branch of a DIFFERENT name — the shape that
+  clobbered PR #2863's reviewed lineage. One rule, applied identically whether
+  `HEAD` is attached or detached: updating an existing branch requires the
+  source branch name to equal the destination branch name. It is installed into
+  `$GIT_COMMON_DIR/hooks` at base-clone time, which every worktree of that base
+  shares, so it also covers ad-hoc `git worktree add` worktrees an agent
+  creates for itself (the actual incident path, which no other trusty-mpm code
+  path ever sees). Three shapes are deliberately out of scope and pass through:
+  non-branch destinations (tags, notes); **creating** a branch that does not
+  exist on the remote yet (git reports an all-zero `<remote sha>`; there is no
+  lineage to destroy, and `git push origin <sha>:refs/heads/<new-name>` is the
+  standard way to rescue work out of a detached worktree); and remote-branch
+  deletes — not because they cannot happen by accident, but because a deleted
+  GitHub branch is recoverable (the PR retains its commits at
+  `refs/pull/<N>/head`) whereas a force-clobbered lineage is not, post-merge
+  cleanup is routine, and server-side branch protection is the right layer to
+  police deletion. Note that a configured `remote.<name>.push` refspec makes a
+  **bare** `git push` land on an arbitrary branch — even from a detached
+  `HEAD`, where `push.default` is never consulted — which is why the exemption
+  is keyed on create-vs-update rather than on `HEAD` state or on how the push
+  was spelled.
+  Installation refuses rather than overwrites whenever the existing `pre-push`
+  is not provably ours — a foreign hook, a symlink, a `core.hooksPath`
+  redirect, or a file that cannot be read at all (invalid UTF-8, a permissions
+  error) — so it never fights husky/lefthook, and a hook that cannot be
+  inspected is never destroyed. The write is atomic (temp file + `rename`)
+  because that one file is executed by every worktree of the clone. Set
+  `TM_ALLOW_CROSS_BRANCH_PUSH=1` for a deliberate cross-branch push.
+
+- **`tm repair push-guard` retrofits that guard onto an already-provisioned
+  clone, and `tm doctor` reports when one is missing**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): the guard
+  installs automatically only on the CLONE path, so every base clone that
+  existed before it shipped — exactly the old, many-worktree clones the
+  incident happened in — was silently unprotected with no supported way to fix
+  that. `tm doctor` now carries a `push_guard` check that warns when the
+  current project's clone has no guard (or an older revision) and names the
+  retrofit command; `tm repair push-guard` performs it. The retrofit is
+  idempotent, writes into the clone's shared hooks directory so ONE invocation
+  from ANY worktree covers them all with no git config write, honours the same
+  never-overwrite-a-foreign-hook refusal, and offers `--dry-run` to report
+  without touching a file that live sessions are executing.
+
+- **Agent delegations are now tracked automatically, with a real lifecycle**
+  ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
+  S1+S2): the daemon observes every native subagent dispatch from the
+  `PreToolUse` hook it already receives on every managed session, so tracking no
+  longer depends on the PM voluntarily calling `agent_delegate`. Delegations move
+  `Running` → `Completed`/`Failed` instead of sitting in `Queued` forever, and a
+  `Delegation` now carries `source`, `tool_use_id`, `agent_id`,
+  `transcript_path`, `cwd`, `started_at`, and `ended_at`. A dispatch that both
+  declares (`agent_delegate`) and executes the *same* task produces one record,
+  not two.
+- **`tm hook` forwards Claude Code's subagent correlation keys** (#2864):
+  `tool_use_id` and `transcript_path` on tool events, and `agent_id` /
+  `agent_type` / `agent_transcript_path` on `SubagentStop`. A `tool_response` is
+  relayed only for a subagent-dispatch tool and only as a fixed five-key
+  projection, so an ordinary tool's output is never forwarded. All fields are
+  additive.
 
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
@@ -46,7 +501,251 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   fixed here; tracked as
   [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
 
+### Changed
+
+- `trusty-common` requirement raised to `^0.27` (was `^0.26`): 0.27.0 makes
+  `ChatEvent` `#[non_exhaustive]`, which a `^0.26` requirement cannot express.
+  `activity::monitor`'s `ChatEvent` match gained a wildcard arm accordingly.
+
+- **Orphan-sweep candidates are processed in sorted order** rather than
+  filesystem order, so a `--dry-run` preview predicts the real run and any
+  ordering-dependent behaviour is reproducible.
+
 ### Fixed
+
+- **Two wrong instructions corrected in the bundled assets composed into every
+  session's prompt.** Both were static text that no project could override, and
+  both had demonstrably misrouted live sessions.
+
+  *Code search.* Agents were told to pass an `index_id` that
+  does not exist: `BASE_PM.md` instructed "Always pass `index_id` = the
+  project directory name (e.g. `index_id: "trusty-mpm"`)", and the
+  `tm-tool-usage-guide` / `tm-circuit-breaker` skills repeated it in their
+  worked examples. No index is registered under a project *name*, so the call
+  returned `404 unknown index` every time — agents concluded code search was
+  broken and silently degraded to `grep`. It also defeated the fix it sat on
+  top of: the launcher already pins each session to its own index via
+  `trusty-search serve --index <id>` in `.mcp.json` precisely so a bare call
+  cannot reach the wrong project (issue #1373), and the tool schema documents
+  `index_id` as defaulting to that pinned index when omitted. All four sites
+  now instruct OMITTING `index_id`, and the misleading worked examples are
+  gone. Deliberately no id *format* is documented, so the guidance stays
+  correct however ids are derived. Because `BASE_PM.md` is the last,
+  non-overridable instruction layer, no project could correct this locally —
+  it affected every session on every project.
+
+  *Ticket routing.* Issue bookkeeping was routed to the `version-control`
+  agent instead of `ticketing`. `PM_INSTRUCTIONS.md` sent
+  `gh issue list/view/create/close` (prohibition P6) and all "ticket
+  references" to Version Control; `tm-bug-reporting` sent manual issue filing
+  there too; and `tm-ticketing` actively argued for the split, on the premise
+  that the `ticketing` agent only spoke `mcp-ticketer`/`aitrackdown` and so
+  could not touch GitHub. That premise is false — `ticketing` is granted the
+  full tool set and uses `gh` directly — so the rationale was stale, not a
+  competing design. One line is now drawn consistently across all four assets:
+  issue/ticket **bookkeeping** (create, update, close, label, triage, comment)
+  is `ticketing`; **git and PR mechanics** (branch, push, rebase, conflict
+  resolution, merge, release, tag) stay `version-control`; opening or editing
+  a PR *body* is bookkeeping, pushing or merging it is not. `P6` is split into
+  `P6` (issues → Ticketing) and `P7` (PRs/git → Version Control), and the
+  bundled `ticketing` agent now documents GitHub as a first-class backend
+  alongside the other two, with GitHub-native ids (`#4069`) and states
+  (open/closed). `AGENT_DELEGATION.md` carries the same defect and is
+  deliberately untouched here — its content diff is owned by the delegation
+  roster work, which replaces that section wholesale rather than hand-editing
+  it.
+
+- **The PM prompt now advertises the agents that are actually deployed**
+  ([#4069](https://github.com/bobmatnyc/trusty-tools/issues/4069)): the
+  delegation roster was computed at every launch (`build_instructions` →
+  `generate_authority`) but never reached the delivered prompt —
+  `resolve_pm_prompt` fell back to the static `AGENT_DELEGATION.md` asset, whose
+  hand-maintained table has named the same 8 agents since 2026-07-03. The
+  bundled roster carries 37 delegatable agents, so `ticketing` and
+  `memory-manager` appeared **zero times** in the delivered prompt and the PM
+  could not route to them. The bundled default now appends a live
+  `## Delegation Authority` roster scanned from the tiers a session loads agents
+  from — `<project>/.claude/agents`, the managed `CLAUDE_CONFIG_DIR/agents`, and
+  `~/.claude/agents`, deduped case-insensitively with project-tier precedence.
+  The bundled routing doctrine (make/mise routing, keyword routing, the ops
+  table) is appended to, never replaced, with a note between the two declaring
+  the roster authoritative on WHICH agents exist and instructing the PM to
+  re-route rather than retry if a listed agent turns out not to be loadable in
+  the current launch mode. An explicit project/user `AGENT_DELEGATION.md`
+  override still replaces the whole section exactly as documented. A tier that
+  cannot be enumerated (permissions, bad mount) now warns instead of being
+  silently indistinguishable from an empty one.
+
+- **Three bundled agents were invisible to every delegation roster**
+  ([#4069](https://github.com/bobmatnyc/trusty-tools/issues/4069)):
+  `memory-manager`, `mpm-agent-manager`, and `mpm-skills-manager` declared
+  `role: base` in their own frontmatter despite being ordinary delegatable
+  agents. `scan_agents` drops any role beginning with `base` — a deliberate rule
+  that catches foundation agents whose file name does not follow the `BASE-`
+  convention — so all three were silently discarded from every tier they deploy
+  into, on every launch path. Their `role` is now their own name; `extends:
+  base-agent` already carried the inheritance. A new asset-level invariant test
+  asserts every non-`BASE-*` bundled agent survives the scan, so a future
+  misfiling fails CI rather than silently shrinking the roster.
+
+- **The worktree reclaim path no longer force-deletes uncommitted work**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
+  orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety
+  model was the #3649 ownership sentinel, and a candidate with a KNOWN owner
+  that passed the owner-terminal and grace-window gates was removed with
+  `git worktree remove --force` (falling back to `fs::remove_dir_all`) no
+  matter what was in it. Because `session_context_pause` prunes by DEFAULT,
+  this fired on an ordinary `/tm-session-pause`. A new
+  `session_manager::worktree_safety::inspect_dirt` gate now runs on every
+  candidate the ownership gate approves, and refuses to remove a worktree that
+  has modified/staged tracked files, untracked (non-ignored) files, or commits
+  present on no remote — that last case matters because
+  `remove_session_worktree` also runs `git branch -D session/<leaf>`, so an
+  unpushed commit loses its last reachable ref. **Every error path resolves to
+  DIRTY**: a git subprocess that cannot run, exits non-zero, or returns an
+  unparsable count, and an unreadable directory, all skip rather than delete.
+  Skips are never silent — they are returned as
+  `skipped_dirty` (path, reason, file/commit counts) from the sweep, as
+  `skipped_dirty_worktrees` from the `session_context_pause` MCP tool, in the
+  `prune-worktrees` HTTP response, printed by `tm session prune-worktrees`, and
+  warned per-path by the daemon's orphan-GC loop. Discarding that work requires
+  an explicit opt-in (`discard_dirty` on the HTTP route,
+  `tm session prune-worktrees --discard-dirty`); `--force` alone does NOT imply
+  it, and the pause tool's schema is closed with no such knob at all, so no
+  default `/tm-session-pause` can reach it. Purely additive — the #3649
+  owner/sentinel guard is unchanged.
+
+- **The dirty-tree guard now sees work `git status` hides**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review
+  round): `git status --porcelain` reports what git has been *configured* to
+  show, and the most valuable content in a session worktree was outside that.
+  Six holes closed, each with a test:
+  - **Nested repositories are now enumerated, not inferred.** A worktree
+    containing nested git worktrees or clones that hold uncommitted or unpushed
+    work is DIRTY regardless of gitignore — the `.claude/worktrees/` agent shape
+    is gitignored on `main`, so seven live nested worktrees inside one session
+    checkout produced `dirty_files = 0`. Since the #3649 gate deliberately
+    refuses to delete those nested worktrees directly, the sweep would have
+    honoured that refusal and then deleted their parent. Registered worktrees
+    come from `git worktree list --porcelain`; unregistered clones come from a
+    bounded walk of gitignored subtrees that skips regenerable build directories
+    (`target/`, `node_modules/`, …). A nested worktree that is itself clean and
+    pushed does NOT pin its parent.
+  - **`.trusty-mpm/` is no longer excused wholesale.** Only
+    `scrollback.txt` and `last-instructions.md` are treated as disposable;
+    pause snapshots under `sessions/`, checkpoints, and anything else — a live
+    example held twelve files of hand-rescued uncommitted Rust source — now
+    count as work, whether the project gitignores the subtree or not.
+  - **Config can no longer silence the guard.** `status.showUntrackedFiles=no`
+    made `git status --porcelain` exit 0 with empty output while untracked work
+    sat on disk, and a `core.excludesFile` naming that work hid it the same way
+    — either one in the shared `.base/.git/config` would have blinded every
+    worktree in a sweep. Both are now pinned on the command line.
+  - **`GIT_DIR`/`GIT_WORK_TREE` and friends are stripped** from every git
+    invocation, so an inherited environment cannot point the check at a
+    different (clean) repository.
+  - **Unpushed commits on `session/<leaf>` are counted**, not just on `HEAD`.
+    `decommission` force-deletes that branch by directory name, and a worktree
+    switched off its own branch reported HEAD fully pushed while the branch
+    about to be destroyed was not.
+  - **The verdict is re-checked immediately before each removal.** Computing it
+    once up front left the whole sweep's duration between "certified clean" and
+    "deleted".
+
+- **A nested self-contained clone is no longer assessed with the wrong loss
+  model** ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091),
+  review round 3): the nested-repository scan found unregistered clones in
+  gitignored subtrees and then asked them the *candidate's* questions — `HEAD`
+  and `session/<leaf>` — which are the right questions only when the object
+  store lives outside the candidate and survives it. A self-contained clone
+  keeps its entire `.git` INSIDE the candidate, so every local branch, tag,
+  stash entry and reflog dies with it. A clone whose `HEAD` sat on a pushed
+  `main` while a `feature` branch held the only copy of a commit answered clean
+  on all three questions and was destroyed. The two shapes are now separated by
+  `git rev-parse --path-format=absolute --git-common-dir` — a direct test of
+  *does this repository's object store live inside the directory we are about
+  to delete* — and a self-contained clone is measured with
+  `rev-list --count --all --not --remotes` plus a `refs/stash` check. Registered
+  nested worktrees keep the shared-store model, so a clean agent worktree still
+  does not pin its parent. A clone with no remotes at all counts every commit,
+  which is the correct answer for a scratch clone nobody pushed.
+
+- **`.trusty-mpm/`'s existence probe no longer fails toward CLEAN**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): it used `Path::exists()`, which collapses every I/O error to `false`,
+  while the first status pass had already skipped every `.trusty-mpm/`-scoped
+  entry on the promise that the second pass owned them — so a permission error
+  became CLEAN, inverting the module's own fail-safe invariant.
+
+- **The unpushed-commit check now covers the bare branch spelling too**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): `core::worktree_naming::worktree_branch_for` says `session/<leaf>`, but
+  `provisioner/workspace.rs` names the branch for the
+  `.base/.worktrees/<session-id>` shape **bare** — the dominant population of a
+  sweep — so the check was inert exactly where most worktrees live. Both
+  spellings are now counted, in one `rev-list` so a shared commit is not counted
+  twice.
+
+- **The age-based ephemeral auto-reaper now honours the dirty-tree guard**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review
+  round): `reap_aged_ephemeral` reaches the same
+  `worktree remove --force` → `remove_dir_all` → `branch -D` sequence as the
+  orphan sweep but never passed through the guard, and it fires automatically
+  on every daemon GC tick. An aged ephemeral whose workspace holds unsaved work
+  is now left in place for an operator. There is deliberately no discard opt-in
+  on this path, and the check is unconditional rather than restricted to
+  `.worktrees/<leaf>` paths — `decommission` also `remove_dir_all`s the whole
+  workspace for `workspace_owned` records, which a path-shape filter would have
+  excused entirely.
+
+- **The idle nudge is no longer suppressed indefinitely by a single delegation**
+  (#2864): `has_live_children` treats `Queued`/`Running` as live, but nothing
+  ever advanced a delegation out of `Queued`, so any session that had delegated
+  once looked permanently busy. Delegations now terminalize on `SubagentStop`,
+  correlated exactly by `agent_id`, so concurrent subagents close independently
+  and finishing one never closes another. `SubagentStop` is not guaranteed to
+  arrive, so a background sweep additionally bounds liveness (below) — together
+  these cover both the hook-observed and the never-observed cases.
+- **A delegation whose `SubagentStop` never arrives can no longer pin a session
+  "busy" for the daemon's lifetime** (#2864 review): a dropped hook POST, an
+  interrupted subagent, or a dispatch that never learned an `agent_id` left a
+  `Running` record with no route out. The 60-second reap loop now sweeps
+  delegations: a live record past its budget (6 hours for `Running`, 15 minutes
+  for a `Queued` `agent_delegate` declaration that was never dispatched) is
+  marked with the new `stale` status. `stale` deliberately means "tracking lost
+  this", **not** "the agent finished" — it stops counting as live but is not
+  terminal, so a late `SubagentStop` still resolves it to the truth.
+- **The delegation map is bounded, without expiring the `stale` recovery
+  window** (#2864 review): a terminal delegation is evicted an hour after
+  `ended_at`; nothing can resolve a terminal record, so that costs nothing. A
+  `stale` one is held for 24 hours from its own start — an **18-hour** window in
+  which a late `SubagentStop` still resolves it — and a live one is never
+  evicted at any age. The sweep does not stamp `ended_at` on `stale`, so that
+  field keeps meaning exactly "reached a terminal status". Past 24 hours a
+  `stale` record is dropped and a later stop finds nothing: the recovery window
+  is long, not infinite, because the map must stay bounded.
+- **A `PostToolUse` no longer marks a running subagent `Completed` on an absent,
+  unparseable, or `agentId`-bearing response** (#2864 review): the launch
+  handler inferred "not async, therefore finished" from an absent response, so a
+  Claude Code response-shape change would have silently reported "no agents in
+  flight" ~1 ms after every dispatch. The response is now classified three ways
+  — *launched* / *returned* / *unknown* — and only *returned* completes. A
+  response carrying an `agentId` counts as *launched*, since that key exists
+  precisely so a future `SubagentStop` can quote it; marking such a dispatch
+  complete while storing the id to expect a stop for was self-contradictory. The
+  recognized key set is defined once and shared by the `tm hook` projection and
+  the daemon so the two cannot drift. *Known limitation:* a recognized response
+  that carries no `agentId` and is silent about liveness is still read as a
+  synchronous return — such a response has no other route to termination, so
+  tightening it is blocked on giving `SubagentStop` a recovery path first.
+- **Two same-agent dispatches inside the dedup window are no longer merged into
+  one record** (#2864 review): dedup matched on the agent name alone, so a
+  declaration plus an unrelated later dispatch of the same agent collapsed
+  together — undercounting work in flight and displaying the declaration's task
+  text for the dispatch that was actually running. The task description is now a
+  required discriminator (whitespace/case-insensitive prefix match either way; a
+  dispatch with no description declines to merge at all), and the window is 120
+  seconds rather than 300.
 
 - **Bare `tm` no longer misreports a managed pane as "not a git project"**
   (closes [#4061](https://github.com/bobmatnyc/trusty-tools/issues/4061)):
@@ -57,6 +756,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   env-resolved managed session id exists, and if the session still hasn't
   settled it prints an honest "still settling" message instead of the
   misleading non-git hint.
+
+- **A session worktree's branch is no longer left tracking the default branch
+  unless a bare `git push` is provably confined to its own branch**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)):
+  `configure_session_branch_tracking` used to set
+  `branch.<session>.merge = refs/heads/<default>` FIRST and pin
+  `push.default = current` afterwards, both best-effort — so any failure of the
+  pin (old git, unwritable base config, sandboxed `git config`) left the
+  worktree armed with a foreign upstream. The pin is now established first and
+  read back from the effective config stack; when it cannot be confirmed the
+  worktree is left with no upstream at all (`git pull origin <default>` still
+  works) rather than an upstream it does not own.
 
 - **Concurrent workspace-trust seeds no longer clobber each other's
   `~/.claude.json` entries** (closes

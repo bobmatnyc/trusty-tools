@@ -6,6 +6,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.22.0] — 2026-07-27
+
+MINOR, not the patch 0.21.3 this was originally staged as (#4177). This crate
+publicly re-exports `trusty-common` items — `src/palace_id_derive.rs:19`:
+
+```rust
+pub use trusty_common::palace_id::{
+    derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
+    parent_dir_slug, PALACE_OVERRIDE_ENV,
+};
+```
+
+The module is declared `pub mod palace_id_derive;` at `lib.rs:140` with no
+`cfg` gate and no feature guard, so the whole shim is unconditional public API.
+Raising the `trusty-common` requirement from `^0.26.2` to `^0.27` changes the
+identity of publicly re-exported items, which at patch level would let `^0.21.2`
+re-resolve already-published consumers onto the new identity — the same shape
+that forced the trusty-analyze 0.7.3 yank. `^0.21` excludes 0.22.0, so
+published consumers keep resolving to 0.21.2 and stay installable.
+
+Consumer pin updated in the same change: `trusty-agents` required
+`trusty-memory = "0.21.1"`, i.e. `^0.21.1` = `>=0.21.1, <0.22.0`, which 0.22.0
+does **not** satisfy — left alone it would have traded one red for another. It
+is now `"0.22"`. `trusty-agents` is unpublished (0.38.6), so this is a
+requirement edit only and its own version is untouched.
+
+### Changed
+
+- `trusty-common` requirement raised to `^0.27` (was `^0.26.2`): 0.27.0 makes
+  `ChatEvent` `#[non_exhaustive]`, which a `^0.26` requirement cannot express.
+  Because the re-exports above are public, this requirement change is itself
+  the reason for the MINOR level.
+
+### Fixed
+
+- **Post-publish source drift — the SSE chat handler did not compile against
+  the `ChatEvent::Usage` variant.** `src/chat/handler.rs` gained its
+  `ChatEvent::Usage(_)` arm in #4112, *after* 0.21.2 was published, so the
+  published 0.21.2 artifact cannot build against any `trusty-common` carrying
+  that variant. This release ships the arm. The match also gained a wildcard
+  arm now that `ChatEvent` is `#[non_exhaustive]`, so the next variant
+  addition is no longer breaking here.
+
+---
+
+## [0.21.2] — 2026-07-26
+
+### Fixed
+
+- slim build (`--no-default-features`) now compiles: `tools::dream_ops` reached
+  the user-config loader through the `axum-server`-gated `crate::web::` re-export,
+  breaking any dependent that opts out of `axum-server` (e.g. `trusty-agents`,
+  which uses `default-features = false`). Now routes through the axum-free
+  `crate::service::load_user_config` like `chat_provider()` already does
+  (closes #2049).
+- decouple recall/remember from embedder warm-up (closes #1970) ([#1972](https://github.com/bobmatnyc/trusty-tools/pull/1972)) ([`bb322d4`](https://github.com/bobmatnyc/trusty-tools/commit/bb322d4678f8e167691688e77190b44d9c08627a))
+- palace-level alias resolution for claude-mpm parity (owner-repo -> bare palace) ([#1945](https://github.com/bobmatnyc/trusty-tools/pull/1945)) ([`af7f904`](https://github.com/bobmatnyc/trusty-tools/commit/af7f90499402971ac65aed5b104cde251e182599))
+- stop console_metrics force-opening every palace on poll (closes #1924) ([#1926](https://github.com/bobmatnyc/trusty-tools/pull/1926)) ([`74e9e54`](https://github.com/bobmatnyc/trusty-tools/commit/74e9e54243efc6de3778d7c43d938add2ab7b676))
+
+---
+
 ## [0.21.1] — 2026-07-24
 
 ### Fixed
@@ -97,23 +162,6 @@ attribution work.
 
 ---
 
-## [Unreleased]
-
----
-
-## [0.21.2] — 2026-07-26
-
-### Fixed
-
-- slim build (`--no-default-features`) now compiles: `tools::dream_ops` reached
-  the user-config loader through the `axum-server`-gated `crate::web::` re-export,
-  breaking any dependent that opts out of `axum-server` (e.g. `trusty-agents`,
-  which uses `default-features = false`). Now routes through the axum-free
-  `crate::service::load_user_config` like `chat_provider()` already does
-  (closes #2049).
-- decouple recall/remember from embedder warm-up (closes #1970) ([#1972](https://github.com/bobmatnyc/trusty-tools/pull/1972)) ([`bb322d4`](https://github.com/bobmatnyc/trusty-tools/commit/bb322d4678f8e167691688e77190b44d9c08627a))
-- palace-level alias resolution for claude-mpm parity (owner-repo -> bare palace) ([#1945](https://github.com/bobmatnyc/trusty-tools/pull/1945)) ([`af7f904`](https://github.com/bobmatnyc/trusty-tools/commit/af7f90499402971ac65aed5b104cde251e182599))
-- stop console_metrics force-opening every palace on poll (closes #1924) ([#1926](https://github.com/bobmatnyc/trusty-tools/pull/1926)) ([`74e9e54`](https://github.com/bobmatnyc/trusty-tools/commit/74e9e54243efc6de3778d7c43d938add2ab7b676))
 ## [0.17.0] — 2026-06-25
 
 ### Added

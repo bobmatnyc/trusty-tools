@@ -116,7 +116,16 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(server.delete(&format!("/indexes/{index_id}")).await)
+            // Issue #4123: `DELETE /indexes/:id` now preserves on-disk data
+            // unless `delete_data=true` is passed. This tool's descriptor
+            // promises "Delete a registered index and all its data", so it
+            // opts in explicitly to keep that contract — without this the
+            // tool would silently stop reclaiming disk.
+            Some(
+                server
+                    .delete(&format!("/indexes/{index_id}?delete_data=true"))
+                    .await,
+            )
         }
         "reindex" => {
             let index_id = match required_index_id(server, args) {

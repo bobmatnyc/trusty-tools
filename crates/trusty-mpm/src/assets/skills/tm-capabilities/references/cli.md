@@ -96,6 +96,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `register` — Register a GitHub repo alias for the standalone managed driver (DOC-24)
 - `repair` — Recover from corrupt or inconsistent deploy state
   - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
+  - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Launch an interactive `claude` session for a managed alias (DOC-24)

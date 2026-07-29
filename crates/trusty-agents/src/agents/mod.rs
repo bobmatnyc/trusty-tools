@@ -16,12 +16,16 @@ pub mod claude_code_runner;
 pub mod claude_mpm_loader;
 mod config;
 pub mod context_filter;
+// ADR-0024: the KIND delegation predicate. `pub(crate)` — it is an
+// enforcement primitive, not part of the crate's public surface.
+pub(crate) mod delegation;
 pub mod extends;
 pub mod harness_protocol;
 pub mod in_process_runner;
 mod loader;
 mod model;
 mod params;
+pub mod permissions;
 pub mod persona;
 pub mod prompt_builder;
 pub mod registry;
@@ -33,12 +37,16 @@ pub(crate) mod tests;
 // for every external consumer after the #358 file split.
 // #4026 adds `SubagentsConfig` (the `[subagents]` cross-product grants).
 pub use config::{
-    AgentCapabilities, AgentConfig, AgentInfo, NativeToolsConfig, RunnerKind, SkillsConfig,
-    SubagentsConfig, SystemPrompt, TicketingTomlConfig, ToolsConfig,
+    AgentCapabilities, AgentConfig, AgentInfo, AgentTier, NativeToolsConfig, RunnerKind,
+    SkillsConfig, SubagentsConfig, SystemPrompt, TicketingTomlConfig, ToolsConfig,
 };
 pub use params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
     SessionCompressionConfig, ToolChoice, WorkstreamContextConfig,
+};
+// #3936: the `[permissions]` section (DOC-57 §7).
+pub use permissions::{
+    AutonomyMode, GrantMode, PermissionGrant, PermissionsConfig, effective_scopes,
 };
 
 // Model resolution: `resolve_model` and `ModelSource` are part of the public

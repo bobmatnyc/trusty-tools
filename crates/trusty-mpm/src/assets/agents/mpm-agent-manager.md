@@ -1,6 +1,6 @@
 ---
 name: mpm-agent-manager
-role: base
+role: mpm-agent-manager
 description: Manages agent lifecycle in trusty-mpm — discovery, validation, bundled-asset deployment, and contribution workflow for the agent catalog
 model: sonnet
 extends: base-agent

@@ -27,6 +27,40 @@
 
 use super::{start_session, start_session_in_place};
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `trusty_mpm::core::session_launch::tests::EnvVarGuard`
+/// and siblings (the `tm` binary is a SEPARATE crate target from the
+/// `trusty-mpm` lib, so `pub(crate) mod test_support` in the lib is not
+/// visible here — each target needs its own copy).
+///
+/// Why (#3965): `start_session_in_place` calls the REAL
+/// `session_launch::prepare_session(fw, path)`, which seeds
+/// `$HOME/.claude.json` via the REAL process `$HOME` — a DIFFERENT
+/// resolution path from the `fw` parameter this test already isolates via
+/// `FrameworkPaths::under(tmp_home.path())`. Pairs with
+/// `#[serial_test::serial]`.
+/// Test: used by `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 /// Run `git <args>` in `dir`, panicking with full context on failure.
 ///
 /// Why: every test below needs a real (but disposable) git repo; a tiny
@@ -136,8 +170,11 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 /// POST — proving `prepare_session` still ran in place.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(tmp_home.path());
     let target = tempfile::TempDir::new().expect("tmp target dir");
     let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
 

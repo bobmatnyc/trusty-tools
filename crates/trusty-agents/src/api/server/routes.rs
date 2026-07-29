@@ -22,11 +22,15 @@ use axum::{
 use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_create::create_agent_route;
+use super::agent_knowledge::agent_knowledge_route;
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
+use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
 use super::agent_stores::agent_stores_route;
+use super::agent_subagents::agent_subagents_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
+use super::costs::get_costs;
 use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
@@ -165,6 +169,39 @@ pub fn build_router_with_origins(
             "/api/agents/{name}/skills",
             axum::routing::get(agent_skills_route),
         )
+        // #3936: the Permissions pane reads the agent's structured
+        // permissions model — scopes (with declared/inherited provenance),
+        // tiers, `user_authority`, autonomy posture, per-skill grants — with
+        // an `enforced` flag on every field (DOC-57 §7). Read-only in every
+        // phase (PM-4).
+        .route(
+            "/api/agents/{name}/permissions",
+            axum::routing::get(agent_permissions_route),
+        )
+        // #3935: the Knowledge pane reads store bindings + knowledge-classified
+        // tools + declared MCP knowledge connections in one call (DOC-57 §4).
+        // Read-only; store editing remains #3890's contract.
+        .route(
+            "/api/agents/{name}/knowledge",
+            axum::routing::get(agent_knowledge_route),
+        )
+        // #4029 (epic #4021, OQ-5): the Sub-agents pane reads the UNION of the
+        // two delegation mechanisms — in-product `delegate_to_agent` targets
+        // (role allowlist + #4169's L0/L1 tier gate) and cross-product
+        // `dispatch_task` specialists (`[subagents].allowed` ∩ the bridge's
+        // `NON_CODING_TARGETS` floor) — labelled by kind, never flattened.
+        // A dedicated route rather than an extension of `GET /api/agents/:name`:
+        // see `agent_subagents`'s module doc. Read-only.
+        .route(
+            "/api/agents/{name}/subagents",
+            axum::routing::get(agent_subagents_route),
+        )
+        // #4098: aggregated usage cost for the Costs tab — totals plus
+        // by-agent/by-model/by-date breakdowns, folded read-time from
+        // `.trusty-agents/state/usage.jsonl` and priced through the single
+        // pricing table (`perf::pricing`). Distinguishes "no log yet"
+        // (200 + `available: false`) from "$0.00" — see `costs`'s module doc.
+        .route("/api/costs", get(get_costs))
         .route("/api/workstreams", get(list_workstreams_route))
         .route(
             "/api/workstreams/{name}/history",

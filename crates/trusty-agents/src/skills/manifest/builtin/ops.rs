@@ -142,6 +142,36 @@ pub(super) static TABLE: &[SkillDef] = &[
         System,
         None,
     ),
+    // --- L0 read-only session state (#4171, epic #4167) ------------------
+    // One skill per tool (owner ruling). These three wrap the L0-ONLY
+    // read-only session-state executors; the tier gate lives in
+    // `tools::session_state`, not here — a skill grant can never widen past
+    // it, because `retain_tier_permitted` runs on the compiled-down tool
+    // names AFTER `[skills].allow` has been expanded.
+    tool_skill(
+        "session-state-list",
+        "List Orchestration Sessions",
+        "List the orchestration sessions recorded on this machine, most recently active first.",
+        "session_state_list",
+        System,
+        None,
+    ),
+    tool_skill(
+        "session-state-status",
+        "Orchestration Session Status",
+        "Report one orchestration session's recorded state, branch, workspace and pending decision.",
+        "session_state_status",
+        System,
+        None,
+    ),
+    tool_skill(
+        "session-state-snapshot",
+        "Read Session Snapshots",
+        "List or read this project's own recorded session artefacts (scrollback, instructions, write-ups).",
+        "session_state_snapshot",
+        System,
+        None,
+    ),
     // --- tmux session control -------------------------------------------
     tool_skill(
         "tmux-session-list",

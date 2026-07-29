@@ -13,20 +13,27 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Haiku pricing — kept here so both the live statusline and the persisted
-/// daily total agree on the rate. Mirrors the constants in
-/// `src/repl/tui.rs::format_cost_chunk`.
-pub const PROMPT_RATE: f64 = 0.00000025;
-pub const COMPLETION_RATE: f64 = 0.00000125;
-
-/// Compute USD cost from token counts using the haiku rate table.
+/// Compute USD cost for `model` from prompt/completion token counts.
 ///
-/// Why: Centralized so daily aggregation never drifts from the per-session
-/// number rendered on the statusline.
-/// What: prompt * $0.00000025 + completion * $0.00000125.
-/// Test: `cost_from_tokens_matches_published_rates`.
-pub fn cost_from_tokens(prompt: u64, completion: u64) -> f64 {
-    (prompt as f64) * PROMPT_RATE + (completion as f64) * COMPLETION_RATE
+/// Why: (#4098, COST-05) This function used to own a SECOND pricing table —
+/// two hardcoded Haiku constants (`$0.25`/`$1.25` per million) applied to
+/// every model. The REPL statusline and the persisted `usage.json` daily
+/// total both went through it, so a Sonnet session (the actual default, see
+/// the provider-policy note in `llm/`) was billed on screen at roughly a
+/// twelfth of its real cost. The table is deleted, not corrected: a second
+/// rate table is a defect regardless of the numbers in it, because nothing
+/// keeps it in step with `perf::pricing`. This is now a thin adapter, kept
+/// only so the two statusline call sites and the daily-total writer share one
+/// spelling of "cost for this session".
+/// What: Delegates to [`crate::perf::cost_usd`] — the single pricing entry
+/// point — passing `0` for both cache buckets. The REPL's `TokenUpdate` feed
+/// carries only in/out counts today; when #4101 threads cache tokens through
+/// `UsageRecord`, this call gains them rather than growing a rate of its own.
+/// Test: `cost_from_tokens_prices_sonnet_above_haiku`,
+/// `cost_from_tokens_matches_pricing_entry_point`.
+pub fn cost_from_tokens(model: &str, prompt: u64, completion: u64) -> f64 {
+    // #4098: one pricing table for the whole crate — see perf::pricing's doc.
+    crate::perf::cost_usd(model, prompt, completion, 0, 0)
 }
 
 /// Persisted shape of `.trusty-agents/state/usage.json`.
@@ -126,11 +133,30 @@ pub fn save_atomic(project_dir: &Path, record: &DailyUsage) -> std::io::Result<(
 mod tests {
     use super::*;
 
+    /// #4098 (COST-05) regression guard: the deleted local table priced every
+    /// model at Haiku rates, so this assertion could not have held before.
     #[test]
-    fn cost_from_tokens_matches_published_rates() {
-        // 1000 prompt + 1000 completion = 0.00025 + 0.00125 = 0.0015
-        let c = cost_from_tokens(1000, 1000);
-        assert!((c - 0.0015).abs() < 1e-9, "got {c}");
+    fn cost_from_tokens_prices_sonnet_above_haiku() {
+        let sonnet = cost_from_tokens("anthropic/claude-sonnet-4-6", 1_000_000, 1_000_000);
+        let haiku = cost_from_tokens("anthropic/claude-haiku-4", 1_000_000, 1_000_000);
+        // Sonnet: $3 + $15 = $18. Haiku: $0.80 + $4 = $4.80.
+        assert!((sonnet - 18.0).abs() < 1e-6, "sonnet got {sonnet}");
+        assert!((haiku - 4.80).abs() < 1e-6, "haiku got {haiku}");
+        assert!(sonnet > haiku, "sonnet must not be billed at haiku rates");
+    }
+
+    /// #4098 (COST-05): the statusline path and the pricing table must be the
+    /// same number, not two numbers that happen to agree today.
+    #[test]
+    fn cost_from_tokens_matches_pricing_entry_point() {
+        for model in ["anthropic/claude-sonnet-4-6", "claude-haiku-4", "mystery/x"] {
+            let via_daily = cost_from_tokens(model, 12_345, 6_789);
+            let via_pricing = crate::perf::cost_usd(model, 12_345, 6_789, 0, 0);
+            assert!(
+                (via_daily - via_pricing).abs() < f64::EPSILON,
+                "{model}: daily={via_daily} pricing={via_pricing}"
+            );
+        }
     }
 
     #[test]

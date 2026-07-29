@@ -138,8 +138,11 @@ use super::managed_routes::{
     register_project_registry_route, rename_managed_session, resume_managed_session,
     send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
-// Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
-use super::manager::manager_router;
+// Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36),
+// and the peer message bus (`/api/v1/bus/*`, DOC-60 §5.3) — both self-contained
+// sub-routers owned by their own modules, so their handlers live beside the
+// state they operate on. Test: `daemon::bus::tests`.
+use super::{bus::routes::bus_router, manager::manager_router};
 
 /// Typed HTTP response bodies for every endpoint.
 ///
@@ -385,7 +388,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             .url("/api-docs/openapi.json", super::openapi::ApiDoc::openapi()),
     );
 
-    router.with_state(state)
+    // DOC-60 §5.3: the peer bus owns its own route table (`bus_router`) and is
+    // merged in whole, like `manager_router` above.
+    router.merge(bus_router()).with_state(state)
 }
 
 /// Liveness probe plus the HR-3 catalog-staleness signal.

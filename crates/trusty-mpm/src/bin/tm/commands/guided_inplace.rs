@@ -86,6 +86,7 @@
 //! pre-existing refuse+switch-client behavior instead.
 
 use anyhow::Context as _;
+use trusty_mpm::core::workspace_liveness::workspace_liveness;
 
 use super::guided_resume::ResumeAction;
 
@@ -467,14 +468,17 @@ pub(crate) enum InPlaceOutcome {
 /// (cwd/binary resolution) or post-reactivate (`exec` itself failing) alike
 /// — as a fall-back-to-reconnect condition, matching that call site's
 /// pre-#2453 behavior of never hard-failing.
-/// What, IN ORDER (#2027 exec-ordering fix, extended by #2790): (1) prints a
-/// one-line notice; (2) resolves the workdir; (2a) #2790 CRITICAL:
-/// verifies the resolved workdir EXISTS ON DISK — a Decommissioned record's
-/// workspace may have been removed by `decommission()` while the record's
-/// `workspace_path`/`cwd` still names it; a missing directory returns
-/// [`InPlaceOutcome::FallThrough`] here, BEFORE any daemon call, so a
-/// known-gone workspace can never be masked by a durably-committed `Active`
-/// record; (3) builds the resume argv via
+/// What, IN ORDER (#2027 exec-ordering fix, extended by #2790 and #4204): (1)
+/// prints a one-line notice; (2) resolves the workdir; (2a) #2790/#4204
+/// CRITICAL: verifies the resolved workdir IS STILL LIVE via
+/// [`trusty_mpm::core::workspace_liveness::workspace_liveness`] — a
+/// Decommissioned record's workspace may have been removed by `decommission()`
+/// while the record's `workspace_path`/`cwd` still names it, and (#4204) a
+/// worktree may have been GUTTED, keeping its directory node while losing its
+/// `.git` and source tree, which the previous bare `is_dir()` test could not
+/// see; either verdict returns [`InPlaceOutcome::FallThrough`] here, BEFORE any
+/// daemon call, so a dead workspace can never be masked by a durably-committed
+/// `Active` record nor exec'd into; (3) builds the resume argv via
 /// [`trusty_mpm::runtime::build_inplace_resume_command`] (the SAME
 /// `--resume`-existence-check → `--continue`/fresh-spawn fallback logic the
 /// tmux-pane resume path uses, #2013) — this is PURE/local (resolving the
@@ -484,11 +488,15 @@ pub(crate) enum InPlaceOutcome {
 /// [`reactivate_managed_session`]), immediately before exec — on a
 /// refused/failed reactivate this returns [`InPlaceOutcome::FallThrough`]
 /// rather than proceeding; (5) execs `claude` in place.
-/// Test: I/O path; not unit-tested (requires a live daemon + real `claude`).
-/// The workdir-existence gate (2a) is exercised via `run_inplace_relaunch`'s
-/// I/O surface only (needs the daemon + tmux + `claude`); the FSM invariant it
-/// protects is separately proven at the daemon layer (defense-in-depth, so the
-/// guard holds even for a future caller that skips this CLI-side check) by
+/// Test: `run_inplace_relaunch_never_reactivates_when_command_build_fails`,
+/// `run_inplace_relaunch_falls_through_on_gutted_worktree`,
+/// `run_inplace_relaunch_serves_live_linked_worktree`. The exec itself is not
+/// unit-tested (it replaces the process image); the gate-2a tests pin the
+/// decision by asserting the daemon mock records ZERO hits, which is only true
+/// when the fall-through happened before any daemon mutation. The FSM invariant
+/// gate 2a protects is separately proven at the daemon layer
+/// (defense-in-depth, so the guard holds even for a future caller that skips
+/// this CLI-side check) by
 /// `mark_reactivated_refuses_when_workspace_removed_by_decommission` in
 /// `session_manager::reactivate_tests`.
 pub(crate) async fn run_inplace_relaunch(
@@ -523,10 +531,25 @@ pub(crate) async fn run_inplace_relaunch(
     // missing workspace into `FallThrough` here — zero daemon calls made —
     // keeps the invariant intact and routes the operator to the same honest
     // self-relaunch hint a refused reactivate would.
-    if !cwd.is_dir() {
+    // #4204 EXTENSION of the #2790 gate above: `is_dir()` is not a liveness
+    // check. A worktree whose `.git` and source tree have been stripped keeps
+    // its directory node, so the bare `is_dir()` test passed and this function
+    // exec'd `claude` into the husk — observed 2026-07-27 with PID 63302 (plus
+    // four MCP children) still parked on the dead cwd of
+    // `.base/.worktrees/f443c12d-…`.
+    //
+    // `ManagedSessionSummary` carries no `workspace_owned` flag, so `false` is
+    // passed for it and the helper falls back to its NARROW path-shape rule
+    // (`.worktrees/<id>`). That is deliberate, not a shortcut: such a directory
+    // is only ever produced by `git worktree add`, so a missing `.git` there is
+    // unambiguous evidence of destruction — while an operator's plain,
+    // non-git working directory (reachable here via `record.cwd` or
+    // `current_dir()`) is owed no `.git` and is never refused.
+    let workspace_owned_unknown = false;
+    let liveness = workspace_liveness(&cwd, workspace_owned_unknown);
+    if liveness.is_dead() {
         eprintln!(
-            "tm: workspace for session {id} no longer exists on disk ({}) — cannot relaunch in \
-             place",
+            "tm: workspace for session {id} is {liveness} ({}) — cannot relaunch in place",
             cwd.display()
         );
         return InPlaceOutcome::FallThrough;

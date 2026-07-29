@@ -10,11 +10,14 @@
 // (2) The takeover needs exit affordances that actually call back out, and the
 // persona edit buffer must survive a SECTION SWITCH now that the body it lives
 // in is an unmounted-on-switch child (G-6a / C-07.4).
-// (3) The five sections and their order are normative (DOC-57 §2.1, C-07.1),
-// and every pane must render an explicit empty/error state rather than
-// fabricated content when its backend is absent or failing (G-4, C-07.2).
-// What: Mounts the real panel with `fetch` stubbed for the three routes it
-// loads (`/api/agents/:name`, `.../persona`, `.../stores`), then asserts the
+// (3) The five sections and their order are normative (DOC-57 §2.1, C-07.1) —
+// #4029 adds Sub-agents as a SIXTH section without reordering any of the five,
+// which is itself asserted below — and every pane must render an explicit
+// empty/error state rather than fabricated content when its backend is absent
+// or failing (G-4, C-07.2).
+// What: Mounts the real panel with `fetch` stubbed for the routes it
+// loads (`/api/agents/:name`, `.../persona`, `.../stores`, `.../skills`,
+// `.../subagents`), then asserts the
 // sizing invariants, the Back/Close wiring, the tab strip, and each pane's
 // degraded rendering. jsdom does no layout, so the "grows with the viewport"
 // half is asserted as the flex chain that produces it rather than as a measured
@@ -120,6 +123,85 @@ const SKILLS_PAYLOAD = {
   declares_capability: true,
 };
 
+/**
+ * `GET /api/agents/:name/subagents` (#4029) — the UNION of both delegation
+ * mechanisms, kept apart by kind. Mirrors the real route's shape, including a
+ * tier-blocked target so the panel test exercises the gate's rendering too.
+ */
+const SUBAGENTS_PAYLOAD = {
+  resolved: true,
+  in_product: {
+    mechanism: 'in_product',
+    tool: 'delegate_to_agent',
+    tool_registered: true,
+    tool_granted: true,
+    delegator_tier: 'l1',
+    allowed_roles: ['engineer', 'qa', 'researcher', 'documentation', 'ops', 'planner', 'assistant'],
+    targets: [
+      {
+        name: 'engineer',
+        display_name: 'Engineer',
+        role: 'engineer',
+        tier: 'l1',
+        reachable: true,
+        reason: null,
+      },
+      {
+        name: 'orch',
+        display_name: 'Orchestrator',
+        role: 'assistant',
+        tier: 'l0',
+        reachable: false,
+        reason: 'refused by the L0/L1 delegation gate (#4169)',
+      },
+    ],
+    role_excluded_count: 2,
+    hidden_excluded_count: 0,
+    unresolved: [],
+  },
+  cross_product: {
+    mechanism: 'cross_product',
+    tool: 'dispatch_task',
+    tool_granted: true,
+    declares_allowed: true,
+    bridge_floor: ['research', 'ticketing'],
+    targets: [
+      { name: 'research', granted: true, reason: null },
+      { name: 'ticketing', granted: false, reason: 'not listed in [subagents].allowed' },
+    ],
+    rejected: [],
+  },
+};
+
+/** The bare-agent counterpart: everything denied, fail-closed. */
+const BARE_SUBAGENTS_PAYLOAD = {
+  resolved: true,
+  in_product: {
+    mechanism: 'in_product',
+    tool: 'delegate_to_agent',
+    tool_registered: true,
+    tool_granted: false,
+    delegator_tier: 'l1',
+    allowed_roles: ['engineer', 'qa', 'researcher', 'documentation', 'ops', 'planner', 'assistant'],
+    targets: [],
+    role_excluded_count: 0,
+    hidden_excluded_count: 0,
+    unresolved: [],
+  },
+  cross_product: {
+    mechanism: 'cross_product',
+    tool: 'dispatch_task',
+    tool_granted: false,
+    declares_allowed: false,
+    bridge_floor: ['research', 'ticketing'],
+    targets: [
+      { name: 'research', granted: false, reason: 'fail-closed' },
+      { name: 'ticketing', granted: false, reason: 'fail-closed' },
+    ],
+    rejected: [],
+  },
+};
+
 function stubApi() {
   vi.stubGlobal(
     'fetch',
@@ -127,6 +209,8 @@ function stubApi() {
       const url = String(input);
       const json = url.includes('/persona')
         ? { content: PERSONA, editable: true }
+        : url.includes('/subagents')
+        ? SUBAGENTS_PAYLOAD
         : url.includes('/skills')
           ? SKILLS_PAYLOAD
           : url.includes('/stores')
@@ -155,6 +239,8 @@ function stubBareApiWithFailingStores() {
       if (url.includes('/stores')) return { ok: false, status: 503, json: async () => ({}) } as Response;
       const json = url.includes('/persona')
         ? { content: '', editable: false }
+        : url.includes('/subagents')
+        ? BARE_SUBAGENTS_PAYLOAD
         : url.includes('/skills')
           ? {
               skills: [],
@@ -296,11 +382,28 @@ describe('AgentConfigPanel — instructions editor sizing (#3894)', () => {
   });
 });
 
-describe('AgentConfigPanel — five sections (#3932, DOC-57 §8.2)', () => {
-  it('renders exactly five tabs in the normative order (C-07.1)', async () => {
+describe('AgentConfigPanel — six sections (#3932 + #4029, DOC-57 §8.2)', () => {
+  // #4029 (epic #4021, OQ-5 resolved by the owner 2026-07-26) adds Sub-agents
+  // as the sixth section. DOC-57 §2.1's ordering stays normative and stays
+  // SATISFIED: the five original sections keep their relative order exactly —
+  // Permissions is still last, Listeners still after Skills — and the new
+  // section is inserted rather than reordering any existing pair. #4182 amends
+  // the spec text.
+  it('renders exactly six tabs, the five normative ones in order (C-07.1)', async () => {
     mountPanel();
     await waitFor(() => editor() !== null);
     expect(tabLabels()).toEqual([
+      'Personality',
+      'Knowledge',
+      'Skills',
+      'Sub-agents',
+      'Listeners',
+      'Permissions',
+    ]);
+    // The normative five, with the insertion removed, must be byte-identical to
+    // DOC-57 §2.1's order — the property that would break if a future edit
+    // "made room" by moving one of them.
+    expect(tabLabels().filter((l) => l !== 'Sub-agents')).toEqual([
       'Personality',
       'Knowledge',
       'Skills',
@@ -331,6 +434,14 @@ describe('AgentConfigPanel — five sections (#3932, DOC-57 §8.2)', () => {
     expect(target.textContent).not.toContain('Gmail Search');
     expect(target.textContent).toContain('2 of 3 known skills granted');
 
+    // #4029: both delegation mechanisms, labelled separately, sourced from
+    // `GET .../subagents` — never derived client-side from `tools_allow`.
+    tabButton('Sub-agents').click();
+    await waitFor(() => target.textContent?.includes('delegate_to_agent') ?? false);
+    expect(target.textContent).toContain('Engineer');
+    expect(target.textContent).toContain('dispatch_task');
+    expect(target.textContent).toContain('1 of 2 cross-product specialists granted');
+
     tabButton('Listeners').click();
     await waitFor(() => target.textContent?.includes('Gmail') ?? false);
     expect(target.textContent).toContain('Google Calendar');
@@ -359,7 +470,7 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     vi.unstubAllGlobals();
     stubBareApiWithFailingStores();
     mountPanel(vi.fn(), 'bare');
-    await waitFor(() => tabLabels().length === 5);
+    await waitFor(() => tabLabels().length === 6);
 
     // Personality: no editable persona.md is a stated fact, not a blank box.
     await waitFor(() => target.textContent?.includes('no editable persona.md') ?? false);
@@ -378,6 +489,13 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     await waitFor(() => target.textContent?.includes('declares neither') ?? false);
     // An absent allow-list denies; the pane must not read as "unrestricted".
     expect(target.textContent).toContain('not "unrestricted"');
+
+    // #4029: a bare agent must be told that absent DENIES on both mechanisms —
+    // the pane may never read an absent `[subagents]` section as "all".
+    tabButton('Sub-agents').click();
+    await waitFor(() => target.textContent?.includes('declares no') ?? false);
+    expect(target.textContent).toContain('does not mean "all"');
+    expect(target.textContent).toContain('0 of 2 cross-product specialists granted');
 
     tabButton('Listeners').click();
     await waitFor(() => target.textContent?.includes('Scaffolding, not configuration') ?? false);

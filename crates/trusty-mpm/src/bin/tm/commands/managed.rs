@@ -704,17 +704,24 @@ pub(crate) async fn session_prune(
 /// `git worktree remove` failed, leave stale `.worktrees/<session-id>/`
 /// directories on disk. This verb lets operators clean them up safely — only
 /// dirs without a corresponding active session are ever removed.
-/// What: POSTs `/api/v1/sessions/managed/prune-worktrees` with `{ dry_run }`;
-/// prints one path per removed (or would-remove) directory and a summary count.
-/// Test: HTTP path covered by integration test; CLI parse by `cli_parses_session_prune`.
+/// What: POSTs `/api/v1/sessions/managed/prune-worktrees` with
+/// `{ dry_run, discard_dirty }`; prints one path per removed (or would-remove)
+/// directory and a summary count, then prints every worktree the #4091
+/// dirty-tree gate refused to touch (path + reason) to stderr so a skip is
+/// never silent — a skipped worktree still holds work the operator needs to
+/// deal with by hand.
+/// Test: HTTP path covered by integration test; CLI parse by
+/// `cli_parses_session_prune_worktrees` and
+/// `cli_prune_worktrees_discard_dirty_is_opt_in`.
 pub(crate) async fn session_prune_worktrees(
     client: &reqwest::Client,
     url: &str,
     dry_run: bool,
+    discard_dirty: bool,
 ) -> anyhow::Result<()> {
     let resp = client
         .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
-        .json(&serde_json::json!({ "dry_run": dry_run }))
+        .json(&serde_json::json!({ "dry_run": dry_run, "discard_dirty": discard_dirty }))
         .send()
         .await?;
     let body: serde_json::Value = resp.error_for_status()?.json().await?;
@@ -737,6 +744,33 @@ pub(crate) async fn session_prune_worktrees(
     }
     let verb = if dry_run { "would remove" } else { "removed" };
     println!("{verb} {printed} orphaned worktree dir(s)");
+
+    // #4091: surface every dirty-skip. These are worktrees that WOULD have
+    // been reclaimed but still hold unsaved work; staying quiet about them is
+    // how the sweep silently loses work.
+    let skipped = body
+        .get("skipped_dirty")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !skipped.is_empty() {
+        eprintln!(
+            "skipped {} worktree(s) holding uncommitted or unpushed work (#4091) — \
+             review them by hand; `--discard-dirty` would destroy this work:",
+            skipped.len()
+        );
+        for entry in &skipped {
+            let path = entry
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown path>");
+            let reason = entry
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<no reason reported>");
+            eprintln!("  {path}: {reason}");
+        }
+    }
     Ok(())
 }
 

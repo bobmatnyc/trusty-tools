@@ -248,6 +248,16 @@ impl HookService {
             &payload,
         );
 
+        // 1c (#2864): track native subagent dispatches. Claude Code already
+        // routes every `Task`/`Agent` tool call through this pipeline via the
+        // `matcher: "*"` PreToolUse hook, so tracking needs no opt-in — it just
+        // needs to read the correlation keys. Synchronous and in-memory only
+        // (one DashMap write): this runs inside the 5 s PreToolUse budget on
+        // the hot path of every tool call, and `observe` early-outs on the tool
+        // name before touching state. Purely observational — it cannot change
+        // the verdict below.
+        crate::daemon::services::delegation_tracker::observe(&self.state, session, event, &payload);
+
         // 2. PostToolUse: compress tool output before it enters the ring buffer.
         if event == HookEvent::PostToolUse {
             let tool_name = payload
@@ -375,6 +385,91 @@ mod tests {
         );
         assert_eq!(decision, HookDecision::Allow);
         assert_eq!(state.recent_hook_events().len(), 1);
+    }
+
+    #[test]
+    fn process_tracks_delegation_lifecycle_and_unblocks_idle_nudge() {
+        // #2864 regression: before this, the only production construction of a
+        // Delegation was `Queued` and nothing ever advanced it, so
+        // `has_live_children` reported a delegation as live FOREVER and
+        // permanently suppressed the idle nudge for any session that had ever
+        // delegated. This drives the real pipeline (`process`, not the tracker
+        // directly) through dispatch → async launch → stop and asserts the live
+        // flag both raises and — critically — clears again.
+        use crate::core::agent::DelegationStatus;
+        use crate::daemon::idle_nudge::has_live_children;
+
+        let state = Arc::new(DaemonState::new());
+        let id = SessionId::new();
+        let mut s = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
+        s.status = SessionStatus::Active;
+        state.register_session(s);
+        let svc = HookService::new(Arc::clone(&state));
+
+        // No delegations yet: a leaf agent must remain nudgeable.
+        assert!(!has_live_children(&state.delegations_for(id)));
+
+        // Dispatch.
+        svc.process(
+            id,
+            HookEvent::PreToolUse,
+            serde_json::json!({
+                "tool": "Agent",
+                "tool_use_id": "toolu_1",
+                "input": { "subagent_type": "engineer", "description": "implement" }
+            }),
+        );
+        assert!(
+            has_live_children(&state.delegations_for(id)),
+            "a dispatched subagent must count as a live child"
+        );
+
+        // Async launch: still running, now bound to an agent id.
+        svc.process(
+            id,
+            HookEvent::PostToolUse,
+            serde_json::json!({
+                "tool": "Agent",
+                "tool_use_id": "toolu_1",
+                "tool_response": { "isAsync": true, "status": "async_launched", "agentId": "aid1" }
+            }),
+        );
+        assert!(
+            has_live_children(&state.delegations_for(id)),
+            "async_launched is a launch, not a completion"
+        );
+
+        // Stop: the delegation terminalizes and the session is nudgeable again.
+        svc.process(
+            id,
+            HookEvent::SubagentStop,
+            serde_json::json!({ "agent_id": "aid1" }),
+        );
+        let delegations = state.delegations_for(id);
+        assert_eq!(delegations.len(), 1);
+        assert_eq!(delegations[0].status, DelegationStatus::Completed);
+        assert!(
+            !has_live_children(&delegations),
+            "a finished delegation must not suppress the idle nudge forever"
+        );
+    }
+
+    #[test]
+    fn process_leaves_ordinary_tool_calls_untracked() {
+        // The hot path: an ordinary tool call must create no delegation state.
+        let state = Arc::new(DaemonState::new());
+        let id = SessionId::new();
+        let mut s = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
+        s.status = SessionStatus::Active;
+        state.register_session(s);
+
+        let svc = HookService::new(Arc::clone(&state));
+        svc.process(
+            id,
+            HookEvent::PreToolUse,
+            serde_json::json!({ "tool": "Bash", "input": { "command": "ls" } }),
+        );
+        assert!(state.delegations_for(id).is_empty());
     }
 
     // ---- is_coding_file unit tests ---------------------------------------

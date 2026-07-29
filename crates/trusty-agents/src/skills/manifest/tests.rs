@@ -919,11 +919,14 @@ fn synthetic_bundle(id: &str, members: &[&str]) -> SkillManifest {
     }
 }
 
-/// The ten ticketing leaf ids the `ticketing` bundle is specified to carry.
+/// The leaf ids the `ticketing` bundle is specified to carry.
 ///
 /// Why: Named here so #4023's assertions read against the ISSUE's list, while
 /// the tools they resolve to are always read from the live `ops.rs` catalog —
 /// a hand-copied tool list would pass while the catalog drifted underneath it.
+/// #4024 widened it by the two READ-ONLY git rows on the owner's directive that
+/// git and ticketing are one unit; the widening is spelled out here so a future
+/// addition has to change this list too, in the same diff.
 const TICKETING_LEAF_IDS: &[&str] = &[
     "ticket-create",
     "ticket-read",
@@ -935,6 +938,34 @@ const TICKETING_LEAF_IDS: &[&str] = &[
     "ticket-assign",
     "ticket-transition",
     "ticket-search",
+    "git-commit-search",
+    "git-branch-list",
+];
+
+/// The mail-and-tasks leaf ids the `google-workspace` bundle carries (#4024).
+const GOOGLE_WORKSPACE_LEAF_IDS: &[&str] = &[
+    "gmail-search",
+    "gmail-read",
+    "gmail-compose",
+    "gmail-draft",
+    "gmail-format",
+    "gmail-labels-apply",
+    "gmail-labels-manage",
+    "gmail-attachments-list",
+    "gmail-attachment-download",
+    "gtasks-lists",
+    "gtasks-manage",
+    "gtasks-list",
+    "gtasks-complete",
+    "gtasks-create",
+];
+
+/// The four leaf ids the `cto-tools` bundle carries (#4024).
+const CTO_TOOLS_LEAF_IDS: &[&str] = &[
+    "cto-headcount",
+    "cto-budget",
+    "cto-risks",
+    "cto-work-classification",
 ];
 
 #[test]
@@ -1131,9 +1162,10 @@ fn authored_manifest_cannot_declare_a_bundle() {
 }
 
 #[test]
-fn ticketing_function_skill_bundles_the_ten_ticket_leaf_skills() {
-    // #4023: the exemplar. Membership is asserted against the issue's list, and
-    // the tools come from the live `ops.rs` catalog so drift fails here.
+fn ticketing_function_skill_bundles_the_ticket_and_git_leaf_skills() {
+    // #4023: the exemplar, widened by #4024. Membership is asserted against the
+    // issue's list, and the tools come from the live `ops.rs`/`core.rs` catalog
+    // so drift fails here.
     let catalog = SkillCatalog::builtin();
     let ticketing = catalog.get("ticketing").expect("ticketing function skill");
     assert_eq!(ticketing.name, "Ticketing");
@@ -1143,10 +1175,137 @@ fn ticketing_function_skill_bundles_the_ten_ticket_leaf_skills() {
         "a bundle wraps no tool of its own"
     );
     assert_eq!(ticketing.members, TICKETING_LEAF_IDS);
+    let tools = catalog.expand(&["ticketing".to_string()]).tools;
+    assert_eq!(tools.len(), TICKETING_LEAF_IDS.len());
+    // The owner's ask, stated as tools rather than ids: git travels with tickets.
+    assert!(tools.contains(&"git_search_commits".to_string()));
+    assert!(tools.contains(&"git_branches".to_string()));
+    assert!(tools.contains(&"create_ticket".to_string()));
+}
+
+#[test]
+fn ticketing_bundle_carries_no_git_mutation_skill() {
+    // #4024: the widening is git INSPECTION only. A bundle turns one config line
+    // into N capabilities, so repository write access must never ride along on a
+    // grant a reviewer reads as "work the tracker".
+    let catalog = SkillCatalog::builtin();
+    let tools = catalog.expand(&["ticketing".to_string()]).tools;
+    for mutating in [
+        "git_create_branch",
+        "git_checkout",
+        "git_stage",
+        "git_commit",
+        "git_stash",
+        "git_push",
+        "git_pull",
+        "git_fetch",
+    ] {
+        // Read from the live catalog first: an assertion that a NON-EXISTENT
+        // tool is absent would pass vacuously and pin nothing.
+        assert!(
+            catalog.skill_for_tool(mutating).is_some(),
+            "{mutating} is no longer a catalog tool; update this list"
+        );
+        assert!(
+            !tools.contains(&mutating.to_string()),
+            "the ticketing bundle grants {mutating}: {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn google_workspace_function_skill_bundles_the_mail_and_tasks_leaves() {
+    // #4024: authored exactly as #4023 authored `ticketing` — a closed const
+    // list, asserted here, resolving through the live `gworkspace.rs` catalog.
+    let catalog = SkillCatalog::builtin();
+    let bundle = catalog.get("google-workspace").expect("the bundle");
+    assert_eq!(bundle.kind, SkillKind::Function);
+    assert!(bundle.tools.is_empty());
+    assert_eq!(bundle.members, GOOGLE_WORKSPACE_LEAF_IDS);
+    let tools = catalog.expand(&["google-workspace".to_string()]).tools;
+    assert_eq!(tools.len(), GOOGLE_WORKSPACE_LEAF_IDS.len());
+    // The four the owner's screen actually showed as loose cards.
+    for tool in ["create_draft", "list_tasks", "complete_task", "create_task"] {
+        assert!(tools.contains(&tool.to_string()), "missing {tool}");
+    }
+}
+
+#[test]
+fn google_workspace_bundle_excludes_account_and_settings_administration() {
+    // The exclusions are load-bearing, not an oversight: mail FORWARDING and
+    // OAuth account administration are different functions from "read and send
+    // my mail", and folding them in would hide teeth behind a one-line grant.
+    let catalog = SkillCatalog::builtin();
+    let tools = catalog.expand(&["google-workspace".to_string()]).tools;
+    for excluded in [
+        "manage_gmail_settings",
+        "manage_gmail_filters",
+        "add_account",
+        "remove_account",
+        "set_default_account",
+        // Other Workspace families the NAME must not be read as covering.
+        "search_drive_files",
+        "manage_events",
+        "get_document",
+    ] {
+        assert!(
+            catalog.skill_for_tool(excluded).is_some(),
+            "{excluded} is no longer a catalog tool; update this list"
+        );
+        assert!(
+            !tools.contains(&excluded.to_string()),
+            "the google-workspace bundle grants {excluded}: {tools:?}"
+        );
+    }
+}
+
+#[test]
+fn cto_tools_function_skill_bundles_the_four_cto_database_leaves() {
+    // #4024: shipped as reviewed const data, NOT as a user-authoring path —
+    // S-14 (bundles are built-in only) is not relaxed by a single line.
+    let catalog = SkillCatalog::builtin();
+    let bundle = catalog.get("cto-tools").expect("the bundle");
+    assert_eq!(bundle.name, "CTO Tools");
+    assert_eq!(bundle.kind, SkillKind::Function);
+    assert_eq!(bundle.members, CTO_TOOLS_LEAF_IDS);
+    let tools = catalog.expand(&["cto-tools".to_string()]).tools;
     assert_eq!(
-        catalog.expand(&["ticketing".to_string()]).tools.len(),
-        TICKETING_LEAF_IDS.len()
+        tools,
+        vec![
+            "query_headcount".to_string(),
+            "query_budget".to_string(),
+            "query_risks".to_string(),
+            "query_work_classification".to_string(),
+        ]
     );
+}
+
+#[test]
+fn every_builtin_bundle_is_grantable_and_leaks_no_bundle_id() {
+    // One property over ALL bundles, so a fourth row added later cannot ship
+    // without the guarantee: a bundle id compiles down and never reaches the
+    // pattern list the permission gates read.
+    let catalog = SkillCatalog::builtin();
+    let bundle_ids: Vec<String> = catalog
+        .manifests()
+        .iter()
+        .filter(|m| m.is_function())
+        .map(|m| m.id.clone())
+        .collect();
+    assert!(bundle_ids.len() >= 3, "expected the three shipped bundles");
+    for id in &bundle_ids {
+        let (patterns, unresolved) =
+            effective_tool_patterns(None, Some(&vec![id.clone()]), &catalog);
+        let patterns = patterns.expect("a declared skills section yields Some");
+        assert!(unresolved.is_empty(), "{id} has unresolved members");
+        assert!(!patterns.is_empty(), "{id} granted nothing");
+        for other in &bundle_ids {
+            assert!(
+                !patterns.contains(other),
+                "{id} leaked the bundle id {other}"
+            );
+        }
+    }
 }
 
 #[test]

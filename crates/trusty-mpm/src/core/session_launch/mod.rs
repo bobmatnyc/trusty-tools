@@ -350,6 +350,55 @@ pub fn prepare_session_with_repo_url(
     prepare_session_inner(fw, project_dir, None, native, repo_url)
 }
 
+/// The deploy layout for a session whose harness is spawned with
+/// [`SETTING_SOURCES_FLAG`](crate::core::model_inject::SETTING_SOURCES_FLAG).
+///
+/// Why (issue #4203): `--setting-sources project,local` makes Claude Code read
+/// ONLY the project and local tiers; the `user` tier (`$HOME/.claude`) is
+/// excluded deliberately (#1269). Deploying such a session's roster through
+/// `FrameworkPaths::default()` therefore writes it somewhere that session will
+/// never look — and nothing reports it, because the deploy genuinely succeeds
+/// and the load silently finds nothing. Naming the correct layout ONCE, here,
+/// is what lets every isolated caller share it instead of each re-deriving it
+/// (and three of them getting it wrong independently).
+/// What: `FrameworkPaths::for_managed_workspace(project_dir)` — the deploy
+/// DESTINATION becomes `<project_dir>/.claude/{agents,skills}`, which the
+/// `project` and `local` tiers read, while every framework SOURCE path still
+/// resolves from the home-relative install root (#1931).
+/// Test: `isolated_layout_deploys_into_a_tier_the_spawn_reads`,
+/// `isolated_layout_keeps_framework_source_at_the_install_root`.
+pub(crate) fn isolated_framework_paths(project_dir: &Path) -> FrameworkPaths {
+    FrameworkPaths::for_managed_workspace(project_dir)
+}
+
+/// Prepare a session whose harness will be spawned with
+/// [`SETTING_SOURCES_FLAG`](crate::core::model_inject::SETTING_SOURCES_FLAG).
+///
+/// Why (issue #4203): `tm launch`, `tm connect`, and `tm meta launch` each
+/// built their own `FrameworkPaths::default()` and each therefore deployed the
+/// agent roster into the one tier their own spawn flag excludes — three
+/// independent instances of the same defect, because each call site was free to
+/// resolve the layout itself. This entry point REMOVES that degree of freedom
+/// rather than checking it after the fact: an isolated caller supplies no
+/// `FrameworkPaths` at all, so there is no wrong value left to pass.
+/// Callers whose spawn does NOT carry the flag must keep using
+/// [`prepare_session`] with their own `fw` — notably `tm session start`, which
+/// spawns a bare `claude` (`commands/session/start.rs`) and so genuinely does
+/// read the user tier; pointing it here would be a regression, not a fix.
+/// What: resolves [`isolated_framework_paths`] for `project_dir` (the cwd the
+/// harness is spawned in) and delegates to [`prepare_session_with_repo_url`],
+/// which is exactly [`prepare_session`] when `repo_url` is `None`.
+/// Test: `isolated_layout_deploys_into_a_tier_the_spawn_reads`;
+/// `launch_paths_prepare_through_the_isolated_seam` (tm binary) binds the call
+/// sites to it.
+pub fn prepare_isolated_session(
+    project_dir: &Path,
+    repo_url: Option<&str>,
+) -> Result<PrepReport, PrepError> {
+    let fw = isolated_framework_paths(project_dir);
+    prepare_session_with_repo_url(&fw, project_dir, repo_url)
+}
+
 /// Defensively (re)write the `tm statusline` config for an EXISTING session
 /// workspace, without re-running the full preparation pipeline.
 ///
@@ -900,6 +949,17 @@ fn prepare_session_inner(
     // `fw.claude_home_dir()` (issue #1860) rather than `dirs::home_dir()`
     // directly so isolated `FrameworkPaths::under(tempdir)` callers (tests)
     // stay confined to the temp dir instead of leaking into the real `$HOME`.
+    //
+    // NOTE (#4203): "home tier" describes only the callers that pass a
+    // home-rooted `fw` — `tm session start`, `tm run`/standalone, `tm repair`.
+    // For an `isolated_framework_paths` caller (`tm launch`, `tm connect`,
+    // `tm meta launch`) and for the daemon's `for_managed_workspace` spawn
+    // (#1931), `fw.claude_home_dir()` IS `project_dir`, so this call and the
+    // project-tier one below write the same bytes to the same place — harmless
+    // and idempotent, but it means those commands do NOT refresh
+    // `$HOME/.claude/output-styles/`. Refreshing the real home tier is owned by
+    // `tm install` and `tm catalog apply`, which still resolve
+    // `FrameworkPaths::default()`.
     let output_style = match deploy_output_style(&fw.claude_home_dir()) {
         Ok(path) => Some(path),
         Err(err) => {

@@ -24,6 +24,41 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
 use std::sync::Arc;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::session_launch::tests::EnvVarGuard` and
+/// siblings (each module needs its own copy; `pub(super)`/module-private
+/// visibility does not cross sibling module trees — see those sites' docs).
+///
+/// Why (#3965): `WorkspaceProvisioner::provision`/`provision_in` call
+/// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
+/// `without_prepare()` — because that seed sits BEFORE the
+/// `if !self.prepare { return ... }` gate in `provisioner/workspace.rs`. It
+/// resolves `~/.claude.json` from the REAL process `$HOME`, not from
+/// `workspace_root`, so every test here driving `.provision(...)` must pin
+/// `$HOME` to its own hermetic root or it writes into the operator's real
+/// `~/.claude.json`. Pairs with `#[serial_test::serial]`.
+/// Test: used by `spawn_session_tmux_cwd_is_workspace`.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 /// A fake tmux driver for unit testing.
 ///
 /// Why: the manager must be testable without a real tmux binary; this
@@ -1067,11 +1102,14 @@ async fn manager_answer_decision() {
 /// path and is NOT the home directory.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn spawn_session_tmux_cwd_is_workspace() {
     use crate::session_manager::record::ManagedSessionId;
 
     let store_dir = crate::test_support::hermetic_temp_dir();
     let workspace_root = crate::test_support::hermetic_temp_dir();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(workspace_root.path());
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(store_dir.path(), fake.clone())
         .await
