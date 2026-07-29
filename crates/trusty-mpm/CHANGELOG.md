@@ -220,6 +220,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Bare `tm` no longer needs two runs after Claude Code backgrounds
+  ([#4335](https://github.com/bobmatnyc/trusty-tools/issues/4335)).
+  `nested_session_guard` fetched the managed-session list with a 2-second
+  timeout and a bare `.ok()?`. On a cold daemon the per-session `stale_assets`
+  pass over a large fleet exceeded that bound, the request was cancelled, and
+  the guard no-opped with nothing in any log to say it had not run — so bare
+  `tm` after an `/exit` (which BACKGROUNDS, never firing `SessionEnd`, leaving
+  the record `active` so the stopped-only gate correctly skips) fell through to
+  the picker and dead-ended on the #2678 switch-client refusal. A second run,
+  against a now-warm daemon, worked. Three changes, smallest lever first:
+  the managed-list endpoint takes `?slim=true` (folds into
+  [#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)) to skip the
+  `stale_assets` probe for callers that never read the flag — the guard reads
+  name/pane_id/state/id and was paying for a filesystem-bound catalog compose
+  it discards; the guard's timeout goes 2s → 8s, still bounding a hung daemon
+  while clearing a cold-start listing; and the error arm is logged at debug via
+  the new `guard_managed_sessions`. Absent or malformed `slim` keeps the full
+  probe, so no existing client changes shape. The stopped-only gate in
+  `plan_inplace` is deliberately unchanged.
 - The per-project worktree opt-out is no longer silently conditional on the
   daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
   `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),
