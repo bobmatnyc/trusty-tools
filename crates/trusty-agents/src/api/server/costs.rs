@@ -88,9 +88,42 @@ pub(super) struct CostsQuery {
 ///
 /// Why/What: see the module doc. The project root is the daemon's CWD, matching
 /// `usage::project_dir`'s convention and the sibling routes' resolution.
-/// Test: `super::tests::costs::costs_route_is_wired_into_router`.
+///
+/// **Why `spawn_blocking`:** [`costs_at`] is synchronous and genuinely blocking
+/// — `aggregate_usage` does a whole-file `std::fs::read_to_string` followed by a
+/// `serde_json::from_str` per line. Running that inline on a tokio worker thread
+/// stalls the whole executor for the duration, not just this request, so a
+/// handful of concurrent Costs loads would degrade every other route on the
+/// daemon. That makes the executor, NOT the fold's own cost, the first thing to
+/// bite: the module doc's ~100k-row read-time ceiling assumes the work is off
+/// the reactor, and without this wrapper the ceiling would arrive far sooner
+/// under any real concurrency. Matches the crate's existing convention for
+/// blocking filesystem work (`interaction_log`, `session_record`,
+/// `system_status::registry_counts`).
+///
+/// A `JoinError` means the blocking task panicked or was cancelled. It is mapped
+/// to a `500` rather than unwrapped: a panic inside the fold must not take the
+/// daemon down with it, and it is a real fault, so it is NOT degraded into the
+/// "no data" answer that a project without a log gets.
+/// Test: `super::tests::costs::costs_route_is_wired_into_router`,
+/// `super::tests::costs::costs_route_answers_through_the_blocking_pool`.
 pub(super) async fn get_costs(Query(q): Query<CostsQuery>) -> Response {
-    costs_at(&crate::usage::project_dir(), q.days)
+    let dir = crate::usage::project_dir();
+    let days = q.days;
+    match tokio::task::spawn_blocking(move || costs_at(&dir, days)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!(error = %e, "costs: aggregation task failed to join");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "available": false,
+                    "error": format!("cost aggregation task failed: {e}"),
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Aggregate `project_dir`'s usage log into an HTTP response.

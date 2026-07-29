@@ -56,6 +56,35 @@ async fn costs_route_is_wired_into_router() {
     assert_ne!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
+/// Why (#4098): `get_costs` runs the blocking fold on `spawn_blocking` so a
+/// whole-file read + per-line parse cannot stall the tokio executor for every
+/// other route. That wrapper adds a join seam the direct `costs_at` tests never
+/// touch — a botched join (or a body that never resolves) would surface as a
+/// hang or a `500` only through the real handler.
+/// What: Drives the actual async handler on a MULTI-THREAD runtime and asserts
+/// it round-trips a well-formed envelope. The assertion is on the envelope, not
+/// on a dollar figure, because the daemon's CWD during tests may or may not
+/// carry a usage log — both answers are `200` and both carry `available`.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn costs_route_answers_through_the_blocking_pool() {
+    let app = test_router();
+    let req = Request::builder()
+        .uri("/api/costs?days=7")
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.oneshot(req).await.expect("response");
+    let (status, body) = read(resp).await;
+    assert_eq!(status, StatusCode::OK, "got body {body}");
+    assert!(
+        body["available"].is_boolean(),
+        "handler must return the documented envelope, got {body}"
+    );
+    // The join seam must not swallow the query string on its way to the pool.
+    // Both 200 branches (recorded and not-recorded) echo the window back.
+    assert_eq!(body["window_days"], 7, "got body {body}");
+}
+
 /// Why (#4098): the Costs tab binds directly to these field names, so the
 /// payload shape is a contract, not an implementation detail.
 /// What: Every documented field is present and the breakdowns carry the

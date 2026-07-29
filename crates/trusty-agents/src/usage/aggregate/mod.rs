@@ -35,6 +35,14 @@
 //! [`CostSummary::records`] is reported in the payload so that threshold can be
 //! observed rather than guessed at.
 //!
+//! That ceiling is about the fold's own cost and assumes the work is NOT on the
+//! async reactor. This function is deliberately synchronous and blocking; every
+//! caller is responsible for keeping it off a tokio worker thread. The HTTP
+//! route does so with `spawn_blocking` (see `api::server::costs::get_costs`).
+//! Called inline from an async context instead, the executor — not the file
+//! size — becomes the binding constraint, and the ceiling above arrives far
+//! sooner under concurrency.
+//!
 //! What: [`aggregate_usage`] folds the log into a [`CostSummary`] — totals plus
 //! three [`CostRow`] breakdowns (by agent, by model, by UTC date) — pricing
 //! every row through the single entry point `crate::perf::cost_usd`.
