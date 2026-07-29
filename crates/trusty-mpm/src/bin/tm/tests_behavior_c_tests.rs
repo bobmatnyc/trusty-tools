@@ -35,14 +35,13 @@ use crate::commands::guided::{
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
-    ResumeAction, is_zombie, needs_restart, parse_pane_probes, plan_resume,
-    resume_classification_state, session_runtime_live,
+    ResumeAction, is_zombie, needs_restart, panes_prove_session_dead, parse_pane_probes,
+    plan_resume, resume_classification_state, session_runtime_live,
 };
 // #3873: the CLI's dead-runtime verdict composes the daemon's OWN liveness
 // primitives rather than reimplementing them, so the tests exercise that
 // composition directly.
 use trusty_mpm::daemon::orphan_gc::AlwaysIdleProbe;
-use trusty_mpm::daemon::runtime_reap::session_has_live_pane;
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 
@@ -1445,49 +1444,80 @@ fn parse_pane_probes_rejects_empty_command_field() {
     );
 }
 
-// ── any-pane-live composition (#3873 round 2, code-critic MEDIUM / #2463) ────
-// `runtime_live` is the ANY-PANE-LIVE question over the whole session, not a
-// check of the record's single stored pane_id. These pin that the parsed rows
-// compose correctly with the daemon's own `session_has_live_pane` primitive.
+// ── panes_prove_session_dead (#3873 rounds 2–3 / #2463) ──────────────────
+// The single predicate between a parsed tmux listing and a `kill_session`. It is
+// phrased as "prove DEAD", so every uncertain input must fall out as `false`.
+// `AlwaysIdleProbe` isolates the command-word gate from the real process tree.
 
 #[test]
-fn session_panes_any_live_pane_keeps_session_live() {
-    // Why (#2463): a manually-split managed session can have an idle pane
-    // alongside a live agent pane. Checking one pane would call the session dead
-    // and — on this path — kill the live agent with it. AlwaysIdleProbe isolates
-    // the command-word gate: `claude` is not an idle shell, so the session lives.
-    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
-        .expect("listing must parse");
-    assert!(
-        session_has_live_pane("tm-apex-01", &panes, &AlwaysIdleProbe),
-        "a sibling pane still running the agent must keep the session LIVE"
-    );
-}
-
-#[test]
-fn session_panes_all_idle_reads_dead() {
-    // Why (#3873): the actual defect shape — every pane fell back to a shell.
-    // This is the ONLY configuration allowed to reach the destructive branch.
+fn panes_prove_session_dead_when_every_pane_is_a_bare_shell() {
+    // Why (#3873): the actual defect shape, and the ONLY configuration allowed to
+    // reach the destructive reconcile branch.
     let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tbash\t41999\n")
         .expect("listing must parse");
     assert!(
-        !session_has_live_pane("tm-apex-01", &panes, &AlwaysIdleProbe),
-        "a session whose every pane is a bare shell must read as dead"
+        panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a session whose every pane is a bare shell must be proven dead"
     );
 }
 
 #[test]
-fn session_panes_foreign_rows_never_prove_our_session_dead() {
-    // Why (#3873 round 2): `session_has_live_pane` FILTERS by session name and
-    // returns false when nothing matches — correct for the daemon's whole-server
-    // listing, fail-CLOSED here where false is destructive. Pins the shape the
-    // membership guard in `session_runtime_live` exists to catch: rows that
-    // cannot be attributed to the session we asked about.
+fn panes_prove_session_dead_refuses_when_a_sibling_pane_is_live() {
+    // Why (#2463): a manually-split managed session can have an idle pane
+    // alongside a live agent pane. Convicting on the idle one would kill the live
+    // agent with it. `claude` is not an idle shell, so the session is not dead.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+        .expect("listing must parse");
+    assert!(
+        !panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a sibling pane still running the agent must block the dead verdict"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_refuses_a_prefix_matched_listing() {
+    // Why (#3873 round 3, code-critic MEDIUM): THE case the membership check
+    // exists for, and it is reachable rather than hypothetical. tmux
+    // PREFIX-MATCHES session targets: with only `tm-apex-01` alive,
+    // `has-session -t tm-apex` succeeds and `list-panes -s -t tm-apex` returns
+    // `tm-apex-01`'s panes. A record named `tm-apex` would then be handed a
+    // well-formed listing describing a DIFFERENT, live session. Without the
+    // membership check, `session_has_live_pane`'s filter matches nothing, reports
+    // `false` ("no live pane"), and that reads as "dead" — and the `kill_session`
+    // that follows prefix-matches onto that same live session. Deleting the check
+    // in `panes_prove_session_dead` must turn this test RED.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\n").expect("listing must parse");
+    assert!(
+        !panes_prove_session_dead("tm-apex", &panes, &AlwaysIdleProbe),
+        "a prefix-matched listing describes ANOTHER session — it must never \
+         convict ours, whose own panes we have not actually seen"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_refuses_a_wholly_foreign_listing() {
+    // Why (#3873 round 3): the general form of the same hazard — whatever the
+    // cause (prefix match, a renamed session, a racing kill), a listing with no
+    // pane attributable to the session we asked about tells us NOTHING about it,
+    // and "nothing" must never be convicted as "dead".
     let panes = parse_pane_probes("tm-other-99\tzsh\t41234\n").expect("listing must parse");
     assert!(
-        !panes.iter().any(|p| p.session_name == "tm-apex-01"),
-        "no row belongs to the session we asked about — the guard must fire and \
-         `session_runtime_live` must fail OPEN rather than consult the filter"
+        !panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a listing belonging entirely to another session must not prove ours dead"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_ignores_foreign_rows_beside_our_own() {
+    // Why (#3873 round 3): the membership check must not over-correct into
+    // "any foreign row blocks the verdict" — our own panes, when present, are
+    // still the ones that decide. A foreign LIVE pane must not rescue a session
+    // whose own panes are all idle shells.
+    let panes = parse_pane_probes("tm-other-99\tclaude\t41000\ntm-apex-01\tzsh\t41234\n")
+        .expect("listing must parse");
+    assert!(
+        panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "our own idle pane decides; a live pane in an unrelated session is not ours"
     );
 }
 

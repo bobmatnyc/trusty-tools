@@ -560,15 +560,21 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     );
 
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
-    // A bare `sh`, explicitly: the pane must be an idle shell with NO live child
-    // — tmux session live, runtime dead, the #3873 defect shape. Passing the
-    // command explicitly rather than letting tmux launch the user's login shell
-    // is what makes this deterministic: an interactive `zsh`/`bash` runs the
-    // developer's rc files and keeps spawning short-lived children for a while
-    // after creation, and the `ChildLivenessProbe` gate correctly reads any of
-    // those as "still alive". That made the fixture's verdict depend on this
-    // machine's dotfiles. `sh` is in `orphan_gc::IDLE_SHELL_COMMANDS` and reads
-    // no rc files here, so it settles immediately and stays childless.
+    // A non-interactive shell, explicitly: the pane must be an idle shell with NO
+    // live child — tmux session live, runtime dead, the #3873 defect shape.
+    // Passing a command at all is what makes this deterministic. With no command
+    // tmux starts the user's LOGIN shell, which runs the developer's rc files and
+    // keeps spawning short-lived children for a while afterwards; the
+    // `ChildLivenessProbe` gate correctly reads any of those as "still alive", so
+    // the fixture's verdict depended on this machine's dotfiles.
+    //
+    // Note what actually runs: tmux executes the argument via its default-shell,
+    // so `pane_current_command` here is that shell (`bash` on this machine,
+    // verified with `tmux display-message -p '#{pane_current_command}'`), NOT the
+    // literal `sh` spelled below. That is fine — every entry in
+    // `orphan_gc::IDLE_SHELL_COMMANDS` is equally an idle shell, and the point of
+    // the argument is only to skip login/rc processing so the pane settles
+    // immediately and stays childless.
     let create_status = std::process::Command::new(&tmux_bin)
         .args(["new-session", "-d", "-s", &record.tmux_name, "sh"])
         .status()

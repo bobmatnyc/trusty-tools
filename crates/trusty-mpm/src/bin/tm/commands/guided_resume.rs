@@ -36,6 +36,20 @@
 //! ANY-pane-live over the whole session, a session with one idle pane and one
 //! live agent pane never reaches the destructive branch at all.
 //!
+//! KNOWN LIMITATION, deliberately accepted (#3873). Any-pane-live is what makes
+//! the destructive branch safe, and it is also what bounds the fix: a SPLIT
+//! session in which the agent pane died but some other pane still runs a
+//! non-shell command (a `vim`, a `tail -f`, a stray `node`) reads as live, so
+//! bare `tm` still `Attach`es the operator into the idle agent pane. #3873 is
+//! therefore fixed for the single-pane case and for splits whose panes are all
+//! idle shells, but NOT for a split with an unrelated live process. That is the
+//! right trade at this altitude — the alternative is per-pane runtime identity
+//! (knowing WHICH pane the agent owned and judging only that one), which the
+//! stored `pane_id` cannot supply reliably enough to gate a `kill_session` on,
+//! since it can be stale or reused. Do not "fix" this by narrowing the question
+//! back to one pane without solving that identity problem first: that is the
+//! regression this design is guarding against, not an oversight.
+//!
 //! #3531: the zombie/restart classification below MUST run on
 //! [`trusty_mpm::client::ManagedSessionSummary::persisted_state`], never the
 //! plain `state` field. #3302 made the list/get endpoints reconcile the
@@ -337,8 +351,9 @@ pub(crate) fn parse_pane_probes(
 /// What: FAILS OPEN — returns `true` (assume live, preserving the pre-#3873
 /// `Attach` behavior) for a blank session name, a `tmux` spawn failure, a
 /// non-zero exit, a listing that cannot be fully parsed
-/// ([`parse_pane_probes`]), or a listing containing no pane attributable to
-/// this session. Only a fully-parsed listing in which EVERY pane is a
+/// ([`parse_pane_probes`]), or a listing [`panes_prove_session_dead`] declines
+/// to convict (no pane attributable to this session, or any pane still live).
+/// Only a fully-parsed listing in which EVERY pane of this session is a
 /// provably-idle shell returns `false`. The asymmetry is deliberate: `false`
 /// now triggers a `/runtime-stop` whose `SessionManager::stop` →
 /// `graceful_terminate_runtime` → `kill_session` destroys the entire tmux
@@ -349,9 +364,9 @@ pub(crate) fn parse_pane_probes(
 /// protection: tmux 3.6b answers an invalid target on some subcommands with
 /// rc=0 and near-empty stdout, so the parse-returned-`None` path is what
 /// actually catches a bad target, and that path IS unit-tested.
-/// Test: the pure parse seam is `parse_pane_probes_*`; the any-pane-live
-/// composition is `session_panes_*`; the blank-name fail-open is
-/// `session_runtime_live_assumes_live_for_blank_session_name`; the
+/// Test: the pure parse seam is `parse_pane_probes_*`; the verdict itself (and
+/// its membership check) is `panes_prove_session_dead_*`; the blank-name
+/// fail-open is `session_runtime_live_assumes_live_for_blank_session_name`; the
 /// classification it delegates to is covered by the daemon's own
 /// `pane_runtime_exited_*` / `session_has_live_pane_*` tests. The tmux
 /// shell-out itself is I/O (a live tmux server), matching the existing
@@ -381,20 +396,52 @@ pub(crate) fn session_runtime_live(session_name: &str) -> bool {
     let Some(panes) = parse_pane_probes(&String::from_utf8_lossy(&output.stdout)) else {
         return true;
     };
-    // Membership guard. `session_has_live_pane` FILTERS by session name and
-    // returns `false` ("no live pane") when nothing matches — correct for the
-    // daemon, which is looking at a whole-server listing where a non-match means
-    // the session is gone, but fail-CLOSED here where `false` is destructive. If
-    // the listing we got back cannot be attributed to the session we asked
-    // about, we have learned nothing and must fail open.
-    if !panes.iter().any(|p| p.session_name == name) {
-        return true;
-    }
-    trusty_mpm::daemon::runtime_reap::session_has_live_pane(
+    !panes_prove_session_dead(
         name,
         &panes,
         &trusty_mpm::daemon::orphan_gc::ProcessTreeProbe,
     )
+}
+
+/// Do `panes` POSITIVELY prove that `session_name`'s runtime is gone? (#3873)
+///
+/// Why: this is the single predicate standing between a parsed tmux listing and
+/// a `kill_session`, so it is extracted as a pure seam that can be unit-tested
+/// without a tmux server — the surrounding [`session_runtime_live`] is all I/O
+/// and cannot be. It is phrased as "prove DEAD" rather than "is live" on purpose:
+/// the burden of proof belongs on the destructive answer, so every uncertain
+/// input falls out as `false` by construction instead of relying on a caller to
+/// remember to invert something.
+///
+/// The membership check is load-bearing, not defensive boilerplate.
+/// [`trusty_mpm::daemon::runtime_reap::session_has_live_pane`] FILTERS by session
+/// name and reports `false` ("no live pane") when nothing matches at all. That is
+/// right for the daemon, which passes a whole-server listing in which a non-match
+/// genuinely means the session is gone — but here a non-match means our targeted
+/// query answered about somebody ELSE, and `false` would be read as "dead" and
+/// kill a session. tmux makes that reachable rather than hypothetical: it
+/// PREFIX-MATCHES session targets, so with only `tm-apex-01` alive,
+/// `has-session -t tm-apex` succeeds and `list-panes -s -t tm-apex` returns
+/// `tm-apex-01`'s panes. A record named `tm-apex` would then be handed a
+/// well-formed listing belonging to a different, live session — and the
+/// `kill_session` that followed would prefix-match onto that same live session.
+///
+/// What: returns `true` only when at least one pane in `panes` actually belongs
+/// to `session_name` AND no pane of `session_name` shows a live runtime.
+/// Returns `false` — "not proven dead", which the caller turns into fail-open —
+/// when no pane belongs to `session_name`, or when any of its panes is live.
+/// Pure; no I/O.
+/// Test: `panes_prove_session_dead_*` in `tests_behavior_c_tests.rs`, including
+/// the prefix-match and foreign-listing cases that pin the membership check.
+pub(crate) fn panes_prove_session_dead(
+    session_name: &str,
+    panes: &[trusty_mpm::daemon::orphan_gc::PaneInfo],
+    probe: &dyn trusty_mpm::daemon::orphan_gc::ChildLivenessProbe,
+) -> bool {
+    if !panes.iter().any(|p| p.session_name == session_name) {
+        return false;
+    }
+    !trusty_mpm::daemon::runtime_reap::session_has_live_pane(session_name, panes, probe)
 }
 
 /// Restart (if needed) then attach to a managed session from the guided picker.

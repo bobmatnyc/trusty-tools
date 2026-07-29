@@ -216,6 +216,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   non-destructive reconcile (#2023 A) but not for a CLI path that drives a
   session kill.
 
+  Known limitation, deliberately accepted: any-pane-live is also what bounds the
+  fix. A SPLIT session whose agent pane died but which still has some other pane
+  running a non-shell command (a `vim`, a `tail -f`) reads as live, so bare `tm`
+  still attaches into the idle agent pane there. #3873 is fixed for the
+  single-pane case and for splits whose panes are all idle shells, but not for a
+  split with an unrelated live process — narrowing the question back to one pane
+  would require per-pane runtime identity that the stored `pane_id` cannot supply
+  reliably enough to gate a session kill on.
+
   Because that reconcile reaches `SessionManager::stop` →
   `graceful_terminate_runtime` → `kill_session`, which is **session-scoped**, the
   restart now discloses that it is about to destroy the whole tmux session — all
