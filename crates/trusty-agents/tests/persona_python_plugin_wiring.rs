@@ -14,9 +14,11 @@
 //! `$HOME` at it, captures `trusty_agents` tracing output, and calls the
 //! dispatch function. The LLM leg is deliberately routed at a local (absent)
 //! Ollama endpoint via `SessionOverrides::provider = "local"`, so the turn
-//! fails AFTER the registry is built, with no external network call and no
-//! credential of any kind required — the assertions are on the captured
-//! registry, not on a model reply. Two things are asserted: the plugin was
+//! fails AFTER the registry is built and no external network call is made; a
+//! placeholder `OPENROUTER_API_KEY` satisfies `llm::create_client`'s
+//! before-the-registry credential check without ever being transmitted. The
+//! assertions are on the captured registry, not on a model reply. Two things
+//! are asserted: the plugin was
 //! registered, and it SURVIVED the `[tools].allow` / RBAC / scope gate into the
 //! set advertised to the model — a plugin registered but gated away would be
 //! just as useless as one never registered.
@@ -123,15 +125,25 @@ content = "Probe persona. Call demo_python_echo."
     // `AgentConfig::by_name_async` resolve our throwaway package (and nothing
     // from the developer's real `~/.trusty-agents`); `HOME` sandboxes the
     // second resolution tier and the global MCP config for the same reason.
+    //
+    // `OPENROUTER_API_KEY` is a PLACEHOLDER and is never transmitted: the
+    // `provider = "local"` override below routes the chat leg at a local
+    // Ollama endpoint, which sends no auth header. It is set because
+    // `llm::create_client` runs BEFORE the registry is built and hard-fails
+    // when no credential of any kind resolves — which is exactly how the first
+    // CI run of this test failed while passing on a developer box that happened
+    // to have a real key exported. Set unconditionally (not only when unset) so
+    // the test behaves identically in both environments.
     unsafe {
         std::env::set_var("TAGENT_CONFIG_DIR", &agents_dir);
         std::env::set_var("HOME", project.path());
+        std::env::set_var("OPENROUTER_API_KEY", "placeholder-never-transmitted");
     }
 
-    // `provider = "local"` forces the Ollama routing branch: no credential is
-    // required, and the eventual chat call targets localhost rather than any
-    // paid or external endpoint. It cannot short-circuit to the claude-cli
-    // path, so the registry below is always built.
+    // `provider = "local"` forces the Ollama routing branch, so the eventual
+    // chat call targets localhost rather than any paid or external endpoint. It
+    // cannot short-circuit to the claude-cli path, so the registry below is
+    // always built.
     let overrides = SessionOverrides {
         provider: Some("local".to_string()),
         ..Default::default()
