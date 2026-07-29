@@ -65,10 +65,9 @@ use crate::daemon::state::DaemonState;
 /// for when that clear did not happen (a crash, a missed hook, or a request
 /// that raced ahead of it).
 /// Test: `session_start_hook_correlates_claude_id`,
-/// `session_start_hook_does_not_overwrite_with_different_id`,
+/// `session_start_hook_still_refuses_a_live_subagent_id`,
 /// `session_start_hook_reasserting_same_id_is_a_noop`,
-/// `session_start_hook_re_correlates_a_stale_id`,
-/// `session_start_hook_still_refuses_a_live_subagent_id` in `api_tests.rs`.
+/// `session_start_hook_re_correlates_a_stale_id` in `api_tests.rs`.
 pub(super) async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
