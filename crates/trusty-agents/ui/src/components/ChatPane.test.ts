@@ -359,3 +359,34 @@ describe('ChatPane — a covered chat keeps its scroll offset (HIGH-3)', () => {
     expect(scroller.scrollTop).toBe(100);
   });
 });
+
+// #4290 code-review follow-up: the Knowledge Graph button has zero coverage
+// today, and its visibility is an owner-normative requirement — Concierge
+// (`activeAgentId === null`) binds no `agent.toml`/`[[stores]]`, so there is
+// no palace for the button to open a browser onto (`ChatHeader.svelte`'s
+// `{#if !isConcierge}` guard). Reuses this file's existing mounted `ChatPane`
+// (which renders the real `ChatHeader`) rather than standing up a second
+// mount harness for one component.
+describe('ChatHeader — Knowledge Graph button is Concierge-only (#4290)', () => {
+  const kgButton = () => target.querySelector('[aria-label="Knowledge Graph"]');
+
+  it('is absent for Concierge, the default selection', () => {
+    expect(get(activeAgentId)).toBeNull();
+    expect(kgButton()).toBeNull();
+  });
+
+  it('appears once a real agent is selected', async () => {
+    activeAgentId.set('izzie');
+    await waitFor(() => kgButton() !== null);
+    expect(kgButton()).not.toBeNull();
+  });
+
+  it('disappears again on switching back to Concierge', async () => {
+    activeAgentId.set('izzie');
+    await waitFor(() => kgButton() !== null);
+
+    activeAgentId.set(null);
+    await waitFor(() => kgButton() === null);
+    expect(kgButton()).toBeNull();
+  });
+});

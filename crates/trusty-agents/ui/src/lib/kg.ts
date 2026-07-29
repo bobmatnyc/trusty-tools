@@ -20,7 +20,10 @@
 // successfully-parsed envelope is NOT an error — it's a first-class state
 // carrying a machine-readable `reason` the caller renders directly, per the
 // route's never-fail posture.
-// Test: `kg.test.ts`.
+// Test: `kg.test.ts` covers this module's own fetch/parse contract.
+// `KnowledgeGraphBrowser.test.ts` covers the caller-side regression — a
+// `connected: false` envelope from any of these functions must not render as
+// empty data (#4290 code-review finding).
 
 import { apiBase } from './api-config';
 import { getCurrentApiToken } from '../stores/app';
@@ -84,7 +87,8 @@ async function getKgEnvelope<T>(path: string): Promise<KgEnvelope<T> | null> {
 
 /**
  * `GET /api/agents/:name/kg/subjects?limit=N`.
- * Test: `fetchKgSubjects_returns_null_on_404`, `fetchKgSubjects_parses_envelope`.
+ * Test: `fetchKgSubjects_returns_null_on_404`, `fetchKgSubjects_parses_envelope`
+ * (`kg.test.ts`).
  */
 export async function fetchKgSubjects(
   name: string,
@@ -96,7 +100,7 @@ export async function fetchKgSubjects(
 
 /**
  * `GET /api/agents/:name/kg/all?limit=N&offset=N`.
- * Test: `fetchKgAll_forwards_limit_and_offset`.
+ * Test: `fetchKgAll_forwards_limit_and_offset` (`kg.test.ts`).
  */
 export async function fetchKgAll(
   name: string,
@@ -111,7 +115,7 @@ export async function fetchKgAll(
  * `GET /api/agents/:name/kg?subject=<s>`. `subject` is REQUIRED by the
  * upstream route (a `400` otherwise) — callers must never pass an empty
  * string.
- * Test: `fetchKgSubject_encodes_the_subject`.
+ * Test: `fetchKgSubject_encodes_the_subject` (`kg.test.ts`).
  */
 export async function fetchKgSubject(
   name: string,
@@ -123,7 +127,7 @@ export async function fetchKgSubject(
 
 /**
  * `GET /api/agents/:name/kg/count`. `data` is `{"active": N}`.
- * Test: `fetchKgCount_parses_active_count`.
+ * Test: `fetchKgCount_parses_active_count` (`kg.test.ts`).
  */
 export async function fetchKgCount(name: string): Promise<KgEnvelope<KgActiveCount> | null> {
   return getKgEnvelope(`/api/agents/${encodeURIComponent(name)}/kg/count`);

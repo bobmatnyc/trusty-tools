@@ -34,6 +34,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `fetchAgentStores`'s null-on-404/throw idiom; the SPA still never calls
   trusty-memory directly.
 
+### Fixed
+
+- **Knowledge Graph browser: a mid-session daemon/palace failure now explains
+  itself instead of rendering as an empty graph** (#4290 code-review
+  finding). Only `bootstrap()`'s initial `/kg/subjects` call checked
+  `env.connected`; `loadAll`, `loadCount`, and `loadSubject` assigned
+  `env.data` unconditionally, so a `connected: false` response arriving AFTER
+  a successful bootstrap — trusty-memory restarts, the palace goes
+  unreachable — rendered as "0 active triples" / "No triples.", visually
+  identical to a genuinely empty, connected palace. All three now check
+  `env.connected` first and route into the same disconnected state
+  `bootstrap()` already shows, carrying the backend's `reason`.
+
 ### Changed
 
 - **An assistant's reachable sub-agent set is now an editable configuration
