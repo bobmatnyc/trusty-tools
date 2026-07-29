@@ -77,6 +77,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use super::probe::{health_str, probe_member_health};
+use super::probe_http::ProbeOutcome;
 use super::stable_set::{ManageStrategy, StableMember};
 use super::verify_launchd_state::{classify_down_state, DownState};
 
@@ -203,16 +204,70 @@ impl VerifyTailReport {
     }
 }
 
-/// Whether a member's health verdict warrants a #2498 kickstart retry.
+/// Whether a member's probe outcome warrants a #2498 kickstart retry.
 ///
 /// Why: only a `down` LAUNCHD daemon is the #2498 failure signature
-/// (`launchctl bootstrap` succeeded, `RunAtLoad` never fired); a
-/// `not_installed` member, an `unknown` process-managed member (trusty-mpm),
-/// or a non-launchd member must never trigger a kickstart attempt.
-/// What: `true` iff `health == "down"` AND `manage == Launchd`.
-/// Test: `tests::needs_kickstart_only_for_down_launchd`.
-pub fn needs_kickstart(health: &str, manage: ManageStrategy) -> bool {
-    health == health_str::DOWN && manage == ManageStrategy::Launchd
+/// (`launchctl bootstrap` succeeded, `RunAtLoad` never fired); a `not_installed`
+/// member, an `unknown` process-managed member (trusty-mpm), or a non-launchd
+/// member must never trigger a kickstart attempt.
+///
+/// #4246: this predicate was never wrong — `probe_member_health` MANUFACTURED
+/// the `down` it fired on, by shelling out to a `health --json` verb no daemon
+/// implements. So the input changed from a flat string to a typed
+/// [`ProbeOutcome`], and the condition from "reads down" to
+/// [`ProbeOutcome::is_confirmed_down`]: `Refused` or `Timeout`, i.e. a
+/// TRANSPORT-level observation that nothing accepted the connection or nothing
+/// answered in time. A schema mismatch, an unusable body, or a squatter on a
+/// documented port all mean *something* answered, so restarting is a guess — and
+/// `kickstart -k` is not a polite restart (no `ExitTimeOut` in the shared plist
+/// renderer, so launchd SIGKILLs 20s after SIGTERM, inside trusty-search's
+/// ≥30s-per-index flush budget). That gate is only expressible now that the
+/// transport is HTTP: a subprocess probe cannot produce a `Refused`.
+///
+/// The mirror property matters just as much: a genuinely dead daemon still
+/// yields `Refused`, so the #2498 repair path is preserved rather than deleted.
+/// What: `true` iff `outcome.is_confirmed_down()` AND `manage == Launchd`.
+/// Test: `tests::needs_kickstart_only_for_confirmed_down_launchd`,
+/// `tests::needs_kickstart_never_fires_on_a_schema_problem`.
+pub fn needs_kickstart(outcome: &ProbeOutcome, manage: ManageStrategy) -> bool {
+    outcome.is_confirmed_down() && manage == ManageStrategy::Launchd
+}
+
+/// The destructive repair [`verify_one`] may perform, behind a seam (#4246).
+///
+/// Why: `verify_one` was untestable in the direction that mattered. The existing
+/// `needs_kickstart_only_for_down_launchd` test passed the whole time the bug was
+/// live, because it fed the predicate a hand-typed `"down"` — nothing exercised
+/// the real probe and the real decision together, so nothing could catch
+/// `probe_member_health` manufacturing that `down`. Injecting the kickstart lets
+/// `tests::verify_one_does_not_kickstart_a_healthy_launchd_daemon` run the REAL
+/// probe against a stubbed healthy daemon and then assert ZERO restarts — the
+/// only shape of test that closes the loop. Mirrors the `ServiceEnv` seam already
+/// in this file (see [`apply_not_loaded_fallback`], tested against
+/// `tests::FakeServiceEnv`).
+/// What: one operation — force-start a member's launchd job — returning whether
+/// it succeeded.
+/// Test: [`RealKickstarter`] is side-effecting; the decision that calls it is
+/// covered against `tests::FakeKickstarter`.
+pub trait Kickstarter {
+    /// Force-start `binary`'s launchd job, returning whether the command
+    /// succeeded. A `false` does NOT by itself mean the daemon is unreachable —
+    /// see [`kickstart`].
+    fn kickstart(&self, binary: &str) -> bool;
+}
+
+/// The production [`Kickstarter`] — the only thing that runs real `launchctl`.
+///
+/// Why: keeps `launchctl kickstart -k` reachable from exactly one place, so a
+/// test can never invoke it by forgetting to pass a fake.
+/// What: delegates to [`kickstart`].
+/// Test: side-effecting; not invoked in the test suite.
+pub struct RealKickstarter;
+
+impl Kickstarter for RealKickstarter {
+    fn kickstart(&self, binary: &str) -> bool {
+        kickstart(binary)
+    }
 }
 
 /// Run `launchctl kickstart -k gui/<uid>/<label>` for a member (macOS only).
@@ -524,22 +579,35 @@ fn apply_not_loaded_fallback_real(
 /// from `start.elapsed()` rather than reusing the raw parameter, so it
 /// correctly reflects whatever the kickstart poll immediately above already
 /// spent within this SAME member's turn.
-/// Test: side-effecting (subprocess + sleep); the decision halves are
-/// `needs_kickstart`, `poll_until_not_down`, `bounded_attempts`,
-/// `classify_down_state_from_entry`, `apply_not_loaded_fallback`.
-fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
+/// #4246: takes `kickstarter: &dyn Kickstarter` rather than calling
+/// [`kickstart`] directly, so the probe→gate→repair decision is testable against
+/// a fake — see [`Kickstarter`] for why that is the only test shape that could
+/// have caught this bug. [`verify_one`] is the real-wiring shell; this mirrors
+/// the `apply_not_loaded_fallback` / `apply_not_loaded_fallback_real` split
+/// immediately above.
+/// Test: `tests::verify_one_does_not_kickstart_a_healthy_launchd_daemon`,
+/// `tests::verify_one_kickstarts_a_genuinely_down_launchd_daemon`; the remaining
+/// decision halves are `needs_kickstart`, `poll_until_not_down`,
+/// `bounded_attempts`, `classify_down_state_from_entry`,
+/// `apply_not_loaded_fallback`.
+fn verify_one_with(
+    m: &StableMember,
+    remaining_budget: Duration,
+    kickstarter: &dyn Kickstarter,
+) -> VerifyRow {
     let start = Instant::now();
-    let mut health = probe_member_health(&m.binary, m.manage)
-        .health_string()
-        .to_owned();
+    // #4246: keep the TYPED outcome — `health` is for display, `outcome` is what
+    // may authorise a restart. Collapsing them is the bug.
+    let outcome = probe_member_health(&m.binary, m.manage);
+    let mut health = outcome.health_string().to_owned();
     let mut kickstarted = false;
     let mut budget_exhausted = false;
-    if needs_kickstart(&health, m.manage) {
+    if needs_kickstart(&outcome, m.manage) {
         if remaining_budget.is_zero() {
             budget_exhausted = true;
         } else {
             kickstarted = true;
-            let _ = kickstart(&m.binary);
+            let _ = kickstarter.kickstart(&m.binary);
             eprintln!("  waiting for {} to start...", m.binary);
             let (polled_health, _attempts) = poll_until_not_down(
                 || {
@@ -584,6 +652,19 @@ fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
         down_state,
         verify_bootstrapped,
     }
+}
+
+/// Real-wiring shell for [`verify_one_with`] — the only place that names
+/// [`RealKickstarter`].
+///
+/// Why: keeps [`run_verify_tail`]'s fold free of the seam, and keeps
+/// `launchctl kickstart -k` reachable from exactly one call site (mirrors
+/// `apply_not_loaded_fallback_real`'s split from `apply_not_loaded_fallback`).
+/// What: delegates to [`verify_one_with`] with the production kickstarter.
+/// Test: side-effecting (real `launchctl` + sleep); the decision it wraps is
+/// `verify_one_with`'s own test suite.
+fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
+    verify_one_with(m, remaining_budget, &RealKickstarter)
 }
 
 /// Run the post-install verify tail over the selected members (#2560).
