@@ -12,10 +12,17 @@
 //! directory do NOT exist, and one opted-in/unset control asserting the
 //! worktree IS created at its exact expected path.
 //! Fixture remotes: every origin here uses the non-resolvable `.invalid` TLD
-//! (RFC 2606) with fixture-only owner/repo names, following the convention
-//! `tests_behavior_c_tests.rs:1570-1580` documents. An earlier revision used
-//! the REAL `bobmatnyc/writing` and `bob-duetto/cto` remotes, and the
-//! guard-neutralised revert run proved why that is wrong: `ensure_base_clone`
+//! (RFC 2606) with fixture-only owner/repo names. THIS paragraph is the
+//! canonical statement of that convention — cite it (file + this `Fixture
+//! remotes:` heading, never a line range) from any new test that needs the
+//! rationale. A previous revision forwarded readers to a line range in
+//! `tests_behavior_c_tests.rs` instead; that pointer was always wrong (that
+//! file lives one directory up, its cited lines hold unrelated
+//! `guided_resume_plan_*` tests, and it does not contain the string
+//! `.invalid` anywhere), and the line range is exactly the part that rotted.
+//! An earlier revision of the FIXTURES used the REAL `bobmatnyc/writing` and
+//! `bob-duetto/cto` remotes, and the guard-neutralised revert run proved why
+//! that is wrong: `ensure_base_clone`
 //! genuinely cloned both private repos over the network (88.43s vs 0.28s
 //! baseline). The assertion under test is the opt-out DECISION, never that a
 //! clone succeeds, so a host that cannot resolve is lossless here and keeps
