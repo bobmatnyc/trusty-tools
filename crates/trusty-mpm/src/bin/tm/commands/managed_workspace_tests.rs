@@ -11,6 +11,15 @@
 //! path is returned and that the base-clone directory and the `.worktrees`
 //! directory do NOT exist, and one opted-in/unset control asserting the
 //! worktree IS created at its exact expected path.
+//! Fixture remotes: every origin here uses the non-resolvable `.invalid` TLD
+//! (RFC 2606) with fixture-only owner/repo names, following the convention
+//! `tests_behavior_c_tests.rs:1570-1580` documents. An earlier revision used
+//! the REAL `bobmatnyc/writing` and `bob-duetto/cto` remotes, and the
+//! guard-neutralised revert run proved why that is wrong: `ensure_base_clone`
+//! genuinely cloned both private repos over the network (88.43s vs 0.28s
+//! baseline). The assertion under test is the opt-out DECISION, never that a
+//! clone succeeds, so a host that cannot resolve is lossless here and keeps
+//! the suite hermetic and fast whether the guard is present or not.
 //! Concurrency: the fallback tests read `TRUSTY_MPM_REPOS_ROOT` (a
 //! process-global) through `inproject::base_clone_path`, so they are
 //! `#[serial_test::serial]` and restore the previous value via an RAII guard
@@ -171,17 +180,24 @@ fn expected_worktree(base: &Path, session_id: &ManagedSessionId) -> PathBuf {
 /// Test: itself. RED with the guard reverted (a clone + worktree appear).
 #[tokio::test]
 async fn provision_for_launch_opted_out_creates_no_clone_and_no_worktree() {
-    let origin = "git@github.com:bobmatnyc/writing.git";
-    let registry = registry_with("https://github.com/bobmatnyc/writing", Some(false)).await;
+    let origin = "git@github.invalid:fixture-owner/optout-repo.git";
+    let registry = registry_with(
+        "https://github.invalid/fixture-owner/optout-repo",
+        Some(false),
+    )
+    .await;
 
     let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root.path().join("bobmatnyc").join("writing");
+    let base = repos_root.path().join("fixture-owner").join("optout-repo");
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
     let workspace = provision_for_launch(registry.path(), origin, &base, live.path(), &session_id)
         .await
-        .unwrap();
+        .expect(
+            "#4300: an opted-out project must not attempt a clone at all — a clone \
+             error here means the opt-out was never consulted",
+        );
 
     assert_eq!(
         workspace,
@@ -195,6 +211,70 @@ async fn provision_for_launch_opted_out_creates_no_clone_and_no_worktree() {
     );
 }
 
+/// `tm launch` from a SUBDIRECTORY of an opted-out project must deploy into
+/// the repo ROOT, never the subdirectory.
+///
+/// Why (code-critic MEDIUM on PR #4303): `get_origin_url` succeeds at any
+/// depth, so `cd repo/src && tm launch` on an opted-out project passed `cwd`
+/// straight through as the workspace — `.claude`, the project hooks, the tmux
+/// cwd and the daemon's `project_path` all landed in `repo/src`. That is
+/// precisely the "tm furniture somewhere the operator did not intend" failure
+/// the opt-out exists to prevent, and it was introduced by this PR: the
+/// pre-#4300 code always redirected to a worktree, so `cwd` never became a
+/// deploy target. The daemon-unreachable fallback already resolved the root
+/// via `classify_cwd_project`; this pins that `tm launch` agrees.
+/// What: builds a REAL git repo (so `git rev-parse --show-toplevel` has a root
+/// to find), registers it opted-out, calls `provision_for_launch` with a
+/// nested subdirectory as `cwd`, and asserts the returned workspace is the
+/// canonical repo root and explicitly NOT the subdirectory.
+/// Test: itself. RED if `provision_for_launch` passes `cwd` through.
+#[tokio::test]
+async fn provision_for_launch_from_subdirectory_targets_repo_root() {
+    let origin = "https://github.invalid/fixture-owner/optout-repo.git";
+    let registry = registry_with(
+        "https://github.invalid/fixture-owner/optout-repo",
+        Some(false),
+    )
+    .await;
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root.path().join("fixture-owner").join("optout-repo");
+
+    // A real git working tree, with a nested subdirectory to launch from.
+    let live = tempfile::tempdir().unwrap();
+    init_git_repo(live.path());
+    let subdir = live.path().join("crates").join("inner");
+    std::fs::create_dir_all(&subdir).unwrap();
+    // `git rev-parse --show-toplevel` canonicalises symlinks (macOS `/var` →
+    // `/private/var`), so the expectation must be canonical too.
+    let repo_root = live.path().canonicalize().unwrap();
+    let session_id = ManagedSessionId::new();
+
+    let workspace = provision_for_launch(registry.path(), origin, &base, &subdir, &session_id)
+        .await
+        .expect(
+            "#4300: an opted-out project must not attempt a clone at all — a clone \
+             error here means the opt-out was never consulted",
+        );
+
+    assert_eq!(
+        workspace,
+        ManagedWorkspace::MainCheckout(repo_root.clone()),
+        "#4300: `tm launch` from a subdirectory must target the repo ROOT"
+    );
+    assert_ne!(
+        workspace.path(),
+        subdir.as_path(),
+        "#4300: the subdirectory must NEVER become the deploy target"
+    );
+    assert!(
+        !subdir.join(".claude").exists(),
+        "nothing may be provisioned inside the subdirectory: {}",
+        subdir.display()
+    );
+    assert_nothing_provisioned(&base);
+}
+
 /// A project with NO `worktree` key still gets a worktree — the `unwrap_or(true)`
 /// default must not regress.
 ///
@@ -205,11 +285,14 @@ async fn provision_for_launch_opted_out_creates_no_clone_and_no_worktree() {
 /// Test: itself.
 #[tokio::test]
 async fn provision_for_launch_unset_creates_worktree() {
-    let origin = "https://github.com/bobmatnyc/trusty-tools";
-    let registry = registry_with("https://github.com/bobmatnyc/trusty-tools", None).await;
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+    let registry = registry_with("https://github.invalid/fixture-owner/isolated-repo", None).await;
 
     let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root.path().join("bobmatnyc").join("trusty-tools");
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
     init_git_repo(&base);
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
@@ -241,11 +324,18 @@ async fn provision_for_launch_unset_creates_worktree() {
 /// Test: itself.
 #[tokio::test]
 async fn provision_for_launch_unregistered_origin_creates_worktree() {
-    let registry = registry_with("https://github.com/bobmatnyc/writing", Some(false)).await;
+    let registry = registry_with(
+        "https://github.invalid/fixture-owner/optout-repo",
+        Some(false),
+    )
+    .await;
 
-    let origin = "https://github.com/acme/unregistered";
+    let origin = "https://github.invalid/fixture-owner/never-registered";
     let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root.path().join("acme").join("unregistered");
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("never-registered");
     init_git_repo(&base);
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
@@ -282,8 +372,12 @@ async fn provision_for_launch_unregistered_origin_creates_worktree() {
 #[tokio::test]
 #[serial_test::serial]
 async fn provision_for_fallback_opted_out_creates_no_clone_and_no_worktree() {
-    let origin = "https://github.com/bob-duetto/cto.git";
-    let registry = registry_with("https://github.com/bob-duetto/cto", Some(false)).await;
+    let origin = "https://github.invalid/fixture-owner/fallback-repo.git";
+    let registry = registry_with(
+        "https://github.invalid/fixture-owner/fallback-repo",
+        Some(false),
+    )
+    .await;
 
     let repos_root = tempfile::tempdir().unwrap();
     let _guard = ReposRootGuard::set(repos_root.path());
@@ -292,14 +386,22 @@ async fn provision_for_fallback_opted_out_creates_no_clone_and_no_worktree() {
 
     let workspace = provision_for_fallback(registry.path(), origin, git_root.path(), &session_id)
         .await
-        .unwrap();
+        .expect(
+            "#4300: an opted-out project must not attempt a clone at all — a clone \
+             error here means the opt-out was never consulted",
+        );
 
     assert_eq!(
         workspace,
         ManagedWorkspace::MainCheckout(git_root.path().to_path_buf()),
         "#4300: the daemon-unreachable fallback must launch in the repo root"
     );
-    assert_nothing_provisioned(&repos_root.path().join("bob-duetto").join("cto"));
+    assert_nothing_provisioned(
+        &repos_root
+            .path()
+            .join("fixture-owner")
+            .join("fallback-repo"),
+    );
     assert_eq!(
         std::fs::read_dir(repos_root.path()).unwrap().count(),
         0,
@@ -320,12 +422,15 @@ async fn provision_for_fallback_opted_out_creates_no_clone_and_no_worktree() {
 #[tokio::test]
 #[serial_test::serial]
 async fn provision_for_fallback_unset_creates_worktree_not_live_checkout() {
-    let origin = "https://github.com/bob-duetto/cto.git";
-    let registry = registry_with("https://github.com/bob-duetto/cto", None).await;
+    let origin = "https://github.invalid/fixture-owner/fallback-repo.git";
+    let registry = registry_with("https://github.invalid/fixture-owner/fallback-repo", None).await;
 
     let repos_root = tempfile::tempdir().unwrap();
     let _guard = ReposRootGuard::set(repos_root.path());
-    let base = repos_root.path().join("bob-duetto").join("cto");
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("fallback-repo");
     init_git_repo(&base);
     let git_root = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
@@ -363,18 +468,25 @@ async fn provision_for_fallback_unset_creates_worktree_not_live_checkout() {
 #[tokio::test]
 #[serial_test::serial]
 async fn provision_for_fallback_other_projects_optout_does_not_leak() {
-    let registry = registry_with("https://github.com/bobmatnyc/writing", Some(false)).await;
+    let registry = registry_with(
+        "https://github.invalid/fixture-owner/optout-repo",
+        Some(false),
+    )
+    .await;
 
     let repos_root = tempfile::tempdir().unwrap();
     let _guard = ReposRootGuard::set(repos_root.path());
-    let base = repos_root.path().join("bob-duetto").join("cto");
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("fallback-repo");
     init_git_repo(&base);
     let git_root = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
     let workspace = provision_for_fallback(
         registry.path(),
-        "https://github.com/bob-duetto/cto.git",
+        "https://github.invalid/fixture-owner/fallback-repo.git",
         git_root.path(),
         &session_id,
     )

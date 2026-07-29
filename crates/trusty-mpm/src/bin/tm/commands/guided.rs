@@ -786,9 +786,17 @@ pub(crate) fn is_github_remote(url: &str) -> bool {
 /// (plain directory or bare repo). Bare repos (`--git-dir` succeeds but
 /// `--show-toplevel` does not) are treated as non-git — deploying into a bare
 /// repo has no live-checkout to protect.
+///
+/// `pub(crate)` since #4300: `managed_workspace::provision_for_launch` must
+/// resolve the repo root the SAME way this path does. `tm launch` has no
+/// `classify_cwd_project` pre-pass, so without a shared definition the two CLI
+/// entry points answered "which directory is this project?" differently and
+/// `tm launch` from a subdirectory deployed into that subdirectory.
 /// Test: `guided_fallback_blocks_github_git_from_subdirectory` calls
-/// `fallback_protected` from a nested subdir and asserts the protection fires.
-fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+/// `fallback_protected` from a nested subdir and asserts the protection fires;
+/// `provision_for_launch_from_subdirectory_targets_repo_root` covers the
+/// `tm launch` side.
+pub(crate) fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)

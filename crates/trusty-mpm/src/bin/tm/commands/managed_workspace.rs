@@ -21,6 +21,15 @@
 //! [`trusty_mpm::project::worktree_enabled_for_origin_at`], and passes the
 //! answer down — so the operator-facing notice and the filesystem action can
 //! never disagree.
+//! Known redundancy, accepted: the daemon-unreachable fallback ends by
+//! calling `launch()`, so on that composed path the registry is read twice —
+//! once by [`provision_for_fallback`] and once by [`provision_for_launch`].
+//! Collapsing it would mean threading a pre-resolved `ManagedWorkspace`
+//! through `launch()`'s signature, a restructure that buys one avoided
+//! `read_to_string` of an atomically-published file whose read path takes no
+//! lock and fails open to isolation-ON. Both reads see the same bytes; the
+//! only operator-visible symptom was a duplicated notice, and that is fixed
+//! in [`provision_for_fallback`] directly.
 //! Scope note: this deliberately does NOT change #3455's concurrency
 //! behaviour. `spawn_managed_on_main` WARNS (never refuses) on a second
 //! session against one main checkout, and that stays the rule here — nothing
@@ -118,21 +127,34 @@ async fn provision(
 /// Why: `tm launch` runs the whole provisioning flow in-process and never
 /// asks the daemon, so it is the CLI path that most visibly ignored the
 /// opt-out before this.
-/// What: reads the opt-out from the registry at `registry_dir`, prints the
-/// notice for whichever branch applies, then delegates to [`provision`] with
-/// the caller-resolved `base_path` (`inproject::base_clone_path(owner, repo)`)
-/// and the operator's live checkout as the opt-out target. Errors are mapped
-/// to `tm launch`'s wording.
+/// What: resolves the REPO ROOT of `cwd` and reads the opt-out from the
+/// registry at `registry_dir`, prints the notice for whichever branch applies,
+/// then delegates to [`provision`] with the caller-resolved `base_path`
+/// (`inproject::base_clone_path(owner, repo)`). Errors are mapped to `tm
+/// launch`'s wording.
+///
+/// The root resolution matters and is not incidental: `get_origin_url`
+/// succeeds at ANY depth, so `cd repo/src && tm launch` on an opted-out
+/// project would otherwise deploy `.claude`, the project hooks and the tmux
+/// cwd into `repo/src` rather than `repo` — landing tm's furniture exactly
+/// where the operator did not ask for it, which is the failure mode the
+/// opt-out exists to prevent. [`super::guided::find_git_root`] is the SAME
+/// helper the daemon-unreachable fallback's classifier uses, so both CLI
+/// entry points cannot disagree about which directory the project is. A `cwd`
+/// that is not inside a working tree (or a machine with no `git` on PATH)
+/// falls back to `cwd` itself — the pre-#4300 behaviour, never worse.
 /// Test: `provision_for_launch_opted_out_creates_no_clone_and_no_worktree`,
+/// `provision_for_launch_from_subdirectory_targets_repo_root`,
 /// `provision_for_launch_unset_creates_worktree`,
 /// `provision_for_launch_unregistered_origin_creates_worktree`.
 pub(crate) async fn provision_for_launch(
     registry_dir: &Path,
     origin_url: &str,
     base_path: &Path,
-    live_path: &Path,
+    cwd: &Path,
     session_id: &ManagedSessionId,
 ) -> anyhow::Result<ManagedWorkspace> {
+    let main_checkout = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let isolate =
         trusty_mpm::project::worktree_enabled_for_origin_at(registry_dir, origin_url).await;
     if isolate {
@@ -145,11 +167,11 @@ pub(crate) async fn provision_for_launch(
         eprintln!(
             "tm: worktree isolation is disabled for this project (#3455) — \
              launching directly in {} (no managed clone, no worktree)",
-            live_path.display()
+            main_checkout.display()
         );
     }
 
-    provision(isolate, origin_url, base_path, live_path, session_id)
+    provision(isolate, origin_url, base_path, &main_checkout, session_id)
         .await
         .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))
 }
@@ -197,10 +219,15 @@ pub(crate) async fn provision_for_fallback(
             base.display()
         );
     } else {
+        // Deliberately terse: this path ends in `launch()`, which calls
+        // `provision_for_launch` and prints the full "worktree isolation is
+        // disabled … no managed clone, no worktree" line itself. Repeating it
+        // here showed the operator the same sentence twice. What is NOT
+        // redundant is the daemon-unreachable context, which only this path
+        // knows.
         eprintln!(
-            "tm: daemon unreachable — worktree isolation is disabled for this project (#3455), \
-             so there is nothing to redirect to; launching in {} (no managed clone, no worktree)",
-            git_root.display()
+            "tm: daemon unreachable — this project opted out of worktrees (#3455), \
+             so there is nothing to redirect to."
         );
     }
 

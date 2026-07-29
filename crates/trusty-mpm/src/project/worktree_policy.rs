@@ -28,7 +28,7 @@
 //! `worktree_enabled_for_origin_honors_registered_false`,
 //! `worktree_enabled_at_reads_registry_from_disk`,
 //! `worktree_enabled_at_defaults_true_when_registry_absent`,
-//! `registry_data_dir_under_matches_daemon_layout` in `worktree_policy_tests.rs`.
+//! `registry_dir_name_is_frozen` in `worktree_policy_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -42,7 +42,7 @@ use super::registry::ProjectRegistry;
 /// make the CLI read an empty registry and silently answer `true` for every
 /// project — re-opening #4300 without any test noticing.
 /// What: `"project-registry"`.
-/// Test: `registry_data_dir_under_matches_daemon_layout`.
+/// Test: `registry_dir_name_is_frozen`.
 pub const REGISTRY_DIR_NAME: &str = "project-registry";
 
 /// Resolve the project-registry data directory under an explicit framework root.
@@ -52,7 +52,7 @@ pub const REGISTRY_DIR_NAME: &str = "project-registry";
 /// `$HOME`-derived CLI form) a thin wrapper rather than a second source of
 /// truth.
 /// What: `<framework_root>/project-registry`.
-/// Test: `registry_data_dir_under_matches_daemon_layout`.
+/// Test: `registry_dir_name_is_frozen`.
 pub fn registry_data_dir_under(framework_root: &Path) -> PathBuf {
     framework_root.join(REGISTRY_DIR_NAME)
 }
@@ -63,7 +63,7 @@ pub fn registry_data_dir_under(framework_root: &Path) -> PathBuf {
 /// the CLI process and still must honour the opt-out (#4300). They have no
 /// `DaemonState`, so they resolve the same framework root the daemon would.
 /// What: `FrameworkPaths::default().root` joined with [`REGISTRY_DIR_NAME`].
-/// Test: `registry_data_dir_under_matches_daemon_layout` pins the join; the
+/// Test: `registry_dir_name_is_frozen` pins the directory name; the
 /// `$HOME`-derived root itself is covered by `core::paths`' own tests.
 pub fn registry_data_dir() -> PathBuf {
     registry_data_dir_under(&crate::core::paths::FrameworkPaths::default().root)

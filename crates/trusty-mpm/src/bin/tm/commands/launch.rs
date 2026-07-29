@@ -169,8 +169,11 @@ pub(crate) async fn launch(
     //    #4300: `provision_for_launch` consults the per-project `worktree`
     //    opt-out (#3455) FIRST — a project registered with `worktree: false`
     //    gets neither a base clone nor a worktree here, exactly as the daemon's
-    //    `spawn_managed_on_main` gives it neither. It also owns the
-    //    uncommitted-changes notice, which only applies when there IS a clone.
+    //    `spawn_managed_on_main` gives it neither. It also resolves the repo
+    //    ROOT of `live_path` (so `tm launch` from a subdirectory of an
+    //    opted-out project deploys to the project, not the subdirectory) and
+    //    owns the uncommitted-changes notice, which only applies when there
+    //    IS a clone.
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
     let workspace = super::managed_workspace::provision_for_launch(
         &trusty_mpm::project::registry_data_dir(),

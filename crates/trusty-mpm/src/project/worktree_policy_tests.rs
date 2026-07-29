@@ -231,21 +231,36 @@ async fn worktree_enabled_at_defaults_true_on_malformed_registry() {
     );
 }
 
-/// The CLI and the daemon must derive the SAME registry directory from a
-/// framework root — a divergence here would make the CLI read an empty
-/// registry and answer `true` for every project, silently re-opening #4300.
+/// Freeze the on-disk directory name `projects.json` lives in.
+///
+/// Why: this is a COMPATIBILITY pin, not a divergence check. Renaming
+/// `project-registry` orphans every existing `~/.trusty-mpm/project-registry/
+/// projects.json` — 33 registered projects on the maintainer's machine —
+/// which would present as "every project silently forgot its settings",
+/// including its `worktree` opt-out.
+/// What it does NOT pin (stated plainly rather than implied): that the daemon
+/// and the CLI agree on the path. An earlier revision asserted
+/// `registry_data_dir_under(root) == root.join(REGISTRY_DIR_NAME)`, which is a
+/// tautology — it restates the one-line function body. Agreement is instead
+/// STRUCTURAL: `DaemonState::project_registry` and `registry_data_dir` both
+/// call `registry_data_dir_under`, so there is no second copy of the join to
+/// drift. The function is the protection; this test only guards the literal.
 /// Test: itself.
 #[test]
-fn registry_data_dir_under_matches_daemon_layout() {
-    let root = Path::new("/tmp/tm-test-framework-root/.trusty-mpm");
-    assert_eq!(
-        registry_data_dir_under(root),
-        root.join(REGISTRY_DIR_NAME),
-        "registry dir must be <framework_root>/{REGISTRY_DIR_NAME}"
-    );
+fn registry_dir_name_is_frozen() {
     assert_eq!(
         REGISTRY_DIR_NAME, "project-registry",
-        "the directory name is the daemon's on-disk layout — changing it \
-         orphans every existing projects.json"
+        "renaming this orphans every existing projects.json on disk"
+    );
+    // The literal must also be what a caller actually lands on — a path
+    // component, not a nested or absolute path that would escape the root.
+    let root = Path::new("/tmp/tm-test-framework-root/.trusty-mpm");
+    let resolved = registry_data_dir_under(root);
+    assert_eq!(
+        resolved.strip_prefix(root).ok(),
+        Some(Path::new("project-registry")),
+        "the registry dir must be a single component directly under the \
+         framework root, got {}",
+        resolved.display()
     );
 }
