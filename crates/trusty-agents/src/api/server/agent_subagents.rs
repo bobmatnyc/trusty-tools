@@ -285,6 +285,16 @@ async fn in_product_surface(
                     continue;
                 }
                 let target_tier = target.agent.tier();
+                // ADR-0024 decision 3: assistants are L0, so this comparison
+                // is no longer vacuous — the code is unchanged and its OUTPUT
+                // moved, which is the whole hazard the ADR names. For an
+                // assistant VIEWER it is still never the reason anything is
+                // refused (source and target-that-matters are both L0; the
+                // kind check below carries the peer prohibition). It DOES fire
+                // for a non-assistant viewer, which now sees assistant targets
+                // reported as tier-refused — honest, and display-only, since
+                // such a viewer never holds `delegate_to_agent` at all
+                // (`tool_registered` below is false for it).
                 let tier_blocked = target_tier == AgentTier::L0Orchestration
                     && delegator_tier != AgentTier::L0Orchestration;
                 // ADR-0024: the KIND predicate the gate now enforces, read

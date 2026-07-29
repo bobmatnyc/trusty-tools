@@ -1856,3 +1856,129 @@ mod agent_name_resolves_tests {
         );
     }
 }
+
+/// ADR-0024 decision 3, asserted against the REAL bundled roster rather than a
+/// synthetic fixture: every assistant-kind persona resolves L0, every
+/// sub-agent stays L1, and the flip grants nothing today.
+///
+/// Why: decision 3 is a claim about a POPULATION, and every prior tier test in
+/// this crate is a claim about a parser. A parser test would stay green if the
+/// roster drifted — a new assistant persona, or an existing one having its
+/// `role` retyped — which is precisely the data/code decorrelation ADR-0024's
+/// "Why this class of error recurs" section is written about. This test reads
+/// the shipped files.
+///
+/// The third assertion is the safety claim the ADR's "YOLO generalization's
+/// actual blast radius" section makes and this PR relies on: the only
+/// tier-conditioned capability that exists in code today is #4171's read-only
+/// session-state surface, `retain_tier_permitted` is DENY-ONLY (it never adds a
+/// tool), and no bundled assistant names an `L0_ONLY_SESSION_STATE_TOOLS` entry
+/// in its resolved `[tools].allow` — so the L0 flip registers three executors
+/// that every shipped persona then intersects away, and the observable
+/// capability delta is zero. If a future persona edit changes that, this test
+/// fails and the grant becomes a reviewed decision instead of a side effect.
+/// What: walks `bundled_agents_dir()` for every resolvable agent name, loads it
+/// through the real `AgentConfig::by_name` dispatch loader, and asserts the
+/// kind/tier correspondence plus the empty capability delta.
+/// Test: This function IS the test.
+#[test]
+fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    // Every resolvable bundled agent name: flat `<name>.toml` plus directory
+    // packages `<name>/agent.toml`. Deduped, because `izzie`, `cto-assistant`
+    // and `ctrl` ship BOTH forms — the duplication that makes a per-file
+    // `tier = "l0"` literal the wrong mechanism (see `AgentTier::for_kind`).
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(bundled_agents_dir()).expect("bundled agents dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        let name = if path.is_dir() {
+            if !path.join("agent.toml").exists() {
+                continue;
+            }
+            path.file_name().and_then(|n| n.to_str()).map(String::from)
+        } else if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            path.file_stem().and_then(|n| n.to_str()).map(String::from)
+        } else {
+            None
+        };
+        if let Some(name) = name
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names.sort();
+    assert!(
+        names.len() > 15,
+        "sanity: the bundled roster should be substantial, got {names:?}"
+    );
+
+    let mut assistants: Vec<String> = Vec::new();
+    for name in &names {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{name}' must resolve: {e}"));
+
+        assert_eq!(
+            cfg.agent.tier, None,
+            "'{name}' must NOT hand-declare a tier — decision 3 is derived from \
+             kind, and a literal here is the drift this design removes"
+        );
+
+        if cfg.agent.role == "assistant" {
+            assistants.push(name.clone());
+            assert_eq!(
+                cfg.agent.tier(),
+                crate::agents::AgentTier::L0Orchestration,
+                "'{name}' is assistant-kind and must resolve L0 (ADR-0024 decision 3)"
+            );
+            // The zero-delta claim: nothing this persona is allowed to call is
+            // gated on L0, so becoming L0 hands it no new tool.
+            if let Some(allow) = cfg.tools.allow.as_deref() {
+                for granted in allow {
+                    assert!(
+                        !crate::tools::session_state::is_l0_only_session_state_tool(granted),
+                        "'{name}' names the L0-gated tool '{granted}' in [tools].allow — \
+                         becoming L0 would GRANT it, which is a capability change this \
+                         PR does not carry. Review it deliberately."
+                    );
+                }
+            }
+        } else {
+            assert_eq!(
+                cfg.agent.tier(),
+                crate::agents::AgentTier::L1Standard,
+                "'{name}' (role '{}') is a sub-agent and must stay L1",
+                cfg.agent.role
+            );
+        }
+    }
+
+    // The roster the owner named, verified rather than assumed. `researcher`
+    // and `writing-assistant` are NOT in it: `research-agent` declares
+    // `role = "researcher"` (a sub-agent role) and no `writing-assistant`
+    // exists anywhere in the roster.
+    assistants.sort();
+    assert_eq!(
+        assistants,
+        vec![
+            "assistant".to_string(),
+            "cto-assistant".to_string(),
+            "ctrl".to_string(),
+            "izzie".to_string(),
+            "personal-assistant".to_string(),
+        ],
+        "the assistant-kind population is fixed by role, not by a guessed \
+         filename list; a new one must be a reviewed addition"
+    );
+}

@@ -1,7 +1,13 @@
 # 0024. Assistants Are Level-0 Delegators; Sub-Agents Are In-Process, Single-Edge Leaves That Never Delegate
 
-- **Status:** Proposed
-- **Date:** 2026-07-28
+- **Status:** Proposed — **partially ratified and partially implemented.** The
+  L0-assistant clause (Context §1 item 3 / Decision clause 2, "every assistant
+  is tier L0") and its kind-primary corollary (Decision clause 6) are RATIFIED
+  by the owner (2026-07-28) and IMPLEMENTED. Every other clause remains
+  Proposed. See "Implementation status" below for the clause-by-clause table —
+  read that, not this one-line summary, before assuming any clause has landed.
+- **Date:** 2026-07-28 (ratification of the L0-assistant clause recorded
+  2026-07-28)
 - **Scope:** crate `trusty-agents` (the `delegate_to_agent` / `dispatch_task` boundary; the L0/L1 tier model, #4167/#4200; touches the `trusty-code` cross-product bridge target and the Sub-agents API/pane, `#4029`/`#4211`)
 - **Reversibility Cost:** High — reverses/re-scopes shipped, tested, owner-directed machinery from epic #4021 (#4026/#4027/#4028/#4211, merged within 48 hours of this ADR), INVERTS the population assignment of the L0/L1 tier model merged the SAME DAY as this decision (PR #4200, squash `ada4d351`), and requires new, currently nonexistent machinery (an editable sub-agent whitelist, an assistant-to-assistant messaging primitive, and a tool-call-counted skill/delegate router)
 - **Decision Drivers:** Product framing clarity (the Sub-agents pane could not honestly present a name that means two different things), the owner's rejection of a UI-only fix, the owner's explicit generalization of the YOLO risk posture to every assistant, a documentation gap (DOC-57 does not yet cover Sub-agents at all, #4182), the owner's own PM/trusty-mpm prior art as an explicit analogy with an owner-named limit, and — underlying all of the above — the owner's virtual-twin authority principle (see "Rationale" below): each assistant must take authority over its own actions, and that authority is not transferable between assistants
@@ -124,6 +130,11 @@ ADR):
   `.trusty-agents/agents/*.toml`; cross-checked directly against the live
   Sub-agents pane, which — per the routing coordinator — "renders tier l1"
   for every agent, `cto-assistant` included.
+  **NOW SUPERSEDED IN CODE** (see "Implementation status"): no bundled agent
+  declares `tier = "l0"` STILL, and none needs to — `AgentInfo::tier()` derives
+  the tier from KIND, so the assistant population resolves L0 with the on-disk
+  files unchanged. Read this bullet as the record of what #4200 shipped, not as
+  current behavior; the pane now renders `tier l0` for `cto-assistant`.
 - The one-directional gate (`delegate.rs:361-438`) blocks exactly one
   direction: `target_tier == L0Orchestration && delegator_tier !=
   L0Orchestration`. Its purpose, as shipped, was to stop an untrusted,
@@ -302,6 +313,130 @@ This ADR does not yet decide, and defers to the owner (see "Consequences"
 and "Conflicts and open questions"), the mechanics each clause raises but
 does not itself answer — enumerated in the Consequences sections below,
 each ending in an explicit recommendation marked owner-ratify.
+
+## Implementation status
+
+**Numbering warning, because this document has two.** Context §1 numbers the
+owner's five verbatim quotes in the order given; the Decision section above
+renumbers the model into six normative clauses. They do not line up: the
+L0-assistant clause is Context §1 item **3** and Decision clause **2**; the
+editable whitelist is Context §1 item **2** and Decision clause **4**. This
+table is keyed by CONTENT so a reader cannot pick the wrong "decision 3".
+
+| Clause (by content) | Ctx §1 | Decision | Ratified | Implemented |
+|---|---|---|---|---|
+| Sub-agents are always in-process | 1 | 1 | yes | yes (pre-existing — see "Is 'sub-agents never delegate' enforced") |
+| **Every assistant is tier L0** | **3** | **2** | **yes, 2026-07-28** | **yes — this PR** |
+| Sub-agent = tier L1, single-edge leaf | 4 | 3 | yes | yes (L1 is the derived default for every non-assistant role) |
+| Reachable sub-agent set is an EDITABLE CONFIG WHITELIST | 2 | 4 | **NO** | **NO** — not in this PR, not designed; the two owner-ratify questions it raises ("The absent-whitelist default is a breaking change", "'Editable' means the GUI starts writing agent config") are both still open |
+| 3-tool-call skill-vs-delegate routing | (5th quote) | 5 | yes | **NO** — the a-priori-vs-reactive question below is unanswered |
+| Delegation authority is governed by KIND, not tier order | — | 6 | yes | yes (PR #4240 — `agents::delegation`, and the `execute()` choke point) |
+| Assistant-to-assistant COMMUNICATION primitive | 1 | — | yes | **NO** — nothing implements it; see "'Communicate' has to be built, not renamed" |
+
+### What the L0-assistant clause's implementation actually did
+
+**Tier is now DERIVED FROM KIND, not declared per file.** `AgentInfo::tier()`
+resolves an explicit, non-blank `[agent].tier` declaration first (unchanged,
+still fail-closed: an unrecognized value narrows to `L1Standard` and can never
+elevate), and otherwise derives from `role` via the new `AgentTier::for_kind` —
+`L0Orchestration` for the assistant kind, `L1Standard` for everything else.
+**Zero agent TOMLs were edited.** The alternative — a `tier = "l0"` literal in
+each bundled assistant persona — was rejected because there is no single file
+per persona to put it in: `izzie`, `cto-assistant` and `ctrl` each ship BOTH a
+directory package and a flat `extends`-shadow-fallback TOML, so the literal
+would have to be written six-plus times and stay in sync forever, and a future
+assistant persona that omitted it would silently resolve L1 — reintroducing,
+in the data, exactly the decorrelation the "Why this class of error recurs"
+section above is written about.
+
+This NARROWS #4168's "never inferred from `role`" rule rather than discarding
+it. The property that rule protected is preserved: an operator adding a new
+SPECIALIST role still lands on `L1Standard`, because the derivation recognizes
+one value and nothing else. And `role == "assistant"` was already the most
+privileged non-orchestrator role in the crate — it is the ONLY role
+`build_registry_for_agent` routes into `build_assistant_tier_registry`, the one
+branch that registers `delegate_to_agent` and the git tool surface at all — so
+deriving L0 from it restates a trust decision the codebase already makes rather
+than opening a new escalation path. An explicit declaration still wins in both
+directions, so a genuinely-L0 non-assistant persona can be pinned, and a single
+assistant can be deliberately narrowed back to L1; both are declared intent,
+never an accident of omission.
+
+**The assistant-kind population, verified against the roster rather than
+guessed:** `assistant`, `cto-assistant`, `ctrl`, `izzie`, `personal-assistant`
+— every agent whose `[agent].role` is `assistant`. Notably NOT `research-agent`
+(it declares `role = "researcher"`, a sub-agent role) and there is no
+`writing-assistant` in the roster at all; both appear on informal lists of
+"the assistants" and both are wrong. `agents::tests::loading::
+bundled_assistant_personas_resolve_l0_and_gain_nothing` walks the shipped
+roster and pins this set, so a new assistant is a reviewed addition.
+
+### The measured blast radius of the flip
+
+Enumerated across every `AgentTier` / `tier()` / `tier_blocked` / `wire_label`
+consumer in the workspace, and confirmed by the test suite:
+
+- **Delegation enforcement (`tools::delegate::execute`): no new refusal on any
+  shipped path.** The kind gate (Decision clause 6, PR #4240) already refused
+  assistant→assistant before the flip and still does, and it is checked FIRST,
+  so the peer message is unchanged. Assistant(L0)→sub-agent(L1) is permitted by
+  both gates before and after. Every other delegator that reaches the gate is
+  already handed `L0Orchestration` explicitly (`ctrl_delegate_posture` and
+  `persona_gate`'s `role != "assistant"` branches), and `pm_mode` passes no
+  `config_dirs` so it runs no gate at all. **Decision clause 6 was load-bearing
+  here: had refusal still keyed on tier order, this flip would have silently
+  opened the peer edge.** Verified, not assumed.
+- **One enforcement-point behavior change, fail-CLOSED and unreachable from any
+  shipped construction site:** a caller that opts into the role allowlist but
+  declares NO delegator identity is treated as `L1Standard`
+  (`delegator_tier.unwrap_or_default()`, #4169 constraint 1) and is now refused
+  when the target is an assistant, because assistants are L0 targets. All three
+  assistant-tier construction sites call `with_delegator`, so this shape exists
+  only in tests — pinned by
+  `delegate_without_declared_identity_is_tier_blocked_from_an_assistant`.
+- **Capability grants: zero observable delta.** The only tier-conditioned
+  capability in shipped code is #4171's read-only session-state surface
+  (`session_state_list`/`_status`/`_snapshot`); #4170/#4172/#4173 are still
+  open, so nothing else is tier-gated. The flip REGISTERS those three executors
+  into each assistant's registry, but `retain_tier_permitted` is deny-only (it
+  never adds a tool) and reachability still requires the persona's own
+  `[tools].allow` to name the tool: no bundled assistant names any
+  `L0_ONLY_SESSION_STATE_TOOLS` entry, none declares a `[skills]` section, and
+  none declares a glob broad enough to match one (`granola_*` is the only glob
+  in the entire assistant roster). `ctrl` declares no `[tools]` section at all,
+  and both of its dispatch paths fail closed on that — `scope_assistant_allowed
+  _tools` returns an empty allow-list, and the persona-chat path builds an empty
+  registry — so it gains nothing either. Pinned mechanically by
+  `bundled_assistant_personas_resolve_l0_and_gain_nothing`, which fails if a
+  future persona edit ever makes the grant real.
+- **The Sub-agents pane (`in_product_surface`) after the change:** an assistant
+  viewing it now reads `delegator_tier: "l0"` (the label the owner reported as
+  wrong), peer assistants render `tier l0` and stay `reachable: false` with the
+  unchanged KIND reason, and sub-agents render `tier l1` and stay reachable.
+  `tier_blocked` is no longer always false — but for an assistant viewer it is
+  still never the reason anything is refused, exactly as Decision clause 6
+  predicate 3 says (redundant-as-designed). It DOES become true in one case: a
+  NON-assistant viewer (a worker role, or `pm`) is L1 and now sees assistant
+  targets reported as tier-refused where they previously read as reachable.
+  That is display-only and honest — the pane already stamps `tool_registered:
+  false` for those viewers, since only `role == "assistant"` ever holds
+  `delegate_to_agent` — but it is a real change to the payload and is pinned by
+  `subagents_route_reports_tool_not_registered_for_a_worker_role`. One known
+  imprecision it exposes, pre-existing and deliberately NOT fixed here: the
+  pane reads `pm`'s declared tier (L1) while `ctrl_delegate_posture` hands
+  `pm`-as-orchestrator `L0Orchestration` at dispatch, so the pane under-reports
+  `pm`'s reach. `pm` sits outside this ADR's graph by predicate 1's scope
+  caveat; folding it in is separate work.
+
+### Explicitly NOT in this implementation
+
+The editable config whitelist (Context §1 item 2 / Decision clause 4) is **not
+ratified and not built**. Neither is the assistant-to-assistant communication
+primitive, nor the 3-tool-call routing rule. The `ASSISTANT_ALLOWED_DELEGATE
+_ROLES` constant still contains `assistant` and is unchanged — the peer edge is
+refused by the kind gate at `execute()`, not by removing that entry, which the
+"`ASSISTANT_TIER_ROLE` in the allowlist" consequence below explains must not
+happen until the lateral communication mechanism exists.
 
 ## Rationale: The Virtual-Twin Authority Principle
 
@@ -827,7 +962,19 @@ every assistant persona's declared `tier` to `l0` grants, in practice, only
 restriction (delegation into an L0 target) that these personas already
 happened to satisfy trivially once they are themselves L0. It does NOT (yet)
 grant shell execution, GitHub PR/CI access, or cross-project reach, because
-those grants are unbuilt. The blast radius the owner ratified is real but
+those grants are unbuilt.
+
+**Measured, post-implementation: the delta is not merely "narrow", it is
+ZERO for the shipped roster.** `retain_tier_permitted` is deny-only and never
+adds a tool, so becoming L0 only makes the three executors REGISTRABLE — a
+persona still has to name one in its own `[tools].allow` to reach it, and none
+does. No bundled assistant declares any `L0_ONLY_SESSION_STATE_TOOLS` entry, no
+`[skills]` section, and no glob wide enough to match one; `ctrl` declares no
+`[tools]` section at all and both of its dispatch paths fail closed on that.
+`bundled_assistant_personas_resolve_l0_and_gain_nothing` asserts this against
+the real files, so the day a persona edit makes the grant real, it fails.
+
+The blast radius the owner ratified is real but
 currently small; it will grow as #4170/#4172/#4173 land, and each of those
 follow-ups should be read, from this point forward, as extending a grant to
 the ENTIRE assistant population rather than to a single rare persona —
@@ -850,7 +997,16 @@ already cover their specifics.
   hours earlier in the day is being redefined, not merely extended, by the
   same day's later decisions. See Context §3 and the "one-directional gate"
   consequence above for the concrete mechanism this leaves inert/vacuous
-  until patched.
+  until patched. **RESOLVED as of the implementation**: the owner ratified
+  the inversion on 2026-07-28 and it has landed. The tier gate is now
+  redundant-as-designed for assistant sources (predicate 3), the peer
+  prohibition is carried by the kind gate, and #4200's own tests are intact
+  because its fail-closed DECLARATION contract is unchanged — only the
+  meaning of an ABSENT declaration moved. What remains genuinely open is
+  narrower and is recorded above: `pm`-as-orchestrator's tier is reported
+  from its declared value on the pane while dispatch hands it
+  `L0Orchestration`, an imprecision this ADR's predicate-1 scope caveat puts
+  outside the model rather than fixes.
 - **DOC-41 §5.5's propose-not-authorize guarantee is not cross-product-
   specific** (retained from the first draft, unchanged) — the in-process
   path satisfies it via manifest-level `user_authority` non-inheritance;
