@@ -526,6 +526,31 @@ fn managed_session_summary_deserializes_stale_assets_flag() {
     );
 }
 
+/// #4322: `stale_assets_unchecked` must round-trip when present, and default
+/// `false` when omitted — the polarity that matters for wire compatibility.
+/// An OLDER daemon probed every meaningful state, so its (field-less)
+/// responses ARE authoritative verdicts; defaulting to `false` is what keeps a
+/// new client from painting `[assets ?]` across every row it serves.
+#[test]
+fn managed_session_summary_defaults_stale_assets_unchecked_false() {
+    let with_flag = serde_json::json!({
+        "id": "x", "name": "n", "state": "stopped", "stale_assets_unchecked": true
+    });
+    let s: ManagedSessionSummary = serde_json::from_value(with_flag).unwrap();
+    assert!(
+        s.stale_assets_unchecked,
+        "stale_assets_unchecked: true must deserialize to true"
+    );
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert!(
+        !s.stale_assets_unchecked,
+        "an older daemon omitting `stale_assets_unchecked` probed everything — \
+         its verdicts must stay authoritative, not be repainted as unknown"
+    );
+}
+
 #[test]
 fn managed_list_response_deserializes() {
     let json = serde_json::json!({

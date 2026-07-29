@@ -45,11 +45,11 @@ fn truncate_clips_and_appends_ellipsis() {
 #[test]
 fn format_state_column_appends_dead_marker() {
     assert_eq!(
-        format_state_column("stopped", true, false),
+        format_state_column("stopped", true, false, false),
         "stopped [dead]"
     );
     assert_eq!(
-        format_state_column("errored", true, false),
+        format_state_column("errored", true, false, false),
         "errored [dead]"
     );
 }
@@ -59,13 +59,35 @@ fn format_state_column_appends_dead_marker() {
 #[test]
 fn format_state_column_appends_stale_assets_marker() {
     assert_eq!(
-        format_state_column("active", false, true),
+        format_state_column("active", false, true, false),
         "active [stale-assets]"
     );
     assert_eq!(
-        format_state_column("stopped", true, true),
+        format_state_column("stopped", true, true, false),
         "stopped [dead] [stale-assets]",
         "both markers must be able to appear together"
+    );
+}
+
+/// #4322: a row the daemon did NOT probe must say so — `[assets ?]`, not
+/// silence — so an operator cannot mistake a skipped check for a clean bill of
+/// health. It composes with `[dead]`, and a real `stale` verdict always wins
+/// over "undetermined" if both flags somehow arrive set.
+#[test]
+fn format_state_column_appends_unchecked_assets_marker() {
+    assert_eq!(
+        format_state_column("stopped", false, false, true),
+        "stopped [assets ?]"
+    );
+    assert_eq!(
+        format_state_column("stopped", true, false, true),
+        "stopped [dead] [assets ?]",
+        "the dead marker and the undetermined-assets marker must compose"
+    );
+    assert_eq!(
+        format_state_column("stopped", false, true, true),
+        "stopped [stale-assets]",
+        "a real stale verdict must win over 'undetermined' — never both"
     );
 }
 
@@ -73,10 +95,13 @@ fn format_state_column_appends_stale_assets_marker() {
 /// unchanged — no regression for the common case.
 #[test]
 fn format_state_column_leaves_healthy_state_unchanged() {
-    assert_eq!(format_state_column("active", false, false), "active");
-    assert_eq!(format_state_column("stopped", false, false), "stopped");
+    assert_eq!(format_state_column("active", false, false, false), "active");
     assert_eq!(
-        format_state_column("provisioning", false, false),
+        format_state_column("stopped", false, false, false),
+        "stopped"
+    );
+    assert_eq!(
+        format_state_column("provisioning", false, false, false),
         "provisioning"
     );
 }
@@ -93,10 +118,13 @@ fn format_tombstone_row_shows_slot_and_placeholder() {
 fn format_state_column_renders_deleted_marker() {
     // A soft-deleted record renders the `--deleted--` marker (#2012) instead of
     // the raw `deleted` state, so the master list REFLECTS the deletion.
-    assert_eq!(format_state_column("deleted", false, false), "--deleted--");
+    assert_eq!(
+        format_state_column("deleted", false, false, false),
+        "--deleted--"
+    );
     // Markers still compose on top of the deleted base.
     assert_eq!(
-        format_state_column("deleted", true, false),
+        format_state_column("deleted", true, false, false),
         "--deleted-- [dead]"
     );
 }
