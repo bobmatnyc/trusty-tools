@@ -375,11 +375,15 @@ fn probe_staleness_in_list(state: &ManagedSessionState) -> bool {
 /// the catalog compose are filesystem-bound, so this function is
 /// synchronous/blocking.
 /// What: returns one [`StalenessInput`] per record, in input order, each
-/// carrying a shared `Arc` handle to its catalog hashes.
-/// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
+/// carrying a shared `Arc` handle to its catalog hashes. `pub(super)` only so
+/// the invariant test below can assert the SHARING structurally.
+/// Test: `staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc`
+/// (the anti-regression pin: same source pair ⇒ pointer-equal `Arc`, so no
+/// second compute exists for a spawned task to perform),
+/// `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
 /// `checked_summaries_flags_stale_assets_only_for_relevant_states` in
 /// `super::tests`.
-fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInput> {
+pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInput> {
     let mut cache: HashMap<(PathBuf, PathBuf), Arc<CatalogHashes>> = HashMap::new();
     let mut out = Vec::with_capacity(records.len());
     for record in records {
@@ -445,6 +449,13 @@ async fn stale_assets_for_many(records: Vec<SessionRecord>) -> HashMap<ManagedSe
         .unwrap_or_default();
     let mut probes = tokio::task::JoinSet::new();
     for (id, fw, plan, catalog) in inputs {
+        // INVARIANT: a spawned task receives an ALREADY-COMPUTED
+        // `Arc<CatalogHashes>` and must never call `CatalogHashes::compute`
+        // itself. Moving the catalog work in here would give every session its
+        // own recompose — the exact N-times recompose #2444's review removed,
+        // traded back for concurrency. Only the cheap deployed-side half (this
+        // session's own manifest + on-disk file reads, which is where the
+        // 35.7 MiB actually goes) belongs in the fan-out.
         probes.spawn_blocking(move || {
             (
                 id,

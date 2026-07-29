@@ -837,6 +837,43 @@ async fn checked_summaries_does_not_probe_stopped_sessions() {
     );
 }
 
+/// Issue #4322 anti-regression pin: parallelizing the staleness fan-out must
+/// NOT reinstate the per-session catalog recompose #2444's review removed.
+///
+/// The guard is structural rather than a call counter: `staleness_inputs`
+/// resolves the SHARED catalog half sequentially and hands each session an
+/// `Arc` to it, and the spawned tasks only ever borrow that `Arc`. So proving
+/// that every session resolving the same `(agent_source, skill_source)` pair
+/// receives a POINTER-EQUAL handle proves there is exactly one compute per
+/// group — and that no second one exists for a spawned task to perform. Move
+/// `CatalogHashes::compute` inside the fan-out and this fails immediately.
+#[tokio::test]
+#[serial_test::serial]
+async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
+    let (home, _guard) = fake_home();
+    let records: Vec<SessionRecord> = (0..3)
+        .map(|i| {
+            let ws = home.path().join(format!("shared-catalog-{i}"));
+            std::fs::create_dir_all(&ws).unwrap();
+            let mut r = make_record(None);
+            r.state = ManagedSessionState::Active;
+            r.workspace_path = Some(ws);
+            r
+        })
+        .collect();
+
+    let inputs = super::summary::staleness_inputs(records);
+
+    assert_eq!(inputs.len(), 3, "one input per record, in input order");
+    assert!(
+        std::sync::Arc::ptr_eq(&inputs[0].3, &inputs[1].3)
+            && std::sync::Arc::ptr_eq(&inputs[0].3, &inputs[2].3),
+        "every session resolving the SAME catalog source pair must share ONE \
+         computed CatalogHashes — a distinct Arc per session means the catalog \
+         was recomposed per session (#2444 regression)"
+    );
+}
+
 /// Issue #4322 correctness gate: skipping the probe on the LIST path must not
 /// delete the SIGNAL. The single-session fetch (`GET …/managed/{id}`, which
 /// `tm session resume` reads — the exact moment a stopped session's drift

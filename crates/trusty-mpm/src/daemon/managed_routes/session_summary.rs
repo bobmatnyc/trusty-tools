@@ -159,8 +159,11 @@ pub struct SessionSummary {
     /// that already reads this endpoint (`tm sessions ls`, the picker) flag a
     /// session that needs `tm sessions sync-assets` run against it. Always
     /// `false` for `provisioning`/`decommissioned` sessions — see
-    /// [`crate::core::session_assets::session_assets_stale`]'s gate in
-    /// `checked_summaries` for exactly which states are probed.
+    /// `summary::staleness_meaningful_for` for exactly which states are worth
+    /// probing — and, on the FLEET LIST path only, also `false` for `stopped`
+    /// sessions, which that path no longer probes for latency (#4322). Such a
+    /// row sets [`Self::stale_assets_unchecked`], so a `false` here means "not
+    /// determined", NOT "fresh".
     /// What: computed by `checked_summaries`/`record_to_summary_checked` via
     /// [`crate::core::session_assets::session_assets_stale`]; every other
     /// handler that builds a `SessionSummary` via `record_to_summary` leaves it
