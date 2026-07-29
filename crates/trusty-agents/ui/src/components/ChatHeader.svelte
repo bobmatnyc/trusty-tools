@@ -38,7 +38,7 @@
    * Assistants section, confirm the title updates.
    */
   import { onMount } from 'svelte';
-  import { ChevronDown, Settings2, Plus, Bot } from 'lucide-svelte';
+  import { ChevronDown, Settings2, Plus, Bot, Network } from 'lucide-svelte';
   import {
     activeAgentId,
     agentRoster,
@@ -52,9 +52,17 @@
   import { CONCIERGE_AGENT_ID, CONCIERGE_LABEL, rosterDisplayName } from '../lib/roster';
   import { configPaneOpen, openConfigPane, requestExitConfigPane } from '../stores/configPane';
   import AddAgentForm from './AddAgentForm.svelte';
+  import KnowledgeGraphBrowser from './KnowledgeGraphBrowser.svelte';
 
   let open = false;
   let addingAgent = false;
+  // #4290: local open/closed bit for the Knowledge Graph slide-over. Kept
+  // local (not a module-level store like `configPaneOpen`) because — unlike
+  // the config takeover, which another surface (App's Chat→Events switch)
+  // must be able to query — nothing outside this component needs to know
+  // whether the panel is open, and there is nothing unsaved to guard on exit
+  // (read-only v1).
+  let kgOpen = false;
 
   $: isConcierge = $activeAgentId === null;
   $: title = isConcierge ? CONCIERGE_LABEL : rosterDisplayName($agentRoster, $activeAgentId);
@@ -213,13 +221,34 @@
     {/if}
   </div>
 
-  <button
-    type="button"
-    class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
-    aria-label="Configure agent"
-    aria-pressed={$configPaneOpen}
-    on:click={handleGear}
-  >
-    <Settings2 class="h-4 w-4" />
-  </button>
+  <span class="ml-auto flex items-center gap-1">
+    <!-- #4290: hidden entirely for Concierge (owner decision 4) — it binds no
+         `agent.toml`/`[[stores]]`, so there is no palace for the button to
+         open a browser onto. -->
+    {#if !isConcierge}
+      <button
+        type="button"
+        class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
+        aria-label="Knowledge Graph"
+        title="Knowledge Graph"
+        on:click={() => (kgOpen = true)}
+      >
+        <Network class="h-4 w-4" />
+      </button>
+    {/if}
+
+    <button
+      type="button"
+      class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
+      aria-label="Configure agent"
+      aria-pressed={$configPaneOpen}
+      on:click={handleGear}
+    >
+      <Settings2 class="h-4 w-4" />
+    </button>
+  </span>
 </div>
+
+{#if kgOpen && $activeAgentId}
+  <KnowledgeGraphBrowser agentName={$activeAgentId} onClose={() => (kgOpen = false)} />
+{/if}

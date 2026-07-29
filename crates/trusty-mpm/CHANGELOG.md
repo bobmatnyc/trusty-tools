@@ -7,6 +7,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Performance
+
+- `tm ls` no longer re-reads the whole fleet's deployed agent/skill trees on
+  every invocation ([#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)).
+  Two changes, both in `daemon::managed_routes::summary`:
+  - **`Stopped` sessions are no longer asset-staleness-probed on the LIST
+    path.** The probe costs ~95 `read_to_string` calls against a session's own
+    `.claude/{agents,skills}` tree, uncached, per invocation. On a measured
+    32-session fleet, 20 of those sessions were stopped and idle for days —
+    56% of the I/O — for a marker that is only actionable at resume. The
+    single-session `GET …/managed/{id}` path (what `tm session resume` reads)
+    still probes every meaningful state, so the signal is unchanged where it
+    is acted on. Measured on that fleet: 3,040 → 1,140 read attempts and
+    35.7 MiB → 15.0 MiB per listing.
+  - **The remaining per-session comparisons now run concurrently** on the
+    blocking pool via `JoinSet::spawn_blocking`, mirroring the `unresumable`
+    fan-out already used alongside them. The shared `CatalogHashes` compute
+    (#2444) stays a single sequential step — fanning it out would reinstate
+    the per-session recompose it exists to prevent.
+
 ### Added
 
 - **`CLAUDE.md` named-section instruction overrides — reader** (epic
@@ -63,6 +83,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   byte-unchanged.
 
 ### Changed
+
+- `tm ls` STATE column: a row the daemon did not probe now renders
+  `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
+  never be misread as "assets fresh"
+  ([#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)). Backed by a
+  new additive wire field, `SessionSummary::stale_assets_unchecked`, whose
+  `false` default keeps an older daemon's (authoritative) verdicts rendering
+  exactly as before.
 
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
   set is now documented as DELIBERATELY unfiltered by session state, and pinned
@@ -240,6 +268,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `inplace_exec_command_forwards_every_arg_in_order`,
   `inplace_exec_command_scrubs_api_key_and_sets_auth_env`, and
   `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
+- Daemon boot reconciliation no longer resurrects soft-deleted sessions.
+  `reconcile_on_boot` hand-rolled a
+  `matches!(record.state, ManagedSessionState::Decommissioned)` check instead
+  of asking the record's own `is_terminal()`, so every `Deleted` record (no
+  live tmux session, by definition) fell through to the "gone" branch and was
+  marked `Stopped` — resurrected — on every daemon restart. `is_terminal()` is
+  now the single source of truth, covering both `Decommissioned` and
+  `Deleted`.
+- `decommission` (and therefore `tm sessions prune --state stopped`, which
+  calls it per matching record) no longer force-deletes a dirty in-project
+  worktree. Removing an SM-created `.worktrees/<id>` ran `git worktree remove
+  --force` (falling back to `fs::remove_dir_all`) with no dirty check at all —
+  a live data-loss path for uncommitted/untracked work. This reuses the same
+  `worktree_safety::inspect_dirt` check the orphan-worktree sweep uses (the
+  #4091 dirty-worktree guard): a dirty candidate is now refused and reported,
+  and the session record still tombstones to `Decommissioned` so the skip is
+  never silent. Two follow-ups close the gap between that refusal and where
+  an operator would actually see it: (1) the tombstone no longer nulls
+  `workspace_path` when nothing was removed — every "skip removal" branch in
+  `decommission` leaves real content in place, and blanking the pointer would
+  strand it with nothing but a transient log line as a trail back to it; (2)
+  `tm sessions prune --state stopped` (and the underlying `PruneAction`) now
+  has a distinct `decommissioned_worktree_retained` outcome, with the
+  retained path echoed back, instead of printing the same `decommissioned`
+  line whether or not the worktree was actually deleted.
+- Bare `tm` no longer needs two runs after Claude Code backgrounds
+  ([#4335](https://github.com/bobmatnyc/trusty-tools/issues/4335)).
+  `nested_session_guard` fetched the managed-session list with a 2-second
+  timeout and a bare `.ok()?`. On a cold daemon the per-session `stale_assets`
+  pass over a large fleet exceeded that bound, the request was cancelled, and
+  the guard no-opped with nothing in any log to say it had not run — so bare
+  `tm` after an `/exit` (which BACKGROUNDS, never firing `SessionEnd`, leaving
+  the record `active` so the stopped-only gate correctly skips) fell through to
+  the picker and dead-ended on the #2678 switch-client refusal. A second run,
+  against a now-warm daemon, worked. Three changes, smallest lever first:
+  the managed-list endpoint takes `?slim=true` (folds into
+  [#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)) to skip the
+  `stale_assets` probe for callers that never read the flag — the guard reads
+  name/pane_id/state/id and was paying for a filesystem-bound catalog compose
+  it discards; the guard's timeout goes 2s → 8s, still bounding a hung daemon
+  while clearing a cold-start listing; and the error arm is logged at debug via
+  the new `guard_managed_sessions`. Absent or malformed `slim` keeps the full
+  probe, so no existing client changes shape. The stopped-only gate in
+  `plan_inplace` is deliberately unchanged.
 - The per-project worktree opt-out is no longer silently conditional on the
   daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
   `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),

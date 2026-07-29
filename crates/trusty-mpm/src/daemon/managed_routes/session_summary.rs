@@ -159,8 +159,11 @@ pub struct SessionSummary {
     /// that already reads this endpoint (`tm sessions ls`, the picker) flag a
     /// session that needs `tm sessions sync-assets` run against it. Always
     /// `false` for `provisioning`/`decommissioned` sessions — see
-    /// [`crate::core::session_assets::session_assets_stale`]'s gate in
-    /// `checked_summaries` for exactly which states are probed.
+    /// `summary::staleness_meaningful_for` for exactly which states are worth
+    /// probing — and, on the FLEET LIST path only, also `false` for `stopped`
+    /// sessions, which that path no longer probes for latency (#4322). Such a
+    /// row sets [`Self::stale_assets_unchecked`], so a `false` here means "not
+    /// determined", NOT "fresh".
     /// What: computed by `checked_summaries`/`record_to_summary_checked` via
     /// [`crate::core::session_assets::session_assets_stale`]; every other
     /// handler that builds a `SessionSummary` via `record_to_summary` leaves it
@@ -169,6 +172,31 @@ pub struct SessionSummary {
     /// `super::tests`.
     #[serde(default)]
     pub stale_assets: bool,
+    /// True when this response did NOT determine `stale_assets` for a session
+    /// whose assets it WOULD be meaningful to check (issue #4322).
+    ///
+    /// Why: the fleet LIST path stopped probing `Stopped` sessions — their
+    /// per-session filesystem comparison (~95 reads each) dominated cold `tm
+    /// ls` latency while telling the operator nothing they could not learn at
+    /// resume time. But a bare `stale_assets: false` on those rows would be a
+    /// LIE by omission: it is indistinguishable from a genuine "checked, and
+    /// fresh" verdict, and an operator (or a future consumer) reading absence
+    /// as freshness would be wrong. This flag makes "we did not look" an
+    /// explicit, first-class third state on the wire so the CLI can render
+    /// `[assets ?]` rather than silence. Polarity is chosen so the DEFAULT
+    /// (`false`) means "this verdict is authoritative" — an OLDER daemon that
+    /// omits the field probed everything, so `#[serde(default)]` deserializes
+    /// its responses to exactly the right answer.
+    /// What: `true` only on the LIST path, only for `Stopped` records (states
+    /// where `summary::staleness_meaningful_for` holds but
+    /// `summary::probe_staleness_in_list` does not). Always `false` for
+    /// `Provisioning`/`Decommissioned`/tombstone rows — nothing to check
+    /// there — and always `false` on the single-session GET, which still
+    /// probes every meaningful state.
+    /// Test: `checked_summaries_does_not_probe_stopped_sessions` in
+    /// `super::tests`.
+    #[serde(default)]
+    pub stale_assets_unchecked: bool,
     /// True when a tmux client is currently ATTACHED to this session's tmux
     /// session (a live probe reconciled against real tmux, not the persisted
     /// `state`).

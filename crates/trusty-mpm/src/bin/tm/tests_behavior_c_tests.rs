@@ -28,10 +28,10 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     CwdProject, NestedFallbackAction, NonGitFallbackPlan, classify_cwd_project, cwd_owns_git_entry,
     derive_project, fallback_protected, format_project_context_row, github_host,
-    inplace_self_relaunch_hint, is_github_remote, ls_tree_reports_tracked_dir,
-    managed_pane_settle_pending_message, nested_fallback_action, nested_guard_notice,
-    non_github_refusal_message, plan_non_git_fallback, print_non_tty_hint, print_project_context,
-    tty_gate, untracked_ancestor_message,
+    guard_managed_sessions, inplace_self_relaunch_hint, is_github_remote,
+    ls_tree_reports_tracked_dir, managed_pane_settle_pending_message, nested_fallback_action,
+    nested_guard_notice, non_github_refusal_message, plan_non_git_fallback, print_non_tty_hint,
+    print_project_context, tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
@@ -1074,6 +1074,7 @@ fn make_session(
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,
@@ -2374,4 +2375,96 @@ fn inplace_self_relaunch_hint_never_suggests_bare_claude() {
             "hint must always point at the managed resume; sid={sid:?}: {hint:?}"
         );
     }
+}
+
+// ── #4335: the nested-session guard's fail-open arm ───────────────────────
+
+/// Serve one canned HTTP response on an ephemeral port, then stop.
+///
+/// Why: `guard_managed_sessions` is a thin I/O wrapper whose ONE interesting
+/// behaviour — what it does when the managed-list call fails — cannot be
+/// exercised without a server that fails. A real socket keeps reqwest's own
+/// status/decode handling in the loop, which is where the failure modes #4335
+/// cares about (5xx, unreachable, malformed body) actually surface.
+/// What: binds `127.0.0.1:0`, accepts exactly one connection, drains the
+/// request, writes `response`, and returns the base URL.
+/// Test: used by the `guard_managed_sessions_*` cases below.
+async fn serve_once(response: &'static str) -> String {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(response.as_bytes()).await;
+            let _ = sock.flush().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn guard_managed_sessions_returns_none_when_the_list_call_errors() {
+    // #4335 core regression: a failing managed-list call must fail OPEN
+    // (None → the guard no-ops → bare `tm` still proceeds) rather than
+    // propagating an error or panicking. The behaviour is unchanged from the
+    // old `.ok()?`; what changed is that it is now LOGGED, and that this arm
+    // has a test at all — the absence of one is why the guard could stop
+    // guarding on a cold daemon without anyone noticing.
+    let url = serve_once("HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n").await;
+    let client = reqwest::Client::new();
+
+    let result = guard_managed_sessions(&client, &url).await;
+
+    assert!(
+        result.is_none(),
+        "a 5xx from the daemon must fail open to None, not error out"
+    );
+}
+
+#[tokio::test]
+async fn guard_managed_sessions_returns_none_when_the_daemon_is_unreachable() {
+    // The other cold-daemon shape: nothing listening at all. Same fail-open
+    // contract — a down daemon must never block bare `tm`.
+    let client = reqwest::Client::new();
+
+    // Port 1 on loopback: reserved, never bound by a normal process.
+    let result = guard_managed_sessions(&client, "http://127.0.0.1:1").await;
+
+    assert!(
+        result.is_none(),
+        "an unreachable daemon must fail open to None"
+    );
+}
+
+#[tokio::test]
+async fn guard_managed_sessions_returns_sessions_on_success() {
+    // The positive half: a well-formed listing must reach the guard intact,
+    // so the fail-open arms above are proven to be FAILURE paths and not the
+    // function's only behaviour.
+    let body = concat!(
+        r#"{"sessions":[{"id":"11111111-2222-3333-4444-555555555555","#,
+        r#""name":"tm-demo-01","state":"active","#,
+        r#""created_at":"2026-07-29T00:00:00Z"}]}"#
+    );
+    let response: &'static str = Box::leak(
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_boxed_str(),
+    );
+    let url = serve_once(response).await;
+    let client = reqwest::Client::new();
+
+    let sessions = guard_managed_sessions(&client, &url)
+        .await
+        .expect("a well-formed listing must reach the guard");
+
+    assert_eq!(sessions.len(), 1, "the listing must survive intact");
+    assert_eq!(sessions[0].name, "tm-demo-01");
 }

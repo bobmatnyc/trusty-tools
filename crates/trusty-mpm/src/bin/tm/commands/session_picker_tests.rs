@@ -41,6 +41,7 @@ fn session(name: &str, state: &str, slot: u32) -> ManagedSessionSummary {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot,
         deleted: false,
