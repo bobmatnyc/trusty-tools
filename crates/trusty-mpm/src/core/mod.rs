@@ -29,6 +29,10 @@ pub mod bundled_pm_package;
 pub mod catchup;
 pub mod circuit;
 pub mod claude_config;
+// Epic #4183 / #4286: the READER for `CLAUDE.md` named-section instruction
+// overrides. Ships before the floor text that advertises the mechanism —
+// advertising an override no code reads is issue #381 verbatim.
+pub mod claude_md_sections;
 // Issue #4072: one process-wide lock every `~/.claude.json` read-modify-write
 // seeder holds, so concurrent daemon provisioning cannot lose a trust entry.
 pub mod claude_json_guard;

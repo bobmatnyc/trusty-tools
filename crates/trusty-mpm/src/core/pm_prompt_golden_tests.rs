@@ -20,6 +20,7 @@
 //! |---|---|---|
 //! | `pm-prompt-bundled-fallback.md` | no `.trusty-mpm/` override, roster present | `InstructionPackage` |
 //! | `pm-prompt-legacy-delegation-override.md` | `.trusty-mpm/AGENT_DELEGATION.md` present | legacy assembly |
+//! | `pm-prompt-claude-md-override.md` | `CLAUDE.md` named sections (#4286) | `InstructionPackage` |
 //!
 //! The second is not redundant. It is the check that a project which overrides
 //! one section still receives the *same* Core/Memory/Search/Workflow/floor text
@@ -32,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::bundled_pm_package::compose_bundled_fallback;
+use crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, OVERRIDE_DIR_NAME, resolve_pm_prompt_with_roster,
 };
@@ -116,8 +117,9 @@ fn assert_golden(name: &str, actual: &str) {
 fn golden_bundled_fallback_prompt() {
     // Configuration 1: what every project with no `.trusty-mpm/` override
     // receives, composed through `InstructionPackage`.
-    let composed =
-        compose_bundled_fallback(FIXED_STACK, FIXED_ROSTER, None).expect("package composes");
+    let composed = compose_bundled_fallback_with_overrides(FIXED_STACK, FIXED_ROSTER, None, &[])
+        .0
+        .expect("package composes");
     assert_golden("pm-prompt-bundled-fallback.md", &composed);
 }
 
@@ -135,4 +137,32 @@ fn golden_legacy_delegation_override_prompt() {
 
     let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert_golden("pm-prompt-legacy-delegation-override.md", &prompt);
+}
+
+#[test]
+fn golden_claude_md_override_prompt() {
+    // Configuration 3 (#4286): named-section overrides marked out in the
+    // project's own `CLAUDE.md`. The snapshot is what makes the DELIVERED shape
+    // of an override reviewable — that WORKFLOW is replaced wholesale, that
+    // AGENT-DELEGATION replaces the doctrine but NOT the live roster below it,
+    // and that the framework floor is byte-for-byte the floor every other
+    // configuration receives.
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("CLAUDE.md"),
+        "# Project Instructions\n\n\
+         Prose outside the markers is not instruction content and is ignored.\n\n\
+         <!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+         # Workflow (project override)\n\n\
+         Two phases only: implement, then verify.\n\
+         <!-- TRUSTY-MPM: WORKFLOW END -->\n\n\
+         <!-- TRUSTY-MPM: AGENT-DELEGATION START v=1 -->\n\
+         # Routing (project override)\n\n\
+         Route every implementation task to `rust-engineer`.\n\
+         <!-- TRUSTY-MPM: AGENT-DELEGATION END -->\n",
+    )
+    .expect("write CLAUDE.md");
+
+    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    assert_golden("pm-prompt-claude-md-override.md", &prompt);
 }
