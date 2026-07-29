@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/agents/:name/kg`, `/kg/subjects`, `/kg/all` and `/kg/count` — a
+  read-only proxy onto the Knowledge Graph of the memory palace the agent binds
+  via `[[stores]].palace`** (#4290). trusty-memory already owns every one of
+  these queries; this crate only maps agent → palace and passes the upstream
+  JSON through verbatim under `{palace, connected, data}`. An agent that binds
+  no palace, or a trusty-memory daemon that is down, returns `200` with
+  `connected: false` and a machine-readable `reason` — the same never-fail
+  posture `GET /api/agents/:name/stores` already has — so the Knowledge Graph
+  browser renders an empty state instead of an error. Assert and delete are
+  deliberately not proxied; editability is a separate ticket.
+
 ### Changed
 
 - **An assistant's reachable sub-agent set is now an editable configuration
