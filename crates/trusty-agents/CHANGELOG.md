@@ -26,6 +26,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **The app header shows the running daemon's version.** A quiet provenance
+  line sits beside the brand lockup, read from `GET /api/health` — the version
+  of the daemon the UI is actually talking to, not what the frontend was
+  compiled against, since surfacing that mismatch is the point. It is one
+  follow-up read fired after the existing readiness probe succeeds, not a
+  second poller. Before the probe answers it shows `v…` and on failure `v—`,
+  never a guessed number and never an empty slot that shifts the lockup. The
+  line is shaped so #4260's commit SHA appends to it (`v0.38.6 · abc1234`)
+  without a redesign; the meaningless `build #N` counter from
+  `tagent --version` is deliberately not shown.
 - **The Skills pane renders function skills as groups (#4024).** A `kind:
   "function"` bundle is no longer filtered out of the pane — it renders as a
   collapsed group header over its member skill cards, with the tri-state grant
