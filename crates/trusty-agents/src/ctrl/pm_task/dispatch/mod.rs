@@ -15,6 +15,9 @@ mod persona;
 // sits exactly at the 500-SLOC production cap.
 mod persona_gate;
 mod persona_memory;
+// #446 (epic #3052): `[[plugins.python]]` registration, split out of
+// `persona.rs` for the same SLOC-cap reason as `persona_gate`.
+mod persona_plugins;
 
 pub use history::run_pm_task_with_history;
 pub use persona::run_pm_task_with_persona;

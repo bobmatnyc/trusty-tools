@@ -49,6 +49,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`[[plugins.python]]` tools declared by an agent are finally registered and
+  callable (#446, epic #3052).** The `PythonToolPlugin` subprocess primitive
+  (spawn `python3 <script>`, one NDJSON `tool_call` in / one `tool_result`
+  out, per-call timeout, fail-closed RBAC tier guard) has shipped fully
+  unit-tested since #446, and `AgentConfig` has parsed `[plugins]` for just as
+  long — but nothing in the workspace ever called
+  `PythonToolPlugin::from_config`, so an agent or skill package declaring a
+  `[[plugins.python]]` tool had its declaration parsed and then silently
+  dropped: never registered, never advertised, never callable, no warning.
+  `run_pm_task_with_persona` now reads `persona_cfg.plugins.python` and
+  registers each entry via a new `persona_plugins::register_python_plugins`
+  helper, resolving a package-relative `script` / `schema_file` against the
+  agent/skill package dir (the same `config_dir` the delegation runner is
+  handed), so `script = "../skills/foo/foo.py"` reaches a co-located skill
+  package. Registration is not a grant: the `[tools].allow` glob filter, the
+  RBAC tier filter and the scope gate all still decide whether the tool
+  reaches the model. Two non-fatal skip paths keep one bad line in one agent
+  TOML from taking down a chat turn — an entry `from_config` rejects (e.g. an
+  unknown `restricted_tiers` string, fail-closed since #3236) is logged and
+  skipped, and an entry whose name is already taken by a native or MCP tool is
+  refused rather than registered (`ToolRegistry::register` overwrites silently
+  in release and `debug_assert!`s in debug, so an unguarded registration would
+  have made a debug-build panic reachable straight from user-authored config).
+  SECURITY NOTE, unchanged by this PR and worth restating now that the path is
+  live: the Python subprocess has NO OS-level sandbox — RBAC gates WHO may call
+  the tool, not WHAT the script does once spawned. KNOWN GAP: this wires the
+  in-process persona-chat dispatch path only; the subprocess `--agent` path
+  (`runtime::tool_registry::build_assistant_tier_registry`, which takes no
+  `AgentConfig`) still ignores `[[plugins.python]]` and needs its own change.
 - **The app header shows the running daemon's version.** A quiet provenance
   line sits beside the brand lockup, read from `GET /api/health` — the version
   of the daemon the UI is actually talking to, not what the frontend was

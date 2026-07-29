@@ -1051,3 +1051,209 @@ async fn persona_delegate_tool_leaves_non_assistant_roles_ungated() {
     assert!(!is_error, "non-assistant persona must stay ungated: {msg}");
     assert_eq!(spawned, 1, "runner must be reached exactly once");
 }
+
+// ---------------------------------------------------------------------------
+// #446 (epic #3052): `[[plugins.python]]` registration — `persona_plugins`.
+// ---------------------------------------------------------------------------
+
+/// Whether the interpreter `PythonToolPlugin` will actually spawn is
+/// invokable, so the dispatch test below skips rather than fails on a
+/// Rust-only box.
+///
+/// Why: mirrors `plugins::python_tool::tests::python_available` verbatim
+/// (same env-var override, same `--version` probe) instead of hardcoding
+/// `python3`, so this test resolves the SAME interpreter the plugin does.
+fn persona_python3_available() -> bool {
+    let python = crate::env_compat::env_var("TAGENT_PYTHON", "OPEN_MPM_PYTHON")
+        .unwrap_or_else(|_| "python3".to_string());
+    std::process::Command::new(&python)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Registered tool names (schema `function.name`) for a registry.
+fn registered_tool_names(registry: &crate::tools::ToolRegistry) -> Vec<String> {
+    registry
+        .schemas()
+        .into_iter()
+        .filter_map(|s| {
+            s.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .collect()
+}
+
+/// A `[[plugins.python]]` entry with a PACKAGE-RELATIVE `script` becomes a
+/// registered, CALLABLE tool (#446).
+///
+/// Why: the whole defect was that `run_pm_task_with_persona` never called
+/// `PythonToolPlugin::from_config`, so the declaration parsed and vanished. A
+/// test that only asserted the name appears in `schemas()` would pass over a
+/// plugin whose `script` was resolved against the wrong base and could never
+/// run — so this dispatches through the production `ToolRegistry` and asserts
+/// on the script's real NDJSON `tool_result` content. That pins BOTH halves:
+/// relative-`script` resolution against `base_dir` (the `config_dir` the
+/// dispatch path passes) and end-to-end callability.
+/// What: writes a minimal NDJSON-contract script into a temp package dir,
+/// declares it by a bare relative filename, registers via
+/// `register_python_plugins`, then dispatches and asserts the echoed payload.
+/// Skipped (not failed) when no python interpreter is on PATH.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_python_plugin_registers_callable_tool() {
+    if !persona_python3_available() {
+        eprintln!("SKIP persona_python_plugin_registers_callable_tool: no python interpreter");
+        return;
+    }
+    let pkg_dir = tempfile::tempdir().expect("temp package dir");
+    // Reads one `tool_call` line, echoes one `tool_result` line embedding the
+    // `symbol` param — the same envelope `plugins::python_tool` speaks.
+    std::fs::write(
+        pkg_dir.path().join("price.py"),
+        "import sys, json\n\
+call = json.loads(sys.stdin.readline())\n\
+sym = call.get('params', {}).get('symbol', '?')\n\
+print(json.dumps({'type': 'tool_result', 'id': call.get('id'), \
+'status': 'success', 'content': 'price of ' + sym + ': 42'}))\n",
+    )
+    .expect("write script");
+
+    let cfg: crate::plugins::PythonPluginConfig = toml::from_str(
+        "name = \"coin_price\"\n\
+description = \"Get a coin price\"\n\
+script = \"price.py\"\n",
+    )
+    .expect("plugin config parses");
+
+    let mut registry = crate::tools::ToolRegistry::new();
+    let registered = register_python_plugins(
+        &mut registry,
+        std::slice::from_ref(&cfg),
+        pkg_dir.path(),
+        "demo-assistant",
+    );
+
+    assert_eq!(registered, vec!["coin_price".to_string()]);
+    let names = registered_tool_names(&registry);
+    assert!(
+        names.iter().any(|n| n == "coin_price"),
+        "python plugin must register under its declared name, got {names:?}"
+    );
+
+    let result = registry
+        .dispatch("coin_price", serde_json::json!({"symbol": "bitcoin"}))
+        .await;
+    assert!(
+        !result.is_error(),
+        "python plugin dispatch errored: {}",
+        result.content()
+    );
+    assert_eq!(result.content(), "price of bitcoin: 42");
+}
+
+/// A malformed `[[plugins.python]]` entry is skipped, never fatal (#446).
+///
+/// Why: `PythonToolPlugin::from_config` fails CLOSED on an unrecognized
+/// `restricted_tiers` string (#3236). If that error propagated out of the
+/// registration helper, one typo in one agent's TOML would abort the entire
+/// chat turn — a config error escalating into a total outage for that persona.
+/// What: an entry with a bogus tier is absent from the registry afterwards and
+/// the helper still returns normally.
+/// Test: this function IS the test.
+#[test]
+fn persona_python_plugin_bad_config_is_skipped() {
+    let cfg: crate::plugins::PythonPluginConfig = toml::from_str(
+        "name = \"broken\"\n\
+description = \"bad tier\"\n\
+script = \"x.py\"\n\
+restricted_tiers = [\"not_a_real_tier\"]\n",
+    )
+    .expect("config itself parses; only from_config rejects the bad tier");
+
+    let mut registry = crate::tools::ToolRegistry::new();
+    let registered = register_python_plugins(
+        &mut registry,
+        std::slice::from_ref(&cfg),
+        std::path::Path::new("/tmp"),
+        "demo-assistant",
+    );
+
+    assert!(
+        registered.is_empty(),
+        "a rejected entry must not be reported"
+    );
+    let names = registered_tool_names(&registry);
+    assert!(
+        !names.iter().any(|n| n == "broken"),
+        "a plugin with an invalid config must be skipped, not registered: {names:?}"
+    );
+}
+
+/// A `[[plugins.python]]` entry may not take over a name already registered
+/// (#446).
+///
+/// Why: `run_pm_task_with_persona` registers this path's plugins AFTER the
+/// full native/CTRL/filesystem/search surface. `ToolRegistry::register`
+/// overwrites silently in release and `debug_assert!`s in debug, so an
+/// unguarded registration would let an agent TOML either hijack `create_dir`
+/// in production or panic every debug build that loads it — a crash reachable
+/// from user-authored config. The helper must refuse instead.
+/// What: pre-register the real `CreateDirTool`, then declare a python plugin
+/// called `create_dir`; the surviving executor is still the native one.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn persona_python_plugin_does_not_shadow_an_existing_tool() {
+    let cfg: crate::plugins::PythonPluginConfig = toml::from_str(
+        "name = \"create_dir\"\n\
+description = \"impostor\"\n\
+script = \"impostor.py\"\n",
+    )
+    .expect("plugin config parses");
+
+    let mut registry = crate::tools::ToolRegistry::new();
+    registry.register(std::sync::Arc::new(CreateDirTool));
+    let registered = register_python_plugins(
+        &mut registry,
+        std::slice::from_ref(&cfg),
+        std::path::Path::new("/tmp"),
+        "demo-assistant",
+    );
+
+    assert!(
+        registered.is_empty(),
+        "a colliding entry must be skipped, not reported as registered"
+    );
+    let schema = registry
+        .schemas()
+        .into_iter()
+        .find(|s| s.pointer("/function/name").and_then(|n| n.as_str()) == Some("create_dir"))
+        .expect("create_dir must still be registered");
+    let description = schema
+        .pointer("/function/description")
+        .and_then(|d| d.as_str())
+        .unwrap_or_default();
+    assert!(
+        !description.contains("impostor"),
+        "the native create_dir must survive; got description {description:?}"
+    );
+}
+
+/// A persona with no `[plugins]` section registers nothing and warns about
+/// nothing (#446) — the no-op that keeps every existing agent unchanged.
+///
+/// Test: this function IS the test.
+#[test]
+fn persona_python_plugin_empty_list_registers_nothing() {
+    let mut registry = crate::tools::ToolRegistry::new();
+    let registered =
+        register_python_plugins(&mut registry, &[], std::path::Path::new("/tmp"), "izzie");
+
+    assert!(registered.is_empty());
+    assert!(registry.schemas().is_empty());
+}
