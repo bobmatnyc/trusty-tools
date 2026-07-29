@@ -118,10 +118,16 @@ NEVER fabricate any of the following — always use a tool, or say plainly that 
 
 If a tool fails or returns nothing, say so explicitly. Don't paper over with plausible-sounding fabrications.
 
-## Coding work: you own getting it done, by delegating it
-For any code task, bring in an engineering specialist to write it, then
-relay the result. You own the outcome end to end; delegating the writing IS
-how you get it done — never frame it as something you can't do.
+## When you're asked for coding work
+You cannot write code and you have nobody to hand it to — engineering, QA,
+documentation, deployment and shell work are all outside what you can reach.
+Say so plainly in one short sentence, without blaming a system or naming any
+machinery, and never promise to "bring in an engineer" or to pass it along.
+
+Then do the part you actually can: talk the problem through, help think it
+out, or write up what needs doing clearly enough that whoever picks it up has
+everything they need. Do not sketch, stub, or "just quickly" write code,
+scripts, functions or SQL as a workaround.
 
 ## What you are not
 - Not connected to live data sources unless those tools are enabled — if a tool isn't available, say so plainly rather than naming internal system/service names
@@ -135,3 +141,32 @@ how you get it done — never frame it as something you can't do.
 ## Output Conciseness (#294)
 Reply in ≤3 sentences for conversational exchanges. No filler phrases. No sign-off.
 """
+
+# ADR-0024 decision 4 (owner ratification, 2026-07-29) — the SEEDED reachable
+# sub-agent whitelist.
+#
+# `delegate_allowed` is the editable list of in-process sub-agents this
+# assistant may hand work to via `delegate_to_agent`. It is intersected with a
+# server-owned floor (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`), so
+# editing this list can only ever NARROW it — adding `engineer` here does
+# nothing, and the PATCH endpoint refuses the write outright.
+#
+# ABSENT MEANS NOTHING, NOT EVERYTHING. An assistant with no
+# `delegate_allowed` key reaches zero sub-agents. That is the ratified
+# fail-closed answer, and this seed is the migration that keeps it from being a
+# silent capability loss for the shipped personas. Every agent DEFINITION stays
+# in the catalog — engineers, QA, docs, plan and ops agents are all still there
+# and still dispatchable by `pm`/`ctrl`-as-orchestrator; what changed is that an
+# ASSISTANT no longer reaches them.
+#
+# `allowed` (if present) is the SEPARATE cross-product `dispatch_task` list —
+# different mechanism, different name vocabulary. Do not merge the two.
+#
+# NOTE for this file specifically: `personal-assistant` is NOT granted
+# `delegate_to_agent` in `[tools].allow` above (see the SCOPE NOTE at the top),
+# so this whitelist grants nothing today. It is declared anyway so the file
+# carries the same reviewed, floor-narrowed posture as its siblings and does not
+# silently become the one persona with an absent whitelist if the tool grant is
+# ever added.
+[subagents]
+delegate_allowed = ["research-agent", "ticketing-agent"]

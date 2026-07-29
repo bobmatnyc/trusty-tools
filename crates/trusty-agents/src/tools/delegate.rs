@@ -20,6 +20,16 @@
 //! system prompt's `{{available_agents}}` template substitution
 //! (`agents::registry::roster::inject_roster_into_prompt`), which is
 //! independent of this schema.
+//!
+//! ADR-0024 gave `execute()` two further gates, both independent conjuncts of
+//! the pre-existing role and tier checks rather than replacements for them:
+//! decision 6's delegation KIND predicate (`agents::delegation`, an assistant
+//! never delegates to a peer assistant) and decision 4's per-agent REACHABLE
+//! SUB-AGENT whitelist (`tools::subagent_allow`, an editable config list
+//! bounded by a server-owned floor). Reachability is
+//! `!(kind_blocked || tier_blocked || !whitelisted)`; the ADR's conformance
+//! checklist requires the kind rule to keep holding even if a whitelist is
+//! misconfigured, which is only true while the two are computed separately.
 //! Test: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`
 //! asserts the error names the REJECTED agent but leaks no on-disk roster
 //! entry and no bundled agent filename/internal system name.
@@ -153,6 +163,39 @@ pub struct DelegateToAgentTool {
     /// `delegate_kind_gate_does_not_touch_orchestrator_sources`,
     /// `delegator_identity_defaults_to_none_on_construction`.
     delegator_role: Option<String>,
+    /// This delegator's own REACHABLE SUB-AGENT SET — ADR-0024 decision 4's
+    /// editable configuration whitelist, already intersected with the
+    /// server-owned floor (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`)
+    /// by the type itself.
+    ///
+    /// Why: decision 4 (owner ratification 2026-07-29) replaces "every
+    /// role-eligible agent on this host" with an explicit, per-agent,
+    /// name-based whitelist — for assistant personas the reachable set becomes
+    /// exactly `{research-agent, ticketing-agent}`, no coding agents. The role
+    /// allowlist above cannot express that: it gates on `role`, and `engineer`
+    /// / `docs-agent` / `plan-agent` are role-eligible by construction. This
+    /// field is the name-level gate, kept SEPARATE from both the role gate and
+    /// the kind predicate rather than folded into either — the ADR's own
+    /// conformance checklist is explicit that the kind exclusion must stay "a
+    /// property of the CODE, not of the data an operator is trusted to curate
+    /// correctly", which is only true while the two are independent
+    /// conjuncts. Set through the SAME builder call as role and tier
+    /// ([`DelegateToAgentTool::with_delegator`]) for the reason that call
+    /// exists: a per-gate opt-in a call site can forget is exactly #4201's
+    /// shape.
+    /// What: a `SubagentAllowSet` over the in-process floor. The default —
+    /// every caller that never calls `with_delegator` — is the EMPTY set, but
+    /// the gate is SCOPED (see `execute`): it runs only when this instance is
+    /// role-gated (`allowed_target_roles.is_some()`, true at exactly the three
+    /// assistant-tier construction sites) or its declared kind IS the
+    /// assistant kind. `pm`/`ctrl`-as-orchestrator therefore delegate exactly
+    /// as before, while an assistant path that somehow skipped wiring fails
+    /// CLOSED to "reaches nothing" rather than open.
+    /// Test: `delegate_assistant_reaches_a_whitelisted_sub_agent`,
+    /// `delegate_assistant_absent_whitelist_reaches_nothing`,
+    /// `delegate_assistant_whitelist_cannot_widen_past_the_floor`,
+    /// `delegate_without_role_gate_allows_any_resolvable_role`.
+    reachable_subagents: crate::tools::subagent_allow::SubagentAllowSet,
     /// #3737 (per-message chat attribution, epic #3052): the id of the task
     /// whose turn this tool is delegating within, used as the `session_id` on
     /// the `AgentSpawned` event emitted on a successful delegation so the API
@@ -189,6 +232,13 @@ impl DelegateToAgentTool {
             allowed_target_roles: None,
             delegator_tier: None,
             delegator_role: None,
+            // ADR-0024 decision 4, fail-closed: an instance that never declares
+            // a delegator identity reaches nothing through the whitelist gate.
+            // Harmless for `pm`/`ctrl` because the gate is scoped — see the
+            // field doc and `execute`.
+            reachable_subagents: crate::tools::subagent_allow::SubagentAllowSet::empty_over(
+                crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+            ),
             session_id: None,
         }
     }
@@ -273,6 +323,11 @@ impl DelegateToAgentTool {
     /// name fails to resolve at all OR resolves to a role outside `roles` —
     /// the caller never learns which case it hit, so no role taxonomy or
     /// on-disk roster leaks.
+    /// ADR-0024 decision 4: this list is now the COARSE pre-filter, not the
+    /// reachable set — `reachable_subagents` is the binding, name-level gate.
+    /// Calling this method is ALSO what makes that gate apply when the caller
+    /// never declared its identity (belt-and-suspenders, see `execute`), so a
+    /// site that role-gates can never silently skip the newer check.
     /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
     /// `delegate_assistant_role_gate_rejects_controller_role`,
     /// `delegate_assistant_role_gate_allows_worker_role`,
@@ -283,7 +338,8 @@ impl DelegateToAgentTool {
     }
 
     /// Declare THIS instance's own delegator identity — its `agent.role`
-    /// (KIND, ADR-0024) and its `AgentInfo::tier()` (#4169, epic #4167).
+    /// (KIND, ADR-0024), its `AgentInfo::tier()` (#4169, epic #4167), and its
+    /// reachable sub-agent whitelist (ADR-0024 decision 4).
     ///
     /// Why: See the `delegator_role` and `delegator_tier` field docs. Role and
     /// tier are taken TOGETHER, in one call, on purpose (ADR-0024 conformance;
@@ -300,20 +356,27 @@ impl DelegateToAgentTool {
     /// design) with [`crate::agents::AgentTier::L0Orchestration`], meaning
     /// "this caller is not gated by the L0/L1 boundary", not that it IS an L0
     /// persona.
-    /// What: Stores `Some(role)` and `Some(tier)`, which — combined with
-    /// `config_dirs` being non-empty — forces full target resolution so both
-    /// the kind predicate and the tier gate can run against the resolved
-    /// target.
+    /// ADR-0024 decision 4 extended this call with a THIRD element for exactly
+    /// the same reason it took the second: the reachable-set whitelist is one
+    /// more reading of "who this delegator is", and a caller must not be able
+    /// to acquire the kind predicate while silently skipping the whitelist.
+    /// What: Stores `Some(role)`, `Some(tier)` and `reachable`, which —
+    /// combined with `config_dirs` being non-empty — forces full target
+    /// resolution so the kind predicate, the tier gate and the whitelist can
+    /// all run against the resolved target.
     /// Test: `delegate_l1_to_l0_is_refused`, `delegate_l0_to_l1_succeeds`,
     /// `delegate_assistant_to_assistant_is_refused`,
+    /// `delegate_assistant_reaches_a_whitelisted_sub_agent`,
     /// `delegator_identity_defaults_to_none_on_construction`.
     pub fn with_delegator(
         mut self,
         role: impl Into<String>,
         tier: crate::agents::AgentTier,
+        reachable: crate::tools::subagent_allow::SubagentAllowSet,
     ) -> Self {
         self.delegator_role = Some(role.into());
         self.delegator_tier = Some(tier);
+        self.reachable_subagents = reachable;
         self
     }
 }
@@ -407,6 +470,35 @@ impl ToolExecutor for DelegateToAgentTool {
             // `ctrl::pm_task::dispatch::persona`).
             let needs_full_resolution =
                 self.allowed_target_roles.is_some() || self.delegator_tier.is_some();
+            // ADR-0024 decision 4: the reachable-set whitelist, SCOPED to the
+            // assistant population and to nobody else. `pm`/`ctrl`-as-
+            // orchestrator declare a real role (`orchestrator`/`controller`)
+            // and never call `with_allowed_target_roles`, so this is false for
+            // them and their delegation is byte-identical to before. It is
+            // deliberately NOT gated on `needs_full_resolution`: that predicate
+            // is also true for the orchestrator paths (they DO declare a tier),
+            // and applying an empty whitelist to `pm` would deny every
+            // delegation in the product. The `allowed_target_roles.is_some()`
+            // disjunct is the same belt-and-suspenders rule the tier gate
+            // follows — a caller that opted into role-gating is an
+            // assistant-tier caller by construction, so it gets this gate too
+            // even if it somehow failed to declare its identity, and it fails
+            // CLOSED (the default set is empty).
+            let whitelist_applies = self.allowed_target_roles.is_some()
+                || self
+                    .delegator_role
+                    .as_deref()
+                    .is_some_and(crate::agents::delegation::is_assistant_kind);
+            let whitelist_blocked =
+                whitelist_applies && self.reachable_subagents.resolve(agent_name).is_err();
+            if whitelist_blocked {
+                tracing::warn!(
+                    agent_name,
+                    source_role = self.delegator_role.as_deref().unwrap_or("<undeclared>"),
+                    "delegate_to_agent: refusing a target outside this agent's configured \
+                     reachable sub-agent set (ADR-0024 decision 4)"
+                );
+            }
             let (rejected, tier_blocked, kind_blocked) = if needs_full_resolution {
                 // Fail-closed default (#4169 constraint 1): a caller that DID
                 // opt into role-gating but never declared its own tier is
@@ -532,6 +624,24 @@ impl ToolExecutor for DelegateToAgentTool {
                      intermediate delegation hop."
                 ));
             }
+            if whitelist_blocked {
+                // ADR-0024 decision 4 AC. Distinct from the generic
+                // roster-hiding message below, and for the same reason the kind
+                // and tier messages are: "the specialists available to you" is a
+                // product-level concept the owner named directly, and this text
+                // enumerates NOTHING — not the whitelist, not the floor, not any
+                // roster entry beyond the one name the caller already supplied.
+                // Checked AFTER kind/tier so a peer edge or a tier violation is
+                // still reported as the specific prohibition it is; a plain
+                // out-of-set name lands here.
+                return ToolResult::err(format!(
+                    "'{agent_name}' is not one of the specialists available to you. Your \
+                     reachable specialist set is configured explicitly and is narrow by \
+                     design — coding and orchestration agents are not in it. Do this \
+                     yourself if you can, or tell the user plainly that it needs a \
+                     specialist you cannot reach."
+                ));
+            }
             if rejected {
                 return ToolResult::err(format!(
                     "'{agent_name}' is not a recognized specialist. Check your own \
@@ -559,7 +669,13 @@ impl ToolExecutor for DelegateToAgentTool {
                     .is_some_and(crate::agents::delegation::is_assistant_kind),
                 delegator_tier = ?self.delegator_tier,
                 role_allowlist_enforced = self.allowed_target_roles.is_some(),
-                "delegate_to_agent: delegation authorized (kind + role + tier predicates passed)"
+                // ADR-0024 decision 4: record whether the reachable-set
+                // whitelist was consulted at all, so "this agent has no
+                // whitelist wired" is distinguishable from "the target was on
+                // it" in a log, rather than inferred.
+                reachable_whitelist_enforced = whitelist_applies,
+                "delegate_to_agent: delegation authorized (kind + role + tier + reachable-set \
+                 predicates passed)"
             );
         }
 

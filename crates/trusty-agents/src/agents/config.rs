@@ -211,9 +211,13 @@ pub struct AgentConfig {
     /// same deny-by-default posture `[skills].allow` takes.
     /// What: [`SubagentsConfig`], whose `allowed` list is intersected with
     /// `tools::cross_product::NON_CODING_TARGETS` by
-    /// `tools::cross_product::SubagentAllowSet` — config can only ever narrow
-    /// that floor, never widen it.
-    /// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`.
+    /// `tools::subagent_allow::SubagentAllowSet` — config can only ever narrow
+    /// that floor, never widen it. ADR-0024 decision 4 adds a SECOND key to
+    /// the same section, `delegate_allowed`, applying the identical
+    /// floor-narrowing rule to the IN-PROCESS `delegate_to_agent` path over
+    /// `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`.
+    /// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`,
+    /// `subagents_config_parses_delegate_allowed`.
     #[serde(default)]
     pub subagents: SubagentsConfig,
 }
@@ -230,16 +234,46 @@ fn default_adapter() -> Arc<dyn ModelAdapter> {
 /// Why: kept as its own struct rather than a bare list so #4029's Sub-agents
 /// configuration section — and #4030's domain-authority feed — can add fields
 /// later without a breaking change, mirroring [`SkillsConfig`]'s rationale.
-/// What: `allowed` is a list of external specialist names. `None` (missing
-/// section) and `Some(vec![])` both resolve to an EMPTY allow-set; the
-/// distinction is deliberately NOT load-bearing here because neither may grant
-/// anything (unlike `[skills]`, where absence leaves `[tools].allow` as the
-/// sole source). No glob dialect — exact names only.
-/// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`.
+/// What: TWO independent lists, one per delegation mechanism, deliberately not
+/// merged (their target vocabularies do not overlap — see
+/// `api::server::agent_subagents`'s module doc):
+/// - `allowed` — CROSS-PRODUCT (`dispatch_task` → trusty-code), intersected
+///   with `tools::cross_product::NON_CODING_TARGETS`.
+/// - `delegate_allowed` — IN-PROCESS (`delegate_to_agent` → trusty-agents),
+///   ADR-0024 decision 4's editable whitelist, intersected with
+///   `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`.
+///
+/// For BOTH, `None` (missing key) and `Some(vec![])` resolve to an EMPTY
+/// allow-set; the distinction is deliberately NOT load-bearing because neither
+/// may grant anything (unlike `[skills]`, where absence leaves `[tools].allow`
+/// as the sole source). No glob dialect — exact names only.
+/// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`,
+/// `subagents_config_parses_delegate_allowed`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SubagentsConfig {
     #[serde(default)]
     pub allowed: Option<Vec<String>>,
+
+    /// ADR-0024 decision 4 (RATIFIED 2026-07-29) — the editable whitelist of
+    /// IN-PROCESS sub-agent names this agent may reach via `delegate_to_agent`.
+    ///
+    /// Why: a separate key rather than a reinterpretation of `allowed` because
+    /// the two mechanisms take different names for different things
+    /// (`research` is a trusty-code specialist; `research-agent` is a
+    /// trusty-agents roster entry), and flattening them would make one config
+    /// line mean two capabilities. The ADR anticipated the collision and
+    /// recorded the alternative (rename the cross-product section, freeing
+    /// `[subagents]` for the in-process list); that rename is a separate,
+    /// unratified decision, so this change takes the additive key and leaves
+    /// the rename to it.
+    /// What: exact agent names. Absent = EMPTY = this agent delegates to
+    /// NOTHING in-process (decision 4 sub-answer (a), fail-closed); the
+    /// bundled assistant personas ship a SEEDED default so that fail-closed
+    /// posture is not a silent capability loss on rollout.
+    /// Test: `subagents_config_parses_delegate_allowed`,
+    /// `bundled_assistant_personas_seed_the_reachable_subagent_whitelist`.
+    #[serde(default)]
+    pub delegate_allowed: Option<Vec<String>>,
 }
 
 /// Optional `[skills]` section in agent TOML (#3933).

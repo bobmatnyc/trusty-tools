@@ -300,6 +300,9 @@ pub async fn run_pm_task_with_persona(
                 sid.clone(),
                 &persona_cfg.agent.role,
                 persona_cfg.agent.tier(),
+                // ADR-0024 decision 4: this persona's own reachable-sub-agent
+                // whitelist, from its resolved config.
+                persona_cfg.subagents.delegate_allowed.as_deref(),
             )));
             registry.register(Arc::new(AddProjectTool));
             registry.register(Arc::new(ListProjectsTool));

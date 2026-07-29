@@ -316,7 +316,8 @@ fn dispatch_task_denies_read_only_and_analytics_tiers() {
 // Cross-product specialists (#4026 allow-set, #4028 envelope)
 // =====================================================================
 
-use crate::tools::cross_product::{CallerAuthority, HANDOFF_MAX_BYTES, SubagentAllowSet};
+use crate::tools::cross_product::{CallerAuthority, HANDOFF_MAX_BYTES, NON_CODING_TARGETS};
+use crate::tools::subagent_allow::SubagentAllowSet;
 
 /// EMPTY-DEFAULT PIN (#4026): a tool constructed without `with_allow_set`
 /// grants no cross-product reach — a named specialist is denied and, crucially,
@@ -342,11 +343,10 @@ async fn named_specialist_is_denied_when_no_allow_set_is_configured() {
 #[tokio::test]
 async fn coding_specialist_is_denied_at_the_bridge_despite_caller_config() {
     let backend = Arc::new(RecordingBackend::new("done"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "rust-engineer".to_string(),
-            "research".to_string(),
-        ])));
+    let tool = PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::over(
+        NON_CODING_TARGETS,
+        Some(&["rust-engineer".to_string(), "research".to_string()]),
+    ));
 
     let result = tool
         .execute(json!({ "task": "rewrite the parser", "specialist": "rust-engineer" }))
@@ -364,10 +364,10 @@ async fn coding_specialist_is_denied_at_the_bridge_despite_caller_config() {
 #[tokio::test]
 async fn named_specialist_reaches_the_backend_when_allowed() {
     let backend = Arc::new(RecordingBackend::new("findings"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "research".to_string(),
-        ])));
+    let tool = PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::over(
+        NON_CODING_TARGETS,
+        Some(&["research".to_string()]),
+    ));
 
     let result = tool
         .execute(json!({ "task": "map the auth flow", "specialist": "research" }))
@@ -384,10 +384,10 @@ async fn named_specialist_reaches_the_backend_when_allowed() {
 #[tokio::test]
 async fn ticketing_specialist_is_reachable_through_the_bridge() {
     let backend = Arc::new(RecordingBackend::new("drafted ISS-1"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "ticketing".to_string(),
-        ])));
+    let tool = PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::over(
+        NON_CODING_TARGETS,
+        Some(&["ticketing".to_string()]),
+    ));
 
     let result = tool
         .execute(json!({ "task": "file an issue for the flaky test", "specialist": "ticketing" }))
@@ -406,9 +406,10 @@ async fn ticketing_specialist_is_reachable_through_the_bridge() {
 async fn envelope_carries_origin_target_and_authority() {
     let backend = Arc::new(RecordingBackend::new("drafted the reply"));
     let tool = PmBridgeTool::new(backend)
-        .with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "ticketing".to_string()
-        ])))
+        .with_allow_set(SubagentAllowSet::over(
+            NON_CODING_TARGETS,
+            Some(&["ticketing".to_string()]),
+        ))
         .with_origin("izzie", CallerAuthority::UserAuthority);
 
     let result = tool
@@ -452,10 +453,10 @@ async fn omitting_specialist_preserves_pre_change_behaviour() {
 #[tokio::test]
 async fn oversized_handoff_is_rejected_without_invoking_the_target() {
     let backend = Arc::new(RecordingBackend::new("done"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "research".to_string(),
-        ])));
+    let tool = PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::over(
+        NON_CODING_TARGETS,
+        Some(&["research".to_string()]),
+    ));
 
     let result = tool
         .execute(json!({
@@ -480,10 +481,10 @@ async fn oversized_handoff_is_rejected_without_invoking_the_target() {
 #[tokio::test]
 async fn handoff_is_prepended_to_the_dispatched_task() {
     let backend = Arc::new(RecordingBackend::new("done"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "research".to_string(),
-        ])));
+    let tool = PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::over(
+        NON_CODING_TARGETS,
+        Some(&["research".to_string()]),
+    ));
 
     let result = tool
         .execute(json!({

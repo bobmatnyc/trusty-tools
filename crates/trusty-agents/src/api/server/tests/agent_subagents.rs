@@ -95,6 +95,38 @@ content = "test"
     .unwrap();
 }
 
+/// Write an assistant-kind agent TOML carrying an explicit
+/// `[subagents].delegate_allowed` whitelist (ADR-0024 decision 4).
+///
+/// Kept separate from [`write_agent`] for the same reason `write_hidden_agent`
+/// is: only the decision-4 tests care about the whitelist, and threading an
+/// eighth parameter through fifteen call sites would make every existing
+/// fixture read as if reachability configuration were part of what it tests.
+/// An absent whitelist is exactly what `write_agent` already produces, and is
+/// the fail-closed case `subagents_route_absent_whitelist_makes_every_target_unreachable`
+/// pins.
+fn write_assistant_with_whitelist(
+    dir: &std::path::Path,
+    name: &str,
+    tier: Option<&str>,
+    tools_allow: &[&str],
+    delegate_allowed: &[&str],
+) {
+    write_agent(dir, name, "assistant", tier, tools_allow, None);
+    let path = dir.join(format!("{name}.toml"));
+    let existing = std::fs::read_to_string(&path).unwrap();
+    let joined = delegate_allowed
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        &path,
+        format!("{existing}\n[subagents]\ndelegate_allowed = [{joined}]\n"),
+    )
+    .unwrap();
+}
+
 /// Write an agent TOML carrying `hidden = true` in `[agent]` (#4235).
 ///
 /// Kept separate from [`write_agent`] rather than adding a seventh parameter:
@@ -137,16 +169,19 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
 /// `ASSISTANT_ALLOWED_DELEGATE_ROLES` (`orchestrator`, the escalation target
 /// #3555's role gate closed).
 fn standard_roster(dir: &std::path::Path) {
-    write_agent(
+    // ADR-0024 decision 4: the subject declares the SEEDED whitelist the
+    // bundled personas now ship, so this roster exercises the shipped posture
+    // rather than the fail-closed one (which has its own test below).
+    write_assistant_with_whitelist(
         dir,
-        "assistant",
         "assistant",
         None,
         &["delegate_to_agent", "git_log"],
-        None,
+        &["research-agent", "ticketing-agent"],
     );
     write_agent(dir, "engineer", "engineer", None, &[], None);
     write_agent(dir, "docs-agent", "documentation", None, &[], None);
+    write_agent(dir, "research-agent", "researcher", None, &[], None);
     write_agent(dir, "izzie", "assistant", None, &[], None);
     write_agent(dir, "pm", "orchestrator", None, &[], None);
     write_agent(dir, "ticketing-agent", "ticketing", None, &[], None);
@@ -188,6 +223,51 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(named.contains(&"engineer"), "{named:?}");
+    // ADR-0024 decision 4: role eligibility still decides which agents get a
+    // CARD; the whitelist decides which cards are reachable. `engineer` is
+    // role-eligible, so it is reported — and refused, with the reachable-set
+    // reason, because it is not on the server-owned floor and could not be put
+    // there by any config.
+    let eng = targets
+        .iter()
+        .find(|t| t["name"] == "engineer")
+        .expect("a role-eligible coding agent is still reported, with a reason");
+    assert_eq!(
+        eng["reachable"], false,
+        "no coding agent is reachable from an assistant (ADR-0024 decision 4): {eng:?}"
+    );
+    assert!(
+        eng["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reachable sub-agent set"),
+        "the pane must explain the whitelist rule: {eng:?}"
+    );
+    // The two floor members this agent whitelisted ARE reachable — without
+    // this, a bug that denied everything would pass the assertions above.
+    for reachable_name in ["research-agent", "ticketing-agent"] {
+        let t = targets
+            .iter()
+            .find(|t| t["name"] == reachable_name)
+            .unwrap_or_else(|| panic!("{reachable_name} must be a target card: {named:?}"));
+        assert_eq!(
+            t["reachable"], true,
+            "a whitelisted floor member must be reachable: {t:?}"
+        );
+        assert_eq!(t["reason"], serde_json::Value::Null);
+    }
+    assert_eq!(
+        ip["whitelist_enforced"], true,
+        "the whitelist gate applies to an assistant-kind viewer"
+    );
+    assert_eq!(ip["declares_whitelist"], true);
+    let reachable_floor: Vec<&str> = ip["reachable_floor"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(reachable_floor, vec!["research-agent", "ticketing-agent"]);
     // ADR-0024: a peer assistant is still REPORTED (role-eligible, so it is
     // not silently dropped) but is no longer REACHABLE — assistants
     // communicate with each other rather than delegating. This assertion
@@ -225,17 +305,27 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         docs["tier"], "l1",
         "a sub-agent stays tier l1 (ADR-0024 decision 3): {docs:?}"
     );
-    assert_eq!(docs["reachable"], true);
-    assert_eq!(docs["reason"], serde_json::Value::Null);
+    // ADR-0024 decision 4 REVERSED this assertion (it read `true` before):
+    // `documentation` remains the role that exists only in the in-product
+    // allowlist, which is still what earns docs-agent a card — but the
+    // reachable set is now the whitelist, and no whitelist can name docs-agent
+    // because the floor does not.
+    assert_eq!(
+        docs["reachable"], false,
+        "a role-eligible agent off the floor is not reachable: {docs:?}"
+    );
 
     // The role gate's exclusions are COUNTED, never named (no roster dump), and
-    // the subject itself never appears as its own target.
+    // the subject itself never appears as its own target. `ticketing-agent` is
+    // no longer among them: ADR-0024 decision 4 added its role to the
+    // allowlist, because an agent on the ratified floor must at least be
+    // role-eligible for the whitelist to be able to name it.
     assert!(
-        !named.contains(&"pm") && !named.contains(&"ticketing-agent"),
+        !named.contains(&"pm"),
         "role-ineligible agents must not become target cards: {named:?}"
     );
     assert!(!named.contains(&"assistant"), "no self-delegation card");
-    assert_eq!(ip["role_excluded_count"], 2, "pm + ticketing-agent");
+    assert_eq!(ip["role_excluded_count"], 1, "pm only");
 
     // The role allowlist is reported verbatim so the pane can explain the rule.
     let roles: Vec<&str> = ip["allowed_roles"]
@@ -258,6 +348,102 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         .map(|r| r.as_str().unwrap())
         .collect();
     assert_eq!(floor, vec!["research", "ticketing"]);
+}
+
+/// ADR-0024 decision 4 sub-answer (a) at the reporting surface: an assistant
+/// that declares NO whitelist has NO reachable in-product target.
+///
+/// Why: the pane's whole reason to exist is that it must not advertise what the
+/// gate refuses. `delegate_assistant_absent_whitelist_reaches_nothing` pins the
+/// gate; this pins that the pane agrees with it. A pane that kept showing the
+/// pre-decision-4 role-scan as reachable would be the exact drift this module's
+/// honesty rules forbid.
+/// What: every target card is `reachable: false` with the reachable-set reason,
+/// `declares_whitelist` is false, and the floor is still reported so the pane
+/// can tell the operator what a whitelist COULD name.
+#[tokio::test]
+async fn subagents_route_absent_whitelist_makes_every_target_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent(
+        dir.path(),
+        "bare-assistant",
+        "assistant",
+        None,
+        &["delegate_to_agent"],
+        None,
+    );
+    write_agent(dir.path(), "research-agent", "researcher", None, &[], None);
+    write_agent(dir.path(), "ticketing-agent", "ticketing", None, &[], None);
+    write_agent(dir.path(), "engineer", "engineer", None, &[], None);
+
+    let resp = subagents_at(&[dir.path().to_path_buf()], "bare-assistant", dir.path()).await;
+    let body = body_json(resp).await;
+    let ip = &body["in_product"];
+    assert_eq!(ip["declares_whitelist"], false);
+    assert_eq!(ip["whitelist_enforced"], true);
+    let targets = ip["targets"].as_array().unwrap();
+    assert!(!targets.is_empty(), "role-eligible cards are still drawn");
+    for t in targets {
+        assert_eq!(
+            t["reachable"], false,
+            "an absent whitelist reaches nothing (fail-closed): {t:?}"
+        );
+        assert!(
+            t["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reachable sub-agent set"),
+            "{t:?}"
+        );
+    }
+    let floor: Vec<&str> = ip["reachable_floor"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert_eq!(floor, vec!["research-agent", "ticketing-agent"]);
+}
+
+/// A whitelist that names an agent OFF the floor grants nothing extra — the
+/// pane reports the same refusal the gate applies.
+///
+/// Why: decision 4's sub-answer (b) puts a floor on the write path, but a
+/// hand-edited TOML bypasses it. The pane must not become the place an
+/// operator "confirms" that a widened config took effect. Same
+/// two-layers-not-one posture the cross-product half already reports through
+/// `rejected`.
+/// What: `[subagents].delegate_allowed = ["engineer", "research-agent"]` —
+/// `engineer` stays unreachable, `research-agent` becomes reachable.
+#[tokio::test]
+async fn subagents_route_reports_a_non_whitelisted_target_as_unreachable() {
+    let dir = tempfile::tempdir().unwrap();
+    write_assistant_with_whitelist(
+        dir.path(),
+        "widened",
+        None,
+        &["delegate_to_agent"],
+        &["engineer", "research-agent"],
+    );
+    write_agent(dir.path(), "engineer", "engineer", None, &[], None);
+    write_agent(dir.path(), "research-agent", "researcher", None, &[], None);
+
+    let resp = subagents_at(&[dir.path().to_path_buf()], "widened", dir.path()).await;
+    let body = body_json(resp).await;
+    let targets = body["in_product"]["targets"].as_array().unwrap();
+    let eng = targets.iter().find(|t| t["name"] == "engineer").unwrap();
+    assert_eq!(
+        eng["reachable"], false,
+        "a config naming a coding agent must not make it reachable: {eng:?}"
+    );
+    let research = targets
+        .iter()
+        .find(|t| t["name"] == "research-agent")
+        .unwrap();
+    assert_eq!(
+        research["reachable"], true,
+        "…and the legitimate entry in the same list still works: {research:?}"
+    );
 }
 
 /// THE test #4029 names explicitly: "an L1 agent must not be shown an L0
@@ -286,13 +472,14 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
     // assistant kind, so the ONLY thing that can keep it out of reach is the
     // tier gate.
     write_agent(dir.path(), "orch", "engineer", Some("l0"), &[], None);
-    write_agent(
+    write_assistant_with_whitelist(
         dir.path(),
         "narrowed-assistant",
-        "assistant",
         Some("l1"),
         &["delegate_to_agent", "git_log"],
-        None,
+        // ADR-0024 decision 4: seeded so the whitelist is not what refuses
+        // anything here — the tier gate is the axis under test.
+        &["research-agent", "ticketing-agent"],
     );
 
     let resp = subagents_at(
@@ -325,10 +512,15 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
     // Not a blanket denial: an L1 SUB-AGENT is still reachable. (Pre-ADR-0024
     // this assertion used the peer assistant `izzie`; a peer is now refused by
     // kind, so the "one-directional, not blanket" property is demonstrated
-    // with a target the kind rule permits.)
-    let eng = targets.iter().find(|t| t["name"] == "engineer").unwrap();
-    assert_eq!(eng["tier"], "l1");
-    assert_eq!(eng["reachable"], true);
+    // with a target the kind rule permits. Decision 4 moved it again, to a
+    // target the WHITELIST also permits — `research-agent` — for the same
+    // reason: the positive case has to survive every gate, not just this one.)
+    let reachable_sub = targets
+        .iter()
+        .find(|t| t["name"] == "research-agent")
+        .unwrap();
+    assert_eq!(reachable_sub["tier"], "l1");
+    assert_eq!(reachable_sub["reachable"], true);
 }
 
 /// The counter-test: an L0 delegator DOES reach an L0 target (and still reaches
@@ -341,23 +533,28 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
 #[tokio::test]
 async fn subagents_route_shows_l0_target_to_l0_delegator() {
     let dir = tempfile::tempdir().unwrap();
-    write_agent(
+    write_assistant_with_whitelist(
         dir.path(),
         "orchestrator-assistant",
-        "assistant",
         Some("l0"),
         &["delegate_to_agent"],
-        None,
+        &["research-agent", "ticketing-agent"],
     );
+    // ADR-0024 decision 4: NAME and role/tier are independent axes (the
+    // whitelist reads the name, the other gates read role and tier), so the
+    // L0 fixture takes a floor NAME while keeping the `engineer` role and the
+    // `orchestration` tier alias this test is actually about. Without a floor
+    // name the whitelist would refuse it and this test would stop exercising
+    // the tier comparison at all.
     write_agent(
         dir.path(),
-        "orch",
+        "research-agent",
         "engineer",
         Some("orchestration"),
         &[],
         None,
     );
-    write_agent(dir.path(), "engineer", "engineer", None, &[], None);
+    write_agent(dir.path(), "ticketing-agent", "engineer", None, &[], None);
 
     let resp = subagents_at(
         &[dir.path().to_path_buf()],
@@ -370,15 +567,21 @@ async fn subagents_route_shows_l0_target_to_l0_delegator() {
     assert_eq!(ip["delegator_tier"], "l0");
 
     let targets = ip["targets"].as_array().unwrap();
-    let orch = targets.iter().find(|t| t["name"] == "orch").unwrap();
+    let orch = targets
+        .iter()
+        .find(|t| t["name"] == "research-agent")
+        .unwrap();
     assert_eq!(
         orch["tier"], "l0",
         "the `orchestration` alias must resolve to l0 like `l0` does"
     );
     assert_eq!(orch["reachable"], true);
     assert_eq!(orch["reason"], serde_json::Value::Null);
-    let eng = targets.iter().find(|t| t["name"] == "engineer").unwrap();
-    assert_eq!(eng["reachable"], true, "L0 → L1 is not restricted");
+    let l1_target = targets
+        .iter()
+        .find(|t| t["name"] == "ticketing-agent")
+        .unwrap();
+    assert_eq!(l1_target["reachable"], true, "L0 → L1 is not restricted");
 }
 
 /// An unrecognized/blank `tier` string must fail closed to L1 on BOTH sides of
@@ -725,11 +928,13 @@ async fn subagents_route_hidden_filter_leaves_the_role_count_untouched() {
     let dir = tempfile::tempdir().unwrap();
     standard_roster(dir.path());
 
-    // Baseline: the roster's two role-ineligible agents (pm, ticketing-agent)
-    // and nothing hidden.
+    // Baseline: the roster's ONE role-ineligible agent (pm) and nothing
+    // hidden. ADR-0024 decision 4 moved `ticketing-agent` out of this bucket by
+    // adding its role to the allowlist — see
+    // `subagents_route_reports_both_mechanisms_for_an_assistant`.
     let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
     let ip = body_json(resp).await["in_product"].clone();
-    assert_eq!(ip["role_excluded_count"], 2);
+    assert_eq!(ip["role_excluded_count"], 1);
     assert_eq!(ip["hidden_excluded_count"], 0);
 
     // A hidden agent whose role is ALSO ineligible must land in exactly one
@@ -738,7 +943,7 @@ async fn subagents_route_hidden_filter_leaves_the_role_count_untouched() {
     let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
     let ip = body_json(resp).await["in_product"].clone();
     assert_eq!(
-        ip["role_excluded_count"], 2,
+        ip["role_excluded_count"], 1,
         "the role count keeps its pre-#4235 meaning: {ip:?}"
     );
     assert_eq!(ip["hidden_excluded_count"], 1, "{ip:?}");

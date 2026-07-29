@@ -143,10 +143,26 @@ pub(crate) const ASSISTANT_TIER_ROLE: &str = "assistant";
 /// eligible for the assistant-tier treatment even though it lives in a
 /// different module tree. Reusing this constant (rather than a second
 /// hand-copied list) is the single-source-of-truth choice.
+///
+/// ADR-0024 decision 4 (RATIFIED 2026-07-29) made this list the COARSE
+/// pre-filter it was already documented as being, and added the fine one: a
+/// per-agent, NAME-based reachable-set whitelist
+/// (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS` as the floor,
+/// `[subagents].delegate_allowed` as the editable narrowing). This list is
+/// deliberately NOT narrowed to match — decision 4's whole point is that the
+/// reachable set is editable config, "not a hand-authored Rust constant", so
+/// curating THIS constant down to the reachable names would reimplement the
+/// decision in exactly the shape it rejects, and would also break the
+/// non-delegation consumers cited above. `ticketing` was ADDED here for the
+/// opposite reason: `ticketing-agent.toml` declares `role = "ticketing"`, and
+/// a role missing from this list is unreachable no matter what a whitelist
+/// says — an agent on the ratified floor must at least be role-eligible. That
+/// widening is safe precisely because the whitelist is now the binding gate.
 pub(crate) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
     "engineer",          // engineer.toml, code-agent.toml, python-engineer.toml, …
     "qa",                // qa-agent.toml
     "researcher",        // research-agent.toml
+    "ticketing",         // ticketing-agent.toml (ADR-0024 decision 4 — see above)
     "documentation",     // docs-agent.toml
     "ops",               // local-ops-agent.toml
     "planner",           // plan-agent.toml
@@ -184,6 +200,14 @@ pub(crate) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
 /// specialist unless this agent is itself L0. Ignored for every
 /// non-assistant-tier role (those never register `delegate_to_agent` at
 /// all — see `build_assistant_tier_registry`'s doc comment).
+///
+/// `delegator_subagents` (ADR-0024 decision 4, RATIFIED 2026-07-29): THIS
+/// agent's own `[subagents].delegate_allowed` list — the editable whitelist of
+/// in-process sub-agent NAMES it may reach. Passed straight through to
+/// `build_assistant_tier_registry`, which intersects it with the server-owned
+/// floor. `None` means the agent declares no whitelist and reaches NOTHING
+/// (fail-closed, ratified); ignored for every non-assistant-tier role.
+/// Test: `assistant_tier_registry_delegation_honors_the_reachable_whitelist`.
 pub(super) fn build_registry_for_agent(
     name: &str,
     role: &str,
@@ -193,11 +217,13 @@ pub(super) fn build_registry_for_agent(
     tag_skill_registry: Arc<skills::registry::SkillRegistry>,
     delegator_allow: Option<&[String]>,
     delegator_tier: crate::agents::AgentTier,
+    delegator_subagents: Option<&[String]>,
 ) -> Option<ToolRegistry> {
     if role == ASSISTANT_TIER_ROLE {
         return Some(build_assistant_tier_registry(
             delegator_allow,
             delegator_tier,
+            delegator_subagents,
         ));
     }
     // #222: When `code_dir` is set and distinct from `out_dir`, the code-agent
@@ -513,9 +539,21 @@ pub(super) fn build_registry_for_agent(
 /// `assistant_tier_registry_includes_session_state_tools_for_l0`,
 /// `l1_persona_declaring_session_state_tools_gets_none`,
 /// `l0_persona_declaring_session_state_tools_gets_them`.
+///
+/// `delegator_subagents` (ADR-0024 decision 4, RATIFIED 2026-07-29): this
+/// agent's own `[subagents].delegate_allowed` whitelist, resolved into a
+/// `SubagentAllowSet` over `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`
+/// and declared through `with_delegator` alongside the role and tier. This is
+/// the gate that makes an assistant's reachable set exactly what its config
+/// says (bounded by the floor) rather than "every role-eligible agent on this
+/// host". `None` reaches nothing — fail-closed, which is why every bundled
+/// assistant persona now ships a seeded `[subagents].delegate_allowed`.
+/// Test: `assistant_tier_registry_delegation_honors_the_reachable_whitelist`,
+/// `assistant_tier_registry_delegation_fails_closed_without_a_whitelist`.
 pub(crate) fn build_assistant_tier_registry(
     delegator_allow: Option<&[String]>,
     delegator_tier: crate::agents::AgentTier,
+    delegator_subagents: Option<&[String]>,
 ) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -575,9 +613,21 @@ pub(crate) fn build_assistant_tier_registry(
             // construction, not by assumption — `build_registry_for_agent`
             // (line ~188) routes into this function on exactly that role and
             // on no other, so every caller of this registry IS an assistant.
-            // Declared together with the tier in one call so this site cannot
-            // acquire the tier gate while missing the kind predicate.
-            .with_delegator(ASSISTANT_TIER_ROLE, delegator_tier),
+            // Declared together with the tier and (decision 4) the reachable
+            // sub-agent whitelist in one call so this site cannot acquire one
+            // gate while missing another. `delegator_subagents` of `None` — an
+            // assistant whose config declares no whitelist — resolves to the
+            // EMPTY set and reaches NOTHING, which is decision 4's ratified
+            // fail-closed answer; the bundled personas ship a seeded default so
+            // that is not a silent capability loss.
+            .with_delegator(
+                ASSISTANT_TIER_ROLE,
+                delegator_tier,
+                crate::tools::subagent_allow::SubagentAllowSet::over(
+                    crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+                    delegator_subagents,
+                ),
+            ),
     ));
 
     // #3745 item C: register the izzie platform-hosted tools

@@ -245,103 +245,24 @@ pub(super) static TABLE: &[SkillDef] = &[
         System,
         None,
     ),
-    // --- ticketing -------------------------------------------------------
-    tool_skill(
-        "ticket-create",
-        "Create a Ticket",
-        "Open a new ticket in the project's tracker.",
-        "create_ticket",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-read",
-        "Read a Ticket",
-        "Fetch one ticket by id.",
-        "get_ticket",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-update",
-        "Update a Ticket",
-        "Change a ticket's fields.",
-        "update_ticket",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-close",
-        "Close a Ticket",
-        "Close a ticket.",
-        "close_ticket",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-list",
-        "List Tickets",
-        "List tickets matching a filter.",
-        "list_tickets",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-comment",
-        "Comment on a Ticket",
-        "Add a comment to a ticket.",
-        "add_comment",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-tag",
-        "Tag a Ticket",
-        "Add or remove labels on a ticket.",
-        "ticket_tag",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-assign",
-        "Assign a Ticket",
-        "Assign a ticket to someone.",
-        "ticket_assign",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-transition",
-        "Transition a Ticket",
-        "Move a ticket to another workflow state.",
-        "ticket_transition",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ticket-search",
-        "Search Tickets",
-        "Search tickets by free text across the tracker.",
-        "ticket_search",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ci-run-trigger",
-        "Trigger a CI Run",
-        "Start a GitHub Actions workflow run.",
-        "actions_trigger",
-        Action,
-        None,
-    ),
-    tool_skill(
-        "ci-run-status",
-        "CI Run Status",
-        "Report the state of GitHub Actions runs.",
-        "actions_status",
-        Action,
-        None,
-    ),
+    // --- ticketing (REMOVED — ADR-0024 decision 4, owner 2026-07-29) -------
+    //
+    // The twelve leaf rows that lived here (`ticket-create`, `ticket-read`,
+    // `ticket-update`, `ticket-close`, `ticket-list`, `ticket-comment`,
+    // `ticket-tag`, `ticket-assign`, `ticket-transition`, `ticket-search`,
+    // `ci-run-trigger`, `ci-run-status`) were deleted with the `ticketing`
+    // function-skill row that bundled them (`super::functions`). The owner's
+    // ruling: ticketing is reachable as a SUB-AGENT only, never as a skill, so
+    // it must not surface as a skill card — and `skills_at`
+    // (`api::server::agent_skills`) renders EVERY manifest row, granted or not,
+    // so removing the rows is the only way to remove the cards.
+    //
+    // The TOOLS are untouched and still registered
+    // (`crate::tools::native_ticketing`); `ticketing-agent.toml` grants them
+    // by name in its own `[tools].allowed`, which does not go through this
+    // catalog. This comment is left in place of the rows so the next reader
+    // finds the decision rather than an unexplained gap between `tmux-*` and
+    // `mcp-*`.
     // --- MCP administration ----------------------------------------------
     tool_skill(
         "mcp-list",

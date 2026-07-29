@@ -7,6 +7,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **An assistant's reachable sub-agent set is now an editable configuration
+  whitelist, and for the bundled assistants it is exactly `{research-agent,
+  ticketing-agent}` — no coding agents** (ADR-0024 decision 4, ratified by the
+  owner 2026-07-29). Reachability was previously an unfiltered scan of every
+  role-eligible agent on the host, with no per-agent narrowing possible. It is
+  now `[subagents].delegate_allowed` in each agent's `agent.toml`, intersected
+  with a server-owned floor. **No agent definitions were removed** — every
+  engineer, QA, docs, planning and ops agent is still in the catalog and still
+  dispatchable by `pm`; only what an ASSISTANT can reach changed.
+- **An absent whitelist reaches NOTHING** (fail-closed), and every bundled
+  assistant persona now ships a seeded `delegate_allowed` so this is not a
+  silent capability loss. Personalizing overlays inherit and can add to their
+  base's list; a custom persona that declares none reaches nothing until it
+  does, which is deliberate.
+- **Assistant persona prose rewritten to match.** `assistant`, `izzie`,
+  `cto-assistant`, `ctrl` and `personal-assistant` previously instructed the
+  model to delegate by name to `engineer`, `python-engineer`, `qa-agent`,
+  `docs-agent`, `local-ops-agent` and `plan-agent` — every one of which the new
+  gate refuses. Each persona now describes what it can actually reach, and what
+  to do when asked for coding work: say plainly that it is not something it can
+  take on, do the part it can (discuss it, or gather background via the research
+  specialist), and offer to open a ticket via the ticketing specialist.
+- **The role allow-list gained `ticketing`** so `ticketing-agent` is
+  role-eligible at all. This widens a COARSE pre-filter, not the reachable set —
+  the whitelist is now the binding gate.
+
+### Added
+
+- **`PATCH /api/agents/:name` accepts `subagents_delegate_allowed`, with a
+  server-side floor.** Unlike the existing `tools_allow` field, this one
+  validates: a request naming anything outside the reachable floor is rejected
+  `400` with the offending names echoed back, and nothing is written. A widened
+  list that reaches disk some other way is still refused at dispatch.
+- The Sub-agents pane reports the whitelist, whether the agent declares one, and
+  the floor a config edit is bounded by; an unreachable target now carries the
+  reachable-set reason alongside the existing kind and tier reasons.
+
+### Removed
+
+- **Ticketing is gone from the skills surface entirely** — it is reachable as a
+  sub-agent only (owner, 2026-07-29). The grouped `Ticketing` skill card, its
+  twelve leaf ticket/CI skill cards, and `cto-assistant`'s four direct
+  ticket-tool grants (`ticket_search`, `list_tickets`, `get_ticket`,
+  `create_ticket`) are all removed. The ticketing TOOLS are unchanged and still
+  granted to `ticketing-agent`, and the authored `ticketing-epic` /
+  `ticketing-ticket` skill assets — that sub-agent's own domain knowledge — are
+  preserved and still injected into its system prompt.
+
 ### Fixed
 
 - **The Sub-agents pane no longer advertises delegation targets the gate

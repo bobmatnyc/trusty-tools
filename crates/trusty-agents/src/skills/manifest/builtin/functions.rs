@@ -22,49 +22,23 @@
 //! authoring path is the part that needs the security design, not the row.
 //! What: A `const` table of [`function_skill`] rows, each naming member skill
 //! ids that exist elsewhere in [`super::all`].
-//! Test: `super::super::tests` — `ticketing_function_skill_bundles_the_ticket_and_git_leaf_skills`,
+//!
+//! **ADR-0024 decision 4 (owner, 2026-07-29):** the `ticketing` row was REMOVED
+//! from this table, together with the twelve leaf ticket/CI skills it bundled
+//! (`super::ops`). The owner's ruling is that ticketing is reachable as a
+//! SUB-AGENT only — never as a skill — so the grouped card and its members are
+//! gone from the skills surface entirely. Nothing about the ticketing TOOLS
+//! changed: `create_ticket` and friends are still registered and still granted
+//! to `ticketing-agent.toml`, which is the agent that owns the domain. The two
+//! authored `.trusty-agents/skills/ticketing-*.md` assets are a DIFFERENT
+//! subsystem — that sub-agent's own domain knowledge, injected into its system
+//! prompt — and are untouched.
+//! Test: `super::super::tests` — `ticketing_is_absent_from_the_skill_surface`,
 //! `google_workspace_function_skill_bundles_the_mail_and_tasks_leaves`,
 //! `cto_tools_function_skill_bundles_the_four_cto_database_leaves`,
 //! `function_skill_never_leaks_its_bundle_id_into_the_tool_patterns`.
 
 use super::super::{SkillDef, function_skill};
-
-/// The ticketing work unit: ten ticket operations plus git *inspection*.
-///
-/// Why: Spelled out rather than derived from a name prefix — DOC-57 §5.5/S-8 is
-/// explicit that *"no prefix grouping [exists] anywhere in this model"*, and a
-/// `ticket-*` prefix scan would be precisely that: a glob dialect reintroduced
-/// through the back door, silently absorbing any future `ticket-`-prefixed skill
-/// into an existing grant. An explicit list means adding a leaf is a deliberate
-/// decision to widen the bundle, visible in review.
-///
-/// **Why the two git rows are here** (owner, 2026-07-28): the ticketing subagent
-/// is the component that answers "what changed for this ticket", which it cannot
-/// do without reading history — so the owner's unit of function is git *plus*
-/// ticketing, controlled together. The widening is deliberately limited to the
-/// two READ-ONLY git skills the request named (`git_search_commits`,
-/// `git_branches`). `git-commit-create`, `git-branch-create` and the rest of
-/// `core.rs`'s git *mutation* rows stay out: a bundle grant is the shape that
-/// turns one config line into N capabilities, so quietly folding write access to
-/// the repository into a ticketing grant is exactly the escalation-by-convenience
-/// S-14 exists to keep reviewable.
-/// Test: `ticketing_function_skill_bundles_the_ticket_and_git_leaf_skills`,
-/// `ticketing_bundle_carries_no_git_mutation_skill`.
-const TICKETING_MEMBERS: &[&str] = &[
-    "ticket-create",
-    "ticket-read",
-    "ticket-update",
-    "ticket-close",
-    "ticket-list",
-    "ticket-comment",
-    "ticket-tag",
-    "ticket-assign",
-    "ticket-transition",
-    "ticket-search",
-    // #4024: git inspection, per the owner's "git + ticketing as one unit".
-    "git-commit-search",
-    "git-branch-list",
-];
 
 /// The Google Workspace mail-and-tasks work unit.
 ///
@@ -147,19 +121,6 @@ const CTO_TOOLS_MEMBERS: &[&str] = &[
 ];
 
 pub(super) static TABLE: &[SkillDef] = &[
-    function_skill(
-        "ticketing",
-        "Ticketing",
-        "Everything needed to work a tracker end to end: open, read, update, comment \
-         on, label, assign, transition, search and close tickets, plus the read-only \
-         git history and branch lookups that answer \"what changed for this ticket\". \
-         Granting this one skill grants all twelve operations; it grants no git \
-         WRITE access. Note: per the domain authority (epic #4021 section D), the \
-         ticketing DOMAIN routes to the subagent modality when a ticketing subagent \
-         is available — this function skill is the direct-skill fallback used when \
-         it is not.",
-        TICKETING_MEMBERS,
-    ),
     function_skill(
         "google-workspace",
         // Short name by owner decision; membership is Gmail + Tasks only — see
