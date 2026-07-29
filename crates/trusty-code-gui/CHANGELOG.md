@@ -39,6 +39,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **The workstream chat pane appends assistant text live over SSE (streaming
+  epic #3696, Slice 3).** Previously the pane only saw a turn once it was
+  complete, batch-replacing the whole list every `POLL_MS` from
+  `GET /sessions/{id}/transcript`. `WorkstreamActivity.svelte` now also
+  subscribes to `GET /sessions/{id}/events` and folds `AgentMessageDelta`
+  events into in-progress bubbles rendered alongside the polled entries, so
+  text builds up as it is generated. The reducer (`applyDelta` in
+  `lib/transcript.ts`) is a pure function — it keys bubbles by
+  `(agent_id, turn_id)` rather than `turn_id` alone, so two concurrently
+  delegated sub-agents that share a turn counter never interleave into one
+  bubble, and it orders bubbles by envelope `seq` so replayed or out-of-order
+  deltas still render correctly.
+
 - **Download workstream transcript as Markdown (closes #3526).** The active
   workstream's chat pane header (`WorkstreamActivity.svelte`) gains a
   `download transcript` button that saves the full run transcript — every

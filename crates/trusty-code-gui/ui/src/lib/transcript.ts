@@ -183,3 +183,106 @@ export function transcriptFilename(workstreamId: string, generatedAtMs: number):
   const idPart = safeId.length > 0 ? safeId : 'workstream';
   return `transcript-${idPart}-${stamp}.md`;
 }
+
+// ---------------------------------------------------------------------------
+// Live SSE delta stream (tcode streaming epic #3696, Slice 3)
+//
+// Why: Slice 0 (`crate::events::Event::AgentMessageDelta`) added the wire
+// event this module's `TurnRecord`/`selectChatEntries` pipeline cannot yet
+// consume — that pipeline only ever sees a turn once it's fully complete,
+// batch-replaced every `POLL_MS` (`WorkstreamActivity.svelte`'s
+// `GET /sessions/{id}/transcript` poll). This section adds the pure,
+// unit-testable reducer side of Slice 3: given the deltas arriving over
+// `GET /sessions/{id}/events` (SSE), fold them into in-progress "bubbles" the
+// component can render alongside `chatEntries` while a turn is still
+// streaming. Kept here (not in the component) for the same reason
+// `selectChatEntries`/`formatElapsed` are — pure functions of their inputs,
+// no `EventSource`/DOM/`Date.now()` inside, so the folding logic is testable
+// without mounting anything.
+// What: [`AgentMessageDeltaEvent`] mirrors
+// `crate::events::Event::AgentMessageDelta`'s wire fields PLUS the owning
+// `SessionEventEnvelope`'s `seq` (the component flattens envelope + event
+// into this one shape before calling [`applyDelta`], since `seq` — not
+// anything on the event payload itself — is what orders bubbles and lets a
+// reconnect dedup against ring-buffer replay). [`StreamBubble`] is the
+// per-`(agent_id, turn_id)` accumulator; [`applyDelta`] is the reducer.
+// Test: `transcript.test.ts` (`applyDelta` describe block).
+
+/** Mirrors `crate::events::Event::AgentMessageDelta`'s wire fields, plus the
+ * owning `SessionEventEnvelope.seq` (see the section Why above for why the
+ * two are flattened into one shape here rather than kept as a nested
+ * envelope/event pair). */
+export interface AgentMessageDeltaEvent {
+  session_id: string;
+  agent: string;
+  agent_id: string;
+  turn_id: string;
+  delta: string;
+  done: boolean;
+  seq: number;
+}
+
+/** One in-progress (or just-completed) streamed turn, keyed by the tuple
+ * `(agentId, turnId)` — never `turnId` alone, since two concurrently
+ * delegated sub-agents can share a `turn_id` counter value (the Slice 0
+ * contract rule documented on `Event::AgentMessageDelta`). `seq` is the
+ * envelope `seq` of the FIRST delta seen for this key, used only to order
+ * bubbles relative to each other; it does not change as later deltas for the
+ * same key arrive. */
+export interface StreamBubble {
+  agentId: string;
+  turnId: string;
+  agent: string;
+  text: string;
+  done: boolean;
+  seq: number;
+}
+
+/**
+ * Fold one `agent_message_delta` event into a bubble list.
+ *
+ * Why: the reducer, not the component, owns the tuple-keying rule — see
+ * `StreamBubble`'s doc for why `(agent_id, turn_id)` and never `turn_id`
+ * alone. Pure and immutable (returns a new array, never mutates `bubbles`)
+ * so the component can call it directly from an `EventSource.onmessage`
+ * handler and reassign `$state` in one step, and so it's callable from a
+ * test with hand-built inputs, no mounting required.
+ * What: no existing bubble for `(delta.agent_id, delta.turn_id)` -> appends a
+ * new one seeded with `delta.text`/`delta.done`/`delta.seq`. An existing
+ * bubble -> returns a copy with `delta.delta` appended to `text` and `done`
+ * OR'd in (once a key's bubble is marked done it stays done, even if a
+ * malformed producer somehow sent another non-done delta for the same key
+ * afterward). The returned array is always sorted ascending by each bubble's
+ * (first-seen) `seq`, so two bubbles built from deltas delivered out of
+ * arrival order still render in the right order — the arrival order an
+ * `EventSource` guarantees in practice, but the sort keeps the function's
+ * output correct even given adversarial/test input order.
+ * Test: `transcript.test.ts::applyDelta-*`.
+ */
+export function applyDelta(bubbles: StreamBubble[], delta: AgentMessageDeltaEvent): StreamBubble[] {
+  const idx = bubbles.findIndex((b) => b.agentId === delta.agent_id && b.turnId === delta.turn_id);
+  let next: StreamBubble[];
+  if (idx === -1) {
+    next = [
+      ...bubbles,
+      {
+        agentId: delta.agent_id,
+        turnId: delta.turn_id,
+        agent: delta.agent,
+        text: delta.delta,
+        done: delta.done,
+        seq: delta.seq,
+      },
+    ];
+  } else {
+    const existing = bubbles[idx];
+    const updated: StreamBubble = {
+      ...existing,
+      text: existing.text + delta.delta,
+      done: existing.done || delta.done,
+    };
+    next = bubbles.slice();
+    next[idx] = updated;
+  }
+  return next.sort((a, b) => a.seq - b.seq);
+}
