@@ -183,6 +183,69 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unchanged (unset or unregistered still means worktrees ON, and an unreadable
   registry fails safe to ON), and #3455's warn-never-refuse concurrency
   behaviour is untouched.
+- Bare `tm` now resumes a session whose runtime has died, instead of switching
+  the operator into a bare shell
+  ([#3873](https://github.com/bobmatnyc/trusty-tools/issues/3873)). The picker's
+  resume planner decided "this session is live" from tmux SESSION existence
+  alone, which cannot see the common case where the tmux pane survives but the
+  `claude` inside it exited and the pane fell back to a login shell. That
+  `(active, tmux up)` pair fell through to `Attach`, so the first `tm` did a
+  `switch-client` into an idle shell and nothing else — the operator had to type
+  `tm` a SECOND time, from inside that pane, before a runtime came back.
+  `guided_resume::plan_resume` takes a third input, `runtime_live`, and maps
+  `(active/provisioning, tmux up, runtime dead)` onto the existing
+  `ReconcileThenRestart` recovery (`/runtime-stop` → `/resume` → attach), so the
+  first invocation does the whole job. `runtime_live` is resolved by the new
+  `session_runtime_live`, which reuses the daemon reaper's own
+  `daemon::runtime_reap::session_has_live_pane` primitive — and through it
+  `pane_runtime_exited`, the same `is_idle_shell` allowlist, and the same
+  `ProcessTreeProbe` child gate — against a session-scoped `tmux list-panes`, so
+  the CLI and the reaper cannot drift apart and the fix works whether or not the
+  60s reaper is healthy.
+
+  The verdict is the ANY-PANE-LIVE question over the whole tmux session, not a
+  check of the record's stored `pane_id`: a managed session can be manually split
+  (#2463), and a session with one idle pane beside a live agent pane must never
+  reach the destructive branch. Fails OPEN throughout — a blank session name, a
+  failed `tmux` call, a listing that cannot be fully parsed, or a listing with no
+  pane attributable to the session all assume the runtime is live and preserve
+  the previous attach behavior. Parsing is strict (exactly three non-empty
+  tab-separated fields with a numeric pid) specifically so a missing or
+  unparseable pid cannot collapse the two-gate check down to `is_idle_shell`
+  alone: `has_live_child(None)` returns `false`, which is right for the daemon's
+  non-destructive reconcile (#2023 A) but not for a CLI path that drives a
+  session kill.
+
+  Known limitation, deliberately accepted: any-pane-live is also what bounds the
+  fix. A SPLIT session whose agent pane died but which still has some other pane
+  running a non-shell command (a `vim`, a `tail -f`) reads as live, so bare `tm`
+  still attaches into the idle agent pane there. #3873 is fixed for the
+  single-pane case and for splits whose panes are all idle shells, but not for a
+  split with an unrelated live process — narrowing the question back to one pane
+  would require per-pane runtime identity that the stored `pane_id` cannot supply
+  reliably enough to gate a session kill on.
+
+  Because that reconcile reaches `SessionManager::stop` →
+  `graceful_terminate_runtime` → `kill_session`, which is **session-scoped**, the
+  restart now discloses that it is about to destroy the whole tmux session — all
+  windows, panes, and scrollback — whenever tmux is live, matching what the plain
+  `Restart` branch already did for the same situation. Stopped/Errored records
+  (whose panes are idle shells too) keep taking the plain `Restart` path, and the
+  decommissioned/deleted tombstone refusal still runs first.
+
+  `commands::managed_tests`: `session_resume_headless_active_live_tmux_skips_restart_and_attach`
+  created its scratch tmux session with a bare `tmux new-session -d`, which lands
+  the pane on a login shell — since #3873 that is a DEAD runtime, so the fixture
+  no longer expressed the live-session case the test asserts about. It now runs
+  an explicit long-lived command, and a new counterpart
+  (`session_resume_headless_dead_runtime_reconciles_and_restarts`) drives the
+  dead-runtime shape end-to-end against a real daemon, proving the reconcile
+  actually reaches `/runtime-stop` + `/resume` rather than being a silent no-op.
+  Both wait for the pane's liveness reading to STABILISE (three agreeing probes)
+  before acting: a freshly created pane transiently reports a live child while
+  the shell initialises, which otherwise made both tests depend on the
+  developer's dotfiles. Their tmux names are now process-unique, since the two
+  bin targets can run concurrently and share the machine-global tmux namespace.
 
 - Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
   The project-store upsert was an unsynchronised read-modify-write of the whole
