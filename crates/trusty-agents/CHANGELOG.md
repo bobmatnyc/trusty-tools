@@ -7,6 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Assistants are tier L0 (ADR-0024 decision 3).** An agent whose `[agent].role`
+  is `assistant` now resolves `AgentTier::L0Orchestration` instead of
+  `L1Standard`; sub-agent roles (`engineer`, `qa`, `researcher`, `documentation`,
+  `ops`, `planner`, …) stay `L1Standard`. The Sub-agents pane consequently
+  reports `tier l0` for the viewing assistant and for peer-assistant target
+  cards, and `tier l1` for sub-agents — it previously labelled every agent
+  `l1`, including assistant-kind ones. The tier is DERIVED from the agent's kind
+  by `AgentTier::for_kind`, so no agent TOML changed and none needs a
+  `tier = "l0"` line; an explicit `[agent].tier` declaration still wins in both
+  directions and is still fail-closed (an unrecognized value narrows to L1 and
+  can never elevate). No capability grant changes: delegation refusal keys on
+  agent KIND rather than tier order, and the one tier-conditioned surface
+  (#4171's read-only session-state tools) stays unreachable for every bundled
+  assistant because none names those tools in its `[tools].allow`.
+
 ### Added
 
 - **The Skills pane renders function skills as groups (#4024).** A `kind:

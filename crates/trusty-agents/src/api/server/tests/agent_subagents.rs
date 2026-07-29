@@ -7,9 +7,12 @@
 //!
 //! 1. **The tier interaction (#4169, epic #4167).** An L1 delegator must not be
 //!    shown an L0-orchestration target as reachable, and an L0 delegator must
-//!    be. Today NO shipped persona declares `tier` at all, so this is
-//!    exercisable only against synthetic fixtures — which is exactly why it
-//!    needs a test rather than a manual check.
+//!    be. Under ADR-0024 decision 3 the assistant kind DERIVES L0 (no persona
+//!    declares `tier` on disk, and none needs to), so the L1 side of this
+//!    property now needs a fixture that explicitly narrows an assistant with
+//!    `tier = "l1"` — see `subagents_route_hides_l0_target_from_l1_delegator`.
+//!    That is deliberate: without it, predicate 3 becomes an unexercised
+//!    branch, which is the state ADR-0024's conformance checklist forbids.
 //! 2. **Cross-product deny-by-default (OQ-7).** An agent with no `[subagents]`
 //!    section must see every floor target denied — the pane may not read an
 //!    absent section as a silent grant.
@@ -170,9 +173,13 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
     // `delegate_to_agent` is both registered (role == "assistant") and granted.
     assert_eq!(ip["tool_registered"], true);
     assert_eq!(ip["tool_granted"], true);
+    // ADR-0024 decision 3: the pane reports the VIEWING agent's own tier, and
+    // an assistant is L0 — derived from its kind, with no `tier = "l0"` line
+    // in the fixture. This is the label the owner was looking at when he
+    // reported the pane calling an assistant "tier l1".
     assert_eq!(
-        ip["delegator_tier"], "l1",
-        "no tier declared ⇒ fail-closed L1"
+        ip["delegator_tier"], "l0",
+        "an assistant-kind agent is tier L0 (ADR-0024 decision 3)"
     );
 
     let targets = ip["targets"].as_array().unwrap();
@@ -190,6 +197,10 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         .iter()
         .find(|t| t["name"] == "izzie")
         .expect("peer assistant must still be reported, with a reason");
+    assert_eq!(
+        izzie["tier"], "l0",
+        "a peer assistant renders as tier l0 too (ADR-0024 decision 3): {izzie:?}"
+    );
     assert_eq!(
         izzie["reachable"], false,
         "peer assistant is not a delegation target: {izzie:?}"
@@ -210,6 +221,10 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         .find(|t| t["name"] == "docs-agent")
         .expect("a documentation-role agent must be an in-product target");
     assert_eq!(docs["role"], "documentation");
+    assert_eq!(
+        docs["tier"], "l1",
+        "a sub-agent stays tier l1 (ADR-0024 decision 3): {docs:?}"
+    );
     assert_eq!(docs["reachable"], true);
     assert_eq!(docs["reason"], serde_json::Value::Null);
 
@@ -255,6 +270,14 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
 /// before the tier comparison is consulted, which would leave this test
 /// green while testing nothing about tier — the same isolation applied to
 /// `delegate_l1_to_l0_is_refused` in `tools::delegate`'s tests.
+///
+/// ADR-0024 decision 3 update: the DELEGATOR now has to be explicitly narrowed
+/// to L1 (`tier = "l1"`), because an assistant otherwise derives L0 and the
+/// tier comparison would be vacuously satisfied. That is not a contrivance —
+/// an explicit narrowing is the only way an L1 delegate-capable agent exists
+/// under the ratified model, and it is exactly the population this gate is
+/// still defending. Keeping the test on that fixture is what stops predicate 3
+/// from rotting into an unexercised branch (ADR-0024 conformance item 5).
 #[tokio::test]
 async fn subagents_route_hides_l0_target_from_l1_delegator() {
     let dir = tempfile::tempdir().unwrap();
@@ -263,11 +286,27 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
     // assistant kind, so the ONLY thing that can keep it out of reach is the
     // tier gate.
     write_agent(dir.path(), "orch", "engineer", Some("l0"), &[], None);
+    write_agent(
+        dir.path(),
+        "narrowed-assistant",
+        "assistant",
+        Some("l1"),
+        &["delegate_to_agent", "git_log"],
+        None,
+    );
 
-    let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
+    let resp = subagents_at(
+        &[dir.path().to_path_buf()],
+        "narrowed-assistant",
+        dir.path(),
+    )
+    .await;
     let body = body_json(resp).await;
     let ip = &body["in_product"];
-    assert_eq!(ip["delegator_tier"], "l1");
+    assert_eq!(
+        ip["delegator_tier"], "l1",
+        "an explicit `tier = \"l1\"` declaration overrides the derived kind"
+    );
 
     let targets = ip["targets"].as_array().unwrap();
     let orch = targets
@@ -466,6 +505,35 @@ async fn subagents_route_reports_tool_not_registered_for_a_worker_role() {
         "an engineer-role agent never registers delegate_to_agent"
     );
     assert_eq!(ip["tool_granted"], false, "and declares no allow-list");
+    // ADR-0024 decision 3, the one pane-reporting change beyond the labels: a
+    // NON-assistant viewer stays L1, so an assistant target — now L0 — reads as
+    // tier-blocked where it used to read as reachable. This is a display
+    // artifact on a card the pane already stamps `tool_registered: false`
+    // (an engineer never holds `delegate_to_agent` at all), and it is honest:
+    // if a worker-role agent somehow held the tool, the tier gate WOULD refuse
+    // that edge. Pinned so the next reader knows it is intended, not a bug.
+    assert_eq!(
+        ip["delegator_tier"], "l1",
+        "a worker role derives L1: {ip:?}"
+    );
+    let targets = ip["targets"].as_array().unwrap();
+    let izzie = targets
+        .iter()
+        .find(|t| t["name"] == "izzie")
+        .expect("an assistant-role agent is still role-eligible and still reported");
+    assert_eq!(izzie["tier"], "l0");
+    assert_eq!(
+        izzie["reachable"], false,
+        "an L1 viewer is shown the L0 target as refused: {izzie:?}"
+    );
+    assert!(
+        izzie["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("L0/L1"),
+        "the tier gate, not the kind gate, is what refuses a non-assistant \
+         source's edge: {izzie:?}"
+    );
 }
 
 /// An agent declaring `[tools].allow` WITHOUT `delegate_to_agent` is registered

@@ -307,8 +307,12 @@ body
     let path = dir.path().join("md-agent-no-tier.md");
     fs::write(&path, no_tier).unwrap();
     let cfg = parse_md_agent(&path).expect("md parses");
-    assert_eq!(cfg.agent.tier, None);
-    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+    assert_eq!(cfg.agent.tier, None, "no `tier:` key in the frontmatter");
+    // ADR-0024 decision 3: an absent declaration is DERIVED from kind, and
+    // this fixture's kind is `assistant` — so "absent" resolves L0 here, not
+    // the pre-decision-3 L1. The fail-closed contract for an unrecognized
+    // DECLARATION is unchanged and lives in `agents::tests`.
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L0Orchestration);
 
     let with_tier = r#"---
 name: md-agent-l0

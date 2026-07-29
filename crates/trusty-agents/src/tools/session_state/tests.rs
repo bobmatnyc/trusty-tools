@@ -120,13 +120,24 @@ fn names(v: &[&str]) -> Vec<String> {
 /// would pass even if the resolver regressed.
 /// What: the same shape `agents::tests::agent_toml_with_tier` uses.
 /// Test: `indeterminate_tier_fails_closed_to_no_session_state_tools`,
-/// `declared_l0_tier_keeps_session_state_tools`.
+/// `declared_l0_tier_keeps_session_state_tools`,
+/// `assistant_kind_without_a_declaration_keeps_session_state`.
 fn persona_toml(tier_line: &str) -> String {
+    persona_toml_with_role("assistant", tier_line)
+}
+
+/// [`persona_toml`] with the ROLE parameterized (ADR-0024 decision 3).
+///
+/// Why: tier is derived from kind now, so a fixture that hardcodes
+/// `role = "assistant"` can only exercise one side of the derivation.
+/// What: the same shape, with `role` supplied by the caller.
+/// Test: `sub_agent_kind_without_a_declaration_is_stripped`.
+fn persona_toml_with_role(role: &str, tier_line: &str) -> String {
     format!(
         r#"
 [agent]
 name = "x"
-role = "assistant"
+role = "{role}"
 model = "x"
 description = "x"
 {tier_line}
@@ -143,15 +154,17 @@ content = "base"
 
 #[test]
 fn indeterminate_tier_fails_closed_to_no_session_state_tools() {
-    // An absent / blank / unrecognized `tier = …` resolves to L1Standard via
-    // #4200's fail-closed resolver; that is the value the gate must strip on.
-    for tier_line in [
-        "",
-        r#"tier = """#,
-        r#"tier = "   ""#,
-        r#"tier = "L2""#,
-        r#"tier = "yolo""#,
-    ] {
+    // An UNRECOGNIZED `tier = …` resolves to L1Standard via #4200's fail-closed
+    // resolver; that is the value the gate must strip on.
+    //
+    // ADR-0024 decision 3 narrowed the input set this test covers. An ABSENT or
+    // blank declaration is no longer "indeterminate" — it means "derive from
+    // kind", and this fixture's `role = "assistant"` derives L0. Those two
+    // cases moved to `assistant_kind_without_a_declaration_keeps_session_state`
+    // below. What remains here is the property that actually matters: a
+    // MALFORMED declaration can only ever narrow, so a typo on an assistant
+    // costs it the L0 surface rather than silently keeping it.
+    for tier_line in [r#"tier = "L2""#, r#"tier = "yolo""#, r#"tier = "l2""#] {
         let cfg: crate::agents::AgentConfig =
             toml::from_str(&persona_toml(tier_line)).expect("parses");
         assert_eq!(
@@ -168,6 +181,72 @@ fn indeterminate_tier_fails_closed_to_no_session_state_tools() {
         assert!(
             session_state_tools(&PathBuf::from("/tmp"), cfg.agent.tier()).is_empty(),
             "{tier_line:?} must register no session-state executor"
+        );
+    }
+}
+
+/// ADR-0024 decision 3, stated where the capability actually lives: an
+/// assistant-kind persona with NO `tier` declaration derives L0 and therefore
+/// keeps an L0-only session-state name that reaches its resolved allow-list.
+///
+/// Why: this is the whole practical delta of decision 3 in shipped code. The
+/// delta is REGISTRATION-level only for today's roster — `retain_tier_permitted`
+/// is deny-only and never adds, and no bundled assistant persona names any
+/// `L0_ONLY_SESSION_STATE_TOOLS` entry in its `[tools].allow` (pinned by
+/// `agents::tests::loading::bundled_assistant_personas_resolve_l0_and_gain_nothing`),
+/// so nothing an operator can observe changes until a persona opts in. Pinning
+/// the mechanism separately from the roster means the day a persona DOES opt
+/// in, the grant is a deliberate config edit and not a surprise.
+/// What: absent and blank declarations on `role = "assistant"` both keep the
+/// name and both register the three executors.
+/// Test: this function IS the test.
+#[test]
+fn assistant_kind_without_a_declaration_keeps_session_state() {
+    for tier_line in ["", r#"tier = """#, r#"tier = "   ""#] {
+        let cfg: crate::agents::AgentConfig =
+            toml::from_str(&persona_toml(tier_line)).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            AgentTier::L0Orchestration,
+            "{tier_line:?} on an assistant derives L0 (ADR-0024 decision 3)"
+        );
+        let kept = retain_tier_permitted(names(&["session_list", "git_log"]), cfg.agent.tier());
+        assert_eq!(
+            kept,
+            names(&["session_list", "git_log"]),
+            "{tier_line:?} must NOT strip the session-state name"
+        );
+        assert_eq!(
+            session_state_tools(&PathBuf::from("/tmp"), cfg.agent.tier()).len(),
+            3,
+            "{tier_line:?} must register the three read-only executors"
+        );
+    }
+}
+
+/// The other half: a SUB-AGENT with no declaration stays L1 and is stripped.
+#[test]
+fn sub_agent_kind_without_a_declaration_is_stripped() {
+    for role in [
+        "engineer",
+        "qa",
+        "researcher",
+        "documentation",
+        "ops",
+        "planner",
+    ] {
+        let cfg: crate::agents::AgentConfig =
+            toml::from_str(&persona_toml_with_role(role, "")).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            AgentTier::L1Standard,
+            "sub-agent role {role:?} stays L1"
+        );
+        let kept = retain_tier_permitted(names(&["session_list", "git_log"]), cfg.agent.tier());
+        assert_eq!(kept, names(&["git_log"]), "role {role:?} must be stripped");
+        assert!(
+            session_state_tools(&PathBuf::from("/tmp"), cfg.agent.tier()).is_empty(),
+            "role {role:?} must register no session-state executor"
         );
     }
 }

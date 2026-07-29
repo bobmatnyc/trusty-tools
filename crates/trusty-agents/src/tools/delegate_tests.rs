@@ -1068,17 +1068,63 @@ async fn delegate_kind_gate_does_not_touch_orchestrator_sources() {
     assert_eq!(runner.invoked.lock().unwrap().len(), 1);
 }
 
-/// A delegator that declares no identity at all keeps pre-ADR-0024 behavior.
+/// A delegator that declares no identity at all leaves the KIND gate a no-op.
 ///
 /// Why: `runtime::pm_mode::run_pm` constructs the tool with neither identity
 /// nor `config_dirs`; pinning the `None` semantics here documents that the
 /// kind predicate is opt-in ON IDENTITY (not on policy) and that nothing
 /// changed for that site.
-/// What: no `with_delegator` call, assistant-role target, still reaches the
-/// runner.
+/// What: no `with_delegator` call, SUB-AGENT target, still reaches the runner.
+///
+/// ADR-0024 decision 3: the target is now `engineer`, not an assistant. An
+/// assistant target derives tier L0, and an undeclared delegator identity
+/// fails closed to `L1Standard` — so an assistant target would be refused by
+/// the TIER gate and this test would prove nothing about the kind gate being
+/// a no-op. That fail-closed refusal is real and is pinned separately by
+/// `delegate_without_declared_identity_is_tier_blocked_from_an_assistant`.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delegate_without_declared_identity_skips_the_kind_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role(dir.path(), "engineer", "engineer");
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(vec!["engineer".to_string()]);
+
+    let result = tool
+        .execute(json!({ "agent_name": "engineer", "task": "undeclared caller" }))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "an undeclared delegator identity must leave the kind gate a no-op: {}",
+        result.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+}
+
+/// ADR-0024 decision 3, the one enforcement-point behavior change: an
+/// UNDECLARED delegator identity is now refused when the target is an
+/// assistant.
+///
+/// Why: the population inversion made every assistant a tier-L0 target, and
+/// `execute` treats a caller that opted into role-gating but declared no tier
+/// as `L1Standard` (`delegator_tier.unwrap_or_default()`, #4169 constraint 1).
+/// L1 -> L0 is exactly what predicate 3 refuses. The polarity is fail-CLOSED —
+/// a call that used to be permitted is now refused, never the reverse — and no
+/// shipped construction site produces this combination (all three
+/// assistant-tier sites call `with_delegator`; `pm_mode` passes no
+/// `config_dirs` and so runs no gate at all). Pinned anyway, because an
+/// unpinned behavior change is how the NEXT population shift becomes invisible.
+/// What: role-gated, tier-undeclared caller, assistant target ⇒ refused with
+/// the tier message, runner never reached.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delegate_without_declared_identity_is_tier_blocked_from_an_assistant() {
     let dir = tempfile::tempdir().unwrap();
     write_agent_toml_with_role(dir.path(), "izzie", "assistant");
 
@@ -1094,9 +1140,19 @@ async fn delegate_without_declared_identity_skips_the_kind_gate() {
         .await;
 
     assert!(
-        !result.is_error(),
-        "an undeclared delegator identity must leave the kind gate a no-op: {}",
+        result.is_error(),
+        "an undeclared caller is L1 by fail-closed default and may not reach an \
+         assistant (now L0): {}",
         result.content()
     );
-    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+    assert!(
+        result.content().contains("orchestration-tier"),
+        "the tier gate, not the kind gate, is what refuses here: {}",
+        result.content()
+    );
+    assert_eq!(
+        runner.invoked.lock().unwrap().len(),
+        0,
+        "the runner must never be reached"
+    );
 }

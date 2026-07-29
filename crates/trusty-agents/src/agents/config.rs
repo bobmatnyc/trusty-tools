@@ -659,20 +659,23 @@ pub struct AgentInfo {
     /// specialist `role` can never accidentally grant it orchestration-tier
     /// delegation reach as a side effect.
     /// What: Raw TOML string (`"l0"` / `"orchestration"` for L0,
-    /// `"l1"` / `"standard"` for L1, case-insensitive). Resolved by
-    /// [`AgentInfo::tier`], which FAILS CLOSED: `None` (field absent —
-    /// every persona shipped before #4168, and the overwhelming majority
-    /// going forward), an unrecognized string, or a blank/whitespace-only
-    /// string all resolve to [`AgentTier::L1Standard`] — the most
-    /// restricted tier — NEVER [`AgentTier::L0Orchestration`]. This is a
-    /// privilege boundary, not a convenience default: every call site that
-    /// needs to know an agent's tier MUST call `AgentInfo::tier()`, never
-    /// match on this raw field.
+    /// `"l1"` / `"standard"` for L1, case-insensitive) — an OPTIONAL
+    /// OVERRIDE, not the primary source. Resolved by [`AgentInfo::tier`],
+    /// which since ADR-0024 decision 3 DERIVES the tier from the agent's
+    /// KIND ([`AgentTier::for_kind`]) whenever this field is absent or
+    /// blank, and honours an explicit declaration otherwise. A declaration
+    /// still FAILS CLOSED: an unrecognized string resolves to
+    /// [`AgentTier::L1Standard`], never [`AgentTier::L0Orchestration`], so a
+    /// typo can only ever narrow. This is a privilege boundary, not a
+    /// convenience default: every call site that needs to know an agent's
+    /// tier MUST call `AgentInfo::tier()`, never match on this raw field.
     /// Test: `agent_tier_defaults_to_l1_when_absent`,
     /// `agent_tier_parses_l0_orchestration_aliases`,
     /// `agent_tier_parses_l1_standard_aliases`,
     /// `agent_tier_unknown_value_fails_closed_to_l1`,
-    /// `agent_tier_blank_value_fails_closed_to_l1`.
+    /// `agent_tier_blank_value_fails_closed_to_l1`,
+    /// `agent_tier_derives_l0_for_the_assistant_kind`,
+    /// `agent_tier_explicit_declaration_overrides_the_derived_kind`.
     #[serde(default)]
     pub tier: Option<String>,
 }
@@ -691,6 +694,15 @@ pub struct AgentInfo {
 /// This PR defines the tier and its one-directional delegation boundary
 /// ONLY; it grants L0 no actual capabilities (those are #4170-#4173) and
 /// creates no L0 persona instance.
+///
+/// ADR-0024 decision 3 (ratified by the owner 2026-07-28) INVERTS that
+/// population assignment: every assistant IS L0, and L1 is the sub-agent
+/// population (`engineer`, `qa`, `documentation`, `ops`, `planner`,
+/// `researcher`, …). The paragraph above is retained verbatim as the record
+/// of what #4168 shipped; read it as history, not as the current population.
+/// The tier is now DERIVED from kind by [`AgentTier::for_kind`] — see
+/// [`AgentInfo::tier`] for why that replaced a per-file `tier = "l0"`
+/// literal on every assistant TOML.
 /// What: Two variants. `L1Standard` is `#[default]` — every accessor that
 /// falls back to `Default::default()` (or an explicit fail-closed match
 /// arm) lands on the restricted tier, never the elevated one.
@@ -745,6 +757,49 @@ impl AgentTier {
         }
     }
 
+    /// The tier every agent of this KIND holds (ADR-0024 decision 3).
+    ///
+    /// Why: ADR-0024 decision 3 — "assistants are a level 0 agent, like a PM,
+    /// that can delegate to sub-agents and communicate with each other" —
+    /// makes tier a FUNCTION of kind, not an independent per-file fact. The
+    /// two shapes available were a `tier = "l0"` literal in every bundled
+    /// assistant TOML, or this derivation. The literal loses: `izzie`,
+    /// `cto-assistant` and `ctrl` each ship TWO resolvable forms (a directory
+    /// package AND a flat `extends`-shadow-fallback TOML), so the literal
+    /// would have to be written six-plus times and kept in sync forever, and
+    /// a future assistant persona that forgot it would resolve L1 — silently
+    /// decorrelating the DATA from the model, which is the exact failure
+    /// class ADR-0024's "Why this class of error recurs" section is about.
+    /// Deriving cannot drift: there is no second place to forget.
+    ///
+    /// This narrows #4168's "never inferred from `role`" rule rather than
+    /// discarding it, and the property that rule protected is preserved: an
+    /// operator adding a NEW SPECIALIST role still lands on `L1Standard`,
+    /// because the derivation recognizes exactly one value — the assistant
+    /// kind — and nothing else. `role == "assistant"` is already the most
+    /// privileged non-orchestrator role in the crate (it is the ONLY role
+    /// `build_registry_for_agent` routes into `build_assistant_tier_registry`,
+    /// the one branch that registers `delegate_to_agent` and the git tool
+    /// surface at all), so deriving L0 from it restates a trust decision the
+    /// codebase already makes rather than creating a new escalation path.
+    /// What: [`AgentTier::L0Orchestration`] for the assistant kind (via
+    /// `delegation::is_assistant_kind`, the ONE definition of that predicate —
+    /// the same function `DelegateToAgentTool::execute` and the `/subagents`
+    /// route call), [`AgentTier::L1Standard`] for every other role, including
+    /// the empty string and `orchestrator`/`controller` (`pm`, which sits
+    /// outside this model and receives `L0Orchestration` explicitly from
+    /// `ctrl_delegate_posture` at dispatch time instead).
+    /// Test: `agent_tier_for_kind_is_l0_only_for_the_assistant_role`,
+    /// `agent_tier_derives_l0_for_the_assistant_kind`,
+    /// `agent_tier_derives_l1_for_every_sub_agent_kind`.
+    pub fn for_kind(role: &str) -> Self {
+        if crate::agents::delegation::is_assistant_kind(role) {
+            AgentTier::L0Orchestration
+        } else {
+            AgentTier::L1Standard
+        }
+    }
+
     /// The canonical lowercase wire label for this tier (`"l0"` / `"l1"`).
     ///
     /// Why: `GET /api/agents/:name/subagents` (#4029) reports both the
@@ -764,30 +819,55 @@ impl AgentTier {
 }
 
 impl AgentInfo {
-    /// Resolve this agent's privilege tier, fail-closed (#4168).
+    /// Resolve this agent's privilege tier: declared wins, else derived from
+    /// KIND (#4168; ADR-0024 decision 3).
     ///
-    /// Why: The single normalization point for the raw [`Self::tier`]
-    /// string — see that field's doc comment for the full fail-closed
-    /// rationale. Every consumer (the delegation gate, and any future
-    /// L0-gated capability) MUST call this rather than matching on the raw
-    /// field, so "what counts as L0" can never drift between call sites.
-    /// What: Case-insensitive, trimmed match against `"l0"`/`"orchestration"`
-    /// (-> [`AgentTier::L0Orchestration`]) and `"l1"`/`"standard"` (->
-    /// [`AgentTier::L1Standard`]); anything else — absent, blank, or an
-    /// unrecognized string — resolves to [`AgentTier::L1Standard`].
+    /// Why: The single resolution point for an agent's tier — see
+    /// [`Self::tier`]'s field doc and [`AgentTier::for_kind`] for the full
+    /// rationale. Every consumer (the delegation gate's defense-in-depth
+    /// layer, the `/subagents` route, the L0-only session-state surface) MUST
+    /// call this rather than matching on the raw field, so "what counts as L0"
+    /// can never drift between call sites.
+    ///
+    /// ADR-0024 decision 3: assistant-kind agents ARE L0. That is expressed
+    /// here as a derivation rather than as a `tier = "l0"` literal in each
+    /// bundled assistant TOML because there is no single such file — `izzie`,
+    /// `cto-assistant` and `ctrl` each ship a directory package AND a flat
+    /// fallback, and a literal that must be repeated is a literal that will
+    /// eventually disagree with itself. See `AgentTier::for_kind`.
+    /// What: An explicit, non-blank `[agent].tier` declaration WINS and is
+    /// parsed by [`AgentTier::from_declared`] — case-insensitive, trimmed,
+    /// fail-closed (an unrecognized value resolves to
+    /// [`AgentTier::L1Standard`], so a typo can only narrow, never elevate).
+    /// An ABSENT or blank declaration derives from `role` via
+    /// [`AgentTier::for_kind`]: the assistant kind resolves
+    /// [`AgentTier::L0Orchestration`], every other role
+    /// [`AgentTier::L1Standard`]. The explicit branch is retained so an
+    /// operator can still pin a genuinely-L0 non-assistant persona, or
+    /// deliberately narrow one assistant back to L1 — both are declared
+    /// intent, never an accident of omission.
     /// Test: `agent_tier_defaults_to_l1_when_absent`,
     /// `agent_tier_parses_l0_orchestration_aliases`,
     /// `agent_tier_parses_l1_standard_aliases`,
     /// `agent_tier_unknown_value_fails_closed_to_l1`,
-    /// `agent_tier_blank_value_fails_closed_to_l1`.
+    /// `agent_tier_blank_value_fails_closed_to_l1`,
+    /// `agent_tier_derives_l0_for_the_assistant_kind`,
+    /// `agent_tier_derives_l1_for_every_sub_agent_kind`,
+    /// `agent_tier_explicit_declaration_overrides_the_derived_kind`,
+    /// `bundled_assistant_personas_resolve_l0_and_gain_nothing`.
     ///
-    /// #4029: the match itself moved to [`AgentTier::from_declared`] so a
-    /// consumer holding only the raw declared string (the `/subagents` route,
-    /// which must report exactly the targets the #4169 gate admits) shares this
-    /// one parser instead of hand-rolling a second one. Behavior is unchanged —
-    /// the tests above are the proof and were not touched.
+    /// #4029: the DECLARED-string match lives in [`AgentTier::from_declared`]
+    /// so a consumer holding only a raw tier string shares one parser instead
+    /// of hand-rolling a second one. That function is deliberately left as a
+    /// pure parser of the raw value — it has no `role` to consult and must not
+    /// grow one; the kind derivation lives here, where the role is in scope.
     pub fn tier(&self) -> AgentTier {
-        AgentTier::from_declared(self.tier.as_deref())
+        match self.tier.as_deref().map(str::trim) {
+            Some(declared) if !declared.is_empty() => AgentTier::from_declared(Some(declared)),
+            // ADR-0024 decision 3: an assistant IS tier L0, derived from kind
+            // so the fact lives in one place instead of in every persona file.
+            _ => AgentTier::for_kind(&self.role),
+        }
     }
 
     /// The human-facing speaker label for this persona (#3738).
