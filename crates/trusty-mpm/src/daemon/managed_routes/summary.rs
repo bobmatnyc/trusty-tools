@@ -413,6 +413,33 @@ pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSumma
 /// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in
 /// `tests/session_manager_mvp.rs`.
 pub(super) async fn checked_summaries(records: &[SessionRecord]) -> Vec<SessionSummary> {
+    checked_summaries_with(records, true).await
+}
+
+/// [`checked_summaries`] with the #2444 asset-staleness probe made optional
+/// (issue #4335, folds into #4322).
+///
+/// Why: `stale_assets` is the single most expensive thing this endpoint
+/// computes — a filesystem-bound catalog compose per distinct
+/// `(agent_source, skill_source)` pair plus a manifest+on-disk comparison per
+/// session — and on a COLD daemon (nothing cached, dozens of sessions) it
+/// pushes the whole response past the caller's timeout. Callers that never
+/// READ the flag were paying for it anyway and then failing open when it took
+/// too long, which is exactly how `guided::nested_session_guard` silently
+/// stopped guarding. Letting such a caller opt out is strictly better than
+/// raising every timeout to accommodate work nobody wants.
+/// What: identical to [`checked_summaries`] except that when `probe_assets` is
+/// `false` the entire second pass is skipped and every `stale_assets` stays at
+/// its `record_to_summary` default of `false`. The `unresumable` probe is NOT
+/// optional — it is cheap (state-gated, no I/O outside `Stopped`/`Errored`)
+/// and the guard's callers do read it. A `false` here means "not computed",
+/// not "computed and found current", so only a caller that ignores the field
+/// may pass it.
+/// Test: `checked_summaries_slim_skips_stale_assets_probe`.
+pub(super) async fn checked_summaries_with(
+    records: &[SessionRecord],
+    probe_assets: bool,
+) -> Vec<SessionSummary> {
     let mut summaries: Vec<SessionSummary> = records.iter().map(record_to_summary).collect();
 
     let mut probes = tokio::task::JoinSet::new();
@@ -440,9 +467,11 @@ pub(super) async fn checked_summaries(records: &[SessionRecord]) -> Vec<SessionS
     // shares the expensive catalog-side compose across all of them (issue
     // #2444 review MEDIUM finding), which a per-record `JoinSet` fan-out
     // would defeat (each task would redundantly recompose the same catalog).
+    // #4335: a slim caller skips this pass entirely — see
+    // [`checked_summaries_with`] for why opting out beats a longer timeout.
     let syncable: Vec<SessionRecord> = records
         .iter()
-        .filter(|r| probe_staleness_for(&r.state))
+        .filter(|r| probe_assets && probe_staleness_for(&r.state))
         .cloned()
         .collect();
     if !syncable.is_empty() {
@@ -487,6 +516,7 @@ pub(super) async fn numbered_summaries(
     numbered: Vec<NumberedSlot>,
     tmux: &dyn ManagedTmuxDriver,
     source_id_filter: Option<&str>,
+    probe_assets: bool,
 ) -> Vec<SessionSummary> {
     let filtered: Vec<NumberedSlot> = numbered
         .into_iter()
@@ -494,7 +524,7 @@ pub(super) async fn numbered_summaries(
         .collect();
     let live_records: Vec<SessionRecord> =
         filtered.iter().filter_map(|n| n.record.clone()).collect();
-    let mut live_summaries = checked_summaries(&live_records).await;
+    let mut live_summaries = checked_summaries_with(&live_records, probe_assets).await;
     reconcile_against_tmux(tmux, &mut live_summaries, &live_records);
     let mut live_summaries = live_summaries.into_iter();
     filtered
