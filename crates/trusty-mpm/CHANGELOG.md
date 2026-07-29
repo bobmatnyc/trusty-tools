@@ -220,6 +220,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- A subagent's `SessionStart` hook can no longer overwrite a managed session's
+  `claude_session_id` with its OWN Claude session UUID
+  ([#4337](https://github.com/bobmatnyc/trusty-tools/issues/4337)). A subagent
+  sharing the PM's cwd is its own top-level Claude Code process and fires its
+  own `SessionStart`, which `correlate_session_start` matched to the PM's sole
+  Active managed session by cwd alone and blindly overwrote — so the next
+  in-place `--resume` would resume the subagent's transcript instead of the
+  PM's conversation. `correlate_session_start` (`daemon/api.rs`) now trusts only
+  the FIRST correlation for a record; a later `SessionStart` reporting a
+  DIFFERENT id for the same cwd is refused and logged, while re-reporting the
+  SAME id (a legitimate `--resume` relaunch) remains a no-op success.
 - The per-project worktree opt-out is no longer silently conditional on the
   daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
   `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),

@@ -1338,7 +1338,33 @@ pub async fn ingest_hook(
 /// correlation is skipped with a warning to avoid mis-attribution. Single match →
 /// `SessionManager::set_claude_session_id`. Best-effort — failures are logged and
 /// silently swallowed so a missing correlation never blocks the hook response.
-/// Test: `session_start_hook_correlates_claude_id` in `api_tests.rs`.
+///
+/// # Subagent overwrite guard (#4337)
+///
+/// A subagent dispatched from a managed session's own pane (native `Task`/
+/// `Agent` tool, or any other `claude` invocation that happens to share the
+/// PM's cwd) is its OWN top-level Claude Code process from Claude Code's point
+/// of view: it gets its own internal session UUID and fires its own
+/// `SessionStart`, which lands here with the SAME `cwd` as the PM's managed
+/// session — because trusty-mpm never registers a subagent as its own managed
+/// session, cwd-matching alone finds exactly one (the PM's) record, the
+/// pre-#4337 ambiguity guard above never triggers, and the subagent's id
+/// silently clobbers the PM's own. The next in-place `--resume` would then
+/// resume the SUBAGENT's transcript instead of the PM's conversation.
+///
+/// The fix: once a record already carries a `claude_session_id`, a `SessionStart`
+/// reporting a DIFFERENT id for the same cwd is refused rather than accepted —
+/// only the FIRST correlation for a given record is trusted. A matching id is a
+/// harmless no-op write. This does mean a record's id can go stale if Claude
+/// Code ever legitimately reassigns a new UUID to the same pane's top-level
+/// conversation (e.g. a `--continue` fallback instead of `--resume`); that is
+/// an acceptable trade — the resume path (`runtime::claude_code::spawn_resume`)
+/// already treats a stored id as advisory and falls back to `--continue` via
+/// its own `session_id_exists` check when the stored id no longer resolves, so
+/// the worst case is a graceful fallback, never resuming the wrong transcript.
+/// Test: `session_start_hook_correlates_claude_id`,
+/// `session_start_hook_does_not_overwrite_with_different_id`,
+/// `session_start_hook_reasserting_same_id_is_a_noop` in `api_tests.rs`.
 async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
@@ -1374,7 +1400,28 @@ async fn correlate_session_start(
     match matched.len() {
         0 => {} // no Active managed session at this cwd — silent, not an error
         1 => {
-            let id = matched[0].id;
+            let record = matched[0];
+            let id = record.id;
+
+            // #4337: an already-correlated record keeps its FIRST id. A report
+            // of a different id — most likely a subagent sharing this cwd, not
+            // the pane's own top-level process — is refused rather than
+            // silently accepted, so a subagent can never clobber the PM's id.
+            if let Some(existing) = record.claude_session_id.as_deref() {
+                if existing != claude_session_id {
+                    tracing::warn!(
+                        managed_id = %id,
+                        existing_claude_session_id = %existing,
+                        reported_claude_session_id = %claude_session_id,
+                        cwd = %cwd_str,
+                        "SessionStart: refusing to overwrite an already-correlated \
+                         claude_session_id with a different one — likely a subagent \
+                         sharing this cwd, not the pane's top-level process (#4337)"
+                    );
+                }
+                return;
+            }
+
             match mgr.set_claude_session_id(&id, claude_session_id).await {
                 Ok(()) => tracing::info!(
                     managed_id = %id,

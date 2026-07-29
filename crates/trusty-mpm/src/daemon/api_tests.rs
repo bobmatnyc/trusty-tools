@@ -1663,6 +1663,83 @@ async fn session_start_hook_correlates_claude_id() {
 }
 
 #[tokio::test]
+async fn session_start_hook_does_not_overwrite_with_different_id() {
+    // Why (#4337): a managed session's record was observed carrying a
+    // SUBAGENT's Claude session id instead of the PM's own — a later
+    // `SessionStart` from any `claude` process sharing the PM's cwd (e.g. a
+    // dispatched subagent, which is its own top-level Claude Code process from
+    // Claude Code's point of view) used to silently clobber an
+    // already-correlated `claude_session_id`. This reproduces exactly that:
+    // correlate once (the PM's own SessionStart), then fire a second
+    // SessionStart with a DIFFERENT id from the same cwd (the subagent), and
+    // assert the ORIGINAL id survives.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-correlate-no-overwrite");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let pm_claude_id = "550e8400-e29b-41d4-a716-446655440010";
+    let post = HookPost {
+        session_id: pm_claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("PM SessionStart must succeed");
+
+    // A subagent's own SessionStart, reported from the SAME cwd with a
+    // DIFFERENT session id — this must be refused, not accepted.
+    let subagent_claude_id = "550e8400-e29b-41d4-a716-446655440011";
+    let post = HookPost {
+        session_id: subagent_claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("subagent SessionStart must still be accepted at the HTTP layer");
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get managed session");
+    assert_eq!(
+        record.claude_session_id.as_deref(),
+        Some(pm_claude_id),
+        "a later SessionStart reporting a DIFFERENT id must never overwrite the \
+         already-correlated PM claude_session_id (#4337)"
+    );
+}
+
+#[tokio::test]
+async fn session_start_hook_reasserting_same_id_is_a_noop() {
+    // Why (#4337): the guard must not be so strict that it breaks the
+    // legitimate case — a `--resume <id>` relaunch preserves the SAME Claude
+    // Code session UUID, so its SessionStart re-reports the identical id. That
+    // must still succeed (as a no-op write), not be treated as a conflicting
+    // report.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-correlate-reassert-same");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let claude_id = "550e8400-e29b-41d4-a716-446655440012";
+    for _ in 0..2 {
+        let post = HookPost {
+            session_id: claude_id.to_string(),
+            event: HookEvent::SessionStart,
+            payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+        };
+        let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+            .await
+            .expect("SessionStart must succeed");
+    }
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get managed session");
+    assert_eq!(
+        record.claude_session_id.as_deref(),
+        Some(claude_id),
+        "reasserting the SAME claude_session_id must remain a no-op success, not be blocked (#4337)"
+    );
+}
+
+#[tokio::test]
 async fn session_end_hook_marks_managed_stopped() {
     // Why (#1744): ingest_hook(SessionEnd) must call handle_session_end, which
     // immediately transitions the Active managed session to Stopped. This is the
