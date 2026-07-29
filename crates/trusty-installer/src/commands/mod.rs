@@ -37,6 +37,9 @@ pub mod sign;
 pub mod stable_set;
 pub mod stack;
 pub mod status;
+// #4246: stub servers + stubbed data dir shared by the probe/verify tests.
+#[cfg(test)]
+pub mod test_support;
 pub mod tmux_gap;
 pub mod ui;
 pub mod up;
