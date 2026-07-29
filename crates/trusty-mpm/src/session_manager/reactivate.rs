@@ -63,10 +63,19 @@ impl SessionManager {
     /// when that resolved directory no longer exists on disk, so a corrupted
     /// `Active` ghost record (workspace gone, state says running) can never be
     /// committed to the store.
+    ///
+    /// Also clears `claude_session_id` back to `None` (#4337): a reactivation
+    /// always precedes the client `exec`-ing a fresh `claude` into this SAME
+    /// pane, so the next `SessionStart` is guaranteed to be that pane's own
+    /// new top-level process. Clearing the old id lets that correlation land
+    /// via the plain "no existing id" path in
+    /// `daemon::api::session_start_correlation` instead of relying on the
+    /// narrower stale-transcript re-sync gate.
     /// Test: `mark_reactivated_flips_stopped_to_active`,
     /// `mark_reactivated_flips_decommissioned_to_active`,
     /// `mark_reactivated_rejects_non_stopped`,
-    /// `mark_reactivated_refuses_when_workspace_removed_by_decommission`.
+    /// `mark_reactivated_refuses_when_workspace_removed_by_decommission`,
+    /// `mark_reactivated_clears_stale_claude_session_id`.
     pub async fn mark_reactivated(
         &self,
         id: &ManagedSessionId,
@@ -102,6 +111,14 @@ impl SessionManager {
 
         record.state = ManagedSessionState::Active;
         record.last_activity_at = Some(Utc::now());
+        // #4337: a reactivation always precedes the client `exec`-ing a fresh
+        // `claude` back into this SAME pane, guaranteeing a genuinely NEW
+        // top-level `SessionStart` is imminent. Clearing the old id here
+        // means that `SessionStart`'s correlation lands via the plain
+        // "no existing id" branch instead of needing the (narrower) staleness
+        // re-sync gate — and prevents a lingering pre-reactivation id from
+        // ever being compared against a later, unrelated report.
+        record.claude_session_id = None;
         self.store.write().await.upsert(record.clone()).await?;
         info!(
             id = %id,

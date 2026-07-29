@@ -221,16 +221,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - A subagent's `SessionStart` hook can no longer overwrite a managed session's
-  `claude_session_id` with its OWN Claude session UUID
+  `claude_session_id` with its OWN Claude session UUID, and a legitimately
+  diverged id can no longer stay wrong forever
   ([#4337](https://github.com/bobmatnyc/trusty-tools/issues/4337)). A subagent
   sharing the PM's cwd is its own top-level Claude Code process and fires its
   own `SessionStart`, which `correlate_session_start` matched to the PM's sole
   Active managed session by cwd alone and blindly overwrote — so the next
   in-place `--resume` would resume the subagent's transcript instead of the
-  PM's conversation. `correlate_session_start` (`daemon/api.rs`) now trusts only
-  the FIRST correlation for a record; a later `SessionStart` reporting a
-  DIFFERENT id for the same cwd is refused and logged, while re-reporting the
-  SAME id (a legitimate `--resume` relaunch) remains a no-op success.
+  PM's conversation. `correlate_session_start` (moved to the new
+  `daemon::api::session_start_correlation` module to stay under `api.rs`'s
+  frozen SLOC budget) now trusts only the FIRST correlation for a record; a
+  later `SessionStart` reporting a DIFFERENT id for the same cwd is accepted
+  only when the stored id's transcript no longer resolves to a live session
+  (`runtime::session_id_exists`, the same staleness check `spawn_resume`
+  already trusts) — otherwise refused and logged — while re-reporting the
+  SAME id (a legitimate `--resume` relaunch) remains a no-op success. The
+  common divergence case is handled even earlier: `SessionEnd` now clears the
+  field via the new exact-match-guarded `SessionManager::clear_claude_session_id_if`
+  (so a later, unrelated `SessionStart` is never compared against a dead id),
+  and `SessionManager::mark_reactivated` clears it outright, since a
+  reactivation always precedes a fresh top-level relaunch into that pane.
 - The per-project worktree opt-out is no longer silently conditional on the
   daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
   `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),
