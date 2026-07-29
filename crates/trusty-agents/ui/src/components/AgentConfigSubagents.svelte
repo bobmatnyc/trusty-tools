@@ -8,8 +8,10 @@
    *
    * The two are not variants of one thing and this pane never merges them:
    * `delegate_to_agent` is in-product (trusty-agents → trusty-agents), its
-   * target set a HARDCODED role allowlist crossed with the resolvable roster
-   * and narrowed by #4169's L0/L1 tier gate — no per-agent config at all;
+   * target set a HARDCODED role allowlist crossed with the resolvable roster,
+   * then narrowed by ADR-0024's delegation KIND rule (an assistant never
+   * delegates to a peer assistant) and by #4169's L0/L1 tier gate — no
+   * per-agent config at all;
    * `dispatch_task` is cross-product (trusty-agents → trusty-code), the one
    * with a real `[subagents].allowed` binding, intersected fail-closed with
    * the bridge's own `NON_CODING_TARGETS` floor (OQ-7). Their target
@@ -29,6 +31,15 @@
    * assistant reach that one" is answerable; and an unresolvable config renders
    * the denial plus the parse error, never a blank pane implying "nothing
    * configured".
+   *
+   * That honesty extends to the PROSE, not only the cards. `allowed_roles` is
+   * the coarse, PRE-kind-gate role list: it still carries `assistant`, kept
+   * deliberately — the Rust constant `ASSISTANT_ALLOWED_DELEGATE_ROLES` names
+   * this route's report as one of the non-delegation consumers holding that
+   * entry there — so quoting it as "the targets" advertised a reachability the
+   * kind gate denies. The copy below therefore states the EFFECTIVE rule
+   * (role-eligible MINUS kind-refused) and names peer assistants as refused,
+   * so a reader can predict the cards the pane draws.
    *
    * DOC-57 still documents five sections; #4182 amends it. This pane cites the
    * decision, it does not restate the spec.
@@ -71,8 +82,9 @@
     enforcement layers — they are shown separately because a name reachable through one is not
     reachable through the other. Read-only; edit
     <code class="font-mono">[subagents]</code> in <code class="font-mono">agent.toml</code>. The
-    in-product target set is not configurable at all — it is a fixed role allow-list plus the
-    L0/L1 delegation gate.
+    in-product target set is not configurable at all — it is a fixed role allow-list, minus every
+    peer assistant (assistants do not delegate to one another), minus whatever the L0/L1 gate
+    blocks.
   </p>
 
   {#if error}
@@ -102,10 +114,15 @@
         </span>
       </div>
       <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/50">
-        Another trusty-agents agent, run in-process. Targets are fixed by the role allow-list
-        <span class="font-mono">({(inProduct?.allowed_roles ?? []).join(', ')})</span> — not by this
-        agent's configuration — and further narrowed by the one-directional L0/L1 delegation gate.
-        This agent's own tier is <code class="font-mono">{inProduct?.delegator_tier ?? 'l1'}</code>.
+        Another trusty-agents agent, run in-process. This agent's configuration does not choose the
+        targets. A target's role must first appear in the role allow-list
+        <span class="font-mono">({(inProduct?.allowed_roles ?? []).join(', ')})</span>, but
+        eligibility is not reachability: the delegation kind rule then refuses every
+        <span class="font-mono">assistant</span> target — assistants communicate with each other
+        rather than delegating to one another (ADR-0024) — so what an assistant can actually
+        delegate to is the SUB-AGENT roles in that list, never a peer assistant. The
+        one-directional L0/L1 tier gate narrows it further. This agent's own tier is
+        <code class="font-mono">{inProduct?.delegator_tier ?? 'l1'}</code>.
       </p>
 
       {#if !inProduct?.tool_registered}

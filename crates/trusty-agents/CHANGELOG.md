@@ -7,6 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **The Sub-agents pane no longer advertises delegation targets the gate
+  refuses.** Its copy said targets were *"fixed by the role allow-list
+  (engineer, qa, researcher, documentation, ops, planner, assistant)"* — true
+  of the constant, misleading as presented: `assistant` is in that list, but
+  ADR-0024's delegation KIND rule independently refuses every assistant →
+  assistant edge, so a reader took the list as a promise of reachability the
+  code denies. The pane now states the EFFECTIVE rule — role-eligible MINUS
+  kind-refused — quoting the allow-list as an eligibility filter, then saying
+  plainly that eligibility is not reachability and that a peer assistant is
+  never a delegation target (assistants communicate with each other rather
+  than delegating to one another). The refusal is attributed to the KIND rule
+  rather than the tier gate, which is what post-#4296 is actually true: with
+  assistants at L0 both endpoints of that edge are L0, so tier is vacuous for
+  it. Copy-only — no gate, payload or reachability logic changed, and
+  `ASSISTANT_ALLOWED_DELEGATE_ROLES` deliberately still carries `assistant`
+  (its doc comment records why the entry is kept: the constant also feeds the
+  `/subagents` route's `allowed_roles` report, and the kind rule must be
+  enforced by code, not by a curated list of names). The stale doc comments
+  that described the rule as "role allowlist + tier gate" were corrected to
+  name the kind rule too.
+
 ### Changed
 
 - **Assistants are tier L0 (ADR-0024 decision 3).** An agent whose `[agent].role`
