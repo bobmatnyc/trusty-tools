@@ -92,6 +92,36 @@ content = "test"
     .unwrap();
 }
 
+/// Write an agent TOML carrying `hidden = true` in `[agent]` (#4235).
+///
+/// Kept separate from [`write_agent`] rather than adding a seventh parameter:
+/// only the #4235 tests care about `hidden`, and threading `Option<bool>`
+/// through the other eleven call sites would make every existing fixture read
+/// as if visibility were part of what it is testing.
+fn write_hidden_agent(dir: &std::path::Path, name: &str, role: &str) {
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!(
+            r#"
+[agent]
+name = "{name}"
+role = "{role}"
+model = "anthropic/claude-sonnet-4-6"
+description = "test fixture"
+hidden = true
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "test"
+"#
+        ),
+    )
+    .unwrap();
+}
+
 async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
         .await
@@ -551,6 +581,99 @@ content = "test"
         research["granted"], true,
         "an inherited [subagents].allowed grant is enforced, so it must be shown: {body:?}"
     );
+}
+
+/// #4235, the reported bug: the pane offered `hidden = true` agents as
+/// delegation targets, so `personal-assistant` (hidden since #3819 precisely
+/// to remove it from listings) rendered a SECOND "Izzie" row beside `izzie`.
+/// A hidden agent must be omitted from `targets` entirely — not shown with a
+/// "hidden" reason, which would still draw the duplicate row AND name an id
+/// the module doc's no-roster-dump rule keeps unnamed — while a non-hidden
+/// agent of the same role is still offered.
+#[tokio::test]
+async fn subagents_route_omits_a_hidden_delegation_target() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent(
+        dir.path(),
+        "assistant-subject",
+        "assistant",
+        None,
+        &["delegate_to_agent"],
+        None,
+    );
+    // The visible control: same role as the hidden peer below, so the ONLY
+    // difference between them is the `hidden` flag.
+    write_agent(dir.path(), "izzie", "assistant", None, &[], None);
+    write_hidden_agent(dir.path(), "personal-assistant", "assistant");
+    // A hidden agent whose role IS delegable as a sub-agent — proves the
+    // filter is not accidentally piggybacking on the peer-assistant kind rule.
+    write_hidden_agent(dir.path(), "researcher", "researcher");
+    write_agent(dir.path(), "engineer", "engineer", None, &[], None);
+
+    let resp = subagents_at(&[dir.path().to_path_buf()], "assistant-subject", dir.path()).await;
+    let body = body_json(resp).await;
+    let ip = &body["in_product"];
+
+    let named: Vec<&str> = ip["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        !named.contains(&"personal-assistant"),
+        "a hidden agent must not be a delegation-target card: {named:?}"
+    );
+    assert!(
+        !named.contains(&"researcher"),
+        "a hidden agent must not be a delegation-target card: {named:?}"
+    );
+    // …and it is not leaked through the OTHER naming channel either.
+    let unresolved: Vec<&str> = ip["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+
+    // Not a blanket suppression: visible agents of both roles still appear,
+    // so this is the `hidden` flag doing the work and nothing else.
+    assert!(named.contains(&"izzie"), "{named:?}");
+    assert!(named.contains(&"engineer"), "{named:?}");
+
+    // Counted, never named — the `role_excluded_count` treatment.
+    assert_eq!(
+        ip["hidden_excluded_count"], 2,
+        "personal-assistant + researcher: {ip:?}"
+    );
+}
+
+/// The two suppression counters must stay DISJOINT: adding a hidden agent may
+/// not move `role_excluded_count`, or the pane double-counts and its "N agents
+/// are not shown" line stops being true.
+#[tokio::test]
+async fn subagents_route_hidden_filter_leaves_the_role_count_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    standard_roster(dir.path());
+
+    // Baseline: the roster's two role-ineligible agents (pm, ticketing-agent)
+    // and nothing hidden.
+    let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
+    let ip = body_json(resp).await["in_product"].clone();
+    assert_eq!(ip["role_excluded_count"], 2);
+    assert_eq!(ip["hidden_excluded_count"], 0);
+
+    // A hidden agent whose role is ALSO ineligible must land in exactly one
+    // bucket — the hidden one, because `hidden` is checked first.
+    write_hidden_agent(dir.path(), "ghost", "orchestrator");
+    let resp = subagents_at(&[dir.path().to_path_buf()], "assistant", dir.path()).await;
+    let ip = body_json(resp).await["in_product"].clone();
+    assert_eq!(
+        ip["role_excluded_count"], 2,
+        "the role count keeps its pre-#4235 meaning: {ip:?}"
+    );
+    assert_eq!(ip["hidden_excluded_count"], 1, "{ip:?}");
 }
 
 #[tokio::test]

@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, BASE_PM, PM_INSTRUCTIONS, SECTION_SEPARATOR, WORKFLOW,
+    AGENT_DELEGATION, SECTION_SEPARATOR, WORKFLOW, base_pm, pm_instructions,
 };
 
 /// Directory under the project root that holds the override files.
@@ -231,7 +231,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     let dir = project_dir.join(OVERRIDE_DIR_NAME);
 
     // Floor is always appended last and never replaceable.
-    let floor = BASE_PM;
+    let floor = base_pm();
 
     // Per-project stack profile derived from detected marker files (#1971). This
     // is auto-derived framework context, not a user override, so it is folded in
@@ -340,7 +340,7 @@ pub(crate) fn assemble_sections(
     delegation: String,
     addendum: Option<String>,
 ) -> String {
-    let mut sections: Vec<String> = vec![PM_INSTRUCTIONS.trim().to_string(), stack];
+    let mut sections: Vec<String> = vec![pm_instructions().trim().to_string(), stack];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.
     if let Some(memory) = memory_override {
@@ -356,7 +356,7 @@ pub(crate) fn assemble_sections(
     }
 
     // Non-overridable floor, always last.
-    sections.push(BASE_PM.trim().to_string());
+    sections.push(base_pm().trim().to_string());
 
     join_sections(sections)
 }

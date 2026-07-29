@@ -91,6 +91,10 @@ tracing-subscriber = { workspace = true }
 # `Layer` impl in `log_buffer` also uses tracing-subscriber's `registry`
 # feature (enabled in the workspace dep).
 sysinfo = { workspace = true }
+# Cross-process advisory file locking for the `json_rmw` locked
+# read-modify-write critical section (trusty-mpm's projects.json lost-update
+# bug; same primitive trusty-gworkspace already uses for tokens.json, #3502).
+fd-lock = { workspace = true }
 dirs = { workspace = true }
 colored = { workspace = true }
 reqwest = { workspace = true }

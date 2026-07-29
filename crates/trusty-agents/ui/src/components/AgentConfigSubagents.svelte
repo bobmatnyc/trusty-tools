@@ -176,6 +176,15 @@
           allow-list and are not delegation targets.
         </p>
       {/if}
+
+      <!-- #4235: hidden agents are omitted from the target cards above, so the
+           pane says how many rather than leaving them silently missing. -->
+      {#if (inProduct?.hidden_excluded_count ?? 0) > 0}
+        <p class="text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
+          {inProduct?.hidden_excluded_count} further agent(s) on this host are hidden
+          (<code class="font-mono">hidden = true</code>) and are not listed here.
+        </p>
+      {/if}
     </section>
 
     <!-- ── Cross-product: dispatch_task ─────────────────────────────────── -->

@@ -9,6 +9,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **PM instructions are authored per section** (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)): the four monolithic assets (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `BASE_PM.md`) are replaced by one markdown source per section under `src/assets/instructions/sections/`, and `core::bundled_pm_package` builds its blocks from those files instead of cutting the monoliths at runtime (the `split_asset` / `Cut` machinery is gone). `instruction_pipeline::pm_instructions()` and `base_pm()` reconstitute the two multi-section strings the legacy override assembly still needs, so a section edit reaches BOTH composers and a project with a `.trusty-mpm/` override can no longer be frozen on stale instructions. Every existing override file (`INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`, `PM_INSTRUCTIONS_DEPLOYED.md`) keeps resolving exactly as before.
+- **Delivered-prompt content changes** (same epic). The Memory and Search guidance is lifted out of the middle of the Core body into two self-contained sections with their own headings — they were two halves of one numbered list, which made their declared `project` tier a false claim (replacing Memory alone left Search opening on a bare `2.`); they are now genuinely independently overridable. `## Trusty Tool Priority (Non-Overridable)` moves to sit with the other non-overridable rules, so it now precedes the framework-guaranteed conventions instead of following them — position only, still inside the floor, wording unchanged. The workflow section gains a **Sprint, then Harden** doctrine (sprint to feature-complete with targeted tests and no CI iteration loops; harden with the full suite, critic and release gates before publishing), including the causal claim that slow release *causes* WIP, the hard line that going fast never licenses turning red green by deleting coverage, and the close-and-fold rule at 3+ review rounds.
+- `core::pm_prompt_golden_tests`: committed snapshots of the fully composed PM prompt for both the packaged and legacy composers. #4249's byte-equality-against-the-old-prompt gate cannot survive a deliberate content change, so these replace it: any future edit to a section source surfaces as a reviewable prose diff in the PR rather than landing invisibly. Regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`.
+
 - `core::instruction_overrides`: the DEFAULT PM prompt — the bundled-fallback
   configuration every project without a `.trusty-mpm/` section override receives
   — is now composed through the typed `InstructionPackage`
@@ -127,6 +131,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to prevent.
 
 ### Fixed
+
+- Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
+  The project-store upsert was an unsynchronised read-modify-write of the whole
+  file — two processes interleaving read/read/write/write silently dropped one
+  registration while both callers saw success, and because every writer shared
+  one fixed `projects.json.tmp` scratch path, overlapping writes could publish a
+  mangled document that no longer parsed. All mutations now run through
+  `ProjectStore::mutate`, which performs the whole cycle inside a cross-process
+  file lock and publishes atomically via `trusty_common::json_rmw`. `PATCH
+  /api/v1/projects/{name}` gets the same guarantee: its fetch→mutate→persist
+  runs under one held lock instead of two separate store calls. A failed lock is
+  an error, never an unsynchronised write.
 
 - Worktree discovery is derived from `git worktree list --porcelain` instead of
   walking five hard-coded location shapes, so a session worktree is found
