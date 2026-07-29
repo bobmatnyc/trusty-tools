@@ -12,6 +12,8 @@
 //! - `store`  — [`ProjectStore`] on-disk JSON persistence.
 //! - `registry` — [`ProjectRegistry`] lifecycle manager.
 //! - `resolver` — NL→project resolver, session↔project binding, fleet grouping.
+//! - `worktree_policy` — the registry-keyed `worktree` opt-out decision
+//!   (#3455), shared by the daemon and the out-of-process `tm` CLI (#4300).
 //! Test: each submodule carries inline unit tests; run with
 //! `cargo test -p trusty-mpm`.
 
@@ -19,6 +21,7 @@ pub mod record;
 pub mod registry;
 pub mod resolver;
 pub mod store;
+pub mod worktree_policy;
 
 pub use record::{Project, derive_name_from_url};
 pub use registry::ProjectRegistry;
@@ -27,3 +30,7 @@ pub use resolver::{
     ResolutionReason, ResolverError, fleet_by_project, resolve_project, resolve_session_project,
 };
 pub use store::ProjectStoreError;
+pub use worktree_policy::{
+    registry_data_dir, registry_data_dir_under, worktree_enabled_for_origin,
+    worktree_enabled_for_origin_at, worktree_enabled_in,
+};

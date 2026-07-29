@@ -165,6 +165,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The per-project worktree opt-out is no longer silently conditional on the
+  daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
+  `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),
+  [#3781](https://github.com/bobmatnyc/trusty-tools/pull/3781)) was consulted at
+  exactly one decision point, inside the daemon's spawn route. Both CLI paths
+  that provision worktrees in the `tm` process itself — `tm launch`, which never
+  asks the daemon, and the daemon-unreachable bare-`tm` fallback, which runs
+  *because* the daemon is down — created a base clone and a per-session worktree
+  regardless. Both now consult the registry BEFORE `ensure_base_clone`, matching
+  the daemon's deliberate ordering, so an opted-out project gets neither a clone
+  nor a worktree and runs in its own checkout exactly as `spawn_managed_on_main`
+  would have given it. The decision itself moved from the `pub(super)`
+  `daemon::managed_routes::launch_on_main::worktree_enabled_for_origin` to
+  `project::worktree_policy`, which serves the daemon in-process and the CLI
+  out-of-process off the same `projects.json`. The `unwrap_or(true)` default is
+  unchanged (unset or unregistered still means worktrees ON, and an unreadable
+  registry fails safe to ON), and #3455's warn-never-refuse concurrency
+  behaviour is untouched.
+
 - Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
   The project-store upsert was an unsynchronised read-modify-write of the whole
   file — two processes interleaving read/read/write/write silently dropped one

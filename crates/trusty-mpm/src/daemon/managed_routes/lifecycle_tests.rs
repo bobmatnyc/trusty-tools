@@ -682,67 +682,12 @@ fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
 // `launch_on_main` module (500-SLOC cap on `lifecycle.rs`); their tests stay
 // here with the rest of the spawn-surface tests and reach them via the
 // managed_routes-scoped `pub(super)` path.
-use super::super::launch_on_main::{
-    has_concurrent_main_checkout_session, spawn_managed_on_main, worktree_enabled_for_origin,
-};
-
-/// A project with no registry entry (or no `worktree` field set) defaults to
-/// worktree isolation ON — the no-regression default #3455 requires.
-/// Test: itself.
-#[tokio::test]
-async fn worktree_enabled_for_origin_defaults_true_when_unregistered() {
-    let data_root = tempfile::TempDir::new().expect("tmp data root");
-    let state = crate::daemon::state::DaemonState::with_root_isolated_managed(
-        data_root.path().to_path_buf(),
-    )
-    .await;
-    let registry = state.project_registry().await;
-
-    assert!(
-        worktree_enabled_for_origin(&registry, "https://github.com/acme/unregistered").await,
-        "an unregistered repo must default to worktree isolation ON"
-    );
-}
-
-/// A registered project with `worktree: Some(false)` disables isolation for
-/// its own `repo_url` only — a DIFFERENT repo is unaffected (#3455).
-/// Test: itself.
-#[tokio::test]
-async fn worktree_enabled_for_origin_honors_registered_false() {
-    let data_root = tempfile::TempDir::new().expect("tmp data root");
-    let state = crate::daemon::state::DaemonState::with_root_isolated_managed(
-        data_root.path().to_path_buf(),
-    )
-    .await;
-    let registry = state.project_registry().await;
-
-    registry
-        .register(crate::project::Project {
-            name: "writing".into(),
-            repo_url: "https://github.com/bobmatnyc/writing".into(),
-            default_branch: "main".into(),
-            stack_hint: None,
-            tags: vec![],
-            description: None,
-            gh_user: None,
-            gh_account: None,
-            github: None,
-            commit_name: None,
-            commit_email: None,
-            worktree: Some(false),
-        })
-        .await
-        .expect("register writing project");
-
-    assert!(
-        !worktree_enabled_for_origin(&registry, "https://github.com/bobmatnyc/writing.git").await,
-        "the registered project's opt-out must be honored (repo_url matching tolerates .git suffix)"
-    );
-    assert!(
-        worktree_enabled_for_origin(&registry, "https://github.com/bobmatnyc/trusty-tools").await,
-        "a DIFFERENT repo must be unaffected by another project's opt-out"
-    );
-}
+//
+// #4300 moved the registry-keyed `worktree_enabled_for_origin` decision (and
+// its two tests) out to `crate::project::worktree_policy`, so the CLI paths
+// that provision worktrees in their own process can consult the SAME rule;
+// what remains here is the daemon-side spawn surface.
+use super::super::launch_on_main::{has_concurrent_main_checkout_session, spawn_managed_on_main};
 
 /// `spawn_managed_on_main` creates a normal `Active` session record rooted
 /// DIRECTLY at `local_path` — no worktree, no clone, `workspace_owned =

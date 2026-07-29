@@ -155,53 +155,34 @@ pub(crate) async fn launch(
         return Ok(());
     }
 
-    // 5. Warn about uncommitted local changes (one-time; non-fatal).
-    eprintln!(
-        "note: uncommitted local changes are not carried into the managed clone. \
-         Use `tm connect` if you need to work from the live checkout."
-    );
-
-    // 6. --style is not yet honoured in managed mode.
+    // 5. --style is not yet honoured in managed mode.
     if style.is_some() {
         tracing::warn!("--style not yet supported for managed launches; ignoring style flag");
         // TODO(follow-up): prepare_session_with_repo_url_and_style
     }
 
-    // 7. Provision the managed workspace using the shared base-clone + per-session
+    // 6. Provision the managed workspace using the shared base-clone + per-session
     //    worktree mechanism (#1803). This matches what `tm` (guided default) does
-    //    via the daemon's `spawn_managed_inproject` path — both now converge on the
+    //    via the daemon's `spawn_managed_inproject` path — both converge on the
     //    SAME base clone at `~/trusty-mpm-projects/<owner>/<repo>/` and the SAME
     //    per-session worktree at `<base>/.worktrees/<session-id>/`.
-    //    Step 7a creates or reuses the shared base clone (idempotent); step 7b adds
-    //    a fresh git worktree for this session; step 7c deploys `.claude` into the
-    //    worktree so the session has the framework available.
-    eprintln!("provisioning managed workspace...");
+    //    #4300: `provision_for_launch` consults the per-project `worktree`
+    //    opt-out (#3455) FIRST — a project registered with `worktree: false`
+    //    gets neither a base clone nor a worktree here, exactly as the daemon's
+    //    `spawn_managed_on_main` gives it neither. It also owns the
+    //    uncommitted-changes notice, which only applies when there IS a clone.
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
-
-    // 7a. Ensure the shared base clone exists. Idempotent: returns immediately when
-    //     `<project_dir>/.git` is already present so a second `tm launch` reuses
-    //     the existing clone rather than re-cloning.
-    trusty_mpm::daemon::managed_routes::inproject::ensure_base_clone(&origin_url, &project_dir)
-        .map_err(|e| anyhow::anyhow!("failed to provision base clone: {e}"))?;
-
-    // 7b. Create a per-session git worktree at `<project_dir>/.worktrees/<session-id>/`.
-    //     Each session gets an isolated branch so concurrent sessions never collide.
-    //     NOTE (#2032): `tm launch` is a standalone CLI flow, not the daemon's
-    //     managed `SessionManager` spawn path — the tmux name here is derived
-    //     from the live folder AFTER the worktree already exists (see
-    //     `folder_name`/`fallback_session_name` below), so there is no
-    //     resolved semantic name available yet at worktree-creation time.
-    //     This keeps the pre-#2032 UUID-named worktree; only
-    //     `spawn_managed_inproject` (the daemon's HTTP/MCP spawn path) uses
-    //     the new semantic-name layout.
-    let managed_path = trusty_mpm::daemon::managed_routes::inproject::create_session_worktree(
+    let workspace = super::managed_workspace::provision_for_launch(
+        &trusty_mpm::project::registry_data_dir(),
+        &origin_url,
         &project_dir,
-        &session_uuid.to_string(),
+        &live_path,
         &session_uuid,
     )
-    .map_err(|e| anyhow::anyhow!("failed to create session worktree: {e}"))?;
+    .await?;
+    let managed_path = workspace.path().to_path_buf();
 
-    // 7c. Deploy the `.claude` framework into the worktree (best-effort).
+    // 7. Deploy the `.claude` framework into the worktree (best-effort).
     //     Non-fatal: a deploy failure never aborts the session — the operator can
     //     run `tm install` / `tm catalog sync` to populate agents manually.
     //     #4203: deploy through the isolated seam so the roster lands in the
