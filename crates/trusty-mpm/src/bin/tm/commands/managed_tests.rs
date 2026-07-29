@@ -301,6 +301,11 @@ async fn session_resume_restart_failure_errors() {
 /// than attempting (and presumably failing/hanging on) a real tmux attach
 /// with no controlling terminal to move.
 ///
+/// #3873: "already-live" now means a live RUNTIME, not merely a live tmux
+/// session — see the fixture note below on why the pane must run a non-shell
+/// command. The dead-runtime counterpart is
+/// `session_resume_headless_dead_runtime_reconciles_and_restarts`.
+///
 /// Why `provisioning` and not the literal `active` string: branch selection
 /// here is state-string-independent — both `active` and `provisioning` fail
 /// `needs_restart` identically, so the `Provisioning` state `create_with_id`
@@ -344,7 +349,12 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
             Some(ws.clone()),
             None,
             Some(ws),
-            Some("https://example.com/r.git".to_string()),
+            // Process-unique so the derived `tmux_name` cannot collide in the
+            // machine-global tmux namespace — see the fuller note on the
+            // dead-runtime counterpart below. This test has always created a real
+            // tmux session under a FIXED name (`tm-r-01`); with a second
+            // real-tmux test now beside it, that is a live cross-binary hazard.
+            Some(format!("https://example.com/r{}.git", std::process::id())),
             Some("main".to_string()),
             RuntimeKind::default(),
             false,
@@ -359,14 +369,29 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     );
 
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    // #3873: the pane must run a NON-shell command. Since #3873, "live" means a
+    // live RUNTIME, not merely a live tmux session — a bare `tmux new-session -d`
+    // leaves the pane on a login shell, which is precisely the dead-runtime shape
+    // this test is NOT trying to exercise (see the sibling test below, which is).
+    // `sleep` is not in `orphan_gc::IDLE_SHELL_COMMANDS`, so it stands in for a
+    // live agent process deterministically. Without it this fixture's verdict
+    // depended on whether the login shell happened to still have a child mid-init
+    // when the probe ran, making the test genuinely flaky under the new logic.
     let create_status = std::process::Command::new(&tmux_bin)
-        .args(["new-session", "-d", "-s", &record.tmux_name])
+        .args(["new-session", "-d", "-s", &record.tmux_name, "sleep 300"])
         .status()
         .expect("spawn real tmux session for the liveness probe");
     assert!(
         create_status.success(),
         "failed to create the real scratch tmux session"
     );
+    // tmux runs the command through a shell, so there is a brief window after
+    // `new-session` in which the pane still reports `sh`/`zsh` rather than
+    // `sleep`. Probing inside that window reads the fixture as an idle shell and
+    // sends this test down the #3873 dead-runtime branch. Wait for the pane to
+    // settle into the live-runtime state the test is actually about — the exact
+    // inverse of the wait in the dead-runtime counterpart below.
+    wait_for_stable_live_runtime(&record.tmux_name);
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -401,6 +426,193 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
         Some("provisioning"),
         "state must be UNCHANGED — a /resume POST would have flipped it to 'active'; this \
          proves the Attach branch never issued a daemon-side restart"
+    );
+}
+
+/// Block until `session_name`'s panes read as a settled LIVE runtime (#3873).
+///
+/// Why: the mirror of [`wait_for_stable_dead_runtime`] — see its doc. tmux
+/// launches a pane command through a shell, so a pane told to run a long-lived
+/// process still reports the shell for a moment; a test asserting about the
+/// Attach branch must not start until the fixture actually expresses it.
+/// What: polls until three consecutive probes report a live runtime, or panics
+/// at a 10-second deadline. Any dead reading resets the streak.
+fn wait_for_stable_live_runtime(session_name: &str) {
+    const REQUIRED_AGREEING_READS: u32 = 3;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut streak = 0;
+    while std::time::Instant::now() < deadline {
+        if crate::commands::guided_resume::session_runtime_live(session_name) {
+            streak += 1;
+            if streak == REQUIRED_AGREEING_READS {
+                return;
+            }
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "fixture precondition: tmux session '{session_name}' never settled into a \
+         stable live-runtime state within 10s; this test would silently exercise \
+         the #3873 reconcile branch instead of the Attach branch it asserts about"
+    );
+}
+
+/// Block until `session_name`'s panes read as a settled dead runtime (#3873).
+///
+/// Why: `session_runtime_live` consults the OS process tree, so a pane that has
+/// only just been created can momentarily report a live child while it finishes
+/// setting itself up. A single probe is therefore not a stable statement about
+/// the fixture; a test that acts on one can silently exercise the opposite
+/// branch from the one it asserts about. Requiring CONSECUTIVE agreeing reads
+/// turns "dead right now" into "dead and settled".
+/// What: polls until three consecutive probes report a dead runtime, or panics
+/// at a 10-second deadline rather than letting the caller proceed on an
+/// unsettled fixture (a silent proceed is what produced an intermittent
+/// failure). Any live reading resets the streak.
+fn wait_for_stable_dead_runtime(session_name: &str) {
+    const REQUIRED_AGREEING_READS: u32 = 3;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut streak = 0;
+    while std::time::Instant::now() < deadline {
+        if crate::commands::guided_resume::session_runtime_live(session_name) {
+            streak = 0;
+        } else {
+            streak += 1;
+            if streak == REQUIRED_AGREEING_READS {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "fixture precondition: tmux session '{session_name}' never settled into a \
+         stable dead-runtime state within 10s; this test cannot distinguish the \
+         #3873 reconcile branch from Attach without it"
+    );
+}
+
+/// #3873 end-to-end: a session whose tmux session is LIVE but whose runtime has
+/// exited must reconcile-then-restart, not attach into the idle shell.
+///
+/// Why: the pure `plan_resume` seam proves the branch SELECTION, but not that
+/// the selection survives the whole I/O driver — `resume_session` computes
+/// `runtime_live` itself, and a wrong `pane_id`/session plumbing, a
+/// short-circuit, or a daemon-side "re-attach to the live pane instead of
+/// recreating" branch could each turn the fix into a silent no-op while every
+/// unit test stayed green. This is the counterpart to
+/// `session_resume_headless_active_live_tmux_skips_restart_and_attach`: same
+/// seeding, same real-tmux liveness fixture, opposite pane command, opposite
+/// expected outcome. Together they pin BOTH directions of the #3873 decision
+/// against a real daemon.
+/// What: seeds a `Provisioning` record with a workspace that EXISTS on disk (the
+/// restart path validates it), spawns a real tmux session left on a bare login
+/// shell — the exact dead-runtime shape — and asserts the daemon record flipped
+/// to `active`, which only a `/runtime-stop` + `/resume` round-trip can do. The
+/// daemon here is `FakeNoopTmuxDriver`-backed, so its `kill_session` is a no-op
+/// and the real scratch session is torn down by this test, unconditionally.
+#[tokio::test]
+async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
+    use trusty_mpm::daemon::{api, state::DaemonState};
+    use trusty_mpm::runtime::RuntimeKind;
+    use trusty_mpm::session_manager::ManagedSessionId;
+
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root.clone()).await);
+    let id = ManagedSessionId::new();
+    let ws = root.join(format!("{id}-dead-runtime-ws"));
+    // The restart path refuses a session whose workspace directory is gone, so
+    // it must actually exist for this test to reach the /resume POST.
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create_with_id(
+            id,
+            "regression: #3873 dead-runtime reconcile CLI test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            // `tmux_name` is derived from the repo name, and this test creates a
+            // REAL tmux session in the machine-global tmux namespace. The name
+            // must therefore be unique BOTH from the sibling live-runtime test
+            // (which would otherwise also derive `tm-r-01`) AND across test
+            // BINARIES: this crate compiles the same sources into two bin targets
+            // (`tm` and `trusty-mpm`) that cargo may run concurrently, so a fixed
+            // name lets one process's unconditional `kill-session` cleanup
+            // destroy the other process's session mid-test — observed as an
+            // intermittent failure of the final assertion below.
+            Some(format!(
+                "https://example.com/deadrt{}.git",
+                std::process::id()
+            )),
+            Some("main".to_string()),
+            RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+    assert_eq!(
+        record.state.to_string(),
+        "provisioning",
+        "sanity: create_with_id must leave a fresh record un-stopped/un-errored"
+    );
+
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    // A bare `sh`, explicitly: the pane must be an idle shell with NO live child
+    // — tmux session live, runtime dead, the #3873 defect shape. Passing the
+    // command explicitly rather than letting tmux launch the user's login shell
+    // is what makes this deterministic: an interactive `zsh`/`bash` runs the
+    // developer's rc files and keeps spawning short-lived children for a while
+    // after creation, and the `ChildLivenessProbe` gate correctly reads any of
+    // those as "still alive". That made the fixture's verdict depend on this
+    // machine's dotfiles. `sh` is in `orphan_gc::IDLE_SHELL_COMMANDS` and reads
+    // no rc files here, so it settles immediately and stays childless.
+    let create_status = std::process::Command::new(&tmux_bin)
+        .args(["new-session", "-d", "-s", &record.tmux_name, "sh"])
+        .status()
+        .expect("spawn real tmux session for the liveness probe");
+    assert!(
+        create_status.success(),
+        "failed to create the real scratch tmux session"
+    );
+    // Belt-and-braces on top of the deterministic fixture: require the "runtime
+    // dead" reading to be STABLE (three consecutive probes) before proceeding,
+    // so a single transient child during pane setup cannot send this test down
+    // the Attach branch it is not testing.
+    wait_for_stable_dead_runtime(&record.tmux_name);
+
+    let router = api::router(std::sync::Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    let url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let result = session_resume(&client, &url, id.to_string()).await;
+
+    let _ = std::process::Command::new(&tmux_bin)
+        .args(["kill-session", "-t", &record.tmux_name])
+        .output();
+
+    result.expect("headless resume of a dead-runtime session must succeed (Ok), not error");
+
+    let after: serde_json::Value = client
+        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.get("persisted_state").and_then(|v| v.as_str()),
+        Some("active"),
+        "the record must have been reconciled and restarted — only a /runtime-stop \
+         + /resume round-trip flips a provisioning record to 'active'. Reading \
+         'provisioning' here means the CLI attached into the idle shell instead, \
+         i.e. the #3873 defect is back"
     );
 }
 

@@ -18,12 +18,23 @@
 //! (where the in-place relaunch gate matches), actually brought a runtime back.
 //! [`plan_resume`] now takes a third input, `runtime_live`, and maps
 //! `(active, tmux up, runtime dead)` onto the existing `ReconcileThenRestart`
-//! recovery so the first invocation does the whole job. [`pane_runtime_live`]
+//! recovery so the first invocation does the whole job. [`session_runtime_live`]
 //! resolves that input by reusing the daemon reaper's own
-//! [`trusty_mpm::daemon::runtime_reap::pane_runtime_exited`] predicate against a
-//! single pane-id-targeted `tmux display-message` — the CLI asks the question
-//! itself at resume time, so this fix does NOT depend on the 60s runtime reaper
-//! having already reconciled the record.
+//! [`trusty_mpm::daemon::runtime_reap::session_has_live_pane`] primitive against
+//! a session-scoped `tmux list-panes` — the CLI asks the question itself at
+//! resume time, so this fix does NOT depend on the 60s runtime reaper having
+//! already reconciled the record.
+//!
+//! #3873 round 2: that recovery is DESTRUCTIVE on this input.
+//! `/runtime-stop` reaches `kill_session(tmux_name)`, which is session-scoped —
+//! every window and pane. The #2001 zombie pays nothing (its session is already
+//! gone) but the #3873 shape has a live session by definition, so
+//! [`resume_session`] discloses the impending session kill before it happens,
+//! matching what the plain `Restart` branch has always done for the same
+//! `tmux_live == true` situation. The sibling-pane question (#2463) is not a
+//! separate guard bolted on afterwards: because `runtime_live` is computed as
+//! ANY-pane-live over the whole session, a session with one idle pane and one
+//! live agent pane never reaches the destructive branch at all.
 //!
 //! #3531: the zombie/restart classification below MUST run on
 //! [`trusty_mpm::client::ManagedSessionSummary::persisted_state`], never the
@@ -235,72 +246,130 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool, runtime_live: bool) -> R
     }
 }
 
-/// Parse `tmux display-message -p -t <pane> '#{pane_current_command} #{pane_pid}'`
-/// output into the two fields [`pane_runtime_exited`] needs (#3873).
+/// Parse a session-scoped `tmux list-panes -F` listing into the
+/// [`trusty_mpm::daemon::orphan_gc::PaneInfo`] rows the daemon's liveness
+/// predicates consume (#3873).
 ///
 /// Why: the shell-out itself is untestable without a live tmux server, but the
-/// parse is exactly where a format change or an empty/short reply would silently
-/// mis-answer "is the runtime alive?". Splitting it out keeps that risk on a pure,
-/// unit-tested seam. Deliberately does NOT go through
-/// [`crate::daemon::tmux`]-style `list-panes -a` enumeration: that path is a
-/// whole-server sweep whose composite-key parsing is a known failure mode
-/// (#1813 shape), and a single pane-id-targeted `display-message` needs none of
-/// it — tmux resolves a pane id to exactly one pane or errors.
-/// What: returns `None` when the reply has no command word at all (empty output,
-/// or tmux printed nothing usable) — the caller treats that as "cannot prove
-/// dead". Otherwise returns the command word plus the pane pid, with the pid
-/// `None` when it is missing or not a number (that alone is not evidence of
-/// death; [`crate::daemon::orphan_gc::ChildLivenessProbe`] treats `None` as
-/// "no live child", and the command-word gate still has to agree).
-/// Test: `parse_pane_probe_*` in `tests_behavior_c_tests.rs`.
-pub(crate) fn parse_pane_probe(stdout: &str) -> Option<(String, Option<u32>)> {
-    let line = stdout.lines().next().unwrap_or("").trim();
-    let mut parts = line.split_whitespace();
-    let command = parts.next()?.to_string();
-    let pid = parts.next().and_then(|p| p.parse::<u32>().ok());
-    Some((command, pid))
+/// parse is exactly where a format change, a short row, or an empty reply would
+/// silently mis-answer "is the runtime alive?" — and a wrong answer here now
+/// drives a `kill_session`. Splitting it out keeps that risk on a pure,
+/// unit-tested seam. Deliberately does NOT go through the `list-panes -a`
+/// whole-server sweep in [`trusty_mpm::daemon::tmux`]: that path's composite-key
+/// parsing is a known live failure mode (the #1813 shape, where `session_name`
+/// ends up holding an entire joined row and `pane_current_command` comes back
+/// empty), and a session-scoped listing needs none of it. The TAB delimiter is
+/// chosen for the same reason — it cannot appear in a tmux session name or a
+/// command word, so the columns cannot smear into each other the way the
+/// space-joined `-a` format did.
+/// What: returns one row per pane, requiring EXACTLY three non-empty
+/// tab-separated fields with a numeric pid. Returns `None` — meaning "cannot
+/// determine", which every caller must treat as fail-open — for an empty
+/// listing, a short or over-long row, an empty session/command field, or a
+/// missing/non-numeric pid. Blank lines are skipped.
+/// Test: `parse_pane_probes_*` in `tests_behavior_c_tests.rs`.
+pub(crate) fn parse_pane_probes(
+    stdout: &str,
+) -> Option<Vec<trusty_mpm::daemon::orphan_gc::PaneInfo>> {
+    let mut panes = Vec::new();
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let session_name = fields.next()?.trim();
+        let command = fields.next()?.trim();
+        let pid = fields.next()?.trim();
+        // More fields than the format string asked for means the reply is not the
+        // shape we requested — refuse to guess which column is which.
+        if fields.next().is_some() {
+            return None;
+        }
+        if session_name.is_empty() || command.is_empty() {
+            return None;
+        }
+        // #3873 round 2 (code-critic MEDIUM): a missing or non-numeric pid is
+        // NOT tolerated. `ProcessTreeProbe::has_live_child(None)` returns
+        // `false`, so accepting `None` here would silently collapse the
+        // documented two-gate check down to `is_idle_shell` alone. That
+        // calibration is correct for the DAEMON (whose reconcile is
+        // non-destructive since #2023 A — the record flips, the pane survives),
+        // but this CLI path drives a `kill_session`, so it must be STRICTER
+        // than the daemon, not merely equal to it.
+        let pane_pid: u32 = pid.parse().ok()?;
+        panes.push(trusty_mpm::daemon::orphan_gc::PaneInfo {
+            session_name: session_name.to_string(),
+            pane_current_command: command.to_string(),
+            pane_pid: Some(pane_pid),
+            // Unused by `pane_runtime_exited`; the session-scoped query below is
+            // what establishes which session these panes belong to.
+            pane_id: None,
+        });
+    }
+    (!panes.is_empty()).then_some(panes)
 }
 
-/// Is the agent runtime inside `pane_id` still alive? (#3873)
+/// Does ANY pane in tmux session `session_name` still show a live runtime? (#3873)
 ///
 /// Why: `tmux_has_session` proves only that the tmux SESSION exists. When a
 /// managed session's inner `claude` exits, the pane survives as a bare login
 /// shell — so session-existence says "live" while the thing the operator wants
 /// is gone. The daemon's 60s runtime reaper already owns the authoritative
-/// answer to this question in
-/// [`trusty_mpm::daemon::runtime_reap::pane_runtime_exited`]; this function
-/// reuses that exact predicate (and therefore the same `is_idle_shell`
-/// allowlist and the same [`trusty_mpm::daemon::orphan_gc::ProcessTreeProbe`]
-/// belt-and-braces child gate) rather than reimplementing idle-shell detection
-/// in the CLI, so the two can never drift apart. Reusing it also means this fix
-/// works whether or not the reaper is currently healthy: the CLI asks the
-/// question itself, at resume time, instead of waiting for a reaped record.
+/// answer in [`trusty_mpm::daemon::runtime_reap::session_has_live_pane`]; this
+/// function reuses that exact primitive (and through it `pane_runtime_exited`,
+/// the same `is_idle_shell` allowlist, and the same
+/// [`trusty_mpm::daemon::orphan_gc::ProcessTreeProbe`] child gate) rather than
+/// reimplementing idle-shell detection in the CLI, so the two can never drift
+/// apart. Reusing it also means this fix works whether or not the reaper is
+/// currently healthy: the CLI asks the question itself, at resume time, instead
+/// of waiting for a reaped record.
+///
+/// #3873 round 2 (code-critic MEDIUM): this is deliberately the ANY-PANE-LIVE
+/// question over the whole session, NOT a check of the record's stored
+/// `pane_id`. A managed session can be manually split (#2463), so a single-pane
+/// check would call a session dead while a sibling pane still runs the agent —
+/// and the consequence of "dead" on this path is a `kill_session` that takes
+/// every window and pane with it. Asking tmux for the session's panes directly
+/// also means pane membership is established BY CONSTRUCTION (a `-t <session>`
+/// listing cannot return another session's panes) instead of trusting a stored
+/// pane id that could be stale or reused.
+///
 /// What: FAILS OPEN — returns `true` (assume live, preserving the pre-#3873
-/// `Attach` behavior) when the record has no `pane_id`, when the `tmux` shell-out
-/// fails or exits non-zero, or when the reply cannot be parsed. Only a positive,
-/// two-gate identification (a recognised bare shell AND no live child under the
-/// pane pid) returns `false`. Failing open matters because `false` now triggers a
-/// `/runtime-stop` that KILLS the pane: a wrong `false` would destroy a live
-/// agent's pane, while a wrong `true` merely reproduces today's already-shipped
-/// behavior.
-/// Test: the pure parse seam is `parse_pane_probe_*`; the fail-open contract for
-/// a missing pane id is `pane_runtime_live_assumes_live_without_pane_id`; the
+/// `Attach` behavior) for a blank session name, a `tmux` spawn failure, a
+/// non-zero exit, a listing that cannot be fully parsed
+/// ([`parse_pane_probes`]), or a listing containing no pane attributable to
+/// this session. Only a fully-parsed listing in which EVERY pane is a
+/// provably-idle shell returns `false`. The asymmetry is deliberate: `false`
+/// now triggers a `/runtime-stop` whose `SessionManager::stop` →
+/// `graceful_terminate_runtime` → `kill_session` destroys the entire tmux
+/// session, so a wrong `false` is destructive while a wrong `true` merely
+/// reproduces the already-shipped attach behavior.
+///
+/// The non-zero-exit guard is belt-and-braces rather than the primary
+/// protection: tmux 3.6b answers an invalid target on some subcommands with
+/// rc=0 and near-empty stdout, so the parse-returned-`None` path is what
+/// actually catches a bad target, and that path IS unit-tested.
+/// Test: the pure parse seam is `parse_pane_probes_*`; the any-pane-live
+/// composition is `session_panes_*`; the blank-name fail-open is
+/// `session_runtime_live_assumes_live_for_blank_session_name`; the
 /// classification it delegates to is covered by the daemon's own
-/// `pane_runtime_exited_*` tests. The tmux shell-out itself is I/O (a live tmux
-/// server), matching the existing `session_for_pane` / `pane_tty_for` precedent
-/// in `tmux_attach.rs`.
-pub(crate) fn pane_runtime_live(pane_id: Option<&str>) -> bool {
-    let Some(pane_id) = pane_id.map(str::trim).filter(|p| !p.is_empty()) else {
+/// `pane_runtime_exited_*` / `session_has_live_pane_*` tests. The tmux
+/// shell-out itself is I/O (a live tmux server), matching the existing
+/// `session_for_pane` / `pane_tty_for` precedent in `tmux_attach.rs`.
+pub(crate) fn session_runtime_live(session_name: &str) -> bool {
+    let name = session_name.trim();
+    if name.is_empty() {
         return true;
-    };
+    }
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
     let Ok(output) = std::process::Command::new(&tmux_bin)
         .args([
-            "display-message",
-            "-p",
+            "list-panes",
+            "-s",
             "-t",
-            pane_id,
-            "#{pane_current_command} #{pane_pid}",
+            name,
+            "-F",
+            "#{session_name}\t#{pane_current_command}\t#{pane_pid}",
         ])
         .output()
     else {
@@ -309,19 +378,21 @@ pub(crate) fn pane_runtime_live(pane_id: Option<&str>) -> bool {
     if !output.status.success() {
         return true;
     }
-    let Some((command, pane_pid)) = parse_pane_probe(&String::from_utf8_lossy(&output.stdout))
-    else {
+    let Some(panes) = parse_pane_probes(&String::from_utf8_lossy(&output.stdout)) else {
         return true;
     };
-
-    let pane = trusty_mpm::daemon::orphan_gc::PaneInfo {
-        session_name: String::new(),
-        pane_current_command: command,
-        pane_pid,
-        pane_id: Some(pane_id.to_string()),
-    };
-    !trusty_mpm::daemon::runtime_reap::pane_runtime_exited(
-        &pane,
+    // Membership guard. `session_has_live_pane` FILTERS by session name and
+    // returns `false` ("no live pane") when nothing matches — correct for the
+    // daemon, which is looking at a whole-server listing where a non-match means
+    // the session is gone, but fail-CLOSED here where `false` is destructive. If
+    // the listing we got back cannot be attributed to the session we asked
+    // about, we have learned nothing and must fail open.
+    if !panes.iter().any(|p| p.session_name == name) {
+        return true;
+    }
+    trusty_mpm::daemon::runtime_reap::session_has_live_pane(
+        name,
+        &panes,
         &trusty_mpm::daemon::orphan_gc::ProcessTreeProbe,
     )
 }
@@ -428,13 +499,13 @@ pub(crate) async fn resume_session(
     // `resume_classification_state`.
     let persisted_state = resume_classification_state(session);
     // #3873: `tmux_live` above proves only that the tmux SESSION exists. Ask the
-    // separate question the operator actually cares about — is the agent runtime
-    // inside the record's pane still there? — before letting an `active` record
-    // fall through to a bare `Attach` that would drop them into an idle shell.
-    // Only worth the shell-out when tmux is up at all; when it is not, `is_zombie`
-    // already classifies the record and `pane_runtime_live` could not answer
-    // anyway (the pane is gone with the session).
-    let runtime_live = !tmux_live || pane_runtime_live(session.pane_id.as_deref());
+    // separate question the operator actually cares about — does ANY pane in that
+    // session still run an agent? — before letting an `active` record fall
+    // through to a bare `Attach` that would drop them into an idle shell. Only
+    // worth the shell-out when tmux is up at all; when it is not, `is_zombie`
+    // already classifies the record and `session_runtime_live` could not answer
+    // anyway (the panes are gone with the session).
+    let runtime_live = !tmux_live || session_runtime_live(&session.name);
     let action = plan_resume(persisted_state, tmux_live, runtime_live);
 
     // Terminal-state refusal (code-critic CRITICAL): a decommissioned/deleted
@@ -462,10 +533,24 @@ pub(crate) async fn resume_session(
         // "its tmux pane is gone", which is now only half the cases — telling an
         // operator their pane vanished when it is sitting right in front of them
         // is worse than saying nothing.
+        //
+        // #3873 round 2 (code-critic HIGH): when tmux IS live this branch is
+        // DESTRUCTIVE and must say so. `/runtime-stop` →
+        // `SessionManager::stop` → `graceful_terminate_runtime` →
+        // `kill_session(tmux_name)` is SESSION-scoped: every window and every
+        // pane goes, not just the one the record points at. For the #2001 zombie
+        // that costs nothing (the session is already gone), but the #3873 shape
+        // has a live session BY DEFINITION, so this is a newly-destructive step
+        // on an input that previously took a harmless `Attach`. The plain
+        // `Restart` branch below already discloses exactly this for the same
+        // `tmux_live == true` situation; reaching the same `kill_session`
+        // silently here would be strictly worse.
         if tmux_live {
             eprintln!(
-                "tm: '{}' is marked {} but its runtime has exited (the pane is a \
-                 bare shell) — restarting the runtime…",
+                "tm: session '{}' is {} but its runtime has exited — every pane in \
+                 the tmux session is now an idle shell. Restarting will KILL that \
+                 tmux session (all windows and panes, including their scrollback) \
+                 and start a fresh runtime.",
                 session.name, persisted_state
             );
         } else {
@@ -487,11 +572,10 @@ pub(crate) async fn resume_session(
         action,
         ResumeAction::Restart | ResumeAction::ReconcileThenRestart
     ) {
-        // Pane-kill disclosure only applies to the plain Restart branch. The
-        // reconcile branch already printed its own message above, and its pane is
-        // either gone (#2001) or a bare shell whose runtime already exited
-        // (#3873) — in neither case is there in-progress runtime state left to
-        // warn about losing.
+        // Pane-kill disclosure only applies to the plain Restart branch here: the
+        // reconcile branch printed its OWN disclosure above (which, since #3873
+        // round 2, covers the destructive live-tmux case explicitly), so
+        // repeating it would double-warn.
         if action == ResumeAction::Restart {
             if tmux_live {
                 eprintln!(
@@ -527,6 +611,17 @@ pub(crate) async fn resume_session(
 /// the record `Stopped` synchronously (keeping the workspace), which then
 /// satisfies the restart path. This is the automation of the old manual
 /// `tm session stop <id>` step.
+///
+/// DESTRUCTIVE (#3873 round 2 — this doc previously said only "marks the record
+/// `Stopped`", which reads as record-only and is what let a destructive step
+/// land without disclosure). Server-side this is
+/// `stop_managed_session_runtime` → [`trusty_mpm::session_manager::SessionManager::stop`]
+/// → `graceful_terminate_runtime` → `kill_session(tmux_name)` — SESSION-scoped,
+/// so every window and pane of the tmux session is destroyed, not merely the
+/// record's own pane. Free for the #2001 zombie (its session is already gone);
+/// materially destructive for the #3873 dead-runtime shape, whose session is
+/// live by definition. Callers reaching this with `tmux_live == true` MUST
+/// disclose that first — `resume_session` does.
 /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop` with a 30-second
 /// timeout. Network/404/other-error each print a distinct actionable message and
 /// bail — a failed stop is the one case that still needs a human. Success returns

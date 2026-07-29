@@ -35,9 +35,14 @@ use crate::commands::guided::{
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
-    ResumeAction, is_zombie, needs_restart, pane_runtime_live, parse_pane_probe, plan_resume,
-    resume_classification_state,
+    ResumeAction, is_zombie, needs_restart, parse_pane_probes, plan_resume,
+    resume_classification_state, session_runtime_live,
 };
+// #3873: the CLI's dead-runtime verdict composes the daemon's OWN liveness
+// primitives rather than reimplementing them, so the tests exercise that
+// composition directly.
+use trusty_mpm::daemon::orphan_gc::AlwaysIdleProbe;
+use trusty_mpm::daemon::runtime_reap::session_has_live_pane;
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 
@@ -1328,63 +1333,161 @@ fn plan_resume_refuses_terminal_states_even_with_dead_runtime() {
 }
 
 #[test]
-fn pane_runtime_live_assumes_live_without_pane_id() {
-    // Why (#3873 fail-open contract): `runtime_live = false` now triggers a
-    // `/runtime-stop` that KILLS the pane. A record with no stored `pane_id`
-    // gives us NO evidence either way, so it must assume live and preserve the
-    // pre-#3873 Attach behavior — a wrong `false` would destroy a live agent's
-    // pane. Pure: takes the early return before any tmux shell-out.
+fn session_runtime_live_assumes_live_for_blank_session_name() {
+    // Why (#3873 fail-open contract): `runtime_live = false` now drives a
+    // `/runtime-stop` whose `kill_session` destroys the WHOLE tmux session. A
+    // blank session name gives us NO evidence either way, so it must assume live
+    // and preserve the pre-#3873 Attach behavior. Pure: takes the early return
+    // before any tmux shell-out.
     assert!(
-        pane_runtime_live(None),
-        "a record with no pane_id must fail OPEN (assume the runtime is live)"
+        session_runtime_live(""),
+        "an empty session name must fail OPEN (assume the runtime is live)"
     );
     assert!(
-        pane_runtime_live(Some("   ")),
-        "a blank pane_id is no evidence either — must fail OPEN too"
+        session_runtime_live("   "),
+        "a whitespace-only session name is no evidence either — must fail OPEN"
+    );
+}
+
+// ── parse_pane_probes (#3873) ────────────────────────────────────────────────
+// Rows come from `tmux list-panes -s -t <session> -F
+// '#{session_name}\t#{pane_current_command}\t#{pane_pid}'`. Anything this seam
+// cannot fully adjudicate must return None, which the caller treats as fail-open
+// — because the only thing a `false` verdict can cause here is a session kill.
+
+#[test]
+fn parse_pane_probes_reads_every_pane() {
+    // Why (#3873): the happy shape — one row per pane, all three fields present.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+        .expect("a well-formed two-pane listing must parse");
+    assert_eq!(panes.len(), 2, "both panes must be returned");
+    assert_eq!(panes[0].session_name, "tm-apex-01");
+    assert_eq!(panes[0].pane_current_command, "zsh");
+    assert_eq!(panes[0].pane_pid, Some(41234));
+    assert_eq!(panes[1].pane_current_command, "claude");
+    assert_eq!(panes[1].pane_pid, Some(41999));
+}
+
+#[test]
+fn parse_pane_probes_rejects_non_numeric_pid() {
+    // Why (#3873 round 2, code-critic MEDIUM): this is THE regression this
+    // parse tightening exists to prevent. A non-numeric pid used to degrade to
+    // `pane_pid: None`; `ProcessTreeProbe::has_live_child(None)` returns `false`,
+    // so the documented two-gate check silently collapsed to `is_idle_shell`
+    // alone and an unparseable row could satisfy the destructive dead-runtime
+    // branch on the strength of the command word by itself. `None → false` is
+    // correct calibration for the DAEMON, whose reconcile is non-destructive
+    // (#2023 A: record flips, pane survives); the CLI reuses that same gate to
+    // drive a `kill_session`, so it must be STRICTER than the daemon, not equal.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01\tzsh\tnotanumber\n"),
+        None,
+        "a non-numeric pid must read as CANNOT DETERMINE (None), never as a \
+         one-gate dead verdict"
     );
 }
 
 #[test]
-fn parse_pane_probe_reads_command_and_pid() {
-    // Why (#3873): the happy shape tmux returns for
-    // `display-message -p -t %333 '#{pane_current_command} #{pane_pid}'`.
+fn parse_pane_probes_rejects_missing_pid() {
+    // Why (#3873 round 2): same MEDIUM, short-row variant — a row that stops
+    // after the command word leaves the child gate with nothing to inspect.
     assert_eq!(
-        parse_pane_probe("zsh 41234\n"),
-        Some(("zsh".to_string(), Some(41234))),
-        "must split the command word from the pane pid"
-    );
-    assert_eq!(
-        parse_pane_probe("claude 41234\n"),
-        Some(("claude".to_string(), Some(41234))),
-        "a live agent's command word must survive intact"
+        parse_pane_probes("tm-apex-01\tzsh\n"),
+        None,
+        "a row missing the pid column must yield None"
     );
 }
 
 #[test]
-fn parse_pane_probe_tolerates_missing_pid() {
-    // Why (#3873): a missing/garbage pid is not evidence of death — the command
-    // word still has to clear `is_idle_shell` before anything is torn down.
+fn parse_pane_probes_rejects_smeared_row() {
+    // Why (#3873): the #1813 composite-key shape that broke the daemon's own
+    // `list-panes -a` enumeration — the whole row collapsed into one field. The
+    // TAB delimiter makes it unparseable rather than silently mis-columned.
     assert_eq!(
-        parse_pane_probe("zsh\n"),
-        Some(("zsh".to_string(), None)),
-        "a command with no pid must still parse, with pid None"
-    );
-    assert_eq!(
-        parse_pane_probe("zsh notanumber\n"),
-        Some(("zsh".to_string(), None)),
-        "a non-numeric pid must degrade to None, never panic"
+        parse_pane_probes("tm-apex-01_zsh_41234\n"),
+        None,
+        "a smeared single-field row must yield None, never a guessed split"
     );
 }
 
 #[test]
-fn parse_pane_probe_none_for_empty_reply() {
-    // Why (#3873): an empty reply means tmux told us nothing — the caller must
-    // fail OPEN rather than treat "no command word" as an idle shell.
-    assert_eq!(parse_pane_probe(""), None, "empty output must yield None");
+fn parse_pane_probes_rejects_extra_fields() {
+    // Why (#3873): more columns than the format asked for means the reply is not
+    // the shape we requested — refuse rather than guess which column is which.
     assert_eq!(
-        parse_pane_probe("   \n"),
+        parse_pane_probes("tm-apex-01\tzsh\t41234\textra\n"),
+        None,
+        "an over-long row must yield None"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_empty_or_blank_listing() {
+    // Why (#3873): an empty listing means tmux told us nothing. It must NOT read
+    // as "no live panes, therefore dead" — that is exactly the fail-closed shape
+    // that would kill a session on a failed query.
+    assert_eq!(parse_pane_probes(""), None, "empty output must yield None");
+    assert_eq!(
+        parse_pane_probes("   \n\n"),
         None,
         "whitespace-only output must yield None"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_empty_command_field() {
+    // Why (#3873): the other half of the #1813 shape — `pane_current_command`
+    // came back EMPTY. An empty command must never be handed to `is_idle_shell`.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01\t\t41234\n"),
+        None,
+        "an empty command field must yield None"
+    );
+}
+
+// ── any-pane-live composition (#3873 round 2, code-critic MEDIUM / #2463) ────
+// `runtime_live` is the ANY-PANE-LIVE question over the whole session, not a
+// check of the record's single stored pane_id. These pin that the parsed rows
+// compose correctly with the daemon's own `session_has_live_pane` primitive.
+
+#[test]
+fn session_panes_any_live_pane_keeps_session_live() {
+    // Why (#2463): a manually-split managed session can have an idle pane
+    // alongside a live agent pane. Checking one pane would call the session dead
+    // and — on this path — kill the live agent with it. AlwaysIdleProbe isolates
+    // the command-word gate: `claude` is not an idle shell, so the session lives.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+        .expect("listing must parse");
+    assert!(
+        session_has_live_pane("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a sibling pane still running the agent must keep the session LIVE"
+    );
+}
+
+#[test]
+fn session_panes_all_idle_reads_dead() {
+    // Why (#3873): the actual defect shape — every pane fell back to a shell.
+    // This is the ONLY configuration allowed to reach the destructive branch.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tbash\t41999\n")
+        .expect("listing must parse");
+    assert!(
+        !session_has_live_pane("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a session whose every pane is a bare shell must read as dead"
+    );
+}
+
+#[test]
+fn session_panes_foreign_rows_never_prove_our_session_dead() {
+    // Why (#3873 round 2): `session_has_live_pane` FILTERS by session name and
+    // returns false when nothing matches — correct for the daemon's whole-server
+    // listing, fail-CLOSED here where false is destructive. Pins the shape the
+    // membership guard in `session_runtime_live` exists to catch: rows that
+    // cannot be attributed to the session we asked about.
+    let panes = parse_pane_probes("tm-other-99\tzsh\t41234\n").expect("listing must parse");
+    assert!(
+        !panes.iter().any(|p| p.session_name == "tm-apex-01"),
+        "no row belongs to the session we asked about — the guard must fire and \
+         `session_runtime_live` must fail OPEN rather than consult the filter"
     );
 }
 
