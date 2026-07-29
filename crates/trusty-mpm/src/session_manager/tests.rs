@@ -1941,6 +1941,38 @@ async fn prune_outcome_serializes() {
         v["sessions"][0]["action"],
         serde_json::json!("decommissioned")
     );
+
+    // #4344 review (critic MEDIUM): pin the NEW `DecommissionedWorktreeRetained`
+    // variant's wire form too, so a future rename/reorder of the enum is
+    // caught here rather than only by the `prune_reports_dirty_worktree_retained`
+    // integration test in `decommission_worktree_tests.rs`.
+    assert_eq!(
+        serde_json::to_value(crate::session_manager::PruneAction::DecommissionedWorktreeRetained)
+            .expect("serialize action"),
+        serde_json::json!("decommissioned_worktree_retained")
+    );
+    let retained = crate::session_manager::PrunedSession {
+        id: "id".into(),
+        tmux_name: "tmux".into(),
+        state: "stopped".into(),
+        action: crate::session_manager::PruneAction::DecommissionedWorktreeRetained,
+        retained_workspace_path: Some(PathBuf::from("/tmp/retained-ws")),
+    };
+    let retained_v = serde_json::to_value(&retained).expect("serialize retained row");
+    assert_eq!(
+        retained_v["retained_workspace_path"],
+        serde_json::json!("/tmp/retained-ws"),
+        "retained_workspace_path must serialize as a plain path string when present"
+    );
+    let clean = crate::session_manager::PrunedSession {
+        retained_workspace_path: None,
+        ..retained.clone()
+    };
+    let clean_v = serde_json::to_value(&clean).expect("serialize clean row");
+    assert!(
+        clean_v.get("retained_workspace_path").is_none(),
+        "retained_workspace_path must be OMITTED (not null) when there is nothing retained"
+    );
 }
 
 /// `compact_record` deletes a tombstone from the store (#1508).
