@@ -156,6 +156,7 @@ const SUBAGENTS_PAYLOAD = {
       },
     ],
     role_excluded_count: 2,
+    hidden_excluded_count: 0,
     unresolved: [],
   },
   cross_product: {
@@ -184,6 +185,7 @@ const BARE_SUBAGENTS_PAYLOAD = {
     allowed_roles: ['engineer', 'qa', 'researcher', 'documentation', 'ops', 'planner', 'assistant'],
     targets: [],
     role_excluded_count: 0,
+    hidden_excluded_count: 0,
     unresolved: [],
   },
   cross_product: {

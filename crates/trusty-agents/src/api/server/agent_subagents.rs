@@ -53,10 +53,13 @@
 //!   and EMPTY target lists — never a guess assembled from a partial parse. An
 //!   agent whose config does not resolve does not run, so "it may delegate to
 //!   nothing" is the truthful answer as well as the safe one.
-//! - **The roster is not dumped.** Only role-ELIGIBLE agents become target
-//!   cards; everything else is counted (`role_excluded_count`), never named,
-//!   preserving the #3052 PR A CRITICAL-2 posture that the delegation surface
-//!   does not enumerate internal agent ids.
+//! - **The roster is not dumped.** Only role-ELIGIBLE, NON-HIDDEN agents become
+//!   target cards; everything else is counted (`role_excluded_count`,
+//!   `hidden_excluded_count`), never named, preserving the #3052 PR A
+//!   CRITICAL-2 posture that the delegation surface does not enumerate internal
+//!   agent ids. The `hidden` half is #4235: this pane is a LISTING surface and
+//!   must apply the same `!hidden` filter `projects::apply_roster_filters`
+//!   applies to the picker, via the same `projects::is_hidden` predicate.
 //!
 //! What: [`agent_subagents_route`] is the axum shim; [`subagents_at`] is the
 //! testable core. Unlike its four sibling section routes this one resolves
@@ -219,16 +222,33 @@ pub(super) async fn subagents_at(
 /// because the gate refuses those too (`Err` ⇒ `rejected`) and a target that
 /// silently vanished from the pane looks identical to one that was never
 /// declared.
+///
+/// The ONE candidate that IS dropped rather than reported is a `hidden` one
+/// (#4235). That is deliberate and is the exception the paragraph above does
+/// not cover: `hidden` is a LISTING-surface flag (`AgentInfo::hidden`), not a
+/// gate, so a hidden agent is not "refused by the gate with a reason to show"
+/// — it is an agent the operator removed from listing surfaces entirely.
+/// Rendering it as a card carrying a "hidden" reason would name the very id
+/// that was suppressed (against the module doc's no-roster-dump rule) and
+/// would still draw the duplicate "Izzie" row #3819 removed from the picker.
+/// So it is omitted and COUNTED in `hidden_excluded_count`, exactly the
+/// "counted but never named" treatment `role_excluded_count` already gives.
+/// The two counts are disjoint: `hidden` is checked first, so a hidden
+/// candidate never reaches the role check, and `role_excluded_count` keeps its
+/// pre-#4235 meaning of "role not in the allowlist" unchanged.
 /// What: `{mechanism, tool, tool_registered, tool_granted, delegator_tier,
-/// allowed_roles, targets, role_excluded_count, unresolved}`. `targets` carries
-/// only role-eligible agents (see the module doc's no-roster-dump rule), each
-/// with `reachable` plus a `reason` when refused. The agent itself is excluded:
-/// self-delegation is not a configuration surface.
+/// allowed_roles, targets, role_excluded_count, hidden_excluded_count,
+/// unresolved}`. `targets` carries only non-hidden, role-eligible agents (see
+/// the module doc's no-roster-dump rule), each with `reachable` plus a `reason`
+/// when refused. The agent itself is excluded: self-delegation is not a
+/// configuration surface.
 /// Test: `subagents_route_reports_both_mechanisms_for_an_assistant`,
 /// `subagents_route_hides_l0_target_from_l1_delegator`,
 /// `subagents_route_shows_l0_target_to_l0_delegator`,
 /// `subagents_route_reports_tool_not_registered_for_a_worker_role`,
-/// `subagents_route_reports_unresolvable_target_rather_than_dropping_it`.
+/// `subagents_route_reports_unresolvable_target_rather_than_dropping_it`,
+/// `subagents_route_omits_a_hidden_delegation_target`,
+/// `subagents_route_hidden_filter_leaves_the_role_count_untouched`.
 async fn in_product_surface(
     dirs: &[PathBuf],
     self_name: &str,
@@ -239,12 +259,23 @@ async fn in_product_surface(
     let mut targets: Vec<Value> = Vec::new();
     let mut unresolved: Vec<Value> = Vec::new();
     let mut role_excluded_count: usize = 0;
+    let mut hidden_excluded_count: usize = 0;
 
     for entry in super::projects::scan_agent_catalog(dirs).await {
         let Some(candidate) = entry.get("name").and_then(Value::as_str) else {
             continue;
         };
         if candidate.eq_ignore_ascii_case(self_name) {
+            continue;
+        }
+        // #4235: this pane is a listing surface, so it applies the SAME
+        // `!hidden` filter the picker applies via `apply_roster_filters` —
+        // through the same `projects::is_hidden` predicate on the same catalog
+        // entry, never a second copy of the check. Checked BEFORE resolution
+        // so a hidden agent is not named in `unresolved` either; counted, not
+        // named (see this fn's doc comment for the omit-not-label reasoning).
+        if super::projects::is_hidden(&entry) {
+            hidden_excluded_count += 1;
             continue;
         }
         match AgentConfig::by_name_in(dirs, candidate) {
@@ -323,6 +354,10 @@ async fn in_product_surface(
         "allowed_roles": ASSISTANT_ALLOWED_DELEGATE_ROLES,
         "targets": targets,
         "role_excluded_count": role_excluded_count,
+        // #4235: hidden candidates are counted here and NOT in
+        // `role_excluded_count`, so neither number double-counts and the pane
+        // can still say "N agents are not shown" truthfully.
+        "hidden_excluded_count": hidden_excluded_count,
         "unresolved": unresolved,
     })
 }
@@ -433,6 +468,10 @@ fn empty_in_product() -> Value {
         "allowed_roles": ASSISTANT_ALLOWED_DELEGATE_ROLES,
         "targets": Vec::<Value>::new(),
         "role_excluded_count": 0,
+        // #4235: keep the degraded payload's key set identical to the real
+        // one, or a pane reading `hidden_excluded_count` blanks out on a
+        // config error instead of rendering zero.
+        "hidden_excluded_count": 0,
         "unresolved": Vec::<Value>::new(),
     })
 }
@@ -475,6 +514,11 @@ mod unit_tests {
         assert_eq!(ip["tool_registered"], false);
         assert_eq!(ip["delegator_tier"], "l1", "fail-closed to the L1 default");
         assert!(ip["targets"].as_array().unwrap().is_empty());
+        // #4235: both suppression counters must be PRESENT (as zero), not
+        // absent — a pane keying off `hidden_excluded_count` would otherwise
+        // render `undefined` on the degraded payload.
+        assert_eq!(ip["role_excluded_count"], 0);
+        assert_eq!(ip["hidden_excluded_count"], 0);
 
         let cp = empty_cross_product();
         assert_eq!(cp["mechanism"], "cross_product");

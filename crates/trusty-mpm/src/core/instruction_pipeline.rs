@@ -39,47 +39,118 @@ pub(crate) const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 // Bundled system-prompt assembly
 //
 // Why: trusty-mpm must own its own PM instructions rather than reading from a
-// `~/.claude-mpm/` install at runtime. The four source assets below are
-// embedded at compile time and assembled into a single `INSTRUCTIONS.md` that
-// is passed to `claude --append-system-prompt-file` on every session launch.
+// `~/.claude-mpm/` install at runtime. The section assets below are embedded at
+// compile time and assembled into a single `INSTRUCTIONS.md` that is passed to
+// `claude --append-system-prompt-file` on every session launch.
+//
+// SOURCE OF TRUTH (#4183): one markdown file per [`SectionId`], under
+// `assets/instructions/sections/`. The four monolithic assets this crate used to
+// embed (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`,
+// `BASE_PM.md`) are gone; `pm_instructions()` and `base_pm()` reconstitute the
+// two that spanned several sections so the legacy override assembly keeps its
+// exact shape. Nothing is duplicated between the two models, so the composed
+// package and the legacy assembly cannot drift apart in content — the property
+// that makes `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`
+// meaningful rather than a check of two copies of the same paste.
 // ---------------------------------------------------------------------------
 
-/// Token-optimized PM orchestration instructions (bundled at compile time).
-///
-/// `pub(crate)` so the override resolver in
-/// [`crate::core::instruction_overrides`] can use it as the default when no
-/// `PM_INSTRUCTIONS_DEPLOYED.md` override is present.
-pub(crate) const PM_INSTRUCTIONS: &str = include_str!("../assets/instructions/PM_INSTRUCTIONS.md");
-/// 5-phase workflow execution details (bundled at compile time).
+/// Absorbed BASE_PM `## Identity` — who the PM is. Floor, tier `fixed`.
+pub(crate) const SECTION_IDENTITY: &str =
+    include_str!("../assets/instructions/sections/identity.md");
+/// The PM's core operating instructions. Tier `project`.
+pub(crate) const SECTION_CORE: &str = include_str!("../assets/instructions/sections/core.md");
+/// Memory (context-first) protocol guidance. Tier `project`.
+pub(crate) const SECTION_MEMORY: &str = include_str!("../assets/instructions/sections/memory.md");
+/// Code/architecture search protocol guidance. Tier `project`.
+pub(crate) const SECTION_SEARCH: &str = include_str!("../assets/instructions/sections/search.md");
+/// 5-phase workflow execution details, including the sprint/harden doctrine.
 ///
 /// `pub(crate)` so the override resolver can use it when no `WORKFLOW.md`
 /// override is present.
-pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/WORKFLOW.md");
-/// Agent delegation routing table (bundled at compile time).
+pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/sections/workflow.md");
+/// Agent delegation routing doctrine (the live roster is appended at compose
+/// time, never authored here).
 ///
 /// `pub(crate)` so the override resolver can use it when no
 /// `AGENT_DELEGATION.md` override is present.
 pub(crate) const AGENT_DELEGATION: &str =
-    include_str!("../assets/instructions/AGENT_DELEGATION.md");
-/// Non-overridable BASE_PM framework floor — includes the Trusty tool-priority
-/// block — bundled at compile time. Placed last so it cannot be overridden.
+    include_str!("../assets/instructions/sections/agent-delegation.md");
+/// Absorbed BASE_PM non-overridable rules, the customization contract, and the
+/// Trusty tool-priority mandate. Floor, tier `fixed`.
+pub(crate) const SECTION_NON_OVERRIDABLE_RULES: &str =
+    include_str!("../assets/instructions/sections/non-overridable-rules.md");
+/// Absorbed BASE_PM framework-guaranteed conventions. Floor, tier `fixed`.
+pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
+    include_str!("../assets/instructions/sections/framework-guaranteed-conventions.md");
+
+/// The former `PM_INSTRUCTIONS.md` body, rebuilt from its three sections.
 ///
-/// `pub(crate)` so the override resolver can append it as the non-overridable
-/// floor even under full PM replacement.
-pub(crate) const BASE_PM: &str = include_str!("../assets/instructions/BASE_PM.md");
+/// Why: the legacy override assembly
+/// ([`crate::core::instruction_overrides::assemble_sections`]) treats the PM body
+/// as one section it may be fully replaced by `PM_INSTRUCTIONS_DEPLOYED.md`. It
+/// still needs that single string, but the *authored* source is now three files.
+/// Reconstituting here — rather than keeping a fourth copy on disk — is what
+/// stops the legacy path and the packaged path from delivering different
+/// content once a section is edited (#4183).
+/// What: Core, Memory and Search joined with a paragraph break, in that order,
+/// with the trailing newline a file would have carried. The paragraph break is
+/// deliberately [`crate::core::instruction_package::Join::Blank`]'s literal, so
+/// this string is byte-identical to what the packaged composer emits for the
+/// same three blocks.
+/// Test: `pm_instructions_is_its_three_sections`,
+/// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
+pub(crate) fn pm_instructions() -> &'static str {
+    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{}\n\n{}\n\n{}\n",
+            SECTION_CORE.trim(),
+            SECTION_MEMORY.trim(),
+            SECTION_SEARCH.trim()
+        )
+    });
+    &JOINED
+}
+
+/// The non-overridable framework floor, rebuilt from its three sections.
+///
+/// Why: the floor is appended last under *every* override branch, including full
+/// PM replacement, so the resolver needs it as one opaque string. Same
+/// no-duplicate-copy argument as [`pm_instructions`].
+/// What: Identity, Non-Overridable Rules (which now carries the Trusty
+/// tool-priority mandate) and Framework-Guaranteed Conventions, joined with a
+/// paragraph break.
+///
+/// ORDER CHANGE, recorded because it is the one floor reordering #4183 makes:
+/// `BASE_PM.md` used to place `## Trusty Tool Priority (Non-Overridable)` *after*
+/// `## Framework-Guaranteed Conventions`. It is a non-overridable rule, so it now
+/// travels with the other non-overridable rules and consequently precedes the
+/// conventions. Position only — not one word of either block changed, and both
+/// remain inside the floor, so nothing about what is overridable moved.
+/// Test: `base_pm_is_its_three_sections`, `floor_carries_the_tool_priority_mandate`.
+pub(crate) fn base_pm() -> &'static str {
+    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{}\n\n{}\n\n{}\n",
+            SECTION_IDENTITY.trim(),
+            SECTION_NON_OVERRIDABLE_RULES.trim(),
+            SECTION_FRAMEWORK_CONVENTIONS.trim()
+        )
+    });
+    &JOINED
+}
 
 /// Assemble the full system prompt from bundled source components.
 ///
 /// Why: a launched `claude` session must receive identical, version-controlled
 /// PM instructions every time; embedding the sources and joining them here
 /// removes any dependency on an external `~/.claude-mpm/` install.
-/// What: concatenates the four bundled assets in the fixed order
-/// PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION → BASE_PM, separated by a
-/// `---` rule. BASE_PM comes last as the non-overridable framework floor; it
-/// carries the Trusty MCP tool-priority block.
+/// What: concatenates the bundled sections in the fixed order
+/// PM body → WORKFLOW → AGENT_DELEGATION → floor, separated by a `---` rule. The
+/// floor comes last as the non-overridable framework floor; it carries the
+/// Trusty MCP tool-priority block.
 /// Test: `assemble_system_prompt_contains_all_sections`.
 pub fn assemble_system_prompt() -> String {
-    [PM_INSTRUCTIONS, WORKFLOW, AGENT_DELEGATION, BASE_PM].join("\n\n---\n\n")
+    [pm_instructions(), WORKFLOW, AGENT_DELEGATION, base_pm()].join("\n\n---\n\n")
 }
 
 /// Write the assembled system prompt to an explicit path.
@@ -596,6 +667,60 @@ mod tests {
         // returned byte-identical.
         let clean = "# My Project\n\nOperator notes.\n";
         assert_eq!(strip_delegation_block(clean), clean);
+    }
+
+    #[test]
+    fn pm_instructions_is_its_three_sections() {
+        // #4183: the legacy PM body is RECONSTITUTED from the authored sections,
+        // never kept as a fourth copy on disk. If it ever became a copy again,
+        // an edit to `core.md` would reach the packaged composer and not the
+        // legacy override assembly — the split-brain this asserts against.
+        let body = pm_instructions();
+        assert_eq!(
+            body,
+            format!(
+                "{}\n\n{}\n\n{}\n",
+                SECTION_CORE.trim(),
+                SECTION_MEMORY.trim(),
+                SECTION_SEARCH.trim()
+            )
+        );
+        // The paragraph break is `Join::Blank`'s literal, which is what makes
+        // this string byte-identical to what the packaged composer emits.
+        assert!(body.contains("## Memory Protocol (Context-First)"));
+        assert!(body.contains("## Code Search Protocol (Context-First)"));
+        assert!(
+            !body.contains("## Context-First Protocol\n"),
+            "the merged Memory+Search block must not survive as a fourth copy"
+        );
+    }
+
+    #[test]
+    fn base_pm_is_its_three_sections() {
+        // Same no-second-copy property for the non-overridable floor, plus the
+        // one reordering #4183 makes: the tool-priority mandate travels with the
+        // other non-overridable rules and so now precedes the conventions.
+        let floor = base_pm();
+        assert_eq!(
+            floor,
+            format!(
+                "{}\n\n{}\n\n{}\n",
+                SECTION_IDENTITY.trim(),
+                SECTION_NON_OVERRIDABLE_RULES.trim(),
+                SECTION_FRAMEWORK_CONVENTIONS.trim()
+            )
+        );
+
+        let tool = floor
+            .find("## Trusty Tool Priority (Non-Overridable)")
+            .expect("the tool-priority mandate stays in the floor");
+        let conventions = floor
+            .find("## Framework-Guaranteed Conventions (Non-Overridable)")
+            .expect("the guaranteed conventions stay in the floor");
+        assert!(
+            tool < conventions,
+            "tool priority now rides with the non-overridable rules it belongs to"
+        );
     }
 
     #[test]

@@ -111,27 +111,25 @@ impl ProjectRegistry {
     /// already-"successful" field edit with no error ever surfacing to that
     /// caller. This is the exact lost-update hazard #2395 already fixed for
     /// `DeliverableManager::update_deliverable_with`.
-    /// What: acquires `self.store.write().await` ONCE and holds the guard for
-    /// the ENTIRE fetch→mutate→persist sequence. Fetches the CURRENT on-disk
-    /// record via the store's own reload-on-read `get` (`NotFound` propagates
-    /// unchanged), calls `f` with that freshly-reloaded record, persists `f`'s
-    /// (infallible — Project PATCH has no state-machine rejection path, unlike
-    /// Deliverable's §10.3 transitions) result, and returns it — all before
-    /// releasing the lock, so no other task can observe or clobber the
-    /// intermediate state.
+    /// What: acquires `self.store.write().await` ONCE (serialising tasks in THIS
+    /// process) and delegates the whole fetch→mutate→persist sequence to
+    /// [`ProjectStore::update_with`], which performs it inside a single
+    /// cross-process file-lock critical section. The in-process guard alone was
+    /// never sufficient: it cannot see a `tm` CLI or MCP process editing the same
+    /// `projects.json`, so the identical lost-update hazard survived across
+    /// processes until the store's write path was serialised. `NotFound`
+    /// propagates unchanged, without writing.
     /// Test: `update_with_serializes_concurrent_field_edits` (the concurrency
     /// regression test — proves two concurrent edits to DIFFERENT fields are
-    /// both present in the final persisted record, never one lost), and
-    /// `update_with_unknown_project_errors`.
+    /// both present in the final persisted record, never one lost),
+    /// `update_with_unknown_project_errors`, and the cross-process
+    /// `projects_json_multiprocess_upsert_no_lost_updates`.
     pub async fn update_with<F>(&self, name: &str, f: F) -> Result<Project, ProjectStoreError>
     where
-        F: FnOnce(Project) -> Project,
+        F: FnOnce(Project) -> Project + Send + 'static,
     {
         let mut guard = self.store.write().await;
-        let current = guard.get(name).await?;
-        let updated = f(current);
-        guard.upsert(updated.clone()).await?;
-        Ok(updated)
+        guard.update_with(name, f).await
     }
 
     /// Seed the registry from statically-declared `projects:` config entries.

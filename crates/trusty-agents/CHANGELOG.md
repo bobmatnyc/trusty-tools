@@ -61,6 +61,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to `>=0.21.1, <0.22.0` and would not have admitted the new version. Requirement
   edit only — this crate's own version is unchanged.
 
+### Fixed
+
+- **The Sub-agents pane no longer offers `hidden` agents as delegation targets
+  (#4235).** `GET /api/agents/:name/subagents` filtered its in-product target
+  list by role and by the kind/tier gate but never by `hidden`, so
+  `assistant`, `personal-assistant` and `researcher` — all `hidden = true`
+  since #3819 — leaked back in as target cards, rendering a SECOND row
+  display-labelled "Izzie" beside `izzie`. The pane now applies the same
+  `!hidden` filter the picker/roster applies, through the same
+  `projects::is_hidden` predicate (promoted from private to `pub(super)`
+  rather than reimplemented, so the two surfaces cannot drift). A hidden agent
+  is OMITTED rather than shown with a reason — `hidden` is a listing-surface
+  flag, not a gate, and a labelled row would still draw the duplicate and
+  would name an id the pane's no-roster-dump posture keeps unnamed. It is
+  counted instead, in a new `in_product.hidden_excluded_count`, disjoint from
+  `role_excluded_count`, which keeps its existing meaning unchanged. The pane
+  renders that count on its own line ("N further agent(s) … are hidden"), so
+  the omission is stated rather than silent, and the two exclusion reasons stay
+  separate — they have different remedies. This weakens no gate: `hidden` has
+  only ever governed visibility, and delegating to a hidden agent by name is
+  unaffected.
+
 ### Security
 
 - **Delegation authority is now governed by agent KIND, not by tier order
