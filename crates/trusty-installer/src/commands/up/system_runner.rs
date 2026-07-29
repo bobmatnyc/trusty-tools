@@ -41,19 +41,35 @@ impl SystemRunner {
     }
 }
 
-/// Map a DOC-1 `health --json` `status` string to a `MemberHealth` verdict.
+/// Map a daemon `/health` envelope's `status` string to a `MemberHealth` verdict.
 ///
-/// Why: The probe parses the contract envelope's `status` field; isolating the
-/// mapping makes the (otherwise side-effecting) probe partially unit-testable.
+/// Why: the probe classifies the envelope's `status` field; isolating the
+/// mapping makes the (otherwise side-effecting) probe unit-testable and keeps
+/// ONE vocabulary shared by `tctl up`, `status`, `stack` and the verify tail.
 ///
-/// What: `"healthy"`/`"ok"`/`"ready"` → `HealthyVersionOk`;
-/// `"stale"`/`"version_below_floor"`/`"degraded"` → `HealthyStale`; anything
-/// else (including `"down"`/`"error"`) → `Down`.
+/// #4246: `"running"`/`"serving"` were missing, so a daemon reporting the
+/// DOC-1 D4 vocabulary literally (`running | degraded | down`) fell through to
+/// `Down` — a false negative baked into the vocabulary itself, and one the test
+/// suite defended (`up::tests` asserted `"anything-else" → Down` where
+/// `"running"` IS "anything-else"). No shipped daemon emits `running` today
+/// (all six emit `ok`), so adding it changes nothing observable now and closes
+/// the trap for the next daemon that follows the spec.
 ///
-/// Test: `super::tests::classify_status_maps_known_values`.
+/// What: `"healthy"`/`"ok"`/`"ready"`/`"running"`/`"serving"` →
+/// `HealthyVersionOk`; `"stale"`/`"version_below_floor"`/`"degraded"` →
+/// `HealthyStale`; anything else (including `"down"`/`"error"`) → `Down`.
+///
+/// A genuinely unrecognised word still maps to `Down`, deliberately: that is a
+/// DISPLAY verdict only. Since #4246 the destructive repair is gated on
+/// [`super::super::probe_http::ProbeOutcome::is_confirmed_down`] — a
+/// transport-level observation — so an unknown status word can no longer
+/// kickstart anything.
+///
+/// Test: `super::tests::classify_status_maps_known_values`,
+/// `super::tests::classify_status_accepts_spec_vocabulary`.
 pub fn classify_status(status: &str) -> MemberHealth {
     match status.to_ascii_lowercase().as_str() {
-        "healthy" | "ok" | "ready" => MemberHealth::HealthyVersionOk,
+        "healthy" | "ok" | "ready" | "running" | "serving" => MemberHealth::HealthyVersionOk,
         "stale" | "version_below_floor" | "degraded" => MemberHealth::HealthyStale,
         _ => MemberHealth::Down,
     }
