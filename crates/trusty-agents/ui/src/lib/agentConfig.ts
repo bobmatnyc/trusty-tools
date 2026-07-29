@@ -475,11 +475,13 @@ export async function fetchAgentSkills(name: string): Promise<AgentSkills | null
  * (#4029) — a trusty-agents agent this agent may hand a task to via
  * `delegate_to_agent`.
  *
- * `reachable` already accounts for #4169's one-directional L0/L1 tier gate, so a
- * pane must render `reachable === false` as DENIED with its `reason` and must
- * never present the card as callable. The server refuses to list targets the
- * gate would refuse; a card that arrives unreachable is one the operator needs
- * an explanation for, not one to hide.
+ * `reachable` already accounts for BOTH refusals the server applies —
+ * ADR-0024's delegation KIND rule (assistant → assistant is refused, read from
+ * roles, not tiers) and #4169's one-directional L0/L1 tier gate — so a pane
+ * must render `reachable === false` as DENIED with its `reason` and must never
+ * present the card as callable. The server refuses to list targets the gate
+ * would refuse; a card that arrives unreachable is one the operator needs an
+ * explanation for, not one to hide.
  */
 export interface SubagentInProductTarget {
   name: string;
@@ -508,7 +510,16 @@ export interface SubagentInProduct {
   tool_granted: boolean;
   /** THIS agent's own resolved tier — the left-hand side of the gate. */
   delegator_tier: string;
-  /** `ASSISTANT_ALLOWED_DELEGATE_ROLES`, verbatim, so the pane can state the rule. */
+  /**
+   * `ASSISTANT_ALLOWED_DELEGATE_ROLES`, verbatim — the COARSE, pre-kind-gate
+   * role eligibility filter, NOT the reachable set. It still contains
+   * `assistant` (deliberately kept in the Rust constant, whose doc explains
+   * why this report is one of the consumers holding it there), yet the kind
+   * rule refuses every assistant→assistant edge. A pane must therefore not
+   * present this array as "the targets": state the effective rule
+   * (role-eligible MINUS kind-refused) and read reachability off
+   * `targets[].reachable`, which is the only field that carries both gates.
+   */
   allowed_roles: string[];
   targets: SubagentInProductTarget[];
   /** Roster entries excluded by the role allowlist — counted, never named. */
@@ -564,8 +575,9 @@ export interface AgentSubagents {
  * HTTP — `parse_agent_toml` enumerates twelve fields and `subagents` is not one
  * of them — so the Sub-agents pane needs its own route rather than a derivation
  * from `AgentDetail`. Critically, the in-product target set is not config at
- * all: it is a hardcoded role allowlist crossed with the resolvable roster and
- * narrowed by #4169's tier gate, none of which a client can compute.
+ * all: it is a hardcoded role allowlist crossed with the resolvable roster,
+ * then narrowed by ADR-0024's delegation kind rule and #4169's tier gate, none
+ * of which a client can compute.
  * What: `null` on 404 (unknown agent) so a stale roster selection is a normal
  * outcome, not a thrown error — same contract as `fetchAgentSkills`.
  * Test: `fetchAgentSubagents_returns_null_on_404`.

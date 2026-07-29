@@ -75,6 +75,14 @@ function payload(over: Partial<AgentSubagents> = {}): AgentSubagents {
   };
 }
 
+/**
+ * The pane's rendered prose with runs of whitespace collapsed. Svelte emits the
+ * template's own line breaks and indentation into `textContent`, so asserting a
+ * sentence that wraps in the source would fail on formatting alone — a copy
+ * assertion must survive a re-wrap.
+ */
+const copy = () => (target.textContent ?? '').replace(/\s+/g, ' ');
+
 /** Every element whose own label is exactly the `reachable` badge. */
 const reachableBadges = () =>
   Array.from(target.querySelectorAll('span')).filter(
@@ -118,6 +126,30 @@ describe('AgentConfigSubagents — the two mechanisms', () => {
     // The allow-list is quoted verbatim so the operator can see the rule —
     // including `documentation`, the role that exists in NO other allow-set.
     expect(target.textContent).toContain('documentation');
+  });
+
+  // The copy defect these two pin shut: `allowed_roles` carries `assistant`
+  // (deliberately — `ASSISTANT_ALLOWED_DELEGATE_ROLES`'s Rust doc explains why
+  // the entry stays, and this route's report is one of the consumers holding
+  // it there), yet ADR-0024's delegation KIND rule refuses every assistant →
+  // assistant edge. Copy that quoted the array as "the targets" was true of
+  // the constant and MISLEADING as presented: it advertised a reachability the
+  // code denies, so a reader could not predict the pane's own cards.
+  it('describes the EFFECTIVE rule, naming peer assistants as refused', () => {
+    render(payload());
+    // Eligibility and reachability must read as different things …
+    expect(copy()).toContain('eligibility is not reachability');
+    // … and the refusal is attributed to the KIND rule, not the tier gate:
+    // post-#4296 both endpoints of an assistant edge are L0, so tier is
+    // vacuous for it and only the kind rule still refuses it.
+    expect(copy()).toContain('the delegation kind rule');
+    expect(copy()).toContain('never a peer assistant');
+    expect(copy()).toContain('ADR-0024');
+  });
+
+  it('never presents the allow-list as the set of reachable targets', () => {
+    render(payload());
+    expect(copy()).not.toContain('Targets are fixed by the role allow-list');
   });
 
   it('renders a reachable in-product target with its role and tier', () => {

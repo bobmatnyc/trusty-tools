@@ -17,9 +17,12 @@
 //!   target set is NOT per-agent config at all: it is the hardcoded
 //!   `runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES` role allowlist
 //!   applied to whatever resolves out of `agents::agents_dir_candidates()`,
-//!   further narrowed by #4169's one-directional L0/L1 tier gate. The role
-//!   `documentation` exists ONLY here — it is in no other allow-set in the
-//!   codebase.
+//!   further narrowed by ADR-0024's delegation KIND rule
+//!   (`agents::delegation::kind_refuses_delegation` — assistant → assistant is
+//!   refused) and by #4169's one-directional L0/L1 tier gate. Role
+//!   eligibility is therefore NOT reachability, and `allowed_roles` below is
+//!   the coarse pre-kind-gate list, not the answer. The role `documentation`
+//!   exists ONLY here — it is in no other allow-set in the codebase.
 //! - **`cross_product`** — `dispatch_task` (`crate::tools::pm_bridge`),
 //!   trusty-agents → trusty-code, out-of-process specialist dispatch. This one
 //!   DOES have a per-agent TOML binding: the optional `[subagents]` section
@@ -36,8 +39,15 @@
 //!   cross-product half (so the pane can never disagree with the bridge — the
 //!   OQ-7 requirement stated in #4029), and, for the in-product half, the same
 //!   `AgentConfig::by_name_in` resolution + `ASSISTANT_ALLOWED_DELEGATE_ROLES`
-//!   membership + `AgentInfo::tier()` comparison that
-//!   `DelegateToAgentTool::execute`'s pre-flight check performs, in that order.
+//!   membership + `agents::delegation::kind_refuses_delegation` call +
+//!   `AgentInfo::tier()` comparison that `DelegateToAgentTool::execute`'s
+//!   pre-flight check performs, in that order.
+//! - **The prose must be predictive, not just the cards.** Any user-visible
+//!   copy describing this mechanism states the EFFECTIVE rule — role-eligible
+//!   MINUS kind-refused — and names peer assistants as refused. Quoting
+//!   `allowed_roles` as "the targets" is the specific defect this rule
+//!   forbids: the array is true of the constant but advertises reachability
+//!   the kind gate denies, so a reader could not predict the pane's own cards.
 //! - **The tier gate is reflected, not re-litigated (#4169, epic #4167).** A
 //!   target that resolves to `AgentTier::L0Orchestration` is reported
 //!   `reachable: false` for any delegator that is not itself L0. This route
@@ -209,19 +219,31 @@ pub(super) async fn subagents_at(
 }
 
 /// The `in_product` half: `delegate_to_agent`'s reachable target set for this
-/// agent, reflecting BOTH the role allowlist and #4169's tier gate.
+/// agent, reflecting the role allowlist, ADR-0024's delegation KIND rule, and
+/// #4169's tier gate.
 ///
 /// Why: this mechanism has no per-agent config to read, so the only honest
 /// source is the gate's own inputs. Every candidate is resolved with
 /// `AgentConfig::by_name_in` — the identical call
 /// `DelegateToAgentTool::execute` makes — and then subjected to the identical
-/// two checks in the identical order: `ASSISTANT_ALLOWED_DELEGATE_ROLES`
-/// membership on the target's resolved `role`, and the tier comparison
+/// checks in the identical order: `ASSISTANT_ALLOWED_DELEGATE_ROLES`
+/// membership on the target's resolved `role`, the kind predicate
+/// (`agents::delegation::kind_refuses_delegation`, called rather than
+/// re-derived), and the tier comparison
 /// (`target == L0Orchestration && delegator != L0Orchestration` ⇒ refused).
 /// A candidate that fails to resolve is reported as such rather than dropped,
 /// because the gate refuses those too (`Err` ⇒ `rejected`) and a target that
 /// silently vanished from the pane looks identical to one that was never
 /// declared.
+///
+/// The reported `allowed_roles` reflects only the FIRST of those checks — it
+/// still lists `assistant`, which the kind rule then refuses for an assistant
+/// delegator. That coarseness is intentional (the array is
+/// `ASSISTANT_ALLOWED_DELEGATE_ROLES` verbatim, and this report is one of the
+/// non-delegation consumers that constant's doc cites for keeping the entry),
+/// so any pane rendering it must describe the effective rule rather than
+/// present it as the reachable set. `targets[].reachable` is the only field
+/// that carries every gate.
 ///
 /// The ONE candidate that IS dropped rather than reported is a `hidden` one
 /// (#4235). That is deliberate and is the exception the paragraph above does
