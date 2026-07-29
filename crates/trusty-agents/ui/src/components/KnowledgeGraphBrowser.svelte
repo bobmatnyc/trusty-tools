@@ -33,7 +33,11 @@
    * reason, never alone — and (6) the fetch-helper error path, split into a
    * 404 ("agent not found", a stale roster selection) and any other
    * network/HTTP throw.
-   * Test: manual — open the panel for an agent with a bound palace with
+   * Test: `KnowledgeGraphBrowser.test.ts` automates the mid-session
+   * degradation regression (#4290 code-review finding) — a `connected: false`
+   * envelope from `loadAll`/`loadCount`/`loadSubject` after a connected
+   * bootstrap. The full six-state sweep against a live agent/palace/daemon
+   * remains manual: open the panel for an agent with a bound palace with
    * data, one with a palace but no triples, one with no `[[stores]].palace`,
    * and with the trusty-memory daemon stopped; confirm each renders its own
    * copy rather than a shared spinner or empty list.
@@ -100,6 +104,28 @@
   })();
 
   /**
+   * Why (#4290 code-review finding, HIGH): every KG route can independently
+   * flip to `connected: false` (still HTTP 200, `data: []`/`{active: 0}`) if
+   * trusty-memory or the palace goes away AFTER bootstrap already resolved
+   * `connected: true` — the daemon restarts mid-session, or the user pages
+   * through "all"/clicks a subject while it's down. Assigning `env.data`
+   * unconditionally in that case renders "0 active triples" / "No triples.",
+   * which is indistinguishable from a genuinely-connected-but-empty palace —
+   * exactly the failure the owner's contract forbids. So `loadAll`,
+   * `loadCount`, and `loadSubject` all check `env.connected` first and, when
+   * false, route into the SAME disconnected state `bootstrap()` shows
+   * (`reason`/`config_error`), rather than assigning empty data.
+   * What: Shared by the three post-bootstrap fetches so they can't drift on
+   * how they handle a degraded envelope.
+   * Test: `KnowledgeGraphBrowser.test.ts`.
+   */
+  function applyDisconnected(env: { reason?: string; config_error?: string }) {
+    connected = false;
+    reason = env.reason ?? '';
+    configError = env.config_error ?? '';
+  }
+
+  /**
    * Why: `/kg/subjects` is the cheapest route that also carries the
    * palace/`connected`/`reason`/`config_error` state every other route would
    * report identically (all four resolve the SAME agent → palace binding).
@@ -151,6 +177,12 @@
         notFound = true;
         return;
       }
+      // #4290: a mid-session degradation must render the same disconnected
+      // state as a degraded bootstrap, never an empty triples list.
+      if (!env.connected) {
+        applyDisconnected(env);
+        return;
+      }
       triples = env.data ?? [];
     } catch (e) {
       triplesError = `${e}`;
@@ -163,7 +195,18 @@
   async function loadCount(name: string) {
     try {
       const env = await fetchKgCount(name);
-      activeCount = env?.data?.active ?? null;
+      if (env === null) {
+        activeCount = null;
+        return;
+      }
+      // #4290: same disconnected-state routing as loadAll — a degraded count
+      // must not render as "0 active triples".
+      if (!env.connected) {
+        applyDisconnected(env);
+        activeCount = null;
+        return;
+      }
+      activeCount = env.data?.active ?? null;
     } catch {
       activeCount = null;
     }
@@ -178,6 +221,11 @@
       const env = await fetchKgSubject(agentName, subject);
       if (env === null) {
         notFound = true;
+        return;
+      }
+      // #4290: same disconnected-state routing as loadAll.
+      if (!env.connected) {
+        applyDisconnected(env);
         return;
       }
       triples = env.data ?? [];
