@@ -35,6 +35,7 @@ use super::persona_gate::{
     persona_max_turns,
 };
 use super::persona_memory;
+use super::persona_plugins::register_python_plugins;
 
 /// Run a single conversation turn against a persona agent (#254).
 ///
@@ -431,6 +432,29 @@ pub async fn run_pm_task_with_persona(
                 for tool in &plugin.tools {
                     registry.register(std::sync::Arc::clone(tool));
                 }
+            }
+
+            // #446 (epic #3052): the agent's OWN `[[plugins.python]]` tools.
+            // Registered LAST among the in-process sources and BEFORE live MCP
+            // discovery below, so a user-authored plugin can shadow neither a
+            // native tool (guarded inside the helper) nor be shadowed by a
+            // late-discovered MCP tool (the `existing_names` seed below already
+            // contains it by then). `config_dir` is the base for a
+            // package-relative `script` — the same agent/skill package dir the
+            // delegation runner was handed above, so `script = "../skills/
+            // foo/foo.py"` reaches a co-located skill package.
+            let python_plugin_names = register_python_plugins(
+                &mut registry,
+                &persona_cfg.plugins.python,
+                &config_dir,
+                persona_name,
+            );
+            if !python_plugin_names.is_empty() {
+                tracing::info!(
+                    persona = %persona_name,
+                    plugins = ?python_plugin_names,
+                    "registered [[plugins.python]] tools"
+                );
             }
 
             // #3238: live-discover MCP servers (`[[mcp.services]] discover =
