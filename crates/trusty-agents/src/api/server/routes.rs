@@ -30,6 +30,7 @@ use super::agent_stores::agent_stores_route;
 use super::agent_subagents::agent_subagents_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
+use super::costs::get_costs;
 use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
@@ -195,6 +196,12 @@ pub fn build_router_with_origins(
             "/api/agents/{name}/subagents",
             axum::routing::get(agent_subagents_route),
         )
+        // #4098: aggregated usage cost for the Costs tab — totals plus
+        // by-agent/by-model/by-date breakdowns, folded read-time from
+        // `.trusty-agents/state/usage.jsonl` and priced through the single
+        // pricing table (`perf::pricing`). Distinguishes "no log yet"
+        // (200 + `available: false`) from "$0.00" — see `costs`'s module doc.
+        .route("/api/costs", get(get_costs))
         .route("/api/workstreams", get(list_workstreams_route))
         .route(
             "/api/workstreams/{name}/history",

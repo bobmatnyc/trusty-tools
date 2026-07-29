@@ -91,6 +91,20 @@ fn cost_usd_unknown_defaults_to_sonnet() {
     assert!((u - 3.0).abs() < 1e-9);
 }
 
+/// Why (#4098): the counts widened to `u64` precisely so the shared aggregate
+/// callers (`usage::aggregate`, `usage::daily`) can sum a whole corpus without
+/// a saturating cast that would silently under-report the total.
+/// What: 10 billion prompt tokens — well past `u32::MAX` — prices linearly.
+/// Test: this test.
+#[test]
+fn cost_usd_accepts_counts_beyond_u32() {
+    let beyond = u64::from(u32::MAX) + 1;
+    let c = cost_usd("anthropic/claude-sonnet-4-6", beyond, 0, 0, 0);
+    let expected = beyond as f64 * 3.0 / 1_000_000.0;
+    assert!((c - expected).abs() < 1e-6, "expected {expected}, got {c}");
+    assert!(c.is_finite());
+}
+
 #[test]
 fn collector_records_phases() {
     let mut c = PerfCollector::new(7, "prescriptive", "write x");

@@ -3,6 +3,16 @@
 //! Why: The pricing table + cost math is mechanically independent of the
 //! collector's lifecycle; isolating it keeps `mod.rs` focused on recording
 //! and persisting performance records.
+//!
+//! **#4098 (COST-05, formerly #4103): this is the SINGLE pricing entry point.**
+//! A second, Haiku-only rate table used to live in `usage::daily`, which meant
+//! the REPL statusline and the persisted daily total priced every Sonnet turn
+//! at Haiku rates — every cost the operator saw was ~12x too low. That table
+//! is gone; `usage::daily::cost_from_tokens`, `usage::aggregate` and
+//! `perf::PerfCollector` all route through [`cost_usd`] here. Do not add a
+//! second table: a rate that disagrees with this one is a defect, not a
+//! variant.
+//!
 //! What: `cost_usd` (public), the `pricing_for`/`per_million` rate helpers, and
 //! the `filename_stamp` / `truncate_preview` formatters used by the collector.
 //! Test: `cost_usd_*` / `filename_stamp_format` / `truncate_preview_*` in
@@ -13,20 +23,29 @@
 ///
 /// Why: (#47) We hard-code the pricing table rather than hit a live endpoint
 /// so offline/CI runs still produce comparable cost figures. Pricing is
-/// per-million-tokens as published by Anthropic and OpenRouter.
+/// per-million-tokens as published by Anthropic and OpenRouter. (#4098) This
+/// is the one entry point every cost surface must call — see the module doc
+/// for the duplicate table it replaced.
 /// What: Substring-matches the model string (e.g. "anthropic/claude-sonnet-4-5"
 /// or "claude-haiku-4") and multiplies each token bucket by its rate.
-/// Test: `cost_usd_known_model`, `cost_usd_unknown_defaults_to_sonnet`.
+///
+/// Counts are `u64` rather than `u32` (#4098) because the aggregate surfaces
+/// that now share this entry point — a whole day of dispatches in
+/// `usage::aggregate`, a whole REPL session in `usage::daily` — sum well past
+/// `u32::MAX`, and a saturating cast at each of those call sites would
+/// silently under-report exactly the totals the Costs tab exists to show.
+/// Test: `cost_usd_known_sonnet`, `cost_usd_known_haiku`,
+/// `cost_usd_unknown_defaults_to_sonnet`, `cost_usd_accepts_counts_beyond_u32`.
 pub fn cost_usd(
     model: &str,
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    cache_read: u32,
-    cache_creation: u32,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
 ) -> f64 {
     // Rates in USD per token (not per million).
     let (rate_in, rate_out, rate_cache_r, rate_cache_w) = pricing_for(model);
-    let to_usd = |tokens: u32, rate: f64| tokens as f64 * rate;
+    let to_usd = |tokens: u64, rate: f64| tokens as f64 * rate;
     to_usd(prompt_tokens, rate_in)
         + to_usd(completion_tokens, rate_out)
         + to_usd(cache_read, rate_cache_r)
