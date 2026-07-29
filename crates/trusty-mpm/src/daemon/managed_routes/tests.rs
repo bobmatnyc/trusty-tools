@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
-use super::summary::{reconcile_against_tmux, reconcile_live_state};
+use super::summary::{reconcile_against_tmux, reconcile_live_state, stale_assets_for_many};
 use super::{checked_summaries, record_to_json, record_to_summary};
 use crate::session_manager::{
     InjectionStatus, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
@@ -871,6 +871,65 @@ async fn staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc() {
         "every session resolving the SAME catalog source pair must share ONE \
          computed CatalogHashes — a distinct Arc per session means the catalog \
          was recomposed per session (#2444 regression)"
+    );
+}
+
+/// Issue #4326 review, HIGH (empirically proven): the pin above only ever
+/// called [`super::summary::staleness_inputs`] directly — it never exercised
+/// [`stale_assets_for_many`], the function `checked_summaries` (and therefore
+/// `tm ls`) actually calls. The critic proved this gap by moving
+/// `CatalogHashes::compute` INSIDE `stale_assets_for_many`'s per-session
+/// `JoinSet::spawn_blocking` fan-out — reinstating the exact #2444 per-session
+/// recompose — and every existing test, including the pin above, stayed
+/// green.
+///
+/// Why this test closes the gap: it calls `stale_assets_for_many` itself (the
+/// real hot path) with three records that all resolve to the SAME
+/// `(agent_source, skill_source)` pair (the shared default, anchored at this
+/// test's `fake_home()`-scoped `$HOME`), and asserts via
+/// [`crate::core::update_check::compute_calls_for`] — a call LOG keyed by the
+/// exact catalog paths, not a bare counter, so unrelated tests reaching
+/// `CatalogHashes::compute` through their own unrelated temp paths can never
+/// pollute this assertion — that `compute` ran EXACTLY ONCE for that pair.
+/// Reinstating the per-session compose inside the fan-out (the critic's
+/// mutation) makes this assert `3`, not `1`, and fail.
+/// What: resets the log, resolves this test's own catalog source pair via
+/// `FrameworkPaths::default()` (identical resolution `staleness_inputs` uses
+/// internally), runs the real fan-out, and asserts one compute for that pair.
+/// Test: this function; mutation-verified per the PR report (temporarily
+/// reinstating the per-task compute reproduces the critic's failure, then
+/// reverted).
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_assets_for_many_computes_catalog_exactly_once_per_source_pair() {
+    let (home, _guard) = fake_home();
+    crate::core::update_check::reset_compute_call_log();
+
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let agent_source = fw.agent_source_dir();
+    let skill_source = fw.skill_source_dir();
+
+    let records: Vec<SessionRecord> = (0..3)
+        .map(|i| {
+            let ws = home.path().join(format!("hot-path-shared-catalog-{i}"));
+            std::fs::create_dir_all(&ws).unwrap();
+            let mut r = make_record(None);
+            r.state = ManagedSessionState::Active;
+            r.workspace_path = Some(ws);
+            r
+        })
+        .collect();
+
+    let result = stale_assets_for_many(records).await;
+
+    assert_eq!(result.len(), 3, "every record gets a result");
+    assert_eq!(
+        crate::core::update_check::compute_calls_for(&agent_source, &skill_source),
+        1,
+        "three sessions sharing one (agent_source, skill_source) pair must \
+         share exactly ONE CatalogHashes::compute — more than one means the \
+         per-session recompose #2444's review removed was reinstated inside \
+         the fan-out (#4326 review HIGH)"
     );
 }
 

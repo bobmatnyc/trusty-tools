@@ -441,9 +441,18 @@ type StalenessInput = (
 /// panicking task is simply absent from the returned map, leaving that
 /// summary at its `false` default rather than failing the whole listing.
 /// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
-/// `checked_summaries_flags_stale_assets_only_for_relevant_states` in
-/// `super::tests`.
-async fn stale_assets_for_many(records: Vec<SessionRecord>) -> HashMap<ManagedSessionId, bool> {
+/// `checked_summaries_flags_stale_assets_only_for_relevant_states`,
+/// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`
+/// (issue #4326 review HIGH: the prior pin only exercised [`staleness_inputs`]
+/// directly, never this actual hot path, and stayed green when
+/// `CatalogHashes::compute` was moved into the fan-out below) in
+/// `super::tests`. `pub(super)` (rather than private) so that regression test
+/// can call this function directly instead of the higher-level
+/// `checked_summaries`, which would also exercise the unrelated `unresumable`
+/// fan-out.
+pub(super) async fn stale_assets_for_many(
+    records: Vec<SessionRecord>,
+) -> HashMap<ManagedSessionId, bool> {
     let inputs = tokio::task::spawn_blocking(move || staleness_inputs(records))
         .await
         .unwrap_or_default();
