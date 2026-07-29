@@ -22,6 +22,10 @@ use axum::{
 use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_create::create_agent_route;
+// #4290: read-only KG proxy routes backing the Knowledge Graph browser.
+use super::agent_kg::{
+    agent_kg_all_route, agent_kg_count_route, agent_kg_query_route, agent_kg_subjects_route,
+};
 use super::agent_knowledge::agent_knowledge_route;
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
 use super::agent_permissions::agent_permissions_route;
@@ -184,6 +188,28 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/knowledge",
             axum::routing::get(agent_knowledge_route),
+        )
+        // #4290: the Knowledge Graph browser reads the agent's BOUND memory
+        // palace's KG through a thin read-only proxy — trusty-memory owns
+        // every one of these queries (`web/kg_routes.rs`), this crate only
+        // maps agent → palace and passes the upstream JSON through. Assert /
+        // delete are deliberately NOT proxied (owner decision: editability is
+        // a separate ticket), so this whole family stays GET-only.
+        .route(
+            "/api/agents/{name}/kg",
+            axum::routing::get(agent_kg_query_route),
+        )
+        .route(
+            "/api/agents/{name}/kg/subjects",
+            axum::routing::get(agent_kg_subjects_route),
+        )
+        .route(
+            "/api/agents/{name}/kg/all",
+            axum::routing::get(agent_kg_all_route),
+        )
+        .route(
+            "/api/agents/{name}/kg/count",
+            axum::routing::get(agent_kg_count_route),
         )
         // #4029 (epic #4021, OQ-5): the Sub-agents pane reads the UNION of the
         // two delegation mechanisms — in-product `delegate_to_agent` targets

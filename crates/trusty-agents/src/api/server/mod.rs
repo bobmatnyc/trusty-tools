@@ -23,6 +23,8 @@
 //!     (`GET /api/agents/:name/permissions`, #3936, DOC-57 §7)
 //!   - `agent_knowledge` → unified knows-surface (`GET /api/agents/:name/knowledge`,
 //!     #3935, DOC-57 §4): store bindings + knowledge tools + MCP connections
+//!   - `agent_kg`     → read-only proxy onto the agent's bound palace's
+//!     Knowledge Graph (`GET /api/agents/:name/kg*`, #4290)
 //!   - `project_registration` → project register + per-project config lookup
 //!   - `ctrl_sessions`→ CTRL session CRUD (`om session …`)
 //!   - `tm`           → tmux session management (`/api/tm/*`)
@@ -37,6 +39,8 @@
 //! Test: `tests` submodule + each submodule's documented coverage.
 
 mod agent_create;
+// #4290: per-agent read-only Knowledge Graph proxy for the KG browser.
+mod agent_kg;
 mod agent_knowledge;
 mod agent_patch;
 mod agent_permissions;
