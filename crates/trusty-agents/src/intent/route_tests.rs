@@ -204,3 +204,46 @@ fn whitespace_padding_invariance() {
         assert_eq!(plain, padded, "whitespace changed the route for '{input}'");
     }
 }
+
+// =====================================================================
+// #4319 (code-critic HIGH-1): `has_tcode_lexical_signal` — reused by
+// `intent::classify_intent`'s bug-report `Research` fallback.
+// =====================================================================
+
+#[test]
+fn has_tcode_lexical_signal_true_for_repo_file_extension() {
+    assert!(has_tcode_lexical_signal("something is wrong in main.rs"));
+}
+
+#[test]
+fn has_tcode_lexical_signal_true_for_src_path_token() {
+    assert!(has_tcode_lexical_signal("look under src/ for the bug"));
+}
+
+#[test]
+fn has_tcode_lexical_signal_true_for_raw_error_marker() {
+    assert!(has_tcode_lexical_signal(
+        "here is a stack trace, error: null pointer"
+    ));
+}
+
+#[test]
+fn has_tcode_lexical_signal_true_for_tcode_phrase() {
+    assert!(has_tcode_lexical_signal(
+        "the unit test for this module keeps failing"
+    ));
+}
+
+#[test]
+fn has_tcode_lexical_signal_true_for_tcode_word() {
+    assert!(has_tcode_lexical_signal("please patch the bug"));
+}
+
+#[test]
+fn has_tcode_lexical_signal_false_for_signal_free_input() {
+    assert!(!has_tcode_lexical_signal("do the thing"));
+    assert!(!has_tcode_lexical_signal(
+        "the situation with the auth middleware on staging seems related \
+         to the recent token refresh changes from last week"
+    ));
+}

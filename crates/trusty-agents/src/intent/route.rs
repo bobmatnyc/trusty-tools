@@ -178,6 +178,41 @@ fn count_phrase_matches(normalized: &str, list: &[&str]) -> usize {
     list.iter().filter(|p| normalized.contains(*p)).count()
 }
 
+/// #4319 (code-critic HIGH-1): True when `input` carries any of the
+/// Tcode-side lexical signals this module already detects for
+/// `route_task` — a repo-file token, a raw `error:` marker, a
+/// `TCODE_PHRASES` substring, or a `TCODE_WORDS` token — independent of
+/// what `route_task`'s full Tm-vs-Tcode precedence order would ultimately
+/// decide between the two.
+///
+/// Why: `intent::classify_intent`'s bug-report `Research` fallback needs
+/// "does this look like it's actually about code" as one of its inputs.
+/// Reusing these exact constants/checks avoids a second, independently
+/// drifting implementation of the same detection — the same
+/// common-entry-point principle `intent::normalize` already follows for
+/// punctuation handling.
+/// What: repo-file extension/path token check against the RAW lowercased
+/// input (pre-normalization, matching `route_task`'s own precedent since
+/// `normalize` maps `.`/`/` to whitespace), `error:` raw substring check,
+/// `TCODE_PHRASES` substring check against normalized text, `TCODE_WORDS`
+/// exact-token check against normalized words.
+/// Test: `route_tests::has_tcode_lexical_signal_*`.
+pub(crate) fn has_tcode_lexical_signal(input: &str) -> bool {
+    let raw_lower = input.to_lowercase();
+    let normalized = normalize(input);
+    let words: Vec<&str> = normalized.split_whitespace().collect();
+
+    let has_repo_file_token = REPO_FILE_EXTENSIONS
+        .iter()
+        .any(|ext| raw_lower.contains(ext))
+        || raw_lower.contains(REPO_FILE_PATH_TOKEN);
+    let has_raw_marker = RAW_TCODE_MARKERS.iter().any(|m| raw_lower.contains(m));
+    let has_tcode_phrase = TCODE_PHRASES.iter().any(|p| normalized.contains(p));
+    let has_tcode_word = words.iter().any(|w| TCODE_WORDS.contains(w));
+
+    has_repo_file_token || has_raw_marker || has_tcode_phrase || has_tcode_word
+}
+
 #[cfg(test)]
 #[path = "route_tests.rs"]
 mod route_tests;

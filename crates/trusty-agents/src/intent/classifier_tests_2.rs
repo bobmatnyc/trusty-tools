@@ -132,34 +132,72 @@ fn five_to_ten_words_no_signals_is_conversational() {
 }
 
 #[test]
-fn eleven_plus_words_no_verbs_is_conversational() {
-    // #4319 regression: length alone must never promote to Implementation.
-    // (Note the original version of this test used a sentence containing
-    // the literal word "test", which is an ACTION_VERBS entry and would
-    // still classify Implementation via that path — masking the length
-    // fallback this test intended to cover. Rewritten to be genuinely
-    // verb-free.)
+fn eleven_plus_words_with_domain_cue_is_research_not_implementation() {
+    // #4319 regression, corrected after code-critic HIGH-1: length alone
+    // must never promote to Implementation — but a verb-less BUG REPORT
+    // must also never silently drop all the way to Conversational, which
+    // is what this exact sentence did under the first #4319 fix pass
+    // (empirically verified by code-critic against pre/post binaries: this
+    // is a paraphrase of a real bug report with "failing test" replaced by
+    // "situation", removing the only signal the first fix pass checked
+    // for). It carries domain/incident vocabulary ("auth", "middleware",
+    // "staging", "token") that `has_bug_report_signal` now catches, so it
+    // lands on Research: in-process, tool-armed, no subprocess, PM decides.
     let long = "the situation with the auth middleware on staging \
                 seems related to the recent token refresh changes from last week";
     assert!(long.split_whitespace().count() > 10);
-    assert_eq!(classify_intent(long), IntentClass::Conversational);
+    assert_eq!(classify_intent(long), IntentClass::Research);
+}
+
+#[test]
+fn verbless_bug_report_login_broken_is_research_not_implementation_or_conversational() {
+    // #4319 code-critic HIGH-1 proven regression #2 (verbatim): a verb-less
+    // bug report with no action verb, no research verb, no leading question
+    // word, and no trailing "?" — but with the incident word "broken".
+    // Previously (first #4319 fix pass) this dropped to Conversational,
+    // which is worse than the original bug: a genuine coding request
+    // answered as idle chat with nothing to signal it happened.
+    let reproducer = "the login page has been broken on mobile safari for the past two days \
+                       and none of my customers can complete checkout";
+    assert!(reproducer.split_whitespace().count() > 10);
+    assert_ne!(classify_intent(reproducer), IntentClass::Implementation);
+    assert_ne!(classify_intent(reproducer), IntentClass::Conversational);
+    assert_eq!(classify_intent(reproducer), IntentClass::Research);
 }
 
 #[test]
 fn issue_4319_reproducer_long_conversational_check_in_is_not_implementation() {
     // Live reproducer from #4319: an ordinary conversational check-in,
     // longer than 10 words, with no action verb, no research verb, no
-    // leading question word, and no trailing "?". Previously this fell
-    // through to `IntentClass::Implementation`, which respawns the
-    // orchestrator as a subprocess — reproduced live as the literal string
-    // `subprocess exited with status Some(1)` surfacing as the assistant's
-    // chat reply on Concierge, Telegram, and Slack (all route through
-    // `ctrl::run_pm_task_with_history`).
+    // leading question word, no trailing "?", and no bug-report/domain
+    // cue. Previously this fell through to `IntentClass::Implementation`,
+    // which respawns the orchestrator as a subprocess — reproduced live as
+    // the literal string `subprocess exited with status Some(1)` surfacing
+    // as the assistant's chat reply on Concierge, Telegram, and Slack (all
+    // route through `ctrl::run_pm_task_with_history`).
     let reproducer =
         "please confirm that the research agent you mentioned earlier is actually available today";
     assert!(reproducer.split_whitespace().count() > 10);
     assert_ne!(classify_intent(reproducer), IntentClass::Implementation);
     assert_eq!(classify_intent(reproducer), IntentClass::Conversational);
+}
+
+#[test]
+fn genuine_coding_request_still_reaches_implementation_and_tcode() {
+    // #4319 code-critic HIGH-1: pins the direction the fallback narrowing
+    // must NOT regress — a real coding request must still classify
+    // Implementation (via the unconditional-on-length ACTION_VERBS path)
+    // AND still route to Tcode once handed to `route_task` (the deterministic
+    // router `dispatch_task` uses once something is already headed to a
+    // backend — see `intent::route`). Uses a sentence carrying both an
+    // action verb and a repo-file token, so both stages are exercised
+    // together end to end.
+    let task = "fix the failing test in src/auth_middleware.rs";
+    assert_eq!(classify_intent(task), IntentClass::Implementation);
+    assert_eq!(
+        crate::intent::route::route_task(task),
+        crate::intent::route::BridgeRoute::Tcode
+    );
 }
 
 #[test]

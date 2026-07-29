@@ -173,6 +173,90 @@ const SELF_QUESTIONS: &[&str] = &[
     "you there",
 ];
 
+/// #4319 (code-critic HIGH-1): bug-report / incident vocabulary not already
+/// covered by `route::has_tcode_lexical_signal` — words that describe
+/// something being WRONG (broken, failing, crash, error, issue, bug,
+/// regression, outage, timeout, exception) or name the technical subsystem
+/// it's wrong in (middleware, backend, frontend, database, server,
+/// endpoint, api, staging, production, auth, token, session, config,
+/// deployment, credentials, certificate, pipeline, queue, cache,
+/// container).
+///
+/// Why: a verb-less bug report — "the login page has been broken on mobile
+/// safari for the past two days and none of my customers can complete
+/// checkout", "the situation with the auth middleware on staging seems
+/// related to the recent token refresh changes from last week" — carries
+/// NEITHER an `ACTION_VERBS` word NOR any of `route_task`'s existing Tcode
+/// lexical signals (no file path, no `error:` marker, no "stack trace" /
+/// "failing test" phrase), so `route::has_tcode_lexical_signal` alone still
+/// misses both. Both regressed to `Conversational` under the #4319 fix
+/// before this list was added (code-critic finding, verified empirically
+/// against pre/post binaries) — a WORSE failure than the original bug: a
+/// genuine coding request answered as idle chat, with nothing anywhere to
+/// signal it happened.
+/// What: matched via exact word-token equality against normalized input
+/// (see `has_bug_report_signal`), same as `ACTION_VERBS`/`RESEARCH_VERBS`.
+/// Deliberately biased toward false positives: this list only feeds the
+/// `Research` fallback (in-process, tool-armed, no subprocess) in
+/// `classify_intent`, never `Implementation` — misrouting ordinary
+/// technical-sounding chatter here costs a slightly more expensive but
+/// still-safe path, not a crash.
+const BUG_REPORT_DOMAIN_WORDS: &[&str] = &[
+    "broken",
+    "failing",
+    "fails",
+    "crash",
+    "crashed",
+    "crashing",
+    "error",
+    "errors",
+    "issue",
+    "issues",
+    "bug",
+    "bugs",
+    "regression",
+    "outage",
+    "incident",
+    "unresponsive",
+    "timeout",
+    "timeouts",
+    "exception",
+    "exceptions",
+    "middleware",
+    "backend",
+    "frontend",
+    "database",
+    "server",
+    "endpoint",
+    "api",
+    "staging",
+    "production",
+    "auth",
+    "authentication",
+    "token",
+    "session",
+    "config",
+    "configuration",
+    "deployment",
+    "credentials",
+    "certificate",
+    "pipeline",
+    "queue",
+    "cache",
+    "container",
+];
+
+/// #4319 (code-critic HIGH-1): True when `input` describes a concrete
+/// technical situation — a bug report, an incident, a system status update
+/// — via lexical cues, without requiring an `ACTION_VERBS` hit. Combines
+/// `route::has_tcode_lexical_signal` (reused, not reimplemented — the
+/// common-entry-point principle) with `BUG_REPORT_DOMAIN_WORDS` above.
+/// Test: `classifier_tests_2::*bug_report*`.
+fn has_bug_report_signal(input: &str, words: &[&str]) -> bool {
+    route::has_tcode_lexical_signal(input)
+        || words.iter().any(|w| BUG_REPORT_DOMAIN_WORDS.contains(w))
+}
+
 /// Strip surrounding/embedded punctuation for matching.
 ///
 /// Why: Users write "Hello!" / "hi." / "hey," — comparing to plain "hello"
@@ -312,8 +396,22 @@ pub fn classify_intent(input: &str) -> IntentClass {
         return IntentClass::Implementation;
     }
 
-    // #4319: No positive evidence of a coding request at ANY length ->
-    // default to the cheap conversational path.
+    // #4319 (code-critic HIGH-1): a verb-less bug report or incident
+    // narrative must not silently drop to Conversational just because it
+    // names no `ACTION_VERBS` word — that is WORSE than the original bug
+    // (a real coding request answered as chat, with nothing anywhere to
+    // signal it happened). Route it to Research instead: in-process,
+    // tool-armed, lets the PM decide with real tools available, and —
+    // critically — never spawns a subprocess. This is deliberately
+    // narrower than the old length-based fallback: it requires an actual
+    // lexical cue (see `has_bug_report_signal`/`BUG_REPORT_DOMAIN_WORDS`),
+    // not merely "the message is long".
+    if has_bug_report_signal(trimmed, &words) {
+        return IntentClass::Research;
+    }
+
+    // #4319: No positive evidence of a coding request OR a bug-report cue
+    // at ANY length -> default to the cheap conversational path.
     //
     // Previously, input longer than 10 words with none of the signals above
     // fell through to `IntentClass::Implementation`, which respawns the
