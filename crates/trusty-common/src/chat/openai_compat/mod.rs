@@ -181,6 +181,7 @@ mod tests {
                 ChatEvent::Delta(s) => deltas.push(s),
                 ChatEvent::Done => saw_done = true,
                 ChatEvent::ToolCall(_) => panic!("unexpected tool call"),
+                ChatEvent::Usage(_) => {}
                 ChatEvent::Error(e) => panic!("stream error: {e}"),
             }
         }
@@ -246,6 +247,7 @@ mod tests {
                 crate::chat::ChatEvent::ToolCall(tc) => tool_calls.push(tc),
                 ChatEvent::Done => saw_done = true,
                 ChatEvent::Delta(_) => {}
+                ChatEvent::Usage(_) => {}
                 ChatEvent::Error(e) => panic!("stream error: {e}"),
             }
         }

@@ -17,6 +17,41 @@ use super::base_lock::{LOCK_STALE_AFTER, lock_is_stale};
 use super::*;
 use tempfile::TempDir;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::standalone::load::tests::HomeGuard` and
+/// `session_launch::tests::EnvVarGuard`.
+///
+/// Why (#3965): `WorkspaceProvisioner::provision`/`provision_in` call
+/// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
+/// `without_prepare()` ("must not touch the shared `~/.claude/` tree", per the
+/// comment on `make_provisioner` below) — because that seed is independent of
+/// the full agent/skill deploy step. It resolves `~/.claude.json` from the
+/// REAL process `$HOME`, not from `workspace_root`, so every test using
+/// `make_provisioner`/`.provision(...)` must pin `$HOME` to its own hermetic
+/// root or it writes into the operator's real `~/.claude.json`. Pairs with
+/// `#[serial_test::serial]`.
+/// Test: used by every `.provision(...)`-driving test in this file.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 fn make_provisioner(root: &TempDir) -> WorkspaceProvisioner<FakeGitBackend> {
     // Skip the global `prepare_session` deploy: these tests verify path
     // isolation only and must not touch the shared `~/.claude/` tree.
@@ -37,8 +72,10 @@ fn repo_slug_extraction() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_isolation_path() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -53,10 +90,12 @@ fn provisioner_isolation_path() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_path_not_in_existing_project() {
     // The workspace must NOT be inside any real project dir.
     // We simulate this by checking the path is inside workspace_root (a tempdir).
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -71,8 +110,10 @@ fn provisioner_path_not_in_existing_project() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_uses_session_id_subdir() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -86,11 +127,13 @@ fn provisioner_uses_session_id_subdir() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provision_in_uses_explicit_project_dir() {
     // The #1220 path: caller supplies a pre-resolved `<owner>/<repo>` project
     // dir. #1935: the session worktree nests under the project dir's shared
     // `.base/.worktrees/<session-id>/`, not directly under the project dir.
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
     let project_dir = root.path().join("bobmatnyc").join("trusty-tools");
@@ -131,8 +174,10 @@ fn provision_in_uses_explicit_project_dir() {
 /// worktree paths sharing the same `.base/` parent.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::serial]
 fn provision_reuses_base_checkout_across_sessions() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let project_dir = root.path().join("owner").join("repo");
 
@@ -170,8 +215,10 @@ fn provision_reuses_base_checkout_across_sessions() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_records_repo_url_and_branch() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -205,8 +252,10 @@ fn provisioner_records_repo_url_and_branch() {
 /// REQUESTED ref verbatim.
 /// Test: this is the test.
 #[test]
+#[serial_test::serial]
 fn blank_git_ref_omits_branch_flag() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     // Use FakeGitBackend via make_provisioner so we can read its call log.
     // make_provisioner returns a provisioner whose backend is a FakeGitBackend
     // but we cannot access it post-move. We build explicitly here so we can
@@ -242,8 +291,10 @@ fn blank_git_ref_omits_branch_flag() {
 /// contains exactly the task string.
 /// Test: this is the test.
 #[test]
+#[serial_test::serial]
 fn provision_writes_task_md() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
     let task = "Fix the authentication bug in the login flow";
@@ -266,8 +317,10 @@ fn provision_writes_task_md() {
 /// What: provisions with an empty task string and asserts TASK.md is absent.
 /// Test: this is the test.
 #[test]
+#[serial_test::serial]
 fn provision_skips_task_md_when_empty() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -754,4 +807,122 @@ fn git_identity_commit_args_applied_to_command() {
             std::ffi::OsStr::new("user.email=bot@example.com"),
         ]
     );
+}
+
+// ── #2867: the provisioner must never arm a worktree with a foreign upstream ──
+
+/// #2867: `RealGitBackend::worktree_add` must leave the session branch with NO
+/// `branch.<name>.merge` pointing at a ref the worktree does not own.
+///
+/// Why: this is the exact config shape that clobbered PR #2863 — a worktree's
+/// local branch tracked a foreign PR branch, so a later bare `git push` landed
+/// on that branch instead of its own. The provisioner is one of the two code
+/// paths that create session worktrees, so its output is a standing invariant,
+/// not an incidental property: any future `--track` / `--set-upstream-to` /
+/// `guessRemote` change here must fail this test rather than silently re-arm
+/// the gun.
+/// What: builds a real local bare `origin`, runs the production
+/// `ensure_base_checkout` + `worktree_add` against it, then enumerates EVERY
+/// `branch.*.merge` key visible from the resulting worktree and asserts each
+/// one names its own branch. Also asserts the session branch has no upstream
+/// at all (`@{u}` fails), which is the fail-safe state.
+/// Test: this function IS the test.
+#[test]
+fn provisioner_worktree_add_writes_no_foreign_branch_merge() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        return; // git unavailable
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("base.git");
+    let backend = RealGitBackend::default();
+    backend
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed against a local bare origin");
+
+    let worktree = scratch.path().join("wt");
+    let branch = "session/tm-2867-01";
+    backend
+        .worktree_add(&base_dir, "main", &worktree, branch)
+        .expect("worktree_add must succeed");
+
+    // Every branch.<name>.merge in the whole config must name its own branch.
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["config", "--get-regexp", r"^branch\..*\.merge$"])
+        .output()
+        .expect("git config --get-regexp");
+    let body = String::from_utf8_lossy(&listed.stdout);
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let own = key
+            .trim_start_matches("branch.")
+            .trim_end_matches(".merge")
+            .to_string();
+        assert_eq!(
+            value.trim(),
+            format!("refs/heads/{own}"),
+            "provisioner wrote a FOREIGN upstream (#2867): {line}"
+        );
+    }
+
+    // And the session branch specifically must have no upstream at all.
+    let upstream = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .output()
+        .expect("git rev-parse @{u}");
+    assert!(
+        !upstream.status.success(),
+        "the provisioner must leave the session branch with NO upstream, got: {}",
+        String::from_utf8_lossy(&upstream.stdout).trim()
+    );
+}
+
+/// #2867: `ensure_base_checkout` must install the cross-branch push guard into
+/// the freshly cloned base's shared hooks directory.
+///
+/// Why: the guard is the only mitigation that covers an ad-hoc `git worktree
+/// add` an agent makes for itself — the actual shape of the PR #2863 clobber.
+/// It only covers those worktrees if it lands in the base clone's
+/// `$GIT_COMMON_DIR/hooks`, which every worktree of that base shares.
+/// What: clones a base via the production path and asserts an executable
+/// `pre-push` carrying the trusty-mpm marker exists in the resolved hooks dir.
+/// Test: this function IS the test.
+#[test]
+fn ensure_base_checkout_installs_push_guard() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        return; // git unavailable
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("base.git");
+    RealGitBackend::default()
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed");
+
+    let hooks = crate::core::push_guard::effective_hooks_dir(&base_dir)
+        .expect("hooks dir must resolve for a fresh bare clone");
+    let hook = hooks.join("pre-push");
+    let body = std::fs::read_to_string(&hook)
+        .unwrap_or_else(|e| panic!("pre-push guard missing at {}: {e}", hook.display()));
+    assert!(
+        body.contains(crate::core::push_guard::HOOK_MARKER),
+        "installed pre-push must carry the trusty-mpm marker"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&hook)
+            .expect("stat hook")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "hook must be executable, mode {mode:o}"
+        );
+    }
 }

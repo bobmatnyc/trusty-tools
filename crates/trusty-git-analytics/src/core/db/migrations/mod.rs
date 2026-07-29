@@ -144,6 +144,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pull_requests_fetched_at",
         sql: include_str!("../sql/0022_pull_requests_fetched_at.sql"),
     },
+    Migration {
+        version: 23,
+        name: "jira_ingestion",
+        sql: include_str!("../sql/0023_jira_ingestion.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

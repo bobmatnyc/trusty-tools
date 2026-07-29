@@ -381,7 +381,19 @@ description = "test"
 allow = ["ticketing"]
 "#;
 
-/// Grants three of the bundle's ten members individually — the `"some"` case.
+/// Grants the Google Workspace mail-and-tasks bundle (#4024) — the credential
+/// rollup case, where every member shares one unverifiable OAuth requirement.
+const GWORKSPACE_BUNDLE_FIXTURE: &str = r#"[agent]
+name = "gworker"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[skills]
+allow = ["google-workspace", "cto-tools"]
+"#;
+
+/// Grants three of the bundle's members individually — the `"some"` case.
 const PARTIAL_BUNDLE_FIXTURE: &str = r#"[agent]
 name = "partial"
 role = "assistant"
@@ -410,13 +422,22 @@ async fn skills_route_surfaces_function_skill_tri_state() {
     std::fs::write(dir.path().join("plain.toml"), BARE_FIXTURE).unwrap();
     let dirs = [dir.path().to_path_buf()];
 
+    // Read the expected membership from the live catalog: #4024 widened this
+    // bundle, and a hard-coded count would have to be edited on every widening
+    // while asserting nothing about the route.
+    let declared = crate::skills::manifest::SkillCatalog::builtin()
+        .get("ticketing")
+        .expect("the ticketing bundle")
+        .members
+        .len();
+
     let all = body_json(skills_at(&dirs, "bundled", dir.path()).await).await;
     let card = find(&all, "ticketing");
     assert_eq!(card["kind"], "function");
     assert_eq!(card["granted_state"], "all");
     assert_eq!(card["granted"], true);
-    assert_eq!(card["members"].as_array().unwrap().len(), 10);
-    assert_eq!(card["granted_members"].as_array().unwrap().len(), 10);
+    assert_eq!(card["members"].as_array().unwrap().len(), declared);
+    assert_eq!(card["granted_members"].as_array().unwrap().len(), declared);
     assert_eq!(
         find(&all, "ticket-create")["granted"],
         true,
@@ -454,6 +475,52 @@ async fn skills_route_groups_agree_with_their_cards() {
     assert_eq!(g["members"], card["members"]);
     assert_eq!(g["granted_members"], card["granted_members"]);
     assert_eq!(g["granted_state"], card["granted_state"]);
+}
+
+#[tokio::test]
+async fn skills_route_rolls_up_group_provider_requirements() {
+    // #4024/S-16: a bundle has no credential of its own, so the pane needs the
+    // members' requirements to say what the one-line grant NEEDS. The rollup is
+    // a SET — every distinct requirement is listed, so a bundle whose members
+    // diverged would show both rather than one averaged verdict — and an OAuth
+    // requirement stays `configured: null`, never a claim nobody checked.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("gworker.toml"), GWORKSPACE_BUNDLE_FIXTURE).unwrap();
+
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "gworker", dir.path()).await).await;
+
+    let gw = group(&body, "google-workspace");
+    assert_eq!(gw["granted_state"], "all");
+    let providers = gw["providers"].as_array().unwrap();
+    assert_eq!(
+        providers.len(),
+        1,
+        "every mail/tasks member shares one requirement: {providers:?}"
+    );
+    assert_eq!(providers[0]["provider"], "Google Workspace");
+    assert_eq!(
+        providers[0]["configured"],
+        serde_json::Value::Null,
+        "an OAuth grant is NOT verified by this endpoint"
+    );
+    assert_eq!(
+        find(&body, "google-workspace")["provider"],
+        serde_json::Value::Null,
+        "the bundle CARD still names no single provider (additive shape)"
+    );
+
+    let cto = group(&body, "cto-tools");
+    assert_eq!(cto["granted_state"], "all");
+    assert_eq!(cto["providers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        cto["providers"][0]["provider"], "CTO operations database",
+        "a DIFFERENT bundle reports its OWN requirement, not a shared rollup"
+    );
+
+    // The ticketing bundle's members need no credential at all — an empty list,
+    // which must read as "nothing stated", never as "verified".
+    let ticketing = group(&body, "ticketing");
+    assert_eq!(ticketing["providers"], serde_json::json!([]));
 }
 
 #[tokio::test]

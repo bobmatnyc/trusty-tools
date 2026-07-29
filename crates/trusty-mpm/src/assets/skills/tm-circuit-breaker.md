@@ -90,7 +90,7 @@ PM: Grep("<symbol>", path="src/")                      # investigation
 
 **Correct:**
 ```
-PM: mcp__trusty-search__search(query="<what to find>", index_id="<project>")
+PM: mcp__trusty-search__search(query="<what to find>")
 PM: *delegates to Research if results are insufficient*
 Research: reads/greps as needed, returns findings
 PM: uses findings to write a grounded Engineer delegation

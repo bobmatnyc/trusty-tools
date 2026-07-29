@@ -176,6 +176,17 @@ impl DaemonState {
         Arc::clone(&self.audit)
     }
 
+    /// The peer message bus (DOC-60 §5.3).
+    ///
+    /// Why: the `/api/v1/bus/*` handlers need the instance registry and the
+    /// delivery channels; borrowing rather than cloning the `Arc` keeps the
+    /// handlers' access read-only in shape.
+    /// What: returns a shared reference to the daemon's [`PeerBus`].
+    /// Test: `crate::daemon::bus::tests::route_register_returns_instance_id`.
+    pub fn bus(&self) -> &Arc<crate::daemon::bus::PeerBus> {
+        &self.bus
+    }
+
     /// The standalone LLM overseer for interactive chat, if configured.
     ///
     /// Why: `POST /llm/chat` needs the concrete [`LlmOverseer`] (the hook-path

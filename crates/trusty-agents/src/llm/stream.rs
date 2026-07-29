@@ -3,35 +3,41 @@
 //! Why: The chat GUI's default surface (the generic Assistant persona and the
 //! no-tools conversational fast path) previously waited for the ENTIRE model
 //! response before rendering anything — a multi-second dead stare on long
-//! replies. `trusty_common::chat::OpenRouterProvider` already speaks the
-//! streaming `/chat/completions` SSE protocol and yields `ChatEvent::Delta`
-//! fragments as tokens arrive; this module adapts that provider stream onto
-//! the crate's own event bus so the browser can render the reply as it is
-//! produced, while still returning the fully-assembled text so history,
-//! `PmResponse`, and responder attribution behave EXACTLY as the
-//! non-streaming path.
+//! replies. `trusty_common::chat::OpenRouterProvider` and (issue #3767)
+//! `trusty_common::chat::BedrockProvider` both speak native token streaming
+//! and yield `ChatEvent::Delta` fragments as tokens arrive; this module
+//! adapts that provider stream onto the crate's own event bus so the browser
+//! can render the reply as it is produced, while still returning the
+//! fully-assembled text so history, `PmResponse`, and responder attribution
+//! behave EXACTLY as the non-streaming path.
 //! What: [`drive_delta_stream`] is the pure, testable batching core — it
 //! consumes a `ChatEvent` receiver, coalesces text deltas to a wall-clock
 //! cadence (so a fast provider produces ~10-20 UI frames/sec instead of one
 //! per token), invokes an `emit(text, done)` sink per flush, and returns the
-//! assembled content. [`stream_reply`] wires that core to a live
-//! `OpenRouterProvider` and publishes each flush as an
-//! [`Event::AgentMessageDelta`] on the process bus (relayed to the browser by
-//! the `/api/events` SSE stream). [`streaming_supported`] is the capability
-//! gate: streaming is used only for OpenRouter-transport models (not Bedrock,
-//! not Fireworks, not Anthropic-direct) and can be disabled wholesale via
-//! `TAGENT_CHAT_STREAMING=0`. Non-streaming providers keep their current
-//! behavior unchanged — callers fall back to the blocking chat path.
+//! assembled content plus any [`ChatEvent::Usage`] the provider reported (#3767
+//! — Bedrock's `ConverseStream` reports it exactly once, in a terminal event,
+//! so it is captured here rather than dropped). [`stream_reply`] picks a live
+//! provider by the model's routed adapter — `BedrockProvider` for
+//! `bedrock/*`, `OpenRouterProvider` otherwise — and publishes each flush as
+//! an [`Event::AgentMessageDelta`] on the process bus (relayed to the browser
+//! by the `/api/events` SSE stream). [`streaming_supported`] is the
+//! capability gate: streaming is used for every adapter family except
+//! Fireworks (no streaming adapter yet) and Anthropic-direct, and can be
+//! disabled wholesale via `TAGENT_CHAT_STREAMING=0`. Non-streaming providers
+//! keep their current behavior unchanged — callers fall back to the blocking
+//! chat path.
 //! Test: `drive_delta_stream_*` unit tests feed a mocked `ChatEvent` channel
 //! (ordered fragments, done flag, assembled-text equality, batching); the
 //! gate is covered by `streaming_supported_*`.
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use tokio::sync::mpsc;
 use trusty_common::ChatMessage;
-use trusty_common::chat::{ChatEvent, ChatProvider, OpenRouterProvider, SamplingParams, ToolCall};
+use trusty_common::chat::{
+    ChatEvent, ChatProvider, ChatUsage, OpenRouterProvider, SamplingParams, ToolCall,
+};
 
 use crate::ctrl::state::ConversationTurn;
 use crate::events::{self, Event};
@@ -59,7 +65,11 @@ const STREAM_CHANNEL_CAPACITY: usize = 256;
 /// `PmResponse`) plus any tool calls the provider surfaced and a terminal
 /// error, without re-deriving them from the emitted deltas.
 /// What: `content` is every `Delta` concatenated in order; `tool_calls` are
-/// fully-accumulated provider tool invocations; `error` is `Some` when the
+/// fully-accumulated provider tool invocations; `usage` is the provider's
+/// token tally when it reported one (#3767 — some providers, e.g. Bedrock's
+/// `ConverseStream`, report usage exactly once in a terminal event rather
+/// than per-delta; `None` when the provider never emitted `ChatEvent::Usage`,
+/// which remains true for OpenRouter today); `error` is `Some` when the
 /// stream terminated with `ChatEvent::Error`.
 #[derive(Debug, Default, Clone)]
 pub struct StreamAssembly {
@@ -67,6 +77,8 @@ pub struct StreamAssembly {
     pub content: String,
     /// Tool invocations the provider streamed (empty for a tools-off turn).
     pub tool_calls: Vec<ToolCall>,
+    /// Token usage the provider reported, if any (#3767).
+    pub usage: Option<ChatUsage>,
     /// Human-readable message when the stream ended via `ChatEvent::Error`.
     pub error: Option<String>,
 }
@@ -108,24 +120,23 @@ fn text_message(role: &str, content: &str) -> ChatMessage {
 
 /// Whether the token-streaming path applies to `model`.
 ///
-/// Why: `OpenRouterProvider` only speaks to the OpenRouter transport. Bedrock
-/// (AWS SDK), Fireworks (own base URL / credential), and the Anthropic-direct
-/// path all reach the model through a different client, so streaming through
-/// the OpenRouter provider would target the wrong endpoint. The
-/// `TAGENT_CHAT_STREAMING` env var is a global kill switch for the demo.
+/// Why: `OpenRouterProvider` and `BedrockProvider` (issue #3767 — Bedrock's
+/// `ConverseStream`, wired via `stream_reply`'s provider dispatch below) both
+/// speak native streaming; Fireworks (own base URL / credential, no streaming
+/// adapter yet) and the Anthropic-direct path reach the model through a
+/// different client that doesn't. The `TAGENT_CHAT_STREAMING` env var is a
+/// global kill switch for the demo.
 /// What: Returns `true` only when streaming is enabled AND `use_anthropic_direct`
-/// is false AND the model's adapter family routes over the OpenRouter client
-/// (everything except `Bedrock` / `Fireworks`).
+/// is false AND the model's adapter family has a streaming provider
+/// (`Bedrock` as of #3767, plus everything except `Fireworks`).
 /// Test: `streaming_supported_gates_on_provider`,
+/// `streaming_supported_allows_bedrock`,
 /// `streaming_supported_respects_anthropic_direct`, `parse_streaming_flag_table`.
 pub fn streaming_supported(model: &str, use_anthropic_direct: bool) -> bool {
     if use_anthropic_direct || !streaming_enabled() {
         return false;
     }
-    !matches!(
-        adapter_for_model(model).provider(),
-        Provider::Bedrock | Provider::Fireworks
-    )
+    !matches!(adapter_for_model(model).provider(), Provider::Fireworks)
 }
 
 /// Read the `TAGENT_CHAT_STREAMING` kill switch (default ON).
@@ -164,16 +175,20 @@ fn parse_streaming_flag(value: Option<&str>) -> bool {
 /// the last flush) and the terminal-marker contract the GUI relies on.
 /// What: For each `Delta`, appends to both the running assembly and a pending
 /// buffer; flushes the buffer via `emit(text, false)` once `cadence` has
-/// elapsed. `ToolCall`s accumulate; `Error` records the message and stops;
-/// `Done` (or a closed channel) stops. On exit it flushes any residual buffer
-/// as a non-terminal delta, then emits exactly one terminal `emit("", true)`
-/// so the consumer has an unambiguous end-of-stream signal (carrying empty
-/// text so it never double-appends). Returns the [`StreamAssembly`].
+/// elapsed. `ToolCall`s accumulate; `Usage` (#3767) is recorded onto
+/// `assembly.usage` — never dropped, so a downstream cost-reporting consumer
+/// sees it — without affecting batching or the terminal marker; `Error`
+/// records the message and stops; `Done` (or a closed channel) stops. On exit
+/// it flushes any residual buffer as a non-terminal delta, then emits exactly
+/// one terminal `emit("", true)` so the consumer has an unambiguous
+/// end-of-stream signal (carrying empty text so it never double-appends).
+/// Returns the [`StreamAssembly`].
 /// Test: `drive_delta_stream_flushes_each_delta_at_zero_cadence`,
 /// `drive_delta_stream_batches_under_cadence`,
 /// `drive_delta_stream_assembles_full_text`,
 /// `drive_delta_stream_surfaces_error`,
-/// `drive_delta_stream_collects_tool_calls`.
+/// `drive_delta_stream_collects_tool_calls`,
+/// `drive_delta_stream_captures_usage`.
 pub async fn drive_delta_stream<F>(
     mut rx: mpsc::Receiver<ChatEvent>,
     cadence: Duration,
@@ -197,11 +212,17 @@ where
                 }
             }
             ChatEvent::ToolCall(call) => assembly.tool_calls.push(call),
+            // #3767: never silently drop usage — a downstream cost-reporting
+            // consumer depends on it surviving the streaming path.
+            ChatEvent::Usage(usage) => assembly.usage = Some(usage),
             ChatEvent::Error(message) => {
                 assembly.error = Some(message);
                 break;
             }
             ChatEvent::Done => break,
+            // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
+            // keeps a future variant from breaking this crate's build.
+            _ => {}
         }
     }
 
@@ -214,29 +235,34 @@ where
     assembly
 }
 
-/// Stream a conversational reply from OpenRouter, publishing deltas on the bus.
+/// Stream a conversational reply, publishing deltas on the bus.
 ///
-/// Why: The live wiring — resolves the OpenRouter credential, spawns the
-/// provider's SSE pump, and drives [`drive_delta_stream`] with a sink that
+/// Why: The live wiring — picks a provider by the model's routed adapter,
+/// spawns its event pump, and drives [`drive_delta_stream`] with a sink that
 /// publishes each flushed batch as an [`Event::AgentMessageDelta`]. The
 /// `agent` label rides every delta so per-message speaker attribution (#3739)
 /// stays truthful mid-stream. Returns the assembled full text so the caller's
 /// downstream behavior (history append, `PmResponse`, attribution) is
 /// byte-for-byte identical to the blocking path.
-/// What: Builds an [`OpenRouterProvider`] for `model`, runs `chat_stream` with
-/// an empty tools list (tools-off conversational turn), and publishes deltas
-/// tagged with `session_id`/`agent`. Errors (empty key, HTTP failure,
-/// mid-stream error) propagate as `Err` so the caller can fall back to the
-/// blocking chat path.
+/// What: `bedrock/*` models (issue #3767) route to [`stream_reply_bedrock`];
+/// everything else builds an [`OpenRouterProvider`] and runs `chat_stream`
+/// with an empty tools list (tools-off conversational turn). Errors (empty
+/// key, HTTP failure, mid-stream error, missing AWS credentials) propagate as
+/// `Err` so the caller can fall back to the blocking chat path.
 ///
-/// `sampling` (issue #3758) MUST carry the same temperature / token ceiling /
-/// stop sequences the caller's blocking path sends for this turn. Without it
-/// the streamed reply silently ran on provider defaults, so its style,
-/// verbosity, and stopping behaviour were not equivalent to the fallback — and
-/// `LlmConfig::stop_sequences` documents itself as forwarded on the OpenRouter
-/// path, which the streaming path was quietly not honouring.
+/// `sampling` (issue #3758, and #3767 for the Bedrock branch) MUST carry the
+/// same temperature / token ceiling / stop sequences the caller's blocking
+/// path sends for this turn. Without it the streamed reply silently ran on
+/// provider defaults, so its style, verbosity, and stopping behaviour were
+/// not equivalent to the fallback — and `LlmConfig::stop_sequences`
+/// documents itself as forwarded on the OpenRouter path, which the streaming
+/// path was quietly not honouring.
 /// Test: exercised end-to-end against a live provider; the batching/assembly
-/// contract is unit-tested via [`drive_delta_stream`].
+/// contract is unit-tested via [`drive_delta_stream`]; the provider-dispatch
+/// branch is covered by `streaming_supported_allows_bedrock` at the gate
+/// level (constructing a live `BedrockProvider` here needs network/credential
+/// access, out of scope for a unit test — see `bedrock_impl`'s own tests for
+/// the Bedrock-specific event mapping).
 pub async fn stream_reply(
     model: &str,
     messages: Vec<ChatMessage>,
@@ -245,6 +271,10 @@ pub async fn stream_reply(
     cadence: Duration,
     sampling: SamplingParams,
 ) -> Result<StreamAssembly> {
+    if adapter_for_model(model).provider() == Provider::Bedrock {
+        return stream_reply_bedrock(model, messages, session_id, agent, cadence, sampling).await;
+    }
+
     let api_key =
         trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default();
     if api_key.is_empty() {
@@ -255,6 +285,48 @@ pub async fn stream_reply(
 
     // #3758: forward the blocking path's sampling knobs onto the stream.
     let provider = OpenRouterProvider::new(api_key, model.to_string()).with_sampling(sampling);
+    stream_with_provider(provider, messages, session_id, agent, cadence).await
+}
+
+/// Stream a conversational reply from Bedrock's `ConverseStream` (issue
+/// #3767), publishing deltas on the bus.
+///
+/// Why: mirrors [`stream_reply`]'s OpenRouter branch, but Bedrock is reached
+/// through the AWS SDK client (standard credential chain: env vars,
+/// `~/.aws/credentials`, IAM roles, SSO) rather than an HTTP request with a
+/// bearer token, so construction needs the `bedrock/` prefix stripped to the
+/// bare model id instead of an API key.
+/// What: strips the `bedrock/` prefix (mirrors
+/// `adapter::adapter_for_model`'s `BedrockAdapter` routing), builds a
+/// [`trusty_common::chat::BedrockProvider`] via
+/// [`trusty_common::chat::BedrockProvider::new`], forwards `sampling` (#3758
+/// parity) via `with_sampling`, and delegates to [`stream_with_provider`] for
+/// the shared batching/failure-guard/usage-recording logic. `BedrockProvider`
+/// construction itself does not require live credentials — only the
+/// subsequent `chat_stream` call does — so a caller with no AWS credentials
+/// configured (as on this machine — `AWS_PROFILE`/`AWS_REGION` are
+/// set-but-empty) still gets `Err` from *this* function (via
+/// `stream_with_provider`'s pump-join propagation), letting the caller fall
+/// back to the blocking chat path exactly like any other stream failure.
+/// Test: exercised end-to-end against a live Bedrock endpoint (not runnable
+/// on this machine — no usable AWS credentials); the Bedrock event → `ChatEvent`
+/// mapping is unit-tested in `trusty_common::chat::bedrock_impl`
+/// (`handle_stream_event` tests), and the batching/assembly/usage-capture
+/// contract this function shares with the OpenRouter branch is unit-tested
+/// via [`drive_delta_stream`] and `stream_with_provider_*`.
+async fn stream_reply_bedrock(
+    model: &str,
+    messages: Vec<ChatMessage>,
+    session_id: &str,
+    agent: &str,
+    cadence: Duration,
+    sampling: SamplingParams,
+) -> Result<StreamAssembly> {
+    let model_id = model.strip_prefix("bedrock/").unwrap_or(model);
+    let provider = trusty_common::chat::BedrockProvider::new(model_id, None)
+        .await
+        .context("build BedrockProvider for streaming")?
+        .with_sampling(sampling);
     stream_with_provider(provider, messages, session_id, agent, cadence).await
 }
 
@@ -276,12 +348,21 @@ pub async fn stream_reply(
 /// [`drive_delta_stream`] with a sink that publishes each batch as an
 /// [`Event::AgentMessageDelta`] tagged with `session_id`/`agent`, joins the
 /// pump (propagating its `Err` and panics), surfaces an explicit
-/// `ChatEvent::Error`, then applies the empty-stream guard.
+/// `ChatEvent::Error`, then applies the empty-stream guard. Whatever the
+/// provider reported (content, tool calls, and — #3767 — usage) rides through
+/// on the returned [`StreamAssembly`] unmodified, so a caller that wires
+/// usage into per-dispatch accounting (mirroring the blocking path's
+/// `record_dispatch_usage`) has it available; this function does not write to
+/// that log itself, since a background-spawned disk write triggered by every
+/// streamed call — including from this very test suite — is exactly the kind
+/// of surprising side effect this layer should not introduce silently.
 /// Test: `stream_with_provider_propagates_error_frame`,
 /// `stream_with_provider_propagates_provider_err`,
 /// `stream_with_provider_guards_empty_stream`,
 /// `stream_with_provider_propagates_panic`,
-/// `stream_with_provider_returns_assembled_content`.
+/// `stream_with_provider_returns_assembled_content`,
+/// `stream_with_provider_surfaces_usage_in_assembly`,
+/// `stream_with_provider_usage_absent_when_not_reported`.
 pub async fn stream_with_provider<P>(
     provider: P,
     messages: Vec<ChatMessage>,

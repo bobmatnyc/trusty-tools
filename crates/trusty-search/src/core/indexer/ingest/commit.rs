@@ -332,6 +332,14 @@ impl CodeIndexer {
     /// What: clones the chunks plus entities, moves them onto a blocking worker,
     /// and writes both tables in one atomic transaction. Failures are logged at
     /// `warn` and swallowed.
+    ///
+    /// Issue #4122: this is the single durable redb write, and the `None` arm
+    /// below is what makes the UNGATED bulk-reindex path safe on a
+    /// write-quarantined index — NOT any assumption that reindexes are
+    /// operator-initiated (boot reconcile auto-fires them, see
+    /// `core::indexer::quarantine`'s module docs). The `debug_assert!` pins
+    /// that invariant so an in-process corpus reopen cannot silently
+    /// reintroduce the data-loss hole.
     /// Test: `tests::test_corpus_store_roundtrip`.
     pub(crate) async fn commit_corpus_to_redb(
         &self,
@@ -341,6 +349,14 @@ impl CodeIndexer {
         let Some(corpus) = self.corpus.clone() else {
             return;
         };
+        debug_assert!(
+            !self.corpus_open_failed,
+            "index '{}': INVARIANT VIOLATED — durable corpus write attempted while \
+             the index is write-quarantined (corpus_open_failed). A quarantined \
+             index must hold no CorpusStore; see core::indexer::quarantine (issue \
+             #4122).",
+            self.index_id
+        );
         let chunks = chunks.to_vec();
         let entities = entities_by_file.to_vec();
         let index_id = self.index_id.clone();

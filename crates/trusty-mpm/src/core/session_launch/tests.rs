@@ -136,6 +136,7 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_stash_reflects_override() {
     // Why: the inspectable stash (`last-instructions.md`) must reflect the
     // SAME override-resolved prompt the launch path uses, so `tm session
@@ -150,11 +151,19 @@ fn prepare_session_stash_reflects_override() {
     // (injection fires). This removes the dependence on the host's `claude` that
     // made this test pass locally but FAIL on CI (where `claude` is absent → the
     // launch prompt was injected but the stash was not, so the two diverged).
+    //
+    // #3965: `prepare_session_with_style_and_native` drives the real
+    // `prepare_session_inner` pipeline, which seeds `$HOME/.claude.json` via
+    // `preseed_workspace_trust_home` (resolved from the REAL process `$HOME`,
+    // not `fw`). `#[serial]` + the per-iteration `$HOME` override below keep
+    // this test from writing into the operator's real `~/.claude.json` and from
+    // racing every other test in this binary that does the same.
     for native_supported in [true, false] {
         // A fresh tmp_home/project per iteration so the second run does not read
         // back a stash written by the first. Dedicated tmp_home keeps parallel
         // runs from racing on the shared ~/.claude/agents manifest.
         let tmp_home = tempdir().unwrap();
+        let _home = EnvVarGuard::set("HOME", tmp_home.path());
         let tmp = tempdir().unwrap();
         let project = tmp.path();
         let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -209,12 +218,17 @@ fn prepare_session_stash_reflects_override() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_writes_claude_md_and_stash() {
     // Why: the launch paths rely on `prepare_session` writing the project
     // CLAUDE.md and the inspectable stash before `claude` is started.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    // #3965: `prepare_session` seeds `$HOME/.claude.json` via the REAL process
+    // `$HOME`, not `fw` — `#[serial]` + the override below keep this test off
+    // the operator's real file and off every sibling test doing the same.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -236,12 +250,16 @@ fn prepare_session_writes_claude_md_and_stash() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_deploys_project_tier_output_style() {
     // Why (#2125 item 2): the daemon managed-spawn path launches `claude`
     // with `--setting-sources project,local`, excluding the `user` tier the
     // home-dir deploy lands in. Without a project-tier copy the `outputStyle`
     // id written into `<project>/.claude/settings.json` cannot resolve.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -257,6 +275,7 @@ fn prepare_session_deploys_project_tier_output_style() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_self_heals_missing_skill_source() {
     // #1917: `fw.skills` (the framework skill *source* dir `skill_source_dir()`
     // falls back to) starts out completely absent here — simulating a machine
@@ -264,7 +283,10 @@ fn prepare_session_self_heals_missing_skill_source() {
     // `deploy_skills_filtered` would silently deploy zero skills from an
     // absent source with no error surfaced anywhere; session prep must now
     // self-heal it first.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -282,12 +304,16 @@ fn prepare_session_self_heals_missing_skill_source() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_self_heals_renamed_skill_source() {
     // #1917: a pre-rename `~/.trusty-mpm/framework/skills/` (stale content
     // left by an old binary, no matching bundle stamp) must be pruned and
     // refreshed automatically during session prep — not left for a manual
     // `tm install --force` to notice and fix.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -327,10 +353,14 @@ fn prepare_session_self_heals_renamed_skill_source() {
 /// correctly absent here).
 /// Test: this is the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn prepare_session_emits_stage_events_in_order() {
     use crate::core::provisioning_stage::{ProvisioningStage, StageEmitter, scoped};
 
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -363,12 +393,16 @@ async fn prepare_session_emits_stage_events_in_order() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_sets_output_style() {
     // Why: a launched session must show `style:trusty-mpm`, which Claude
     // Code reads from `<project>/.claude/settings.json`.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -383,10 +417,14 @@ fn prepare_session_sets_output_style() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_writes_configured_style() {
     // Why: HR-4 — when `[style] active` is set in the framework config, the
     // launched session's settings.json must carry that id.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -412,10 +450,14 @@ fn prepare_session_writes_configured_style() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_explicit_style_overrides_config() {
     // Why: HR-4 — an explicit `--style` override beats the config `[style] active`
     // key for that launch.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -445,10 +487,14 @@ fn prepare_session_explicit_style_overrides_config() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_unknown_style_falls_back_to_default() {
     // Why: DOC-17 — an unknown configured style must not fail the launch; it
     // falls back to the professional default.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -975,13 +1021,17 @@ fn inject_trusty_memory_mcp_override_env_wins() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_injects_trusty_memory_mcp() {
     // Why: `prepare_session` is the single launch-prep entry point; it must
     // register the trusty-memory MCP server so launched sessions get the
     // memory tools.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1253,10 +1303,14 @@ fn register_project_index_returns_derived_id() {
 // coverage below.
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_injects_both_mcp_servers() {
     // Why (#1270/step 4): the single launch-prep entry point must wire BOTH the
     // memory and the search MCP servers.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1556,12 +1610,16 @@ fn deploy_output_style_writes_all_styles() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_reports_output_style() {
     // Why: callers report the deployed style path; `prepare_session` must
     // populate `PrepReport.output_style` with the file it deployed.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1583,12 +1641,16 @@ fn prepare_session_reports_output_style() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_reports_skill_deploy() {
     // Why: `prepare_session` must run the skill deploy step so launched
     // sessions see trusty-mpm skills; the report must carry its stats.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1602,12 +1664,16 @@ fn prepare_session_reports_skill_deploy() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_is_idempotent() {
     // Why: `/connect` and `tm session start` may run repeatedly on the same
     // project; a second prep must not fail and must not recreate CLAUDE.md.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1650,11 +1716,15 @@ fn seed_bundled_agents(fw: &crate::core::paths::FrameworkPaths) {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_default_deploys_all_seeded_agents() {
     // Why: HR-2 must be regression-safe — with NO manifest present, the
     // compiled-in default reproduces today's behavior, deploying every bundled
     // agent. This proves "absent manifest = unchanged provisioning".
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1683,10 +1753,14 @@ fn prepare_session_default_deploys_all_seeded_agents() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_manifest_filters_agent_set() {
     // Why: HR-2 — a project manifest's `[agents] include` must restrict WHICH
     // agents the harness deploys.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1722,10 +1796,14 @@ fn prepare_session_manifest_filters_agent_set() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_manifest_disables_mcp_server() {
     // Why: HR-2 — a manifest `[mcp] trusty_search = false` must suppress the
     // trusty-search MCP injection while leaving trusty-memory intact.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1759,10 +1837,14 @@ fn prepare_session_manifest_disables_mcp_server() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_manifest_sets_default_style() {
     // Why: HR-2 — a manifest `[style] active` sets the default output style when
     // no `--style` flag and no `[style] active` config key override it.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -1789,10 +1871,14 @@ fn prepare_session_manifest_sets_default_style() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_config_style_overrides_manifest() {
     // Why: HR-2 precedence — the `[style] active` CONFIG key must win over the
     // manifest's `[style] active` (config > manifest > default).
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -2125,5 +2211,92 @@ fn resolve_statusline_binary_with_falls_back_to_bare_name() {
     assert_eq!(
         resolved, "tm",
         "must degrade to the bare literal when both sources fail"
+    );
+}
+
+// ── Issue #4203: the isolated deploy layout must land in a tier the spawn reads ──
+
+/// Why (#4203): `tm launch`, `tm connect`, and `tm meta launch` all spawn a
+/// harness carrying `--setting-sources project,local` and then deploy the agent
+/// roster. If the deploy destination is not in a tier that flag names, the
+/// roster is invisible to the session it was deployed for — and nothing errors,
+/// because the deploy itself succeeds. This asserts the RELATIONSHIP between the
+/// two, with both sides derived from production code, so it keeps biting if
+/// either moves. `isolated_framework_paths` is the single layout every isolated
+/// caller now shares, so this one test covers all three CLI paths at once.
+#[test]
+fn isolated_layout_deploys_into_a_tier_the_spawn_reads() {
+    // Derive the tier list from the flag itself — never hard-coded, so the
+    // check and the spawned command cannot drift apart.
+    let (flag, tier_list) = crate::core::model_inject::SETTING_SOURCES_FLAG
+        .split_once(' ')
+        .expect("SETTING_SOURCES_FLAG must be `--setting-sources <tiers>`");
+    assert_eq!(flag, "--setting-sources");
+    let tiers: Vec<&str> = tier_list.split(',').map(str::trim).collect();
+    assert!(
+        !tiers.is_empty() && !tiers.contains(&"user"),
+        "this invariant is only meaningful while the flag names tiers and excludes \
+         `user` (#1269); got {tiers:?}"
+    );
+    assert!(
+        tiers.contains(&"project"),
+        "the isolated deploy targets the project tier, so the flag must name it; \
+         got {tiers:?}"
+    );
+
+    // `project_dir` is the cwd the harness is spawned in: the managed worktree
+    // for `launch`, the live checkout for `connect`, the project dir for
+    // `meta launch`.
+    let project_dir = std::path::Path::new("/work/some-checkout");
+    let fw = isolated_framework_paths(project_dir);
+
+    // `<cwd>/.claude` is exactly what the `project` (and `local`) tiers read.
+    assert_eq!(
+        fw.claude_home_dir(),
+        project_dir,
+        "the deploy base must BE the harness cwd — anything else is the `user`-tier \
+         mismatch of #4203"
+    );
+    assert_eq!(
+        fw.claude_agents_dir(),
+        project_dir.join(".claude").join("agents"),
+        "agents must land under the harness cwd, not $HOME"
+    );
+    assert_eq!(
+        fw.claude_skills_dir(),
+        project_dir.join(".claude").join("skills"),
+        "skills must land under the harness cwd, not $HOME"
+    );
+}
+
+/// Why (#1931, restated for #4203): only the deploy DESTINATION moves
+/// workspace-local. If the framework SOURCE paths moved with it, the isolated
+/// seam would deploy from an empty `<workspace>/.trusty-mpm` and every session
+/// would come up with a zero-agent roster — a worse failure than the one #4203
+/// fixes, and equally silent.
+///
+/// Why serial: reads `FrameworkPaths::default()`, which resolves
+/// `dirs::home_dir()`; serialized against the other `HOME`-redirecting tests in
+/// this binary (the #2461 sweep).
+#[test]
+#[serial_test::serial]
+fn isolated_layout_keeps_framework_source_at_the_install_root() {
+    let project_dir = std::path::Path::new("/work/some-checkout");
+    let fw = isolated_framework_paths(project_dir);
+
+    assert_eq!(
+        fw.root,
+        FrameworkPaths::default().root,
+        "the framework install root must NOT move workspace-local"
+    );
+    assert!(
+        !fw.agent_source_dir().starts_with(project_dir),
+        "agent SOURCE must never resolve inside the deploy destination; got {}",
+        fw.agent_source_dir().display()
+    );
+    assert!(
+        !fw.skill_source_dir().starts_with(project_dir),
+        "skill SOURCE must never resolve inside the deploy destination; got {}",
+        fw.skill_source_dir().display()
     );
 }

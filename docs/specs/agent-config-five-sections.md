@@ -601,33 +601,18 @@ future `ticket-`-prefixed skill is not silently absorbed into an existing grant.
 Rendering bundles as group headers in the Skills pane is #4024; until it lands a
 `function` card is excluded from the pane's buckets rather than mis-filed.
 
-### 5.8 No executable payload in skills (NORMATIVE)
+### 5.8 Executable payload in skills (AMENDED 2026-07-27)
 
-The prior enhanced-skill direction envisaged a skill as *SKILL.md plus a bundled
-implementation* (e.g. a Python tool). **That collides with a hard invariant of
-the current specification and is therefore NOT adopted by this spec.**
+Agent skills may carry executable code — Python packages, binaries, or other implementations discovered and loaded by the skill plugin system (e.g., `install_discovered_skill_plugins`, `runtime/startup.rs:153`). The responsibility for vetting, auditing, and managing that code lies with the operator and agent owner.
 
-DOC-41 §2.6 defines a directory-package file allowlist — `.md`, `.yaml`, `.yml`,
-`.json`, `.txt` plus the named manifest/persona files — and makes **any other
-extension, or any file with the Unix executable bit set (`mode() & 0o111 != 0`),
-a load error (`PackageContainsForeignFile`)**. DOC-41 §6 records it as *"not
-configurable — always on — a hard invariant, deliberately not a toggle."* It is
-the mechanical half of the declarative-only rule (#2791, reaffirmed 2026-07-24 in
-DOC-54 §3.1). The deployer confirms it in code: the only sanctioned skill
-subdirectory is `references/`, `.md`-filtered
-(`trusty-agents-common/src/skills/deployer.rs:217`); there is no generic
-asset-copy path, and `find` over the bundled skill assets returns **zero**
-non-`.md` files.
+**Historical context:** An earlier version of this spec proposed a platform-enforced ban on executable files in skill packages, grounded in DOC-41 §2.6's allowlist. That rule was never implemented — `load_agent_package` performs no file validation and `PackageContainsForeignFile` has zero occurrences in the codebase. Executable skill code is already in production: the `cto-db` skill bundles a full Python package. This amendment ratifies existing behavior and clarifies that the operator, not the platform, manages code provenance.
 
-- **S-13** A skill MUST NOT bundle an executable script or binary payload.
-- **S-14** The sanctioned path for "a skill that runs code" is an **MCP server** —
-  `McpService.command` in the operator-controlled `~/.trusty-agents/config.toml`,
-  which is precisely the carve-out DOC-41 §2.6 already grants. A skill wraps such
-  a server's tools exactly as it wraps any other tool.
+- **S-13** A skill MAY bundle executable code (scripts, binaries, or language-specific packages). The owner/operator is responsible for vetting its source, security, and compatibility.
+- **S-14** Two sanctioned paths exist for "a skill that runs code":
+  1. **Bundled implementation** — a skill package may include executable assets directly, discovered and loaded by the platform's plugin system at startup. The operator controls deployment and bears responsibility for auditing the code.
+  2. **MCP server** — `McpService.command` in `~/.trusty-agents/config.toml`, operator-controlled platform infrastructure. A skill wraps such a server's tools exactly as it wraps any other tool.
 
-Whether to amend DOC-41 §2.6 with a security-reviewed carve-out is an owner
-decision, not an implementation detail (OQ-1, §12). Until it is decided, S-13
-stands.
+**Future enforcement (planned):** A security review is underway to establish review-gated skill code loading. Epic #4128 will add a `build_plugin`-level check (#4137) that refuses to load executable skill code unless a recorded review verdict exists, via a canonical package hash (#4135) and fail-closed verdict store (#4136). This amendment describes the current permissive state; §5.8 will be revisited once the review gate lands to make the gating requirement normative.
 
 ### 5.9 Conformance
 
@@ -641,8 +626,8 @@ stands.
   FAILS this test; that failure is the mechanism, not a nuisance.
 - **C-04.4** A skill naming a nonexistent tool renders as ungranted with a
   reason; the agent still boots (S-3).
-- **C-04.5** A directory package containing an executable file fails to load with
-  `PackageContainsForeignFile` (DOC-41 §2.6 regression guard, S-13).
+- **C-04.5** A directory package may contain executable files; the operator is
+  responsible for vetting and managing such code (§5.8, S-13, 2026-07-27).
 - **C-04.6** An authored manifest naming an already-wrapped tool REPLACES the
   built-in skill rather than adding a second card for that tool (S-2, S-9).
 - **C-04.7** No skill's `name` equals or machine-echoes its tool identifier
@@ -1089,9 +1074,10 @@ work, and so that no phase can regress an existing agent.
 Explicitly out of scope. Each is listed because it is a plausible reading of the
 directive that this spec deliberately does **not** adopt.
 
-1. **Skills bundling executable code.** DOC-41 §2.6 bans it as a hard, non-
-   configurable invariant; the sanctioned code path is an MCP server (§5.8,
-   S-13/S-14). Revisiting requires an owner decision plus security review (OQ-1).
+1. **RESOLVED (OQ-1, 2026-07-27):** Skills may bundle executable code. The owner
+   decided to permit bundled implementations (Python packages, etc.) with the
+   operator bearing responsibility for vetting. Both bundled code and MCP servers
+   are valid paths (§5.8, S-13/S-14).
 2. **Unifying the trusty-agents and trusty-mpm skill implementations.** Two
    dialects and two on-disk shapes exist (§5.1). This spec governs the
    trusty-agents dialect only (OQ-3).
@@ -1119,14 +1105,13 @@ directive that this spec deliberately does **not** adopt.
 Each blocks or reshapes a specific deliverable. Recommendations are the
 engineering default if no decision is given.
 
-**OQ-1 — May a skill carry executable code?**
-The enhanced-skill direction was *SKILL.md + bundled implementation* (e.g. a
-Python tool). DOC-41 §2.6 makes any non-allowlisted extension, or any file with
-the executable bit set, a load error, and §6 records it as "not configurable —
-always on". Options: **(a)** keep the ban — a skill that runs code wraps an MCP
-server (the existing sanctioned carve-out); **(b)** amend DOC-41 §2.6 with a
-security-reviewed carve-out for skill packages.
-*Recommendation: (a) for M1.* Blocks: §5.8, Phase 2 scope.
+**OQ-1 — May a skill carry executable code? — RESOLVED 2026-07-27 (owner): YES.**
+
+**Resolution:** Skills may carry executable code (Python packages, binaries, or other implementations). The operator and agent owner are responsible for managing, vetting, and auditing that code. The platform imposes no automated validation. Both bundled implementation (discovered by `install_discovered_skill_plugins`) and MCP server hosting (operator-configured `McpService.command`) are valid paths. This amendment ratifies existing production behavior — the `cto-db` skill already bundles a Python package — and clarifies responsibility assignment rather than introducing new capability.
+
+**Rationale:** The earlier proposed ban (DOC-41 §2.6's `PackageContainsForeignFile` error) was policy-only, never enforced in `load_agent_package` (`loader.rs:764-784`), with zero occurrences in the codebase. Executable skill code is already loading at runtime. The owner decision reflects this reality and makes responsibility explicit.
+
+**Blocking resolved.** §5.8, Phase 2 scope, and the non-goal at §11.1 are amended accordingly.
 
 **OQ-2 — Skill granularity: per tool, or per capability family? — RESOLVED
 2026-07-25 (owner): PER TOOL.**
@@ -1268,3 +1253,22 @@ tools *and* MCP connections. Users may read "Knowledge" as documents only.
   never-committed local `agent.toml` files, and five-phase delivery. Records
   eight open questions for the owner, including whether skills may carry
   executable code (DOC-41 §2.6 currently forbids it).
+- **2026-07-27** — Amended §5.8 and resolved OQ-1. Owner decision: skills may
+  carry executable code; the operator is responsible for managing and vetting it.
+  The prior proposed ban (DOC-41 §2.6's `PackageContainsForeignFile` error) was
+  never implemented and executable skill code is already in production (the
+  `cto-db` skill). Amendment ratifies existing behavior and clarifies
+  responsibility. Updated §5.8 from "No executable payload" to "Executable
+  payload in skills", rewrote S-13/S-14 to permit bundled implementations and
+  MCP servers as two valid paths, marked OQ-1 RESOLVED with the decision and
+  rationale, and updated §11.1 non-goal 1 to reflect the resolution. Updated
+  conformance C-04.5 to permit executables in skill packages with operator
+  responsibility for vetting.
+- **2026-07-27 (clarification)** — Sharpened §5.8's closing paragraph from
+  noting that mandatory controls "may" be added to stating that they "will" be
+  added. Epic #4128 will implement a `build_plugin`-level check (#4137) enforcing
+  a recorded security verdict before skill code loads, via canonical package hash
+  (#4135) and fail-closed verdict lookup (#4136). This amendment describes current
+  permissive behavior; §5.8 will be revisited when the review gate lands to make
+  enforcement normative. Harmonizes this spec with the stated intent that security
+  review gates implementation.

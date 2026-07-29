@@ -7,6 +7,80 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- `json_rmw`: cross-process locked read-modify-write for whole-file JSON
+  documents — the single implementation of the load → mutate → save critical
+  section that `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s
+  `tokens.json` (#3502) and the epic #4207 worktree registry all need.
+  `json_rmw::update` takes an exclusive advisory lock on a `<path>.lock`
+  sidecar, re-reads the document under that lock (never trusting a caller's
+  stale copy), applies the mutation, and publishes atomically via a
+  per-writer-unique temp file + `fsync` + `rename` + directory `fsync`. Never
+  fails open: a failed lock, read, parse or write returns `Err` with the
+  document byte-for-byte unchanged, and only a genuinely absent file starts
+  from `Default`. Adds `fd-lock` as an unconditional dependency.
+
+- **`project_index_id` — project-derived trusty-search index identity (#4207).**
+  New `ProjectIdentity` (origin + root + operator) with a pure, deterministic
+  `index_id()`, plus `derive_project_index_id()` and
+  `resolve_operator_identity()`. Unlike
+  the basename rule in `index_id` (which collides for unrelated checkouts sharing
+  a directory name) and the session-worktree UUID (which binds service identity to
+  ephemeral writer isolation), this id *partitions*: the canonical content-tree
+  root is a hashed component, so sibling clones, linked worktrees, and differing
+  accounts derive distinct ids by construction. Derivation only — nothing is wired
+  into `ensure_project_indexed`, `trusty-search serve`, or the daemon's resolution
+  path; registry reconciliation and migration of existing indexes are separate
+  slices of #4207. No behaviour change for any existing caller.
+
+  Derivation is hermetic: it reads no environment variable, so two callers on one
+  tree (e.g. the launchd daemon and a shell CLI) cannot derive different ids. The
+  `index_id()` docs enumerate exactly which inputs are mutable — `origin` moves on
+  the first commit, on `git remote add origin`, and on a new root commit — each
+  pinned by a test, so the migration slice inherits a true guarantee rather than an
+  assumption of permanence.
+
+---
+## [0.27.0] — 2026-07-27
+
+MINOR, not patch — deliberately. `ChatEvent::Usage` (added below) is a new
+variant on an enum that was neither `#[non_exhaustive]` nor private, so every
+downstream exhaustive `match` over it stops compiling with E0004; five
+in-workspace consumers had to gain an arm. Shipping that as 0.26.3 would have
+let `^0.26` re-resolve the ALREADY-PUBLISHED, arm-less consumer sources onto
+the new variant and hard-fail `cargo install` — the exact failure that forced
+`trusty-analyze` 0.7.3 to be yanked on 2026-07-27. `^0.26` excludes 0.27.0, so
+published consumers keep resolving to 0.26.2 and stay installable.
+
+### Changed
+
+- **`chat::ChatEvent` is now `#[non_exhaustive]`.** Downstream `match`es must
+  carry a wildcard arm. This is itself the breaking change that the MINOR bump
+  covers, and it is an ADDITION to that bump rather than a substitute for it:
+  it does nothing for consumers published before it landed, it only stops the
+  *next* variant addition from repeating the break.
+
+### Added
+
+- **`chat::BedrockProvider` now streams via `ConverseStream` instead of
+  buffering a full `Converse` reply into a single delta (issue #3767).**
+  `chat_stream` drives Bedrock's binary event-stream framing: `ContentBlockDelta`
+  text fragments become incremental `ChatEvent::Delta`s, mid-stream failures
+  (throttling, validation, transport errors) emit `ChatEvent::Error` and
+  return `Err` — mirroring the OpenAI-compatible SSE pump's #3757 dual-channel
+  failure contract — and the terminal `Metadata` event's token tally becomes
+  a new `ChatEvent::Usage` (Bedrock reports usage exactly once, never
+  per-delta, so it needed its own event to avoid being silently dropped).
+  `BedrockProvider` also gained `with_sampling` (parity with
+  `OpenRouterProvider::with_sampling`, #3758) so a Bedrock-routed streamed
+  turn honours the same temperature/token-ceiling/stop-sequences as the
+  blocking path.
+- **`chat::ChatEvent::Usage(ChatUsage)`** — a new event variant carrying
+  prompt/completion/cache token counts for providers that report usage
+  out-of-band from text deltas. `ChatUsage` is re-exported from the crate
+  root alongside `ChatEvent`.
+
 ---
 ## [0.26.2] — 2026-07-26
 

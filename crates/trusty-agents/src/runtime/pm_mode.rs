@@ -92,6 +92,26 @@ pub(super) async fn run_pm() -> Result<()> {
 
     // Registry with a single tool (delegate_to_agent) wired to the
     // production subprocess runner.
+    //
+    // #4169 (epic #4167) coverage note: this `DelegateToAgentTool` is built
+    // with NO `config_dirs` (`with_config_dir`/`with_config_dirs` are never
+    // called here) — pre-flight validation, including the new one-directional
+    // L0/L1 tier gate, is entirely skipped for it (see
+    // `DelegateToAgentTool::execute`'s `config_dirs.is_empty()` guard), so
+    // `run_pm` needs no `with_delegator` call to be correct (ADR-0024: it
+    // therefore also declares no delegator KIND, so the peer-assistant
+    // predicate is a no-op here — deliberate, this is predicate 1's explicit
+    // orchestrator scope caveat, and unreachable from any assistant anyway).
+    // This is
+    // deliberate, not an oversight: `pm` (role `orchestrator`) is the
+    // trusted top-level orchestrator, already unreachable as a delegation
+    // TARGET from any L1 persona (`orchestrator` was never in
+    // `ASSISTANT_ALLOWED_DELEGATE_ROLES`, proven by
+    // `delegate_assistant_role_gate_rejects_orchestrator_role` in
+    // `tools::delegate`'s tests) — so no L1 persona can ever reach THIS
+    // unrestricted registry transitively, and gating it further would only
+    // block `pm` itself from reaching a future L0 persona, which is not
+    // what #4169 asks for.
     let runner: Arc<dyn tools::AgentRunner> = Arc::new(SubprocessAgentRunner::new());
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(DelegateToAgentTool::new(runner)));

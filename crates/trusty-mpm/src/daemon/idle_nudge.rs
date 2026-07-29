@@ -25,7 +25,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tracing::{info, warn};
 
-use crate::core::agent::{Delegation, DelegationStatus};
+use crate::core::agent::Delegation;
 use crate::core::config::MpmConfig;
 use crate::core::hook::HookEvent;
 use crate::core::idle_nudge::{IdleNudgeConfig, NudgeDecision, NudgeLedger, decide_nudge};
@@ -42,19 +42,18 @@ use crate::session_manager::{ManagedSessionState, SessionManager};
 /// A leaf engineer agent (the common dogfooding park) has no live children, so
 /// this returns `false` and the nudge proceeds; a PM with a running delegation
 /// returns `true` and is left alone.
-/// What: `true` iff any delegation is [`DelegationStatus::Queued`] or
-/// [`DelegationStatus::Running`]. `Completed`/`Failed`/`Cancelled` delegations
-/// are terminal and do not count. An empty list (no tracked delegations at all)
-/// is `false` — the conservative default that lets a leaf agent be nudged.
+/// What: `true` iff any delegation's status
+/// [`is_live`](DelegationStatus::is_live) — i.e. `Queued` or `Running`.
+/// `Completed`/`Failed`/`Cancelled` are terminal and do not count, and neither
+/// does `Stale`: a delegation the staleness sweep gave up on is no longer
+/// trustworthy evidence of work in flight, and treating it as live is what let a
+/// single lost `SubagentStop` suppress this session's nudge forever (#2864
+/// review). An empty list (no tracked delegations at all) is `false` — the
+/// conservative default that lets a leaf agent be nudged.
 /// Test: `has_live_children_true_for_running`, `has_live_children_false_when_terminal`,
-/// `has_live_children_false_when_empty`.
+/// `has_live_children_false_when_empty`, `stale_running_delegation_stops_suppressing_the_nudge`.
 pub fn has_live_children(delegations: &[Delegation]) -> bool {
-    delegations.iter().any(|d| {
-        matches!(
-            d.status,
-            DelegationStatus::Queued | DelegationStatus::Running
-        )
-    })
+    delegations.iter().any(|d| d.status.is_live())
 }
 
 /// The result of one nudge attempt, for structured logging and tests.
@@ -287,7 +286,7 @@ pub async fn maybe_nudge_parked_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::agent::{Delegation, ModelTier};
+    use crate::core::agent::{Delegation, DelegationStatus, ModelTier};
     use crate::core::idle_nudge::SkipReason;
     use crate::core::session::SessionId;
     use crate::session_manager::{FakeNoopTmuxDriver, ManagedSessionId};

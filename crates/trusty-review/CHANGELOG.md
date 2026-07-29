@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.11.0] — 2026-07-27
+
+MINOR, not patch: `HealthResponse::is_serving` and
+`pipeline::citation_check::downgrade_uncitable_findings` were removed from the
+public API (replaced by `serving_state()` and
+`enforce_citation_integrity` respectively), and `pipeline::finding_hygiene` is
+a new public module.
+
+### Changed
+
+- `trusty-common` requirement raised to `^0.27` (was `^0.26`, inherited from
+  `[workspace.dependencies]`): 0.27.0 makes `ChatEvent` `#[non_exhaustive]`,
+  which a `^0.26` requirement cannot express.
+
 ### Fixed
 
 - **A live trusty-search was reported as `"unreachable"`, and a degraded verdict
@@ -81,6 +96,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     fix is marker-based on the finding's own admission and does not catch a
     finding grounded in an in-code COMMENT's hypothetical (the code file
     itself is real, so extension/path-based detection does not apply there).
+
+---
+## [0.10.1] — 2026-07-23
 
 ### Fixed
 

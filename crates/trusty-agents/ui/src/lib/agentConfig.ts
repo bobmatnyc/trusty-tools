@@ -371,6 +371,15 @@ export interface AgentSkillGroup {
   members: string[];
   granted_members: string[];
   granted_state: 'all' | 'some' | 'none';
+  /**
+   * #4024: the DISTINCT credential requirements across the members — a SET, not
+   * a rolled-up verdict. A bundle has no `provider` of its own, and its members
+   * need not agree; render every entry, so two members needing two different
+   * credentials show as two chips rather than one averaged claim. Empty means
+   * "no member states a requirement", never "verified". Optional so an older
+   * sidecar (pre-#4024) renders the group rather than throwing.
+   */
+  providers?: AgentSkillProvider[];
 }
 
 /**
@@ -387,6 +396,34 @@ export interface AgentSkillProvider {
   requirement: string;
   env_var: string | null;
   configured: boolean | null;
+}
+
+/**
+ * Render one credential requirement as a chip label + tone (#4024).
+ *
+ * Why: Both a leaf card and a function-skill group header state credentials, and
+ * they must state them IDENTICALLY — a group that renders "configured" where its
+ * member card says "not verified" is the display-layer form of the drift the
+ * route's single-computation rule exists to prevent. One function, two call
+ * sites. It is also where `configured: null` is pinned to "not verified" rather
+ * than to a green chip nobody checked (DOC-57 S-11b).
+ * What: `{ label, tone, title }`; `tone` is `ok` | `bad` | `unknown`.
+ * Test: `agentConfig.test.ts`, `AgentConfigSkills.test.ts`.
+ */
+export function providerChip(p: AgentSkillProvider): {
+  label: string;
+  tone: 'ok' | 'bad' | 'unknown';
+  title: string;
+} {
+  if (p.configured === true)
+    return { label: `${p.provider} configured`, tone: 'ok', title: p.requirement };
+  if (p.configured === false)
+    return {
+      label: `${p.provider} NOT configured`,
+      tone: 'bad',
+      title: `${p.requirement} Set ${p.env_var}.`,
+    };
+  return { label: `${p.provider} — not verified`, tone: 'unknown', title: p.requirement };
 }
 
 /** `GET /api/agents/:name/skills`'s wire shape. */
@@ -431,4 +468,125 @@ export async function fetchAgentSkills(name: string): Promise<AgentSkills | null
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`GET /api/agents/${name}/skills failed: ${r.status}`);
   return (await r.json()) as AgentSkills;
+}
+
+/**
+ * One in-product delegation target from `GET /api/agents/:name/subagents`
+ * (#4029) — a trusty-agents agent this agent may hand a task to via
+ * `delegate_to_agent`.
+ *
+ * `reachable` already accounts for BOTH refusals the server applies —
+ * ADR-0024's delegation KIND rule (assistant → assistant is refused, read from
+ * roles, not tiers) and #4169's one-directional L0/L1 tier gate — so a pane
+ * must render `reachable === false` as DENIED with its `reason` and must never
+ * present the card as callable. The server refuses to list targets the gate
+ * would refuse; a card that arrives unreachable is one the operator needs an
+ * explanation for, not one to hide.
+ */
+export interface SubagentInProductTarget {
+  name: string;
+  display_name: string;
+  /** The target's resolved `[agent].role` — the field the allowlist gates on. */
+  role: string;
+  /** `l0` | `l1`, resolved fail-closed server-side. */
+  tier: string;
+  reachable: boolean;
+  /** Present iff `reachable === false`. Explains which gate refused it. */
+  reason: string | null;
+}
+
+/**
+ * The in-product half of the Sub-agents section: `delegate_to_agent`.
+ *
+ * `tool_registered` and `tool_granted` are deliberately separate. The tool is
+ * only registered for assistant-tier personas, and even then dispatch is gated
+ * by the agent's own resolved tool patterns — collapsing the two into one badge
+ * would report "can delegate" for an agent that holds no such grant.
+ */
+export interface SubagentInProduct {
+  mechanism: 'in_product';
+  tool: string;
+  tool_registered: boolean;
+  tool_granted: boolean;
+  /** THIS agent's own resolved tier — the left-hand side of the gate. */
+  delegator_tier: string;
+  /**
+   * `ASSISTANT_ALLOWED_DELEGATE_ROLES`, verbatim — the COARSE, pre-kind-gate
+   * role eligibility filter, NOT the reachable set. It still contains
+   * `assistant` (deliberately kept in the Rust constant, whose doc explains
+   * why this report is one of the consumers holding it there), yet the kind
+   * rule refuses every assistant→assistant edge. A pane must therefore not
+   * present this array as "the targets": state the effective rule
+   * (role-eligible MINUS kind-refused) and read reachability off
+   * `targets[].reachable`, which is the only field that carries both gates.
+   */
+  allowed_roles: string[];
+  targets: SubagentInProductTarget[];
+  /** Roster entries excluded by the role allowlist — counted, never named. */
+  role_excluded_count: number;
+  /**
+   * Roster entries excluded because they carry `[agent].hidden = true` (#4235)
+   * — counted, never named, exactly like `role_excluded_count`. Disjoint from
+   * it: the server checks `hidden` first, so an entry contributes to one
+   * counter or the other, never both. Rendered as its own line rather than
+   * summed with the role count, because the two have different remedies (edit
+   * the agent's `hidden` flag vs. its `role`).
+   */
+  hidden_excluded_count: number;
+  unresolved: { name: string; reason: string }[];
+}
+
+/**
+ * The cross-product half: `dispatch_task` into trusty-code's non-coding roster.
+ *
+ * Every `bridge_floor` specialist appears in `targets` with its grant state
+ * (the `/skills` precedent — report the whole vocabulary, not only the granted
+ * subset), so a denied specialist carries a reason rather than being invisible.
+ * `rejected` holds declared names the bridge floor hard-denies, which is the one
+ * way a hand-written `[subagents].allowed` silently does nothing.
+ */
+export interface SubagentCrossProduct {
+  mechanism: 'cross_product';
+  tool: string;
+  tool_granted: boolean;
+  /** `false` when the agent declares no `[subagents]` section at all. */
+  declares_allowed: boolean;
+  /** `NON_CODING_TARGETS` — the bridge-owned floor config can only narrow. */
+  bridge_floor: string[];
+  targets: { name: string; granted: boolean; reason: string | null }[];
+  rejected: { name: string; reason: string }[];
+}
+
+/** `GET /api/agents/:name/subagents`'s wire shape (#4029). */
+export interface AgentSubagents {
+  /**
+   * `false` when the agent's own config could not be resolved. Both halves then
+   * arrive empty and deny-everything, with `config_error` set — fail-closed, not
+   * a partial-parse guess.
+   */
+  resolved: boolean;
+  in_product: SubagentInProduct;
+  cross_product: SubagentCrossProduct;
+  config_error?: string;
+}
+
+/**
+ * Why (#4029, epic #4021 OQ-5): neither delegation mechanism was reachable over
+ * HTTP — `parse_agent_toml` enumerates twelve fields and `subagents` is not one
+ * of them — so the Sub-agents pane needs its own route rather than a derivation
+ * from `AgentDetail`. Critically, the in-product target set is not config at
+ * all: it is a hardcoded role allowlist crossed with the resolvable roster,
+ * then narrowed by ADR-0024's delegation kind rule and #4169's tier gate, none
+ * of which a client can compute.
+ * What: `null` on 404 (unknown agent) so a stale roster selection is a normal
+ * outcome, not a thrown error — same contract as `fetchAgentSkills`.
+ * Test: `fetchAgentSubagents_returns_null_on_404`.
+ */
+export async function fetchAgentSubagents(name: string): Promise<AgentSubagents | null> {
+  const r = await fetch(`${apiBase()}/api/agents/${encodeURIComponent(name)}/subagents`, {
+    headers: authHeaders(),
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GET /api/agents/${name}/subagents failed: ${r.status}`);
+  return (await r.json()) as AgentSubagents;
 }

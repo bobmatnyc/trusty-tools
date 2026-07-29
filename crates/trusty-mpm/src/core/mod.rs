@@ -21,6 +21,10 @@ pub mod artifact;
 pub mod auto_resume;
 pub mod budget;
 pub mod bundle;
+// Epic #4183: the DEFAULT (bundled-fallback) PM prompt, re-sourced through
+// `instruction_package`. Byte-identical to the legacy assembly it replaces; the
+// override configurations stay on that legacy path by design.
+pub mod bundled_pm_package;
 // DOC-28 cutover bridge: incremental catch-up runtime — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod catchup;
 pub mod circuit;
@@ -52,7 +56,12 @@ pub mod hook;
 pub mod idle_nudge;
 pub mod idle_parking;
 pub mod instruction_overrides;
+// Issue #4184 / epic #4183: the sectioned-JSON instruction package schema. Types
+// + validation only; `bundled_pm_package` is its first composing call site.
+pub mod instruction_package;
 pub mod instruction_pipeline;
+// Epic #4183: committed snapshots of the fully composed PM prompt. The
+// delivered-prompt diff a content change produces is the review artifact.
 pub mod ipc;
 pub mod llm_overseer;
 pub mod managed_config;
@@ -63,6 +72,9 @@ pub mod memory;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
+#[cfg(test)]
+#[path = "pm_prompt_golden_tests.rs"]
+mod pm_prompt_golden_tests;
 // DOC-28 cutover bridge: unified session finder — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod native_session_finder;
 pub mod output_style;
@@ -78,6 +90,7 @@ pub mod project_discovery;
 pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;
+pub mod push_guard;
 pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
@@ -97,6 +110,7 @@ pub mod tmux;
 pub mod trusty_tools_config;
 pub mod update_check;
 pub mod version_staleness;
+pub mod workspace_liveness;
 pub mod workspace_scan;
 pub mod worktree_naming;
 

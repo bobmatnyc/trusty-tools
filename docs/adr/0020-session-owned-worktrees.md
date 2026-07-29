@@ -1,11 +1,11 @@
 # 0020. Session-owned worktrees: ownership registry + owner-gated reclamation
 
-- **Status:** Accepted
+- **Status:** Amended by [0023](0023-worktree-authority-existence-vs-ownership.md)
 - **Date:** 2026-07-22
 - **Scope:** crate `trusty-mpm` (`session_manager`, `provisioner::workspace`, `daemon::managed_routes::inproject`, orphan-GC)
 - **Reversibility Cost:** Low — purely additive (`#[serde(default)]` fields, a JSON sentinel payload replacing a zero-byte convention); no destructive migration, no schema break
 - **Decision Drivers:** worktree data-loss risk from unattributed reclamation, multiple independent worktree stores with no ownership concept, safe-default bias (never delete over accidentally deleting live work)
-- **Supersedes / Superseded by:** none
+- **Supersedes / Superseded by:** none (amended by ADR-0023, which promotes this ADR's git-list cross-check into an explicit existence-authority principle and adds a rebuildability requirement on the ownership registry; this ADR's sentinel, registry field, and owner-gating decisions remain in force)
 
 ## Context
 

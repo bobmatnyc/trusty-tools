@@ -11,6 +11,9 @@
 mod classification;
 mod history;
 mod persona;
+// #4171 (epic #4167): pure gating helpers split out of `persona.rs`, which
+// sits exactly at the 500-SLOC production cap.
+mod persona_gate;
 mod persona_memory;
 
 pub use history::run_pm_task_with_history;

@@ -577,13 +577,28 @@ fn format_token_chunk_compacts_thousands() {
 /// Test: deterministic boundary check.
 #[test]
 fn format_cost_chunk_thresholds() {
-    // 1000 prompt + 1000 completion @ haiku rates =
-    //   1000 * 0.00000025 + 1000 * 0.00000125 = 0.0015
-    let s = format_cost_chunk(1000, 1000);
-    assert_eq!(s, "$0.0015");
-    // 100k prompt + 100k completion = 0.025 + 0.125 = 0.150 → 3 decimals.
-    let s = format_cost_chunk(100_000, 100_000);
-    assert_eq!(s, "$0.150");
+    // #4098: rates now come from the single pricing table, keyed by model.
+    // 1000 prompt + 1000 completion @ haiku ($0.80/$4 per M) =
+    //   1000 * 0.0000008 + 1000 * 0.000004 = 0.0048
+    let s = format_cost_chunk("claude-haiku-4", 1000, 1000);
+    assert_eq!(s, "$0.0048");
+    // 10k prompt + 10k completion @ haiku = 0.008 + 0.04 = 0.048 → 3 decimals.
+    let s = format_cost_chunk("claude-haiku-4", 10_000, 10_000);
+    assert_eq!(s, "$0.048");
+}
+
+/// Why (#4098, COST-05): the statusline used to bill every model at Haiku
+/// rates. A threshold test alone would still pass under that bug, so pin the
+/// property the bug violated: the same token counts must cost more on Sonnet.
+/// What: Same counts, two models, compare the rendered strings numerically.
+/// Test: this test.
+#[test]
+fn format_cost_chunk_is_model_aware() {
+    let haiku = format_cost_chunk("claude-haiku-4", 1_000_000, 0);
+    let sonnet = format_cost_chunk("anthropic/claude-sonnet-4-6", 1_000_000, 0);
+    assert_eq!(haiku, "$0.800");
+    assert_eq!(sonnet, "$3.000");
+    assert_ne!(haiku, sonnet, "model must change the rendered cost");
 }
 
 /// Why: Activity row 1 must include elapsed time and the cycling status

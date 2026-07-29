@@ -53,15 +53,18 @@
     patchAgent,
     fetchAgentStores,
     fetchAgentSkills,
+    fetchAgentSubagents,
     matchesToolGlob,
     STORE_BOUND_KNOWLEDGE_TOOLS,
     type AgentDetail,
     type AgentSkills,
+    type AgentSubagents,
     type OkgStoreBinding,
   } from '../lib/agentConfig';
   import AgentConfigPersonality from './AgentConfigPersonality.svelte';
   import AgentConfigKnowledge from './AgentConfigKnowledge.svelte';
   import AgentConfigSkills from './AgentConfigSkills.svelte';
+  import AgentConfigSubagents from './AgentConfigSubagents.svelte';
   import AgentConfigListeners from './AgentConfigListeners.svelte';
   import AgentConfigPermissions from './AgentConfigPermissions.svelte';
 
@@ -84,11 +87,31 @@
   export let onExit: () => void;
 
   /** DOC-57 §2.1: the order is NORMATIVE, and it is not the pre-#3932 order
-   * (which put Permissions before Listeners). */
+   * (which put Permissions before Listeners).
+   *
+   * #4029 adds a SIXTH entry, `subagents`, per the owner's 2026-07-26 OQ-5
+   * ruling on epic #4021 ("Sub-agents is its own configuration section"). It is
+   * inserted between Skills and Listeners, and the choice is deliberate on both
+   * counts:
+   *
+   * - **The normative order is preserved, not overridden.** Every one of the
+   *   five existing sections keeps its position relative to every other; no pair
+   *   is swapped. §2.1 fixes the order of the five, and inserting a new section
+   *   between two of them leaves that order intact — unlike moving Permissions
+   *   back before Listeners, which §8.2's G-1 explicitly forbids.
+   * - **It continues §2.1's progression** (identity → knowledge → capability →
+   *   reactivity → constraint): Skills is what the agent can do ITSELF, and
+   *   Sub-agents is what it can hand off — the same "capability" beat, so the
+   *   two belong adjacent. Putting delegation after Listeners/Permissions would
+   *   separate the two halves of one question with two unrelated sections.
+   *
+   * #4182 amends DOC-57 to document the sixth section formally; this change
+   * deliberately does not touch the spec. */
   const SECTIONS = [
     ['personality', 'Personality'],
     ['knowledge', 'Knowledge'],
     ['skills', 'Skills'],
+    ['subagents', 'Sub-agents'],
     ['listeners', 'Listeners'],
     ['permissions', 'Permissions'],
   ] as const;
@@ -112,6 +135,10 @@
   /** Resolved one-skill-per-tool capability set (#3933) — `null` until loaded. */
   let skills: AgentSkills | null = null;
   let skillsError = '';
+
+  /** Resolved delegation reach, both mechanisms (#4029) — `null` until loaded. */
+  let subagents: AgentSubagents | null = null;
+  let subagentsError = '';
 
   let saving = false;
   let saveError = '';
@@ -233,6 +260,16 @@
       skills = null;
       skillsError = `${e}`;
     }
+    // #4029: its own leg for the same reason — the sub-agents route resolves
+    // every candidate agent's config, so it is the slowest of the three and a
+    // degraded roster must darken only this pane (C-07.2 / DOC-57 §8.3 G-5).
+    try {
+      subagentsError = '';
+      subagents = await fetchAgentSubagents(name);
+    } catch (e) {
+      subagents = null;
+      subagentsError = `${e}`;
+    }
   }
 
   $: load(agentName);
@@ -346,6 +383,8 @@
       />
     {:else if tab === 'skills'}
       <AgentConfigSkills data={skills} error={skillsError} />
+    {:else if tab === 'subagents'}
+      <AgentConfigSubagents data={subagents} error={subagentsError} />
     {:else if tab === 'listeners'}
       <AgentConfigListeners />
     {:else if tab === 'permissions'}

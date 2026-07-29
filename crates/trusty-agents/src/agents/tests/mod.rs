@@ -10,7 +10,7 @@
 pub(crate) mod loading;
 mod params;
 
-use crate::agents::{AgentConfig, ToolsConfig};
+use crate::agents::{AgentConfig, AgentInfo, ToolsConfig};
 
 #[test]
 fn llm_params_parses_model_override() {
@@ -668,5 +668,316 @@ allowed = ["research", "ticketing"]
     assert_eq!(
         cfg.tools.allow.as_deref(),
         Some(&["git_log".to_string()][..])
+    );
+}
+
+// --- `AgentInfo::tier` (#4168, epic #4167 — L0/L1 orchestration model) ---
+//
+// Fail-closed contract: absent, blank, or unrecognized `[agent].tier` must
+// NEVER resolve to `AgentTier::L0Orchestration` — only an explicit,
+// recognized declaration does.
+
+fn agent_toml_with_tier(tier_line: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+{tier_line}
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#
+    )
+}
+
+#[test]
+fn agent_tier_defaults_to_l1_when_absent() {
+    // No `tier` key at all — the state of every persona TOML shipped before
+    // #4168, and the overwhelming majority going forward.
+    let cfg: AgentConfig = toml::from_str(&agent_toml_with_tier("")).expect("parses");
+    assert_eq!(cfg.agent.tier, None);
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn agent_tier_parses_l0_orchestration_aliases() {
+    for alias in ["l0", "L0", "orchestration", "Orchestration", "  l0  "] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_tier(&format!(r#"tier = "{alias}""#))).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L0Orchestration,
+            "alias {alias:?} must resolve to L0Orchestration"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_parses_l1_standard_aliases() {
+    for alias in ["l1", "L1", "standard", "Standard"] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_tier(&format!(r#"tier = "{alias}""#))).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L1Standard,
+            "alias {alias:?} must resolve to L1Standard"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_unknown_value_fails_closed_to_l1() {
+    // The core fail-closed requirement: a malformed/unrecognized value must
+    // NEVER silently become the elevated tier.
+    for bogus in ["orchestrator", "l2", "yolo", "L0RCHESTRATION", "true"] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_tier(&format!(r#"tier = "{bogus}""#))).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L1Standard,
+            "unrecognized tier value {bogus:?} must fail closed to L1Standard, never L0"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_blank_value_fails_closed_to_l1() {
+    let cfg: AgentConfig =
+        toml::from_str(&agent_toml_with_tier(r#"tier = "   ""#)).expect("parses");
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn agent_tier_default_trait_is_l1_standard() {
+    // `AgentTier::default()` (used as the fail-closed default in
+    // `DelegateToAgentTool::new`) must be `L1Standard`, not derived
+    // accidentally onto the wrong variant by a future field reorder.
+    assert_eq!(
+        crate::agents::AgentTier::default(),
+        crate::agents::AgentTier::L1Standard
+    );
+}
+
+// #4029: `AgentTier::from_declared` extracted `AgentInfo::tier()`'s match so
+// the `/api/agents/:name/subagents` route — which must report exactly the
+// targets #4169's gate admits — shares ONE parser with the gate instead of
+// hand-rolling a second one. These two tests exist to make that extraction a
+// pinned equivalence rather than an assumed one.
+
+#[test]
+fn agent_tier_from_declared_matches_agent_info_tier() {
+    // Every alias and every fail-closed case the tests above cover, asserted to
+    // produce the IDENTICAL result through both entry points. If the two ever
+    // diverge, the config surface starts advertising a target the delegation
+    // gate refuses (or hiding one it allows).
+    //
+    // ADR-0024 decision 3 scopes this equivalence: it holds for a DECLARED
+    // value always, and for an absent/blank value only when the role is not
+    // the assistant kind (the fixture's `role = "x"`), because `AgentInfo::
+    // tier()` now derives an absent value from kind while `from_declared`
+    // stays a pure parser with no role in scope. The assistant-kind divergence
+    // is pinned separately by `agent_tier_derives_l0_for_the_assistant_kind`.
+    for raw in [
+        None,
+        Some(""),
+        Some("   "),
+        Some("l0"),
+        Some("L0"),
+        Some("  l0  "),
+        Some("orchestration"),
+        Some("Orchestration"),
+        Some("l1"),
+        Some("standard"),
+        Some("orchestrator"),
+        Some("l2"),
+        Some("yolo"),
+    ] {
+        let via_info = AgentInfo {
+            tier: raw.map(str::to_string),
+            ..toml::from_str::<AgentConfig>(&agent_toml_with_tier(""))
+                .expect("parses")
+                .agent
+        }
+        .tier();
+        assert_eq!(
+            crate::agents::AgentTier::from_declared(raw),
+            via_info,
+            "from_declared({raw:?}) must equal AgentInfo::tier() for the same raw value"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_wire_label_round_trips_through_from_declared() {
+    for tier in [
+        crate::agents::AgentTier::L0Orchestration,
+        crate::agents::AgentTier::L1Standard,
+    ] {
+        assert_eq!(
+            crate::agents::AgentTier::from_declared(Some(tier.wire_label())),
+            tier,
+            "the wire label the API emits must parse back to the same tier"
+        );
+    }
+    assert_eq!(
+        crate::agents::AgentTier::L0Orchestration.wire_label(),
+        "l0",
+        "the SHORT alias is the wire value, matching what an operator writes"
+    );
+    assert_eq!(crate::agents::AgentTier::L1Standard.wire_label(), "l1");
+}
+
+// --- ADR-0024 decision 3: assistants are tier L0, derived from KIND -------
+//
+// Ratified by the owner 2026-07-28. The population #4168 shipped is inverted:
+// L0 is no longer a rare, unpopulated orchestration tier above the assistants
+// — it IS the assistant population, and L1 is the sub-agent population. These
+// tests pin the derivation itself; the pane's rendering of it is pinned in
+// `api::server::tests::agent_subagents`, and the delegation gate's KIND-first
+// behaviour in `tools::delegate`'s tests.
+
+/// Build a config with an explicit role and an optional tier line.
+fn agent_toml_with_role_and_tier(role: &str, tier_line: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "x"
+role = "{role}"
+model = "x"
+description = "x"
+{tier_line}
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#
+    )
+}
+
+#[test]
+fn agent_tier_for_kind_is_l0_only_for_the_assistant_role() {
+    // The derivation reads ONE value. Everything else — including the empty
+    // string, and including `orchestrator`/`controller` (which sit outside
+    // this model and are handed L0 explicitly at dispatch by
+    // `ctrl_delegate_posture`, not by this function) — lands on L1.
+    assert_eq!(
+        crate::agents::AgentTier::for_kind("assistant"),
+        crate::agents::AgentTier::L0Orchestration
+    );
+    for other in [
+        "",
+        "engineer",
+        "qa",
+        "researcher",
+        "documentation",
+        "ops",
+        "planner",
+        "ticketing",
+        "analysis",
+        "observer",
+        "orchestrator",
+        "controller",
+        "Assistant",
+        "assistant-tier",
+    ] {
+        assert_eq!(
+            crate::agents::AgentTier::for_kind(other),
+            crate::agents::AgentTier::L1Standard,
+            "role {other:?} must NOT derive the elevated tier"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_derives_l0_for_the_assistant_kind() {
+    // The decision-3 case: an assistant-kind agent that declares no `tier` at
+    // all — the state of every bundled assistant TOML — resolves L0.
+    let cfg: AgentConfig =
+        toml::from_str(&agent_toml_with_role_and_tier("assistant", "")).expect("parses");
+    assert_eq!(cfg.agent.tier, None, "no literal is written to the file");
+    assert_eq!(
+        cfg.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration,
+        "ADR-0024 decision 3: an assistant IS L0, with no per-file declaration"
+    );
+    // A blank declaration is "not declared", not "declared as something odd".
+    let blank: AgentConfig = toml::from_str(&agent_toml_with_role_and_tier(
+        "assistant",
+        r#"tier = "   ""#,
+    ))
+    .expect("parses");
+    assert_eq!(
+        blank.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration
+    );
+}
+
+#[test]
+fn agent_tier_derives_l1_for_every_sub_agent_kind() {
+    // The other half of decision 3: sub-agents stay L1. Asserted over the
+    // whole `ASSISTANT_ALLOWED_DELEGATE_ROLES` sub-agent vocabulary rather
+    // than one sample, so widening that constant without thinking about tier
+    // fails here.
+    for role in [
+        "engineer",
+        "qa",
+        "researcher",
+        "documentation",
+        "ops",
+        "planner",
+    ] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_role_and_tier(role, "")).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L1Standard,
+            "sub-agent role {role:?} must stay L1"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_explicit_declaration_overrides_the_derived_kind() {
+    // The escape hatch, in BOTH directions, so the derivation is a default
+    // and not a hard-coded identity: an assistant can be deliberately narrowed
+    // to L1, and a non-assistant can be deliberately pinned to L0.
+    let narrowed: AgentConfig = toml::from_str(&agent_toml_with_role_and_tier(
+        "assistant",
+        r#"tier = "l1""#,
+    ))
+    .expect("parses");
+    assert_eq!(narrowed.agent.tier(), crate::agents::AgentTier::L1Standard);
+
+    let pinned: AgentConfig = toml::from_str(&agent_toml_with_role_and_tier(
+        "orchestrator",
+        r#"tier = "l0""#,
+    ))
+    .expect("parses");
+    assert_eq!(
+        pinned.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration
+    );
+
+    // And the fail-closed rule survives the override: a typo on an assistant
+    // NARROWS to L1 rather than being ignored or silently elevating.
+    let typo: AgentConfig = toml::from_str(&agent_toml_with_role_and_tier(
+        "assistant",
+        r#"tier = "L0RCHESTRATION""#,
+    ))
+    .expect("parses");
+    assert_eq!(
+        typo.agent.tier(),
+        crate::agents::AgentTier::L1Standard,
+        "an unrecognized declaration can only ever narrow"
     );
 }

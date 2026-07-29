@@ -76,7 +76,10 @@ pub(crate) fn build_rich_statusline(app: &ReplApp) -> Line<'static> {
         let display = m.strip_prefix("ollama/").unwrap_or(m);
         format!("local: {display}")
     });
-    let session_cost = crate::usage::daily::cost_from_tokens(app.tokens_in, app.tokens_out);
+    // #4098: price the session at the model actually in use, not the retired
+    // Haiku-only table that under-billed every Sonnet turn ~12x.
+    let session_cost =
+        crate::usage::daily::cost_from_tokens(&app.model_name, app.tokens_in, app.tokens_out);
     let daily_cost = app.daily_cost_start + session_cost;
     // Show the daily-total segment only when there was prior usage today —
     // i.e. the "today" total exceeds the in-flight session cost. On a fresh
@@ -89,7 +92,11 @@ pub(crate) fn build_rich_statusline(app: &ReplApp) -> Line<'static> {
                 chunks.push(format!("{} session", format_cost_value(session_cost)));
                 chunks.push(format!("{} today", format_cost_value(daily_cost)));
             } else {
-                chunks.push(format_cost_chunk(app.tokens_in, app.tokens_out));
+                chunks.push(format_cost_chunk(
+                    &app.model_name,
+                    app.tokens_in,
+                    app.tokens_out,
+                ));
             }
         }
         chunks.push((*chunk).to_string());
@@ -144,13 +151,15 @@ pub(crate) fn format_token_chunk(tokens_in: u64, tokens_out: u64) -> String {
 
 /// Format the `$0.0034` estimated-cost chunk for the statusline.
 ///
-/// Why: Surfaces approximate spend at-a-glance using OpenRouter haiku
-/// pricing (a reasonable default for the most-common harness model).
-/// What: Cost = prompt_tokens * $0.00000025 + completion_tokens * $0.00000125.
-/// Format with 4 decimals if <$0.01, 3 decimals otherwise.
-/// Test: `format_cost_chunk_thresholds`.
-pub(crate) fn format_cost_chunk(tokens_in: u64, tokens_out: u64) -> String {
-    let cost = crate::usage::daily::cost_from_tokens(tokens_in, tokens_out);
+/// Why: Surfaces approximate spend at-a-glance. (#4098) It used to price
+/// every session at Haiku rates regardless of the model in use — the
+/// statusline is the operator's only live cost signal, so a wrong-by-12x
+/// figure there is worse than none.
+/// What: Prices `tokens_in`/`tokens_out` for `model` through the single
+/// pricing entry point, then formats with 4 decimals if <$0.01, 3 otherwise.
+/// Test: `format_cost_chunk_thresholds`, `format_cost_chunk_is_model_aware`.
+pub(crate) fn format_cost_chunk(model: &str, tokens_in: u64, tokens_out: u64) -> String {
+    let cost = crate::usage::daily::cost_from_tokens(model, tokens_in, tokens_out);
     format_cost_value(cost)
 }
 
@@ -188,7 +197,10 @@ pub(crate) fn persist_daily_usage_if_due(app: &mut ReplApp) {
     if !due {
         return;
     }
-    let session_cost = crate::usage::daily::cost_from_tokens(app.tokens_in, app.tokens_out);
+    // #4098: same model-aware pricing the statusline renders, so the persisted
+    // daily total and the on-screen figure can never disagree.
+    let session_cost =
+        crate::usage::daily::cost_from_tokens(&app.model_name, app.tokens_in, app.tokens_out);
     let record = crate::usage::daily::DailyUsage {
         date: crate::usage::daily::today_local(),
         // Note: prompt_tokens / completion_tokens are *daily* totals on disk.

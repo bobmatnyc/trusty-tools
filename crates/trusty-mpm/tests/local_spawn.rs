@@ -13,6 +13,46 @@
 use trusty_mpm::daemon::managed_routes::{is_local_workdir, write_task_md};
 use trusty_mpm::session_manager::ManagedSessionId;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `tests/standalone_isolation.rs` and
+/// `tests/session_manager_mvp.rs` (each integration-test binary is a
+/// SEPARATE crate target, so none of these can share a single copy).
+///
+/// Why (#3965): `WorkspaceProvisioner::provision_in` calls
+/// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
+/// `without_prepare()` — because that seed sits BEFORE the
+/// `if !self.prepare { return ... }` gate in `provisioner/workspace.rs`. It
+/// resolves `~/.claude.json` from the REAL process `$HOME`, not from the
+/// provisioner's workspace root, so `spawn_managed_local_redirects_to_managed_clone`
+/// (which drives `.provision_in(...)` directly) must pin `$HOME` to its own
+/// hermetic root or it writes into the operator's real `~/.claude.json`.
+/// `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024
+/// (thread-unsafe), so every caller pairs this guard with
+/// `#[serial_test::serial]`.
+struct HomeGuard(Option<String>);
+
+impl HomeGuard {
+    /// Redirect `$HOME` to `dir` and return a guard that restores the
+    /// original value on drop (including on panic). Callers MUST be
+    /// `#[serial_test::serial]`.
+    fn set(dir: &std::path::Path) -> Self {
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: guarded by #[serial_test::serial] on all callers — only one
+        // thread mutates HOME at a time.
+        unsafe { std::env::set_var("HOME", dir) };
+        HomeGuard(prev)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
 /// An existing absolute directory must be detected as a local workdir so the
 /// spawn uses it directly and SKIPS the clone (#1433).
 ///
@@ -297,6 +337,7 @@ fn workspace_subpath_produces_owner_repo_path() {
 /// checkout directory.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::serial]
 fn spawn_managed_local_redirects_to_managed_clone() {
     use trusty_common::github_path::parse_github_path;
     use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
@@ -346,6 +387,10 @@ fn spawn_managed_local_redirects_to_managed_clone() {
     // Step 2: compute managed project_dir with a controlled workspace root so the
     // test does not write into the real ~/trusty-mpm-projects.
     let managed_root = tempfile::TempDir::new().expect("managed workspace root tempdir");
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    // `preseed_home_trust` fires unconditionally in `provision_in` below,
+    // even under `without_prepare()`.
+    let _home = HomeGuard::set(managed_root.path());
     let cfg = TrustyToolsConfig {
         workspace_root_template: Some(managed_root.path().to_string_lossy().into_owned()),
         ..Default::default()

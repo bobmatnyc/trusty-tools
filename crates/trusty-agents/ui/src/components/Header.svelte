@@ -16,7 +16,9 @@
    * instead of touching the header's top/bottom border.
    * What: Renders the Trusty Agents brand lockup (`<Logo>` — mark +
    * "TRUSTY AGENTS" wordmark + "UNIT-04 · MPM ORCHESTRATION" descriptor,
-   * theme-aware per `docs/design/UI/icons/README.md`) on the left. On the
+   * theme-aware per `docs/design/UI/icons/README.md`) on the left, followed
+   * by the running daemon's build provenance (see the `buildInfo` block
+   * below) — the header now also answers "which build is this". On the
    * right: the view-switch tabs (#3819: Chat/Events — App.svelte owns
    * `activeView`; this component only dispatches `switch-view`), the
    * `ModelSwitcher` model/provider picker (#3245; the agent/persona picker
@@ -51,13 +53,20 @@
   import ThemeToggle from './ThemeToggle.svelte';
   import ModelSwitcher from './ModelSwitcher.svelte';
   import { isDesktop } from '../lib/transport';
+  import {
+    fetchBuildInfo,
+    formatProvenance,
+    provenanceTitle,
+    type BuildInfoState,
+  } from '../lib/buildInfo';
 
   // #3819: Chat/Projects/Personality → Chat/Events (Bob's nav reshape).
   // `AgentSwitcher` moved out of this header into `ChatHeader` (the chat
   // pane's own header — title + selector + gear all live together there
   // now); `ModelSwitcher` stays here since model/provider is a separate,
   // unrelated axis Bob's directive didn't touch.
-  export let activeView: 'chat' | 'events' = 'chat';
+  // #4098: 'costs' added for the Costs tab (COST-09).
+  export let activeView: 'chat' | 'events' | 'costs' = 'chat';
   export let apiReady = false;
 
   const desktop = isDesktop();
@@ -66,10 +75,49 @@
   const tabs: { id: typeof activeView; label: string }[] = [
     { id: 'chat', label: 'Chat' },
     { id: 'events', label: 'Events' },
+    // #4098: spend by agent/model/day, from GET /api/costs.
+    { id: 'costs', label: 'Cost' },
   ];
 
   function switchView(view: typeof activeView) {
     dispatch('switch-view', { view });
+  }
+
+  /**
+   * Build provenance of the DAEMON this UI is talking to (owner ask: "we need
+   * to show version in the header").
+   *
+   * Why fire on `apiReady` rather than `onMount`: on a cold start the sidecar
+   * isn't listening when this component first renders (the same race
+   * `catalogRefetch.ts` documents for the pickers), so a mount-time probe
+   * would reliably fail and latch `unavailable`. `apiReady` flips true only
+   * after `App.svelte`'s bootstrap loop has already seen a healthy
+   * `check_health` — so this is a single follow-up read against a server known
+   * to be up, NOT a second poller. `requestedBuildInfo` keeps it to one
+   * request per app lifetime no matter how often this reactive block
+   * re-evaluates.
+   *
+   * States (deliberate, see `buildInfo.ts`): `v…` before the probe answers —
+   * never a compiled-in or guessed number, since a wrong version is worse than
+   * no version for the stale-build diagnosis this exists to serve; `v—` if it
+   * answers unusably. The slot is always rendered and width-reserved, so
+   * neither transition shifts the lockup. If the API never becomes ready the
+   * line stays `v…`, which is honest and already explained by the CONNECTING
+   * badge on the right of this same row.
+   *
+   * #4260 (build provenance in `tagent --version` and `/api/health`) is filed
+   * but NOT implemented: once it emits a commit, `parseHealthBody` picks it up
+   * and this same single line renders `v0.38.6 · abc1234`. Nothing here needs
+   * to change — add the SHA in `lib/buildInfo.ts`, not in this markup.
+   */
+  let buildInfo: BuildInfoState = { status: 'loading' };
+  let requestedBuildInfo = false;
+
+  $: if (apiReady && !requestedBuildInfo) {
+    requestedBuildInfo = true;
+    void fetchBuildInfo().then((info) => {
+      buildInfo = info;
+    });
   }
 </script>
 
@@ -78,6 +126,19 @@
 >
   <div class="flex items-center gap-3 min-w-0">
     <Logo height={50} />
+    <!-- Provenance of the running daemon — reference information, so it is
+         deliberately subordinate to the lockup: the badge row's 10px mono
+         scale but with no border/background chip, and the muted text token
+         (one variable per theme, so it reads correctly in light and dark).
+         `min-w-[7ch]` reserves the width of a settled `v0.0.00` so the
+         `v…` → `v0.38.6` transition can't nudge the lockup. -->
+    <span
+      class="shrink-0 min-w-[7ch] font-mono text-[10px] font-semibold tracking-wide text-foundry-light-muted dark:text-foundry-muted"
+      title={provenanceTitle(buildInfo)}
+      data-testid="build-provenance"
+    >
+      {formatProvenance(buildInfo)}
+    </span>
   </div>
 
   <div class="flex items-center gap-2.5">

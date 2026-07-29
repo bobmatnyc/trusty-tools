@@ -436,6 +436,17 @@ impl GitBackend for RealGitBackend {
             .map_err(|e| ProvisionError::Git(format!("git clone --bare exec failed: {e}")))?;
         if outcome.success {
             info!(url = %repo_url, dest = %base_dir.display(), "base checkout cloned");
+            // #2867: install the cross-branch push guard into the FRESHLY
+            // cloned base only. `$GIT_COMMON_DIR/hooks` is shared by every
+            // worktree of this base — including ad-hoc `git worktree add`
+            // worktrees an agent creates itself, which no other trusty-mpm code
+            // path ever sees — so this one file is the only mitigation that
+            // covers the actual PR #2863 clobber shape. Best-effort: a refusal
+            // (foreign hook / `core.hooksPath` redirect) must never fail
+            // provisioning. An already-provisioned base is retrofitted by the
+            // operator via `tm repair push-guard`, which `tm doctor`'s
+            // `push_guard` check names when it finds a clone unprotected.
+            crate::core::push_guard::install_and_log(base_dir);
             Ok(())
         } else {
             Err(ProvisionError::Git(format!(

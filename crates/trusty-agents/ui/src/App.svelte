@@ -9,6 +9,9 @@
   // has to be a sibling of the group rather than nested in the chat column.
   import ChatPane from './components/ChatPane.svelte';
   import EventsView from './components/EventsView.svelte';
+  // #4098 (COST-09): the Costs tab — spend by agent/model/day from
+  // `GET /api/costs`. Owns its own fetch; see the component's doc comment.
+  import CostsView from './components/CostsView.svelte';
   // #3819: `ProjectsView`/`PersonalityPanel` are no longer routed — Bob's
   // nav reshape drops the Projects/Personality top tabs entirely. Left
   // unimported/unrouted rather than deleted pending a decision on their
@@ -54,9 +57,10 @@
   // (reached via `ChatHeader`'s gear icon) saves each section independently
   // on its own explicit Save button, so there is no cross-tab discard risk
   // to guard against here anymore.
-  let activeView: 'chat' | 'events' = 'chat';
+  // #4098: 'costs' added for the Costs tab (COST-09).
+  let activeView: 'chat' | 'events' | 'costs' = 'chat';
 
-  function switchView(view: 'chat' | 'events') {
+  function switchView(view: 'chat' | 'events' | 'costs') {
     // #3894: leaving Chat abandons any open configuration takeover, so the
     // top-level tabs always mean what they say — coming back to Chat shows
     // chat, never a config surface the user left behind minutes ago.
@@ -412,6 +416,9 @@
            whole app. -->
       {#if activeView === 'chat'}
         <ChatPane />
+      {:else if activeView === 'costs'}
+        <!-- #4098 (COST-09): Costs tab. -->
+        <CostsView />
       {:else}
         <EventsView />
       {/if}

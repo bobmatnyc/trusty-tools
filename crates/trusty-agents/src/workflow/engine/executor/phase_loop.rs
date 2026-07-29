@@ -401,12 +401,13 @@ impl WorkflowEngine {
 
             // #84: Compute this phase's cost for the ticket comment and
             // accumulate into the workflow total.
+            // #4098: `cost_usd` counts widened to u64; `TokenUsage` is u32.
             let phase_cost = crate::perf::cost_usd(
                 &phase_model,
-                output.usage.prompt_tokens,
-                output.usage.completion_tokens,
-                output.usage.cache_read_tokens,
-                output.usage.cache_creation_tokens,
+                output.usage.prompt_tokens.into(),
+                output.usage.completion_tokens.into(),
+                output.usage.cache_read_tokens.into(),
+                output.usage.cache_creation_tokens.into(),
             );
             total_cost_usd += phase_cost;
 

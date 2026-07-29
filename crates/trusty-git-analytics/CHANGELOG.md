@@ -5,6 +5,114 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+MINOR, not patch. `Config` gained a public field and its fields are all public
+with no `#[non_exhaustive]`, and the new default flips identity-resolution
+behaviour for every existing `aliases_file` deployment on upgrade.
+
+### Fixed
+
+- Identity resolution no longer runs the Tier-3/4 Jaro-Winkler fuzzy fallback
+  when a comprehensive `aliases_file` is configured (#4251). As the alias
+  roster grew from 130 to 177 entries, the fuzzy tiers began collapsing
+  distinct people onto similarly-spelled colleagues — `Cristian Dominguez` →
+  `Crislaine Tripoli`, `Ravi Chandrasekaran` → `Ravi Pandey`, `Gauri Saykar` →
+  `Gaurav Sharma`, `Josh Taylor` and `Joseph Ku` → `Joshua Lepage` — none of
+  which had a declared alias explaining the match. An author that matches no
+  declared alias is now reported under its own raw name instead of being
+  guessed. Tier-1/2 exact alias resolution and the #2253 email-domain gate are
+  unchanged.
+
+### Added
+
+- `fuzzy_identity_fallback` config key (#4251). Unset (default) disables the
+  Tier-3/4 fuzzy fallback only when a declared `aliases_file` successfully
+  loaded a non-empty alias table; `true` forces it on, `false` forces it off.
+  A declared `aliases_file` that fails to load, or resolves empty, leaves the
+  fallback ON and logs at `error!` rather than silently fragmenting every
+  identity. `IdentityResolver` gained the matching `with_fuzzy_fallback()`
+  builder and `fuzzy_fallback()` accessor for callers that construct a
+  resolver outside `from_config`.
+- The behaviour flip is announced once at `info!` when it takes effect.
+
+### Internal
+
+- Identity resolver tests now use `tempfile::TempDir` instead of a hand-rolled
+  `process::id() + SystemTime` directory name. The old scheme was not unique
+  within a test binary — `process::id()` is constant across parallel tests and
+  the `SystemTime` remainder is coarser than a nanosecond — so tests collided
+  and each one's cleanup deleted a directory another was still using. Because
+  `Config::resolved_aliases()` swallows alias-file load errors, the victim got
+  a resolver with zero members, which returns every input unchanged and so
+  satisfied the #4251 pass-through assertions *vacuously*. Measured at 10
+  failures per 100 runs. The affected tests now also carry an explicit
+  non-vacuity assertion that the roster loaded.
+
+---
+## [2.10.0] — 2026-07-27
+
+MINOR, not patch. The JIRA ingestion work (#3966, #4084) landed on `main`
+without a version bump while 2.9.4 was already live on crates.io, so the
+version-parity guard (#3366) went red: 11 files added and 9 modified under a
+published version number. The drift is purely additive but it is *public API*,
+not internals — `tga` auto-detects `src/lib.rs` as a library target, so these
+are real SemVer-relevant additions:
+
+- `collect::errors::CollectError` gained `Throttled`, `IncompleteChangelog`
+  and `PagingBudgetExceeded`, and became `#[non_exhaustive]`.
+- `collect::jira` gained public modules `http`, `jql_time`, `model`, `paging`,
+  `retry`, `sync`, and re-exports `ChangelogIssue`, `ChangelogWalk`,
+  `JiraComment`, `JiraTransition`, `RetryPolicy`.
+- `core::db` gained the public `jira_facts` module and its re-exports.
+- `commands` gained the public `jira` module; `commands::args` gained
+  `JiraSubcommandArgs` / `JiraSubcommand`.
+- `core::config::JiraConfig` gained a `timezone` field.
+
+Nothing was removed and no existing public signature changed, so this is not a
+major bump. The one published consumer, `trusty-review` (optional `profile`
+feature), only constructs `CollectError` through `#[from]` and never matches on
+it exhaustively, so `#[non_exhaustive]` costs it nothing.
+
+No crates are published by this change.
+
+### Added
+
+- JIRA changelog + comment extraction client, covering issue transition history and per-comment detail (closes [#3966](https://github.com/bobmatnyc/trusty-tools/issues/3966)).
+- `fact_ticket_transitions` + `fact_jira_comment_detail` schema, introduced by migration `0023_jira_ingestion`.
+- `tga jira sync` and `tga jira freshness` subcommands to drive ingestion and report per-project data freshness.
+- `tga jira freshness --project <KEY>` scopes the freshness guard to one project; with no flag it now checks every project carrying a sync cursor individually, so one project's ongoing writes can no longer mask another project's dead sync.
+- Bounded retry with exponential backoff (429 / 5xx / timeouts) on the JIRA paged read paths, so a transient rate-limit response during a backfill no longer turns into a ticket-level ingestion failure.
+
+- `jira.timezone` config key pins the IANA timezone in which the JIRA account evaluates JQL date literals; when unset it is discovered from `GET /rest/api/3/myself` and cached.
+- `tga jira freshness --max-cursor-lag-days N` fails when a project's sync cursor falls that far behind, catching a sync that runs on schedule but never catches up. Cursor lag is always reported; only this flag makes it fail.
+
+### Changed
+
+- `CollectError` and `ChangelogIssue` are now `#[non_exhaustive]`. Both grow with every provider failure mode or per-ticket verdict the collector learns — `CollectError` gained `Throttled`, `IncompleteChangelog` and `PagingBudgetExceeded` across #3966 and #4084, and `ChangelogIssue` gained `truncated_history_total` — and on a published crate each such addition was a SemVer-major break, forcing a minor bump for what is genuinely a patch. Downstream crates must now carry a wildcard `match` arm on `CollectError`; `ChangelogIssue` was already receive-only outside the crate (its sole constructor is `pub(crate)`), so that half costs callers nothing. Every in-tree `match` already used a wildcard, so no call site changed.
+
+### Fixed
+
+- JIRA changelog pagination no longer silently truncates a ticket's oldest status transitions. The search-embedded changelog is itself paged, so `search_with_changelog` now compares JIRA's `changelog.total` against the embedded entry count and flags the shortfall; `tga jira sync` then walks the dedicated `GET /issue/{key}/changelog` endpoint to exhaustion and replaces the truncated history. A repair that cannot retrieve every entry the server reported fails with the new `CollectError::IncompleteChangelog`, naming the ticket and the expected-vs-retrieved counts, rather than returning a partial history that reads as complete — and the knowingly-short embedded copy is not persisted either. Unblocks the #3966 historical backfill (closes [#4084](https://github.com/bobmatnyc/trusty-tools/issues/4084)).
+- A ticket whose changelog repair fails no longer costs every other ticket its data. The repair originally ran inside the search walk, which `run_sync` awaits in full before writing anything, so one `IncompleteChangelog`/500/403 meant zero rows for all 10,000 tickets, no cursor movement, and a deterministic repeat on the next run. It now runs in the per-ticket loop, reusing the failed-ticket / cursor-clamp / circuit-breaker machinery the comment fetch already had: the bad ticket holds the cursor, the rest still land, and the run still exits non-zero naming it.
+- The changelog repair no longer accepts a partial history as complete when the dedicated endpoint omits `total`. Under `#[serde(default)] u64` an absent `total` read as `0`, ending the walk after page 1 and making the `retrieved < total` completeness check pass vacuously — so the repair could replace a truncated history with something no larger. `total` is now `Option<u64>`: an unstated one ends the walk only on an empty page, and the count the search itself reported is carried in as a standing lower bound.
+- `fetch_comments` no longer silently ingests a partial comment set. Termination was `start_at >= total` with `total` defaulting to `0` when absent, so a response omitting the field ended the walk after one page — observed as 100 of 150 comments ingested with no error. Because the fetch still returned `Ok`, the failed-ticket cursor clamp did not protect it: the cursor advanced past the ticket and the loss was permanent. The walk now terminates on a short page.
+- `fetch_comments` measures "short page" against the page size the server APPLIED (the `maxResults` every Atlassian paged bean echoes), not the one requested. Comparing against the request re-entered the same fail-open from the other end: a server paging 50 while the client asks for 100 made page 1 look short, ingesting 50 of 150 comments and returning `Ok` so the cursor advanced. An absent `maxResults` now ends the walk only on an empty page.
+- Both per-ticket JIRA paged walks are bounded (200 pages) and report `CollectError::PagingBudgetExceeded` instead of looping forever against a server that ignores `startAt`.
+- The JQL date renderer's step-back search no longer emits an unvalidated bound when it exhausts its ceiling. The ceiling was 180 minutes on the stated grounds that "historic DST shifts never exceed two hours" — false, as `Antarctica/Casey` folds exactly three hours (UTC+11 → UTC+08), landing on the ceiling with zero margin and saturating the loop. Saturation is now an explicit error with a remediation hint rather than a silently-emitted literal, and the ceiling is derived from the −12:00…+14:00 UTC-offset span instead of an empirical claim about tzdata's contents.
+- `tga jira sync` renders its JQL `updated >=` bound in the JIRA account's timezone rather than UTC. JQL date literals are zoneless and JIRA evaluates them in the querying account's profile timezone, so on a non-UTC account every sync window landed hours away from the instant it encoded — silently skipping tickets on negative-offset accounts and stalling the pager on positive-offset ones. The renderer is also correct across DST folds and gaps, where a local literal maps to two instants or none.
+- `tga jira sync` aborts after 10 consecutive comment-fetch failures instead of walking every remaining ticket. Under sustained rate-limiting a 10,000-ticket run previously issued up to 40,000 requests and slept for hours against a server explicitly asking it to stop.
+- JIRA 429/503 responses now honour `Retry-After`, under a whole-run backoff budget (120s) that bounds total time lost to throttling regardless of ticket count.
+- `tga jira sync` reports when a run is incomplete without being an error: `--max-tickets` truncation and any minute that had to be walked by offset are both surfaced in the run summary.
+- A clean `tga jira sync` no longer moves the stored cursor backwards, so `--since 2020-01-01` or a truncated `--backfill` cannot rewind a healthy incremental cursor. A failure clamp may still regress it, which is its purpose.
+- `tga jira freshness` also checks the configured `jira.project_key` even when it has no cursor row, so a project that has never completed a sync is no longer invisible to the default check.
+- `tga jira sync` no longer advances the incremental cursor past a ticket whose comment fetch failed. Previously the cursor moved to the batch maximum, leaving the failed ticket permanently below every later `updated >=` window — its comments were lost silently, with the process still exiting 0. The cursor is now clamped at or below the earliest failure, the failure count is printed in the run summary, and the run exits non-zero.
+- `tga jira sync` paginates the changelog walk by re-anchoring the `updated >=` window instead of by `startAt` offset. Offset paging over `ORDER BY updated ASC` let a ticket edited mid-walk shift an unread ticket across the read boundary, permanently excluding it from later runs.
+- `tga jira sync --dry-run` now fetches comments and reports their real count instead of always printing `0 comment(s)`; it still writes nothing and leaves the cursor untouched.
+- A JIRA project key that is not `[A-Za-z][A-Za-z0-9_]*` is rejected locally instead of being interpolated into JQL, where it could silently widen the query and let another project's tickets advance this project's cursor.
+- A `${ENV_VAR}` JIRA credential whose variable is unset is now a startup configuration error naming the field and variable, instead of an empty password surfacing as an opaque HTTP 401.
+
+---
 ## [2.9.4] — 2026-07-21
 
 ### Fixed

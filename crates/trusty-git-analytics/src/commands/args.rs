@@ -13,6 +13,7 @@ use clap::{Args, Subcommand};
 
 use crate::commands::deployments::DeploymentsCollectArgs;
 use crate::commands::incidents::IncidentsCollectArgs;
+use crate::commands::jira::{JiraFreshnessArgs, JiraSyncArgs};
 
 /// Args wrapper for the `tga deployments` subcommand tree.
 #[derive(Args, Debug)]
@@ -42,6 +43,25 @@ pub struct IncidentsSubcommandArgs {
 pub enum IncidentsSubcommand {
     /// Ingest incidents into `fact_incidents`.
     Collect(IncidentsCollectArgs),
+}
+
+/// Args wrapper for the `tga jira` subcommand tree.
+#[derive(Args, Debug)]
+pub struct JiraSubcommandArgs {
+    /// `tga jira` operation.
+    #[command(subcommand)]
+    pub subcommand: JiraSubcommand,
+}
+
+/// `tga jira` subcommand variants (issue #3966).
+#[derive(Subcommand, Debug)]
+pub enum JiraSubcommand {
+    /// Sync status transitions and comments into `fact_ticket_transitions` /
+    /// `fact_jira_comment_detail`.
+    Sync(JiraSyncArgs),
+    /// Check freshness of the JIRA-derived fact tables (fails loudly if
+    /// stale/empty).
+    Freshness(JiraFreshnessArgs),
 }
 
 /// Arguments for `tga analyze`.

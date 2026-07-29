@@ -32,7 +32,9 @@ use trusty_tui::{CommandDescriptor, PickerItem, ReplEvent, StatuslineSegment, Wo
 
 use crate::events::SessionEventEnvelope;
 
-use super::engine::{RECONNECT_BACKOFF, SESSION_STREAM_MAX_RECONNECTS, SSE_IDLE_TIMEOUT};
+use super::engine::{
+    CONNECT_TIMEOUT, RECONNECT_BACKOFF, SESSION_STREAM_MAX_RECONNECTS, SSE_IDLE_TIMEOUT,
+};
 use super::error::EngineError;
 use super::rpc::RpcHttpClient;
 use super::session_events::{
@@ -318,7 +320,18 @@ impl EngineState {
         let url = format!("{}/sessions/{session_id}/events", self.rpc.base_url());
         let mut attempts = 0u32;
         'reconnect: loop {
-            let resp = match self.rpc.http().get(&url).send().await {
+            // `.timeout(CONNECT_TIMEOUT)` bounds connect-through-headers only
+            // (issue #3494) — see that const's doc comment for why this
+            // can't silently extend to the `resp.bytes_stream()` body read
+            // governed by `SSE_IDLE_TIMEOUT` below.
+            let resp = match self
+                .rpc
+                .http()
+                .get(&url)
+                .timeout(CONNECT_TIMEOUT)
+                .send()
+                .await
+            {
                 Ok(r) if r.status().is_success() => r,
                 Ok(r) => {
                     let status = r.status();

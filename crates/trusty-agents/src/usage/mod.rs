@@ -13,9 +13,10 @@
 //! Test: see `tests` module — round-trip serialization, task_prefix
 //! truncation, file create + append semantics.
 
+pub mod aggregate;
 pub mod daily;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -25,8 +26,20 @@ use tokio::io::AsyncWriteExt;
 /// grep-able and trivially loadable into pandas / DuckDB / jq.
 /// What: ts (RFC3339), agent name, model, runner tag, token counts,
 /// duration, and a 60-char task prefix.
-/// Test: `usage_record_serializes_to_valid_jsonl`.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Deserialize` (#4098) makes this the SINGLE shape for the log — the
+/// aggregator in [`aggregate`] reads back exactly what `append_usage` wrote
+/// rather than carrying its own DTO that could drift from the writer. The
+/// three attribution fields (`ts`, `agent`, `model`) are REQUIRED on read: a
+/// row missing any of them cannot be placed on a timeline or attributed to
+/// anything, so it is reported as malformed rather than defaulted into a
+/// plausible-looking bucket. Everything else defaults, so rows written by an
+/// older binary (or by a newer one, once #4101 adds cache-token fields) still
+/// parse instead of invalidating the whole file.
+/// Test: `usage_record_serializes_to_valid_jsonl`,
+/// `usage_record_round_trips_through_jsonl`,
+/// `usage_record_requires_attribution_fields`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     /// RFC3339 timestamp in UTC of when the dispatch *completed*.
     pub ts: String,
@@ -37,16 +50,21 @@ pub struct UsageRecord {
     /// Model id as actually dispatched (e.g. `anthropic/claude-sonnet-4-6`).
     pub model: String,
     /// One of `"claude-code" | "anthropic-direct" | "openrouter" | "bedrock"`.
+    #[serde(default)]
     pub runner: String,
     /// Prompt / input tokens reported by the provider. `0` when unavailable
     /// (e.g. older `claude` CLI versions that omit the `usage` block).
+    #[serde(default)]
     pub input_tokens: u32,
     /// Completion / output tokens. `0` when unavailable.
+    #[serde(default)]
     pub output_tokens: u32,
     /// Wall-clock milliseconds for the LLM call.
+    #[serde(default)]
     pub duration_ms: u64,
     /// First 60 chars of the task string. Strictly for human readability
     /// when tailing the log; not load-bearing for any tooling.
+    #[serde(default)]
     pub task_prefix: String,
 }
 
@@ -177,6 +195,61 @@ mod tests {
         assert_eq!(parsed["output_tokens"], 312);
         assert_eq!(parsed["duration_ms"], 4800);
         assert_eq!(parsed["task_prefix"], "fix credential routing");
+    }
+
+    /// Why (#4098): `usage::aggregate` reads the log back through THIS struct
+    /// rather than a reader DTO of its own, so a serialize/deserialize
+    /// asymmetry would silently drop usage from every cost figure.
+    /// What: Write a record, parse it back, compare every field.
+    /// Test: this test.
+    #[test]
+    fn usage_record_round_trips_through_jsonl() {
+        let r = UsageRecord::new(
+            "engineer",
+            "claude-sonnet-4-6",
+            "openrouter",
+            12,
+            34,
+            56,
+            "t",
+        );
+        let json = serde_json::to_string(&r).expect("serialize");
+        let back: UsageRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.ts, r.ts);
+        assert_eq!(back.agent, r.agent);
+        assert_eq!(back.model, r.model);
+        assert_eq!(back.runner, r.runner);
+        assert_eq!(back.input_tokens, r.input_tokens);
+        assert_eq!(back.output_tokens, r.output_tokens);
+        assert_eq!(back.duration_ms, r.duration_ms);
+        assert_eq!(back.task_prefix, r.task_prefix);
+    }
+
+    /// Why (#4098): a row missing `ts`, `agent` or `model` cannot be placed on
+    /// a timeline or attributed to anything. It must FAIL to parse so the
+    /// aggregator counts it as malformed, rather than defaulting into a
+    /// plausible-looking zero-cost row. Optional fields must still default, so
+    /// rows from an older binary keep counting.
+    /// What: Each of the three required fields, omitted in turn, fails; a row
+    /// carrying only those three succeeds.
+    /// Test: this test.
+    #[test]
+    fn usage_record_requires_attribution_fields() {
+        for missing in [
+            r#"{"agent":"a","model":"m"}"#,
+            r#"{"ts":"2026-07-27T00:00:00Z","model":"m"}"#,
+            r#"{"ts":"2026-07-27T00:00:00Z","agent":"a"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<UsageRecord>(missing).is_err(),
+                "must reject {missing}"
+            );
+        }
+        let minimal: UsageRecord =
+            serde_json::from_str(r#"{"ts":"2026-07-27T00:00:00Z","agent":"a","model":"m"}"#)
+                .expect("required fields alone must parse");
+        assert_eq!(minimal.input_tokens, 0);
+        assert_eq!(minimal.runner, "");
     }
 
     #[test]

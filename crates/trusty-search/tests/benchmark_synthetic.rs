@@ -207,7 +207,9 @@ async fn assert_daemon_healthy(client: &Client) {
 async fn register_index(client: &Client) {
     // Delete first if it exists, to start from a clean slate.
     let _ = client
-        .delete(format!("{DAEMON_URL}/indexes/{INDEX_NAME}"))
+        .delete(format!(
+            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+        ))
         .send()
         .await;
 
@@ -304,7 +306,9 @@ async fn fetch_status(client: &Client) -> Value {
 /// Test: failures are printed, not panicked (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
     let resp = client
-        .delete(format!("{DAEMON_URL}/indexes/{INDEX_NAME}"))
+        .delete(format!(
+            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+        ))
         .send()
         .await;
     match resp {

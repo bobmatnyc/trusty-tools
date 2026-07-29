@@ -141,6 +141,13 @@ where
 /// Test: `extends_resolved_config_has_no_extends`.
 fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
     cfg.agent.extends = None;
+    // #3936: seed the `permissions.scopes` accumulator with THIS (root)
+    // level's own CC-9-resolved value, so a root agent and a merged
+    // multi-level agent share one invariant: after resolution,
+    // `permissions.scopes` always holds the chain's fully-resolved effective
+    // scope set — see `merge_extends`'s matching seed for the non-root case.
+    cfg.permissions.scopes =
+        crate::agents::permissions::effective_scopes(&cfg.tools, &cfg.permissions);
     cfg
 }
 
@@ -179,8 +186,31 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// `extends_nameless_child_does_not_inherit_named_base_display`,
 /// `extends_scalar_child_override`, `extends_llm_child_overrides_temperature_only`,
 /// `extends_llm_child_overrides_max_tokens_only`,
-/// `extends_llm_child_inherits_when_omitted`.
+/// `extends_llm_child_inherits_when_omitted`,
+/// `extends_tier_child_inherits_l0_from_base_when_omitted`,
+/// `extends_tier_child_can_downgrade_l0_base_to_l1`,
+/// `extends_tier_omitted_everywhere_resolves_l1`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
+    // #3936: the base's own contribution to the `permissions.scopes`
+    // accumulator, captured BEFORE `base` moves into `merged` below.
+    //
+    // `resolve_inner` always hands this function a `base` that already went
+    // through `clear_extends` (root) or a prior `merge_extends` call
+    // (multi-level) — either way `base.permissions.scopes` already holds
+    // that level's CC-9-collapsed, chain-unioned value, and is used
+    // verbatim. A `base` that skipped both (a direct `merge_extends` call,
+    // e.g. from a unit test) has NOT been collapsed yet, so this falls back
+    // to computing it here — the same `effective_scopes` call
+    // `clear_extends` makes — rather than silently dropping that level's
+    // legacy `[tools].scopes` contribution. Idempotent either way: re-running
+    // `effective_scopes` over an already-collapsed value is a no-op because
+    // `permissions.scopes` is already `Some`.
+    let base_scopes_seed = if base.permissions.scopes.is_some() {
+        base.permissions.scopes.clone()
+    } else {
+        crate::agents::permissions::effective_scopes(&base.tools, &base.permissions)
+    };
+
     let mut merged = base;
 
     // #3738: capture the base's identity BEFORE overwriting it with the
@@ -248,6 +278,22 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     if child.agent.persistent_session {
         merged.agent.persistent_session = true;
     }
+    // `tier` (#4168, epic #4167 — L0/L1 orchestration model): child-declares-
+    // wins, child-omits-inherits — the SAME posture as `enforce_search_indexes`/
+    // `default_tier` below: a hardened (L1) base stays hardened under a
+    // silent overlay, and this is a privilege boundary, not a convenience
+    // default, so the rule cuts both ways deliberately. An L0 base's
+    // elevated tier travels to a child overlay that doesn't explicitly
+    // declare its own `tier` — exactly like every other un-redeclared field
+    // in an `extends` overlay — while a child that DOES declare `tier`
+    // (including downgrading an L0 base to `l1`) always wins. This is
+    // distinct from the "absent/malformed -> L1" fail-closed resolution
+    // `AgentInfo::tier()` performs: that guards a chain where NO level ever
+    // declares a recognized value, not a child that inherits an ancestor's
+    // explicit declaration.
+    if child.agent.tier.is_some() {
+        merged.agent.tier = child.agent.tier.clone();
+    }
 
     // --- user_authority: NEVER inherited/unioned through `extends` ---
     //
@@ -286,6 +332,13 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
         merged.llm.max_tokens = child.llm.max_tokens;
     }
 
+    // #3936: computed BEFORE the `child.tools.*` partial moves below (`scopes`
+    // and `search_indexes` are moved out of `child.tools` by `union_opt_vec`
+    // a few lines down) — `effective_scopes` needs to borrow `child.tools`
+    // and `child.permissions` together, so it must run first.
+    let child_effective_scopes =
+        crate::agents::permissions::effective_scopes(&child.tools, &child.permissions);
+
     // --- List fields: union (dedup, base-first order) ---
     merged.tools.allowed = union_opt_vec(merged.tools.allowed, child.tools.allowed);
     merged.tools.allow = union_opt_vec(merged.tools.allow, child.tools.allow);
@@ -308,6 +361,41 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // the same reason — an overlay ADDS capability to its base and must never
     // silently remove what the base granted.
     merged.skills.allow = union_opt_vec(merged.skills.allow, child.skills.allow);
+
+    // `[permissions]` (#3936, DOC-57 §2.3 + §7.2):
+    //
+    // `scopes` — base-first UNION across the chain, same polarity as legacy
+    // `tools.scopes` above, but sourced through `effective_scopes` so a
+    // per-file CC-9 collapse (this file's OWN `[permissions].scopes` beats
+    // this file's OWN legacy `[tools].scopes`) happens BEFORE the cross-chain
+    // union. `base_scopes_seed` (captured above, before `base` moved into
+    // `merged`) already holds the accumulated union of every ancestor level;
+    // this only has to fold in the CHILD's own contribution (also computed
+    // above, before the partial moves).
+    merged.permissions.scopes = union_opt_vec(base_scopes_seed, child_effective_scopes);
+    // `grants[]` — union keyed by `skill`, same shape as the listener-binding
+    // union: a child re-declaring a grant for a skill OVERRIDES the base's
+    // mode for it rather than appending a second, shadowing entry.
+    merged.permissions.grants =
+        union_permission_grants(merged.permissions.grants, child.permissions.grants);
+    // `default_tier` / `unauthenticated_tier` / `autonomy` — child-declares-
+    // wins, child-omits-inherits (same posture as `enforce_search_indexes`
+    // above): a hardened base stays hardened under a silent overlay.
+    if child.permissions.default_tier.is_some() {
+        merged.permissions.default_tier = child.permissions.default_tier.clone();
+    }
+    if child.permissions.unauthenticated_tier.is_some() {
+        merged.permissions.unauthenticated_tier = child.permissions.unauthenticated_tier.clone();
+    }
+    if child.permissions.autonomy.is_some() {
+        merged.permissions.autonomy = child.permissions.autonomy;
+    }
+    // `user_authority` — NEVER inherited (PM-3, DOC-41 §5.5). Always the
+    // child's own explicit setting (defaulting `false`), even when `extends`
+    // targets the authority holder. `merged` starts as a clone of `base`, so
+    // this assignment is what actually enforces the exclusion — omitting it
+    // would leave the base's value sitting in `merged` untouched.
+    merged.permissions.user_authority = child.permissions.user_authority;
     merged.system_prompt.skills =
         union_opt_vec(merged.system_prompt.skills, child.system_prompt.skills);
     merged.agent.capabilities =
@@ -410,6 +498,32 @@ fn union_listener_bindings(
             *existing = child_binding;
         } else {
             merged.push(child_binding);
+        }
+    }
+    merged
+}
+
+/// Union two `[[permissions.grants]]` lists, base-first, keyed by `skill` —
+/// a child grant for a skill already named by the base REPLACES the base's
+/// mode for it (#3936, DOC-57 §2.3 "grants union-by-skill").
+///
+/// Why: Mirrors [`union_listener_bindings`]'s keyed-replace semantics exactly
+/// — a grant is identified by WHICH skill it governs, not by its `mode`, so
+/// two grants for the same skill are the same declaration with the child's
+/// value winning, not two independent entries.
+/// What: base entries, with any child entry sharing a `skill` overwriting
+/// in place; a child entry naming a new skill is appended.
+/// Test: `extends_permission_grants_union_by_skill`.
+fn union_permission_grants(
+    base: Vec<crate::agents::permissions::PermissionGrant>,
+    child: Vec<crate::agents::permissions::PermissionGrant>,
+) -> Vec<crate::agents::permissions::PermissionGrant> {
+    let mut merged = base;
+    for grant in child {
+        if let Some(existing) = merged.iter_mut().find(|g| g.skill == grant.skill) {
+            *existing = grant;
+        } else {
+            merged.push(grant);
         }
     }
     merged
