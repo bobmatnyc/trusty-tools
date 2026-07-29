@@ -1074,6 +1074,7 @@ fn make_session(
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,

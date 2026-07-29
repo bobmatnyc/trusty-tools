@@ -7,7 +7,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Performance
+
+- `tm ls` no longer re-reads the whole fleet's deployed agent/skill trees on
+  every invocation ([#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)).
+  Two changes, both in `daemon::managed_routes::summary`:
+  - **`Stopped` sessions are no longer asset-staleness-probed on the LIST
+    path.** The probe costs ~95 `read_to_string` calls against a session's own
+    `.claude/{agents,skills}` tree, uncached, per invocation. On a measured
+    32-session fleet, 20 of those sessions were stopped and idle for days —
+    56% of the I/O — for a marker that is only actionable at resume. The
+    single-session `GET …/managed/{id}` path (what `tm session resume` reads)
+    still probes every meaningful state, so the signal is unchanged where it
+    is acted on. Measured on that fleet: 3,040 → 1,140 read attempts and
+    35.7 MiB → 15.0 MiB per listing.
+  - **The remaining per-session comparisons now run concurrently** on the
+    blocking pool via `JoinSet::spawn_blocking`, mirroring the `unresumable`
+    fan-out already used alongside them. The shared `CatalogHashes` compute
+    (#2444) stays a single sequential step — fanning it out would reinstate
+    the per-session recompose it exists to prevent.
+
 ### Changed
+
+- `tm ls` STATE column: a row the daemon did not probe now renders
+  `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
+  never be misread as "assets fresh"
+  ([#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)). Backed by a
+  new additive wire field, `SessionSummary::stale_assets_unchecked`, whose
+  `false` default keeps an older daemon's (authoritative) verdicts rendering
+  exactly as before.
 
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
   set is now documented as DELIBERATELY unfiltered by session state, and pinned

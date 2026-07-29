@@ -494,6 +494,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,
@@ -533,6 +534,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,
@@ -763,6 +765,105 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     assert!(
         !summaries[1].stale_assets,
         "a Provisioning session must never be probed — it has not deployed yet"
+    );
+    assert!(
+        !summaries[0].stale_assets_unchecked && !summaries[1].stale_assets_unchecked,
+        "neither an Active (probed) nor a Provisioning (nothing to check) row \
+         may claim an UNDETERMINED asset verdict"
+    );
+}
+
+/// Deploy `stem`.md into `workspace`'s `.claude/agents` from the (fake-home)
+/// bundled source, then drift the catalog underneath it — leaving that
+/// workspace GENUINELY stale relative to the catalog.
+///
+/// Why: three staleness tests below need the identical "deployed at v1,
+/// catalog moved to v2" setup; sharing it keeps them asserting about the
+/// PROBE rather than re-deriving the fixture, and guarantees the stopped-vs-
+/// on-demand pair below compare the exact same on-disk condition.
+fn deploy_then_drift_catalog(workspace: &std::path::Path) {
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+    std::fs::create_dir_all(workspace).unwrap();
+    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workspace);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &session_fw.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+}
+
+/// Issue #4322: the FLEET LIST path must not probe `Stopped` sessions — that
+/// probe is ~95 filesystem reads per session and dominated cold `tm ls`
+/// latency, while telling the operator nothing actionable until resume.
+///
+/// This pins BOTH halves of the contract, because either alone would be a
+/// silent regression:
+///   1. a genuinely stale STOPPED session is NOT flagged `stale_assets` by
+///      `checked_summaries` (proving the probe really was skipped — this
+///      assertion FAILS if `probe_staleness_in_list` is reverted to include
+///      `Stopped`), and
+///   2. that row carries `stale_assets_unchecked`, so its `stale_assets:
+///      false` can never be read as a "checked, and fresh" verdict.
+/// The companion `record_to_summary_checked_still_flags_stale_stopped_session`
+/// proves the SIGNAL itself was not deleted — the same record, fetched
+/// individually (the resume path), still reports stale.
+#[tokio::test]
+#[serial_test::serial]
+async fn checked_summaries_does_not_probe_stopped_sessions() {
+    let (home, _guard) = fake_home();
+    let workspace = home.path().join("stopped-drifted");
+    deploy_then_drift_catalog(&workspace);
+
+    let mut stopped = make_record(None);
+    stopped.state = ManagedSessionState::Stopped;
+    stopped.workspace_path = Some(workspace);
+
+    let summaries = checked_summaries(std::slice::from_ref(&stopped)).await;
+
+    assert!(
+        !summaries[0].stale_assets,
+        "the fleet list must NOT probe a Stopped session — a `true` here means \
+         the per-session filesystem probe ran anyway (#4322 regression)"
+    );
+    assert!(
+        summaries[0].stale_assets_unchecked,
+        "an unprobed Stopped row must advertise that its asset verdict is \
+         UNDETERMINED — absence of `[stale-assets]` must never read as 'fresh'"
+    );
+}
+
+/// Issue #4322 correctness gate: skipping the probe on the LIST path must not
+/// delete the SIGNAL. The single-session fetch (`GET …/managed/{id}`, which
+/// `tm session resume` reads — the exact moment a stopped session's drift
+/// becomes actionable) must still flag the very same genuinely-stale STOPPED
+/// record its list row leaves undetermined.
+#[tokio::test]
+#[serial_test::serial]
+async fn record_to_summary_checked_still_flags_stale_stopped_session() {
+    let (home, _guard) = fake_home();
+    let workspace = home.path().join("stopped-drifted-on-demand");
+    deploy_then_drift_catalog(&workspace);
+
+    let mut stopped = make_record(None);
+    stopped.state = ManagedSessionState::Stopped;
+    stopped.workspace_path = Some(workspace);
+
+    let summary = super::summary::record_to_summary_checked(&stopped).await;
+
+    assert!(
+        summary.stale_assets,
+        "the on-demand single-session path must still detect a Stopped \
+         session's deployed-asset drift — a fast `tm ls` that never detects \
+         staleness anywhere is a regression, not a fix"
+    );
+    assert!(
+        !summary.stale_assets_unchecked,
+        "the on-demand path DID check, so its verdict is authoritative"
     );
 }
 

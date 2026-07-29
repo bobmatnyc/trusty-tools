@@ -526,6 +526,24 @@ pub struct ManagedSessionSummary {
     /// Test: `managed_session_summary_deserializes_stale_assets_flag`.
     #[serde(default)]
     pub stale_assets: bool,
+    /// True when the daemon did NOT determine `stale_assets` for this session
+    /// even though checking it would be meaningful (issue #4322). Mirrors
+    /// `daemon::managed_routes::SessionSummary::stale_assets_unchecked`
+    /// field-for-field.
+    ///
+    /// Why: the fleet list stopped probing `Stopped` sessions (their
+    /// per-session filesystem comparison dominated cold `tm ls` latency), so
+    /// `stale_assets: false` on those rows means "not determined", NOT
+    /// "fresh". Carrying that distinction on the wire is what lets
+    /// `render_session_table` print an honest `[assets ?]` instead of silently
+    /// implying freshness. `#[serde(default)]` keeps the client tolerant of an
+    /// OLDER daemon that omits the field — `false` is exactly right there,
+    /// since such a daemon probed every meaningful state.
+    /// What: a plain bool, `true` only for `stopped` rows from a daemon that
+    /// carries this fix.
+    /// Test: `managed_session_summary_defaults_stale_assets_unchecked_false`.
+    #[serde(default)]
+    pub stale_assets_unchecked: bool,
     /// True when a tmux client is currently ATTACHED to this session (live-tmux
     /// reconciliation; mirrors `daemon::managed_routes::SessionSummary::attached`).
     ///
