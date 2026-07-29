@@ -215,7 +215,7 @@ fn admin_dir_name(worktree: &Path) -> Option<String> {
 /// — everything else, including every unanswerable probe. Report, never act.
 /// Test: `stopped_records_workspace_is_live_not_orphaned`,
 /// `clean_ownerless_admitted_worktree_is_orphaned`,
-/// `record_pointing_at_a_plain_directory_is_unknown`.
+/// `reconcile_keys_on_the_git_registry_not_the_path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconcileState {
@@ -382,7 +382,7 @@ pub struct ReconcileReport {
 /// is an inaccurate report.
 /// Test: `report_unions_registry_and_session_records`,
 /// `stopped_records_workspace_is_live_not_orphaned`,
-/// `record_pointing_at_a_plain_directory_is_unknown`,
+/// `reconcile_keys_on_the_git_registry_not_the_path`,
 /// `clean_ownerless_admitted_worktree_is_orphaned`,
 /// `reconcile_keys_on_the_git_registry_not_the_path`.
 pub fn reconcile_worktrees(
@@ -482,7 +482,7 @@ fn count(entries: &[ReconciledWorktree]) -> ReconcileCounts {
 /// then ORPHANED only for an ADMITTED entry whose sentinel names a provably
 /// ownerless owner and whose tree is clean; else UNKNOWN with the reason.
 /// Test: `stopped_records_workspace_is_live_not_orphaned`,
-/// `record_pointing_at_a_plain_directory_is_unknown`,
+/// `reconcile_keys_on_the_git_registry_not_the_path`,
 /// `clean_ownerless_admitted_worktree_is_orphaned`.
 fn classify(
     path: &Path,

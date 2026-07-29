@@ -40,7 +40,7 @@ use crate::daemon::state::DaemonState;
 /// axum matches them ahead of the `…/managed/{id}` param route regardless of
 /// where this sub-router is merged.
 /// Test: `reconcile_worktrees_route_reports_without_mutating`;
-/// `prune_worktrees_route_dry_run` covers the prune half.
+/// `prune_spares_a_stopped_records_workspace` covers the prune half.
 pub fn worktree_routes() -> Router<Arc<DaemonState>> {
     Router::new()
         .route(
