@@ -6,8 +6,9 @@
 //!
 //! What: For each stable-set member, reports the installed version (via
 //! `<binary> --version`) and — for daemons — a coarse health verdict (via the
-//! shared `probe::probe_member_health`, strategy-aware so process-managed
-//! members like trusty-mpm report `unknown` rather than a false `down`).
+//! shared `probe::probe_member_health` — an HTTP `GET /health` probe since
+//! #4246, strategy-aware so process-managed members like trusty-mpm report
+//! `unknown` rather than a false `down`).
 //! Renders a human table or a `--json` envelope. Returns exit 0 when every
 //! daemon is healthy (or absent/unknown-but-reported), 2 when a daemon is down.
 //!

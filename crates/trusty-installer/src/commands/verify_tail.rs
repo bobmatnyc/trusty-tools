@@ -17,14 +17,19 @@
 //!    reimplemented; only the CLI-level render is skipped so `--json` install
 //!    output stays a single JSON object).
 //! 2. Probes health for every selected daemon member.
-//! 3. For any `down` LAUNCHD daemon (the #2498 failure signature: `launchctl
-//!    bootstrap` succeeds but `RunAtLoad` doesn't fire), issues one
+//! 3. For any CONFIRMED-down LAUNCHD daemon (the #2498 failure signature:
+//!    `launchctl bootstrap` succeeds but `RunAtLoad` doesn't fire), issues one
 //!    `launchctl kickstart -k gui/<uid>/<label>` and then, instead of a single
 //!    instant re-probe (#3833 — this raced trusty-search's first-boot
 //!    embedding-model download and reported a false `NOT VERIFIED`),
 //!    [`poll_until_not_down`] re-probes on a bounded ~60s schedule so a
 //!    slow-but-healthy daemon is given real wall-clock time to come up before
 //!    the verdict is finalised.
+//!    "Confirmed" is load-bearing (#4246): the kickstart fires only on
+//!    [`ProbeOutcome::is_confirmed_down`] — a TCP refusal or a timeout — never on
+//!    a schema/envelope problem. Before that gate, `tctl install` hard-restarted
+//!    every healthy daemon on every run, because the probe shelled out to a
+//!    `health --json` verb no daemon implements and read the failure as `down`.
 //! 4. A member still `down` after that wait is classified into one of three
 //!    distinct end states via `super::verify_launchd_state::classify_down_state`
 //!    — [`DownState::NotLoaded`], [`DownState::Crashed`], or

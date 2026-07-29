@@ -4,7 +4,8 @@
 //! strategy-aware health probe across every stable-set daemon and reduces the
 //! per-member verdicts to one overall verdict.
 //!
-//! What: probes each daemon member via `probe::probe_member_health`, builds a
+//! What: probes each daemon member via `probe::probe_member_health` (an HTTP
+//! `GET /health` probe since #4246, not a `health --json` subprocess), builds a
 //! [`HealthReport`], renders a human matrix or `--json` envelope, and returns an
 //! exit code (0 ready, 2 when any daemon is `down`).
 //!
@@ -53,7 +54,7 @@ impl HealthReport {
     /// to `degraded`. A `down` daemon is the running-but-broken failure signal; a
     /// `not_installed` member is a real gap in the resolved stable set (an
     /// operator after a failed install must NOT see green). Only a genuinely
-    /// `unknown` member (e.g. trusty-mpm, which has no `health --json` verb) does
+    /// `unknown` member (e.g. trusty-mpm, deliberately left unprobed — #4246) does
     /// NOT degrade — its health is unprobeable, not absent. `stale` also stays
     /// non-degrading (running, just below the version floor).
     /// Test: `tests::verdict_down_is_degraded`,
