@@ -10,13 +10,15 @@
 //! promoted here rather than copied a third time.
 //!
 //! What: [`ENV_TEST_LOCK`] (the process-global serialiser every env-mutating
-//! test must hold), [`stub_once`] / [`stub_seq`] (one-shot and sequenced
-//! loopback servers), and [`stub_data_dir`] / [`stub_empty_data_dir`] /
+//! test must hold), [`stub_once`] / [`stub_seq`] / [`stub_hang`] /
+//! [`stub_seq_blocking`] (loopback servers: one-shot, sequenced, silent, and one
+//! hosted on its own thread for callers that block), [`dead_addr`] (an address
+//! guaranteed to refuse), and [`stub_data_dir`] / [`stub_empty_data_dir`] /
 //! [`clear_data_dir_override`] (a throwaway data dir with or without a planted
 //! `http_addr`).
 //!
 //! Test: this module IS test support; it is exercised by every test that imports
-//! it (`ensure::project_setup`, `probe_http`, `verify_tail`).
+//! it (`ensure::project_setup`, `probe`, `probe_http`, `verify_tail`).
 
 /// Process-wide lock serialising tests that mutate global env vars.
 ///
@@ -31,6 +33,26 @@
 /// Test: used by the env-mutating tests in `ensure::{daemon, project_setup,
 /// readiness}`, `probe_http`, and `verify_tail`.
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A member binary name that is guaranteed resolvable on PATH, has NO documented
+/// default port, and is not a real trusty daemon (#4246).
+///
+/// Why: `probe::probe_member_health` short-circuits to
+/// `ProbeOutcome::NotInstalled` before it ever reaches the HTTP transport when
+/// `resolve_binary_path` finds nothing — so a test that wants to exercise the
+/// probe→kickstart-gate path cannot use a made-up binary name. Using a REAL
+/// member name instead (`trusty-search`, …) is worse: `fixed_port_for` would
+/// resolve its documented port and the probe's second leg would hit whatever
+/// daemon happens to be running on the developer's machine, making the test
+/// environment-dependent. `sh` satisfies all three constraints: always present
+/// on the unix targets this crate's tests already assume (they spawn `echo` and
+/// `sleep` unconditionally), absent from
+/// [`crate::commands::probe_http::fixed_port_for`], and never a daemon — so the
+/// ONLY address that resolves is the `http_addr` the test itself plants.
+/// What: `"sh"`.
+/// Test: used by `probe::tests::probe_member_health_*` and
+/// `verify_tail::tests::verify_one_*`.
+pub(crate) const PROBEABLE_BINARY: &str = "sh";
 
 /// Spawn a one-shot TCP server that answers the first request with a fixed
 /// HTTP response, and return its `host:port`.
@@ -51,47 +73,151 @@ pub(crate) async fn stub_once(status_line: &'static str, body: &'static str) -> 
 /// Why: some flows issue two requests (`ensure`'s palace-create does an
 /// existence GET then a create POST); covering those needs a stub that can
 /// answer differently per connection.
-/// What: binds an ephemeral loopback port, accepts `responses.len()`
-/// connections, and writes each `(status_line, body)` in turn.
+///
+/// # Preconditions
+/// The caller must remain on a runtime that can poll the spawned accept loop —
+/// i.e. it must `await` rather than block. A caller that blocks its own runtime
+/// thread (the #4246 sync probe bridge) must use [`stub_seq_blocking`] instead,
+/// or the accept loop never runs and the probe times out.
+/// What: binds an ephemeral loopback port, `tokio::spawn`s the accept loop, and
+/// returns the bound address.
 /// Test: used by `ensure::project_setup::tests::create_palace_created`.
 pub(crate) async fn stub_seq(responses: Vec<(&'static str, &'static str)>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for (status_line, body) in responses {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                // Drain the request up to (and including) the end-of-headers
-                // marker before replying. A single fixed-size read can split
-                // a request whose body is long, which used to race the write
-                // and flake CI; reading until `\r\n\r\n` (or EOF) consumes the
-                // whole header block deterministically. We don't need the body
-                // — only that the request is fully sent.
-                let mut acc = Vec::with_capacity(2048);
-                let mut chunk = [0u8; 2048];
-                loop {
-                    match sock.read(&mut chunk).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            acc.extend_from_slice(&chunk[..n]);
-                            if acc.windows(4).any(|w| w == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+    tokio::spawn(serve_fixed(listener, responses));
+    addr
+}
+
+/// Answer `responses.len()` connections on `listener`, one fixed response each.
+///
+/// Why: the shared body of [`stub_seq`] and [`stub_seq_blocking`] — the two
+/// differ only in WHERE the accept loop is driven, never in what it answers, and
+/// a second copy of the header-draining logic would be free to drift.
+/// What: for each `(status_line, body)`, accepts one connection, drains the
+/// request headers, writes the response with a correct `Content-Length`, and
+/// shuts the socket down.
+/// Test: exercised by every stub-server test in the crate.
+async fn serve_fixed(
+    listener: tokio::net::TcpListener,
+    responses: Vec<(&'static str, &'static str)>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (status_line, body) in responses {
+        let Ok((mut sock, _)) = listener.accept().await else {
+            break;
+        };
+        // Drain the request up to (and including) the end-of-headers marker
+        // before replying. A single fixed-size read can split a request whose
+        // body is long, which used to race the write and flake CI; reading until
+        // `\r\n\r\n` (or EOF) consumes the whole header block deterministically.
+        // We don't need the body — only that the request is fully sent.
+        let mut acc = Vec::with_capacity(2048);
+        let mut chunk = [0u8; 2048];
+        loop {
+            match sock.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&chunk[..n]);
+                    if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
                     }
                 }
-                let resp = format!(
-                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            } else {
-                break;
+                Err(_) => break,
             }
         }
+        let resp = format!(
+            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+        let _ = sock.shutdown().await;
+    }
+}
+
+/// [`stub_seq`], but hosted on its own thread and callable from sync code
+/// (#4246).
+///
+/// Why: `probe_http::probe_member_http_blocking` BLOCKS its caller — that is its
+/// contract, because `tctl`'s dispatch is synchronous. A stub whose accept loop
+/// lives on the *test's* runtime would therefore deadlock: the test blocks
+/// waiting for a response the runtime cannot produce because the test is holding
+/// it. Hosting the stub on a wholly separate thread + runtime removes the shared
+/// resource, which is what lets `verify_one`'s kickstart-gate tests be plain
+/// `#[test]` functions driving the REAL probe.
+/// What: spawns a thread with its own current-thread runtime that binds the
+/// listener, reports the address back over a channel, then serves `responses`.
+/// The thread exits once every response is written.
+/// Test: used by `probe::tests::probe_member_health_*` and
+/// `verify_tail::tests::verify_one_*`.
+pub(crate) fn stub_seq_blocking(responses: Vec<(&'static str, &'static str)>) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        rt.block_on(async move {
+            let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:0").await else {
+                return;
+            };
+            let Ok(addr) = listener.local_addr() else {
+                return;
+            };
+            if tx.send(addr.to_string()).is_err() {
+                return;
+            }
+            serve_fixed(listener, responses).await;
+        });
     });
+    rx.recv()
+        .expect("stub server must report its bound address")
+}
+
+/// Spawn a TCP server that ACCEPTS connections and then never answers, and
+/// return its `host:port` (#4246).
+///
+/// Why: `ProbeOutcome::Timeout` and `ProbeOutcome::Refused` must be
+/// distinguishable — that distinction is the whole basis of the confirmed-down
+/// kickstart gate. A refusal is easy to stage ([`dead_addr`]); a timeout needs a
+/// peer that completes the TCP handshake and then goes silent, which is exactly
+/// the wedged-daemon shape the bound exists for.
+/// What: binds an ephemeral loopback port and holds every accepted socket open
+/// (never writing) until the test process ends. Returns the bound address.
+/// Test: `probe_http::tests::probe_distinguishes_failure_causes`.
+pub(crate) async fn stub_hang() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            // Keep the socket alive — dropping it would send FIN and turn the
+            // timeout under test into a connection-closed error instead.
+            held.push(sock);
+        }
+    });
+    addr
+}
+
+/// A loopback `host:port` guaranteed to REFUSE a connection.
+///
+/// Why: the confirmed-down half of the probe taxonomy needs a deterministic
+/// "nothing is listening" address. Hardcoding a port risks colliding with a real
+/// daemon on the developer's machine (this workspace has had three port
+/// collisions); binding an ephemeral port and immediately releasing it yields an
+/// address the OS has just confirmed is free. Deliberately sync (`std::net`) so
+/// it is usable from both `#[test]` and `#[tokio::test]`.
+/// What: binds `127.0.0.1:0`, records the address, drops the listener, and
+/// returns the address.
+/// Test: `probe_http::tests::probe_distinguishes_failure_causes`,
+/// `probe_http::tests::probe_port_walked_daemon_is_healthy`,
+/// `verify_tail::tests::verify_one_kickstarts_a_genuinely_down_launchd_daemon`.
+pub(crate) fn dead_addr() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
     addr
 }
 

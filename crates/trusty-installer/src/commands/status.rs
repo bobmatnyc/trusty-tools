@@ -106,7 +106,13 @@ pub fn run(json: bool) -> i32 {
     for m in stable_set() {
         let installed = installed_version(&m.binary);
         let (health, daemon) = if m.daemon {
-            (probe_member_health(&m.binary, m.manage), true)
+            // #4246: the probe is now typed; `status` renders only the flat word.
+            (
+                probe_member_health(&m.binary, m.manage)
+                    .health_string()
+                    .to_owned(),
+                true,
+            )
         } else {
             (
                 if installed.is_some() {

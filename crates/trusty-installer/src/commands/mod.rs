@@ -28,6 +28,8 @@ pub mod plist_label;
 pub mod port;
 pub mod prereqs;
 pub mod probe;
+// #4246: the HTTP `/health` transport behind every health verdict.
+pub mod probe_http;
 pub mod progress_ui;
 pub mod runtime;
 pub mod self_update;

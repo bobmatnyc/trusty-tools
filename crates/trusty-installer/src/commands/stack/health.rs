@@ -96,7 +96,10 @@ pub fn run_health(json: bool) -> i32 {
         .into_iter()
         .filter(|m| m.daemon)
         .map(|m| HealthRow {
-            health: probe_member_health(&m.binary, m.manage),
+            // #4246: typed probe; the rollup renders the flat word.
+            health: probe_member_health(&m.binary, m.manage)
+                .health_string()
+                .to_owned(),
             member: m.crate_name,
         })
         .collect();

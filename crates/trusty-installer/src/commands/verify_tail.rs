@@ -472,7 +472,11 @@ fn apply_not_loaded_fallback_real(
         binary,
         manage,
         remaining_budget,
-        || probe_member_health(binary, manage),
+        || {
+            probe_member_health(binary, manage)
+                .health_string()
+                .to_owned()
+        },
         || std::thread::sleep(POLL_INTERVAL),
         || classify_down_state(binary),
     )
@@ -525,7 +529,9 @@ fn apply_not_loaded_fallback_real(
 /// `classify_down_state_from_entry`, `apply_not_loaded_fallback`.
 fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
     let start = Instant::now();
-    let mut health = probe_member_health(&m.binary, m.manage);
+    let mut health = probe_member_health(&m.binary, m.manage)
+        .health_string()
+        .to_owned();
     let mut kickstarted = false;
     let mut budget_exhausted = false;
     if needs_kickstart(&health, m.manage) {
@@ -536,7 +542,11 @@ fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
             let _ = kickstart(&m.binary);
             eprintln!("  waiting for {} to start...", m.binary);
             let (polled_health, _attempts) = poll_until_not_down(
-                || probe_member_health(&m.binary, m.manage),
+                || {
+                    probe_member_health(&m.binary, m.manage)
+                        .health_string()
+                        .to_owned()
+                },
                 || std::thread::sleep(POLL_INTERVAL),
                 bounded_attempts(remaining_budget),
             );

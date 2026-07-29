@@ -127,7 +127,10 @@ fn diagnose(m: &StableMember) -> MemberDoctor {
         Ok(Some(a)) if !a.is_empty()
     );
     MemberDoctor {
-        health: probe_member_health(&m.binary, m.manage),
+        // #4246: typed probe; the doctor row renders the flat word.
+        health: probe_member_health(&m.binary, m.manage)
+            .health_string()
+            .to_owned(),
         on_path,
         plist_installed,
         port_recorded,
