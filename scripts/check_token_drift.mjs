@@ -116,6 +116,7 @@ const ENFORCED = [
       ["border", "trusty-border"],
       ["primary", "trusty-accent"],
       ["info", "trusty-info"],
+      ["success", "trusty-success"],
       ["warning", "trusty-warning"],
       ["sidebar-accent", "trusty-sidebar-accent"],
     ],

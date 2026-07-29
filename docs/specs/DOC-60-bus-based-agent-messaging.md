@@ -3,7 +3,28 @@
 **Status:** Draft
 **Spec ID:** `SPEC-AGENTBUS-01~draft`
 **Subsystem:** trusty-mpm (bus host, daemon) — trusty-agents (assistants, sub-agents, ctrl) — trusty-channels (Slack/Telegram/etc.) — trusty-memory (consolidation target) — trusty-search (index target)
-**Last-updated:** 2026-07-28 (Rev 3: three owner decisions recorded — (1) the
+**Last-updated:** 2026-07-28 (Rev 4: owner-ratified decision that chat
+consolidates onto this bus — turn-level user prompts, assistant final
+responses, and peer messages are all canonical bus traffic, widening the
+bus's role beyond the peer channel it was originally scoped as and bringing
+§5.1 into scope for the bus path on equal footing with §5.3 (§1, §5.1); tool
+calls are explicitly excluded and stay intra-turn execution-loop metadata on
+the turn's response envelope, never independent bus traffic, for the same
+request/response-shaped cost reasons that already keep token deltas off this
+bus (§5.2, §11); the "all responses ride the bus" claim is reconciled
+explicitly against "no deltas ride the bus" — one completed-turn envelope,
+deltas over the legacy path only (§11); a read model / write model split is
+established — the bus is the durable write path and `trusty-memory`'s
+`chat_session` becomes a derived, read-side projection fed from the bus
+rather than an independent writer, with dual-writing chat as two
+independently-written durable records now explicitly prohibited (§9);
+sequencing is recorded — chat-view rehydration ships first against
+`chat_session` as written today, then the writer is re-pointed at the bus
+once §5.1 publishing and the replay/thread query surface land, frontend
+unchanged (§9); and a new open question on how a §5.1 user-edge publish is
+authenticated against PR #4261's registered-instance model is added,
+deliberately left unanswered (§12 Open Question 10). Rev 3: three owner
+decisions recorded — (1) the
 persona peer channel (§5.3) ships independently of ADR-0019, with the
 persona-layer-only scope of the "one bus" claim made explicit (§1); (2)
 instance-bypass addressing is in scope and normative in §5.3, with the
@@ -81,6 +102,25 @@ layer only** — user↔assistant, assistant↔sub-agent, assistant↔assistant
 whole: the tm-session (tmux CLI) lane keeps whatever delivery mechanism it
 has today, unaffected by and unintegrated with this spec, until ADR-0019 is
 separately implemented.
+
+**Owner decision: chat consolidates onto this bus.** User prompts, assistant
+final responses, and peer messages (§5.3) all ride this bus as turn-level
+messages — this bus is the system of record for chat, not only for the peer
+channel it was originally scoped to close (see "Why the peer-to-peer edge...
+is load-bearing" above). §5.1 (user ↔ assistant) is accordingly in scope for
+the bus path on the same footing as §5.3, not a second-class or aspirational
+edge. Two things explicitly do **not** ride this bus, for reasons stated
+where each is specified: tool calls, which stay intra-turn execution-loop
+metadata attached to the turn's response envelope rather than independent
+bus traffic (§5.2), and streaming token deltas, which remain on the retained
+per-crate buses for live rendering only (§11) — both excluded by the same
+cost argument: modelling a high-frequency, request/response-shaped or
+sub-message-granularity mechanism as durable, addressed bus envelopes would
+build an RPC layer, or a UI telemetry feed, inside a fabric designed for
+fire-and-forget delivery with a durable audit record. §9 records the
+corresponding read/write split: the bus is the write path and durable truth
+for chat; `trusty-memory`'s `chat_session` becomes a derived, read-side
+projection rather than a second independent writer.
 
 This is a DRAFT. It resolves what is answerable from the current codebase and
 flags the rest explicitly in §12 for the owner.
@@ -165,7 +205,7 @@ Verdicts:
 | 1 | trusty-mpm global hook/event bus (`event_tx`) | **SURVIVES**, scope-narrowed | Stays as `tm`'s process-local debug/SSE fan-out for UI streaming (`GET /events`). It is not addressed and is not asked to become addressed — the new bus (§5) carries agent messaging; this bus keeps carrying UI telemetry. Its consumers (coordinator TUI, `GET /events`) are unaffected. |
 | 2 | trusty-mpm per-session `SessionEvent` bus | **SURVIVES**, scope-narrowed | Same rationale as #1: session-lifecycle telemetry (backend spawn, stop reasons, stream-json passthrough) stays here. Cross-agent *messaging* moves off the substring-match `/sessions/{id}/events` path onto the new bus's addressed delivery (§5); the SSE endpoint keeps working for what it is actually good at — a debug tail. |
 | 3 | `trusty-agents-common::events::bus` (`HarnessEvent`) | **DELETED** | Zero consumers by its own module doc and confirmed by a workspace-wide import search. Nothing to migrate. Delete the module; do not carry its `HarnessPayload` vocabulary forward — the new bus's envelope (§11) is defined fresh from actual delivery requirements, not backfilled from an unused design. |
-| 4 | trusty-agents `events.rs` bus (20+-variant `Event`) | **SUBSUMED** | This is the richest existing domain vocabulary (`AgentMessage`, `ToolCalled`, `SlackMessageReceived`, `ListenerEventReceived`, …) and the closest thing to a real requirements list for the new bus's payload union. It does not survive as a separate transport: its UI-facing consumers (`repl/event_display.rs`, the SSE relay in `api/server/relay.rs`) are repointed to subscribe to the new bus, and its variant set seeds — but does not freeze — the new envelope's payload enum. |
+| 4 | trusty-agents `events.rs` bus (20+-variant `Event`) | **SUBSUMED** | This is the richest existing domain vocabulary (`AgentMessage`, `ToolCalled`, `SlackMessageReceived`, `ListenerEventReceived`, …) and the closest thing to a real requirements list for the new bus's payload union. It does not survive as a separate transport: its UI-facing consumers (`repl/event_display.rs`, the SSE relay in `api/server/relay.rs`) are repointed to subscribe to the new bus, and its variant set seeds — but does not freeze — the new envelope's payload enum (`ToolCalled` explicitly does NOT carry forward: tool calls are excluded from bus traffic entirely, owner decision recorded in §5.2/§11). |
 | 5 | trusty-code `events.rs` bus (`SessionEventEnvelope`) | **SURVIVES**, scope-narrowed | Same shape as #1/#2: it is trusty-code's session-attach replay/live continuity mechanism (`seq` is deliberately per-session, per its own module doc), not a cross-agent messaging path. It stays for that job. Any trusty-code-originated agent message (a workstream update that should reach an assistant) is published to the new bus, not re-derived from this one. |
 | — | `crates/trusty-agents/src/bus/mod.rs` (project-scoped `MessageBus`) | **SUBSUMED** | The one bus that was already addressed, just at the wrong granularity (project, not agent instance). Its transport shape (Unix socket, NDJSON envelope, broadcast fan-out per connection) is the strongest prior art in the codebase for the new bus's local delivery mechanics, but project-level routing does not compose with the per-instance addressing §6 requires. `ctrl/repl/mod.rs` and `runtime/startup.rs` are repointed to the new bus; `source_project`/`target_project` become one addressing dimension inside the new envelope (§11), not a separate wire format. |
 | — | `crates/trusty-mpm/src/daemon/audit.rs` (`AuditLogger`) | **SURVIVES**, target widened | Not a messaging bus — the durable JSONL sink §9 needs already exists. Widened to also receive bus envelopes (a second `logs_dir/bus/YYYY-MM-DD.jsonl` stream alongside the existing `overseer/` one), not rewritten. |
@@ -236,6 +276,18 @@ action — §8). This edge rides the bus so the user-facing surface (CLI, TUI,
 GUI, channel) can be swapped without the assistant knowing which one is
 listening.
 
+**Canonical for chat (owner-ratified 2026-07-28).** This edge is not merely
+specified alongside §5.3 — it is where the bus becomes the system of record
+for chat: a user's prompt and the assistant's completed final response are
+both turn-level messages on this edge, addressed and durable exactly as
+§5.3's peer messages are (§6, §9). This closes the gap between this
+section's original design-time framing and the bus's actual role — the bus
+is not a peer-only side-channel with user↔assistant as an
+equally-specified-but-lower-stakes edge; it is the canonical chat transport,
+full stop. What does NOT ride this edge as bus traffic: tool calls (§5.2) and
+streaming token deltas (§11) — both excluded by a shared cost argument
+stated where each is specified, not by this edge being partially in scope.
+
 - **Addressing.** A user message addresses an assistant `definition_id`
   (§6a) — "talk to izzie" — resolved at send time to a live `instance_id`
   (§6b) when one exists for that user+definition pair, or queued when none
@@ -270,6 +322,24 @@ to a path that today has neither. What DOES go on the bus is the **record**
 of that exchange (§9) — durability and search, not delivery mechanics — so
 the sub-agent's request/response is bus-searchable without the sub-agent
 process itself being a bus publisher.
+
+**Owner decision, generalized beyond this one edge: no tool call rides this
+bus, ever** — not `delegate_to_agent`/`dispatch_task` above, and not any
+other tool an assistant or sub-agent invokes (bash, git, file read/write,
+search, …). Tool calls stay inside the agent's own execution loop and are
+represented as structured metadata attached to the turn's response envelope
+(§11), never as independent bus traffic. Rationale, stated explicitly rather
+than left implicit: tool calls are intra-turn, high-frequency, and
+request/response-shaped; modelling them as envelopes would force correlation
+ids, ordering guarantees, partial-failure semantics, and timeouts into a
+fabric designed for fire-and-forget delivery with a durable record — i.e.
+building an RPC layer inside an audit bus — and would make every tool
+invocation both a network hop and a durable write. This is the same cost
+argument that already keeps token deltas off this bus (§11), applied to a
+different high-frequency category. `delegate_to_agent`/`dispatch_task` above
+are simply the one instance of this general rule that also happens to raise
+its own addressing question (this edge) — the rule itself is broader than
+this edge and governs every tool call an assistant or sub-agent makes.
 
 - **Addressing.** Not bus-addressed at all — the invoking assistant's own
   process holds the direct in-process reference to the sub-agent task it
@@ -582,6 +652,37 @@ path. This keeps the mandatory cost (JSONL write) flat and makes the
 expensive path (semantic indexing) something an operator turns on, not
 something every message pays for.
 
+**Read model / write model split, owner-ratified 2026-07-28: `chat_session`
+becomes a derived projection, not a second writer.**
+`<logs_dir>/bus/YYYY-MM-DD.jsonl` (above) is an append-only audit sink, not a
+query surface — rehydrating a chat view needs indexed query by agent, time
+range, and workstream, which scanning daily JSONL cannot serve and which
+degrades as the file set grows. The bus is therefore the WRITE path and
+durable truth for chat; the existing `trusty-memory` `chat_session` keyed
+`persona-{agent}` (`crates/trusty-agents/src/ctrl/pm_task/dispatch/
+persona_memory.rs`, `session_id_for`, DOC-54 §9.1 — "each agent maintains ONE
+continuous conversation per session") becomes a DERIVED PROJECTION fed from
+the bus, and is the surface the UI actually reads for chat rehydration.
+`persona_memory.rs`'s `spawn_persist_turn` stops being an independent writer
+once the projection is fed from the bus. **Explicit prohibition:** chat MUST
+NOT be dual-written as two independent durable records (the bus JSONL AND
+`chat_session`) — two independently-written copies of the same truth drift,
+and this section's own storage rationale above (one write path, `tm`'s
+existing durability discipline widened, not duplicated) is undermined the
+moment a second writer exists.
+
+**Sequencing.** Today, `spawn_persist_turn` writes `chat_session` directly —
+§5.1's bus-side user-edge publishing and the replay/thread query surface
+above do not exist yet. Chat-view rehydration ships FIRST against
+`chat_session` as it is written today, ahead of and independent from this
+spec's bus-side delivery landing. When §5.1's user-edge publishing and the
+replay/thread query surface land, the WRITER is re-pointed at the bus —
+`chat_session` is populated by consuming bus traffic instead of by direct
+persistence inside the persona dispatch path — and the frontend is
+unchanged, because the UI reads the projection either way. This makes the
+near-term `chat_session`-direct fix a step toward the target architecture,
+not throwaway work to be later discarded.
+
 ## 10. Messages vs. memories
 
 **Normative constraint, restated as a rule this spec is bound by:** the bus
@@ -618,6 +719,16 @@ requirement and the field the bus side must expose (`message_id`,
 globally unique, stable across the JSONL log's rotation) for
 `trusty-memory` to reference.
 
+**Distinct from §9's `chat_session` projection.** The `chat_session` derived
+projection (§9) is a complete, uncurated per-turn rehydration surface — it
+exists so a chat view can be redrawn, not so content becomes memory-eligible.
+It is unrelated to the curated-memory promotion this section governs:
+populating `chat_session` from the bus is not consolidation, carries no
+promotion decision, and does not make bus content memory-eligible by itself.
+The two pathways — chat rehydration (§9) and curated memory promotion (this
+section) — read the same underlying bus log but serve different purposes,
+and neither substitutes for the other.
+
 ## 11. Envelope schema (illustrative)
 
 Not normative wire format — illustrates how §6's three identifiers, §5's
@@ -652,7 +763,11 @@ payload vocabulary (§3 retirement #4) rather than invented from scratch.
 
   "delivery_state": "queued | delivered | acked | dropped",  // ADR-0019's acknowledgment requirement, carried into this bus too
 
-  "payload": { "type": "chat_text | tool_call | ... ", "...": "..." }  // seeded from events.rs's variant union, §3 #4
+  "payload": {
+    "type": "chat_text | ... ",              // deliberately NOT "tool_call" — see below
+    "tool_calls": [ /* structured metadata only, §5.2 */ ],
+    "...": "..."
+  }  // seeded from events.rs's variant union, §3 #4
 }
 ```
 
@@ -672,6 +787,27 @@ standalone meaning once the turn completes and no reason to be individually
 searchable, threaded (`in_reply_to`), or retained. Only the completed turn —
 the payload this envelope actually carries — is bus traffic; the deltas that
 assembled it are not.
+
+**Second explicit boundary, owner-decided: tool calls do NOT ride this bus
+either.** The payload schema above deliberately does not include a
+`tool_call` type, despite `events.rs`'s `ToolCalled` variant (§3 #4) being an
+available candidate — it is not carried forward. §5.2 states the full
+rationale (request/response-shaped, high-frequency, would force an RPC
+layer's guarantees onto a fire-and-forget fabric); this section states its
+consequence for the wire shape: a completed turn's envelope may carry a
+`tool_calls` array as descriptive metadata — which tools ran, in what order,
+summarized — but each individual tool call is never itself published,
+addressed, or durably logged as its own envelope.
+
+**Reconciling "every turn-level message rides the bus" (§1, §5.1) with "no
+deltas ride the bus" (above): these are not in tension.** A turn produces
+exactly ONE bus envelope — the completed response — regardless of how many
+intermediate token deltas or tool calls occurred while producing it. Deltas
+stream over the legacy per-crate buses (§3 #1/#2/#5) for live rendering only
+and are never durable bus traffic; tool calls are metadata inside the one
+completed envelope (above), never separate traffic. "Chat consolidates onto
+the bus" means the finished turn is canonical here — not that every event
+that occurred while producing it is.
 
 ## 12. Open questions
 
@@ -734,6 +870,24 @@ not this spec.
    *(Former Open Question 9 — whether a peer request may be decline-able —
    is no longer open: it is answered by derivation from ADR-0024's
    virtual-twin authority principle and is now normative text in §5.3.)*
+
+10. **How is a §5.1 user-edge publish authenticated?** PR #4261's
+    caller-identity fix (now on branch `feat/peer-bus-daemon-foundation`)
+    requires every publisher on the peer path to be a REGISTERED INSTANCE:
+    publish admits only `kind: assistant_instance`, resolves the claimed
+    `instance_id` through the registry, and re-stamps `definition_id` from
+    the registration so a sender cannot choose its own attribution.
+    `CallerKind::peer_edge()` is a total match and `user`/`channel` are
+    REJECTED, not mapped — deliberately, because routing them there is the
+    delegation hole ADR-0024 closes. A user prompt has no instance
+    registration, so admitting the §5.1 edge onto the same publish path is
+    NOT a one-line match-arm addition: it needs a stated authentication rule
+    for user-originated publishes that does not reopen the forgery path
+    (an assistant publishing as `kind: user`, and a receiving assistant
+    treating that as a genuine user instruction — reconstituting the
+    assistant→assistant delegation ADR-0024 closes, under a different
+    label). This spec frames the question; the answer is left to the owner
+    and the engineer implementing §5.1's bus-side publishing.
 
 ## 13. DOC-N numbering note
 

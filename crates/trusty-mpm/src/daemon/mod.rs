@@ -12,6 +12,8 @@
 pub mod api;
 pub mod audit;
 pub mod bug_report;
+/// The peer message bus (DOC-60 §5.3) — envelope, pub/sub, instance registry.
+pub mod bus;
 pub mod claude_config;
 pub mod coordinator;
 pub mod discover;
