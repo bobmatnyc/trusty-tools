@@ -199,21 +199,17 @@ fn multiple_emails_same_person() {
 /// `configs/duetto-contractors.yaml` setup. This guards against
 /// regressions in YAML schema, path resolution, or resolver wiring.
 ///
-/// The fixture is materialized into a temp dir so the test is
+/// The fixture is materialized into a `tempfile::TempDir` so the test is
 /// hermetic: it does not depend on absolute paths outside the repo
-/// (which would fail in CI).
+/// (which would fail in CI). Previously this built its own `pid + nanos`
+/// directory name, the same scheme that raced in the #4251 helper below —
+/// `process::id()` is constant within a test binary and the `SystemTime`
+/// remainder is coarser than a nanosecond, so the name is not actually
+/// unique. `TempDir` also cleans up on panic, which the manual path did not.
 #[test]
 fn duetto_contractors_config_resolves() {
-    let unique = format!(
-        "tga-duetto-contractors-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let tmp = std::env::temp_dir().join(unique);
-    std::fs::create_dir_all(&tmp).expect("create tmp");
+    let tmpdir = tempfile::TempDir::new().expect("create tmp");
+    let tmp = tmpdir.path();
 
     // Aliases file with a subset of the real Duetto contractor map,
     // including the cases the assertions below exercise (case-folding,
@@ -260,8 +256,6 @@ developers:
     // Non-email login handle alias.
     let (n, _) = r.resolve("jangareddy-duetto", "noise@nowhere.test");
     assert_eq!(n, "Janga Vinod Kumar Reddy");
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -461,6 +455,436 @@ fn tier3_still_matches_same_domain_near_identical_local_parts() {
     let (name, email) = r.resolve("acoopr", "alice.coopr@acme.com");
     assert_eq!(name, "Alice Cooper");
     assert_eq!(email, "alice.cooper@acme.com");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4251 — Tier-3/4 fuzzy fallback must not fire when a comprehensive
+// `aliases_file` is supplied.
+// ---------------------------------------------------------------------------
+
+/// Roster excerpt from the production Duetto alias map (177 entries) — only the
+/// members implicated in the #4251 misattributions, plus two entries whose
+/// explicit aliases must keep resolving through Tiers 1/2.
+const ISSUE_4251_ALIASES_YAML: &str = r#"
+developers:
+  - name: "Crislaine Tripoli"
+    primary_email: "crislaine.tripoli@duettoresearch.com"
+    aliases: []
+  - name: "Ravi Pandey"
+    primary_email: "ravi.pandey@duettoresearch.com"
+    aliases: []
+  - name: "Gaurav Sharma"
+    primary_email: "gaurav.sharma@duettoresearch.com"
+    aliases: []
+  - name: "Joshua Lepage"
+    primary_email: "joshua.lepage@duettoresearch.com"
+    aliases: []
+  - name: "Joshua McCartney"
+    primary_email: "joshua.mccartney@duettoresearch.com"
+    aliases: []
+  - name: "Akash Arora"
+    primary_email: "akash.arora@duettoresearch.com"
+    aliases:
+      - "Akash.Arora-c@duettoresearch.com"
+      - "akash-duetto"
+  - name: "Andre Ramos"
+    primary_email: "andre.ramos@duettoresearch.com"
+    aliases:
+      - "129991831+andreramosduetto@users.noreply.github.com"
+"#;
+
+/// The `(author_name, author_email)` pairs observed in production `tga.db` that
+/// #4251 reports as misattributed, paired with the roster member each was
+/// wrongly collapsed onto.
+const ISSUE_4251_MISATTRIBUTIONS: &[(&str, &str, &str)] = &[
+    (
+        "Cristian Dominguez",
+        "cristian.dominguez@duettoresearch.com",
+        "Crislaine Tripoli",
+    ),
+    (
+        "Ravi Chandrasekaran",
+        "ravi.chandrasekaran@duettoresearch.com",
+        "Ravi Pandey",
+    ),
+    (
+        "Gauri Saykar",
+        "gauri.saykar@duettoresearch.com",
+        "Gaurav Sharma",
+    ),
+    ("Josh Taylor", "josh@duettoresearch.com", "Joshua Lepage"),
+    ("Joseph Ku", "joseph.ku@duettoresearch.com", "Joshua Lepage"),
+];
+
+/// Materialize a `config.yaml` + external `aliases_file` pair into a private
+/// temp directory and load it through the real
+/// [`crate::core::config::Config::load`] path, returning `(resolver, tmpdir)`.
+/// The caller must keep `tmpdir` alive for the duration of the test.
+///
+/// Why: #4251 is a *config-shape* defect — it only manifests when the alias map
+/// arrives via `aliases_file`. Constructing the resolver by hand would bypass
+/// the very wiring under test.
+///
+/// Uses [`tempfile::TempDir`] rather than a hand-rolled `pid + nanos` name.
+/// Tests in one binary share a process, so `process::id()` is constant, and the
+/// `SystemTime` remainder is coarser than a nanosecond on macOS: hand-rolled
+/// names collided across the parallel tests below, and each test's cleanup then
+/// deleted a directory another test was still using. Because
+/// `Config::resolved_aliases()` swallows alias-file load errors, the victim
+/// silently got a resolver with ZERO members — which returns every input
+/// unchanged and so satisfied the primary #4251 assertion *vacuously*.
+/// `TempDir` gives a kernel-guaranteed unique name and RAII cleanup that also
+/// runs on panic.
+fn resolver_from_aliases_file(extra_config_yaml: &str) -> (IdentityResolver, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    let aliases_path = tmp.path().join("aliases.yaml");
+    std::fs::write(&aliases_path, ISSUE_4251_ALIASES_YAML).unwrap();
+
+    let config_yaml = format!(
+        "version: \"1.0\"\naliases_file: \"{}\"\n{extra_config_yaml}",
+        aliases_path.to_string_lossy()
+    );
+    let config_path = tmp.path().join("config.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let cfg = crate::core::config::Config::load(&config_path).unwrap();
+    (IdentityResolver::from_config(&cfg), tmp)
+}
+
+/// Assert the roster actually loaded.
+///
+/// Why: a resolver built from a failed alias load has zero members and returns
+/// **every** input unchanged — which is exactly what the #4251 pass-through
+/// assertions check. Without this positive control those assertions can pass
+/// against a resolver that never read the alias file. `fuzzy_fallback()` is not
+/// a substitute: it is derived from config, not from load success.
+fn assert_roster_loaded(r: &IdentityResolver) {
+    assert_eq!(
+        r.resolve("whoever", "crislaine.tripoli@duettoresearch.com"),
+        (
+            "Crislaine Tripoli".to_string(),
+            "crislaine.tripoli@duettoresearch.com".to_string()
+        ),
+        "non-vacuity: the roster must actually be loaded, otherwise a \
+         pass-through result proves nothing"
+    );
+    assert_eq!(
+        r.resolve("akash-duetto", "noise@nowhere.test").0,
+        "Akash Arora",
+        "non-vacuity: declared login-handle aliases must be present"
+    );
+}
+
+/// Issue #4251 (primary reproduction): with a comprehensive `aliases_file`
+/// supplied, an author who has no alias entry must pass through UNCHANGED
+/// rather than being fuzzy-guessed onto the nearest-spelled roster member.
+///
+/// Each pair below is a real production misattribution. The precondition
+/// assertions prove the fuzzy tiers genuinely clear their thresholds on these
+/// inputs, so the test cannot pass vacuously.
+#[test]
+fn aliases_file_disables_tier34_name_fuzzy() {
+    let (r, _tmp) = resolver_from_aliases_file("");
+    assert!(
+        !r.fuzzy_fallback(),
+        "supplying an aliases_file must disable the fuzzy fallback"
+    );
+    // MUST come first: everything below asserts pass-through, which a
+    // zero-member resolver would also satisfy.
+    assert_roster_loaded(&r);
+
+    // Collect every resolution before asserting so a failure reports the whole
+    // misattribution set, not just the first pair to trip.
+    let mut observed: Vec<String> = Vec::new();
+    let mut expected: Vec<String> = Vec::new();
+    for (name, email, wrong_target) in ISSUE_4251_MISATTRIBUTIONS {
+        // Precondition: at least one fuzzy tier really does score this pair
+        // above its acceptance threshold, i.e. the defect is live in the
+        // scoring functions and this assertion is guarding real behaviour.
+        let raw_name = jaro_winkler(&name.to_lowercase(), &wrong_target.to_lowercase());
+        let norm_local = jaro_winkler(
+            &normalize_for_fuzzy(&email_local_part(email)),
+            &normalize_for_fuzzy(wrong_target),
+        );
+        assert!(
+            raw_name >= DEFAULT_SIMILARITY_THRESHOLD
+                || norm_local >= NORMALIZED_SIMILARITY_THRESHOLD,
+            "precondition: {name} vs {wrong_target} must be fuzzy-reachable \
+             (tier3 name={raw_name:.4}, tier4 normalized={norm_local:.4})"
+        );
+
+        let (resolved_name, resolved_email) = r.resolve(name, email);
+        observed.push(format!(
+            "{name} <{email}> => {resolved_name} <{resolved_email}>"
+        ));
+        // Correct behaviour: an undeclared identity is returned untouched.
+        expected.push(format!("{name} <{email}> => {name} <{email}>"));
+    }
+    assert_eq!(
+        observed, expected,
+        "#4251: undeclared authors must pass through, not be guessed onto the \
+         nearest-spelled roster member"
+    );
+}
+
+/// The #4251 gate must not cost us the alias-table resolutions that the
+/// 130 → 177 entry expansion was made FOR. Every genuine correction rides on
+/// Tiers 1/2 (exact alias / canonical email / login handle), which the gate
+/// leaves untouched.
+#[test]
+fn aliases_file_gate_preserves_tier12_declared_resolutions() {
+    let (r, _tmp) = resolver_from_aliases_file("");
+
+    // Declared secondary email (the `-c` contractor variant) → canonical pair.
+    let (n, e) = r.resolve("whoever", "Akash.Arora-c@duettoresearch.com");
+    assert_eq!(n, "Akash Arora");
+    assert_eq!(e, "akash.arora@duettoresearch.com");
+
+    // Declared non-email login handle.
+    let (n, e) = r.resolve("akash-duetto", "noise@nowhere.test");
+    assert_eq!(n, "Akash Arora");
+    assert_eq!(e, "akash.arora@duettoresearch.com");
+
+    // Declared GitHub noreply alias.
+    let (n, e) = r.resolve(
+        "andreramosduetto",
+        "129991831+andreramosduetto@users.noreply.github.com",
+    );
+    assert_eq!(n, "Andre Ramos");
+    assert_eq!(e, "andre.ramos@duettoresearch.com");
+
+    // Canonical email, case-folded.
+    let (n, e) = r.resolve("whoever", "CRISLAINE.TRIPOLI@DUETTORESEARCH.COM");
+    assert_eq!(n, "Crislaine Tripoli");
+    assert_eq!(e, "crislaine.tripoli@duettoresearch.com");
+}
+
+/// `fuzzy_identity_fallback: true` is the documented escape hatch: a project
+/// that wants the old guessing behaviour alongside its alias file can say so,
+/// and then the reported misattributions come back.
+#[test]
+fn explicit_opt_in_reenables_fuzzy_with_aliases_file() {
+    let (r, _tmp) = resolver_from_aliases_file("fuzzy_identity_fallback: true\n");
+    assert!(
+        r.fuzzy_fallback(),
+        "explicit opt-in must re-enable Tier 3/4"
+    );
+    assert_roster_loaded(&r);
+
+    // With fuzzy back on, `Gauri Saykar` collapses onto `Gaurav Sharma` again —
+    // the exact defect #4251 reports, proving the flag is load-bearing and the
+    // primary test above is not passing for some unrelated reason.
+    let (n, _) = r.resolve("Gauri Saykar", "gauri.saykar@duettoresearch.com");
+    assert_eq!(n, "Gaurav Sharma");
+}
+
+/// The non-vacuity control must actually reject a resolver that never loaded
+/// the roster.
+///
+/// Why: `assert_roster_loaded` is the only thing standing between a zero-member
+/// resolver and a vacuously-green #4251 proof. Measured on the pre-fix helper,
+/// a zero-member resolver satisfied **every** assertion of
+/// `aliases_file_disables_tier34_name_fuzzy`, including `!fuzzy_fallback()` —
+/// pass-through is what an empty resolver does. A guard nobody proves is
+/// load-bearing is not a guard, so this pins it.
+#[test]
+#[should_panic(expected = "non-vacuity")]
+fn non_vacuity_control_rejects_zero_member_resolver() {
+    let empty: HashMap<String, Vec<String>> = HashMap::new();
+    let r = IdentityResolver::from_alias_map(&empty);
+    // Sanity: this resolver passes everything through, exactly like the racing
+    // zero-member resolver did.
+    assert_eq!(
+        r.resolve(
+            "Cristian Dominguez",
+            "cristian.dominguez@duettoresearch.com"
+        ),
+        (
+            "Cristian Dominguez".to_string(),
+            "cristian.dominguez@duettoresearch.com".to_string()
+        )
+    );
+    assert_roster_loaded(&r); // must panic
+}
+
+/// A declared-but-unloadable `aliases_file` must NOT disable the fallback.
+///
+/// Why: `Config::resolved_aliases` swallows alias-file load errors. If the gate
+/// keyed on the mere presence of the `aliases_file` key, a typo'd path would
+/// produce an empty alias table AND a disabled fallback — every author
+/// fragments to its raw identity and nothing in the resolution path says why.
+/// Gating on a successful, non-empty load means a broken config degrades to the
+/// documented pre-#4251 behaviour instead of to silent fragmentation.
+#[test]
+fn broken_aliases_file_keeps_fuzzy_enabled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let missing = tmp.path().join("does-not-exist.yaml");
+    let config_yaml = format!(
+        "version: \"1.0\"\naliases_file: \"{}\"\n",
+        missing.to_string_lossy()
+    );
+    let config_path = tmp.path().join("config.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let cfg = crate::core::config::Config::load(&config_path).unwrap();
+    // Precondition: the alias map really did fail to load, and the failure
+    // really is swallowed — this is the trap being guarded.
+    assert!(cfg.resolved_alias_map(cfg.config_dir()).is_err());
+    assert!(cfg.resolved_aliases().is_empty());
+
+    let r = IdentityResolver::from_config(&cfg);
+    assert!(
+        r.fuzzy_fallback(),
+        "a declared aliases_file that failed to load must not be treated as a \
+         comprehensive alias table"
+    );
+}
+
+/// An `aliases_file` that loads but declares no developers is equally not a
+/// comprehensive table, and must not disable the fallback either.
+#[test]
+fn empty_aliases_file_keeps_fuzzy_enabled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let aliases_path = tmp.path().join("aliases.yaml");
+    std::fs::write(&aliases_path, "developers: []\n").unwrap();
+    let config_yaml = format!(
+        "version: \"1.0\"\naliases_file: \"{}\"\n",
+        aliases_path.to_string_lossy()
+    );
+    let config_path = tmp.path().join("config.yaml");
+    std::fs::write(&config_path, config_yaml).unwrap();
+
+    let cfg = crate::core::config::Config::load(&config_path).unwrap();
+    assert!(cfg.resolved_alias_map(cfg.config_dir()).unwrap().is_empty());
+
+    let r = IdentityResolver::from_config(&cfg);
+    assert!(r.fuzzy_fallback());
+}
+
+/// A non-empty INLINE `developer_aliases` map must not disable the fallback.
+///
+/// Why: this pins the gate to `aliases_file` specifically, which is what #4251
+/// asks for. A gate written as `map.is_empty() && aliases_file.is_none()` would
+/// silently flip every inline-alias deployment to fuzzy-off — a behaviour
+/// change well outside the issue's scope. This test fails under that form.
+#[test]
+fn inline_developer_aliases_do_not_disable_fuzzy() {
+    let yaml = r#"
+version: "1.0"
+developer_aliases:
+  "Gaurav Sharma":
+    - "gaurav.sharma@duettoresearch.com"
+"#;
+    let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).unwrap();
+    assert!(
+        !cfg.resolved_aliases().is_empty(),
+        "inline map must be loaded"
+    );
+    let r = IdentityResolver::from_config(&cfg);
+    assert!(
+        r.fuzzy_fallback(),
+        "#4251 gates on aliases_file, not on any non-empty alias map"
+    );
+    // Historical fuzzy behaviour is intact for these deployments.
+    let (n, _) = r.resolve("Gauri Saykar", "gauri.saykar@duettoresearch.com");
+    assert_eq!(n, "Gaurav Sharma");
+}
+
+/// `fuzzy_identity_fallback: false` turns the fallback off even when no
+/// `aliases_file` is present (inline `developer_aliases` deployments).
+#[test]
+fn explicit_opt_out_disables_fuzzy_without_aliases_file() {
+    let yaml = r#"
+version: "1.0"
+fuzzy_identity_fallback: false
+developer_aliases:
+  "Gaurav Sharma":
+    - "gaurav.sharma@duettoresearch.com"
+"#;
+    let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).unwrap();
+    let r = IdentityResolver::from_config(&cfg);
+    assert!(!r.fuzzy_fallback());
+    let (n, e) = r.resolve("Gauri Saykar", "gauri.saykar@duettoresearch.com");
+    assert_eq!(n, "Gauri Saykar");
+    assert_eq!(e, "gauri.saykar@duettoresearch.com");
+}
+
+/// No `aliases_file` and no explicit flag → historical behaviour is preserved
+/// exactly. This is the compatibility guarantee for every existing deployment
+/// that relies on fuzzy resolution.
+#[test]
+fn no_aliases_file_keeps_fuzzy_enabled_by_default() {
+    let yaml = r#"
+version: "1.0"
+developer_aliases:
+  "Bob Matsuoka":
+    - "bob.matsuoka@duettoresearch.com"
+"#;
+    let cfg: crate::core::config::Config = serde_yaml::from_str(yaml).unwrap();
+    let r = IdentityResolver::from_config(&cfg);
+    assert!(r.fuzzy_fallback());
+    let (n, _) = r.resolve("Bob M", "bob.matsuoka@otherdomain.com");
+    assert_eq!(n, "Bob Matsuoka");
+}
+
+/// The builder switch works for callers that never touch `Config`
+/// (`trusty-review`'s profile selector, `feed_azdo_users`, benches).
+#[test]
+fn with_fuzzy_fallback_false_suppresses_tier34() {
+    let r = IdentityResolver::new(Some(&make_team()));
+    // Baseline: fuzzy on, "Bob Smyth" collapses onto "Bob Smith".
+    assert_eq!(
+        r.resolve("Bob Smyth", "unknown@elsewhere.com").0,
+        "Bob Smith"
+    );
+
+    let r = IdentityResolver::new(Some(&make_team())).with_fuzzy_fallback(false);
+    let (n, e) = r.resolve("Bob Smyth", "unknown@elsewhere.com");
+    assert_eq!(n, "Bob Smyth");
+    assert_eq!(e, "unknown@elsewhere.com");
+    // Exact alias resolution is untouched by the switch.
+    assert_eq!(r.resolve("bobby", "x@y.com").0, "Bob Smith");
+}
+
+/// Issue #2253 regression guard, re-asserted under #4251: the email-domain
+/// gate is orthogonal to the new switch and must still hold on a resolver with
+/// fuzzy ENABLED (no `aliases_file`), which is the configuration #2253 fixed.
+#[test]
+fn issue_2253_domain_gate_intact_when_fuzzy_enabled() {
+    let team = TeamConfig {
+        members: vec![
+            TeamMember {
+                name: "Jenkins CI".into(),
+                email: "jenkins@duettoresearch.com".into(),
+                aliases: vec![],
+            },
+            TeamMember {
+                name: "Alice Cooper".into(),
+                email: "alice.cooper@acme.com".into(),
+                aliases: vec![],
+            },
+        ],
+        aliases: HashMap::new(),
+        canonical_domain: None,
+    };
+    let r = IdentityResolver::new(Some(&team));
+    assert!(r.fuzzy_fallback(), "no aliases_file → fuzzy stays on");
+
+    // Shared domain suffix alone must NOT merge two unrelated bots (#2253).
+    assert!(
+        jaro_winkler("ops+snyk@duettoresearch.com", "jenkins@duettoresearch.com")
+            >= DEFAULT_SIMILARITY_THRESHOLD,
+        "precondition: full-string similarity clears the threshold"
+    );
+    let (n, e) = r.resolve("Snyk Bot", "ops+snyk@duettoresearch.com");
+    assert_eq!(n, "Snyk Bot");
+    assert_eq!(e, "ops+snyk@duettoresearch.com");
+
+    // ...while a genuine same-domain, near-identical local-part still matches.
+    let (n, e) = r.resolve("acoopr", "alice.coopr@acme.com");
+    assert_eq!(n, "Alice Cooper");
+    assert_eq!(e, "alice.cooper@acme.com");
 }
 
 #[test]

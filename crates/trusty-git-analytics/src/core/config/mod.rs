@@ -230,6 +230,23 @@ pub struct Config {
     #[serde(default)]
     pub aliases_file: Option<String>,
 
+    /// Explicit control over the Tier-3/4 fuzzy identity fallback (issue #4251).
+    ///
+    /// Why: the Jaro-Winkler fallback in
+    /// [`crate::collect::identity::resolver::IdentityResolver::resolve`] exists
+    /// to guess identities a project has *not* declared. Once a project supplies
+    /// a comprehensive [`Self::aliases_file`], every extra roster entry enlarges
+    /// the fuzzy haystack and the guesser starts producing cross-identity false
+    /// positives (`Cristian Dominguez` → `Crislaine Tripoli`). A fallback must
+    /// not fire when the authoritative answer is already on file.
+    /// What: `None` (the default) means "enable the fallback only when no
+    /// `aliases_file` is configured". `Some(true)` forces it on even with an
+    /// alias file; `Some(false)` forces it off even without one.
+    /// Test: see `resolver_tests::aliases_file_disables_tier34_name_fuzzy` and
+    /// `resolver_tests::explicit_opt_in_reenables_fuzzy_with_aliases_file`.
+    #[serde(default)]
+    pub fuzzy_identity_fallback: Option<bool>,
+
     /// Analysis settings (ML categorization, etc.).
     ///
     /// Parsed for forward compatibility; individual sub-features gate their
