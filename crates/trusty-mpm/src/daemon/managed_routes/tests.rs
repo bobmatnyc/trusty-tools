@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 
+use super::summary::checked_summaries_with;
 use super::summary::{reconcile_against_tmux, reconcile_live_state, stale_assets_for_many};
 use super::{checked_summaries, record_to_json, record_to_summary};
 use crate::session_manager::{
@@ -960,6 +961,59 @@ async fn record_to_summary_checked_still_flags_stale_stopped_session() {
     assert!(
         !summary.stale_assets_unchecked,
         "the on-demand path DID check, so its verdict is authoritative"
+    );
+}
+
+/// Issue #4335: `?slim=true` must actually SKIP the asset-staleness probe.
+///
+/// Why: asserting only that a slim listing reports `stale_assets: false` is
+/// vacuous — `false` is also the value a session with current assets gets.
+/// This builds the exact fixture
+/// `checked_summaries_flags_stale_assets_only_for_relevant_states` uses to
+/// produce a genuine `true`, then shows the slim path reports `false` for it.
+/// The difference can only come from the probe not running, which is the whole
+/// point of the flag: the guard's cold-daemon timeout was that probe's cost.
+#[tokio::test]
+#[serial_test::serial]
+async fn checked_summaries_slim_skips_stale_assets_probe() {
+    let (home, _guard) = fake_home();
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled = fw.agent_source_dir();
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled,
+        &session_fw.claude_agents_dir(),
+        |_| true,
+    )
+    .unwrap();
+    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+
+    let mut active = make_record(None);
+    active.state = ManagedSessionState::Active;
+    active.workspace_path = Some(workspace);
+    let records = vec![active];
+
+    // Control: the full probe SEES the drift.
+    let full = checked_summaries_with(&records, true).await;
+    assert!(
+        full[0].stale_assets,
+        "fixture must genuinely be stale, else the slim assertion below is vacuous"
+    );
+
+    // Slim: same records, probe skipped, flag left at its default.
+    let slim = checked_summaries_with(&records, false).await;
+    assert!(
+        !slim[0].stale_assets,
+        "slim mode must skip the staleness probe entirely (#4335)"
+    );
+    assert_eq!(
+        slim[0].id, full[0].id,
+        "slim mode must still return every session — only the probe is skipped"
     );
 }
 
