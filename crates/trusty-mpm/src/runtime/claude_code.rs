@@ -766,28 +766,50 @@ pub struct InPlaceResumeCommand {
 /// keeps the decision itself testable in every CI environment — mirroring how
 /// [`resume_command`]'s selection tests pass a fake `claude_bin` string rather
 /// than depending on [`ClaudeCodeAdapter::resolve_claude`].
-/// What: the isolation flags ([`crate::core::model_inject::SETTING_SOURCES_FLAG`]
-/// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`], whitespace-split
+/// What: `--append-system-prompt-file <path>` when `prompt_file` is `Some`
+/// (#4336 — see below), then the isolation flags
+/// ([`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
+/// [`crate::core::model_inject::PERMISSION_MODE_FLAG`], whitespace-split
 /// into argv tokens since both constants are simple space-separated flags with
 /// no embedded quoting) followed by `--resume <id>` (id exists under
 /// `config_dir`, per [`session_id_exists`]), `--continue` (no usable id but
 /// [`has_prior_conversation`] is true), or neither (fresh start) — the exact
 /// same three-way selection [`resume_command`] makes.
+///
+/// `prompt_file` (#4336): this path previously omitted the PM system prompt BY
+/// DESIGN, so an in-place relaunch silently restored the operator into vanilla
+/// Claude Code — the same defect #2125/#2230 fixed for the spawn and resume
+/// paths, left unfixed here because the exec seam is not a shell string. The
+/// path is pushed as its OWN argv token and is deliberately NOT run through
+/// [`shell_single_quote`] the way [`prompt_file_flag`] does: that helper exists
+/// because `spawn_command`/`resume_command` build a string a pane SHELL will
+/// re-split, whereas these tokens go straight to `execv` with no shell in
+/// between, so quoting them would embed literal quote characters in the
+/// filename claude then fails to open.
 /// Test: `compose_inplace_args_uses_resume_for_existing_id`,
 /// `compose_inplace_args_falls_back_for_missing_id`,
-/// `compose_inplace_args_uses_continue_when_no_id_but_prior_conv`.
+/// `compose_inplace_args_uses_continue_when_no_id_but_prior_conv`,
+/// `compose_inplace_args_carries_prompt_file_unquoted`,
+/// `compose_inplace_args_omits_prompt_flag_when_absent`.
 fn compose_inplace_args(
     cwd: &Path,
     config_dir: Option<&Path>,
     claude_session_id: Option<&str>,
+    prompt_file: Option<&Path>,
 ) -> Vec<String> {
     let effective_id = claude_session_id.filter(|id| session_id_exists(cwd, config_dir, id));
 
-    let mut args: Vec<String> = crate::core::model_inject::SETTING_SOURCES_FLAG
-        .split_whitespace()
-        .chain(crate::core::model_inject::PERMISSION_MODE_FLAG.split_whitespace())
-        .map(str::to_owned)
-        .collect();
+    let mut args: Vec<String> = Vec::new();
+    if let Some(prompt) = prompt_file {
+        args.push("--append-system-prompt-file".to_owned());
+        args.push(prompt.display().to_string());
+    }
+    args.extend(
+        crate::core::model_inject::SETTING_SOURCES_FLAG
+            .split_whitespace()
+            .chain(crate::core::model_inject::PERMISSION_MODE_FLAG.split_whitespace())
+            .map(str::to_owned),
+    );
 
     match effective_id {
         Some(id) => {
@@ -813,8 +835,12 @@ fn compose_inplace_args(
 /// missing), provisions/trust-seeds the managed `CLAUDE_CONFIG_DIR` via
 /// [`prepare_managed_config`] (logged under the synthetic session name
 /// `"in-place-relaunch"` — there is no tmux session name in this context),
-/// then delegates argv composition to [`compose_inplace_args`].
-/// Test: `build_inplace_resume_command_resolves_claude_binary`.
+/// builds the PM system-prompt file via [`build_prompt_file`] (#4336 — the
+/// SAME carrier `spawn`/`spawn_resume` use, previously missing from this path
+/// alone; non-fatal, a write failure omits the flag), then delegates argv
+/// composition to [`compose_inplace_args`].
+/// Test: `build_inplace_resume_command_resolves_claude_binary`,
+/// `build_inplace_resume_command_carries_prompt_file`.
 pub fn build_inplace_resume_command(
     cwd: &Path,
     claude_session_id: Option<&str>,
@@ -827,7 +853,13 @@ pub fn build_inplace_resume_command(
         )
     })?;
     let config_dir = prepare_managed_config("in-place-relaunch", cwd);
-    let args = compose_inplace_args(cwd, config_dir.as_deref(), claude_session_id);
+    let prompt_file = build_prompt_file(cwd);
+    let args = compose_inplace_args(
+        cwd,
+        config_dir.as_deref(),
+        claude_session_id,
+        prompt_file.as_deref(),
+    );
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     Ok(InPlaceResumeCommand {
         claude_bin,
