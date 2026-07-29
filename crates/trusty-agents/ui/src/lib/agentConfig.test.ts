@@ -212,6 +212,7 @@ describe('fetchAgentSubagents', () => {
           },
         ],
         role_excluded_count: 3,
+        hidden_excluded_count: 0,
         unresolved: [],
       },
       cross_product: {
