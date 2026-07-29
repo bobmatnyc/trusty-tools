@@ -10,11 +10,14 @@
 //! only caller) can route to them; the shared spawn helpers they reuse
 //! (`write_task_md`/`prepare_inproject_session`/`front_gate_or_escalate`/
 //! `resolve_gh_env`) stay owned by `lifecycle` and are called back into.
-//! What: [`worktree_enabled_for_origin`] (registry-keyed isolation decision),
-//! [`has_concurrent_main_checkout_session`] (pure collision detector), and
-//! [`spawn_managed_on_main`] (the no-worktree spawn flow).
-//! Test: `worktree_enabled_for_origin_*`,
-//! `spawn_managed_on_main_creates_record_without_worktree`, and
+//! What: [`has_concurrent_main_checkout_session`] (pure collision detector)
+//! and [`spawn_managed_on_main`] (the no-worktree spawn flow). The registry
+//! lookup that DECIDES whether isolation is on used to live here too, as a
+//! `pub(super)` `worktree_enabled_for_origin`; #4300 moved it to
+//! [`crate::project::worktree_policy`] because the `tm` CLI provisions
+//! worktrees in its OWN process and could not reach a `daemon::`-scoped
+//! function — the daemon now calls the shared one.
+//! Test: `spawn_managed_on_main_creates_record_without_worktree` and
 //! `spawn_managed_on_main_warns_on_concurrent_main_checkout_session` in
 //! `lifecycle_tests.rs` (this module's tests live with `lifecycle`'s, since
 //! the opt-out is a branch of the same spawn surface).
@@ -28,35 +31,8 @@ use super::lifecycle::{
     SpawnParams, front_gate_or_escalate, prepare_inproject_session, resolve_gh_env, write_task_md,
 };
 use crate::daemon::state::DaemonState;
-use crate::project::ProjectRegistry;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
-
-/// Resolve whether per-session worktree isolation is enabled for the
-/// registered project whose `repo_url` matches `origin` (#3455).
-///
-/// Why: mirrors `core::gh_account::find_pinned_gh_account` — the registry
-/// (not the static `config.yaml`, which only ever SEEDS the registry via
-/// `seed_from_config`) is the source of truth consulted at spawn time, keyed
-/// by `repo_url` identity so lookup works regardless of the registry's
-/// `name` key or how the project got registered (explicit `tm projects
-/// register`, config-seeded, or auto-registered from session history).
-/// What: `true` (worktree isolation ON, the default — no regression) when no
-/// registered project matches `origin`, the registry is unreachable, or the
-/// matched project's `worktree` field is unset/`Some(true)`; `false` only
-/// when a matched project has `worktree == Some(false)`.
-/// Test: `worktree_enabled_for_origin_defaults_true_when_unregistered`,
-/// `worktree_enabled_for_origin_honors_registered_false`.
-pub(super) async fn worktree_enabled_for_origin(registry: &ProjectRegistry, origin: &str) -> bool {
-    let Ok(projects) = registry.list().await else {
-        return true;
-    };
-    projects
-        .iter()
-        .find(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))
-        .map(|p| p.worktree_enabled())
-        .unwrap_or(true)
-}
 
 /// Return the FIRST already-`Active` session whose cwd is EXACTLY
 /// `local_path`, if any (#3455 collision detector).

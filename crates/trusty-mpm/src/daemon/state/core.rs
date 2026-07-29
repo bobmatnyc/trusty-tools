@@ -888,7 +888,10 @@ impl DaemonState {
         let sm = self.session_manager().await;
         self.project_registry
             .get_or_init(|| async {
-                let data_dir = self.framework_root.join("project-registry");
+                // #4300: one shared helper names this directory so the
+                // out-of-process `tm` CLI reader can never point at a
+                // different file than the daemon writes.
+                let data_dir = crate::project::registry_data_dir_under(&self.framework_root);
                 let registry = match crate::project::ProjectRegistry::load(&data_dir).await {
                     Ok(r) => r,
                     Err(e) => {

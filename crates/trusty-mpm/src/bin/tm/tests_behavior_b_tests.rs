@@ -1543,7 +1543,7 @@ async fn guided_fallback_blocks_github_git_from_subdirectory() {
     );
 }
 
-/// Why (#1724 success path): proves that when `redirect_to_managed_clone` succeeds
+/// Why (#1724 success path): proves that when `launch_protected_workspace` succeeds
 /// (base clone exists as a real git repo so `create_session_worktree` can create a
 /// worktree), `launch()` is called with `Some(worktree)` — not `None` — so
 /// framework files go to the worktree, never to the live checkout.

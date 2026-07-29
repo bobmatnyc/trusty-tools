@@ -34,6 +34,7 @@ pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 pub(crate) mod managed_root;
 pub(crate) mod managed_route;
+pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
 pub(crate) mod meta;
