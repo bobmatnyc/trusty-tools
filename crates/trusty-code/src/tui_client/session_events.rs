@@ -72,7 +72,10 @@ pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
 /// `engine_tests::forward_session_done_is_terminal`,
 /// `engine_tests::forward_session_done_failed_marks_is_error`,
 /// `engine_tests::forward_session_cancelled_is_terminal`,
-/// `engine_tests::forward_unrelated_event_is_ignored`.
+/// `engine_tests::forward_unrelated_event_is_ignored`,
+/// `engine_tests::forward_agent_message_delta_not_done_appends`,
+/// `engine_tests::forward_agent_message_delta_done_finalizes`,
+/// `engine_tests::forward_agent_message_delta_distinct_agent_ids_not_merged`.
 pub(super) fn forward_session_event(
     envelope: SessionEventEnvelope,
     tx: &UnboundedSender<ReplEvent>,
@@ -84,6 +87,35 @@ pub(super) fn forward_session_event(
             let _ = tx.send(ReplEvent::AssistantOutput {
                 chunk: text,
                 done: false,
+                is_error: false,
+            });
+            false
+        }
+        // tcode streaming epic #3696 Slice 2: wire the Slice 0 contract
+        // (`Event::AgentMessageDelta`, `events.rs:459`) into the SAME
+        // `AssistantOutput` chunk-append machinery `Message`/`AgentMessage`
+        // above already use, so no new rendering path is needed in
+        // `trusty-tui` — `done: false` appends via `ReplApp::streaming_idx`,
+        // `done: true` finalizes (`reduce.rs:141-172`).
+        //
+        // KNOWN GAP (reported, not fixed here — see PR description): the
+        // Slice 0 contract requires consumers to group deltas by
+        // `(agent_id, turn_id)`, not `turn_id` alone, because this codebase
+        // runs sub-agents concurrently and a producer could get `turn_id`
+        // scoping wrong (`events.rs:436-456`). `ReplEvent::AssistantOutput`
+        // carries neither id, and `ReplApp::streaming_idx` is a single
+        // `Option<usize>` shared by the whole app (not keyed at all) — so
+        // two agents legitimately streaming concurrently within ONE human
+        // turn (the busy-guard at `trusty-tui/src/app/mod.rs:457-471` only
+        // rules out a SECOND top-level turn starting, not concurrent
+        // sub-agents inside the current one) will interleave into the same
+        // chat bubble today. Fixing this requires threading a key through
+        // `trusty-tui`'s `ReplEvent`/`ReplApp` (out of this slice's file
+        // scope — a shared, cross-slice type). Tracked as a follow-up.
+        Event::AgentMessageDelta { delta, done, .. } => {
+            let _ = tx.send(ReplEvent::AssistantOutput {
+                chunk: delta,
+                done,
                 is_error: false,
             });
             false
