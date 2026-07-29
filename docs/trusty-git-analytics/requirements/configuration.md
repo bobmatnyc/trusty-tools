@@ -12,6 +12,9 @@ database: ~               # path  — SQLite DB override (added v2.2.2, issue #4
 llm: {}                   # LlmConfig — top-level LLM section (added v2.2.2, issue #407)
 github: {}                # GitHubConfig
 bitbucket: {}             # BitbucketConfig (Cloud only)
+developer_aliases: {}     # dict[str, list[str]] — inline identity alias map
+aliases_file: ~           # path — external YAML alias file
+fuzzy_identity_fallback: ~ # bool — Tier-3/4 fuzzy identity fallback (issue #4251)
 analysis: {}              # AnalysisConfig
 output: {}                # OutputConfig
 cache: {}                 # CacheConfig
@@ -212,6 +215,45 @@ State mapping into the shared `pull_requests` table:
 `DECLINED` and `SUPERSEDED` collapse onto `closed` because the shared schema
 has no richer variants. Reports that need to distinguish them must consult
 the raw Bitbucket payload, which is currently not persisted.
+
+### Identity resolution — alias table and fuzzy fallback
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `developer_aliases` | dict[string, list[string]] | {} | Inline alias map: canonical name → emails / login handles |
+| `aliases_file` | path | None | External YAML alias file, merged over `developer_aliases` (supports `~`) |
+| `fuzzy_identity_fallback` | bool | see below | Override for the Tier-3/4 Jaro-Winkler fallback (added v2.11.0, issue #4251) |
+
+`tga` resolves each observed `(author_name, author_email)` pair in four tiers:
+
+1. exact alias match on the email,
+2. exact alias match on the display name,
+3. Jaro-Winkler similarity ≥ 0.85 against canonical names, and against email
+   local-parts **when both addresses share the same domain** (issue #2253),
+4. Jaro-Winkler ≥ 0.82 against punctuation-normalized names / local-parts.
+
+Tiers 3 and 4 exist to *guess* identities that were never declared. Once a
+project supplies a comprehensive `aliases_file`, every additional roster entry
+enlarges the fuzzy haystack, and the guesser starts collapsing distinct people
+onto similarly-spelled colleagues (`Cristian Dominguez` → `Crislaine Tripoli`,
+`Gauri Saykar` → `Gaurav Sharma`). So:
+
+- **`fuzzy_identity_fallback` unset (default)** — Tiers 3/4 run unless a
+  declared `aliases_file` **successfully loaded a non-empty alias table**. With
+  such a table present, an author that matches no declared alias is reported
+  under its own raw name. A declared `aliases_file` that is missing, unreadable,
+  malformed, or empty leaves Tiers 3/4 **on** and logs at `error!` — a broken
+  config degrades to the previous behaviour rather than to silent
+  fragmentation. An inline `developer_aliases` map does not disable the tiers;
+  use `fuzzy_identity_fallback: false` for that.
+- **`fuzzy_identity_fallback: true`** — force Tiers 3/4 on even with an alias
+  file (pre-2.11.0 behaviour).
+- **`fuzzy_identity_fallback: false`** — force Tiers 3/4 off even without an
+  alias file (useful for exhaustive inline `developer_aliases` maps).
+
+An undeclared author showing up under its own name is a visible, fixable gap —
+add an alias. A silently misattributed one corrupts every per-developer metric
+downstream with no signal that it happened.
 
 ### `analysis` — AnalysisConfig
 
