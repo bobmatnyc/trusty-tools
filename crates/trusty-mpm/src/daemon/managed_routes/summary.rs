@@ -14,9 +14,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::http::StatusCode;
 
+use crate::core::manifest::HarnessPlan;
+use crate::core::paths::FrameworkPaths;
 use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan};
 use crate::core::update_check::CatalogHashes;
 use crate::session_manager::{
@@ -121,6 +124,7 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         injection_status: injection_status_wire(r.injection_status),
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         // `attached` is a live-tmux reconciliation only the list handler
         // computes (see [`super::list_managed_sessions`]); every other summary
         // builder leaves it at its `false` default.
@@ -292,34 +296,67 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot,
         deleted: true,
     }
 }
 
-/// Whether a record's state is one [`session_assets_stale`] is worth probing.
+/// Whether a record's state has a deployed workspace whose asset staleness is
+/// MEANINGFUL to compute at all.
 ///
-/// Why: shared by [`record_to_summary_checked`] and [`checked_summaries`] so
-/// the two never disagree on which states get the asset-staleness probe.
-/// Provisioning workspaces have not deployed yet (every managed artifact would
-/// spuriously read as "new"/stale) and decommissioned ones have no workspace
-/// left to probe — both would only add noise, not signal.
+/// Why: `Provisioning` workspaces have not deployed yet (every managed
+/// artifact would spuriously read as "new"/stale) and `Decommissioned` ones
+/// have no workspace left to probe — both would only add noise, not signal.
+/// This is the same state set `sync_assets::syncable` gates the actual
+/// redeploy on, so "we can tell you it's stale" and "we can fix it" never
+/// disagree. It is the gate for the ON-DEMAND single-session path
+/// ([`record_to_summary_checked`], which `tm session resume` reads); the fleet
+/// LIST path applies the stricter [`probe_staleness_in_list`] on top of it.
 /// What: `true` for `Active`, `Stopped`, and `Errored`.
-/// Test: `checked_summaries_flags_stale_assets_only_for_relevant_states`.
-fn probe_staleness_for(state: &ManagedSessionState) -> bool {
+/// Test: `checked_summaries_flags_stale_assets_only_for_relevant_states`,
+/// `record_to_summary_checked_still_flags_stale_stopped_session`.
+fn staleness_meaningful_for(state: &ManagedSessionState) -> bool {
     matches!(
         state,
         ManagedSessionState::Active | ManagedSessionState::Stopped | ManagedSessionState::Errored
     )
 }
 
-/// Compute `stale_assets` for every record in `records`, sharing the
-/// catalog-side compose/hash work across ALL of them (issue #2444 review,
-/// MEDIUM finding: `checked_summaries` originally called
-/// `session_assets_stale` — a full, independent catalog recompose — once PER
-/// SESSION on every `tm sessions ls`, recomposing the same ~40+ catalog
-/// agents redundantly for every session sharing the default source).
+/// Whether a record gets the asset-staleness probe on the FLEET LIST path.
+///
+/// Why (issue #4322): the probe is filesystem-bound — ~95 `read_to_string`
+/// calls and tens of megabytes per session, uncached — and `tm ls` paid it for
+/// every `Active`/`Stopped`/`Errored` record on EVERY invocation. On a real
+/// fleet the majority of those records are `Stopped` sessions idle for days
+/// (20 of 32 in the reported measurement, ~56% of the total I/O) whose
+/// deployed assets cannot possibly have drifted since the last listing —
+/// nothing writes to a stopped session's workspace. Staleness is only
+/// ACTIONABLE at resume time, and that path fetches the session individually
+/// (`GET …/managed/{id}` → [`record_to_summary_checked`]), which still probes
+/// under [`staleness_meaningful_for`]. Dropping `Stopped` from the LIST fan-out
+/// removes that work from the interactive, per-keystroke-latency surface
+/// without removing the signal from the surface that acts on it.
+/// What: `true` for `Active` and `Errored` only. A `Stopped` record's summary
+/// therefore carries `stale_assets: false` — which is NOT a "fresh" verdict,
+/// so [`super::SessionSummary::stale_assets_unchecked`] is set instead and the
+/// CLI renders an explicit `[assets ?]` marker rather than silence.
+/// Test: `checked_summaries_does_not_probe_stopped_sessions`.
+fn probe_staleness_in_list(state: &ManagedSessionState) -> bool {
+    matches!(
+        state,
+        ManagedSessionState::Active | ManagedSessionState::Errored
+    )
+}
+
+/// Resolve every record's plan and compute ONE [`CatalogHashes`] per distinct
+/// `(agent_source, skill_source)` pair — the SHARED half of the staleness
+/// comparison (issue #2444 review, MEDIUM finding: `checked_summaries`
+/// originally called `session_assets_stale` — a full, independent catalog
+/// recompose — once PER SESSION on every `tm sessions ls`, recomposing the
+/// same ~40+ catalog agents redundantly for every session sharing the default
+/// source).
 ///
 /// Why: a staleness comparison splits into an expensive CATALOG-side half
 /// (composing agents, reading skill bodies — identical for every session
@@ -331,38 +368,126 @@ fn probe_staleness_for(state: &ManagedSessionState) -> bool {
 /// SINGLE compute for the common case where every session resolves the
 /// shared default bundled/catalog source, and stays exactly correct for the
 /// rare session carrying its own project-level manifest override — removes
-/// the N-times recompose entirely. Both the manifest resolution and the
-/// catalog compose are filesystem-bound, so this whole function is
-/// synchronous/blocking; callers run it via [`tokio::task::spawn_blocking`].
-/// What: returns `record.id -> stale` for every record passed in (typically
-/// pre-filtered to [`probe_staleness_for`]'s syncable subset by the caller).
-/// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
+/// the N-times recompose entirely. This half is deliberately kept SEQUENTIAL
+/// and run in a single blocking task by [`stale_assets_for_many`]: fanning it
+/// out would race N tasks into the same empty cache and reinstate exactly the
+/// N-times recompose it exists to prevent. Both the manifest resolution and
+/// the catalog compose are filesystem-bound, so this function is
+/// synchronous/blocking.
+/// What: returns one [`StalenessInput`] per record, in input order, each
+/// carrying a shared `Arc` handle to its catalog hashes. `pub(super)` only so
+/// the invariant test below can assert the SHARING structurally.
+/// Test: `staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc`
+/// (the anti-regression pin: same source pair ⇒ pointer-equal `Arc`, so no
+/// second compute exists for a spawned task to perform),
+/// `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
 /// `checked_summaries_flags_stale_assets_only_for_relevant_states` in
 /// `super::tests`.
-fn stale_assets_for_many(records: Vec<SessionRecord>) -> HashMap<ManagedSessionId, bool> {
-    let mut cache: HashMap<(PathBuf, PathBuf), CatalogHashes> = HashMap::new();
-    let mut result = HashMap::with_capacity(records.len());
+pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInput> {
+    let mut cache: HashMap<(PathBuf, PathBuf), Arc<CatalogHashes>> = HashMap::new();
+    let mut out = Vec::with_capacity(records.len());
     for record in records {
         let (fw, plan) = session_plan(&record);
         let key = (plan.agent_source.clone(), plan.skill_source.clone());
         let catalog = cache
             .entry(key)
-            .or_insert_with(|| CatalogHashes::compute(&plan.agent_source, &plan.skill_source));
-        let stale = session_asset_staleness_with_catalog(&fw, &plan, catalog).stale;
-        result.insert(record.id, stale);
+            .or_insert_with(|| {
+                Arc::new(CatalogHashes::compute(
+                    &plan.agent_source,
+                    &plan.skill_source,
+                ))
+            })
+            .clone();
+        out.push((record.id, fw, plan, catalog));
+    }
+    out
+}
+
+/// One session's fully-resolved staleness comparison inputs: its id, its
+/// workspace-scoped paths and plan, and a SHARED handle to the catalog-side
+/// hashes for its resolved `(agent_source, skill_source)` pair.
+///
+/// Why: [`stale_assets_for_many`] hands one of these to each per-session
+/// blocking task. `Arc<CatalogHashes>` (rather than a clone of the hashes) is
+/// what lets the expensive catalog compose stay shared across the fan-out
+/// while each task still owns everything it needs — the whole point of the
+/// #2444 split, preserved under parallelism.
+type StalenessInput = (
+    ManagedSessionId,
+    FrameworkPaths,
+    HarnessPlan,
+    Arc<CatalogHashes>,
+);
+
+/// Compute `stale_assets` for every record, sharing the catalog work and
+/// running the per-session comparisons CONCURRENTLY on the blocking pool
+/// (issue #4322).
+///
+/// Why: the shared-catalog design (#2444) removed the redundant per-session
+/// RECOMPOSE, but left the remaining per-session work — ~95 `read_to_string`
+/// calls against that session's own `.claude/{agents,skills}` tree — running
+/// SERIALLY inside a single `spawn_blocking`. Those reads are independent
+/// across sessions and entirely I/O-bound (the daemon burns a constant ~0.13 s
+/// of CPU while `tm ls` blocks for 5–9 s cold), so serializing them makes cold
+/// latency scale linearly in fleet size for no reason. This mirrors the
+/// `unresumable` fan-out [`checked_summaries`] already performs — same
+/// `JoinSet` pattern, `spawn_blocking` instead of `spawn` because the work is
+/// synchronous filesystem I/O rather than `tokio::fs`.
+/// What: resolves every session's plan and computes one [`CatalogHashes`] per
+/// distinct source pair in ONE blocking task ([`staleness_inputs`] — the
+/// sharing that must NOT be parallelized, or each task would redundantly
+/// recompose the same catalog), then spawns one blocking task per session for
+/// the cheap deployed-side [`session_asset_staleness_with_catalog`] half. A
+/// panicking task is simply absent from the returned map, leaving that
+/// summary at its `false` default rather than failing the whole listing.
+/// Test: `checked_summaries_stale_assets_independent_per_session_sharing_one_catalog`,
+/// `checked_summaries_flags_stale_assets_only_for_relevant_states`,
+/// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`
+/// (issue #4326 review HIGH: the prior pin only exercised [`staleness_inputs`]
+/// directly, never this actual hot path, and stayed green when
+/// `CatalogHashes::compute` was moved into the fan-out below) in
+/// `super::tests`. `pub(super)` (rather than private) so that regression test
+/// can call this function directly instead of the higher-level
+/// `checked_summaries`, which would also exercise the unrelated `unresumable`
+/// fan-out.
+pub(super) async fn stale_assets_for_many(
+    records: Vec<SessionRecord>,
+) -> HashMap<ManagedSessionId, bool> {
+    let inputs = tokio::task::spawn_blocking(move || staleness_inputs(records))
+        .await
+        .unwrap_or_default();
+    let mut probes = tokio::task::JoinSet::new();
+    for (id, fw, plan, catalog) in inputs {
+        // INVARIANT: a spawned task receives an ALREADY-COMPUTED
+        // `Arc<CatalogHashes>` and must never call `CatalogHashes::compute`
+        // itself. Moving the catalog work in here would give every session its
+        // own recompose — the exact N-times recompose #2444's review removed,
+        // traded back for concurrency. Only the cheap deployed-side half (this
+        // session's own manifest + on-disk file reads, which is where the
+        // 35.7 MiB actually goes) belongs in the fan-out.
+        probes.spawn_blocking(move || {
+            (
+                id,
+                session_asset_staleness_with_catalog(&fw, &plan, &catalog).stale,
+            )
+        });
+    }
+    let mut result = HashMap::with_capacity(probes.len());
+    while let Some(res) = probes.join_next().await {
+        if let Ok((id, stale)) = res {
+            result.insert(id, stale);
+        }
     }
     result
 }
 
-/// Run [`stale_assets_for_many`] on the blocking pool for a single record —
-/// the `record_to_summary_checked` (single-session GET) call site, which has
-/// no batching benefit (N=1) but still needs the same blocking-pool handoff
-/// [`checked_summaries`] uses for the multi-session path.
+/// Run [`stale_assets_for_many`] for a single record — the
+/// `record_to_summary_checked` (single-session GET) call site, which has no
+/// batching benefit (N=1) but reuses the same blocking-pool handoff.
 async fn probe_stale_assets(record: SessionRecord) -> bool {
     let id = record.id;
-    tokio::task::spawn_blocking(move || stale_assets_for_many(vec![record]))
+    stale_assets_for_many(vec![record])
         .await
-        .unwrap_or_default()
         .get(&id)
         .copied()
         .unwrap_or(false)
@@ -377,12 +502,21 @@ async fn probe_stale_assets(record: SessionRecord) -> bool {
 /// bodies a single line each (`mod.rs` sits at its 500-SLOC production cap).
 /// What: [`record_to_summary`], then overwrites `unresumable` via
 /// `session_manager::resume_workdir::is_unresumable`.
+///
+/// Staleness (#4322): this SINGLE-session path keeps the full
+/// [`staleness_meaningful_for`] gate — including `Stopped`, which the fleet
+/// LIST path now skips. `GET …/managed/{id}` is what `tm session resume`
+/// reads, and resume is precisely the moment a stopped session's asset drift
+/// becomes actionable; paying ~95 file reads for ONE session on an explicit,
+/// infrequent fetch is not the cost that made `tm ls` slow.
 /// Test: `list_marks_dead_stopped_session_unresumable`,
-/// `list_leaves_live_and_healthy_stopped_sessions_unmarked` in `super::tests`.
+/// `list_leaves_live_and_healthy_stopped_sessions_unmarked`,
+/// `record_to_summary_checked_still_flags_stale_stopped_session` in
+/// `super::tests`.
 pub(super) async fn record_to_summary_checked(r: &SessionRecord) -> SessionSummary {
     let mut summary = record_to_summary(r);
     summary.unresumable = crate::session_manager::resume_workdir::is_unresumable(r).await;
-    if probe_staleness_for(&r.state) {
+    if staleness_meaningful_for(&r.state) {
         summary.stale_assets = probe_stale_assets(r.clone()).await;
     }
     summary
@@ -461,23 +595,28 @@ pub(super) async fn checked_summaries_with(
         }
     }
 
-    // Second, independent pass for the #2444 asset-staleness probe. Unlike
-    // `unresumable` above, this is a SINGLE `spawn_blocking` call over every
-    // syncable record rather than one task per record — `stale_assets_for_many`
-    // shares the expensive catalog-side compose across all of them (issue
-    // #2444 review MEDIUM finding), which a per-record `JoinSet` fan-out
-    // would defeat (each task would redundantly recompose the same catalog).
-    // #4335: a slim caller skips this pass entirely — see
-    // [`checked_summaries_with`] for why opting out beats a longer timeout.
-    let syncable: Vec<SessionRecord> = records
+    // Second, independent pass for the #2444 asset-staleness probe.
+    // `stale_assets_for_many` computes the shared catalog half ONCE and then
+    // fans the per-session deployed-side comparisons across the blocking pool
+    // (#4322). `Stopped` records are deliberately EXCLUDED here (see
+    // `probe_staleness_in_list`) — their summaries carry
+    // `stale_assets_unchecked` instead, so "no marker" is never silently read
+    // as "assets fresh". A slim caller (#4335's `probe_assets: false`) skips
+    // this ENTIRE pass — every meaningful-state record is left
+    // `stale_assets_unchecked` too, for the identical reason: the probe
+    // genuinely did not run, so silence must never be misread as "checked and
+    // fresh" regardless of WHICH gate (state or slim) skipped it.
+    for (idx, r) in records.iter().enumerate() {
+        summaries[idx].stale_assets_unchecked = staleness_meaningful_for(&r.state)
+            && (!probe_assets || !probe_staleness_in_list(&r.state));
+    }
+    let probed: Vec<SessionRecord> = records
         .iter()
-        .filter(|r| probe_assets && probe_staleness_for(&r.state))
+        .filter(|r| probe_assets && probe_staleness_in_list(&r.state))
         .cloned()
         .collect();
-    if !syncable.is_empty() {
-        let stale_map = tokio::task::spawn_blocking(move || stale_assets_for_many(syncable))
-            .await
-            .unwrap_or_default();
+    if !probed.is_empty() {
+        let stale_map = stale_assets_for_many(probed).await;
         for (idx, r) in records.iter().enumerate() {
             if let Some(&stale) = stale_map.get(&r.id) {
                 summaries[idx].stale_assets = stale;

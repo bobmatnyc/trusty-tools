@@ -376,6 +376,51 @@ pub struct CatalogHashes {
     skill_hashes: HashMap<String, String>,
 }
 
+/// Test-only call log for [`CatalogHashes::compute`], keyed by the exact
+/// `(catalog_agents, catalog_skills)` pair each invocation was called with.
+///
+/// Why (issue #4326 review, HIGH — empirically proven): the anti-regression
+/// pin for the shared-catalog invariant
+/// (`staleness_inputs_computes_one_catalog_per_source_pair_shared_by_arc`)
+/// only asserted the `Arc`-sharing structure of `staleness_inputs` directly —
+/// it never exercised `stale_assets_for_many` (the actual hot path `tm ls`
+/// calls), so moving `compute` inside that function's per-session
+/// `JoinSet::spawn_blocking` fan-out left every existing test green. A LOG
+/// (rather than a bare atomic counter) records the exact paths each call
+/// used, so a test can filter to just the source pair IT constructed —
+/// keyed by that test's own unique `fake_home()`-scoped temp directory — and
+/// get a reliable exact-count assertion even though `cargo test` runs many
+/// unrelated tests that also reach `compute` (directly or via
+/// `detect_staleness`) concurrently in the same binary.
+/// What: a process-wide `Mutex<Vec<(PathBuf, PathBuf)>>`, appended to by
+/// every real `compute()` call; [`reset_compute_call_log`] clears it and
+/// [`compute_calls_for`] counts entries matching one specific pair.
+/// Test: `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`
+/// in `daemon::managed_routes::tests`.
+#[cfg(test)]
+pub(crate) static COMPUTE_CALL_LOG: std::sync::LazyLock<
+    std::sync::Mutex<Vec<(std::path::PathBuf, std::path::PathBuf)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Clear [`COMPUTE_CALL_LOG`] — call before the fan-out under test so earlier
+/// tests' entries can never be mistaken for this test's calls.
+#[cfg(test)]
+pub(crate) fn reset_compute_call_log() {
+    COMPUTE_CALL_LOG.lock().unwrap().clear();
+}
+
+/// Count logged [`CatalogHashes::compute`] calls for exactly one
+/// `(catalog_agents, catalog_skills)` pair.
+#[cfg(test)]
+pub(crate) fn compute_calls_for(catalog_agents: &Path, catalog_skills: &Path) -> usize {
+    COMPUTE_CALL_LOG
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(a, s)| a == catalog_agents && s == catalog_skills)
+        .count()
+}
+
 impl CatalogHashes {
     /// Compute the catalog-side hashes for one `(catalog_agents,
     /// catalog_skills)` pair.
@@ -385,9 +430,17 @@ impl CatalogHashes {
     /// source pair and reuses via [`Self::detect`].
     /// What: `unknown: true` (empty maps) when NEITHER source tree exists —
     /// identical short-circuit to [`detect_staleness`]'s original
-    /// never-synced check; otherwise computes both maps.
-    /// Test: `catalog_hashes_compute_is_unknown_without_either_source`.
+    /// never-synced check; otherwise computes both maps. Under `cfg(test)`,
+    /// every call (regardless of outcome) is appended to
+    /// [`COMPUTE_CALL_LOG`] before either branch runs.
+    /// Test: `catalog_hashes_compute_is_unknown_without_either_source`,
+    /// `stale_assets_for_many_computes_catalog_exactly_once_per_source_pair`.
     pub fn compute(catalog_agents: &Path, catalog_skills: &Path) -> Self {
+        #[cfg(test)]
+        COMPUTE_CALL_LOG
+            .lock()
+            .unwrap()
+            .push((catalog_agents.to_path_buf(), catalog_skills.to_path_buf()));
         if !catalog_agents.is_dir() && !catalog_skills.is_dir() {
             return Self {
                 unknown: true,
