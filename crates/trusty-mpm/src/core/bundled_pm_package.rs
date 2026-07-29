@@ -59,6 +59,7 @@
 //!
 //! Test: `bundled_pm_package_tests.rs`.
 
+use crate::core::claude_md_sections::{Rejection, SectionOverride};
 use crate::core::instruction_overrides::ROSTER_PRECEDENCE_NOTE;
 use crate::core::instruction_package::{
     BlockBody, CompositionError, CompositionInputs, CustomizationTier, Generator, InstructionBlock,
@@ -246,7 +247,7 @@ pub(crate) fn bundled_fallback_package() -> InstructionPackage {
     }
 }
 
-/// Compose the bundled-fallback PM prompt.
+/// Compose the bundled-fallback PM prompt, applying named-section overrides.
 ///
 /// Why: the single entry point `resolve_pm_prompt` calls for configuration 1.
 /// Keeping build and compose together means the caller cannot compose a package
@@ -254,25 +255,37 @@ pub(crate) fn bundled_fallback_package() -> InstructionPackage {
 /// argument, so the #4196 "computed but never delivered" shape is not
 /// expressible here.
 ///
-/// What: builds the package, then composes it with `stack` (the derived stack
-/// profile), `roster` (the rendered `## Delegation Authority` block, required)
-/// and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All three are trimmed
-/// by the composer. The result is byte-identical to `instruction_overrides`'
-/// legacy assembly for the same inputs — see the module docs.
+/// `CLAUDE.md` named sections (#4183 / #4286) arrive here rather than through a
+/// second string-splice, because this is the only composer that HAS sections and
+/// because [`InstructionPackage::with_overrides`] asks the package's own
+/// `customization_tier` for permission. The floor refuses a `CLAUDE.md` override
+/// for exactly the reason it refuses every other one: it is tier `fixed`.
+///
+/// What: builds the package, applies `overrides`, then composes with `stack`
+/// (the derived stack profile), `roster` (the rendered `## Delegation Authority`
+/// block, required) and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All
+/// are trimmed by the composer. Declined overrides come back alongside the
+/// result so the caller can report them. With an empty `overrides` slice the
+/// result is byte-identical to the pre-#4286 composition — `with_overrides` then
+/// returns a clone — and to `instruction_overrides`' legacy assembly for the
+/// same inputs; see the module docs.
 ///
 /// Test: `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`,
-/// `roster_is_required_and_never_droppable`.
-pub(crate) fn compose_bundled_fallback(
+/// `roster_is_required_and_never_droppable`, `golden_claude_md_override_prompt`.
+pub(crate) fn compose_bundled_fallback_with_overrides(
     stack: &str,
     roster: &str,
     addendum: Option<&str>,
-) -> Result<String, CompositionError> {
-    bundled_fallback_package().compose(&CompositionInputs {
+    overrides: &[SectionOverride],
+) -> (Result<String, CompositionError>, Vec<Rejection>) {
+    let (package, rejected) = bundled_fallback_package().with_overrides(overrides);
+    let composed = package.compose(&CompositionInputs {
         agent_roster: roster.to_string(),
         stack_profile: Some(stack.to_string()),
         project_addendum: addendum.map(str::to_string),
-    })
+    });
+    (composed, rejected)
 }
 
 #[cfg(test)]

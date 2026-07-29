@@ -7,6 +7,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`CLAUDE.md` named-section instruction overrides — reader** (epic
+  [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183),
+  [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286)): a project can
+  now override one PM instruction section by marking it out inside its own
+  `CLAUDE.md`, instead of maintaining a second instruction surface under
+  `.trusty-mpm/`. New module `core::claude_md_sections`. The grammar, matched
+  whole-line:
+
+  ```
+  <!-- TRUSTY-MPM: WORKFLOW START v=1 -->
+  …override content…
+  <!-- TRUSTY-MPM: WORKFLOW END -->
+  ```
+
+  The token is the section id kebab-case uppercased (`CORE`, `MEMORY`, `SEARCH`,
+  `WORKFLOW`, `AGENT-DELEGATION`), matched case-insensitively; text outside
+  markers is ignored. Hosts scanned, in precedence order:
+  `<project>/CLAUDE.md`, then `<project>/.trusty-mpm/INSTRUCTIONS.md` —
+  `CLAUDE.md` wins a same-section collision, and a marked block in
+  `INSTRUCTIONS.md` is removed from the additive project addendum so it is
+  delivered once. A marker-free `INSTRUCTIONS.md` is passed through byte-for-byte
+  and keeps feeding the addendum exactly as before.
+
+  **The package is the sole authority on what may be overridden.** The new
+  `InstructionPackage::with_overrides` asks each section's declared
+  `customization_tier`, so the three floor sections (`identity`,
+  `non-overridable-rules`, `framework-guaranteed-conventions`) refuse every
+  `CLAUDE.md` override and compose byte-identically to no `CLAUDE.md` at all. An
+  override replaces only its section's authored text blocks — generated blocks
+  survive, so an `AGENT-DELEGATION` override rewrites the routing doctrine but
+  cannot suppress the live agent roster
+  ([#4196](https://github.com/bobmatnyc/trusty-tools/issues/4196)).
+
+  Nothing here fails a launch. A missing or unreadable `CLAUDE.md`, an unclosed
+  or nested marker pair, an unknown token, an unknown `v=`, an override aimed at
+  the floor, an empty body, and a package that stops validating all degrade to
+  the bundled section, each with a `warn!` naming the file, line and reason. A
+  missing `v=` is accepted as `v=1` for this release, with a warning. `tm` still
+  never writes a project's `CLAUDE.md`
+  ([#2170](https://github.com/bobmatnyc/trusty-tools/issues/2170)), now asserted
+  by test.
+
+  This ships the READER before the floor text that advertises the mechanism —
+  advertising an override no code reads is
+  [#381](https://github.com/bobmatnyc/trusty-tools/issues/381) verbatim. The five
+  `.trusty-mpm/` override files are untouched and keep working; a project still
+  carrying one composes through the sectionless legacy assembly, and its named
+  sections are reported unapplied rather than dropped in silence.
+
+  A third committed prompt snapshot, `testdata/pm-prompt-claude-md-override.md`,
+  makes the delivered shape of an override reviewable. Both existing goldens are
+  byte-unchanged.
+
 ### Changed
 
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`

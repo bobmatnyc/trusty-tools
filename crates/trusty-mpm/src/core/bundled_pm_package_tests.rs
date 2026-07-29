@@ -29,6 +29,21 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
+/// The no-override composition, which every gate below is written against.
+///
+/// Why: #4286 gave the production composer an `overrides` parameter. Keeping
+/// the zero-override call behind its original name is not cosmetic — it means
+/// none of the byte-equality gates in this file were touched by that change, so
+/// they still compare exactly what they compared before it.
+/// What: [`compose_bundled_fallback_with_overrides`] with no overrides.
+fn compose_bundled_fallback(
+    stack: &str,
+    roster: &str,
+    addendum: Option<&str>,
+) -> Result<String, CompositionError> {
+    compose_bundled_fallback_with_overrides(stack, roster, addendum, &[]).0
+}
+
 /// A fixed, deterministic roster — the composition-time input the byte-equality
 /// gate holds constant.
 ///
