@@ -687,6 +687,28 @@ async fn record_message_publishes_event() {
     assert!(matches!(envelope.event, Event::Message { text, .. } if text == "hello world"));
 }
 
+/// `record_agent_message_delta` must publish an `AgentMessageDelta` event
+/// (tcode streaming epic #3696, Gap A, Slice 1).
+#[tokio::test]
+async fn record_agent_message_delta_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_agent_message_delta(&session.id, "pm", "pm-1", "turn-1", "hello", true)
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "agent_message_delta");
+    assert!(matches!(
+        envelope.event,
+        Event::AgentMessageDelta { agent, agent_id, turn_id, delta, done, .. }
+            if agent == "pm" && agent_id == "pm-1" && turn_id == "turn-1"
+                && delta == "hello" && done
+    ));
+}
+
 /// Every `record_*` emission-plumbing method must reject an unknown
 /// session id with `session_not_found` rather than panicking.
 #[tokio::test]
@@ -740,6 +762,13 @@ async fn record_plumbing_methods_reject_unknown_session() {
     );
     assert_eq!(
         registry.record_message("nope", "m").unwrap_err().code,
+        -32007
+    );
+    assert_eq!(
+        registry
+            .record_agent_message_delta("nope", "pm", "pm-1", "turn-1", "m", true)
+            .unwrap_err()
+            .code,
         -32007
     );
 }

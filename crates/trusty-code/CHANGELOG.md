@@ -10,6 +10,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`Event::AgentMessageDelta` now has a producer (streaming epic #3696,
+  Gap A / Slice 1).** The event contract landed in #3701, but no production
+  code ever constructed it — `AgentMessageDelta` existed only in `events.rs`
+  and its own tests, so every streaming consumer had nothing to consume. The
+  agent loop now emits one `AgentMessageDelta` per assistant turn through the
+  event sink (`agent_loop/sink.rs`, `task/sink.rs`,
+  `session/registry_events.rs`), so assistant text reaches the session event
+  stream as it is produced rather than only at turn end. This is the emit side
+  only; the TUI and GUI consumers land separately (Slices 2 and 3).
+
+- **The TUI renders assistant text as it streams (streaming epic #3696,
+  Slice 2).** `forward_session_event` now maps `Event::AgentMessageDelta` onto
+  `ReplEvent::AssistantOutput`, reusing the same chunk-append machinery
+  `Message`/`AgentMessage` already drive — `done: false` appends to the live
+  bubble, `done: true` finalizes it — so no new rendering path was needed in
+  `trusty-tui`. An agent turn finishing is explicitly NOT terminal for the SSE
+  pump: one agent completing does not end the session stream.
+
 - **`ticketing` is now a bundled, dispatchable roster agent (#4027; epic
   #4021 bridge track).** `crates/trusty-code/src/assets/agents/ticketing.md`
   is a byte-for-byte port of `crates/trusty-mpm/src/assets/agents/ticketing.md`
