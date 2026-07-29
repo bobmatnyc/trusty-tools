@@ -35,7 +35,8 @@ use crate::commands::guided::{
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
-    ResumeAction, is_zombie, needs_restart, plan_resume, resume_classification_state,
+    ResumeAction, is_zombie, needs_restart, pane_runtime_live, parse_pane_probe, plan_resume,
+    resume_classification_state,
 };
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
@@ -1245,12 +1246,145 @@ fn guided_resume_not_zombie_active_with_tmux() {
 
 #[test]
 fn guided_resume_plan_active_live_tmux_attaches() {
-    // Why: active state with a live tmux pane is the happy path — attach directly,
-    // no daemon round-trip, no stop, no resume.
+    // Why: active state with a live tmux pane AND a live runtime is the happy
+    // path — attach directly, no daemon round-trip, no stop, no resume. #3873
+    // added `runtime_live`; this case MUST keep attaching when it is true, or a
+    // genuinely-running agent would get its pane killed and restarted.
     assert_eq!(
-        plan_resume("active", true),
+        plan_resume(
+            "active", /* tmux_live */ true, /* runtime_live */ true
+        ),
         ResumeAction::Attach,
-        "active + live tmux must attach directly"
+        "active + live tmux + live runtime must attach directly"
+    );
+}
+
+#[test]
+fn guided_resume_plan_active_live_tmux_dead_runtime_reconciles_then_restarts() {
+    // Why (#3873): the reported defect. The daemon record says `active` and the
+    // tmux SESSION exists, but the inner `claude` has exited and the pane fell
+    // back to a bare login shell. `tmux_live` cannot see that difference, so the
+    // plan used to be `Attach` — bare `tm` switched the operator into an idle
+    // shell and did nothing useful, forcing a second `tm` from inside that pane
+    // to actually get a runtime back. The recovery is the SAME auto-stop-then-
+    // restart the tmux-gone zombie already uses, so invocation #1 does the whole
+    // job.
+    assert_eq!(
+        plan_resume(
+            "active", /* tmux_live */ true, /* runtime_live */ false
+        ),
+        ResumeAction::ReconcileThenRestart
+    );
+}
+
+#[test]
+fn guided_resume_plan_provisioning_live_tmux_dead_runtime_reconciles_then_restarts() {
+    // Why (#3873): `provisioning` is the other non-terminal, non-restartable
+    // state that reaches the Attach branch, and a provisioning session whose
+    // runtime died is just as unusable as an active one. Pins that the fix keys
+    // off the same `!needs_restart` family rather than a hard-coded "active".
+    assert_eq!(
+        plan_resume(
+            "provisioning",
+            /* tmux_live */ true,
+            /* runtime_live */ false
+        ),
+        ResumeAction::ReconcileThenRestart,
+        "provisioning + live tmux + dead runtime must reconcile then restart"
+    );
+}
+
+#[test]
+fn guided_resume_plan_stopped_live_tmux_dead_runtime_still_plain_restarts() {
+    // Why (#3873 branch ordering): a Stopped record's pane is an idle shell too,
+    // so it also reports `runtime_live = false`. It must KEEP taking the plain
+    // `Restart` path — `/resume` already accepts Stopped, and routing it through
+    // `ReconcileThenRestart` would add a pointless `/runtime-stop` round-trip
+    // against a record that is already stopped. Guards that the new gate sits
+    // BELOW `needs_restart`, not above it.
+    assert_eq!(
+        plan_resume(
+            "stopped", /* tmux_live */ true, /* runtime_live */ false
+        ),
+        ResumeAction::Restart,
+        "stopped + dead runtime must still take the plain Restart path"
+    );
+}
+
+#[test]
+fn plan_resume_refuses_terminal_states_even_with_dead_runtime() {
+    // Why (#3873): the terminal tombstone refusal must stay FIRST. A
+    // decommissioned/deleted record whose pane is an idle shell must never be
+    // resurrected through the new dead-runtime reconcile path.
+    for state in ["deleted", "decommissioned"] {
+        assert_eq!(
+            plan_resume(
+                state, /* tmux_live */ true, /* runtime_live */ false
+            ),
+            ResumeAction::Terminal,
+            "{state} + dead runtime must still be refused as Terminal"
+        );
+    }
+}
+
+#[test]
+fn pane_runtime_live_assumes_live_without_pane_id() {
+    // Why (#3873 fail-open contract): `runtime_live = false` now triggers a
+    // `/runtime-stop` that KILLS the pane. A record with no stored `pane_id`
+    // gives us NO evidence either way, so it must assume live and preserve the
+    // pre-#3873 Attach behavior — a wrong `false` would destroy a live agent's
+    // pane. Pure: takes the early return before any tmux shell-out.
+    assert!(
+        pane_runtime_live(None),
+        "a record with no pane_id must fail OPEN (assume the runtime is live)"
+    );
+    assert!(
+        pane_runtime_live(Some("   ")),
+        "a blank pane_id is no evidence either — must fail OPEN too"
+    );
+}
+
+#[test]
+fn parse_pane_probe_reads_command_and_pid() {
+    // Why (#3873): the happy shape tmux returns for
+    // `display-message -p -t %333 '#{pane_current_command} #{pane_pid}'`.
+    assert_eq!(
+        parse_pane_probe("zsh 41234\n"),
+        Some(("zsh".to_string(), Some(41234))),
+        "must split the command word from the pane pid"
+    );
+    assert_eq!(
+        parse_pane_probe("claude 41234\n"),
+        Some(("claude".to_string(), Some(41234))),
+        "a live agent's command word must survive intact"
+    );
+}
+
+#[test]
+fn parse_pane_probe_tolerates_missing_pid() {
+    // Why (#3873): a missing/garbage pid is not evidence of death — the command
+    // word still has to clear `is_idle_shell` before anything is torn down.
+    assert_eq!(
+        parse_pane_probe("zsh\n"),
+        Some(("zsh".to_string(), None)),
+        "a command with no pid must still parse, with pid None"
+    );
+    assert_eq!(
+        parse_pane_probe("zsh notanumber\n"),
+        Some(("zsh".to_string(), None)),
+        "a non-numeric pid must degrade to None, never panic"
+    );
+}
+
+#[test]
+fn parse_pane_probe_none_for_empty_reply() {
+    // Why (#3873): an empty reply means tmux told us nothing — the caller must
+    // fail OPEN rather than treat "no command word" as an idle shell.
+    assert_eq!(parse_pane_probe(""), None, "empty output must yield None");
+    assert_eq!(
+        parse_pane_probe("   \n"),
+        None,
+        "whitespace-only output must yield None"
     );
 }
 
@@ -1259,7 +1393,9 @@ fn guided_resume_plan_stopped_restarts() {
     // Why: stopped state must go straight to the daemon /resume restart path —
     // NOT reconcile (there is nothing to stop) and NOT a bare attach.
     assert_eq!(
-        plan_resume("stopped", false),
+        plan_resume(
+            "stopped", /* tmux_live */ false, /* runtime_live */ true
+        ),
         ResumeAction::Restart,
         "stopped must select the plain Restart path"
     );
@@ -1269,7 +1405,9 @@ fn guided_resume_plan_stopped_restarts() {
 fn guided_resume_plan_errored_restarts() {
     // Why: errored is resumable via /resume just like stopped.
     assert_eq!(
-        plan_resume("errored", false),
+        plan_resume(
+            "errored", /* tmux_live */ false, /* runtime_live */ true
+        ),
         ResumeAction::Restart,
         "errored must select the plain Restart path"
     );
@@ -1282,7 +1420,9 @@ fn guided_resume_plan_active_no_tmux_reconciles_then_restarts() {
     // must be ReconcileThenRestart, not a bail and not a plain Restart (a bare
     // /resume would 409 because the record is still active).
     assert_eq!(
-        plan_resume("active", false),
+        plan_resume(
+            "active", /* tmux_live */ false, /* runtime_live */ true
+        ),
         ResumeAction::ReconcileThenRestart,
         "active + no tmux must reconcile (auto-stop) then restart"
     );
@@ -1293,7 +1433,11 @@ fn guided_resume_plan_provisioning_no_tmux_reconciles_then_restarts() {
     // Why (#2001): provisioning + tmux gone is also a zombie and follows the same
     // auto-stop-then-restart recovery.
     assert_eq!(
-        plan_resume("provisioning", false),
+        plan_resume(
+            "provisioning",
+            /* tmux_live */ false,
+            /* runtime_live */ true
+        ),
         ResumeAction::ReconcileThenRestart,
         "provisioning + no tmux must reconcile then restart"
     );
@@ -1308,7 +1452,7 @@ fn plan_resume_refuses_terminal_states() {
     for state in ["deleted", "decommissioned"] {
         for tmux_live in [false, true] {
             assert_eq!(
-                plan_resume(state, tmux_live),
+                plan_resume(state, tmux_live, /* runtime_live */ true),
                 ResumeAction::Terminal,
                 "{state} (tmux_live={tmux_live}) must be refused as Terminal, never resumed"
             );
@@ -1333,7 +1477,9 @@ fn guided_resume_plan_stopped_with_stale_tmux_still_restarts() {
     // zombie (needs_restart is true) — it takes the plain Restart path (the daemon
     // kills the stale pane). Guards the branch ordering in plan_resume.
     assert_eq!(
-        plan_resume("stopped", true),
+        plan_resume(
+            "stopped", /* tmux_live */ true, /* runtime_live */ true
+        ),
         ResumeAction::Restart,
         "stopped + stale live tmux must still take the Restart path, not reconcile"
     );
@@ -1382,7 +1528,11 @@ fn guided_resume_plan_resume_prefers_persisted_state_over_display_state() {
     // daemon's authoritative state.
     let session = make_session_with_persisted_state("tm-writing-01", "stopped", "active");
     let tmux_live = false; // the picker's "(stopped)" label implies tmux is gone
-    let action = plan_resume(resume_classification_state(&session), tmux_live);
+    let action = plan_resume(
+        resume_classification_state(&session),
+        tmux_live,
+        /* runtime_live */ true,
+    );
     assert_eq!(
         action,
         ResumeAction::ReconcileThenRestart,
@@ -1394,7 +1544,7 @@ fn guided_resume_plan_resume_prefers_persisted_state_over_display_state() {
     // reproduces the reported dead-end — proving this test would have caught
     // the regression.
     assert_eq!(
-        plan_resume(&session.state, tmux_live),
+        plan_resume(&session.state, tmux_live, /* runtime_live */ true),
         ResumeAction::Restart,
         "classifying off the display-reconciled state alone reproduces the bug"
     );

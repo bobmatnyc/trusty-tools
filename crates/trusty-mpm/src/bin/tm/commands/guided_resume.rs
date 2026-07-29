@@ -1,4 +1,4 @@
-//! Guided-picker resume/restart flow (#1742, #2001, #3531).
+//! Guided-picker resume/restart flow (#1742, #2001, #3531, #3873).
 //!
 //! Why: resuming a managed session from the bare-`tm` picker must handle every
 //! runtime state without ever exposing a raw tmux failure. A live session is
@@ -8,6 +8,22 @@
 //! stops it (resetting the record to Stopped) then restarts it via the same
 //! path, so the operator does nothing (#2001). Extracted from `guided.rs` to keep
 //! both files under the 500-SLOC production cap.
+//!
+//! #3873: "live session" was originally decided by tmux SESSION existence alone
+//! (`tmux_has_session`), which cannot see the far more common failure the
+//! operator actually hits — the tmux pane is still there, but the `claude`
+//! inside it exited and the pane fell back to a bare login shell. Bare `tm`
+//! therefore picked `Attach` and `switch-client`ed the operator into an idle
+//! shell, doing nothing useful; only a SECOND `tm`, typed from inside that pane
+//! (where the in-place relaunch gate matches), actually brought a runtime back.
+//! [`plan_resume`] now takes a third input, `runtime_live`, and maps
+//! `(active, tmux up, runtime dead)` onto the existing `ReconcileThenRestart`
+//! recovery so the first invocation does the whole job. [`pane_runtime_live`]
+//! resolves that input by reusing the daemon reaper's own
+//! [`trusty_mpm::daemon::runtime_reap::pane_runtime_exited`] predicate against a
+//! single pane-id-targeted `tmux display-message` — the CLI asks the question
+//! itself at resume time, so this fix does NOT depend on the 60s runtime reaper
+//! having already reconciled the record.
 //!
 //! #3531: the zombie/restart classification below MUST run on
 //! [`trusty_mpm::client::ManagedSessionSummary::persisted_state`], never the
@@ -135,21 +151,6 @@ pub(crate) enum ResumeAction {
     Terminal,
 }
 
-/// Decide, purely from `state` and `tmux_live`, how a guided resume should proceed.
-///
-/// Why: single source of truth for the resume branch selection so the zombie
-/// reconcile, the plain restart, and the happy-path attach can never diverge
-/// from what [`is_zombie`]/[`needs_restart`] classify. Pure so it is exhaustively
-/// unit-tested.
-/// What: TERMINAL (`decommissioned`/`deleted`, checked FIRST) → `Terminal`
-/// (refuse); zombie (checked next, since a zombie's state also fails
-/// `needs_restart`) → `ReconcileThenRestart`; Stopped/Errored → `Restart`;
-/// everything else (active/provisioning with a live tmux) → `Attach`. The
-/// terminal check is first so neither the zombie path (would resurrect via
-/// reconcile-restart) nor the Attach path (would attach into a deleted session)
-/// can ever be reached for a tombstone (code-critic CRITICAL).
-/// Test: `guided_resume_plan_*`, `plan_resume_refuses_terminal_states` in
-/// `tests_behavior_c_tests.rs`.
 /// Resolve the state string [`plan_resume`] must classify from a wire
 /// [`trusty_mpm::client::ManagedSessionSummary`] (#3531).
 ///
@@ -173,16 +174,156 @@ pub(crate) fn resume_classification_state(
     session.persisted_state.as_deref().unwrap_or(&session.state)
 }
 
-pub(crate) fn plan_resume(state: &str, tmux_live: bool) -> ResumeAction {
+/// Decide, purely from `state` + `tmux_live` + `runtime_live`, how a guided
+/// resume should proceed.
+///
+/// Why: single source of truth for the resume branch selection so the zombie
+/// reconcile, the plain restart, and the happy-path attach can never diverge
+/// from what [`is_zombie`]/[`needs_restart`] classify. Pure so it is exhaustively
+/// unit-tested.
+///
+/// #3873: `tmux_live` answers "does the tmux SESSION exist?", which is NOT the
+/// same question as "is the agent runtime alive?". A managed session whose inner
+/// `claude` exited leaves the tmux pane alive as a bare login shell, so
+/// `(active, tmux_live = true)` used to fall straight through to `Attach` — bare
+/// `tm` switched the operator into an idle shell and did nothing useful. The
+/// operator then had to type `tm` a SECOND time (now inside that pane, where the
+/// in-place relaunch gate matches) to actually get a runtime back. `runtime_live`
+/// is the missing third input: when the record is active/provisioning, tmux is
+/// up, but the runtime is provably gone, the plan is `ReconcileThenRestart` —
+/// the SAME auto-stop-then-restart recovery the tmux-gone zombie already uses,
+/// so the first invocation does the whole job. See [`pane_runtime_live`] for how
+/// the caller resolves this input (it reuses the daemon reaper's own
+/// [`trusty_mpm::daemon::runtime_reap::pane_runtime_exited`] predicate, so the
+/// CLI and the reaper can never disagree on what "dead runtime" means), and note
+/// that it fails OPEN (`true`) whenever liveness cannot be proven — an
+/// unprovable case keeps the pre-#3873 `Attach` behavior rather than tearing a
+/// pane down on a guess.
+///
+/// What: TERMINAL (`decommissioned`/`deleted`, checked FIRST) → `Terminal`
+/// (refuse); zombie (checked next, since a zombie's state also fails
+/// `needs_restart`) → `ReconcileThenRestart`; Stopped/Errored → `Restart`;
+/// active/provisioning with a live tmux but a DEAD runtime (#3873) →
+/// `ReconcileThenRestart`; everything else (active/provisioning with a live tmux
+/// AND a live runtime) → `Attach`. The terminal check is first so neither the
+/// zombie path (would resurrect via reconcile-restart) nor the Attach path
+/// (would attach into a deleted session) can ever be reached for a tombstone
+/// (code-critic CRITICAL). The `needs_restart` check stays AHEAD of the #3873
+/// gate so a Stopped/Errored record — whose pane is an idle shell too, and would
+/// therefore also report `runtime_live = false` — keeps taking the plain
+/// `Restart` path rather than a pointless `/runtime-stop` round-trip against a
+/// record that is already stopped.
+/// Test: `guided_resume_plan_*`, `plan_resume_refuses_terminal_states` in
+/// `tests_behavior_c_tests.rs`;
+/// `guided_resume_plan_active_live_tmux_dead_runtime_reconciles_then_restarts`
+/// pins the #3873 case specifically.
+pub(crate) fn plan_resume(state: &str, tmux_live: bool, runtime_live: bool) -> ResumeAction {
     if is_terminal_state(state) {
         ResumeAction::Terminal
     } else if is_zombie(state, tmux_live) {
         ResumeAction::ReconcileThenRestart
     } else if needs_restart(state) {
         ResumeAction::Restart
+    } else if !runtime_live {
+        // #3873: active/provisioning, tmux session up, but the runtime inside the
+        // pane is provably gone. Same recovery as the tmux-gone zombie above —
+        // `/runtime-stop` resets the record to Stopped so the daemon's `/resume`
+        // (which only accepts Stopped/Errored) will take it, then attach.
+        ResumeAction::ReconcileThenRestart
     } else {
         ResumeAction::Attach
     }
+}
+
+/// Parse `tmux display-message -p -t <pane> '#{pane_current_command} #{pane_pid}'`
+/// output into the two fields [`pane_runtime_exited`] needs (#3873).
+///
+/// Why: the shell-out itself is untestable without a live tmux server, but the
+/// parse is exactly where a format change or an empty/short reply would silently
+/// mis-answer "is the runtime alive?". Splitting it out keeps that risk on a pure,
+/// unit-tested seam. Deliberately does NOT go through
+/// [`crate::daemon::tmux`]-style `list-panes -a` enumeration: that path is a
+/// whole-server sweep whose composite-key parsing is a known failure mode
+/// (#1813 shape), and a single pane-id-targeted `display-message` needs none of
+/// it — tmux resolves a pane id to exactly one pane or errors.
+/// What: returns `None` when the reply has no command word at all (empty output,
+/// or tmux printed nothing usable) — the caller treats that as "cannot prove
+/// dead". Otherwise returns the command word plus the pane pid, with the pid
+/// `None` when it is missing or not a number (that alone is not evidence of
+/// death; [`crate::daemon::orphan_gc::ChildLivenessProbe`] treats `None` as
+/// "no live child", and the command-word gate still has to agree).
+/// Test: `parse_pane_probe_*` in `tests_behavior_c_tests.rs`.
+pub(crate) fn parse_pane_probe(stdout: &str) -> Option<(String, Option<u32>)> {
+    let line = stdout.lines().next().unwrap_or("").trim();
+    let mut parts = line.split_whitespace();
+    let command = parts.next()?.to_string();
+    let pid = parts.next().and_then(|p| p.parse::<u32>().ok());
+    Some((command, pid))
+}
+
+/// Is the agent runtime inside `pane_id` still alive? (#3873)
+///
+/// Why: `tmux_has_session` proves only that the tmux SESSION exists. When a
+/// managed session's inner `claude` exits, the pane survives as a bare login
+/// shell — so session-existence says "live" while the thing the operator wants
+/// is gone. The daemon's 60s runtime reaper already owns the authoritative
+/// answer to this question in
+/// [`trusty_mpm::daemon::runtime_reap::pane_runtime_exited`]; this function
+/// reuses that exact predicate (and therefore the same `is_idle_shell`
+/// allowlist and the same [`trusty_mpm::daemon::orphan_gc::ProcessTreeProbe`]
+/// belt-and-braces child gate) rather than reimplementing idle-shell detection
+/// in the CLI, so the two can never drift apart. Reusing it also means this fix
+/// works whether or not the reaper is currently healthy: the CLI asks the
+/// question itself, at resume time, instead of waiting for a reaped record.
+/// What: FAILS OPEN — returns `true` (assume live, preserving the pre-#3873
+/// `Attach` behavior) when the record has no `pane_id`, when the `tmux` shell-out
+/// fails or exits non-zero, or when the reply cannot be parsed. Only a positive,
+/// two-gate identification (a recognised bare shell AND no live child under the
+/// pane pid) returns `false`. Failing open matters because `false` now triggers a
+/// `/runtime-stop` that KILLS the pane: a wrong `false` would destroy a live
+/// agent's pane, while a wrong `true` merely reproduces today's already-shipped
+/// behavior.
+/// Test: the pure parse seam is `parse_pane_probe_*`; the fail-open contract for
+/// a missing pane id is `pane_runtime_live_assumes_live_without_pane_id`; the
+/// classification it delegates to is covered by the daemon's own
+/// `pane_runtime_exited_*` tests. The tmux shell-out itself is I/O (a live tmux
+/// server), matching the existing `session_for_pane` / `pane_tty_for` precedent
+/// in `tmux_attach.rs`.
+pub(crate) fn pane_runtime_live(pane_id: Option<&str>) -> bool {
+    let Some(pane_id) = pane_id.map(str::trim).filter(|p| !p.is_empty()) else {
+        return true;
+    };
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    let Ok(output) = std::process::Command::new(&tmux_bin)
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{pane_current_command} #{pane_pid}",
+        ])
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let Some((command, pane_pid)) = parse_pane_probe(&String::from_utf8_lossy(&output.stdout))
+    else {
+        return true;
+    };
+
+    let pane = trusty_mpm::daemon::orphan_gc::PaneInfo {
+        session_name: String::new(),
+        pane_current_command: command,
+        pane_pid,
+        pane_id: Some(pane_id.to_string()),
+    };
+    !trusty_mpm::daemon::runtime_reap::pane_runtime_exited(
+        &pane,
+        &trusty_mpm::daemon::orphan_gc::ProcessTreeProbe,
+    )
 }
 
 /// Restart (if needed) then attach to a managed session from the guided picker.
@@ -286,7 +427,15 @@ pub(crate) async fn resume_session(
     // the pre-#3531 (imperfect but not regressed) behavior — see
     // `resume_classification_state`.
     let persisted_state = resume_classification_state(session);
-    let action = plan_resume(persisted_state, tmux_live);
+    // #3873: `tmux_live` above proves only that the tmux SESSION exists. Ask the
+    // separate question the operator actually cares about — is the agent runtime
+    // inside the record's pane still there? — before letting an `active` record
+    // fall through to a bare `Attach` that would drop them into an idle shell.
+    // Only worth the shell-out when tmux is up at all; when it is not, `is_zombie`
+    // already classifies the record and `pane_runtime_live` could not answer
+    // anyway (the pane is gone with the session).
+    let runtime_live = !tmux_live || pane_runtime_live(session.pane_id.as_deref());
+    let action = plan_resume(persisted_state, tmux_live, runtime_live);
 
     // Terminal-state refusal (code-critic CRITICAL): a decommissioned/deleted
     // tombstone must never be attached to or restarted — doing either would
@@ -300,17 +449,31 @@ pub(crate) async fn resume_session(
         return Ok(AttachOutcome::Skipped);
     }
 
-    // Zombie auto-reconcile (#2001): the daemon still marks the session
-    // active/provisioning but its tmux pane is gone (e.g. after a reboot). The
-    // daemon's /resume only accepts Stopped/Errored, so first reset the record to
+    // Zombie auto-reconcile (#2001, #3873): the daemon still marks the session
+    // active/provisioning but there is no runtime to attach to — either the whole
+    // tmux session is gone (#2001, e.g. after a reboot) or the pane survived but
+    // its agent process exited, leaving a bare shell (#3873). The daemon's
+    // /resume only accepts Stopped/Errored, so first reset the record to
     // Stopped via /runtime-stop, then fall through into the SAME restart path
     // below. Only bail if the stop itself fails — that is the one remaining case
     // that needs a human.
     if action == ResumeAction::ReconcileThenRestart {
-        eprintln!(
-            "tm: '{}' is marked {} but its tmux pane is gone — reconciling and restarting…",
-            session.name, persisted_state
-        );
+        // #3873: report which of the two shapes this is. The old wording asserted
+        // "its tmux pane is gone", which is now only half the cases — telling an
+        // operator their pane vanished when it is sitting right in front of them
+        // is worse than saying nothing.
+        if tmux_live {
+            eprintln!(
+                "tm: '{}' is marked {} but its runtime has exited (the pane is a \
+                 bare shell) — restarting the runtime…",
+                session.name, persisted_state
+            );
+        } else {
+            eprintln!(
+                "tm: '{}' is marked {} but its tmux pane is gone — reconciling and restarting…",
+                session.name, persisted_state
+            );
+        }
         reconcile_zombie_stop(client, url, session).await?;
     }
 
@@ -324,8 +487,11 @@ pub(crate) async fn resume_session(
         action,
         ResumeAction::Restart | ResumeAction::ReconcileThenRestart
     ) {
-        // Pane-kill disclosure only applies to the plain Restart branch: a zombie
-        // has no live pane (that is what made it a zombie), so skip the notice there.
+        // Pane-kill disclosure only applies to the plain Restart branch. The
+        // reconcile branch already printed its own message above, and its pane is
+        // either gone (#2001) or a bare shell whose runtime already exited
+        // (#3873) — in neither case is there in-progress runtime state left to
+        // warn about losing.
         if action == ResumeAction::Restart {
             if tmux_live {
                 eprintln!(

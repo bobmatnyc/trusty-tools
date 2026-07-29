@@ -183,6 +183,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unchanged (unset or unregistered still means worktrees ON, and an unreadable
   registry fails safe to ON), and #3455's warn-never-refuse concurrency
   behaviour is untouched.
+- Bare `tm` now resumes a session whose runtime has died, instead of switching
+  the operator into a bare shell
+  ([#3873](https://github.com/bobmatnyc/trusty-tools/issues/3873)). The picker's
+  resume planner decided "this session is live" from tmux SESSION existence
+  alone, which cannot see the common case where the tmux pane survives but the
+  `claude` inside it exited and the pane fell back to a login shell. That
+  `(active, tmux up)` pair fell through to `Attach`, so the first `tm` did a
+  `switch-client` into an idle shell and nothing else — the operator had to type
+  `tm` a SECOND time, from inside that pane, before a runtime came back.
+  `guided_resume::plan_resume` takes a third input, `runtime_live`, and maps
+  `(active/provisioning, tmux up, runtime dead)` onto the existing
+  `ReconcileThenRestart` recovery (`/runtime-stop` → `/resume` → attach), so the
+  first invocation does the whole job. `runtime_live` is resolved by the new
+  `pane_runtime_live`, which reuses the daemon reaper's own
+  `daemon::runtime_reap::pane_runtime_exited` predicate — same `is_idle_shell`
+  allowlist, same `ProcessTreeProbe` child gate — against a single
+  pane-id-targeted `tmux display-message`, so the CLI and the reaper cannot drift
+  apart and the fix works whether or not the 60s reaper is healthy. Fails OPEN:
+  a record with no `pane_id`, a failed `tmux` call, or an unparseable reply all
+  assume the runtime is live and preserve the previous attach behavior, because a
+  wrong "dead" verdict would kill a live agent's pane. Stopped/Errored records
+  (whose panes are idle shells too) keep taking the plain `Restart` path, and the
+  decommissioned/deleted tombstone refusal still runs first.
 
 - Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
   The project-store upsert was an unsynchronised read-modify-write of the whole
