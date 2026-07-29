@@ -74,6 +74,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
+  The project-store upsert was an unsynchronised read-modify-write of the whole
+  file — two processes interleaving read/read/write/write silently dropped one
+  registration while both callers saw success, and because every writer shared
+  one fixed `projects.json.tmp` scratch path, overlapping writes could publish a
+  mangled document that no longer parsed. All mutations now run through
+  `ProjectStore::mutate`, which performs the whole cycle inside a cross-process
+  file lock and publishes atomically via `trusty_common::json_rmw`. `PATCH
+  /api/v1/projects/{name}` gets the same guarantee: its fetch→mutate→persist
+  runs under one held lock instead of two separate store calls. A failed lock is
+  an error, never an unsynchronised write.
+
 - Worktree discovery is derived from `git worktree list --porcelain` instead of
   walking five hard-coded location shapes, so a session worktree is found
   wherever it lives rather than only where someone remembered to look (#4207

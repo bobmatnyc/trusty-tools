@@ -11431,6 +11431,7 @@ dependencies = [
  "dirs 5.0.1",
  "dotenvy",
  "fastembed",
+ "fd-lock",
  "futures",
  "futures-util",
  "genco",
