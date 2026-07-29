@@ -9,6 +9,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
+  set is now documented as DELIBERATELY unfiltered by session state, and pinned
+  by a new regression test `prune_spares_a_stopped_records_workspace`
+  ([#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288),
+  [#4207](https://github.com/bobmatnyc/trusty-tools/issues/4207)). No behavior
+  change — the construction is untouched. A `SessionRecord`'s state is
+  bookkeeping, not a liveness signal (a session measured running in tmux was
+  recorded `stopped` while holding uncommitted and unpushed work), so the
+  inviting `.filter(|r| r.state == Active)` tidy-up would make a live worktree
+  an orphan candidate. The test drives the real route and fails if that filter
+  is ever added.
+- `session_manager::prune`: `prune_orphaned_worktrees`'s `active_workspace_paths`
+  parameter is renamed **`in_use_workspace_paths`** (and its `initial_active` /
+  `fresh_active` locals to `initial_in_use` / `fresh_in_use`). Rename only, no
+  behavior change: the old name is what made `.filter(|r| r.state == Active)`
+  read as a tidy-up rather than a data-loss bug.
+- `session_manager::prune`: `phase2_fresh_snapshot_spares_a_record_the_caller_set_missed`
+  closes a pre-existing coverage hole — the Phase 2 `fresh_in_use` re-read, the
+  last check between a reclaimable candidate and deletion, had ZERO executed
+  coverage. The one test that named it builds its worktree with no ownership
+  sentinel, so the #3649 gate skipped it before Phase 2 ever ran; filtering
+  Phase 2 by state broke nothing in the suite.
+- `session_manager::prune`: the same pin extended to the two remaining unfiltered
+  reads on the AUTOMATIC orphan-GC path — the active set built in
+  `reap_orphaned_worktrees` (what the daemon's sweep loop calls on a timer, with
+  `dry_run: false` hardcoded and no preview) and the Phase 2 `fresh_active`
+  snapshot inside `prune_orphaned_worktrees` that re-reads the store immediately
+  before deletion. Both are now commented, and
+  `reap_spares_a_stopped_records_workspace` asserts end-to-end that a `Stopped`
+  record's worktree survives a real, deleting sweep. Measured and documented:
+  these two reads are defense-in-depth — neither is load-bearing alone, and only
+  narrowing BOTH actually deletes a live worktree. No behavior change.
+
 - **PM instructions are authored per section** (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)): the four monolithic assets (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `BASE_PM.md`) are replaced by one markdown source per section under `src/assets/instructions/sections/`, and `core::bundled_pm_package` builds its blocks from those files instead of cutting the monoliths at runtime (the `split_asset` / `Cut` machinery is gone). `instruction_pipeline::pm_instructions()` and `base_pm()` reconstitute the two multi-section strings the legacy override assembly still needs, so a section edit reaches BOTH composers and a project with a `.trusty-mpm/` override can no longer be frozen on stale instructions. Every existing override file (`INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`, `PM_INSTRUCTIONS_DEPLOYED.md`) keeps resolving exactly as before.
 - **Delivered-prompt content changes** (same epic). The Memory and Search guidance is lifted out of the middle of the Core body into two self-contained sections with their own headings — they were two halves of one numbered list, which made their declared `project` tier a false claim (replacing Memory alone left Search opening on a bare `2.`); they are now genuinely independently overridable. `## Trusty Tool Priority (Non-Overridable)` moves to sit with the other non-overridable rules, so it now precedes the framework-guaranteed conventions instead of following them — position only, still inside the floor, wording unchanged. The workflow section gains a **Sprint, then Harden** doctrine (sprint to feature-complete with targeted tests and no CI iteration loops; harden with the full suite, critic and release gates before publishing), including the causal claim that slow release *causes* WIP, the hard line that going fast never licenses turning red green by deleting coverage, and the close-and-fold rule at 3+ review rounds.
 - `core::pm_prompt_golden_tests`: committed snapshots of the fully composed PM prompt for both the packaged and legacy composers. #4249's byte-equality-against-the-old-prompt gate cannot survive a deliberate content change, so these replace it: any future edit to a section source surfaces as a reviewable prose diff in the PR rather than landing invisibly. Regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`.

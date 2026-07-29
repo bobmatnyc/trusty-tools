@@ -105,14 +105,44 @@ fn default_dry_run() -> bool {
 /// default, and so is skipping dirty worktrees — `discard_dirty: true` is the
 /// only path to a destructive removal of unsaved work.
 /// Test: `prune_worktrees_route_dry_run`,
-/// `prune_worktrees_request_defaults_to_skip_dirty`.
+/// `prune_worktrees_request_defaults_to_skip_dirty`,
+/// `prune_spares_a_stopped_records_workspace` (#4288).
 pub async fn prune_worktrees_route(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PruneWorktreesRequest>,
 ) -> impl IntoResponse {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
-    let active_workspace_paths: Vec<std::path::PathBuf> = records
+    // #4288 (item 4 of #4207): DELIBERATELY UNFILTERED. Do NOT "tidy this up"
+    // by adding `.filter(|r| r.state == ManagedSessionState::Active)` — every
+    // record with a `workspace_path` belongs in this set, whatever its state.
+    //
+    // Why: a `SessionRecord`'s state is bookkeeping, NOT a liveness signal. It
+    // is written by reconcile/stop/hook paths that can miss, race, or be
+    // skipped entirely, so live sessions are routinely observed carrying a
+    // terminal state. Measured on this repo 2026-07-28: session
+    // `2eb72dca-de08-481b-8dfa-22ab7f81b1f9` was RUNNING (tmux pane `%981`,
+    // `pane_current_path` inside its own worktree) while `sessions.json`
+    // recorded it as `state: "stopped"`, holding 12 modified tracked files,
+    // 31 untracked files, and 1 unpushed commit.
+    //
+    // What narrowing this set costs, measured rather than assumed (#4288):
+    // such a worktree stops being spared and becomes an orphan CANDIDATE, so
+    // this route's DRY-RUN preview reports a live worktree as reclaimable —
+    // a false report an operator may then act on. It does NOT by itself delete
+    // anything: the real (`dry_run: false`) path re-reads the store for
+    // `prune_orphaned_worktrees`'s Phase 2 `fresh_active` snapshot, itself
+    // deliberately unfiltered, and that second read still spares the candidate
+    // immediately before deletion. The two reads are defense-in-depth; data
+    // loss needs BOTH narrowed. Do not read that as permission to narrow one
+    // "because the other covers it" — that argument applied twice is exactly
+    // how a pair of independent boundaries collapses into none.
+    //
+    // Pinned by `prune_spares_a_stopped_records_workspace` in this file's test
+    // module (which fails on the dry-run preview alone), and end-to-end on the
+    // automatic GC path by `reap_spares_a_stopped_records_workspace` in
+    // `session_manager::reap_orphaned_worktrees_tests`.
+    let in_use_workspace_paths: Vec<std::path::PathBuf> = records
         .iter()
         .filter_map(|r| r.workspace_path.clone())
         .collect();
@@ -128,7 +158,7 @@ pub async fn prune_worktrees_route(
         DirtyWorktreePolicy::Skip
     };
     match mgr
-        .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run, policy)
+        .prune_orphaned_worktrees(&repos_root, &in_use_workspace_paths, req.dry_run, policy)
         .await
     {
         Ok(outcome) => {
@@ -216,5 +246,169 @@ mod tests {
             serde_json::from_str(r#"{"dry_run":false,"discard_dirty":true}"#)
                 .expect("explicit body parses");
         assert!(explicit.discard_dirty, "the opt-in must round-trip");
+    }
+
+    /// Read a route response's JSON body.
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("route body must be readable");
+        serde_json::from_slice(&bytes).expect("route body must be JSON")
+    }
+
+    /// #4288: a `Stopped` record's workspace is spared by the orphan sweep —
+    /// the active-set construction above must stay UNFILTERED by record state.
+    ///
+    /// Why: session state is not a liveness signal (see the comment at the
+    /// construction site — a live session was measured recorded as `stopped`
+    /// while holding 12 modified files and an unpushed commit). The obvious
+    /// tidy-up, `.filter(|r| r.state == Active)`, would drop that record's
+    /// workspace out of the spared set and hand a LIVE worktree to the
+    /// reclaim path. This test exists to turn that tidy-up red.
+    ///
+    /// Non-vacuity: the fixture is stamped with an aged, well-formed ownership
+    /// sentinel naming a never-registered owner, so EVERY downstream gate
+    /// (#3649 ownership, the `git worktree list` cross-check, the #4091 dirty
+    /// gate) already votes "reclaim". The CONTROL below asserts exactly that
+    /// against an EMPTY active set — so if a future change makes the fixture
+    /// unreclaimable for some unrelated reason, the control fails loudly
+    /// instead of letting the real assertions pass for the wrong reason.
+    /// Membership in `in_use_workspace_paths` is therefore the ONLY thing
+    /// under test here.
+    /// Test: this function IS the test.
+    ///
+    /// `await_holding_lock` is the point, not an oversight: the route reads the
+    /// workspace root from the process environment, so the crate-wide
+    /// `env_test_lock` must span the awaited route calls or a sibling env test
+    /// can clobber the override mid-request. Each `#[tokio::test]` gets its own
+    /// thread and current-thread runtime, so a blocking sync guard serialises
+    /// those threads without any chance of deadlocking the executor.
+    #[allow(clippy::await_holding_lock)]
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn prune_spares_a_stopped_records_workspace() {
+        use crate::session_manager::record::ManagedSessionId;
+        use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+        use crate::session_manager::{ManagedSessionState, SessionRecord};
+
+        let fx = GitWorktreeFixture::new();
+        let wt = fx.add_worktree("stopped-but-live");
+        GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+        let wt_str = wt.to_string_lossy().into_owned();
+
+        let root = crate::test_support::hermetic_temp_dir();
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let mgr = state.session_manager().await;
+
+        // CONTROL: with an EMPTY active set the fixture IS reclaimable. Dry-run
+        // so nothing is deleted before the real assertions run.
+        let control = mgr
+            .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+            .await
+            .expect("control sweep must not error");
+        assert!(
+            control.removed.contains(&wt),
+            "CONTROL: {wt_str} must be reclaimable with an empty active set, \
+             otherwise this test proves nothing; removed={:?} owner_unknown={:?} \
+             skipped_dirty={:?}",
+            control.removed,
+            control.owner_unknown,
+            control.skipped_dirty
+        );
+
+        // Register the worktree to a record and drive it to `Stopped` — the
+        // exact shape observed on a session that was actually still running.
+        let record = mgr
+            .create_with_id(
+                ManagedSessionId::new(),
+                "pinned by #4288".into(),
+                Some(wt.clone()),
+                None,
+                Some(wt.clone()),
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                false,
+            )
+            .await
+            .expect("seed session record");
+        let stopped = SessionRecord {
+            state: ManagedSessionState::Stopped,
+            ..record
+        };
+        mgr.store
+            .write()
+            .await
+            .upsert(stopped)
+            .await
+            .expect("persist the Stopped record");
+
+        // Point the route's repos-root resolver at the fixture.
+        //
+        // This test issues a DRY-RUN sweep only — it must never run a deleting
+        // sweep whose target root comes from a process-global env var. If a
+        // concurrent test restored that var mid-call, a destructive sweep would
+        // target the operator's real `~/trusty-mpm-projects`, and the
+        // three-read defense would NOT save it: the caller set and the Phase 2
+        // re-read both draw from this empty isolated store, so real worktrees
+        // are absent from both. The deleting half also bought zero mutation
+        // coverage (its assertions pass under the M1 mutation), so it is gone.
+        //
+        // BOTH guards are required and they do not interoperate:
+        // `env_test_lock` serialises the env-precedence tests, while
+        // `#[serial_test::serial]` serialises `connectors::tm_tests`, which
+        // mutates this same var in this same binary under `serial` alone.
+        let _env = crate::core::trusty_tools_config::env_test_lock();
+        // SAFETY: guarded by env_test_lock; removed below before the asserts.
+        unsafe {
+            std::env::set_var(
+                crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV,
+                &fx.repos_root,
+            )
+        };
+
+        let preview = body_json(
+            prune_worktrees_route(
+                State(state.clone()),
+                Json(PruneWorktreesRequest {
+                    dry_run: true,
+                    discard_dirty: false,
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        // SAFETY: guarded by env_test_lock, still held.
+        unsafe { std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV) };
+
+        let strings = |v: &serde_json::Value, key: &str| -> Vec<String> {
+            v.get(key)
+                .and_then(|x| x.as_array())
+                .unwrap_or_else(|| panic!("route body must carry `{key}`: {v}"))
+                .iter()
+                .map(|s| {
+                    s.as_str()
+                        .unwrap_or_else(|| panic!("`{key}` must hold strings: {v}"))
+                        .to_owned()
+                })
+                .collect()
+        };
+
+        // Dry-run `paths` IS the reclaimable set (see `prune_orphaned_worktrees`).
+        let preview_paths = strings(&preview, "paths");
+        assert!(
+            !preview_paths.contains(&wt_str),
+            "a Stopped record's workspace must NOT be reclaimable; \
+             {wt_str} appeared in the dry-run set {preview_paths:?}"
+        );
+        let preview_unknown = strings(&preview, "owner_unknown_paths");
+        assert!(
+            !preview_unknown.contains(&wt_str),
+            "a spared workspace is never even a candidate, so it must not be \
+             reported as owner-unknown either; got {preview_unknown:?}"
+        );
     }
 }
