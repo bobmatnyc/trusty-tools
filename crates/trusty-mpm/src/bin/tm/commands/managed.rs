@@ -705,6 +705,19 @@ pub(crate) async fn session_prune(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("?");
         println!("{action} {id} {name} [{prior}]");
+        // #4344 review: `decommissioned_worktree_retained` means the record
+        // was tombstoned but its in-project worktree held unsaved work and
+        // was deliberately NOT deleted (see `worktree_safety::inspect_dirt`).
+        // Without a distinct, visible line here, this printed identically to
+        // an ordinary `decommissioned` row and the refusal was invisible at
+        // the one surface an operator actually reads.
+        if action == "decommissioned_worktree_retained" {
+            let retained_path = s
+                .get("retained_workspace_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            println!("  ! worktree retained (dirty, not deleted): {retained_path}");
+        }
     }
     let verb = if dry_run { "would prune" } else { "pruned" };
     println!("{verb} {} session(s) (filter={state})", sessions.len());
