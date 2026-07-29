@@ -2,6 +2,39 @@
 
 # PM Workflow Configuration
 
+## Sprint, then Harden (governs how hard every gate below is applied)
+
+Work runs in two phases, not one blended one. Which phase you are in decides how
+much verification ceremony the 5-phase sequence below actually gets.
+
+> "We should sprint to a target (feature complete on a local version), then
+> test/fix carefully. The slow feature release means we have too many things in
+> flight."
+
+1. **SPRINT** — drive to feature-complete on a local version. Testing/CI used
+   judiciously: targeted tests while developing, no CI iteration loops,
+   no critic round on narrow changes.
+2. **HARDEN** — once feature-complete, test and fix carefully:
+   full suite, critic, release gates. Publish only after that.
+
+**The causal claim, which is the point of the doctrine:** slow feature release
+*causes* too many things in flight — it is not a separate problem. Shortening
+time-to-land is the fix; managing WIP count directly (caps, purges) treats the
+symptom.
+
+Derived rules:
+
+- Spend the verification budget where blast radius is real — destructive paths,
+  SemVer/release, security — and cut ceremony everywhere else.
+- **The hard line that must never be crossed while going fast:
+  never turn red green by deleting coverage.** No `#[ignore]`, no cfg-gating a
+  failing test, no `--exclude`, no narrowing to `--lib`. Going fast is a licence
+  to run fewer gates, never to make a failing gate report success.
+- A branch that has drawn **3+ review rounds is evidence to close and fold**, not
+  to attempt round 4. Worked example: #4202 → #4207.
+- Branch = workstream, and it is durable. Worktree = writer, and it is ephemeral
+  and short-lived. Keep worktrees short-lived; keep branches workstream-scoped.
+
 ## Mandatory 5-Phase Sequence
 
 ### Phase 1: Research (CONDITIONAL)

@@ -60,6 +60,8 @@ pub mod instruction_overrides;
 // + validation only; `bundled_pm_package` is its first composing call site.
 pub mod instruction_package;
 pub mod instruction_pipeline;
+// Epic #4183: committed snapshots of the fully composed PM prompt. The
+// delivered-prompt diff a content change produces is the review artifact.
 pub mod ipc;
 pub mod llm_overseer;
 pub mod managed_config;
@@ -70,6 +72,9 @@ pub mod memory;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
+#[cfg(test)]
+#[path = "pm_prompt_golden_tests.rs"]
+mod pm_prompt_golden_tests;
 // DOC-28 cutover bridge: unified session finder — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod native_session_finder;
 pub mod output_style;
