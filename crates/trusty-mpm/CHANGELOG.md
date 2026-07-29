@@ -20,6 +20,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   inviting `.filter(|r| r.state == Active)` tidy-up would make a live worktree
   an orphan candidate. The test drives the real route and fails if that filter
   is ever added.
+- `session_manager::prune`: `prune_orphaned_worktrees`'s `active_workspace_paths`
+  parameter is renamed **`in_use_workspace_paths`** (and its `initial_active` /
+  `fresh_active` locals to `initial_in_use` / `fresh_in_use`). Rename only, no
+  behavior change: the old name is what made `.filter(|r| r.state == Active)`
+  read as a tidy-up rather than a data-loss bug.
+- `session_manager::prune`: `phase2_fresh_snapshot_spares_a_record_the_caller_set_missed`
+  closes a pre-existing coverage hole — the Phase 2 `fresh_in_use` re-read, the
+  last check between a reclaimable candidate and deletion, had ZERO executed
+  coverage. The one test that named it builds its worktree with no ownership
+  sentinel, so the #3649 gate skipped it before Phase 2 ever ran; filtering
+  Phase 2 by state broke nothing in the suite.
 - `session_manager::prune`: the same pin extended to the two remaining unfiltered
   reads on the AUTOMATIC orphan-GC path — the active set built in
   `reap_orphaned_worktrees` (what the daemon's sweep loop calls on a timer, with

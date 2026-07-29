@@ -131,7 +131,7 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
 ///
 /// WHAT THIS TEST DOES AND DOES NOT CATCH — measured, not assumed. There are
 /// TWO deliberately-unfiltered reads on this path: the caller-supplied set
-/// built in `reap_orphaned_worktrees`, and the Phase 2 `fresh_active` snapshot
+/// built in `reap_orphaned_worktrees`, and the Phase 2 `fresh_in_use` snapshot
 /// that `prune_orphaned_worktrees` re-reads from the store immediately before
 /// deleting. They are defense-in-depth, and NEITHER is load-bearing alone:
 /// narrowing only the reap-side set leaves the worktree a candidate that
@@ -140,6 +140,13 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
 /// single narrowing and goes RED when BOTH are narrowed — verified in both
 /// directions. It pins the PAIR, which is the property that actually keeps a
 /// live worktree on disk; it is not a tripwire on either read in isolation.
+///
+/// Nor does it add coverage for the literal `== Active` tidy-up at the reap
+/// site: `create_with_id` persists records as `Provisioning`, not `Active`, so
+/// `reap_orphaned_worktrees_removes_orphan_preserves_live` above already fails
+/// on that mutation via its own live record. What is new here is the STOPPED
+/// case — a state that reads terminal but is routinely live — which no
+/// existing test covered on this path.
 ///
 /// Non-vacuity: the fixture carries an aged, well-formed ownership sentinel
 /// naming a NEVER-REGISTERED owner, so every downstream gate already votes

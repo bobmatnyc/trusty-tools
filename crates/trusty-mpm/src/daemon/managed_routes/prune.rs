@@ -142,7 +142,7 @@ pub async fn prune_worktrees_route(
     // module (which fails on the dry-run preview alone), and end-to-end on the
     // automatic GC path by `reap_spares_a_stopped_records_workspace` in
     // `session_manager::reap_orphaned_worktrees_tests`.
-    let active_workspace_paths: Vec<std::path::PathBuf> = records
+    let in_use_workspace_paths: Vec<std::path::PathBuf> = records
         .iter()
         .filter_map(|r| r.workspace_path.clone())
         .collect();
@@ -158,7 +158,7 @@ pub async fn prune_worktrees_route(
         DirtyWorktreePolicy::Skip
     };
     match mgr
-        .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run, policy)
+        .prune_orphaned_worktrees(&repos_root, &in_use_workspace_paths, req.dry_run, policy)
         .await
     {
         Ok(outcome) => {
@@ -273,7 +273,7 @@ mod tests {
     /// against an EMPTY active set — so if a future change makes the fixture
     /// unreclaimable for some unrelated reason, the control fails loudly
     /// instead of letting the real assertions pass for the wrong reason.
-    /// Membership in `active_workspace_paths` is therefore the ONLY thing
+    /// Membership in `in_use_workspace_paths` is therefore the ONLY thing
     /// under test here.
     /// Test: this function IS the test.
     ///
@@ -284,6 +284,7 @@ mod tests {
     /// thread and current-thread runtime, so a blocking sync guard serialises
     /// those threads without any chance of deadlocking the executor.
     #[allow(clippy::await_holding_lock)]
+    #[serial_test::serial]
     #[tokio::test]
     async fn prune_spares_a_stopped_records_workspace() {
         use crate::session_manager::record::ManagedSessionId;
@@ -344,9 +345,21 @@ mod tests {
             .await
             .expect("persist the Stopped record");
 
-        // Point the route's repos-root resolver at the fixture. Held under the
-        // crate-wide env lock and restored before any assertion, matching the
-        // existing env-mutating tests in this crate.
+        // Point the route's repos-root resolver at the fixture.
+        //
+        // This test issues a DRY-RUN sweep only — it must never run a deleting
+        // sweep whose target root comes from a process-global env var. If a
+        // concurrent test restored that var mid-call, a destructive sweep would
+        // target the operator's real `~/trusty-mpm-projects`, and the
+        // three-read defense would NOT save it: the caller set and the Phase 2
+        // re-read both draw from this empty isolated store, so real worktrees
+        // are absent from both. The deleting half also bought zero mutation
+        // coverage (its assertions pass under the M1 mutation), so it is gone.
+        //
+        // BOTH guards are required and they do not interoperate:
+        // `env_test_lock` serialises the env-precedence tests, while
+        // `#[serial_test::serial]` serialises `connectors::tm_tests`, which
+        // mutates this same var in this same binary under `serial` alone.
         let _env = crate::core::trusty_tools_config::env_test_lock();
         // SAFETY: guarded by env_test_lock; removed below before the asserts.
         unsafe {
@@ -368,19 +381,6 @@ mod tests {
             .into_response(),
         )
         .await;
-        let real = body_json(
-            prune_worktrees_route(
-                State(state.clone()),
-                Json(PruneWorktreesRequest {
-                    dry_run: false,
-                    discard_dirty: false,
-                }),
-            )
-            .await
-            .into_response(),
-        )
-        .await;
-
         // SAFETY: guarded by env_test_lock, still held.
         unsafe { std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV) };
 
@@ -409,18 +409,6 @@ mod tests {
             !preview_unknown.contains(&wt_str),
             "a spared workspace is never even a candidate, so it must not be \
              reported as owner-unknown either; got {preview_unknown:?}"
-        );
-
-        // And the real (deleting) run must leave it alone, on disk too.
-        let removed = strings(&real, "paths");
-        assert!(
-            !removed.contains(&wt_str),
-            "a Stopped record's workspace must NOT be removed; \
-             {wt_str} appeared in the removed set {removed:?}"
-        );
-        assert!(
-            wt.exists(),
-            "{wt_str} must still exist on disk after a real prune run"
         );
     }
 }

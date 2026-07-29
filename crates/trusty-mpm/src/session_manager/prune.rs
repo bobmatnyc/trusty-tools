@@ -621,7 +621,7 @@ impl SessionManager {
     /// worktrees, but sessions decommissioned before the fix — or where the git
     /// command failed — leave stale `.worktrees/<session-id>/` directories. This
     /// sweep removes them without touching any directory that still corresponds to a
-    /// live session (i.e. whose path appears in `active_workspace_paths`).
+    /// live session (i.e. whose path appears in `in_use_workspace_paths`).
     ///
     /// SAFETY: only directories whose full canonicalized path is NOT in the active
     /// set are removed. Active session worktrees are NEVER touched. Paths are
@@ -629,7 +629,7 @@ impl SessionManager {
     ///
     /// TOCTOU safety (#1840, hardened #1845 item 9): the sweep runs in two phases.
     /// Phase 1 discovers orphan candidates using the caller-supplied
-    /// `active_workspace_paths` snapshot (which may have been taken moments before
+    /// `in_use_workspace_paths` snapshot (which may have been taken moments before
     /// this call). Phase 2 — the real deletion path — takes ONE fresh snapshot from
     /// the live session store immediately before the deletion loop (O(1) lock
     /// acquisitions vs. the prior O(n) per-candidate approach). The snapshot is
@@ -710,7 +710,7 @@ impl SessionManager {
     pub async fn prune_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
-        active_workspace_paths: &[std::path::PathBuf],
+        in_use_workspace_paths: &[std::path::PathBuf],
         dry_run: bool,
         policy: DirtyWorktreePolicy,
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
@@ -720,7 +720,7 @@ impl SessionManager {
 
         let repos_root = repos_root.to_path_buf();
         // Build a canonicalized set for O(1) lookup and symlink safety.
-        let initial_active: HashSet<std::path::PathBuf> = active_workspace_paths
+        let initial_in_use: HashSet<std::path::PathBuf> = in_use_workspace_paths
             .iter()
             .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
             .collect();
@@ -729,8 +729,8 @@ impl SessionManager {
         // Propagate a spawn_blocking panic as Err (#1845 item 7) rather than
         // silently returning an empty candidate list.
         let candidates = tokio::task::spawn_blocking({
-            let initial_active = initial_active.clone();
-            move || find_orphaned_worktrees(&repos_root, &initial_active)
+            let initial_in_use = initial_in_use.clone();
+            move || find_orphaned_worktrees(&repos_root, &initial_in_use)
         })
         .await
         .map_err(|e| anyhow::anyhow!("prune-worktrees: orphan scan panicked: {e}"))?;
@@ -796,7 +796,7 @@ impl SessionManager {
         // (Finding 3 #1845: if canonicalize fails on the active side, keep the
         // raw path as a protective fallback so a canonicalize failure can never
         // cause an active worktree to be misidentified as an orphan and deleted).
-        let fresh_active: HashSet<std::path::PathBuf> = {
+        let fresh_in_use: HashSet<std::path::PathBuf> = {
             let mut set = HashSet::new();
             // Raw `workspace_path`s actually observed THIS sweep, used below to
             // evict stale streak entries (#3715 finding 2) — kept separate from
@@ -889,7 +889,7 @@ impl SessionManager {
             // (Finding 3 #1845: protects against active-path canonicalize failures
             // — if the active side couldn't be canonicalized, its raw path is in
             // the set and a raw-path match prevents accidental deletion).
-            if fresh_active.contains(&canonical_candidate) || fresh_active.contains(&candidate) {
+            if fresh_in_use.contains(&canonical_candidate) || fresh_in_use.contains(&candidate) {
                 info!(
                     path = %candidate.display(),
                     "prune-worktrees: skipping — active session appeared after initial snapshot"
@@ -996,7 +996,7 @@ impl SessionManager {
         // SCOPE OF THIS SET, measured rather than assumed (#4288): narrowing
         // THIS read alone does NOT delete anything. It makes a live-but-
         // mislabelled worktree an orphan CANDIDATE, but `prune_orphaned_worktrees`
-        // then re-reads the store for its Phase 2 `fresh_active` snapshot —
+        // then re-reads the store for its Phase 2 `fresh_in_use` snapshot —
         // itself deliberately unfiltered, see the comment there — and that
         // second read still spares the candidate immediately before deletion.
         // The two unfiltered reads are defense-in-depth: NEITHER is load-bearing
@@ -1008,17 +1008,26 @@ impl SessionManager {
         // preview mode to catch it.
         //
         // Pinned by `reap_spares_a_stopped_records_workspace` in
-        // `super::reap_orphaned_worktrees_tests`, which asserts a Stopped
-        // record's worktree survives a real sweep. That test goes red when BOTH
-        // reads are narrowed; it stays green under either single narrowing,
-        // because the other read genuinely still protects the worktree.
-        let active: Vec<std::path::PathBuf> = self
+        // `super::reap_orphaned_worktrees_tests`, which asserts a STOPPED
+        // record's worktree survives a real sweep, and by the pair property
+        // above: that test goes red when BOTH reads are narrowed, and stays
+        // green under either single narrowing because the other read genuinely
+        // still protects the worktree.
+        //
+        // Be precise about what that test does NOT add: the literal
+        // `== Active` tidy-up at THIS line was already caught before it existed,
+        // because `create_with_id` persists records as `Provisioning` (not
+        // `Active`), so `prune_orphaned_worktrees_removes_orphan_preserves_live`
+        // already fails on it. The new coverage here is the STOPPED case — a
+        // state that reads terminal but is routinely live — and the pair
+        // property, not the tidy-up as literally written.
+        let in_use: Vec<std::path::PathBuf> = self
             .list()
             .await
             .into_iter()
             .filter_map(|r| r.workspace_path)
             .collect();
-        self.prune_orphaned_worktrees(repos_root, &active, false, DirtyWorktreePolicy::Skip)
+        self.prune_orphaned_worktrees(repos_root, &in_use, false, DirtyWorktreePolicy::Skip)
             .await
     }
 

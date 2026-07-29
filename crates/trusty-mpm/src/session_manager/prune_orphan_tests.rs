@@ -80,7 +80,7 @@ fn prune_orphaned_worktrees_collects_orphan() {
 ///
 /// Why: the existing sync test at `prune_orphaned_worktrees_fresh_active_set_blocks_deletion`
 /// only calls `find_orphaned_worktrees` directly, giving zero executed coverage of
-/// the Phase 2 `fresh_active` snapshot logic in the async method. This test goes
+/// the Phase 2 `fresh_in_use` snapshot logic in the async method. This test goes
 /// end-to-end through `prune_orphaned_worktrees` with a real `SessionManager`:
 /// Phase 1 finds the worktree as a candidate (empty initial snapshot), then Phase 2
 /// reads the live store and finds the matching record — skipping deletion.
@@ -496,7 +496,7 @@ async fn prune_orphaned_worktrees_spares_live_owner() {
     let wt = fx.add_worktree("live-owner-elsewhere");
 
     // Register the owner as a LIVE record whose workspace_path points
-    // somewhere else entirely — so `wt` is NOT in `active_workspace_paths`
+    // somewhere else entirely — so `wt` is NOT in `in_use_workspace_paths`
     // (it looks orphaned by the path-only check) but its sentinel's owner
     // is still genuinely alive.
     let owner_id = ManagedSessionId::new();
@@ -1221,4 +1221,103 @@ async fn prune_orphaned_worktrees_dry_run_reports_dirty_skip() {
         outcome.skipped_dirty
     );
     assert!(wt.exists(), "dry-run must not touch anything");
+}
+
+/// #4288 M3: the Phase 2 `fresh_in_use` snapshot spares a worktree whose record
+/// the CALLER's (stale) snapshot missed — the read that nothing else covers.
+///
+/// Why: `prune_orphaned_worktrees` protects a live worktree twice — once via
+/// the caller-supplied set, and again via the Phase 2 re-read of the store
+/// taken immediately before deletion. The Phase 2 read is the LAST thing
+/// between a reclaimable candidate and `remove_session_worktree`, and until
+/// this test it had ZERO executed coverage: the one test that names it
+/// (`prune_orphaned_worktrees_store_snapshot_blocks_deletion`) builds its
+/// worktree with NO ownership sentinel, so the #3649 gate classifies it
+/// owner-unknown and skips it BEFORE Phase 2 ever runs — as that test's own
+/// comment states. Filtering Phase 2 by `state` therefore broke nothing in the
+/// entire suite, which is exactly the invisible-loss shape this PR exists to
+/// close.
+///
+/// What: an EMPTY caller set models the realistic TOCTOU case Phase 2 was
+/// built for (#1845 item 9) — a snapshot taken before the record existed, or
+/// stale by the time the sweep reaches the deletion loop. Phase 1.5 still
+/// votes "reclaim" (the sentinel names a never-registered owner, unrelated to
+/// the record below), so Phase 2 is the ONLY thing that can spare it.
+///
+/// Non-vacuity: the CONTROL is the dry-run of the SAME sweep with the SAME
+/// record present. Dry-run returns before Phase 2, so it still lists the
+/// worktree as reclaimable — the delta between that and the real run below IS
+/// the Phase 2 protection, and it cannot be faked by a fixture that was simply
+/// never reclaimable.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn phase2_fresh_snapshot_spares_a_record_the_caller_set_missed() {
+    use crate::session_manager::record::{ManagedSessionState, SessionRecord};
+
+    let (mgr, _store, fx, wt) = reclaimable_fixture("stale-caller-set").await;
+
+    // Register the worktree to a record and drive it to `Stopped` — the shape
+    // observed on a session that was in fact still running.
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "pinned by #4288".into(),
+            Some(wt.clone()),
+            None,
+            Some(wt.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session record");
+    let stopped = SessionRecord {
+        state: ManagedSessionState::Stopped,
+        ..record
+    };
+    mgr.store
+        .write()
+        .await
+        .upsert(stopped)
+        .await
+        .expect("persist the Stopped record");
+
+    // CONTROL: dry-run returns BEFORE Phase 2, so the worktree is still a
+    // reclaimable candidate even with the record in the store. This proves
+    // every earlier gate votes "reclaim" and that only Phase 2 can save it.
+    let control = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("control sweep must not error");
+    assert!(
+        control.removed.contains(&wt),
+        "CONTROL: {} must reach Phase 2 as a reclaimable candidate, otherwise \
+         this test proves nothing; removed={:?} owner_unknown={:?} skipped_dirty={:?}",
+        wt.display(),
+        control.removed,
+        control.owner_unknown,
+        control.skipped_dirty
+    );
+
+    // THE PIN: the real (deleting) sweep, caller set still empty. Only the
+    // Phase 2 re-read of the store stands between this worktree and deletion.
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        !outcome.removed.contains(&wt),
+        "the Phase 2 fresh snapshot must spare a worktree backed by a store \
+         record the caller's set missed; {} appeared in the removed set {:?}",
+        wt.display(),
+        outcome.removed
+    );
+    assert!(
+        wt.exists(),
+        "{} must still exist on disk after the real sweep",
+        wt.display()
+    );
 }
