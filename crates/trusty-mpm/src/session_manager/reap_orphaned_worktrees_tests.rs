@@ -117,3 +117,130 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
         outcome.owner_unknown
     );
 }
+
+/// #4288: the AUTOMATIC GC path spares a `Stopped` record's workspace — its
+/// active-set construction must stay UNFILTERED by record state.
+///
+/// Why: this is the sibling of `prune_spares_a_stopped_records_workspace`
+/// (which pins the manual HTTP route). `reap_orphaned_worktrees` is what the
+/// daemon's orphan-GC loop calls on a timer; it hardcodes `dry_run: false` and
+/// has no preview mode, so it is the path that would destroy a live worktree
+/// unattended. Session state is not a liveness signal: a session measured
+/// still running in tmux was recorded `stopped` while holding 12 modified
+/// files, 31 untracked files, and an unpushed commit.
+///
+/// WHAT THIS TEST DOES AND DOES NOT CATCH — measured, not assumed. There are
+/// TWO deliberately-unfiltered reads on this path: the caller-supplied set
+/// built in `reap_orphaned_worktrees`, and the Phase 2 `fresh_in_use` snapshot
+/// that `prune_orphaned_worktrees` re-reads from the store immediately before
+/// deleting. They are defense-in-depth, and NEITHER is load-bearing alone:
+/// narrowing only the reap-side set leaves the worktree a candidate that
+/// Phase 2 still spares; narrowing only Phase 2 leaves the worktree out of the
+/// candidate list entirely. This test therefore stays GREEN under either
+/// single narrowing and goes RED when BOTH are narrowed — verified in both
+/// directions. It pins the PAIR, which is the property that actually keeps a
+/// live worktree on disk; it is not a tripwire on either read in isolation.
+///
+/// Nor does it add coverage for the literal `== Active` tidy-up at the reap
+/// site: `create_with_id` persists records as `Provisioning`, not `Active`, so
+/// `reap_orphaned_worktrees_removes_orphan_preserves_live` above already fails
+/// on that mutation via its own live record. What is new here is the STOPPED
+/// case — a state that reads terminal but is routinely live — which no
+/// existing test covered on this path.
+///
+/// Non-vacuity: the fixture carries an aged, well-formed ownership sentinel
+/// naming a NEVER-REGISTERED owner, so every downstream gate already votes
+/// "reclaim". That detail is load-bearing and not incidental — a sentinel
+/// naming the stopped session ITSELF would be spared at the #3649 gate
+/// (`resolve_ownerless_with_grace` treats `Stopped` as live/resumable, NOT
+/// terminal), so such a fixture would survive the mutation too and pin
+/// nothing. The CONTROL below asserts reclaimability against an EMPTY active
+/// set, so if a future change makes this fixture unreclaimable for an
+/// unrelated reason the control fails loudly instead of letting the real
+/// assertions pass for the wrong reason. Active-set membership is therefore
+/// the ONLY thing under test.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reap_spares_a_stopped_records_workspace() {
+    use super::record::{ManagedSessionState, SessionRecord};
+    use super::worktree_git_fixture::GitWorktreeFixture;
+
+    let store_dir = TempDir::new().unwrap();
+    let mgr = SessionManager::new(store_dir.path(), FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("stopped-but-live");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    // CONTROL: with an EMPTY active set this fixture IS reclaimable. Dry-run,
+    // so nothing is deleted before the real assertions run.
+    let control = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, super::DirtyWorktreePolicy::Skip)
+        .await
+        .expect("control sweep must not error");
+    assert!(
+        control.removed.contains(&wt),
+        "CONTROL: {} must be reclaimable with an empty active set, otherwise \
+         this test proves nothing; removed={:?} owner_unknown={:?} skipped_dirty={:?}",
+        wt.display(),
+        control.removed,
+        control.owner_unknown,
+        control.skipped_dirty
+    );
+
+    // Register the worktree to a record and drive it to `Stopped` — the exact
+    // shape observed on a session that was in fact still running.
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "pinned by #4288".into(),
+            Some(wt.clone()),
+            None,
+            Some(wt.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session record");
+    let stopped = SessionRecord {
+        state: ManagedSessionState::Stopped,
+        ..record
+    };
+    mgr.store
+        .write()
+        .await
+        .upsert(stopped)
+        .await
+        .expect("persist the Stopped record");
+
+    // The automatic sweep always really deletes (`dry_run: false` is hardcoded),
+    // so this is the destructive path, not a preview.
+    let outcome = mgr
+        .reap_orphaned_worktrees(&fx.repos_root)
+        .await
+        .expect("reap must not error");
+
+    assert!(
+        !outcome.removed.contains(&wt),
+        "a Stopped record's workspace must NOT be removed by the automatic \
+         orphan-GC sweep; {} appeared in the removed set {:?}",
+        wt.display(),
+        outcome.removed
+    );
+    assert!(
+        !outcome.owner_unknown.contains(&wt),
+        "a spared workspace is never even a candidate, so it must not be \
+         reported as owner-unknown either; got {:?}",
+        outcome.owner_unknown
+    );
+    assert!(
+        wt.exists(),
+        "{} must still exist on disk after the automatic sweep",
+        wt.display()
+    );
+}
