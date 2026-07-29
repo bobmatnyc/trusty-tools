@@ -144,4 +144,33 @@ pub trait ToolEventSink: Send + Sync {
         _telemetry: &ToolTelemetry,
     ) {
     }
+
+    /// One assistant turn's text became available (tcode streaming epic
+    /// #3696, Gap A — per-agent streaming, Slice 1).
+    ///
+    /// Why: before this hook, a text-bearing assistant turn was recorded to
+    /// the transcript (`transcript.push_response`) but never surfaced to a
+    /// `session.attach`ed client — only tool activity was observable via the
+    /// hooks above. This is the seam that makes the assistant's own words
+    /// streamable, reusing the same optional-sink pattern rather than
+    /// threading the event bus into the engine layer.
+    /// What: a default no-op body keeps every pre-existing sink impl (and
+    /// every test double) compiling unchanged — only sinks that actually
+    /// serve the UI need to override it. `turn_id` MUST be unique within the
+    /// session across ALL agents (see [`crate::events::Event::AgentMessageDelta`]'s
+    /// doc for why a per-agent-local counter is unsafe); callers mint a UUID
+    /// v4 per turn. `done: true` for Gap A (Slice 1) always — the whole
+    /// turn's text arrives in one call; a future token-level streaming slice
+    /// (Gap B) would call this repeatedly per turn with `done: false` until
+    /// the last delta.
+    /// Test: `crate::task::sink::tests::agent_message_reaches_stream_as_delta`.
+    async fn agent_message(
+        &self,
+        _agent: &str,
+        _agent_id: &str,
+        _turn_id: &str,
+        _delta: &str,
+        _done: bool,
+    ) {
+    }
 }
