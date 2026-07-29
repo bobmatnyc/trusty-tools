@@ -125,7 +125,7 @@ async fn provision(
 /// to `tm launch`'s wording.
 /// Test: `provision_for_launch_opted_out_creates_no_clone_and_no_worktree`,
 /// `provision_for_launch_unset_creates_worktree`,
-/// `provision_for_launch_opted_in_creates_worktree`.
+/// `provision_for_launch_unregistered_origin_creates_worktree`.
 pub(crate) async fn provision_for_launch(
     registry_dir: &Path,
     origin_url: &str,
@@ -168,7 +168,7 @@ pub(crate) async fn provision_for_launch(
 /// "start the daemon" remediation.
 /// Test: `provision_for_fallback_opted_out_creates_no_clone_and_no_worktree`,
 /// `provision_for_fallback_unset_creates_worktree_not_live_checkout`,
-/// `provision_for_fallback_rejects_unparseable_remote`.
+/// `provision_for_fallback_other_projects_optout_does_not_leak`.
 pub(crate) async fn provision_for_fallback(
     registry_dir: &Path,
     origin_url: &str,
