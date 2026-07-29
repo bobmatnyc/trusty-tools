@@ -17,7 +17,8 @@
 //! - Invariants: totality (never panics), determinism, whitespace invariance
 //! - Slash prefix always Implementation
 //! - Action verb dominance across all verb x context combinations (23 * 6 = 138 cases)
-//! - Word count boundary sweep (1-15 words)
+//! - Word count boundary sweep (1-30 words, all Conversational absent
+//!   verb/question signals — #4319)
 //! - Constant-list completeness guards (count, lowercase, no duplicates, no overlap)
 //! - Regression: underscored identifiers must not split into action verbs
 
@@ -174,6 +175,10 @@ fn action_verb_always_dominates() {
 
 // =====================================================================
 // Parameterized: word count boundary sweep (no verb signals)
+//
+// #4319: word count alone must NEVER promote a message to Implementation.
+// Every length from 1 to 30 words, absent any action/research verb,
+// question word, or trailing "?", stays Conversational.
 // =====================================================================
 
 #[test]
@@ -196,7 +201,7 @@ fn word_count_boundary_sweep() {
         "probably",
     ];
 
-    for n in 1..=15 {
+    for n in 1..=30 {
         let input: String = filler
             .iter()
             .cycle()
@@ -205,23 +210,13 @@ fn word_count_boundary_sweep() {
             .collect::<Vec<_>>()
             .join(" ");
         let result = classify_intent(&input);
-        if n <= 10 {
-            assert_eq!(
-                result,
-                IntentClass::Conversational,
-                "word_count={} should be Conversational, got {:?}",
-                n,
-                result
-            );
-        } else {
-            assert_eq!(
-                result,
-                IntentClass::Implementation,
-                "word_count={} (>10) should be Implementation, got {:?}",
-                n,
-                result
-            );
-        }
+        assert_eq!(
+            result,
+            IntentClass::Conversational,
+            "word_count={} (no verb signals) should be Conversational, got {:?}",
+            n,
+            result
+        );
     }
 }
 

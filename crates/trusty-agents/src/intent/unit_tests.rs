@@ -112,7 +112,10 @@ fn single_ambiguous_word_is_conversational() {
 
 #[test]
 fn long_descriptive_input_routes_to_implementation() {
-    // > 10 words, no action verb, but clearly a request for work.
+    // > 10 words, contains the ACTION_VERBS entry "test" (as in "integration
+    // test") -> Implementation via the action-verb path, unconditional on
+    // length. (Word count itself is never evidence for Implementation, see
+    // #4319 — this passes because of the verb hit, not the length.)
     let long = "the failing integration test for the auth middleware on staging \
                 seems related to the recent token refresh changes from last week";
     assert_eq!(classify_intent(long), IntentClass::Implementation);

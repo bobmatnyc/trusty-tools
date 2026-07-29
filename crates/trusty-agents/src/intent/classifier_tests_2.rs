@@ -94,9 +94,12 @@ fn short_question_mark_is_research() {
 
 #[test]
 fn question_mark_on_long_input_without_action_verb() {
+    // #4319: a trailing "?" is evidence of a question at ANY length, not
+    // evidence of a coding command. Previously the (now-removed) `word_count
+    // > 10` fallback won here and misrouted this to Implementation.
     let long_q = "so I was wondering about the overall performance characteristics \
                   of the system under heavy load with many concurrent users?";
-    assert_eq!(classify_intent(long_q), IntentClass::Implementation);
+    assert_eq!(classify_intent(long_q), IntentClass::Research);
 }
 
 #[test]
@@ -129,11 +132,34 @@ fn five_to_ten_words_no_signals_is_conversational() {
 }
 
 #[test]
-fn eleven_plus_words_no_verbs_is_implementation() {
-    let long = "the failing integration test for the auth middleware on staging \
+fn eleven_plus_words_no_verbs_is_conversational() {
+    // #4319 regression: length alone must never promote to Implementation.
+    // (Note the original version of this test used a sentence containing
+    // the literal word "test", which is an ACTION_VERBS entry and would
+    // still classify Implementation via that path — masking the length
+    // fallback this test intended to cover. Rewritten to be genuinely
+    // verb-free.)
+    let long = "the situation with the auth middleware on staging \
                 seems related to the recent token refresh changes from last week";
     assert!(long.split_whitespace().count() > 10);
-    assert_eq!(classify_intent(long), IntentClass::Implementation);
+    assert_eq!(classify_intent(long), IntentClass::Conversational);
+}
+
+#[test]
+fn issue_4319_reproducer_long_conversational_check_in_is_not_implementation() {
+    // Live reproducer from #4319: an ordinary conversational check-in,
+    // longer than 10 words, with no action verb, no research verb, no
+    // leading question word, and no trailing "?". Previously this fell
+    // through to `IntentClass::Implementation`, which respawns the
+    // orchestrator as a subprocess — reproduced live as the literal string
+    // `subprocess exited with status Some(1)` surfacing as the assistant's
+    // chat reply on Concierge, Telegram, and Slack (all route through
+    // `ctrl::run_pm_task_with_history`).
+    let reproducer =
+        "please confirm that the research agent you mentioned earlier is actually available today";
+    assert!(reproducer.split_whitespace().count() > 10);
+    assert_ne!(classify_intent(reproducer), IntentClass::Implementation);
+    assert_eq!(classify_intent(reproducer), IntentClass::Conversational);
 }
 
 #[test]

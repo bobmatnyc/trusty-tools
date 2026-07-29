@@ -13,7 +13,7 @@
 //! commands are always Implementation so the user can force the full pipeline.
 //! Test: `cargo test intent::` exercises greetings, closings, self-questions,
 //! research verbs, question words, action-verb tasks, and edge cases.
-//! See `tests` module below — fixes #199, #203.
+//! See `tests` module below — fixes #199, #203, #4319.
 
 /// Deterministic Tm-vs-Tcode router for the `dispatch_task` bridge tool
 /// (epic #3052, PR B, lane 3).
@@ -208,10 +208,14 @@ pub(crate) fn normalize(input: &str) -> String {
 /// to its cheapest viable path — direct reply (Conversational), in-process
 /// tool-armed loop (Research), or full subprocess pipeline (Implementation).
 /// What: Applies heuristics in priority order — empty, slash command, greeting,
-/// closing, self-question, research-question, action-verb scan, length-based
-/// fallback.
+/// closing, self-question, action-verb scan (wins outright, any length),
+/// research-verb/question-word scan, trailing question mark, "help me", then
+/// defaults to `Conversational` when no positive signal fired. Word count
+/// alone is NEVER evidence for `Implementation` (#4319) — only an
+/// `ACTION_VERBS` hit or a leading slash routes there.
 /// Test: `tests::*` below covers greetings, closings, self-questions, research
-/// verbs, question words, clear task verbs, slash commands, and edge cases.
+/// verbs, question words, clear task verbs, slash commands, the #4319
+/// long-conversational-input regression, and edge cases.
 pub fn classify_intent(input: &str) -> IntentClass {
     let trimmed = input.trim();
 
@@ -293,9 +297,12 @@ pub fn classify_intent(input: &str) -> IntentClass {
         return IntentClass::Research;
     }
 
-    // Question mark on a short input with no action verb -> Research
-    // (e.g. "is bedrock enabled?", "does this support tokio?").
-    if ends_with_question_mark && word_count <= 15 {
+    // A trailing question mark is positive evidence of an interrogative, not
+    // a coding command -> Research, regardless of length. (Previously capped
+    // at `word_count <= 15`; the cap only existed to interact with the
+    // now-removed length-based Implementation fallback below, and itself
+    // risked misrouting long genuine questions to Implementation — see #4319.)
+    if ends_with_question_mark {
         return IntentClass::Research;
     }
 
@@ -305,19 +312,27 @@ pub fn classify_intent(input: &str) -> IntentClass {
         return IntentClass::Implementation;
     }
 
-    // Short input, no action/research/question signal -> probably conversational.
-    if word_count <= 4 {
-        return IntentClass::Conversational;
-    }
-
-    // Long input without action verbs but past the threshold -> Implementation.
-    if word_count > 10 {
-        return IntentClass::Implementation;
-    }
-
-    // Ambiguous middle range (5-10 words, no action verb): treat as
-    // conversational. The user can re-issue with an action verb if they
-    // actually wanted delegation.
+    // #4319: No positive evidence of a coding request at ANY length ->
+    // default to the cheap conversational path.
+    //
+    // Previously, input longer than 10 words with none of the signals above
+    // fell through to `IntentClass::Implementation`, which respawns the
+    // entire orchestrator as a subprocess. Word count and the absence of a
+    // question mark are NOT evidence of a coding request — plenty of
+    // ordinary conversational messages (status updates, context-setting,
+    // "confirm the research agent is available" style check-ins) run past
+    // 10 words with no action verb, no research verb, no leading question
+    // word, and no trailing "?". Routing those to Implementation crashed
+    // Concierge/Telegram/Slack (all three route through
+    // `ctrl::run_pm_task_with_history`) whenever the subprocess spawn failed,
+    // surfacing the literal string `subprocess exited with status Some(1)`
+    // as the assistant's reply.
+    //
+    // Genuine coding requests are unaffected: they carry an `ACTION_VERBS`
+    // hit (checked above, and unconditional on length) or a slash command
+    // (checked at the top of this function), so `route_task` ->
+    // `ProcessPmBridge::run_tcode` still fires for real work regardless of
+    // sentence length.
     IntentClass::Conversational
 }
 
