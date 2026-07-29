@@ -193,12 +193,14 @@ impl PerfCollector {
     /// `PhaseRecord`.
     /// Test: `collector_records_phases`.
     pub fn record_phase(&mut self, name: &str, duration_ms: u64, model: &str, usage: &TokenUsage) {
+        // #4098: `cost_usd` counts widened to u64 for the shared aggregate
+        // surfaces; `TokenUsage` stays u32, so widen at the seam.
         let cost = cost_usd(
             model,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.cache_read_tokens,
-            usage.cache_creation_tokens,
+            usage.prompt_tokens.into(),
+            usage.completion_tokens.into(),
+            usage.cache_read_tokens.into(),
+            usage.cache_creation_tokens.into(),
         );
         self.phases.push(PhaseRecord {
             name: name.to_string(),

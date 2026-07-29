@@ -86,7 +86,6 @@ crates/trusty-agents/src/memory/store.rs	evict_then_warm_returns_same_results
 crates/trusty-agents/src/perf/mod.rs	collector_records_skills_considered
 crates/trusty-agents/src/perf/mod.rs	collector_totals_sum_phases
 crates/trusty-agents/src/perf/mod.rs	cost_usd_known_model
-crates/trusty-agents/src/perf/pricing.rs	cost_usd_known_model
 crates/trusty-agents/src/plugins/manager.rs	global_returns_none_before_init
 crates/trusty-agents/src/plugins/manager.rs	global_returns_some_after_init
 crates/trusty-agents/src/plugins/manager.rs	status_reports_active

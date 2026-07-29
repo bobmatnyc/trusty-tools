@@ -36,6 +36,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   line is shaped so #4260's commit SHA appends to it (`v0.38.6 · abc1234`)
   without a redesign; the meaningless `build #N` counter from
   `tagent --version` is deliberately not shown.
+- **A `Cost` tab showing spend by agent, model, and day (#4098).** The new
+  `CostsView` renders `GET /api/costs`, which folds
+  `.trusty-agents/state/usage.jsonl` on request into a grand total plus three
+  breakdowns. It refuses to render a confident `$0.00` over a usage log that
+  does not exist: a missing log is reported as "no usage has been recorded",
+  naming the file it looked for, and is visibly distinct from an empty-but-
+  present log, from a read failure, and from still-loading. Lines that fail to
+  parse are counted and surfaced as a warning that the totals are incomplete,
+  rather than silently dropped. Charts are plain CSS bars — no charting
+  dependency was added.
+- **`GET /api/costs` (#4098).** Optional `?days=<n>` narrows the window,
+  anchored on the newest recorded row. Returns `200` with `available: false`
+  when no log exists, `500` when a log exists but cannot be read, and always
+  reports `records` / `malformed_lines` so a partial total is identifiable as
+  one. Aggregation is read-time; the durable rollup tables of #4104/#4105 are
+  NOT implemented.
 - **The Skills pane renders function skills as groups (#4024).** A `kind:
   "function"` bundle is no longer filtered out of the pane — it renders as a
   collapsed group header over its member skill cards, with the tri-state grant
@@ -90,6 +106,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Cost figures were priced at Haiku rates for every model (#4098).**
+  `usage::daily` carried a second, hardcoded two-constant rate table that the
+  REPL statusline and the persisted daily total both used, so a Sonnet session
+  — the default — displayed roughly a twelfth of its real cost. The duplicate
+  table is deleted, not corrected; `perf::pricing::cost_usd` is now the single
+  pricing entry point for the statusline, the daily total, the perf collector,
+  and the new Costs tab. Its token counts widened from `u32` to `u64` so the
+  aggregate callers cannot saturate a total.
 - **The Sub-agents pane no longer offers `hidden` agents as delegation targets
   (#4235).** `GET /api/agents/:name/subagents` filtered its in-product target
   list by role and by the kind/tier gate but never by `hidden`, so

@@ -65,7 +65,8 @@
   // pane's own header — title + selector + gear all live together there
   // now); `ModelSwitcher` stays here since model/provider is a separate,
   // unrelated axis Bob's directive didn't touch.
-  export let activeView: 'chat' | 'events' = 'chat';
+  // #4098: 'costs' added for the Costs tab (COST-09).
+  export let activeView: 'chat' | 'events' | 'costs' = 'chat';
   export let apiReady = false;
 
   const desktop = isDesktop();
@@ -74,6 +75,8 @@
   const tabs: { id: typeof activeView; label: string }[] = [
     { id: 'chat', label: 'Chat' },
     { id: 'events', label: 'Events' },
+    // #4098: spend by agent/model/day, from GET /api/costs.
+    { id: 'costs', label: 'Cost' },
   ];
 
   function switchView(view: typeof activeView) {
