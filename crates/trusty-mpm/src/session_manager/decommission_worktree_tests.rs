@@ -87,6 +87,15 @@ async fn manager_decommission_removes_real_git_worktree() {
         return;
     }
 
+    // ── Give the base clone a remote and push (the #4400-style dirty gate) ──
+    // Without ANY remote, `worktree_safety::inspect_dirt`'s unpushed-commit
+    // check treats every commit as unpushed (there is nothing to exclude via
+    // `--not --remotes`), which would make this "clean happy path" fixture
+    // spuriously dirty and refuse removal. Push to a real bare remote so the
+    // ONLY thing under test in this function is the ordinary clean-removal
+    // path; the dirty-refusal path has its own fixture/test below.
+    push_to_bare_remote(&base);
+
     // ── Real `git worktree add` under <base>/.worktrees/<session-name> ───────
     // Branch is `session/<session_name>` (issue #2032 fix) — this MUST mirror
     // the exact convention `create_session_worktree`/`worktree_branch_for`
@@ -178,5 +187,225 @@ async fn manager_decommission_removes_real_git_worktree() {
     assert!(
         branch_stdout.trim().is_empty(),
         "the session branch ref must be deleted after decommission; got: {branch_stdout}"
+    );
+}
+
+/// Push `repo`'s current `HEAD` to a fresh bare remote and fetch it back.
+///
+/// Why: `worktree_safety::inspect_dirt`'s unpushed-commit check treats a
+/// repository with NO remote at all as fully unpushed (there is nothing for
+/// `--not --remotes` to exclude), which would make a "clean happy path"
+/// fixture built with a bare `git init` + one commit spuriously dirty. Tests
+/// that need a genuinely CLEAN worktree call this immediately after the base
+/// clone's first commit.
+/// What: `git init --bare` a throwaway remote, `remote add origin`, `push
+/// origin HEAD`, `fetch origin` — panics with git's stderr on any failure.
+/// Test: `manager_decommission_removes_real_git_worktree`.
+fn push_to_bare_remote(repo: &std::path::Path) {
+    let remote_dir = crate::test_support::hermetic_temp_dir();
+    let remote = remote_dir.path().to_path_buf();
+    let remote_str = remote.to_str().expect("utf8 remote path");
+    let repo_str = repo.to_str().expect("utf8 repo path");
+
+    let init_ok = std::process::Command::new("git")
+        .args(["init", "--bare"])
+        .current_dir(&remote)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(init_ok, "git init --bare must succeed for the test remote");
+
+    for args in [
+        vec!["-C", repo_str, "remote", "add", "origin", remote_str],
+        vec!["-C", repo_str, "push", "origin", "HEAD"],
+        vec!["-C", repo_str, "fetch", "origin"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(&args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} must succeed");
+    }
+}
+
+/// `decommission` refuses to remove an in-project worktree that holds unsaved
+/// (uncommitted/untracked) work — the data-loss fix.
+///
+/// Why: before this fix, `remove_session_worktree` ran `git worktree remove
+/// --force` (falling back to `fs::remove_dir_all`) with NO dirty check at
+/// all. `tm sessions prune --state stopped` calls `decommission` for every
+/// matching record, so a stopped session with uncommitted/untracked work in
+/// its in-project worktree was silently destroyed. This reuses
+/// `worktree_safety::inspect_dirt` (the same check the orphan-worktree sweep
+/// uses) to gate removal.
+/// What: builds a real, clean, pushed git worktree (so the ONLY dirt is the
+/// file this test adds), drops an untracked file into it, then decommissions.
+/// Asserts: (1) `workspace_removed` is `false`; (2) the record still
+/// tombstones to `Decommissioned` (consistent with every other "skip
+/// removal" branch in `decommission_with_root`); (3) the worktree directory
+/// AND the untracked file both survive on disk; (4) the tombstone record
+/// KEEPS `workspace_path` pointing at the retained directory (#4344 review) —
+/// nulling it here would strand the retained work with nothing but a
+/// transient warn! log line as a trail back to it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_decommission_refuses_dirty_worktree() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake)
+        .await
+        .expect("manager");
+
+    let fixture = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let session_name = "test-session-dirty";
+    let worktree_path = fixture.add_worktree(session_name);
+
+    // Write the SM ownership sentinel, mirroring `create_session_worktree`.
+    std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
+
+    // Dirty the worktree: an untracked file `git status` will report. This is
+    // the ONLY source of dirt — the fixture's base repo is already pushed.
+    std::fs::write(
+        worktree_path.join("uncommitted-work.txt"),
+        b"unsaved work\n",
+    )
+    .expect("write uncommitted file");
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(worktree_path.clone()),
+            None,
+            Some(worktree_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false, // owned: false — in-project worktree, not a full clone
+        )
+        .await
+        .expect("create");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let (tombstone, workspace_removed) = mgr
+        .decommission_with_root(&record.id, managed_root.path(), None)
+        .await
+        .expect("decommission");
+
+    assert!(
+        !workspace_removed,
+        "workspace_removed must be false when the worktree holds unsaved work"
+    );
+    assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
+    assert!(
+        worktree_path.exists(),
+        "a dirty worktree must survive on disk — decommission must refuse to delete it"
+    );
+    assert!(
+        worktree_path.join("uncommitted-work.txt").exists(),
+        "the uncommitted file itself must survive the refused decommission"
+    );
+    assert_eq!(
+        tombstone.workspace_path.as_deref(),
+        Some(worktree_path.as_path()),
+        "workspace_path must survive on the tombstone when removal was refused \
+         (#4344 review) — it is the only durable pointer back to the retained work"
+    );
+}
+
+/// `tm sessions prune --state stopped` (via `prune_managed`) surfaces a
+/// dirty-worktree refusal through its own report, instead of printing the
+/// same `decommissioned` line whether or not the worktree was actually
+/// removed (#4344 review).
+///
+/// Why: `prune_managed` discarded the `bool` half of `decommission`'s
+/// `(SessionRecord, bool)` return, and `PruneAction` had no variant for
+/// "refused, worktree retained" — so `tm sessions prune --state stopped`
+/// gave no visible signal, at the ONE surface an operator actually reads,
+/// that a worktree was silently kept dirty on disk instead of removed.
+/// What: seeds a `Stopped` record (via the real `stop()` teardown, mirroring
+/// how a genuinely stopped session gets there) pointing at a real,
+/// dirtied in-project worktree, runs
+/// `prune_managed(PruneFilter::Stopped, …)`, and asserts the single
+/// returned row is `PruneAction::DecommissionedWorktreeRetained` with
+/// `retained_workspace_path` set to the worktree's path — plus the usual
+/// on-disk survival assertions.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_reports_dirty_worktree_retained() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake)
+        .await
+        .expect("manager");
+
+    let fixture = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let session_name = "test-session-prune-dirty";
+    let worktree_path = fixture.add_worktree(session_name);
+    std::fs::write(worktree_path.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
+    std::fs::write(
+        worktree_path.join("uncommitted-work.txt"),
+        b"unsaved work\n",
+    )
+    .expect("write uncommitted file");
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(worktree_path.clone()),
+            None,
+            Some(worktree_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false, // owned: false — in-project worktree, not a full clone
+        )
+        .await
+        .expect("create");
+
+    // Transition to Stopped exactly like a real "runtime exited" session —
+    // `prune --state stopped` only ever targets genuinely Stopped records.
+    mgr.stop(&record.id).await.expect("stop");
+
+    let outcome = mgr
+        .prune_managed(
+            crate::session_manager::PruneFilter::Stopped,
+            false,
+            false,
+            None,
+        )
+        .await
+        .expect("prune stopped");
+
+    assert_eq!(
+        outcome.count(),
+        1,
+        "the dirty stopped session is the only candidate"
+    );
+    let pruned = &outcome.sessions[0];
+    assert_eq!(
+        pruned.action,
+        crate::session_manager::PruneAction::DecommissionedWorktreeRetained,
+        "a dirty in-project worktree must report as retained, not a plain decommission; got {:?}",
+        pruned.action
+    );
+    assert_eq!(
+        pruned.retained_workspace_path.as_deref(),
+        Some(worktree_path.as_path()),
+        "the prune report must echo back WHERE the retained work lives"
+    );
+
+    // The usual on-disk guarantees still hold at the prune surface too.
+    assert!(
+        worktree_path.exists(),
+        "the dirty worktree must survive a prune sweep"
+    );
+    assert!(
+        worktree_path.join("uncommitted-work.txt").exists(),
+        "the uncommitted file must survive a prune sweep"
     );
 }

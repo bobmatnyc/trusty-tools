@@ -71,8 +71,14 @@ impl SessionManager {
 
         // Reconcile store records against live sessions.
         for mut record in all_records {
-            // Decommissioned tombstones are never touched by reconciliation.
-            if matches!(record.state, ManagedSessionState::Decommissioned) {
+            // Terminal tombstones (`Decommissioned` OR `Deleted`) are never
+            // touched by reconciliation. Previously this only checked
+            // `Decommissioned` by hand, so every soft-deleted (`Deleted`)
+            // record was silently resurrected to `Stopped` on daemon boot —
+            // `is_terminal()` is the single source of truth for "terminal"
+            // and must be used here so a future terminal variant can never
+            // slip past this check again the way `Deleted` did.
+            if record.state.is_terminal() {
                 continue;
             }
 

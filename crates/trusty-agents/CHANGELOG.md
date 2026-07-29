@@ -7,6 +7,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`GET /api/agents/:name/kg`, `/kg/subjects`, `/kg/all` and `/kg/count` — a
+  read-only proxy onto the Knowledge Graph of the memory palace the agent binds
+  via `[[stores]].palace`** (#4290). trusty-memory already owns every one of
+  these queries; this crate only maps agent → palace and passes the upstream
+  JSON through verbatim under `{palace, connected, data}`. An agent that binds
+  no palace, or a trusty-memory daemon that is down, returns `200` with
+  `connected: false` and a machine-readable `reason` — the same never-fail
+  posture `GET /api/agents/:name/stores` already has — so the Knowledge Graph
+  browser renders an empty state instead of an error. Assert and delete are
+  deliberately not proxied; editability is a separate ticket.
+- **Knowledge Graph browser — the UI leg of #4290.** A "Knowledge Graph"
+  button beside the Assistant selector in `ChatHeader` opens a dedicated
+  slide-over (`KnowledgeGraphBrowser.svelte`) over the active agent's one
+  bound palace: a filterable/sortable subject list with count badges,
+  drill-down into a subject's triples, and a paginated "all triples" mode —
+  porting `trusty-memory`'s `KG.svelte` interaction pattern into this app's
+  Foundry/Tailwind idiom (single palace, no picker). Read-only v1, hidden
+  entirely for Concierge (no `agent.toml`/`[[stores]]` binding). Renders six
+  explicit states rather than a generic spinner or empty list: loading,
+  connected with data, connected with a genuinely empty graph, `connected:
+  false` with its `reason`, a `config_error` surfaced alongside that, and the
+  fetch-helper's 404/network-error path. New `lib/kg.ts` client following
+  `fetchAgentStores`'s null-on-404/throw idiom; the SPA still never calls
+  trusty-memory directly.
+
+### Fixed
+
+- **Knowledge Graph browser: a mid-session daemon/palace failure now explains
+  itself instead of rendering as an empty graph** (#4290 code-review
+  finding). Only `bootstrap()`'s initial `/kg/subjects` call checked
+  `env.connected`; `loadAll`, `loadCount`, and `loadSubject` assigned
+  `env.data` unconditionally, so a `connected: false` response arriving AFTER
+  a successful bootstrap — trusty-memory restarts, the palace goes
+  unreachable — rendered as "0 active triples" / "No triples.", visually
+  identical to a genuinely empty, connected palace. All three now check
+  `env.connected` first and route into the same disconnected state
+  `bootstrap()` already shows, carrying the backend's `reason`.
+
 ### Changed
 
 - **An assistant's reachable sub-agent set is now an editable configuration
