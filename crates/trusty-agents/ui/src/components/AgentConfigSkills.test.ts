@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mount, unmount } from 'svelte';
 import AgentConfigSkills from './AgentConfigSkills.svelte';
-import type { AgentSkill, AgentSkills } from '../lib/agentConfig';
+import type { AgentSkill, AgentSkillGroup, AgentSkills } from '../lib/agentConfig';
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -262,6 +262,145 @@ describe('AgentConfigSkills', () => {
     expect(target.textContent).toContain('1 of 1 known skills granted');
     expect(target.textContent).toContain('Create a Ticket');
     expect(target.textContent).not.toContain('2 of 2');
+  });
+
+  // ------------------------------------------------------------------
+  // #4024: function-skill groups
+  // ------------------------------------------------------------------
+
+  /** Two ticket leaves + the bundle they belong to, wired as the route wires them. */
+  function bundled(grantedMembers: string[], over: Partial<AgentSkillGroup> = {}) {
+    const members = ['ticket-create', 'ticket-read'];
+    const state =
+      grantedMembers.length === 0
+        ? 'none'
+        : grantedMembers.length === members.length
+          ? 'all'
+          : 'some';
+    const group: AgentSkillGroup = {
+      id: 'ticketing',
+      name: 'Ticketing',
+      description: 'Work a tracker end to end.',
+      members,
+      granted_members: grantedMembers,
+      granted_state: state as AgentSkillGroup['granted_state'],
+      providers: [],
+      ...over,
+    };
+    return payload({
+      groups: [group],
+      granted_count: grantedMembers.length,
+      skills: [
+        // An ungrouped leaf, so the fixture also proves grouping leaves the
+        // flat buckets alone.
+        skill(),
+        skill({
+          id: 'ticketing',
+          name: 'Ticketing',
+          kind: 'function',
+          tools: [],
+          granted: state === 'all',
+          members,
+          granted_members: grantedMembers,
+          granted_state: group.granted_state,
+        }),
+        skill({
+          id: 'ticket-create',
+          name: 'Create a Ticket',
+          tools: ['create_ticket'],
+          granted: grantedMembers.includes('ticket-create'),
+        }),
+        skill({
+          id: 'ticket-read',
+          name: 'Read a Ticket',
+          tools: ['get_ticket'],
+          granted: grantedMembers.includes('ticket-read'),
+        }),
+      ],
+    });
+  }
+
+  it('renders a function skill as a group over its member cards', () => {
+    render(bundled(['ticket-create', 'ticket-read']));
+    const details = target.querySelector('details') as HTMLDetailsElement;
+    expect(details).not.toBeNull();
+    expect(details.open).toBe(false); // a header is a summary, not a wall of cards
+    expect(details.textContent).toContain('Ticketing');
+    expect(details.textContent).toContain('Create a Ticket');
+    expect(details.textContent).toContain('Read a Ticket');
+    // Members render INSIDE the group, not a second time in the flat buckets.
+    expect(target.textContent).not.toContain('Actions (2)');
+  });
+
+  it('says granted only when every member is granted', () => {
+    render(bundled(['ticket-create', 'ticket-read']));
+    const summary = target.querySelector('summary') as HTMLElement;
+    expect(summary.textContent).toContain('granted');
+    expect(summary.textContent).toContain('2 of 2 skills');
+    expect(summary.textContent).not.toContain('partial');
+  });
+
+  it('says partial — never granted — when only some members are granted', () => {
+    render(bundled(['ticket-create']));
+    const summary = target.querySelector('summary') as HTMLElement;
+    expect(summary.textContent).toContain('partial');
+    expect(summary.textContent).toContain('1 of 2 skills');
+    // The ungranted member is counted, not listed — same policy as a leaf.
+    expect(target.textContent).toContain('1 member skill in this function is not granted');
+    expect(target.textContent).not.toContain('Read a Ticket');
+  });
+
+  it('says not granted when no member is granted', () => {
+    render(bundled([]));
+    const summary = target.querySelector('summary') as HTMLElement;
+    expect(summary.textContent).toContain('not granted');
+    expect(summary.textContent).toContain('0 of 2 skills');
+    expect(target.textContent).not.toContain('Create a Ticket');
+  });
+
+  it('leaves an ungrouped leaf skill rendering exactly as before', () => {
+    // The regression this pane's grouping must not cause: a skill belonging to
+    // no bundle keeps its flat Actions bucket.
+    render(bundled(['ticket-create', 'ticket-read']));
+    expect(target.textContent).toContain('Actions (1)');
+    expect(target.textContent).toContain('MTA Train Time');
+    expect(target.textContent).toContain('get_train_schedule');
+  });
+
+  it('does not let a group move the granted count (a bundle is not a capability)', () => {
+    render(bundled(['ticket-create']));
+    expect(target.textContent).toContain('2 of 3 known skills granted');
+  });
+
+  it('shows every distinct member credential, so a divergence is visible', () => {
+    render(
+      bundled(['ticket-create', 'ticket-read'], {
+        providers: [
+          {
+            provider: 'Google Workspace',
+            requirement: 'An authorized Google account profile.',
+            env_var: null,
+            configured: null,
+          },
+          {
+            provider: 'MTA',
+            requirement: 'An MTA developer API key.',
+            env_var: 'MTA_API_KEY',
+            configured: false,
+          },
+        ],
+      }),
+    );
+    const details = target.querySelector('details') as HTMLDetailsElement;
+    expect(details.textContent).toContain('Google Workspace — not verified');
+    expect(details.textContent).toContain('MTA NOT configured');
+    expect(details.textContent).not.toContain('Google Workspace configured');
+  });
+
+  it('renders no group section for a payload with no function skills', () => {
+    render(payload());
+    expect(target.querySelector('details')).toBeNull();
+    expect(target.textContent).not.toContain('Functions (');
   });
 
   it('offers no write path in this phase (S-12) and points at the real edit surface', () => {

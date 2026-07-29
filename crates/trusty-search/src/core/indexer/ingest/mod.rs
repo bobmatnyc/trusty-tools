@@ -228,8 +228,38 @@ impl CodeIndexer {
     /// What: chunk the file, batch-embed all chunks, commit vectors / BM25 /
     /// corpus, then enrich entities via the NLP helper and rebuild the
     /// symbol graph once.
-    /// Test: covered by every `index_file`-based test in `indexer::tests`.
+    ///
+    /// Issue #4122: this is the single choke point every INCREMENTAL write
+    /// funnels through — the file watcher (`service::watch_loop`), the
+    /// boot-time catch-up reconciler (`service::reconcile`), and the explicit
+    /// `POST /indexes/{id}/index-file` endpoint (`service::server::files`).
+    /// When the index is write-quarantined because its durable corpus failed
+    /// to open, every one of them must be refused: accepting them rebuilds a
+    /// fresh PARTIAL corpus over the never-opened original and destroys it.
+    /// The refusal is returned as an `Err` rather than a silent `Ok(())` so
+    /// the HTTP endpoint reports `500` instead of falsely answering
+    /// `"indexed": true` — the ERROR-level diagnostic is emitted by
+    /// `refuse_incremental_write` either way. The BULK path
+    /// (`index_files_batch*`, used by a full reindex) is intentionally NOT
+    /// gated. Note this is NOT because reindexes are operator-initiated —
+    /// `service::reconcile` auto-fires them at boot with no
+    /// `corpus_open_failed` check. It is safe because of the invariant in
+    /// `core::indexer::quarantine`: a quarantined index holds no
+    /// `CorpusStore`, so `commit_corpus_to_redb` early-returns and
+    /// `staging::should_stage` is `false` — a bulk reindex on a quarantined
+    /// index writes nothing durable at all.
+    /// Test: covered by every `index_file`-based test in `indexer::tests`;
+    /// the quarantine branch by
+    /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`.
     pub async fn index_file(&self, file_path: &str, content: &str) -> Result<()> {
+        if self.refuse_incremental_write("index_file", file_path) {
+            anyhow::bail!(
+                "index '{}' is write-quarantined: its durable corpus failed to open, so \
+                 incremental indexing of '{file_path}' was refused to avoid overwriting \
+                 the on-disk corpus (issue #4122)",
+                self.index_id
+            );
+        }
         let (mut chunks, entities) = chunk_ast(file_path, content);
 
         populate_virtual_terms(&mut chunks, &entities);

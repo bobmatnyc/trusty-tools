@@ -35,8 +35,13 @@ use crate::commands::guided::{
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
-    ResumeAction, is_zombie, needs_restart, plan_resume, resume_classification_state,
+    ResumeAction, is_zombie, needs_restart, panes_prove_session_dead, parse_pane_probes,
+    plan_resume, resume_classification_state, session_runtime_live,
 };
+// #3873: the CLI's dead-runtime verdict composes the daemon's OWN liveness
+// primitives rather than reimplementing them, so the tests exercise that
+// composition directly.
+use trusty_mpm::daemon::orphan_gc::AlwaysIdleProbe;
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 
@@ -1245,12 +1250,274 @@ fn guided_resume_not_zombie_active_with_tmux() {
 
 #[test]
 fn guided_resume_plan_active_live_tmux_attaches() {
-    // Why: active state with a live tmux pane is the happy path — attach directly,
-    // no daemon round-trip, no stop, no resume.
+    // Why: active state with a live tmux pane AND a live runtime is the happy
+    // path — attach directly, no daemon round-trip, no stop, no resume. #3873
+    // added `runtime_live`; this case MUST keep attaching when it is true, or a
+    // genuinely-running agent would get its pane killed and restarted.
     assert_eq!(
-        plan_resume("active", true),
+        plan_resume(
+            "active", /* tmux_live */ true, /* runtime_live */ true
+        ),
         ResumeAction::Attach,
-        "active + live tmux must attach directly"
+        "active + live tmux + live runtime must attach directly"
+    );
+}
+
+#[test]
+fn guided_resume_plan_active_live_tmux_dead_runtime_reconciles_then_restarts() {
+    // Why (#3873): the reported defect. The daemon record says `active` and the
+    // tmux SESSION exists, but the inner `claude` has exited and the pane fell
+    // back to a bare login shell. `tmux_live` cannot see that difference, so the
+    // plan used to be `Attach` — bare `tm` switched the operator into an idle
+    // shell and did nothing useful, forcing a second `tm` from inside that pane
+    // to actually get a runtime back. The recovery is the SAME auto-stop-then-
+    // restart the tmux-gone zombie already uses, so invocation #1 does the whole
+    // job.
+    assert_eq!(
+        plan_resume(
+            "active", /* tmux_live */ true, /* runtime_live */ false
+        ),
+        ResumeAction::ReconcileThenRestart
+    );
+}
+
+#[test]
+fn guided_resume_plan_provisioning_live_tmux_dead_runtime_reconciles_then_restarts() {
+    // Why (#3873): `provisioning` is the other non-terminal, non-restartable
+    // state that reaches the Attach branch, and a provisioning session whose
+    // runtime died is just as unusable as an active one. Pins that the fix keys
+    // off the same `!needs_restart` family rather than a hard-coded "active".
+    assert_eq!(
+        plan_resume(
+            "provisioning",
+            /* tmux_live */ true,
+            /* runtime_live */ false
+        ),
+        ResumeAction::ReconcileThenRestart,
+        "provisioning + live tmux + dead runtime must reconcile then restart"
+    );
+}
+
+#[test]
+fn guided_resume_plan_stopped_live_tmux_dead_runtime_still_plain_restarts() {
+    // Why (#3873 branch ordering): a Stopped record's pane is an idle shell too,
+    // so it also reports `runtime_live = false`. It must KEEP taking the plain
+    // `Restart` path — `/resume` already accepts Stopped, and routing it through
+    // `ReconcileThenRestart` would add a pointless `/runtime-stop` round-trip
+    // against a record that is already stopped. Guards that the new gate sits
+    // BELOW `needs_restart`, not above it.
+    assert_eq!(
+        plan_resume(
+            "stopped", /* tmux_live */ true, /* runtime_live */ false
+        ),
+        ResumeAction::Restart,
+        "stopped + dead runtime must still take the plain Restart path"
+    );
+}
+
+#[test]
+fn plan_resume_refuses_terminal_states_even_with_dead_runtime() {
+    // Why (#3873): the terminal tombstone refusal must stay FIRST. A
+    // decommissioned/deleted record whose pane is an idle shell must never be
+    // resurrected through the new dead-runtime reconcile path.
+    for state in ["deleted", "decommissioned"] {
+        assert_eq!(
+            plan_resume(
+                state, /* tmux_live */ true, /* runtime_live */ false
+            ),
+            ResumeAction::Terminal,
+            "{state} + dead runtime must still be refused as Terminal"
+        );
+    }
+}
+
+#[test]
+fn session_runtime_live_assumes_live_for_blank_session_name() {
+    // Why (#3873 fail-open contract): `runtime_live = false` now drives a
+    // `/runtime-stop` whose `kill_session` destroys the WHOLE tmux session. A
+    // blank session name gives us NO evidence either way, so it must assume live
+    // and preserve the pre-#3873 Attach behavior. Pure: takes the early return
+    // before any tmux shell-out.
+    assert!(
+        session_runtime_live(""),
+        "an empty session name must fail OPEN (assume the runtime is live)"
+    );
+    assert!(
+        session_runtime_live("   "),
+        "a whitespace-only session name is no evidence either — must fail OPEN"
+    );
+}
+
+// ── parse_pane_probes (#3873) ────────────────────────────────────────────────
+// Rows come from `tmux list-panes -s -t <session> -F
+// '#{session_name}\t#{pane_current_command}\t#{pane_pid}'`. Anything this seam
+// cannot fully adjudicate must return None, which the caller treats as fail-open
+// — because the only thing a `false` verdict can cause here is a session kill.
+
+#[test]
+fn parse_pane_probes_reads_every_pane() {
+    // Why (#3873): the happy shape — one row per pane, all three fields present.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+        .expect("a well-formed two-pane listing must parse");
+    assert_eq!(panes.len(), 2, "both panes must be returned");
+    assert_eq!(panes[0].session_name, "tm-apex-01");
+    assert_eq!(panes[0].pane_current_command, "zsh");
+    assert_eq!(panes[0].pane_pid, Some(41234));
+    assert_eq!(panes[1].pane_current_command, "claude");
+    assert_eq!(panes[1].pane_pid, Some(41999));
+}
+
+#[test]
+fn parse_pane_probes_rejects_non_numeric_pid() {
+    // Why (#3873 round 2, code-critic MEDIUM): this is THE regression this
+    // parse tightening exists to prevent. A non-numeric pid used to degrade to
+    // `pane_pid: None`; `ProcessTreeProbe::has_live_child(None)` returns `false`,
+    // so the documented two-gate check silently collapsed to `is_idle_shell`
+    // alone and an unparseable row could satisfy the destructive dead-runtime
+    // branch on the strength of the command word by itself. `None → false` is
+    // correct calibration for the DAEMON, whose reconcile is non-destructive
+    // (#2023 A: record flips, pane survives); the CLI reuses that same gate to
+    // drive a `kill_session`, so it must be STRICTER than the daemon, not equal.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01\tzsh\tnotanumber\n"),
+        None,
+        "a non-numeric pid must read as CANNOT DETERMINE (None), never as a \
+         one-gate dead verdict"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_missing_pid() {
+    // Why (#3873 round 2): same MEDIUM, short-row variant — a row that stops
+    // after the command word leaves the child gate with nothing to inspect.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01\tzsh\n"),
+        None,
+        "a row missing the pid column must yield None"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_smeared_row() {
+    // Why (#3873): the #1813 composite-key shape that broke the daemon's own
+    // `list-panes -a` enumeration — the whole row collapsed into one field. The
+    // TAB delimiter makes it unparseable rather than silently mis-columned.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01_zsh_41234\n"),
+        None,
+        "a smeared single-field row must yield None, never a guessed split"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_extra_fields() {
+    // Why (#3873): more columns than the format asked for means the reply is not
+    // the shape we requested — refuse rather than guess which column is which.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01\tzsh\t41234\textra\n"),
+        None,
+        "an over-long row must yield None"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_empty_or_blank_listing() {
+    // Why (#3873): an empty listing means tmux told us nothing. It must NOT read
+    // as "no live panes, therefore dead" — that is exactly the fail-closed shape
+    // that would kill a session on a failed query.
+    assert_eq!(parse_pane_probes(""), None, "empty output must yield None");
+    assert_eq!(
+        parse_pane_probes("   \n\n"),
+        None,
+        "whitespace-only output must yield None"
+    );
+}
+
+#[test]
+fn parse_pane_probes_rejects_empty_command_field() {
+    // Why (#3873): the other half of the #1813 shape — `pane_current_command`
+    // came back EMPTY. An empty command must never be handed to `is_idle_shell`.
+    assert_eq!(
+        parse_pane_probes("tm-apex-01\t\t41234\n"),
+        None,
+        "an empty command field must yield None"
+    );
+}
+
+// ── panes_prove_session_dead (#3873 rounds 2–3 / #2463) ──────────────────
+// The single predicate between a parsed tmux listing and a `kill_session`. It is
+// phrased as "prove DEAD", so every uncertain input must fall out as `false`.
+// `AlwaysIdleProbe` isolates the command-word gate from the real process tree.
+
+#[test]
+fn panes_prove_session_dead_when_every_pane_is_a_bare_shell() {
+    // Why (#3873): the actual defect shape, and the ONLY configuration allowed to
+    // reach the destructive reconcile branch.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tbash\t41999\n")
+        .expect("listing must parse");
+    assert!(
+        panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a session whose every pane is a bare shell must be proven dead"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_refuses_when_a_sibling_pane_is_live() {
+    // Why (#2463): a manually-split managed session can have an idle pane
+    // alongside a live agent pane. Convicting on the idle one would kill the live
+    // agent with it. `claude` is not an idle shell, so the session is not dead.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+        .expect("listing must parse");
+    assert!(
+        !panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a sibling pane still running the agent must block the dead verdict"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_refuses_a_prefix_matched_listing() {
+    // Why (#3873 round 3, code-critic MEDIUM): THE case the membership check
+    // exists for, and it is reachable rather than hypothetical. tmux
+    // PREFIX-MATCHES session targets: with only `tm-apex-01` alive,
+    // `has-session -t tm-apex` succeeds and `list-panes -s -t tm-apex` returns
+    // `tm-apex-01`'s panes. A record named `tm-apex` would then be handed a
+    // well-formed listing describing a DIFFERENT, live session. Without the
+    // membership check, `session_has_live_pane`'s filter matches nothing, reports
+    // `false` ("no live pane"), and that reads as "dead" — and the `kill_session`
+    // that follows prefix-matches onto that same live session. Deleting the check
+    // in `panes_prove_session_dead` must turn this test RED.
+    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\n").expect("listing must parse");
+    assert!(
+        !panes_prove_session_dead("tm-apex", &panes, &AlwaysIdleProbe),
+        "a prefix-matched listing describes ANOTHER session — it must never \
+         convict ours, whose own panes we have not actually seen"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_refuses_a_wholly_foreign_listing() {
+    // Why (#3873 round 3): the general form of the same hazard — whatever the
+    // cause (prefix match, a renamed session, a racing kill), a listing with no
+    // pane attributable to the session we asked about tells us NOTHING about it,
+    // and "nothing" must never be convicted as "dead".
+    let panes = parse_pane_probes("tm-other-99\tzsh\t41234\n").expect("listing must parse");
+    assert!(
+        !panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "a listing belonging entirely to another session must not prove ours dead"
+    );
+}
+
+#[test]
+fn panes_prove_session_dead_ignores_foreign_rows_beside_our_own() {
+    // Why (#3873 round 3): the membership check must not over-correct into
+    // "any foreign row blocks the verdict" — our own panes, when present, are
+    // still the ones that decide. A foreign LIVE pane must not rescue a session
+    // whose own panes are all idle shells.
+    let panes = parse_pane_probes("tm-other-99\tclaude\t41000\ntm-apex-01\tzsh\t41234\n")
+        .expect("listing must parse");
+    assert!(
+        panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        "our own idle pane decides; a live pane in an unrelated session is not ours"
     );
 }
 
@@ -1259,7 +1526,9 @@ fn guided_resume_plan_stopped_restarts() {
     // Why: stopped state must go straight to the daemon /resume restart path —
     // NOT reconcile (there is nothing to stop) and NOT a bare attach.
     assert_eq!(
-        plan_resume("stopped", false),
+        plan_resume(
+            "stopped", /* tmux_live */ false, /* runtime_live */ true
+        ),
         ResumeAction::Restart,
         "stopped must select the plain Restart path"
     );
@@ -1269,7 +1538,9 @@ fn guided_resume_plan_stopped_restarts() {
 fn guided_resume_plan_errored_restarts() {
     // Why: errored is resumable via /resume just like stopped.
     assert_eq!(
-        plan_resume("errored", false),
+        plan_resume(
+            "errored", /* tmux_live */ false, /* runtime_live */ true
+        ),
         ResumeAction::Restart,
         "errored must select the plain Restart path"
     );
@@ -1282,7 +1553,9 @@ fn guided_resume_plan_active_no_tmux_reconciles_then_restarts() {
     // must be ReconcileThenRestart, not a bail and not a plain Restart (a bare
     // /resume would 409 because the record is still active).
     assert_eq!(
-        plan_resume("active", false),
+        plan_resume(
+            "active", /* tmux_live */ false, /* runtime_live */ true
+        ),
         ResumeAction::ReconcileThenRestart,
         "active + no tmux must reconcile (auto-stop) then restart"
     );
@@ -1293,7 +1566,11 @@ fn guided_resume_plan_provisioning_no_tmux_reconciles_then_restarts() {
     // Why (#2001): provisioning + tmux gone is also a zombie and follows the same
     // auto-stop-then-restart recovery.
     assert_eq!(
-        plan_resume("provisioning", false),
+        plan_resume(
+            "provisioning",
+            /* tmux_live */ false,
+            /* runtime_live */ true
+        ),
         ResumeAction::ReconcileThenRestart,
         "provisioning + no tmux must reconcile then restart"
     );
@@ -1308,7 +1585,7 @@ fn plan_resume_refuses_terminal_states() {
     for state in ["deleted", "decommissioned"] {
         for tmux_live in [false, true] {
             assert_eq!(
-                plan_resume(state, tmux_live),
+                plan_resume(state, tmux_live, /* runtime_live */ true),
                 ResumeAction::Terminal,
                 "{state} (tmux_live={tmux_live}) must be refused as Terminal, never resumed"
             );
@@ -1333,7 +1610,9 @@ fn guided_resume_plan_stopped_with_stale_tmux_still_restarts() {
     // zombie (needs_restart is true) — it takes the plain Restart path (the daemon
     // kills the stale pane). Guards the branch ordering in plan_resume.
     assert_eq!(
-        plan_resume("stopped", true),
+        plan_resume(
+            "stopped", /* tmux_live */ true, /* runtime_live */ true
+        ),
         ResumeAction::Restart,
         "stopped + stale live tmux must still take the Restart path, not reconcile"
     );
@@ -1382,7 +1661,11 @@ fn guided_resume_plan_resume_prefers_persisted_state_over_display_state() {
     // daemon's authoritative state.
     let session = make_session_with_persisted_state("tm-writing-01", "stopped", "active");
     let tmux_live = false; // the picker's "(stopped)" label implies tmux is gone
-    let action = plan_resume(resume_classification_state(&session), tmux_live);
+    let action = plan_resume(
+        resume_classification_state(&session),
+        tmux_live,
+        /* runtime_live */ true,
+    );
     assert_eq!(
         action,
         ResumeAction::ReconcileThenRestart,
@@ -1394,7 +1677,7 @@ fn guided_resume_plan_resume_prefers_persisted_state_over_display_state() {
     // reproduces the reported dead-end — proving this test would have caught
     // the regression.
     assert_eq!(
-        plan_resume(&session.state, tmux_live),
+        plan_resume(&session.state, tmux_live, /* runtime_live */ true),
         ResumeAction::Restart,
         "classifying off the display-reconciled state alone reproduces the bug"
     );

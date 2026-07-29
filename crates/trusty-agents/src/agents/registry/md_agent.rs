@@ -73,6 +73,15 @@ struct MdAgentFrontmatter {
     /// Test: `agents::extends::tests`.
     #[serde(default)]
     extends: Option<String>,
+    /// Privilege tier declaration (#4168, epic #4167 — L0/L1 orchestration
+    /// model). Mirrors `AgentInfo::tier`'s raw string exactly — see that
+    /// field's doc comment for the fail-closed resolution
+    /// (`AgentInfo::tier()`) every consumer must call. Absent (the
+    /// overwhelming majority of `.md` overlays) resolves to L1, same as a
+    /// TOML agent that omits `[agent].tier`.
+    /// Test: `md_frontmatter_tier_parses_and_defaults_absent`.
+    #[serde(default)]
+    tier: Option<String>,
 }
 
 /// Parse an `.md` agent file into an `AgentConfig`.
@@ -184,6 +193,7 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             kind: "assistant".to_string(),
             prompt_label: None,
             extends: fm.extends,
+            tier: fm.tier,
         },
         llm: LlmParams {
             temperature: llm_temperature,
@@ -225,6 +235,8 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         // store is a valid state (see `AgentConfig::stores`).
         stores: crate::stores::StoresConfig::default(),
         skills: crate::agents::SkillsConfig::default(),
+        // #3936: markdown agents carry no `[permissions]` table.
+        permissions: crate::agents::PermissionsConfig::default(),
         // #4026: no cross-product grants from an .md-sourced agent yet.
         subagents: crate::agents::SubagentsConfig::default(),
     })

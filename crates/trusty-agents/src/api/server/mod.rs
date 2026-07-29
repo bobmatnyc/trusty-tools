@@ -12,10 +12,17 @@
 //!   - `routes`       → router assembly + `serve*` bootstrap
 //!   - `handlers`     → task / health / docs core handlers
 //!   - `cancel`       → task cancellation (`DELETE /api/task/:id`, #3063)
+//!   - `costs`        → aggregated usage cost (`GET /api/costs`, #4098): totals
+//!     + by-agent/model/date breakdowns folded read-time from
+//!     `.trusty-agents/state/usage.jsonl`
 //!   - `models`       → inference provider catalog (`GET /api/models`, #3243)
 //!   - `projects`     → project / session / agent listing handlers
 //!   - `agent_patch`  → per-agent model/provider write path
 //!     (`PATCH /api/agents/:name`, #3246)
+//!   - `agent_permissions` → structured permissions model
+//!     (`GET /api/agents/:name/permissions`, #3936, DOC-57 §7)
+//!   - `agent_knowledge` → unified knows-surface (`GET /api/agents/:name/knowledge`,
+//!     #3935, DOC-57 §4): store bindings + knowledge tools + MCP connections
 //!   - `project_registration` → project register + per-project config lookup
 //!   - `ctrl_sessions`→ CTRL session CRUD (`om session …`)
 //!   - `tm`           → tmux session management (`/api/tm/*`)
@@ -30,11 +37,15 @@
 //! Test: `tests` submodule + each submodule's documented coverage.
 
 mod agent_create;
+mod agent_knowledge;
 mod agent_patch;
+mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
+mod agent_subagents;
 mod auth;
 mod cancel;
+mod costs;
 mod ctrl_sessions;
 mod events_sse;
 mod handlers;

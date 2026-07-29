@@ -374,7 +374,7 @@ async fn spawn_managed_routed(
             && let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url)
         {
             let registry = state.project_registry().await;
-            if !super::launch_on_main::worktree_enabled_for_origin(&registry, &origin_url).await {
+            if !crate::project::worktree_enabled_for_origin(&registry, &origin_url).await {
                 info!(
                     id = %session_id,
                     path = %local_path.display(),

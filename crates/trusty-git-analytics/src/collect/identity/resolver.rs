@@ -6,12 +6,17 @@
 //! 2. Fuzzy match against team member canonical emails/names using
 //!    Jaro-Winkler similarity above a configurable threshold.
 //! 3. Fall through and return the raw pair unchanged.
+//!
+//! The fuzzy tiers are a *fallback for undeclared identities*, not a
+//! supplement to a declared roster: when the project supplies a comprehensive
+//! alias table they are switched off (issue #4251). See
+//! [`IdentityResolver::fuzzy_fallback`].
 
 use std::collections::HashMap;
 
 use rusqlite::params;
 use strsim::jaro_winkler;
-use tracing::debug;
+use tracing::{debug, error, info};
 
 use crate::core::config::TeamConfig;
 use crate::core::db::Database;
@@ -99,6 +104,13 @@ pub struct IdentityResolver {
     /// the stored canonical email. See [`Self::upsert_author`] for the
     /// selection policy.
     canonical_domain: Option<String>,
+    /// Whether the Tier-3/4 Jaro-Winkler fuzzy fallback may run (issue #4251).
+    ///
+    /// `true` preserves the historical behaviour. `false` stops resolution
+    /// after the exact Tier-1/2 alias lookups, so an identity that is not
+    /// declared in the alias table passes through unchanged instead of being
+    /// guessed onto the nearest-spelled roster member.
+    fuzzy_fallback: bool,
 }
 
 impl IdentityResolver {
@@ -130,6 +142,7 @@ impl IdentityResolver {
             members,
             threshold: DEFAULT_SIMILARITY_THRESHOLD,
             canonical_domain,
+            fuzzy_fallback: true,
         }
     }
 
@@ -166,12 +179,19 @@ impl IdentityResolver {
             members,
             threshold: DEFAULT_SIMILARITY_THRESHOLD,
             canonical_domain: None,
+            fuzzy_fallback: true,
         }
     }
 
     /// Construct a resolver from a [`crate::core::config::Config`], preferring
     /// the Python-compatible `developer_aliases` map when present, falling
     /// back to `team.members`.
+    ///
+    /// Also decides whether the Tier-3/4 fuzzy fallback runs (issue #4251):
+    /// an explicit `fuzzy_identity_fallback` in the config wins; otherwise the
+    /// fallback is disabled only when a declared `aliases_file` actually
+    /// resolved to a non-empty alias table. A declared-but-unloadable file
+    /// leaves the fallback ON and logs at `error!`.
     pub fn from_config(config: &crate::core::config::Config) -> Self {
         let map = config.resolved_aliases();
         let mut resolver = if !map.is_empty() {
@@ -191,6 +211,47 @@ impl IdentityResolver {
                     .filter(|d| !d.is_empty());
             }
         }
+        // Gate on whether the alias table actually LOADED, not merely on whether
+        // one was declared. `Config::resolved_aliases` deliberately swallows
+        // alias-file load errors, so keying on `aliases_file.is_some()` alone
+        // would let a typo'd or unreadable file produce the worst possible
+        // state: an empty alias table AND a disabled fallback, fragmenting every
+        // author with nothing but a debug line to show for it.
+        let alias_table_loaded = match &config.aliases_file {
+            None => false,
+            Some(_) => match config.resolved_alias_map(config.config_dir()) {
+                Ok(m) if !m.is_empty() => true,
+                Ok(_) => {
+                    error!(
+                        "aliases_file is configured but resolved to an EMPTY alias table; \
+                         keeping the Tier-3/4 fuzzy fallback enabled"
+                    );
+                    false
+                }
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "aliases_file is configured but could not be loaded; identity \
+                         resolution will fall back to fuzzy matching — fix the config"
+                    );
+                    false
+                }
+            },
+        };
+        resolver.fuzzy_fallback = config
+            .fuzzy_identity_fallback
+            .unwrap_or(!alias_table_loaded);
+        if !resolver.fuzzy_fallback {
+            // Announce at info!, not debug!: this flips resolution behaviour for
+            // every existing `aliases_file` deployment on upgrade, and an
+            // operator comparing two runs needs to see why the numbers moved.
+            info!(
+                members = resolver.members.len(),
+                "Tier-3/4 fuzzy identity fallback DISABLED (alias table supplied); \
+                 authors with no declared alias will be reported under their raw \
+                 name. Set `fuzzy_identity_fallback: true` to restore guessing."
+            );
+        }
         resolver
     }
 
@@ -198,6 +259,28 @@ impl IdentityResolver {
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.threshold = threshold;
         self
+    }
+
+    /// Enable or disable the Tier-3/4 Jaro-Winkler fuzzy fallback (issue #4251).
+    ///
+    /// Why: [`Self::from_config`] derives the flag from config, but resolvers
+    /// built from a bare alias map ([`Self::from_alias_map`]) or a
+    /// [`crate::core::config::TeamConfig`] have no config to read. Those
+    /// callers — currently `trusty-review`'s profile selector and the benches —
+    /// keep the historical fuzzy-on default and can opt out through this
+    /// builder if they ever need to. No caller sets it today; it exists so the
+    /// switch is reachable without routing through `Config`.
+    /// What: sets the flag consulted by [`Self::resolve`] after the exact
+    /// Tier-1/2 alias lookups.
+    /// Test: see `resolver_tests::with_fuzzy_fallback_false_suppresses_tier34`.
+    pub fn with_fuzzy_fallback(mut self, enabled: bool) -> Self {
+        self.fuzzy_fallback = enabled;
+        self
+    }
+
+    /// Report whether the Tier-3/4 fuzzy fallback is active on this resolver.
+    pub fn fuzzy_fallback(&self) -> bool {
+        self.fuzzy_fallback
     }
 
     /// Register an alias → canonical-name mapping after construction.
@@ -257,6 +340,17 @@ impl IdentityResolver {
             if let Some((cn, ce)) = self.find_member_by_name(canon_name) {
                 return (cn, ce);
             }
+        }
+
+        // Issue #4251: Tiers 3 and 4 guess. When the project has declared a
+        // comprehensive alias table, an inbound pair that reached this point is
+        // by definition NOT on the roster, and every additional roster entry
+        // only widens the set of near-spellings it can be captured by
+        // (`Cristian Dominguez` → `Crislaine Tripoli`). Stop here and let the
+        // identity pass through unresolved — a visibly-unmapped author is
+        // recoverable by adding an alias; a silently-misattributed one is not.
+        if !self.fuzzy_fallback {
+            return (name.to_string(), email.to_string());
         }
 
         // 3. Fuzzy match against member names/emails (Jaro-Winkler).

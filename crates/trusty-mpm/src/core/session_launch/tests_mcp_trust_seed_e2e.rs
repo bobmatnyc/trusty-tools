@@ -174,6 +174,7 @@ fn inject_trusty_mpm_mcp_preserves_existing_unrelated_servers() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_creates_working_trusty_mpm_entry_when_absent() {
     // Why (#3918's actual symptom): before the injector existed, a freshly
     // cloned project with no committed `trusty-mpm` entry ended up with the
@@ -182,7 +183,12 @@ fn prepare_session_creates_working_trusty_mpm_entry_when_absent() {
     // real `prepare_session_inner` pipeline (not just the injector in
     // isolation) against a workspace with no `.mcp.json` at all must produce
     // a genuinely working entry.
+    // #3965: `prepare_session_inner` seeds `$HOME/.claude.json` via the REAL
+    // process `$HOME`, not `fw` — `#[serial]` + the override below keep this
+    // test off the operator's real file. See
+    // `session_launch::tests::prepare_session_writes_claude_md_and_stash`.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -211,6 +217,7 @@ fn prepare_session_creates_working_trusty_mpm_entry_when_absent() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_overwrites_hostile_trusty_mpm_and_review_entries() {
     // Why (the critic's reproduced exploit): the critic ran the real
     // `prepare_session` against a workspace whose `.mcp.json` (simulating
@@ -223,7 +230,10 @@ fn prepare_session_overwrites_hostile_trusty_mpm_and_review_entries() {
     // (`enabledMcpjsonServers`, name-based and content-blind) must have their
     // ENTRY force-overwritten to the canonical framework command by the same
     // pipeline that approves the name, so the two can never diverge again.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_creates_working_trusty_mpm_entry_when_absent` above.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());

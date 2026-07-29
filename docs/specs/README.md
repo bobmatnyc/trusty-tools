@@ -74,6 +74,9 @@ normative grammar — this note does not restate it.
 | DOC-56 | `SPEC-AGENTSYNC-01~draft` … `-07~draft` | [Agent Configuration Sync: The `trusty-agents-agents` Private Monorepo](./trusty-agents-agents-sync.md) | trusty-agents — agent configuration lifecycle, provisioning merge (subsumes #3844), multi-machine sync |
 | DOC-57 | `SPEC-AGENTCFG-01~draft` … `-09~draft` | [Five-Section Agent Configuration: Personality / Knowledge / Skills / Listeners / Permissions](./agent-config-five-sections.md) | trusty-agents — agent configuration model, capability declaration (tool→skill wrapping), permissions surface, GUI config pane (**supersedes DOC-54 §5**) |
 | DOC-58 | `SPEC-KDIDX-01~draft` … `-06~draft` | [Knowledge Section Addendum: K-d Attached Search Indexes](./DOC-58-knowledge-kd-attached-indexes.md) | trusty-agents — Knowledge section (DOC-57 §4) fourth sub-surface, `tools.search_indexes` config; trusty-search — arbitrary attached indexes (**extends DOC-57 §4 and amends #3935's scope; edits neither in place**) |
+| DOC-59 | `SPEC-PMINSTR-01~draft` … `-07~draft` | [P1/P2 Instruction Restructure: Tiered, Cache-Stable, Customizable PM System Prompt Composition](./SPEC-PMINSTR-01-p1-p2-instruction-restructure.md) | trusty-mpm — PM instruction pipeline (`instruction_pipeline.rs`, `instruction_overrides.rs`, `stack_profile.rs`); session-manager (workstream/session persistence) — motivated by issue #4071 |
+| DOC-60 | `SPEC-AGENTBUS-01~draft` | [Unified Agent Communication: User ↔ Assistant, Assistant ↔ Sub-Agent, Assistant ↔ Assistant](./DOC-60-bus-based-agent-messaging.md) | trusty-mpm (bus host, daemon) — trusty-agents (assistants, sub-agents, ctrl) — trusty-channels (Slack/Telegram/etc.) — trusty-memory (consolidation target) — trusty-search (index target) |
+| DOC-61 | `SPEC-AGENTSTD-01~draft` | [Canonical Agent Standard: A Shared Source Model for trusty-mpm, trusty-code, and trusty-agents](./DOC-61-canonical-agent-standard.md) | cross-crate — trusty-mpm (source model owner today), trusty-code (per-product builder, prospective), trusty-agents (assistant/sub-agent split, `agents::config`) |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -87,14 +90,21 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-59`** (updated 2026-07-26 — DOC-58 claimed by
+> **Next free `DOC-N` = `DOC-62`** (updated 2026-07-28 — DOC-60 claimed by
+> [Unified Agent Communication](./DOC-60-bus-based-agent-messaging.md) (retitled from
+> "Bus-Based Agent Messaging" in its Rev 1 update to reflect its now-unified
+> user↔assistant / assistant↔sub-agent / assistant↔assistant scope; filename
+> unchanged) and DOC-61 by
+> [Canonical Agent Standard](./DOC-61-canonical-agent-standard.md); DOC-59 claimed by
+> [P1/P2 Instruction Restructure](./SPEC-PMINSTR-01-p1-p2-instruction-restructure.md),
+> DOC-58 claimed by
 > [Knowledge Section Addendum: K-d Attached Search Indexes](./DOC-58-knowledge-kd-attached-indexes.md),
 > DOC-55 claimed by
 > [Universal OKG Importer](./okg-universal-importer.md), DOC-56 by
 > [Agent Configuration Sync](./trusty-agents-agents-sync.md), and DOC-57 by
 > [Five-Section Agent Configuration](./agent-config-five-sections.md)):
-> the highest cataloged number is now **DOC-58**, which claimed the next free number after
-> **DOC-57**, itself claimed after
+> the highest cataloged number is now **DOC-59**, which claimed the next free number after
+> **DOC-58**, itself claimed after
 > **DOC-54** ([Trusty Agents Product Specification](./trusty-agents-product-spec.md))
 > per the scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
 > note is a *hint, not authority*; the scan is authoritative). DOC-44/45 are claimed by the

@@ -147,8 +147,12 @@ pub(super) async fn stores_at(
 /// what this route reports and what the tool accepts cannot disagree.
 /// What: `ToolsConfig::resolved_search_indexes` (already trimmed/deduped)
 /// filtered against every binding's `resolved_index`.
+///
+/// `pub(super)` since #3935: `agent_knowledge::knowledge_at` reports the
+/// identical id set under the identical field name (`search_indexes`) so the
+/// two routes can never disagree about which ids are curated vs. attached.
 /// Test: `attached_indexes_deduped_presents_overlap_under_its_bound_role`.
-fn attached_indexes_deduped(stores: &StoresConfig, tools: &ToolsConfig) -> Vec<String> {
+pub(super) fn attached_indexes_deduped(stores: &StoresConfig, tools: &ToolsConfig) -> Vec<String> {
     tools
         .resolved_search_indexes()
         .into_iter()

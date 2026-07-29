@@ -112,7 +112,7 @@ async fn agents_check_ok_when_managed_workspace_roster_populated() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_twenty_one_checks() {
+async fn run_doctor_produces_twenty_two_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -123,38 +123,40 @@ async fn run_doctor_produces_twenty_one_checks() {
     // (seventeen → eighteen); issue #2997 adds `tcc_taint` (eighteen →
     // nineteen); issue #3453 part 2 adds `output_style_legacy_ids` (nineteen
     // → twenty); issue #3427 adds `scaffold_tracking` (twenty →
-    // twenty-one).
+    // twenty-one); issue #2867 adds `push_guard` (twenty-one →
+    // twenty-two).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[]).await;
-    assert_eq!(report.checks.len(), 21);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(
-        names,
-        [
-            "instructions",
-            "agents",
-            "skills",
-            "skill_source",
-            "output_style",
-            "output_style_staleness",
-            "output_style_legacy_ids",
-            "deployment",
-            "skill_staleness",
-            "legacy_sources",
-            "agent_skills",
-            "agent_skills_prose_hints",
-            "memory",
-            "search",
-            "worktrees",
-            "gh_account",
-            "oauth_token",
-            "hooks_contamination",
-            "hooks_foreign_conflict",
-            "tcc_taint",
-            "scaffold_tracking"
-        ]
-    );
+    let expected = [
+        "instructions",
+        "agents",
+        "skills",
+        "skill_source",
+        "output_style",
+        "output_style_staleness",
+        "output_style_legacy_ids",
+        "deployment",
+        "skill_staleness",
+        "legacy_sources",
+        "agent_skills",
+        "agent_skills_prose_hints",
+        "memory",
+        "search",
+        "worktrees",
+        "gh_account",
+        "oauth_token",
+        "hooks_contamination",
+        "hooks_foreign_conflict",
+        "tcc_taint",
+        "scaffold_tracking",
+        "push_guard",
+    ];
+    assert_eq!(names, expected);
+    // Count derived from the list above, never a standalone literal:
+    // adding a check is then a one-line edit here (#4090 review LOW-1).
+    assert_eq!(report.checks.len(), expected.len());
 }
 
 #[test]
@@ -274,47 +276,23 @@ async fn worktrees_no_repos_root_is_ok() {
 
 #[tokio::test]
 async fn worktrees_no_orphans_is_ok() {
-    // Why (#1845 item 2): on macOS /tmp is a symlink to /private/tmp. If we pass the
-    // raw tempfile path as active (e.g. /tmp/…) but the walk canonicalises it to
-    // /private/tmp/…, the active-set lookup misses and a live worktree is falsely
-    // flagged as an orphan — causing a spurious CI failure. Canonicalize the active
-    // path in the test so the set membership check in find_orphaned_worktrees matches.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // Create owner/repo/.worktrees/session-abc/ and register it as active.
-    let wt = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-abc");
-    std::fs::create_dir_all(&wt).unwrap();
-    // Canonicalize so /tmp vs /private/tmp symlink differences are resolved.
-    let canonical_wt = std::fs::canonicalize(&wt).unwrap_or(wt);
-    let active = vec![canonical_wt];
-    let check = check_worktrees(Some(root), &active).await;
+    // #4207: a REAL `git worktree add`, since discovery is now derived from
+    // git's registry — a `mkdir` is not a candidate and would make this pass
+    // for the wrong reason. The fixture canonicalizes its own root, so the
+    // /tmp vs /private/tmp symlink hazard (#1845 item 2) is handled there.
+    let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let wt = fx.add_worktree("session-abc");
+    let check = check_worktrees(Some(&fx.repos_root), &[wt]).await;
     assert_eq!(check.status, CheckStatus::Ok);
 }
 
 #[tokio::test]
 async fn worktrees_with_orphan_is_warn() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // Create two worktrees; only one has an active session.
-    let wt1 = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-live");
-    let wt2 = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-dead");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::create_dir_all(&wt2).unwrap();
-    // wt2 is orphaned (no active session).
-    let active = vec![wt1];
-    let check = check_worktrees(Some(root), &active).await;
+    // #4207: two REAL worktrees; only one has an active session.
+    let fx = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
+    let live = fx.add_worktree("session-live");
+    let _dead = fx.add_worktree("session-dead");
+    let check = check_worktrees(Some(&fx.repos_root), &[live]).await;
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(check.message.contains("1 orphaned"));
     assert!(check.message.contains("tm session prune --worktrees"));

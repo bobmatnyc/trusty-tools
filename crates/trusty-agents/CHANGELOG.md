@@ -7,6 +7,332 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **The Sub-agents pane no longer advertises delegation targets the gate
+  refuses.** Its copy said targets were *"fixed by the role allow-list
+  (engineer, qa, researcher, documentation, ops, planner, assistant)"* — true
+  of the constant, misleading as presented: `assistant` is in that list, but
+  ADR-0024's delegation KIND rule independently refuses every assistant →
+  assistant edge, so a reader took the list as a promise of reachability the
+  code denies. The pane now states the EFFECTIVE rule — role-eligible MINUS
+  kind-refused — quoting the allow-list as an eligibility filter, then saying
+  plainly that eligibility is not reachability and that a peer assistant is
+  never a delegation target (assistants communicate with each other rather
+  than delegating to one another). The refusal is attributed to the KIND rule
+  rather than the tier gate, which is what post-#4296 is actually true: with
+  assistants at L0 both endpoints of that edge are L0, so tier is vacuous for
+  it. Copy-only — no gate, payload or reachability logic changed, and
+  `ASSISTANT_ALLOWED_DELEGATE_ROLES` deliberately still carries `assistant`
+  (its doc comment records why the entry is kept: the constant also feeds the
+  `/subagents` route's `allowed_roles` report, and the kind rule must be
+  enforced by code, not by a curated list of names). The stale doc comments
+  that described the rule as "role allowlist + tier gate" were corrected to
+  name the kind rule too.
+
+### Changed
+
+- **Assistants are tier L0 (ADR-0024 decision 3).** An agent whose `[agent].role`
+  is `assistant` now resolves `AgentTier::L0Orchestration` instead of
+  `L1Standard`; sub-agent roles (`engineer`, `qa`, `researcher`, `documentation`,
+  `ops`, `planner`, …) stay `L1Standard`. The Sub-agents pane consequently
+  reports `tier l0` for the viewing assistant and for peer-assistant target
+  cards, and `tier l1` for sub-agents — it previously labelled every agent
+  `l1`, including assistant-kind ones. The tier is DERIVED from the agent's kind
+  by `AgentTier::for_kind`, so no agent TOML changed and none needs a
+  `tier = "l0"` line; an explicit `[agent].tier` declaration still wins in both
+  directions and is still fail-closed (an unrecognized value narrows to L1 and
+  can never elevate). No capability grant changes: delegation refusal keys on
+  agent KIND rather than tier order, and the one tier-conditioned surface
+  (#4171's read-only session-state tools) stays unreachable for every bundled
+  assistant because none names those tools in its `[tools].allow`.
+
+### Added
+
+- **The app header shows the running daemon's version.** A quiet provenance
+  line sits beside the brand lockup, read from `GET /api/health` — the version
+  of the daemon the UI is actually talking to, not what the frontend was
+  compiled against, since surfacing that mismatch is the point. It is one
+  follow-up read fired after the existing readiness probe succeeds, not a
+  second poller. Before the probe answers it shows `v…` and on failure `v—`,
+  never a guessed number and never an empty slot that shifts the lockup. The
+  line is shaped so #4260's commit SHA appends to it (`v0.38.6 · abc1234`)
+  without a redesign; the meaningless `build #N` counter from
+  `tagent --version` is deliberately not shown.
+- **A `Cost` tab showing spend by agent, model, and day (#4098).** The new
+  `CostsView` renders `GET /api/costs`, which folds
+  `.trusty-agents/state/usage.jsonl` on request into a grand total plus three
+  breakdowns. It refuses to render a confident `$0.00` over a usage log that
+  does not exist: a missing log is reported as "no usage has been recorded",
+  naming the file it looked for, and is visibly distinct from an empty-but-
+  present log, from a read failure, and from still-loading. Lines that fail to
+  parse are counted and surfaced as a warning that the totals are incomplete,
+  rather than silently dropped. Charts are plain CSS bars — no charting
+  dependency was added.
+- **`GET /api/costs` (#4098).** Optional `?days=<n>` narrows the window,
+  anchored on the newest recorded row. Returns `200` with `available: false`
+  when no log exists, `500` when a log exists but cannot be read, and always
+  reports `records` / `malformed_lines` so a partial total is identifiable as
+  one. Aggregation is read-time; the durable rollup tables of #4104/#4105 are
+  NOT implemented.
+- **The Skills pane renders function skills as groups (#4024).** A `kind:
+  "function"` bundle is no longer filtered out of the pane — it renders as a
+  collapsed group header over its member skill cards, with the tri-state grant
+  display DOC-57 S-16 specifies: "granted" only when every member is granted,
+  "partial — k of n" when some are, "not granted" when none are. Members render
+  inside their group instead of the flat Actions/Knowledge/System buckets (one
+  card, one place); a skill belonging to no bundle renders exactly as before.
+  Membership and grant state are read from the route's `groups[]`, never
+  re-derived client-side, and a bundle still does not move the "N of M known
+  skills granted" count — it is not a capability of its own.
+- **A `Google Workspace` function skill (#4024)** bundling the Gmail and Google
+  Tasks leaf skills (search, read, compose, draft, format, labels, attachments;
+  task lists, create, update, complete) as one grantable unit. Gmail account
+  settings and filters, Google account administration, and the Drive/Docs/
+  Sheets/Slides/Calendar families are deliberately NOT members.
+- **A `CTO Tools` function skill (#4024)** bundling the four CTO operations
+  database queries (headcount, budget, risks, work classification).
+- **`groups[].providers` on `GET /api/agents/:name/skills` (#4024).** A bundle
+  carries no credential of its own, so the group now reports the DISTINCT
+  credential requirements across its members, each with the same tri-state
+  `configured` a leaf card carries. Members needing different credentials
+  produce one entry each — a divergence is rendered, never collapsed into a
+  single verdict — and an OAuth requirement still reports `configured: null`
+  ("not verified"), never a check nobody ran. Additive: existing fields are
+  unchanged.
+
+### Changed
+
+- **The chat's "waiting on the agent" indicator now lives inside the reply
+  bubble.** The spinner used to render as a separate element below the message
+  list, left-aligned under the bubble it belonged to and visually detached from
+  it. It now renders in the bubble's own body — standing in for the `…`
+  placeholder while the reply is empty, then trailing the streamed text like a
+  caret — and the in-flight bubble carries a pulsing green ring (Foundry's
+  `--trusty-success`, so it themes correctly in light and dark). Both the
+  spinner and the ring are driven by the same `isRunning` + `activeTaskId`
+  pair, so they cannot disagree, and both clear on completion, error, and
+  cancellation. Users with `prefers-reduced-motion: reduce` get the same green
+  ring, static rather than pulsing.
+
+- **The `ticketing` function skill now also bundles the two read-only git
+  inspection skills (#4024)** — `git_search_commits` and `git_branches` — so
+  git and ticketing are granted as one unit. Git *mutation* skills (commit,
+  push, branch creation, checkout, stash) remain excluded, and a test pins
+  that exclusion.
+
+- `trusty-memory` requirement raised to `^0.22` (was `^0.21.1`). trusty-memory
+  goes 0.21.3 -> 0.22.0 because it publicly re-exports `trusty_common::palace_id`
+  items and its `trusty-common` requirement moved to `^0.27`; `^0.21.1` resolves
+  to `>=0.21.1, <0.22.0` and would not have admitted the new version. Requirement
+  edit only — this crate's own version is unchanged.
+
+### Fixed
+
+- **Cost figures were priced at Haiku rates for every model (#4098).**
+  `usage::daily` carried a second, hardcoded two-constant rate table that the
+  REPL statusline and the persisted daily total both used, so a Sonnet session
+  — the default — displayed roughly a twelfth of its real cost. The duplicate
+  table is deleted, not corrected; `perf::pricing::cost_usd` is now the single
+  pricing entry point for the statusline, the daily total, the perf collector,
+  and the new Costs tab. Its token counts widened from `u32` to `u64` so the
+  aggregate callers cannot saturate a total.
+- **The Sub-agents pane no longer offers `hidden` agents as delegation targets
+  (#4235).** `GET /api/agents/:name/subagents` filtered its in-product target
+  list by role and by the kind/tier gate but never by `hidden`, so
+  `assistant`, `personal-assistant` and `researcher` — all `hidden = true`
+  since #3819 — leaked back in as target cards, rendering a SECOND row
+  display-labelled "Izzie" beside `izzie`. The pane now applies the same
+  `!hidden` filter the picker/roster applies, through the same
+  `projects::is_hidden` predicate (promoted from private to `pub(super)`
+  rather than reimplemented, so the two surfaces cannot drift). A hidden agent
+  is OMITTED rather than shown with a reason — `hidden` is a listing-surface
+  flag, not a gate, and a labelled row would still draw the duplicate and
+  would name an id the pane's no-roster-dump posture keeps unnamed. It is
+  counted instead, in a new `in_product.hidden_excluded_count`, disjoint from
+  `role_excluded_count`, which keeps its existing meaning unchanged. The pane
+  renders that count on its own line ("N further agent(s) … are hidden"), so
+  the omission is stated rather than silent, and the two exclusion reasons stay
+  separate — they have different remedies. This weakens no gate: `hidden` has
+  only ever governed visibility, and delegating to a hidden agent by name is
+  unaffected.
+
+### Security
+
+- **Delegation authority is now governed by agent KIND, not by tier order
+  (ADR-0024, "Assistants Are Level-0 Delegators; Sub-Agents Are In-Process,
+  Single-Edge Leaves That Never Delegate" — cited by title as well as number
+  because the ADR is not on `main` yet; it lands with PR #4243).** The
+  shipped L0/L1 gate expressed its rule as a tier
+  comparison, which is a proxy: a total order cannot forbid an edge WITHIN a
+  rank, for any numbering. It appeared to work only because every assistant
+  was L1 and L0 was empty. Under the ratified model — where all assistants
+  become L0 and "assistants communicate with each other, but never delegate"
+  — that check becomes vacuous for exactly the case it must forbid, and no
+  renumbering fixes it. `DelegateToAgentTool::execute` now refuses any
+  assistant-to-assistant delegation edge by reading the two endpoints' `role`
+  (the KIND discriminator), never a tier. The check lives in the shared
+  `execute()` choke point every delegation traverses rather than in a
+  per-call-site builder method, and the delegator's role and tier are declared
+  through a single `with_delegator(role, tier)` call (superseding
+  `with_delegator_tier`), so no construction site can acquire one gate while
+  silently missing the other — the failure shape the persona-path fix above
+  was filed for. The tier gate is RETAINED unchanged as defense-in-depth over
+  a different config field. `pm`/`ctrl`-as-orchestrator are explicitly outside
+  this rule and are unaffected. The `GET /api/agents/:name/subagents` route
+  reports peer assistants as unreachable with the kind reason, reading the
+  same predicate the gate enforces rather than a second copy of it.
+
+  **Known regression, accepted by the owner:** this closes the Izzie <->
+  cto-assistant peer-consult lane, and the replacement mechanism
+  ("assistants communicate") does not exist yet — there is no implemented
+  agent-to-agent messaging path for trusty-agents personas today.
+
+- **Applied the `ASSISTANT_ALLOWED_DELEGATE_ROLES` gate on the persona-chat
+  dispatch path (#4201).** The REPL `/agent` persona path built its
+  `DelegateToAgentTool` with the #4169 L0/L1 tier gate but WITHOUT the role
+  allowlist its sibling ctrl/session path applies, so an assistant-tier
+  persona could delegate to `pm` (role `orchestrator`) or `ctrl` (role
+  `controller`) — roles that are not in the allowlist at all — and
+  `run_subagent` would arm the spawned subprocess from that child's own role,
+  handing an unrestricted orchestrator registry (shell, `write_file`,
+  unrestricted `delegate_to_agent`) to a persona that ingests untrusted
+  content. The tier gate did not cover for it: it can only refuse an
+  `L0Orchestration` TARGET and no bundled agent declares `tier = "l0"` today,
+  so on this path both defense-in-depth layers were ineffective. Both gates
+  are now applied from one place (`persona_gate::build_persona_delegate_tool`,
+  reusing the same single-source-of-truth constant the other paths use), which
+  the regression tests drive directly so a call-site regression cannot pass
+  silently. A persona whose own role is outside the assistant tier is
+  unaffected.
+
+- **Defined the L0/L1 persona privilege tier and made the L1->L0 delegation
+  path structurally forbidden (#4168, #4169, epic #4167).** Added an
+  explicit `AgentTier` (`AgentInfo::tier`, TOML `[agent].tier` / `.md`
+  frontmatter `tier`), decoupled from `role`, that fails closed to
+  `L1Standard` on an absent, blank, or unrecognized value — never `L0`.
+  `delegate_to_agent` now refuses any call where the resolved TARGET's tier
+  is `L0Orchestration` unless the DELEGATOR's own tier is also
+  `L0Orchestration`, checked at every dispatch path that can construct a
+  `DelegateToAgentTool` (the `--direct`/`--agent` subprocess path, the
+  persona-chat REPL path, and the ctrl history/session path), including
+  through a peer-assistant delegation hop — no chain of L1 hops can reach
+  L0. This PR defines the tier and the boundary only; it grants L0 no new
+  capabilities and creates no L0 persona instance (those are #4170-#4173).
+
+- **Closed a prompt-injection-to-arbitrary-code-execution path through
+  `delegate_to_agent` (#4126).** An assistant-tier persona (`assistant`,
+  `cto-assistant`, `izzie`) holding live external-content tools
+  (`get_gmail_message_content`, `web_search`, …) plus `delegate_to_agent`
+  could be driven by attacker-controlled fetched content to delegate an
+  attacker-authored task to `engineer` — a worker role with no
+  `[tools].allow` at all — and the spawned `claude-code` subprocess got its
+  full unrestricted tool surface (shell, file write) with no narrowing,
+  because the existing `scope_assistant_allowed_tools` gate only narrowed a
+  spawn when the SPAWNED agent's own role was `"assistant"`. Every
+  assistant-tier `delegate_to_agent` call now tags its spawn with the
+  delegator's own `[tools].allow` posture (`SubprocessAgentRunner::
+  with_delegation_taint`); the spawned worker's registry is narrowed to that
+  posture regardless of its own declared role, on both dispatch paths (the
+  `--direct`/`--agent` subprocess path and the in-process `/agent`
+  persona-chat path). A malformed/corrupted taint value fails CLOSED
+  (deny-all), never silently untainted. Narrowing is logged on both the
+  parent (pre-spawn) and child (post-scoping) sides, and a disallowed tool
+  call already returned (and continues to return) a legible
+  "not permitted for this agent" error rather than a silently-missing tool.
+
+- **Follow-up hardening for the `delegate_to_agent` taint fix above (#4126):
+  closed a multi-hop composition gap, added a fail-closed default, and
+  covered a third, previously-unpatched dispatch path.** (1) At hop 2+
+  (`assistant -> izzie -> engineer`), both dispatch paths forwarded the
+  INTERMEDIATE agent's own native `[tools].allow` as the outbound taint
+  instead of intersecting it with the INBOUND taint it had itself received —
+  a taint could widen back out instead of only ever narrowing. A new
+  `compose_delegation_taint` helper is now the single place both paths
+  compute the outbound taint, always as an intersection. (2) An
+  assistant-tier agent reached with no taint AND no resolvable
+  `[tools].allow` previously fell through to fully unrestricted; it is now
+  denied every tool by default. (3) `run_pm_task_with_history` — the path
+  backing the REPL, Slack, Telegram, and the API server, and `ctrl.toml`
+  (the standalone default) declares `role = "assistant"` per #3812 — built
+  its `DelegateToAgentTool` with no taint and no target-role gate at all,
+  reproducing #4126's exact exploit shape on the default path; it now
+  applies the same taint and `ASSISTANT_ALLOWED_DELEGATE_ROLES` gate as the
+  other two dispatch paths (`pm`/orchestrator-role callers are unaffected).
+
+### Added
+
+- **The token-streaming chat path now streams Bedrock models via
+  `ConverseStream` instead of silently falling back to the blocking
+  `Converse` call (#3767).** `streaming_supported()` no longer excludes
+  `Provider::Bedrock`; `stream_reply` routes `bedrock/*` models to a new
+  `trusty_common::chat::BedrockProvider` (real event-stream) branch, with the
+  `bedrock` feature now enabled on the `trusty-common` dependency (zero added
+  weight — this crate already links the AWS Bedrock SDK unconditionally).
+  `StreamAssembly` gained a `usage: Option<ChatUsage>` field so per-call token
+  usage — which Bedrock reports exactly once, in a terminal event — survives
+  the streaming path instead of being dropped.
+- **`GET /api/agents/:name/permissions` — the Permissions pane's structured
+  backend (#3936, DOC-57 §7).** A new `[permissions]` `agent.toml` section
+  (`scopes`, `user_authority`, `default_tier`/`unauthenticated_tier`,
+  `autonomy`, `[[grants]]`) describes the four scattered enforcement
+  mechanisms (`[tools].allow`, `[tools].scopes`, RBAC tiers, the endpoint
+  scope filter) as one coherent model rather than inventing a new one. Every
+  response field carries an `enforced` boolean — `true` only for `scopes[]`,
+  which is now resolved by `agents::permissions::effective_scopes` and fed
+  into the SAME persona-chat dispatch gate the route reports on (so the
+  claim is never aspirational); every other field (`user_authority`, tiers,
+  `autonomy`, `grants`) is honestly `enforced: false`, since none has a live
+  enforcement site yet. `enforced: true` is **qualified**, not universal:
+  each `scopes[]` element also carries `enforced_on: ["persona_chat"]`,
+  because `effective_scopes` gates the persona-chat dispatch path only — the
+  `--direct`/subprocess path (`runtime::subagent_mode` →
+  `scope_assistant_allowed_tools`) filters by `[tools].allow` name globs and
+  never consults a scope pattern, so an agent invoked via `tagent --direct`
+  is not scope-restricted by anything this pane reports (#3987/#4093 track
+  unifying the two paths). `[permissions].scopes` supersedes legacy
+  `[tools].scopes` within one file (CC-9 — the union is deliberately not
+  taken) but still unions base-first across `extends` (§2.3), so a
+  partially-migrated inheritance chain never silently drops a base's
+  un-migrated grant. `source` distinguishes `declared` from
+  `inherited:<base>` so the class of defect DOC-57 §7.3 records (an agent
+  granting tools whose scopes it never actually declared) is visible in the
+  pane. `user_authority` (DOC-41 §5.5's reserved singleton) is now a real,
+  parsed `AgentConfig` field and is never inherited across `extends`
+  (PM-3) — the previously `#[ignore]`d
+  `extends_does_not_inherit_user_authority` regression test is un-ignored.
+  Read-only in every phase (PM-4); grants or widens nothing (C-06.4).
+- **`GET /api/agents/:name/knowledge` — the Knowledge pane's unified
+  "what does this agent know" backend (#3935, DOC-57 §4).** One response
+  carries all three sub-surfaces so the pane never has to correlate a store
+  card, a tool glob and a harness endpoint table across three routes: `[[stores]]`
+  bindings resolved live (`/stores`' existing, now-fixed logic — see Fixed
+  below), the agent's knowledge-classified tools (`kind = Knowledge` in
+  `#3933`'s skill catalog, `vector_search` rendered under its bound store),
+  the tier-2 `[tools].search_indexes` attachments (`search_indexes` +
+  `enforce_search_indexes`, same field names `/stores` already uses), and the
+  operator-configured MCP knowledge connections
+  (`[[tool_registry.endpoints]]` + `[[mcp.services]]`, read-only, no live
+  probe — a disabled/unenabled service is always reported truthfully, never
+  as connected, and every card carries `granted_for_agent` so an operator-
+  enabled connection isn't conflated with one this specific agent can
+  actually reach). Read-only in this slice; store editing remains #3890's
+  contract.
+
+### Fixed
+
+- **`GET /api/agents/:name/stores` (and the new `/knowledge` route above) no
+  longer report `connected: true` for an index whose corpus failed to open
+  (#4115).** `resolve_store_statuses` previously derived `connected` from
+  HTTP reachability alone — a warm-booted index with `corpus_open_failed`
+  answers the status probe with 2xx, `status: "ready"` and `chunk_count: 0`
+  while every staged-pipeline lane is `Failed`, and the store card showed a
+  healthy green connection for a corpus that answers zero queries.
+  `StoreStatus` now derives `connected` from the response's `stages` object
+  (the same ground truth trusty-search's own `/health` handler uses,
+  `IndexStages::any_failed`) and carries a new `failed_stages` field naming
+  which lane(s) failed, instead of collapsing everything to a boolean.
+
 ### Removed
 
 - **Removed the unused `ompm` `[[bin]]` target.** It was a thin HTTP client

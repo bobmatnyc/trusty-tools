@@ -281,7 +281,29 @@ pub(super) fn is_assistant_role(v: &serde_json::Value) -> bool {
 /// True when a parsed catalog entry's `hidden` field is exactly `true`.
 /// Absent/non-bool defaults to `false` (visible) — see `AgentInfo::hidden`'s
 /// doc comment.
-fn is_hidden(v: &serde_json::Value) -> bool {
+///
+/// Why `pub(super)` rather than private to this module (#4235): this predicate
+/// is THE single decision point for "does this agent appear on a listing
+/// surface", and it now has a second caller —
+/// `super::agent_subagents::in_product_surface`, the Sub-agents pane. That
+/// pane shipped without any `hidden` filter, so `assistant`,
+/// `personal-assistant` and `researcher` (all `hidden = true`) leaked back in
+/// as delegation-target cards, rendering the duplicate "Izzie" row #3819's
+/// `hidden` flag was added to remove. Promoting this fn to the parent module
+/// keeps BOTH surfaces on one implementation: a second `v["hidden"]` read
+/// would be free to drift (and this repo treats a second independent
+/// implementation of a shared capability as a defect). It reads the SAME
+/// catalog `Value` shape both surfaces already enumerate via
+/// [`scan_agent_catalog`], so the pane and the picker cannot disagree about
+/// which agents are hidden.
+/// What: reads `v["hidden"]` as a bool; anything absent or non-bool is
+/// `false`. Pure; no side effects. Governs VISIBILITY only — a hidden agent is
+/// still fully resolvable and dispatchable by name (see `AgentInfo::hidden`),
+/// so this is not a security gate and filtering by it weakens nothing.
+/// Test: `apply_roster_filters_excludes_hidden_assistant`,
+/// `apply_roster_filters_includes_visible_assistant`,
+/// `super::tests::agent_subagents::subagents_route_omits_a_hidden_delegation_target`.
+pub(super) fn is_hidden(v: &serde_json::Value) -> bool {
     v.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
 }
 

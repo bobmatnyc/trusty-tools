@@ -33,7 +33,15 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 DEAD_ASSET="crates/trusty-mpm/src/assets/instructions/CLAUDE.md"
-FLOOR="crates/trusty-mpm/src/assets/instructions/BASE_PM.md"
+# The floor is authored per-section since #4183; the guaranteed conventions have
+# their own source file. Checking that file directly (rather than the former
+# monolithic BASE_PM.md) keeps the guard pointed at the real home, and the
+# adjacent floor sources are listed so a section that goes missing is also loud.
+FLOOR="crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md"
+FLOOR_SIBLINGS=(
+  "crates/trusty-mpm/src/assets/instructions/sections/identity.md"
+  "crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md"
+)
 
 fail=0
 
@@ -53,6 +61,21 @@ fi
 if [[ ! -f "$FLOOR" ]]; then
   echo "FAIL: $FLOOR is missing — the non-overridable instruction floor must exist."
   exit 1
+fi
+
+for sibling in "${FLOOR_SIBLINGS[@]}"; do
+  if [[ ! -f "$sibling" ]]; then
+    echo "FAIL: $sibling is missing — every floor section must exist."
+    fail=1
+  fi
+done
+
+# The former monolithic BASE_PM.md must not come back: two sources for the floor
+# is exactly the drift #3374 removed.
+LEGACY_FLOOR="crates/trusty-mpm/src/assets/instructions/BASE_PM.md"
+if [[ -e "$LEGACY_FLOOR" ]]; then
+  echo "FAIL: $LEGACY_FLOOR has reappeared; the floor is authored per-section (#4183)."
+  fail=1
 fi
 
 check_convention() {

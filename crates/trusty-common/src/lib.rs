@@ -444,6 +444,27 @@ pub use slug::slugify_string;
 pub mod index_id;
 pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
 
+/// Project-derived trusty-search index identity — the PARTITIONING key
+/// (epic #4207; supersedes the approach closed as won't-do in #4063).
+///
+/// Why: [`index_id::derive_index_id`]'s bare basename collides for unrelated
+/// checkouts sharing a directory name, and a tm session gets its worktree UUID
+/// as the id — so service identity is bound to ephemeral writer isolation and
+/// BASE_PM's "pass the project name" instruction 404s. Both need ONE id derived
+/// from the PROJECT. It lives here, beside `index_id`/`repo_identity`/`slug`,
+/// because trusty-mpm, trusty-search, trusty-review and trusty-code must all
+/// compute the identical id — the same single-source-of-truth rule `index_id`
+/// was hoisted here for (#1373). Unconditional (not feature-gated) because an
+/// identity that varies with a feature flag is worse than none.
+/// What: exposes [`project_index_id::ProjectIdentity`] (origin + root + operator,
+/// with a pure `index_id()`), [`project_index_id::derive_project_index_id`], and
+/// [`project_index_id::resolve_operator_identity`]. Derivation only — wired
+/// into no resolution path; registry reconciliation and migration of existing
+/// indexes are separate slices of #4207.
+/// Test: `cargo test -p trusty-common -- project_index_id`.
+pub mod project_index_id;
+pub use project_index_id::{ProjectIdentity, derive_project_index_id};
+
 /// Shared best-effort trusty-search "ensure this project is indexed" helper
 /// (issues #1373 / #1908), gated behind the `search-index` feature.
 ///
@@ -574,6 +595,19 @@ pub mod slack_format;
 /// Test: `cargo test -p trusty-common -- data_dir::tests`.
 pub mod data_dir;
 
+/// Cross-process locked read-modify-write for whole-file JSON documents.
+///
+/// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`
+/// (#3502) and the worktree registry of epic #4207 are each a small JSON file
+/// mutated by several independent PROCESSES via load → mutate → save. Without
+/// cross-process serialisation those writers lose each other's updates, and a
+/// shared scratch path lets them publish a corrupt document. This module is the
+/// single implementation of that critical section.
+/// What: Exposes [`json_rmw::update`], [`json_rmw::lock_path`], and
+/// [`json_rmw::JsonRmwError`].
+/// Test: `cargo test -p trusty-common -- json_rmw::tests`.
+pub mod json_rmw;
+
 /// Shared CLI daemon-guard helper (probe + spinner + spawn).
 ///
 /// Why: trusty-search, trusty-memory, and trusty-analyze each had an identical
@@ -654,7 +688,7 @@ pub mod tmux;
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 
 pub use chat::{
-    BedrockProvider, ChatEvent, ChatProvider, DEFAULT_BEDROCK_MODEL, LocalModelConfig,
+    BedrockProvider, ChatEvent, ChatProvider, ChatUsage, DEFAULT_BEDROCK_MODEL, LocalModelConfig,
     OllamaProvider, OpenRouterProvider, SamplingParams, ToolCall, ToolDef,
     auto_detect_local_provider,
 };

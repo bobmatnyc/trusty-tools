@@ -46,6 +46,11 @@ export default {
           border: 'rgb(var(--color-border) / <alpha-value>)',
           primary: 'rgb(var(--color-primary) / <alpha-value>)',
           teal: 'rgb(var(--color-info) / <alpha-value>)',
+          // Foundry's --trusty-success pair. Introduced for the chat's
+          // waiting indicator (the in-flight bubble's green ring/spinner);
+          // registered here rather than hardcoded so it themes like every
+          // other foundry-* color.
+          success: 'rgb(var(--color-success) / <alpha-value>)',
           amber: 'rgb(var(--color-warning) / <alpha-value>)',
           'sidebar-accent': 'rgb(var(--color-sidebar-accent) / <alpha-value>)',
           // Light-named keys (used via `dark:` prefix inversion) — same
@@ -56,6 +61,7 @@ export default {
           'light-muted': 'rgb(var(--color-text-muted) / <alpha-value>)',
           'light-border': 'rgb(var(--color-border) / <alpha-value>)',
           'light-primary': 'rgb(var(--color-primary) / <alpha-value>)',
+          'light-success': 'rgb(var(--color-success) / <alpha-value>)',
         },
       },
       fontFamily: {

@@ -110,7 +110,12 @@ pub(super) async fn delete_search_index_best_effort(index_id: &str) {
             return;
         }
     };
-    let url = format!("{base}/indexes/{index_id}");
+    // Issue #4123: trusty-search's `DELETE /indexes/:id` now preserves on-disk
+    // data unless `delete_data=true` is passed. Opt in — the workspace this
+    // index describes is a disposable worktree that decommission is about to
+    // delete, so nothing will ever re-register at that root and preserved
+    // index data would be unreachable garbage on disk forever.
+    let url = format!("{base}/indexes/{index_id}?delete_data=true");
     match client.delete(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
             info!(
@@ -182,7 +187,7 @@ pub(super) struct IndexSnapshot {
 /// named `.worktrees` (mirrors [`is_session_worktree`] — the sweep NEVER
 /// touches a manually-registered, persistent, non-session project index),
 /// (b) neither `entry.root_path` nor its canonicalized form appears in
-/// `active_workspace_paths` (a live session still claims this root), and (c)
+/// `in_use_workspace_paths` (a live session still claims this root), and (c)
 /// `entry.chunk_count == 0` OR `entry.root_path` no longer exists on disk.
 /// Test: `is_orphan_index_false_for_non_worktree_root`,
 /// `is_orphan_index_false_when_claimed_by_active_session`,
@@ -242,7 +247,7 @@ async fn fetch_chunk_count(client: &reqwest::Client, base: &str, id: &str) -> u6
 impl SessionManager {
     /// Snapshot every live managed session's workspace path, canonicalized
     /// (with a raw-path fallback for symlink-canonicalize failures — mirrors
-    /// `prune::prune_orphaned_worktrees`'s `fresh_active` construction).
+    /// `prune::prune_orphaned_worktrees`'s `fresh_in_use` construction).
     async fn active_workspace_path_set(&self) -> HashSet<PathBuf> {
         let mut set = HashSet::new();
         for p in self
@@ -322,7 +327,11 @@ impl SessionManager {
 
         let mut removed = Vec::new();
         for id in candidates {
-            let url = format!("{base}/indexes/{id}");
+            // Issue #4123: opt in to data deletion — same rationale as
+            // `delete_search_index_best_effort`. Every candidate here is a
+            // worktree-scoped index with no live session, so its data is
+            // unreachable garbage; a bare DELETE would silently leak it.
+            let url = format!("{base}/indexes/{id}?delete_data=true");
             match client.delete(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     info!(index_id = %id, "search-index-gc: removed orphaned/0-chunk index");

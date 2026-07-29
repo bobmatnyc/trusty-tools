@@ -809,4 +809,117 @@ fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
         "true",
         "extensions.worktreeConfig must be true"
     );
+
+    // (d) #2867: the foreign upstream is only ever armed behind an EFFECTIVE
+    // push pin. Assert the pin as `git push` itself resolves it (full config
+    // stack), not merely as a `--worktree`-scoped key.
+    let effective = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree_path)
+        .args(["config", "--get", "push.default"])
+        .output()
+        .expect("git config --get push.default");
+    assert_eq!(
+        String::from_utf8_lossy(&effective.stdout).trim(),
+        "current",
+        "the EFFECTIVE push.default (not just the --worktree key) must be `current` \
+         whenever a foreign upstream is set (#2867)"
+    );
+}
+
+/// #2867: [`super::push_is_pinned_to_current`] must report the EFFECTIVE
+/// `push.default`, because that — not the exit code of the write that set it —
+/// is what decides whether writing a foreign upstream is safe.
+///
+/// Why: the PR #2863 clobber came from a worktree whose branch tracked a ref it
+/// did not own. `configure_session_branch_tracking` may only create that
+/// tracking state while a bare `git push` is provably confined to the current
+/// branch; if the detector returned `true` optimistically the gate would be
+/// decorative.
+/// What: builds a real repo, asserts the detector is `false` with no
+/// `push.default` set and `false` for a non-`current` value, then enables
+/// `extensions.worktreeConfig`, pins `push.default=current` in a linked
+/// worktree, and asserts it flips to `true` there while a NON-pinned sibling
+/// worktree still reports `false` — proving the detector reads worktree-scoped
+/// config rather than the shared repo config.
+/// Test: this function IS the test.
+#[test]
+fn push_pin_detection_matches_effective_config() {
+    let repo_dir = crate::test_support::hermetic_temp_dir();
+    let repo = repo_dir.path().to_path_buf();
+    let git = |args: &[&str], cwd: &std::path::Path| -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(&repo)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return; // git unavailable — nothing to assert
+    }
+    assert!(git(&["config", "user.email", "t@example.com"], &repo));
+    assert!(git(&["config", "user.name", "T"], &repo));
+    std::fs::write(repo.join("README"), b"seed").expect("write README");
+    assert!(git(&["add", "."], &repo));
+    assert!(git(&["commit", "-qm", "init"], &repo));
+
+    assert!(
+        !super::push_is_pinned_to_current(&repo),
+        "an unset push.default must NOT be reported as pinned"
+    );
+    assert!(git(&["config", "push.default", "simple"], &repo));
+    assert!(
+        !super::push_is_pinned_to_current(&repo),
+        "push.default=simple must NOT be reported as pinned"
+    );
+
+    // Two linked worktrees off the same repo: only one gets the pin.
+    let wt_parent = crate::test_support::hermetic_temp_dir();
+    let pinned = wt_parent.path().join("pinned");
+    let unpinned = wt_parent.path().join("unpinned");
+    assert!(git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-a",
+            pinned.to_str().unwrap()
+        ],
+        &repo
+    ));
+    assert!(git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-b",
+            unpinned.to_str().unwrap()
+        ],
+        &repo
+    ));
+    assert!(git(&["config", "extensions.worktreeConfig", "true"], &repo));
+    assert!(git(
+        &["config", "--worktree", "push.default", "current"],
+        &pinned
+    ));
+
+    assert!(
+        super::push_is_pinned_to_current(&pinned),
+        "a worktree-scoped push.default=current must be reported as pinned"
+    );
+    assert!(
+        !super::push_is_pinned_to_current(&unpinned),
+        "a sibling worktree without the pin must NOT be reported as pinned — \
+         the detector must read worktree-scoped config, not the shared repo config"
+    );
 }

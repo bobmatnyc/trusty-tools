@@ -15,6 +15,7 @@ pub mod deployments;
 pub mod dora;
 pub mod incidents;
 pub mod install;
+pub mod jira;
 pub mod override_cmd;
 pub mod pr_metrics;
 pub mod report;

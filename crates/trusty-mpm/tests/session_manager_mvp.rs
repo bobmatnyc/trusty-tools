@@ -20,6 +20,44 @@ use trusty_mpm::session_manager::{
     ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
 };
 
+// ── RAII HOME guard (#3965) ─────────────────────────────────────────────────
+//
+// Why: `WorkspaceProvisioner::provision`/`provision_in` call
+// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
+// `without_prepare()` — because that seed sits BEFORE the
+// `if !self.prepare { return ... }` gate in `provisioner/workspace.rs`. It
+// resolves `~/.claude.json` from the REAL process `$HOME`, not from the
+// provisioner's `workspace_root`, so every test in this file driving
+// `.provision(...)`/`.provision_in(...)` must pin `$HOME` to its own
+// hermetic root or it writes into the operator's real `~/.claude.json`.
+// Mirrors the identical pattern in `tests/standalone_isolation.rs`.
+// `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024
+// (thread-unsafe), so every caller pairs this guard with
+// `#[serial_test::serial]`.
+struct HomeGuard(Option<String>);
+
+impl HomeGuard {
+    /// Redirect `$HOME` to `dir` and return a guard that restores the
+    /// original value on drop (including on panic). Callers MUST be
+    /// `#[serial_test::serial]`.
+    fn set(dir: &std::path::Path) -> Self {
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: guarded by #[serial_test::serial] on all callers — only one
+        // thread mutates HOME at a time.
+        unsafe { std::env::set_var("HOME", dir) };
+        HomeGuard(prev)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
 /// An in-memory tmux driver that records sends and create_session calls.
 ///
 /// Why: the session manager and its HTTP surface must be testable without tmux.
@@ -124,8 +162,13 @@ impl ManagedTmuxDriver for LiveTrackingTmux {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_isolates_workspace_under_root() {
     let root = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    // `preseed_home_trust` fires unconditionally in `provision`, even under
+    // `without_prepare()`.
+    let _home = HomeGuard::set(root.path());
     // Skip the global `prepare_session` deploy — this test verifies path
     // isolation only and must not touch the shared `~/.claude/` tree.
     let prov = WorkspaceProvisioner::without_prepare(FakeGitBackend::new(), root.path().to_owned());
@@ -347,9 +390,12 @@ use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
 /// asserts `env -u ANTHROPIC_API_KEY claude` was sent to the tmux pane.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn handler_spawn_wires_provision_and_spawn() {
     // Temp dir acts as both workspace root and session store.
     let workspace_root_dir = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = HomeGuard::set(workspace_root_dir.path());
     let store_dir = TempDir::new().unwrap();
     let tmux = RecordingTmux::new();
     let mgr = Arc::new(
@@ -547,8 +593,11 @@ async fn handler_activity_cache_hit() {
 /// `create_session` call was recorded with cwd == workspace_path.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn handler_spawn_creates_tmux_at_workspace_cwd() {
     let workspace_root_dir = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = HomeGuard::set(workspace_root_dir.path());
     let store_dir = TempDir::new().unwrap();
     let tmux = RecordingTmux::new();
     let mgr = Arc::new(

@@ -12,6 +12,17 @@
 //! `crate::system_status::daemons`' established "down is a normal, reportable
 //! state" contract. A bound store that cannot be resolved must never stop an
 //! agent booting.
+//!
+//! **Issue #4115: HTTP reachability is not corpus health.** A 2xx response
+//! with a parseable body used to be treated as `connected: true`
+//! unconditionally — but trusty-search can warm-boot an index whose corpus
+//! failed to open (`chunk_count: 0`, every staged-pipeline lane `Failed`)
+//! while still answering the status probe successfully, which reported a
+//! healthy-looking green card for a store that returns zero results for
+//! every query. `connected` is now derived from the response's `stages`
+//! object (see [`failed_stages`]) — the exact ground truth trusty-search's
+//! own `/health` handler already uses (`IndexStages::any_failed`,
+//! `core::registry.rs`) — not from HTTP status alone.
 //! What: [`StoreStatus`] is the per-store report (serialized straight to the
 //! sidecar API and the GUI card). [`resolve_store_statuses`] resolves a whole
 //! [`StoresConfig`]; base URLs are injected so tests can point at a mock
@@ -92,6 +103,23 @@ pub struct StoreStatus {
     /// `pending_index`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synced_index: Option<usize>,
+    /// Names of the `/indexes/{id}/status` `stages` (`lexical`/`semantic`/
+    /// `graph`) reporting `status: "failed"` (issue #4115).
+    ///
+    /// Why: trusty-search can warm-boot an index whose durable corpus (or a
+    /// single lane) failed to open — `chunk_count: 0`, every stage `Failed` —
+    /// while the HTTP probe itself still returns 2xx with a parseable body.
+    /// HTTP reachability is not corpus health: a bare boolean `connected`
+    /// collapsed those two into the same "green" outcome, which is exactly
+    /// how `cto-duetto` reported `connected: true` while answering zero
+    /// queries. This field is the distinct degraded/failed signal the
+    /// boolean cannot carry — empty when every present stage is healthy,
+    /// non-empty (and `connected` forced to `false`) otherwise. Mirrors
+    /// trusty-search's own `IndexStages::any_failed()` ground truth
+    /// (`core/registry.rs`), which `/health` already uses for the identical
+    /// reason.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub failed_stages: Vec<String>,
 }
 
 impl StoreStatus {
@@ -116,6 +144,7 @@ impl StoreStatus {
             tree_path: None,
             pending_index: None,
             synced_index: None,
+            failed_stages: Vec::new(),
         }
     }
 }
@@ -268,28 +297,56 @@ async fn resolve_one(
                     format!("trusty-search returned an unreadable status body: {e}"),
                 );
             }
-            Ok(body) => StoreStatus {
-                name: binding.name.clone(),
-                tree: binding.resolved_tree(agent_name),
-                index: index.clone(),
-                palace: binding.palace.clone(),
-                connected: true,
-                reason: None,
-                chunk_count: body.get("chunk_count").and_then(serde_json::Value::as_u64),
-                root_path: body
-                    .get("root_path")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                index_status: body
+            Ok(body) => {
+                // Issue #4115: HTTP 2xx + parseable JSON only proves the
+                // daemon answered — it does NOT prove the corpus opened. A
+                // warm-boot `corpus_open_failed` marks every stage `Failed`
+                // (trusty-search's `derive_warm_boot_stages`) while `status`
+                // and `chunk_count: 0` still look plausible. `failed_stages`
+                // is the ground truth `/health` already uses
+                // (`IndexStages::any_failed`, `core/registry.rs`); a
+                // non-empty result forces `connected: false` regardless of
+                // what the top-level `status` string claims.
+                let failed_stages = failed_stages(&body);
+                let index_status = body
                     .get("status")
                     .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                palace_connected: None,
-                palace_reason: None,
-                tree_path: None,
-                pending_index: None,
-                synced_index: None,
-            },
+                    .map(str::to_string);
+                let (connected, reason) = if failed_stages.is_empty() {
+                    (true, None)
+                } else {
+                    (
+                        false,
+                        Some(format!(
+                            "index `{index}` is reachable but its corpus failed to open — \
+                             {} stage(s) report `failed` ({}); the index answers no results \
+                             regardless of what `status` claims",
+                            failed_stages.len(),
+                            failed_stages.join(", "),
+                        )),
+                    )
+                };
+                StoreStatus {
+                    name: binding.name.clone(),
+                    tree: binding.resolved_tree(agent_name),
+                    index: index.clone(),
+                    palace: binding.palace.clone(),
+                    connected,
+                    reason,
+                    chunk_count: body.get("chunk_count").and_then(serde_json::Value::as_u64),
+                    root_path: body
+                        .get("root_path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    index_status,
+                    palace_connected: None,
+                    palace_reason: None,
+                    tree_path: None,
+                    pending_index: None,
+                    synced_index: None,
+                    failed_stages,
+                }
+            }
         },
     };
 
@@ -301,6 +358,47 @@ async fn resolve_one(
     attach_tree_coverage(&mut status);
 
     status
+}
+
+/// The three staged-pipeline lane names trusty-search's `/indexes/{id}/status`
+/// nests under `stages` (issue #109 Phase 1: `lexical` → `semantic` →
+/// `graph`, `core::registry::IndexStages`).
+const STAGE_NAMES: &[&str] = &["lexical", "semantic", "graph"];
+
+/// Which of `body["stages"]`'s three lanes report `status: "failed"`.
+///
+/// Why (issue #4115): trusty-search serialises `IndexStages` (three
+/// `StageState`s) under `stages`; a stage's `status` is one of `pending` /
+/// `in_progress` / `ready` / `skipped` / `failed` (snake_case,
+/// `core::registry::StageStatus`). `core::registry::IndexStages::any_failed()`
+/// is the exact ground truth trusty-search's OWN `/health` handler uses to
+/// detect a warm-booted-but-broken index (issue #1870) — this function reads
+/// the same three fields off the wire JSON rather than depending on
+/// trusty-search's internal types directly (`IndexStages`/`StageState` do not
+/// derive `Deserialize`; only the wire shape is a stable contract here).
+/// What: names of every stage present in `body["stages"]` whose `status` is
+/// exactly `"failed"`, in `lexical, semantic, graph` order. An absent
+/// `stages` object (a trusty-search version predating issue #109) yields an
+/// empty vec — this is additive detection, never a new false-negative on an
+/// older daemon.
+/// Test: `resolves_connected_store_with_stats` (empty — healthy stages),
+/// `reports_corpus_open_failed_as_not_connected`,
+/// `failed_stages_ignores_a_missing_stages_object`.
+fn failed_stages(body: &serde_json::Value) -> Vec<String> {
+    let Some(stages) = body.get("stages") else {
+        return Vec::new();
+    };
+    STAGE_NAMES
+        .iter()
+        .filter(|name| {
+            stages
+                .get(**name)
+                .and_then(|s| s.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("failed")
+        })
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 /// Probe whether `palace` exists on the trusty-memory daemon.
@@ -347,257 +445,8 @@ async fn probe_palace(
     }
 }
 
+// Split into a sibling file (issue #610's 500-SLOC production cap) —
+// mirrors `index_feed.rs` / `index_feed_tests.rs` in this same directory.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{Json, Router, extract::Path, http::StatusCode, routing::get};
-    use serde_json::json;
-    use tokio::net::TcpListener;
-
-    /// Spin up a mock daemon exposing both the trusty-search status route and
-    /// the trusty-memory drawers route, and return its base URL.
-    ///
-    /// Why: Testing against the developer's real daemons would make the suite
-    /// depend on machine state; a mock keeps the probe logic (status codes,
-    /// body parsing, reason strings) under test deterministically.
-    async fn mock_daemon() -> String {
-        let app = Router::new()
-            .route(
-                "/indexes/{id}/status",
-                get(|Path(id): Path<String>| async move {
-                    if id == "bob-kb" {
-                        (
-                            StatusCode::OK,
-                            Json(json!({
-                                "index_id": "bob-kb",
-                                "chunk_count": 552,
-                                "root_path": "/Users/masa/trusty-agents/bob-kb",
-                                "status": "ready",
-                            })),
-                        )
-                    } else {
-                        (
-                            StatusCode::NOT_FOUND,
-                            Json(json!({"error": "no such index"})),
-                        )
-                    }
-                }),
-            )
-            .route(
-                "/api/v1/palaces/{id}/drawers",
-                get(|Path(id): Path<String>| async move {
-                    if id == "owner-profile" {
-                        (StatusCode::OK, Json(json!({"drawers": []})))
-                    } else {
-                        (StatusCode::NOT_FOUND, Json(json!({"error": "no palace"})))
-                    }
-                }),
-            );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    fn stores_toml(raw: &str) -> StoresConfig {
-        #[derive(serde::Deserialize)]
-        struct W {
-            #[serde(default)]
-            stores: StoresConfig,
-        }
-        toml::from_str::<W>(raw).unwrap().stores
-    }
-
-    #[tokio::test]
-    async fn resolves_connected_store_with_stats() {
-        let base = mock_daemon().await;
-        let stores = stores_toml(
-            r#"
-[[stores]]
-name = "bob-kb"
-tree = "okg://izzie"
-index = "bob-kb"
-palace = "owner-profile"
-"#,
-        );
-        let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
-        assert_eq!(out.len(), 1);
-        let s = &out[0];
-        assert!(s.connected, "expected connected, got reason {:?}", s.reason);
-        assert_eq!(s.reason, None);
-        assert_eq!(s.chunk_count, Some(552));
-        assert_eq!(s.index_status.as_deref(), Some("ready"));
-        assert_eq!(s.tree, "okg://izzie");
-        assert_eq!(s.palace_connected, Some(true));
-        assert_eq!(s.palace_reason, None);
-    }
-
-    #[tokio::test]
-    async fn reports_missing_index_as_not_connected() {
-        let base = mock_daemon().await;
-        let stores = stores_toml("[[stores]]\nname = \"nope\"\n");
-        let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
-        assert!(!out[0].connected);
-        let reason = out[0].reason.as_deref().unwrap();
-        assert!(reason.contains("not registered"), "reason was: {reason}");
-        // The binding identity must still round-trip so the GUI can render
-        // WHAT is disconnected, not just that something is.
-        assert_eq!(out[0].index, "nope");
-        assert_eq!(out[0].tree, "okg://izzie");
-    }
-
-    #[tokio::test]
-    async fn reports_missing_palace_without_downgrading_index() {
-        let base = mock_daemon().await;
-        let stores = stores_toml(
-            "[[stores]]\nname = \"bob-kb\"\nindex = \"bob-kb\"\npalace = \"ghost-palace\"\n",
-        );
-        let out = resolve_store_statuses("izzie", &stores, Some(&base), Some(&base)).await;
-        assert!(
-            out[0].connected,
-            "index health must not depend on the palace"
-        );
-        assert_eq!(out[0].palace_connected, Some(false));
-        assert!(
-            out[0]
-                .palace_reason
-                .as_deref()
-                .unwrap()
-                .contains("does not exist")
-        );
-    }
-
-    #[tokio::test]
-    async fn reports_undiscoverable_search_daemon() {
-        let stores = stores_toml("[[stores]]\nname = \"bob-kb\"\n");
-        let out = resolve_store_statuses("izzie", &stores, None, None).await;
-        assert!(!out[0].connected);
-        assert!(
-            out[0]
-                .reason
-                .as_deref()
-                .unwrap()
-                .contains("not discoverable")
-        );
-    }
-
-    #[tokio::test]
-    async fn invalid_binding_short_circuits_without_network() {
-        // A bad tree scheme must be reported as the reason WITHOUT any probe
-        // — note the deliberately unroutable base URL: if this test made a
-        // network call it would report a connection error instead.
-        let stores = stores_toml("[[stores]]\nname = \"kb\"\ntree = \"https://example.com\"\n");
-        let out = resolve_store_statuses("izzie", &stores, Some("http://127.0.0.1:1"), None).await;
-        assert!(!out[0].connected);
-        assert!(out[0].reason.as_deref().unwrap().contains("okg://"));
-    }
-
-    /// Why (#3892): "connected" only ever meant "the index exists". A store can
-    /// be connected, hold 200,090 chunks, and contain NOTHING the agent
-    /// ingested — the exact state the issue documents. The card must therefore
-    /// carry the tree side too: where `okg://` actually resolves, and how much
-    /// of that tree is not yet searchable.
-    /// What: sandboxes `KB_KNOWLEDGE_DIR`, builds a real ingested-but-unfed KB
-    /// tree at the bound `okg://` path, and asserts the resolved status reports
-    /// the tree path and the pending backlog alongside `connected`.
-    /// Test: self-contained.
-    /// Sandbox `KB_KNOWLEDGE_DIR` for one test, restoring it on drop.
-    ///
-    /// Why: the guard has to survive `.await` points (the probes are async), and
-    /// a bare `MutexGuard` held across an await is both a clippy error and a
-    /// genuine deadlock hazard. Owning the guard inside a struct — the same
-    /// shape as `tools::okg::tests::KnowledgeDirGuard` — keeps the critical
-    /// section scoped to the test body without hand-written restore paths.
-    struct KnowledgeDirGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior: Option<std::ffi::OsString>,
-        dir: tempfile::TempDir,
-    }
-
-    impl KnowledgeDirGuard {
-        fn new() -> Self {
-            let lock = crate::test_env::HOME_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let dir = tempfile::tempdir().unwrap();
-            let prior = std::env::var_os("KB_KNOWLEDGE_DIR");
-            // SAFETY: guarded by HOME_LOCK; restored in Drop.
-            unsafe { std::env::set_var("KB_KNOWLEDGE_DIR", dir.path()) };
-            Self {
-                _lock: lock,
-                prior,
-                dir,
-            }
-        }
-    }
-
-    impl Drop for KnowledgeDirGuard {
-        fn drop(&mut self) {
-            // SAFETY: still holding HOME_LOCK for this guard's lifetime.
-            unsafe {
-                match &self.prior {
-                    Some(v) => std::env::set_var("KB_KNOWLEDGE_DIR", v),
-                    None => std::env::remove_var("KB_KNOWLEDGE_DIR"),
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn reports_the_unsearchable_backlog_for_a_bound_tree() {
-        let guard = KnowledgeDirGuard::new();
-        let tmp = guard.dir.path();
-
-        // A tree at okg://izzie with one ingested, never-indexed entity.
-        let corpus = tmp.join("corpus");
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::write(corpus.join("one.md"), "a note").unwrap();
-        let store = trusty_kb::store::KbStore::new(
-            tmp.join("izzie"),
-            trusty_kb::schema::Profile::default_profile(),
-        );
-        store
-            .okg_register_source(trusty_kb::okg::registry::SourceSpec::new(
-                "corpus",
-                Some("notes"),
-                trusty_kb::okg::registry::Locator::DocStore {
-                    path: corpus.to_string_lossy().to_string(),
-                    extensions: vec![],
-                    recursive: true,
-                },
-                "t0",
-            ))
-            .unwrap();
-        store
-            .okg_ingest_docstore(
-                "corpus",
-                &trusty_kb::okg::policy::DocStorePolicy::new(vec![tmp.canonicalize().unwrap()]),
-                "t0",
-            )
-            .unwrap();
-
-        let base = mock_daemon().await;
-        let stores = stores_toml("[[stores]]\nname = \"bob-kb\"\ntree = \"okg://izzie\"\n");
-        let out = resolve_store_statuses("izzie", &stores, Some(&base), None).await;
-
-        assert!(out[0].connected, "reason: {:?}", out[0].reason);
-        assert_eq!(
-            out[0].tree_path.as_deref(),
-            Some(tmp.join("izzie").display().to_string().as_str()),
-            "the okg:// URI must resolve to a real directory"
-        );
-        assert_eq!(
-            (out[0].pending_index, out[0].synced_index),
-            (Some(1), Some(0)),
-            "connected, and still holding nothing the tree holds"
-        );
-    }
-
-    #[tokio::test]
-    async fn no_bindings_resolves_to_empty() {
-        let out = resolve_store_statuses("izzie", &StoresConfig::default(), None, None).await;
-        assert!(out.is_empty());
-    }
-}
+#[path = "status_tests.rs"]
+mod tests;

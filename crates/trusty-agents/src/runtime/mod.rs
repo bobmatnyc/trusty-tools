@@ -94,7 +94,14 @@ mod subagent_exec;
 mod subagent_mode;
 mod subcommands;
 mod system_cmd;
-mod tool_registry;
+// Security fix (delegate_to_agent injection-to-RCE path, #4126): `pub(crate)`
+// (not private) so `ctrl::pm_task::dispatch::{persona, history}` — the two
+// OTHER `delegate_to_agent` call sites outside this module — can reuse
+// `ASSISTANT_ALLOWED_DELEGATE_ROLES`, `parse_delegation_taint_env`, and
+// `compose_delegation_taint` as the single source of truth for the
+// assistant-tier delegation-taint invariant, rather than re-deriving
+// (and risking drift in) their own copies.
+pub(crate) mod tool_registry;
 mod workflow_mode;
 
 use cli_def::{Cli, HELP, argv_as_task_text};

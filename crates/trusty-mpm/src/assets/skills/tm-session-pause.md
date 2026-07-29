@@ -147,7 +147,8 @@ mcp__trusty-mpm__session_context_pause(
 )
 ```
 
-The tool returns `{ snapshot_path, timestamp, pruned_worktrees }`. It writes
+The tool returns
+`{ snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees }`. It writes
 `.trusty-mpm/sessions/session-YYYYMMDD-HHMMSS.md` in the same section format
 `/tm-session-resume` already parses (`## Summary` / `## Completed` /
 `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`,
@@ -158,6 +159,16 @@ in the same project keep their own history), and computes the
 itself — no separate `git status`/`git log` shell-out needed.
 
 Report the returned `snapshot_path` to the user.
+
+**If `skipped_dirty_worktrees` is non-empty, you MUST report it** — do not let
+it disappear into the tool result. Each entry is
+`{ path, reason, dirty_files, unpushed_commits }` and names a worktree the
+prune refused to delete because it still holds uncommitted or unpushed work.
+List them for the user, with the path and reason, and say plainly that the
+work is still on disk and needs a human decision (commit it, push it, or
+delete the directory deliberately). Never summarise them as "some worktrees
+were skipped" — the whole point of the #4091 guard is that unsaved work stops
+being invisible.
 
 ## If the Tool Call Fails — Diagnose Before Falling Back
 
@@ -257,13 +268,25 @@ true`, the default) — the same in-process engine `tm session prune-worktrees`
 uses. Only directories with **no** corresponding active session are ever
 touched; the tool returns the list of paths removed as `pruned_worktrees`.
 
+**A worktree holding unsaved work is never removed** (#4091). Before deleting
+anything, the prune checks each candidate for uncommitted or staged changes,
+untracked (non-ignored) files, and commits that exist on no remote — and
+refuses to touch it if any are present, or if the check itself cannot
+complete. Those are returned as `skipped_dirty_worktrees` (see above) rather
+than deleted. `/tm-session-pause` has **no** option that can override this;
+discarding unsaved work requires the deliberate CLI opt-in below.
+
 Pass `prune_worktrees: false` to skip this step (e.g. to preview first with
 the CLI):
 
 ```bash
 tm session prune-worktrees          # dry-run by default (preview only)
-tm session prune-worktrees --force  # actually remove the orphaned dirs
+tm session prune-worktrees --force  # remove the orphaned dirs, sparing dirty ones
 ```
+
+`--force` still refuses to delete a worktree with unsaved work; it lists them
+on stderr instead. Only `tm session prune-worktrees --force --discard-dirty`
+destroys that work, and it should be reached for only after reading that list.
 
 `tm doctor`'s `worktrees` probe reports the orphan count and suggests this
 command; run it whenever that probe is non-zero, and always before ending a

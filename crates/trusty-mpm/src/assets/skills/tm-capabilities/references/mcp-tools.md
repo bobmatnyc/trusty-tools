@@ -175,7 +175,7 @@ Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused se
 
 ## `session_context_pause`
 
-Write a session-pause snapshot for `project_dir`: a `session-YYYYMMDD-HHMMSS.md` file in the SAME section format the catch-up reader already parses (`## Summary` / `## Completed` / `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`), plus an appended `pause` line in the append-only `sessions-log.jsonl`. Also prunes orphaned managed-session git worktrees in-process (same engine as `tm session prune-worktrees`) unless `prune_worktrees` is set to `false`. Does NOT touch tmux — window realignment on resume stays a PM-side `tmux select-window` step.
+Write a session-pause snapshot for `project_dir`: a `session-YYYYMMDD-HHMMSS.md` file in the SAME section format the catch-up reader already parses (`## Summary` / `## Completed` / `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`), plus an appended `pause` line in the append-only `sessions-log.jsonl`. Also prunes orphaned managed-session git worktrees in-process (same engine as `tm session prune-worktrees`) unless `prune_worktrees` is set to `false`. That prune NEVER removes a worktree holding uncommitted or unpushed work (#4091) — any such worktree is returned in `skipped_dirty_worktrees` with a reason and file/commit counts for you to relay to the user. Does NOT touch tmux — window realignment on resume stays a PM-side `tmux select-window` step.
 
 | Parameter | Type | Required |
 |---|---|---|

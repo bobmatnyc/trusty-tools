@@ -70,6 +70,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
             kind: "assistant".to_string(),
             prompt_label: None,
             extends: None,
+            tier: None,
         },
         llm: LlmParams {
             temperature: 0.0,
@@ -105,6 +106,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         listeners: Vec::new(),
         stores: crate::stores::StoresConfig::default(),
         skills: crate::agents::SkillsConfig::default(),
+        permissions: crate::agents::PermissionsConfig::default(),
         subagents: crate::agents::SubagentsConfig::default(),
     }
 }

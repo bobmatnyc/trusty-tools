@@ -10302,13 +10302,14 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.9.4"
+version = "2.11.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "async-trait",
  "blake3",
  "chrono",
+ "chrono-tz",
  "clap",
  "criterion",
  "csv",
@@ -11268,7 +11269,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.7.4"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11409,7 +11410,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.26.2"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11430,6 +11431,7 @@ dependencies = [
  "dirs 5.0.1",
  "dotenvy",
  "fastembed",
+ "fd-lock",
  "futures",
  "futures-util",
  "genco",
@@ -11633,7 +11635,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.21.2"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11673,7 +11675,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.0.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11766,7 +11768,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11807,7 +11809,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.39.1"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "arc-swap",

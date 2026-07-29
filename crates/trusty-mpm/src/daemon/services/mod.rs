@@ -11,6 +11,7 @@
 //! Test: each submodule carries its own `#[cfg(test)]` suite; run them with
 //! `cargo test -p trusty-mpm-daemon services`.
 
+pub mod delegation_tracker;
 pub mod hook_service;
 pub mod pairing_service;
 pub mod session_service;

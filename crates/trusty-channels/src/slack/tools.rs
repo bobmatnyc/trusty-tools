@@ -213,7 +213,9 @@ pub fn tool_list_response() -> Value {
                 "query": { "type": "string", "description": "Slack search query string." },
                 "count": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default 20).",
+                    "description": "Number of results to return (default 20). Slack caps \
+                        search.messages at 100 per call; a larger value is reduced to 100 \
+                        rather than rejected.",
                 },
                 "scope": {
                     "type": "string",
