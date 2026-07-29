@@ -63,8 +63,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   first place, and §4 requires failures reach the sender rather than being
   dropped. `404` (definition has nothing running) and `409` (registered but no
   subscriber) are separately distinguishable so a client can implement recovery
-  from the status alone. Every failure, not just every success, leaves a
-  `Dropped` envelope in the durable log.
+  from the status alone.
+- **Caller identity is verified, not asserted.** `from` arrives client-asserted
+  over loopback HTTP, so the peer publish path (a) admits only
+  `kind: assistant_instance` senders, rejecting a `user`-kind publish with
+  `400`, and (b) resolves the claimed `instance_id` against a live registration
+  (`403 UnregisteredSender` when it does not resolve), then re-stamps
+  `definition_id` from the registry rather than trusting the caller's copy.
+  Without this, assistant A could publish to assistant B as `kind: "user"` and
+  B — which by §5.3's design cannot tell a lateral message from a user message
+  by shape — would read it as a user instruction and act on it, reconstituting
+  assistant-to-assistant delegation through the very bus ADR-0024 closed it
+  from. `403` is deliberately distinct from the recipient-side `410`: the fault
+  is the caller's own identity and the recovery is to register, not to
+  re-address.
+- The `edge` field is **derived** from the caller's kind (`CallerKind::peer_edge`,
+  a total match over the enum) rather than stamped as a constant, so §9 search
+  and §10 consolidation can actually tell the three §5 edges apart. Adding a
+  caller kind is a compile error until someone decides which edge it crosses.
+- **What the durable §9 log contains:** once a sender is verified, every
+  outcome is recorded — `Delivered` or `Dropped`. Requests rejected *before*
+  verification (malformed identity, disallowed caller kind, unverifiable
+  sender) are surfaced as `4xx` and leave no record: they never became
+  envelopes, and writing one would stamp an unverified — possibly forged —
+  identity into the log in the same shape as attributable traffic.
 - Instance ids are `<definition_id>~<8 hex>`, using an RFC 3986 *unreserved*
   separator rather than DOC-60 §11's illustrative `#`: `#` is the URI fragment
   delimiter, so a raw id in a path segment is truncated by conforming clients
