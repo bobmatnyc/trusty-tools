@@ -60,6 +60,37 @@ pub enum CallerKind {
     Channel,
 }
 
+impl CallerKind {
+    /// The §5 edge a message from this caller crosses on the peer path.
+    ///
+    /// Why: [`BusEnvelope::edge`] must be DERIVED from who actually sent the
+    /// message, never stamped as a constant. §9 search and §10 consolidation
+    /// read `edge` to tell the three edges apart after the fact, so a
+    /// hardcoded value would silently record §5.1 user traffic as §5.3 lateral
+    /// traffic and corrupt exactly the distinction the field exists to carry.
+    /// What: a TOTAL match over [`CallerKind`] — adding a kind is a compile
+    /// error here until someone decides which edge it crosses, which is the
+    /// property that keeps the derivation honest as §5.1/§5.2 land. Today the
+    /// peer path carries [`CallerKind::AssistantInstance`] only; `user` and
+    /// `channel` are rejected rather than mapped, because routing them here
+    /// would let one assistant address another as a user (see
+    /// [`BusError::CallerKindNotPermitted`](super::BusError::CallerKindNotPermitted)).
+    /// When §5.1 lands it maps `User`/`Channel` to
+    /// [`BusEdge::UserAssistant`] — a one-line change in this match, with no
+    /// caller to update.
+    /// Test: `peer_edge_derives_assistant_assistant`,
+    /// `peer_edge_rejects_user_and_channel`,
+    /// `published_envelope_edge_is_derived`.
+    pub fn peer_edge(self) -> Result<BusEdge, super::BusError> {
+        match self {
+            Self::AssistantInstance => Ok(BusEdge::AssistantAssistant),
+            Self::User | Self::Channel => {
+                Err(super::BusError::CallerKindNotPermitted { kind: self })
+            }
+        }
+    }
+}
+
 /// Platform-native identity behind a channel-originated message (DOC-60 §8).
 ///
 /// Why: §8 requires all three values be carried separately and "none collapsed
@@ -110,8 +141,17 @@ impl CallerIdentity {
     ///
     /// Why: an `assistant_instance` caller with no `instance_id` would let a
     /// peer message masquerade as an unattributable one, defeating the whole
-    /// point of §6c. Validating at the boundary keeps every envelope in the
-    /// durable log (§9) attributable.
+    /// point of §6c.
+    ///
+    /// **This is a STRUCTURAL check only — it proves nothing about identity.**
+    /// It confirms the declared kind and the supplied ids are mutually
+    /// consistent; it cannot tell whether the sender is who it claims, because
+    /// the fields are entirely client-asserted. Attributability of the §9 log
+    /// comes from
+    /// [`PeerBus::publish`](super::PeerBus::publish) resolving the claimed
+    /// `instance_id` against a live registration and re-stamping the
+    /// definition from the registry. Do not read this method as an
+    /// authentication step.
     /// What: requires `instance_id` for [`CallerKind::AssistantInstance`] and
     /// `channel_origin` for [`CallerKind::Channel`]; [`CallerKind::User`]
     /// requires neither.

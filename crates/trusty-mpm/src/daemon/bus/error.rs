@@ -69,6 +69,42 @@ pub enum BusError {
         instance_id: String,
     },
 
+    /// The sender claimed an `instance_id` that is not a live registration.
+    ///
+    /// Why this is 403-class and NOT a reuse of [`BusError::InstanceGone`]:
+    /// the two describe opposite ends of the message. `InstanceGone` (410) is
+    /// about the RECIPIENT — "your target died, re-address it" — and a client's
+    /// correct recovery is to re-resolve by `definition_id`. This variant is
+    /// about the SENDER — "you are claiming an identity the registry cannot
+    /// confirm" — and the correct recovery is for the sender to register
+    /// itself. Collapsing them into one variant would leave a client unable to
+    /// tell which end of its own request was at fault, which is precisely the
+    /// ambiguity DOC-60 §4's explicit-error rule exists to prevent.
+    #[error(
+        "sender instance '{instance_id}' is not a live registration; a peer \
+         message must be sent by a registered instance (DOC-60 §6b/§6c)"
+    )]
+    UnregisteredSender {
+        /// The unverifiable instance id the sender claimed.
+        instance_id: String,
+    },
+
+    /// A caller kind that this delivery path does not carry.
+    ///
+    /// Why: the peer path serves DOC-60 §5.3's lateral edge only. Accepting a
+    /// `user`-kind caller here would let one assistant hand another a message
+    /// that the recipient reads as a user instruction — assistant-to-assistant
+    /// delegation reconstituted through the very bus ADR-0024 closed it from.
+    #[error(
+        "caller kind {kind:?} may not publish on the peer path; DOC-60 §5.3 \
+         carries assistant_instance senders only (§5.1/§5.2 edges are not \
+         routed here)"
+    )]
+    CallerKindNotPermitted {
+        /// The rejected caller kind.
+        kind: super::envelope::CallerKind,
+    },
+
     /// A definition id failed validation.
     #[error("invalid definition id '{definition_id}': {reason}")]
     InvalidDefinitionId {
@@ -95,17 +131,23 @@ impl BusError {
     /// [`BusError::InstanceGone`] deliberately — it is the one status whose
     /// HTTP semantics ("the target existed and no longer does") match the
     /// bypass failure mode exactly, so a client can distinguish it from a
-    /// never-existed `404` without parsing the message.
-    /// What: `404` not-found, `410` gone, `409` conflict, `400` bad request.
-    /// Test: `bus_error_status_codes_map`, `instance_gone_is_410`.
+    /// never-existed `404` without parsing the message. `403` is reserved for
+    /// [`BusError::UnregisteredSender`] — the one failure about the caller's
+    /// own identity rather than the target's.
+    /// What: `403` sender unverified, `404` not-found, `410` gone, `409`
+    /// conflict, `400` bad request.
+    /// Test: `bus_error_status_codes_map`, `instance_gone_is_410`,
+    /// `unregistered_sender_is_403`.
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::UnregisteredSender { .. } => StatusCode::FORBIDDEN,
             Self::NoLiveInstance { .. } => StatusCode::NOT_FOUND,
             Self::InstanceGone { .. } => StatusCode::GONE,
             Self::NoSubscriber { .. } => StatusCode::CONFLICT,
-            Self::InvalidDefinitionId { .. } | Self::InvalidTarget(_) | Self::InvalidCaller(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InvalidDefinitionId { .. }
+            | Self::InvalidTarget(_)
+            | Self::InvalidCaller(_)
+            | Self::CallerKindNotPermitted { .. } => StatusCode::BAD_REQUEST,
         }
     }
 }

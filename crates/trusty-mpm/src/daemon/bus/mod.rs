@@ -118,29 +118,82 @@ impl PeerBus {
         Ok(self.registry.resolve_instance(instance_id)?.tx.subscribe())
     }
 
+    /// Verify a claimed sender identity against the live registry.
+    ///
+    /// Why: `from` arrives entirely client-asserted over loopback HTTP. Left
+    /// unverified, assistant A could publish to assistant B claiming
+    /// `kind: "user"`, and B — which by §5.3's design cannot distinguish a
+    /// lateral message from a user message by shape — would read it as a user
+    /// instruction and act on it. That is assistant-to-assistant DELEGATION
+    /// reconstituted through the very bus ADR-0024 closed it from, so the
+    /// sender's claim has to be checked against something the sender does not
+    /// control. The registry is that something.
+    /// What: resolves the claimed `instance_id` through the registry's
+    /// EXISTING [`InstanceRegistry::resolve_instance`] (no second lookup path
+    /// — this repo's common-entry-point rule), then re-stamps
+    /// `definition_id` from the registration rather than trusting the
+    /// caller's copy, so the §9 log records the definition the daemon knows
+    /// rather than the one the sender asserted. The registry error is
+    /// deliberately MAPPED, not propagated: a miss here means the SENDER is
+    /// unverified ([`BusError::UnregisteredSender`], 403), which is a
+    /// different fault with a different recovery than the recipient being
+    /// gone ([`BusError::InstanceGone`], 410).
+    /// Test: `publish_rejects_unregistered_sender`,
+    /// `publish_restamps_sender_definition_from_registry`.
+    fn verified_sender(&self, mut from: CallerIdentity) -> Result<CallerIdentity, BusError> {
+        let claimed = from.instance_id.clone().ok_or_else(|| {
+            BusError::InvalidCaller("peer sender requires instance_id (DOC-60 §6c)".into())
+        })?;
+        let live =
+            self.registry
+                .resolve_instance(&claimed)
+                .map_err(|_| BusError::UnregisteredSender {
+                    instance_id: claimed,
+                })?;
+        from.definition_id = Some(live.meta.definition_id);
+        Ok(from)
+    }
+
     /// Publish one peer message, fail-closed.
     ///
     /// Why: this is the §5.3 delivery path and the §4 fail-closed contract in
-    /// one place. Every outcome — delivered or not — leaves a durable §9
-    /// record, because a log that only contains successes cannot answer the
-    /// question ADR-0019 exists to answer ("was it sent, or just never read?").
+    /// one place.
     /// What:
-    /// 1. validates the caller identity (§6c);
-    /// 2. resolves `target` through the registry — with NO fallback between
+    /// 1. structurally validates the caller identity (§6c);
+    /// 2. DERIVES the §5 edge from the caller's kind via
+    ///    [`CallerKind::peer_edge`], which also gates the path to
+    ///    `assistant_instance` senders — a `user`-kind publish is rejected
+    ///    here, not silently recorded as lateral traffic;
+    /// 3. VERIFIES the claimed sender against the live registry
+    ///    ([`verified_sender`](Self::verified_sender));
+    /// 4. resolves `target` through the registry — with NO fallback between
     ///    addressing modes (see [`registry`]'s module doc);
-    /// 3. on resolution failure, stamps a [`DeliveryState::Dropped`] envelope,
+    /// 5. on resolution failure, stamps a [`DeliveryState::Dropped`] envelope,
     ///    logs it, and returns the error to the sender;
-    /// 4. on success, stamps a [`DeliveryState::Delivered`] envelope, logs it,
-    ///    and sends it to that instance's channel. A registered instance with
-    ///    no attached subscriber yields [`BusError::NoSubscriber`] rather than
-    ///    a silent drop — DOC-60 §7's durable inbox is what will make that case
+    /// 6. on success, stamps a [`DeliveryState::Delivered`] envelope, sends it
+    ///    to that instance's channel, and logs what actually happened. A
+    ///    registered instance with no attached subscriber yields
+    ///    [`BusError::NoSubscriber`] and a `Dropped` record rather than a
+    ///    silent drop — DOC-60 §7's durable inbox is what will make that case
     ///    queue instead, and it is deferred.
+    ///
+    /// **What the durable §9 log does and does not contain.** Once a sender is
+    /// verified (step 3), EVERY outcome is recorded — delivered or dropped —
+    /// because a log holding only successes cannot answer the question
+    /// ADR-0019 exists to answer ("was it sent, or just never read?"). Steps
+    /// 1–3 record NOTHING: a request that fails structural validation, the
+    /// kind gate, or sender verification never became an envelope. Writing one
+    /// would mean stamping an unverified — possibly forged — identity into the
+    /// log in the same shape as attributable traffic, which would corrupt the
+    /// §9 record it is meant to protect. Rejected requests are surfaced to the
+    /// caller as 4xx, which is where an unauthenticated attempt belongs.
     ///
     /// Returns the stamped envelope so the sender holds the `message_id` it
     /// needs for `in_reply_to` threading and §10 provenance.
     /// Test: `publish_delivers_to_definition_addressed_instance`,
     /// `bypass_publish_stamps_both_ids`, `failed_publish_logs_dropped_envelope`,
-    /// `publish_without_subscriber_errors`.
+    /// `publish_without_subscriber_errors`, `publish_rejects_forged_user_kind`,
+    /// `rejected_publish_writes_no_durable_record`.
     pub fn publish(
         &self,
         from: CallerIdentity,
@@ -149,6 +202,8 @@ impl PeerBus {
         in_reply_to: Option<String>,
     ) -> Result<BusEnvelope, BusError> {
         from.validate()?;
+        let edge = from.kind.peer_edge()?;
+        let from = self.verified_sender(from)?;
 
         let live = match self.registry.resolve(target) {
             Ok(live) => live,
@@ -167,7 +222,7 @@ impl PeerBus {
                     },
                 };
                 self.audit.log_record(&BusEnvelope::new(
-                    BusEdge::AssistantAssistant,
+                    edge,
                     from,
                     to,
                     payload,
@@ -179,7 +234,7 @@ impl PeerBus {
         };
 
         let mut envelope = BusEnvelope::new(
-            BusEdge::AssistantAssistant,
+            edge,
             from,
             Recipient {
                 instance_id: Some(live.meta.instance_id.clone()),

@@ -195,12 +195,19 @@ pub async fn list_instances(State(state): State<Arc<DaemonState>>) -> Json<ListI
 /// `POST /api/v1/bus/publish` — send one peer message.
 ///
 /// Why: the §5.3 delivery path. Every failure reaches the sender as a distinct
-/// status (`404` no live instance, `410` the named instance is gone, `409`
-/// registered but unattached) per §4's fail-closed rule.
+/// status (`400` malformed request or a caller kind this path does not carry,
+/// `403` the claimed sender is not a live registration, `404` no live
+/// instance, `410` the named instance is gone, `409` registered but
+/// unattached) per §4's fail-closed rule.
 /// What: resolves the target, publishes, and returns the stamped envelope with
-/// `202 Accepted` so the sender holds the `message_id` for threading.
+/// `202 Accepted` so the sender holds the `message_id` for threading. The
+/// `from` field is a CLAIM: [`PeerBus::publish`](crate::daemon::bus::PeerBus::publish)
+/// verifies it against the registry and re-stamps the definition, so a caller
+/// cannot choose the identity its message is recorded under.
 /// Test: `route_publish_to_dead_instance_is_410`,
-/// `route_publish_delivers_and_returns_envelope`.
+/// `route_publish_delivers_and_returns_envelope`,
+/// `route_publish_forged_user_kind_is_400`,
+/// `route_publish_unregistered_sender_is_403`.
 pub async fn publish_message(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PublishRequest>,
