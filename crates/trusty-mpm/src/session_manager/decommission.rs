@@ -22,6 +22,7 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
 use super::workspace_guard::is_safe_to_remove;
+use super::worktree_safety::{DirtyWorktree, inspect_dirt};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
 /// per-session git worktree (#1845 item 5).
@@ -411,34 +412,71 @@ impl SessionManager {
                 // the git ref is also pruned.  The base clone directory is NEVER
                 // touched — only the leaf worktree path.
                 if is_session_worktree(ws) {
-                    // Item 4 (#1845): wrap the blocking `git worktree remove`
-                    // call in spawn_blocking + tokio::time::timeout so a hung
-                    // git process cannot stall the async executor indefinitely.
-                    let ws_clone = ws.clone();
-                    let join =
-                        tokio::task::spawn_blocking(move || remove_session_worktree(&ws_clone));
-                    workspace_removed =
-                        match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
-                            Ok(Ok(removed)) => removed,
-                            Ok(Err(e)) => {
-                                warn!(
-                                    id = %id,
-                                    workspace = %ws.display(),
-                                    "decommission: remove_session_worktree task panicked: {e}"
-                                );
-                                false
-                            }
-                            Err(_elapsed) => {
-                                warn!(
-                                    id = %id,
-                                    workspace = %ws.display(),
-                                    timeout_secs = GIT_WORKTREE_REMOVE_TIMEOUT.as_secs(),
-                                    "decommission: git worktree remove timed out; \
-                                     worktree may require manual cleanup"
-                                );
-                                false
-                            }
-                        };
+                    // Data-safety gate (#4091-style, decommission-side): before
+                    // this, `remove_session_worktree` ran `git worktree remove
+                    // --force` (falling back to `fs::remove_dir_all`)
+                    // unconditionally, with NO dirty check at all — a live
+                    // data-loss path for `tm sessions prune --state stopped`
+                    // (which calls `decommission` per matching record). Reuse
+                    // the same `worktree_safety::inspect_dirt` check the
+                    // orphan-worktree sweep (`prune_orphaned_worktrees`)
+                    // already uses: refuse (and report) a candidate holding
+                    // uncommitted/untracked work or unpushed commits. Runs on
+                    // spawn_blocking since it shells out to git, same as the
+                    // removal itself; a panicked check is treated as dirty
+                    // (fail-safe) rather than a green light to delete.
+                    let ws_for_check = ws.clone();
+                    let dirt = tokio::task::spawn_blocking(move || inspect_dirt(&ws_for_check))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Some(DirtyWorktree::new(
+                                ws,
+                                format!("dirty-check task panicked: {e}"),
+                                0,
+                                0,
+                            ))
+                        });
+
+                    if let Some(dirt) = dirt {
+                        warn!(
+                            id = %id,
+                            workspace = %ws.display(),
+                            reason = %dirt.reason,
+                            "decommission: refusing to remove worktree — it holds \
+                             unsaved work; leaving it on disk (the record below is \
+                             still tombstoned)"
+                        );
+                        // workspace_removed stays false — nothing was deleted.
+                    } else {
+                        // Item 4 (#1845): wrap the blocking `git worktree remove`
+                        // call in spawn_blocking + tokio::time::timeout so a hung
+                        // git process cannot stall the async executor indefinitely.
+                        let ws_clone = ws.clone();
+                        let join =
+                            tokio::task::spawn_blocking(move || remove_session_worktree(&ws_clone));
+                        workspace_removed =
+                            match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
+                                Ok(Ok(removed)) => removed,
+                                Ok(Err(e)) => {
+                                    warn!(
+                                        id = %id,
+                                        workspace = %ws.display(),
+                                        "decommission: remove_session_worktree task panicked: {e}"
+                                    );
+                                    false
+                                }
+                                Err(_elapsed) => {
+                                    warn!(
+                                        id = %id,
+                                        workspace = %ws.display(),
+                                        timeout_secs = GIT_WORKTREE_REMOVE_TIMEOUT.as_secs(),
+                                        "decommission: git worktree remove timed out; \
+                                         worktree may require manual cleanup"
+                                    );
+                                    false
+                                }
+                            };
+                    }
                 } else {
                     warn!(
                         id = %id,

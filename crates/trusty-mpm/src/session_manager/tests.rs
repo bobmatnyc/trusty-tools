@@ -917,6 +917,75 @@ async fn manager_reconcile_skips_decommissioned() {
     assert_eq!(after.state, ManagedSessionState::Decommissioned);
 }
 
+/// A soft-deleted (`Deleted`) record must survive daemon boot/reconcile
+/// without being resurrected — the same terminal-tombstone guarantee as
+/// `Decommissioned`.
+///
+/// Why: `reconcile_on_boot` used to hand-roll
+/// `matches!(record.state, ManagedSessionState::Decommissioned)` instead of
+/// asking the record's own `is_terminal()`, so a `Deleted` record (no live
+/// tmux session, by definition) fell through to the "gone" branch and was
+/// resurrected to `Stopped` on every daemon boot. `is_terminal()` covers
+/// BOTH `Decommissioned` and `Deleted`, so this is the regression test for
+/// the second terminal variant the hand-rolled check missed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_reconcile_skips_deleted() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let deleted = SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: "tmpm-deleted".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "deleted task".into(),
+        state: ManagedSessionState::Deleted,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: None,
+    };
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(deleted.clone()).await.unwrap();
+    }
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    // Tombstone must not appear in adopted or stopped lists — a resurrection
+    // would show up as this record's id in `report.stopped`.
+    assert!(!report.adopted.contains(&deleted.tmux_name));
+    assert!(
+        !report.stopped.contains(&deleted.id.to_string()),
+        "a Deleted record must never be resurrected to Stopped by reconcile; report: {:?}",
+        report
+    );
+
+    // State must remain Deleted after reconcile — never resurrected.
+    let after = mgr.get(&deleted.id).await.unwrap();
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Deleted,
+        "a Deleted record must survive daemon boot/reconcile without being resurrected"
+    );
+}
+
 #[tokio::test]
 async fn manager_send_input() {
     let dir = crate::test_support::hermetic_temp_dir();

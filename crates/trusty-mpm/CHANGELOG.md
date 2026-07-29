@@ -220,6 +220,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Daemon boot reconciliation no longer resurrects soft-deleted sessions.
+  `reconcile_on_boot` hand-rolled a
+  `matches!(record.state, ManagedSessionState::Decommissioned)` check instead
+  of asking the record's own `is_terminal()`, so every `Deleted` record (no
+  live tmux session, by definition) fell through to the "gone" branch and was
+  marked `Stopped` — resurrected — on every daemon restart. `is_terminal()` is
+  now the single source of truth, covering both `Decommissioned` and
+  `Deleted`.
+- `decommission` (and therefore `tm sessions prune --state stopped`, which
+  calls it per matching record) no longer force-deletes a dirty in-project
+  worktree. Removing an SM-created `.worktrees/<id>` ran `git worktree remove
+  --force` (falling back to `fs::remove_dir_all`) with no dirty check at all —
+  a live data-loss path for uncommitted/untracked work. This reuses the same
+  `worktree_safety::inspect_dirt` check the orphan-worktree sweep uses (the
+  #4091 dirty-worktree guard): a dirty candidate is now refused and reported,
+  and the session record still tombstones to `Decommissioned` so the skip is
+  never silent.
 - The per-project worktree opt-out is no longer silently conditional on the
   daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
   `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),
