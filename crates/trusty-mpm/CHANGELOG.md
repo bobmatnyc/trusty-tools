@@ -42,6 +42,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `daemon::bus`: the peer message bus foundation (DOC-60 §5.3) — the
+  daemon-side replacement for the assistant-to-assistant lane PR #4240 closed
+  under ADR-0024. Three pieces: the §11 **envelope schema** carrying all three
+  §6 identifiers (definition id, instance id, per-message caller identity), an
+  **instance registry** resolving `definition_id` → live `instance_id`, and a
+  **pub/sub HTTP surface** (`/api/v1/bus/instances`, `/publish`,
+  `/subscribe/{instance_id}`). Delivery is addressed per instance — each live
+  instance owns its channel — rather than broadcast-then-filtered, which is the
+  defect §2 identifies in the existing `/sessions/{id}/events` path. Both
+  addressing modes are supported: definition-addressed (§5.3 normative) and
+  direct **instance bypass**. A peer *request* is a distinct payload variant
+  from informational chat and carries an explicit accept/decline response, per
+  §5.3's normative decline-ability rule (ADR-0024's virtual-twin authority
+  principle). The durable §9 record rides the EXISTING `daemon::audit`
+  `AuditLogger` through a new `logs_dir/bus/` sibling stream — the logger gained
+  `for_stream` and a generic `log_record`, so there is no second JSONL writer.
+- **Instance-bypass failure mode: explicit error, never silent fallback.** When
+  a sender targets an `instance_id` that died between learning it and sending,
+  the bus returns `BusError::InstanceGone` (HTTP `410 Gone`) and does **not**
+  redirect to another live instance of the same definition — even when the
+  request also supplies a `definition_id`. A silent redirect would deliver to a
+  peer with no memory of the thread whose continuity motivated bypass in the
+  first place, and §4 requires failures reach the sender rather than being
+  dropped. `404` (definition has nothing running) and `409` (registered but no
+  subscriber) are separately distinguishable so a client can implement recovery
+  from the status alone.
+- **Caller identity is verified, not asserted.** `from` arrives client-asserted
+  over loopback HTTP, so the peer publish path (a) admits only
+  `kind: assistant_instance` senders, rejecting a `user`-kind publish with
+  `400`, and (b) resolves the claimed `instance_id` against a live registration
+  (`403 UnregisteredSender` when it does not resolve), then re-stamps
+  `definition_id` from the registry rather than trusting the caller's copy.
+  Without this, assistant A could publish to assistant B as `kind: "user"` and
+  B — which by §5.3's design cannot tell a lateral message from a user message
+  by shape — would read it as a user instruction and act on it, reconstituting
+  assistant-to-assistant delegation through the very bus ADR-0024 closed it
+  from. `403` is deliberately distinct from the recipient-side `410`: the fault
+  is the caller's own identity and the recovery is to register, not to
+  re-address.
+- The `edge` field is **derived** from the caller's kind (`CallerKind::peer_edge`,
+  a total match over the enum) rather than stamped as a constant, so §9 search
+  and §10 consolidation can actually tell the three §5 edges apart. Adding a
+  caller kind is a compile error until someone decides which edge it crosses.
+- **What the durable §9 log contains:** once a sender is verified, every
+  outcome is recorded — `Delivered` or `Dropped`. Requests rejected *before*
+  verification (malformed identity, disallowed caller kind, unverifiable
+  sender) are surfaced as `4xx` and leave no record: they never became
+  envelopes, and writing one would stamp an unverified — possibly forged —
+  identity into the log in the same shape as attributable traffic.
+- Instance ids are `<definition_id>~<8 hex>`, using an RFC 3986 *unreserved*
+  separator rather than DOC-60 §11's illustrative `#`: `#` is the URI fragment
+  delimiter, so a raw id in a path segment is truncated by conforming clients
+  before the request is sent. §11 self-declares as non-normative wire format.
+- Deferred, not built: the durable inbox and queue-not-spawn behavior (§7),
+  cross-project addressing (§12 Q4), retention policy (§12 Q1), and version-skew
+  negotiation (§12 Q2/Q5). Streaming token deltas stay on the existing per-crate
+  buses. The trusty-agents client and the peer-message tool are separate changes.
+
 - `core::instruction_package`: the sectioned-JSON instruction-package schema
   ([#4184](https://github.com/bobmatnyc/trusty-tools/issues/4184), epic #4183) —
   the eight-section taxonomy (Core, Memory, Search, Workflow, Agent Delegation

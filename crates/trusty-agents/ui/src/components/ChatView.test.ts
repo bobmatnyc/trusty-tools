@@ -26,7 +26,7 @@ import { bridgeEventToWebBus } from '../lib/eventBridge';
 import { emitWebEvent, type AppEvent } from '../lib/transport';
 import { streamAccumulator } from '../lib/chatStream';
 import { resetWorkflow } from '../stores/workflow';
-import { activeProjectId, addMessage, isRunning, messages } from '../stores/app';
+import { activeProjectId, activeTaskId, addMessage, isRunning, messages } from '../stores/app';
 
 const PROJECT = 'ctrl';
 const TASK = 'task-1';
@@ -51,9 +51,28 @@ function bubbleText(): string {
   return paras.map((p) => p.textContent ?? '').join('\n');
 }
 
-/** Whether the "Assistant is responding" spinner is on screen (`$isRunning`). */
+/**
+ * Whether the "Assistant is responding" spinner is on screen (`$isRunning` +
+ * `$activeTaskId`).
+ *
+ * The query is scoped to the bubble BODY on purpose: the spinner used to be a
+ * sibling element rendered under the message list, visually detached from the
+ * bubble it belonged to. Now it renders inside the in-flight bubble, so a
+ * regression that moved it back out would read as "no spinner" here rather
+ * than passing silently.
+ */
 function spinnerVisible(): boolean {
-  return target.querySelector('[role="status"]') !== null;
+  const body = target.querySelector('p.whitespace-pre-wrap');
+  return body?.querySelector('[role="status"]') != null;
+}
+
+/**
+ * Whether the in-flight bubble carries the pulsing green ring. Driven by the
+ * SAME expression as `spinnerVisible()` — the assertions below pin that the
+ * two never diverge, and that neither survives a failed or cancelled task.
+ */
+function waitingRingVisible(): boolean {
+  return target.querySelector('.waiting-bubble') !== null;
 }
 
 /** Settle Svelte's render queue so `bubbleText()` reflects the last emit. */
@@ -75,6 +94,10 @@ beforeEach(async () => {
   messages.set(new Map());
   activeProjectId.set(PROJECT);
   isRunning.set(true);
+  // The waiting indicator is per-bubble now, so the fixture has to say WHICH
+  // bubble is in flight — exactly as `InputArea` does at submit time, where
+  // `isRunning` and `activeTaskId` are written in the same synchronous block.
+  activeTaskId.set(TASK);
   streamAccumulator.finalize(TASK);
   resetWorkflow();
 
@@ -175,5 +198,43 @@ describe('task-complete race (#3759)', () => {
     await rendered();
 
     expect(bubbleText()).toContain('(no narrative)');
+  });
+});
+
+describe('in-bubble waiting indicator', () => {
+  it('rings the in-flight bubble and stops on completion', async () => {
+    expect(waitingRingVisible()).toBe(true);
+    // Same flag as the spinner — one source of truth, so the two can never
+    // show contradictory states.
+    expect(spinnerVisible()).toBe(true);
+
+    pollComplete();
+    await rendered();
+
+    expect(waitingRingVisible()).toBe(false);
+    expect(spinnerVisible()).toBe(false);
+  });
+
+  it('stops on error, so a failed task never leaves a bubble pulsing', async () => {
+    emitWebEvent('task-error', { task_id: TASK, error: 'boom' });
+    await rendered();
+
+    expect(bubbleText()).toContain('Error: boom');
+    expect(waitingRingVisible()).toBe(false);
+    expect(spinnerVisible()).toBe(false);
+  });
+
+  it('stops on cancellation', async () => {
+    // `session_cancelled` reaches ChatView as `task-error` (lib/eventBridge.ts)
+    // — the path a Stop click takes.
+    bridgeEventToWebBus({
+      type: 'session_cancelled',
+      session_id: TASK,
+      status: 'cancelled',
+    } as AppEvent);
+    await rendered();
+
+    expect(waitingRingVisible()).toBe(false);
+    expect(spinnerVisible()).toBe(false);
   });
 });
