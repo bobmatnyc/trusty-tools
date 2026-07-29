@@ -808,3 +808,144 @@ async fn patch_agent_prefers_first_tier_over_second() {
         "the $HOME tier's copy must be untouched when the project-local tier already resolves"
     );
 }
+
+// --- ADR-0024 decision 4 sub-answer (b): the server-side write floor ---
+//
+// The owner ratified that a GUI write "must not be able to widen an assistant's
+// reachable set past the floor", and named `tools_allow` above as the precedent
+// NOT to copy. These three pin the resulting asymmetry: this field validates,
+// that one does not.
+
+/// A write that NARROWS is persisted and round-trips.
+///
+/// Why: the fail-closed test below would pass against an endpoint that rejected
+/// everything. This is the non-vacuity half — the feature has to actually work.
+/// What: one floor member is written to `[subagents].delegate_allowed`, and the
+/// file on disk carries it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_writes_a_narrowed_subagent_whitelist() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Original persona.\n",
+    );
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            subagents_delegate_allowed: Some(vec!["research-agent".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Read the written table back through a plain `toml::Value` — the fixture
+    // is a minimal `[agent]`-only file that `AgentConfig` (which requires
+    // `[llm]`/`[system_prompt]`) would reject for reasons unrelated to this
+    // field.
+    let raw = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&raw).expect("still valid TOML");
+    assert_eq!(
+        doc["subagents"]["delegate_allowed"],
+        toml::Value::Array(vec![toml::Value::String("research-agent".to_string())])
+    );
+}
+
+/// THE security test for decision 4 sub-answer (b): a write may NOT widen the
+/// reachable set past the server-owned floor.
+///
+/// Why: "editable" means a GUI, a script, or anyone who can reach the API can
+/// set this value. Following the `tools_allow` precedent literally would let
+/// such a caller add `engineer` — or `pm` — to an assistant's reachable set with
+/// no server-side check, which the ADR calls out as "a materially different, and
+/// weaker, security posture" than the mechanism this one parallels. The request
+/// must be refused WHOLE: a partial application would persist a config the
+/// caller did not ask for and quietly disagree with the response.
+/// What: a mixed list (one legal, two illegal) is rejected `400`, every offender
+/// is named back, and — the part that matters — NOTHING is written: the file on
+/// disk still declares no whitelist.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_rejects_a_subagent_whitelist_that_widens_past_the_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Original persona.\n",
+    );
+    let before = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            subagents_delegate_allowed: Some(vec![
+                "research-agent".to_string(),
+                "engineer".to_string(),
+                "pm".to_string(),
+            ]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let err = body["error"].as_str().unwrap();
+    assert!(err.contains("engineer"), "{err}");
+    assert!(err.contains("pm"), "{err}");
+    assert!(err.contains("narrow"), "{err}");
+
+    let after = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+    assert_eq!(
+        before, after,
+        "a refused write must leave the file byte-identical — no partial application"
+    );
+}
+
+/// An EMPTY list is a legitimate narrowing ("reach nothing") and is written as
+/// an empty array, not omitted.
+///
+/// Why: the caller must be able to express "revoke everything" and see it
+/// persisted, distinguishably from "never set" — the same distinction
+/// `tools_allow` documents for its own empty case. Silently ignoring an empty
+/// list would leave a revocation that appeared to succeed and did not.
+/// What: `[]` round-trips as an empty `delegate_allowed` array.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn patch_agent_subagent_whitelist_accepts_an_empty_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Original persona.\n",
+    );
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            subagents_delegate_allowed: Some(Vec::new()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let raw = std::fs::read_to_string(tmp.path().join("izzie").join("agent.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&raw).expect("still valid TOML");
+    assert_eq!(
+        doc["subagents"]["delegate_allowed"],
+        toml::Value::Array(Vec::new()),
+        "an explicit empty list must persist as an empty array, not be omitted"
+    );
+}

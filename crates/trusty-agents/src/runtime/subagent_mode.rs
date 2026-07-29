@@ -388,6 +388,10 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         tag_skill_registry.clone(),
         outbound_delegate_allow.as_deref(),
         cfg.agent.tier(),
+        // ADR-0024 decision 4: this agent's own editable reachable-sub-agent
+        // whitelist, read from the SAME resolved config every other posture on
+        // this path comes from. Absent = reaches nothing (fail-closed).
+        cfg.subagents.delegate_allowed.as_deref(),
     );
 
     // #57: If the agent opts into `use_finish_task`, auto-register the

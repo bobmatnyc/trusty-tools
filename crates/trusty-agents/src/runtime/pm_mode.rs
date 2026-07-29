@@ -65,9 +65,10 @@ use tools::{ToolRegistry, delegate::DelegateToAgentTool};
 
 use crate::rbac::ServiceTier;
 use crate::subprocess;
-use crate::tools::cross_product::{CallerAuthority, SubagentAllowSet};
+use crate::tools::cross_product::{CallerAuthority, NON_CODING_TARGETS};
 use crate::tools::pm_bridge::PmBridgeTool;
 use crate::tools::pm_bridge_backend::ProcessPmBridge;
+use crate::tools::subagent_allow::SubagentAllowSet;
 
 /// PM mode: interactive orchestrator.
 pub(super) async fn run_pm() -> Result<()> {
@@ -125,7 +126,8 @@ pub(super) async fn run_pm() -> Result<()> {
         registry.register(Arc::new(
             PmBridgeTool::new(Arc::new(ProcessPmBridge::from_project(cwd)))
                 .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics])
-                .with_allow_set(SubagentAllowSet::from_allowed(
+                .with_allow_set(SubagentAllowSet::over(
+                    NON_CODING_TARGETS,
                     pm_cfg.subagents.allowed.as_deref(),
                 ))
                 .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard),

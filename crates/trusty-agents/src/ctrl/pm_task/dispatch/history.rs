@@ -20,9 +20,10 @@ use crate::intent::{IntentClass, classify_intent};
 use crate::llm;
 use crate::rbac::ServiceTier;
 use crate::subprocess::SubprocessAgentRunner;
-use crate::tools::cross_product::{CallerAuthority, SubagentAllowSet};
+use crate::tools::cross_product::{CallerAuthority, NON_CODING_TARGETS};
 use crate::tools::pm_bridge::PmBridgeTool;
 use crate::tools::pm_bridge_backend::ProcessPmBridge;
+use crate::tools::subagent_allow::SubagentAllowSet;
 use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
@@ -419,7 +420,19 @@ pub async fn run_pm_task_with_history(
     let mut delegate_tool = DelegateToAgentTool::new(runner)
         .with_config_dir(config_dir.clone())
         .with_session_id(sid.clone())
-        .with_delegator(pm_cfg.agent.role.clone(), delegator_tier);
+        // ADR-0024 decision 4: the reachable-set whitelist joins role and tier
+        // in the same indivisible identity declaration. For `ctrl.toml`
+        // (`role = "assistant"`, #3812) this is the binding gate; for a
+        // resolved `pm.toml` (`role = "orchestrator"`) `execute` does not apply
+        // it at all, so orchestrator delegation is unchanged.
+        .with_delegator(
+            pm_cfg.agent.role.clone(),
+            delegator_tier,
+            crate::tools::subagent_allow::SubagentAllowSet::over(
+                crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+                pm_cfg.subagents.delegate_allowed.as_deref(),
+            ),
+        );
     if let Some(roles) = allowed_target_roles {
         delegate_tool = delegate_tool.with_allowed_target_roles(roles);
     }
@@ -436,7 +449,8 @@ pub async fn run_pm_task_with_history(
             project_path.to_path_buf(),
         )))
         .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics])
-        .with_allow_set(SubagentAllowSet::from_allowed(
+        .with_allow_set(SubagentAllowSet::over(
+            NON_CODING_TARGETS,
             pm_cfg.subagents.allowed.as_deref(),
         ))
         // `user_authority` has no `AgentConfig` field yet (#3074/AUTH-1), so

@@ -318,7 +318,7 @@ fn session_state_tools_present_for_l0() {
 /// What: constructs the registry and returns its tool names.
 /// Test: used by `assistant_tier_registry_*` and `l*_persona_declaring_*`.
 fn registry_names(tier: AgentTier) -> Vec<String> {
-    crate::runtime::tool_registry::build_assistant_tier_registry(None, tier)
+    crate::runtime::tool_registry::build_assistant_tier_registry(None, tier, None)
         .schemas()
         .into_iter()
         .filter_map(|s| {
@@ -388,6 +388,7 @@ fn l1_persona_declaring_session_state_tools_gets_none() {
     let reg = crate::runtime::tool_registry::build_assistant_tier_registry(
         Some(&allow),
         AgentTier::L1Standard,
+        None,
     );
     let scoped = crate::runtime::tool_registry::scope_assistant_allowed_tools(
         true,
@@ -423,6 +424,7 @@ fn l0_persona_declaring_session_state_tools_gets_them() {
     let reg = crate::runtime::tool_registry::build_assistant_tier_registry(
         Some(&allow),
         AgentTier::L0Orchestration,
+        None,
     );
     let scoped = crate::runtime::tool_registry::scope_assistant_allowed_tools(
         true,

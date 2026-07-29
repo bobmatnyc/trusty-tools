@@ -190,9 +190,11 @@ fn granted_ids_do_not_grant_a_function_skill_by_id_alone() {
     // grant it just for being named — asserting a grant nobody verified.
     // Its state comes from its members, computed by `function_groups`.
     let catalog = SkillCatalog::builtin();
-    let allow = vec!["ticketing".to_string()];
+    // Retargeted from `ticketing` to `google-workspace` by ADR-0024 decision 4,
+    // which removed the ticketing row from the catalog entirely.
+    let allow = vec!["google-workspace".to_string()];
     let granted = granted_skill_ids(&catalog, Some(&[]), Some(&allow));
-    assert!(!granted.contains("ticketing"));
+    assert!(!granted.contains("google-workspace"));
 }
 
 #[test]
@@ -201,26 +203,32 @@ fn function_group_never_reports_all_when_a_member_is_missing() {
     // that fails to resolve can never enter `granted_ids`, so this is also
     // the shape an unresolvable member produces.
     let catalog = SkillCatalog::builtin();
-    let ticketing = catalog.get("ticketing").expect("ticketing bundle");
-    let mut granted: std::collections::BTreeSet<String> =
-        ticketing.members.iter().cloned().collect();
-    let dropped = ticketing.members.last().unwrap().clone();
+    // Retargeted from `ticketing` to `google-workspace` by ADR-0024 decision 4.
+    let bundle = catalog
+        .get("google-workspace")
+        .expect("google-workspace bundle");
+    let mut granted: std::collections::BTreeSet<String> = bundle.members.iter().cloned().collect();
+    let dropped = bundle.members.last().unwrap().clone();
     granted.remove(&dropped);
 
     let groups = function_groups(&catalog, &granted);
-    let g = groups.iter().find(|g| g.id == "ticketing").unwrap();
+    let g = groups.iter().find(|g| g.id == "google-workspace").unwrap();
     // Counted from the live catalog: #4024 widened the bundle, and the property
     // under test is "one short is `some`", not any particular membership size.
-    assert_eq!(g.members.len(), ticketing.members.len());
-    assert_eq!(g.granted_members.len(), ticketing.members.len() - 1);
+    assert_eq!(g.members.len(), bundle.members.len());
+    assert_eq!(g.granted_members.len(), bundle.members.len() - 1);
     assert_eq!(g.state(), "some");
     assert!(!g.granted_members.contains(&dropped));
 
     // And the full set is `"all"` — the tri-state is not stuck.
-    let full: std::collections::BTreeSet<String> = ticketing.members.iter().cloned().collect();
+    let full: std::collections::BTreeSet<String> = bundle.members.iter().cloned().collect();
     let groups = function_groups(&catalog, &full);
     assert_eq!(
-        groups.iter().find(|g| g.id == "ticketing").unwrap().state(),
+        groups
+            .iter()
+            .find(|g| g.id == "google-workspace")
+            .unwrap()
+            .state(),
         "all"
     );
 }

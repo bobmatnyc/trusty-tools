@@ -1307,3 +1307,66 @@ content = "c"
     let merged = merge_extends(base, ch);
     assert_eq!(merged.stores.default_search_index(), Some("assistant"));
 }
+
+/// ADR-0024 decision 4: an `extends` child's own `[subagents]` declarations
+/// survive the merge, unioned base-first.
+///
+/// Why: before decision 4 neither `[subagents]` key was merged at all — the
+/// base's value survived only because `merged` starts as `base`, and a CHILD's
+/// declaration was silently discarded. Harmless while nothing declared the
+/// section; not harmless for a whitelist the owner ratified as EDITABLE, since
+/// a personalization overlay declaring its own reachable set would have had it
+/// dropped. Union cannot widen past the server-owned floor — `resolve`
+/// intersects at dispatch — so the safe direction is the §2.5 list rule.
+/// What: base declares one floor member, the child the other; the merge carries
+/// both, base-first, on both keys.
+/// Test: this function IS the test.
+#[test]
+fn extends_unions_the_subagent_whitelist() {
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "assistant"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+[subagents]
+allowed = ["research"]
+delegate_allowed = ["research-agent"]
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "assistant"
+model = "m"
+description = "d"
+extends = "base"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+[subagents]
+allowed = ["ticketing"]
+delegate_allowed = ["ticketing-agent"]
+"#);
+
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.subagents.allowed,
+        Some(vec!["research".to_string(), "ticketing".to_string()]),
+        "the cross-product list must union base-first"
+    );
+    assert_eq!(
+        merged.subagents.delegate_allowed,
+        Some(vec![
+            "research-agent".to_string(),
+            "ticketing-agent".to_string()
+        ]),
+        "the in-process whitelist must union base-first"
+    );
+}

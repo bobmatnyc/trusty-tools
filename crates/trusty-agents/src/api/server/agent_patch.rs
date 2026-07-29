@@ -50,13 +50,30 @@
 //! that convention is being established elsewhere for `~/.trusty-agents/`
 //! writes generally; see the PR body for the follow-up. [`get_agent_persona_route`]
 //! is the read counterpart the gear panel's Personality tab loads from.
+//!
+//! **ADR-0024 decision 4 addition (ratified 2026-07-29):**
+//! `subagents_delegate_allowed` writes `[subagents].delegate_allowed`, the
+//! editable whitelist of in-process sub-agent names an assistant may delegate
+//! to. It is the FIRST field on this route with a server-side ceiling: the
+//! owner ratified that a write must not be able to widen a reachable set past
+//! the floor and named the `tools_allow` field above as the precedent NOT to
+//! copy. Every entry is checked against
+//! `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS` via
+//! `tools::subagent_allow::narrow_to_floor` before any file is touched; a
+//! widening request is a `400` naming the offenders, never a partial write.
+//! `tools_allow`'s own unvalidated behaviour is deliberately left unchanged
+//! here — auditing that field against a capability ceiling is a separate,
+//! unratified decision, and quietly tightening it inside this change would be
+//! an unreviewed behaviour break for every existing GUI edit.
 //! Test: `super::tests::agent_patch` — persists + round-trips a model
 //! change, rejects an unknown agent (404), an empty body (400), an unknown
 //! `provider_id` (400), a claude-code/non-Anthropic conflict via an explicit
 //! prefix (400), the same conflict via a *bare* unprefixed model_id (400,
 //! the fail-shut case), the accepted Anthropic case, malformed on-disk TOML
 //! (500), package-vs-flat path resolution, `tools_allow` round-trip, and
-//! `personality` accept (package)/reject (flat-only) cases.
+//! `personality` accept (package)/reject (flat-only) cases, plus the
+//! decision-4 whitelist write, its empty-list narrowing, and its
+//! floor-widening rejection.
 
 use std::path::PathBuf;
 
@@ -145,6 +162,33 @@ pub(super) struct PatchAgentRequest {
     /// difference from omitting the field.
     #[serde(default)]
     pub(super) tools_allow: Option<Vec<String>>,
+    /// ADR-0024 decision 4 (RATIFIED 2026-07-29) — overwrites
+    /// `[subagents].delegate_allowed`, the editable whitelist of in-process
+    /// sub-agent names this agent may reach via `delegate_to_agent`.
+    ///
+    /// Why: decision 4's sub-answer (b), ratified with it: *"the write path
+    /// MUST enforce a SERVER-SIDE FLOOR — a GUI write must not be able to
+    /// widen an assistant's reachable set past the floor"*, and explicitly
+    /// *"the existing `tools_allow` precedent applies NO validation; do not
+    /// copy that"*. So unlike `tools_allow` above, this field is NOT written
+    /// verbatim: every entry must be on
+    /// `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`, checked by
+    /// `tools::subagent_allow::narrow_to_floor` — the same-floor counterpart of
+    /// the `SubagentAllowSet::resolve` gate the dispatch path runs — BEFORE the
+    /// file is touched. A widening request is rejected whole, with the
+    /// offending names echoed back; it is never partially applied. Defence in
+    /// depth, not the only defence: even a hand-edited TOML that names
+    /// `engineer` is refused at dispatch, because `resolve` re-checks the same
+    /// floor. The write gate exists so the config an operator READS is the
+    /// config that is enforced.
+    /// What: an exact list. An empty (non-null) array is a legitimate
+    /// narrowing — "reach nothing" — and is written as an empty TOML array so
+    /// it is distinguishable on the next `GET` from "never set".
+    /// Test: `patch_agent_writes_a_narrowed_subagent_whitelist`,
+    /// `patch_agent_rejects_a_subagent_whitelist_that_widens_past_the_floor`,
+    /// `patch_agent_subagent_whitelist_accepts_an_empty_list`.
+    #[serde(default)]
+    pub(super) subagents_delegate_allowed: Option<Vec<String>>,
 }
 
 /// Build a `400 Bad Request` JSON error response.
@@ -200,11 +244,43 @@ pub(super) async fn patch_agent_at(
         && req.provider_id.is_none()
         && req.personality.is_none()
         && req.tools_allow.is_none()
+        && req.subagents_delegate_allowed.is_none()
     {
         return bad_request(
-            "request body must set at least one of model_id/provider_id/personality/tools_allow",
+            "request body must set at least one of model_id/provider_id/personality/\
+             tools_allow/subagents_delegate_allowed",
         );
     }
+
+    // ADR-0024 decision 4 sub-answer (b): the SERVER-SIDE FLOOR, applied before
+    // anything is read or written so a widening request never leaves a partial
+    // write behind (the same up-front posture the `personality` check below
+    // takes). Deliberately a hard 400 rather than a silent intersection: an
+    // operator who asked for `engineer` should learn the request was refused,
+    // not discover later that the saved list quietly differs from the one they
+    // submitted.
+    let subagents_to_write = match req.subagents_delegate_allowed.as_deref() {
+        Some(requested) => match crate::tools::subagent_allow::narrow_to_floor(
+            crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,
+            requested,
+        ) {
+            Ok(narrowed) => Some(narrowed),
+            Err(offenders) => {
+                tracing::warn!(
+                    agent = name,
+                    ?offenders,
+                    "patch_agent: refused a reachable-sub-agent whitelist that widens past \
+                     the server-owned floor"
+                );
+                return bad_request(format!(
+                    "subagents_delegate_allowed may only narrow the server-owned reachable \
+                     sub-agent floor ({floor}), never widen it — refused: {offenders:?}",
+                    floor = crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS.join(", "),
+                ));
+            }
+        },
+        None => None,
+    };
 
     let Some((path, package_dir)) = resolve_agent_paths(dirs, name) else {
         return (
@@ -400,6 +476,40 @@ pub(super) async fn patch_agent_at(
                     Json(
                         serde_json::json!({ "error": "agent config's [tools] key is not a table" }),
                     ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // ADR-0024 decision 4: `[subagents].delegate_allowed`, written only AFTER
+    // `narrow_to_floor` accepted the whole list above. Creates the `[subagents]`
+    // table when absent; the sibling `allowed` key (cross-product) is left
+    // untouched, because the two mechanisms' target vocabularies are disjoint
+    // and one must never be edited as a side effect of the other.
+    if let Some(subagents) = &subagents_to_write {
+        let subagents_table = doc
+            .entry("subagents")
+            .or_insert_with(|| Item::Table(Table::new()))
+            .as_table_like_mut();
+        match subagents_table {
+            Some(subagents_table) => {
+                let mut arr = Array::new();
+                for target in subagents {
+                    arr.push(target.as_str());
+                }
+                subagents_table.insert("delegate_allowed", value(arr));
+            }
+            None => {
+                tracing::warn!(
+                    agent = name,
+                    "patch_agent: [subagents] exists but is not a table"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "agent config's [subagents] key is not a table"
+                    })),
                 )
                     .into_response();
             }

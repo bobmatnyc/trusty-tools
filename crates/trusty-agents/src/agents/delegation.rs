@@ -19,8 +19,20 @@
 //! fixes it and any future check leaning on tier values reintroduces the same
 //! defect under new labels. This module holds the rule expressed against the
 //! attribute it is actually about.
+//! ADR-0024 decision 4 (RATIFIED 2026-07-29) adds a SECOND, independent
+//! narrowing to the same edge: the reachable sub-agent set is an editable
+//! per-agent configuration whitelist, bounded by a server-owned floor
+//! ([`ASSISTANT_REACHABLE_SUBAGENTS`]). The two rules are deliberately NOT
+//! collapsed — the kind predicate is a property of the CODE and must keep
+//! refusing a peer edge even if a whitelist is misconfigured to name an
+//! assistant (the ADR's own conformance checklist says so in as many words),
+//! while the whitelist is data an operator curates. Reachability is the
+//! conjunction: `!(kind_blocked || tier_blocked || !whitelisted)`.
+//!
 //! What: [`is_assistant_kind`] and [`kind_refuses_delegation`] — the ONE
-//! definition of the kind predicate in this crate. Both the enforcement point
+//! definition of the kind predicate in this crate — plus
+//! [`ASSISTANT_REACHABLE_SUBAGENTS`], the floor decision 4's whitelist narrows.
+//! Both the enforcement point
 //! (`tools::delegate::DelegateToAgentTool::execute`) and the reporting surface
 //! that must agree with it (`api::server::agent_subagents::in_product_surface`)
 //! call these rather than re-deriving the comparison, per the crate's "no
@@ -33,6 +45,37 @@
 //! `tools::delegate`'s tests (`delegate_assistant_to_assistant_is_refused*`).
 
 use crate::runtime::tool_registry::ASSISTANT_TIER_ROLE;
+
+/// The server-owned FLOOR of in-process sub-agent NAMES an assistant-kind
+/// delegator may ever reach — the ceiling ADR-0024 decision 4's editable
+/// whitelist narrows (owner ratification, 2026-07-29).
+///
+/// Why: the owner's concrete goal for decision 4 is that an assistant persona's
+/// reachable sub-agent set becomes exactly `{research, ticketing}` — NO coding
+/// agents. Decision 4 also says the set must be "an editable configuration
+/// whitelist … not a hand-authored Rust constant", and this constant is NOT
+/// that set: it is the FLOOR the editable set is bounded by, the exact
+/// counterpart of `tools::cross_product::NON_CODING_TARGETS` for the
+/// out-of-process mechanism. Two layers, not one — a config (or a GUI PATCH)
+/// that names `engineer` must be refused by CODE, not merely absent from a
+/// curated list, which is the ADR's ratified sub-answer (b) ("the write path
+/// MUST enforce a server-side floor"). A floor is also what makes the
+/// whitelist safe to expose for editing at all.
+/// What: NAMES, not roles — this is the vocabulary `delegate_to_agent`'s
+/// `agent_name` parameter actually takes and `AgentConfig::by_name_in`
+/// resolves, so the whitelist is checked against the same string the caller
+/// supplies. `research-agent` (role `researcher`) and `ticketing-agent` (role
+/// `ticketing`) are the two bundled non-coding specialists; they are the
+/// in-process spellings of the same two capabilities the bridge floor names
+/// `research`/`ticketing`. Nothing in the roster is REMOVED to achieve this —
+/// every agent definition stays in the catalog, only reachability changes.
+/// Deliberately NOT derived from the role allowlist: role eligibility is a
+/// coarse pre-filter (`ASSISTANT_ALLOWED_DELEGATE_ROLES`), and deriving one
+/// from the other would collapse two independent gates into one.
+/// Test: `delegate_floor_rejects_an_engineer_even_when_config_allows_it`,
+/// `the_two_floors_share_no_name`,
+/// `assistant_reachable_floor_names_resolve_in_the_bundled_roster`.
+pub(crate) const ASSISTANT_REACHABLE_SUBAGENTS: &[&str] = &["research-agent", "ticketing-agent"];
 
 /// Is `role` the assistant KIND?
 ///

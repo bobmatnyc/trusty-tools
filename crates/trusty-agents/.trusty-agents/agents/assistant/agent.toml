@@ -268,3 +268,25 @@ skills = [
     "gworkspace-drive",
     "trusty-memory-openrpc",
 ]
+
+# ADR-0024 decision 4 (owner ratification, 2026-07-29) — the SEEDED reachable
+# sub-agent whitelist.
+#
+# `delegate_allowed` is the editable list of in-process sub-agents this
+# assistant may hand work to via `delegate_to_agent`. It is intersected with a
+# server-owned floor (`agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`), so
+# editing this list can only ever NARROW it — adding `engineer` here does
+# nothing, and the PATCH endpoint refuses the write outright.
+#
+# ABSENT MEANS NOTHING, NOT EVERYTHING. An assistant with no
+# `delegate_allowed` key reaches zero sub-agents. That is the ratified
+# fail-closed answer, and this seed is the migration that keeps it from being a
+# silent capability loss for the shipped personas. Every agent DEFINITION stays
+# in the catalog — engineers, QA, docs, plan and ops agents are all still there
+# and still dispatchable by `pm`/`ctrl`-as-orchestrator; what changed is that an
+# ASSISTANT no longer reaches them.
+#
+# `allowed` (if present) is the SEPARATE cross-product `dispatch_task` list —
+# different mechanism, different name vocabulary. Do not merge the two.
+[subagents]
+delegate_allowed = ["research-agent", "ticketing-agent"]

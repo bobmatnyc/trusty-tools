@@ -12,8 +12,16 @@
 //! `<project>/.trusty-mpm/` and produces the effective PM prompt, *always*
 //! appending the non-overridable `BASE_PM.md` floor last. The bundled assets are
 //! the defaults for any section that has no override.
+//! Named sections (#4183 / #4286): a project may instead mark out an override
+//! inside its `CLAUDE.md`, read by [`crate::core::claude_md_sections`]. Those
+//! apply on the packaged composition path only — the legacy string assembly has
+//! no sections to replace — so an override that cannot be honoured is reported
+//! by `warn_unapplied` rather than dropped in silence. The five override file
+//! constants below are unchanged and keep working.
+//!
 //! Test: the `tests` module exercises every documented file, the BASE_PM floor
-//! invariant, and the robustness fallbacks (missing/empty/unreadable files).
+//! invariant, and the robustness fallbacks (missing/empty/unreadable files);
+//! `claude_md_sections_tests.rs` covers the named-section wiring end to end.
 
 use std::path::Path;
 
@@ -230,6 +238,13 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 ) -> (String, PromptSource) {
     let dir = project_dir.join(OVERRIDE_DIR_NAME);
 
+    // #4183/#4286: named-section overrides marked out in the project's
+    // `CLAUDE.md`. Scanned before any branch so a project that still carries a
+    // legacy override file gets a loud "not applied" rather than a silent drop —
+    // an advertised-but-unread override is issue #381 verbatim.
+    let named = crate::core::claude_md_sections::scan_project(project_dir);
+    named.log();
+
     // Floor is always appended last and never replaceable.
     let floor = base_pm();
 
@@ -246,6 +261,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     // work tracked as follow-up on the epic; do not make it "schema-valid" by
     // weakening either check.
     if let Some(body) = read_override(&dir, FILE_PM_DEPLOYED) {
+        crate::core::claude_md_sections::warn_unapplied(&named);
         let mut sections: Vec<String> = vec![body, stack];
         if let Some(extra) = read_override(&dir, FILE_INSTRUCTIONS) {
             sections.push(extra);
@@ -258,7 +274,13 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     let workflow_override = read_override(&dir, FILE_WORKFLOW);
     let delegation_override = read_override(&dir, FILE_AGENT_DELEGATION);
     let memory_override = read_override(&dir, FILE_MEMORY);
-    let addendum = read_override(&dir, FILE_INSTRUCTIONS);
+    // `INSTRUCTIONS.md` is BOTH the additive addendum and a named-section host,
+    // so any marked block is removed here — otherwise it would be delivered
+    // twice, once as the override it is and once as raw prose with its markers.
+    // A file carrying no marker is returned byte-for-byte unchanged.
+    let addendum = read_override(&dir, FILE_INSTRUCTIONS)
+        .map(|body| crate::core::claude_md_sections::strip_marker_blocks(&body))
+        .filter(|body| !body.is_empty());
 
     let delegation = match delegation_override {
         // See #4183 — configuration 2 is deliberately still on the legacy path:
@@ -288,11 +310,20 @@ pub(crate) fn resolve_pm_prompt_with_roster(
                     workflow_override.is_none() && memory_override.is_none(),
                     "the bundled-fallback branch requires no workflow/memory override"
                 );
-                match crate::core::bundled_pm_package::compose_bundled_fallback(
-                    &stack,
-                    roster,
-                    addendum.as_deref(),
-                ) {
+                let (composed, rejected) =
+                    crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides(
+                        &stack,
+                        roster,
+                        addendum.as_deref(),
+                        &named.overrides,
+                    );
+                for rejection in &rejected {
+                    tracing::warn!(
+                        %rejection,
+                        "named-section override declined; keeping the bundled section"
+                    );
+                }
+                match composed {
                     Ok(prompt) => return (prompt, PromptSource::Package),
                     // Unreachable for the shipped assets — `shipped_assets_
                     // build_and_validate` proves it — so this is a loud last
@@ -315,6 +346,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 
     let workflow = workflow_override.unwrap_or_else(|| WORKFLOW.trim().to_string());
 
+    crate::core::claude_md_sections::warn_unapplied(&named);
     (
         assemble_sections(stack, memory_override, workflow, delegation, addendum),
         PromptSource::Legacy,
