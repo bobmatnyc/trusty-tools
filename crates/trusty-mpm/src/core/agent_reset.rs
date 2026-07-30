@@ -70,6 +70,21 @@ pub struct ResetResult {
     /// Only ever populated by [`reset_project_agents`] — always empty for a
     /// plain [`reset_agents`] call, which has no roster filter to apply.
     pub deselected: Vec<String>,
+    /// Filenames REMOVED from a workspace because bundled agents no longer
+    /// belong there (issue #4409).
+    ///
+    /// Why: the `--reset-agents-workspaces` sweep stopped recomposing the
+    /// bundled roster into `<workspace>/.claude/agents/` — the project tier
+    /// outranks the tm-managed config tier, so recomposing would re-create the
+    /// shadow #4409 exists to clear. The sweep retracts instead, and the
+    /// operator still needs to see what it removed.
+    /// What: populated only by
+    /// [`crate::core::agent_reset_workspace::reset_active_workspace_agents`];
+    /// always empty for [`reset_agents`]/[`reset_project_agents`], which write
+    /// rather than remove.
+    /// Test: `sweep_retracts_intact_workspace`,
+    /// `reset_report_lines_shows_retracted`.
+    pub retracted: Vec<String>,
 }
 
 /// Suffix template for reset backups: `<file>.bak-<unix_nanos>`.

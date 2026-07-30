@@ -1,29 +1,29 @@
-//! Sweep active session/project workspaces into `tm install --reset-agents`
-//! (issue #2508).
+//! Sweep active session/project workspaces during `tm install --reset-agents`
+//! (issue #2508), RETRACTING their bundled agents (issue #4409).
 //!
-//! STATUS AFTER #4409: bundled agents no longer deploy per-workspace, and
-//! `prepare_session`/`sync-assets` RETRACT the framework-owned copies an older
-//! binary left behind, so a swept workspace normally has an empty (or absent)
-//! agent manifest and this sweep is a no-op. It is retained deliberately: a
-//! workspace that has not yet been re-prepared under the new binary still
-//! carries the legacy roster, and this is the operator-driven path that
-//! reconciles it without waiting for a session launch. It is also still the
-//! only mechanism that would refresh a project-tier agent should project-custom
-//! deployment land later.
+//! Why (#2508, historical): [`super::agent_reset::reset_agents`] only ever
+//! targeted the USER-LEVEL directory `tm install` writes to. PROJECT-LEVEL
+//! `.claude/agents/` directories — which `session_launch` used to deploy into
+//! every managed session's workspace/worktree — carried their OWN independently
+//! stale composition and never received the fix `--reset-agents` applied to the
+//! user-level copy. #2508's observed symptom: a user-level reset verified clean
+//! while the active session worktree's `.claude/agents/` still had zero files
+//! containing the new BASE-AGENT sections, reproducing the #2501 parking
+//! failure the reset was meant to close.
 //!
-//! Why: [`super::agent_reset::reset_agents`] only ever targeted the USER-LEVEL
-//! `~/.claude/agents/` directory `tm install` writes to. PROJECT-LEVEL
-//! `.claude/agents/` directories — deployed by [`super::session_launch`] into
-//! every managed session's workspace/worktree — carry their OWN independently
-//! stale composition and never receive the fix `--reset-agents` applies to the
-//! user-level copy. #2508's observed symptom: a user-level reset verified
-//! clean while the active session worktree's `.claude/agents/` still had zero
-//! files containing the new BASE-AGENT sections, reproducing the #2501 parking
-//! failure the reset was meant to close. This module is the sweep that
-//! reconciles every INTACT (non-decommissioned) session's workspace alongside
-//! the user-level reset, using the session's OWN resolved harness plan so an
-//! agent one project's manifest excludes is never resurrected there (the
-//! #2462 cross-warning) even while a sibling project's copy IS refreshed.
+//! WHAT THIS SWEEP DOES SINCE #4409 — it RETRACTS, it does not recompose.
+//! Bundled agents now deploy exclusively into the tm-managed `CLAUDE_CONFIG_DIR`
+//! tier, and a project-tier copy OUTRANKS that tier in the harness's agent
+//! resolution. Force-recomposing the bundled roster back into a workspace —
+//! which is exactly what this module did before #4409, and into the workspaces
+//! of LIVE sessions — would re-create the shadow the flip exists to remove, and
+//! nothing would ever refresh it again. So the sweep is now the operator-driven
+//! path that CLEARS a workspace an older binary provisioned, complementing the
+//! automatic retraction `prepare_session`/`sync-assets` perform at launch. The
+//! per-project harness plan is no longer consulted: a project's `[agents]`
+//! selection governs what DEPLOYS, and nothing bundled deploys here any more,
+//! so the only scope left to honour is the operator's explicit `--reset-agents
+//! <names>` list.
 //!
 //! CRITICAL SAFETY GATE (#1511 incident class): NOT every session's
 //! `workspace_path` is a directory trusty-mpm provisioned. A local-path/
@@ -32,9 +32,11 @@
 //! refuses to `remove_dir_all` and `session_manager::search_gc` refuses to
 //! drop the search index for. This module reuses that IDENTICAL ownership
 //! predicate (`workspace_owned || is_session_worktree(path)`) before ever
-//! writing a byte into a workspace's `.claude/agents/` — a sweep must never
-//! force-recompose the bundled roster into a real repository the operator
-//! did not hand to trusty-mpm to manage.
+//! touching a workspace's `.claude/agents/` — a sweep must never modify, and
+//! since #4409 must never DELETE from, a real repository the operator did not
+//! hand to trusty-mpm to manage. (Retraction is additionally constrained by the
+//! ownership manifest: it can only remove files trusty-mpm itself deployed and
+//! recorded, so even past the gate it cannot touch an operator's own file.)
 //! SECOND SAFETY GATE — LIVENESS (#4204): ownership answers "may we write
 //! here?", not "is there still anything here to write to?" The original
 //! `workspace_path.is_dir()` filter conflated the two: a worktree whose `.git`
@@ -50,16 +52,16 @@
 //! required), filters to sessions with an intact `workspace_path`, SKIPS any
 //! session that fails the ownership gate above (recording a
 //! [`WorkspaceResetOutcome`] with `skipped_reason` set so the operator sees a
-//! deliberate exclusion rather than silent absence), resolves each remaining
-//! session's [`crate::core::manifest::HarnessPlan`] exactly as
-//! [`super::session_launch::prepare_session`] does, and calls
-//! [`super::agent_reset::reset_project_agents`] against that workspace's
-//! `.claude/agents/` with the plan's `agent_selected` predicate. Returns one
-//! [`WorkspaceResetOutcome`] per considered workspace (reset OR skipped) so
+//! deliberate exclusion rather than silent absence), and calls
+//! [`crate::core::agent_deployer::retract_framework_agents_filtered`] against
+//! that workspace's `.claude/agents/`, scoped to the operator's requested
+//! `names`. Removals land in [`ResetResult::retracted`]. Returns one
+//! [`WorkspaceResetOutcome`] per considered workspace (retracted OR skipped) so
 //! the CLI can render a per-session report.
-//! Test: `sweep_resets_intact_workspace`, `sweep_skips_decommissioned_session`,
+//! Test: `sweep_retracts_intact_workspace`, `sweep_skips_decommissioned_session`,
 //! `sweep_skips_session_without_workspace`,
-//! `sweep_respects_per_workspace_manifest_exclude`,
+//! `sweep_retraction_honors_requested_names`,
+//! `sweep_never_removes_a_hand_placed_agent`,
 //! `sweep_skips_unowned_non_worktree_session`,
 //! `sweep_skips_gutted_worktree_whose_git_was_stripped`,
 //! `sweep_serves_live_linked_worktree_with_git_file`.
@@ -67,9 +69,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_builder::AgentBuildError;
-use crate::core::agent_reset::{ResetResult, reset_project_agents};
-use crate::core::manifest::{HarnessPlan, ManifestSources, resolve_manifest};
-use crate::core::paths::FrameworkPaths;
+use crate::core::agent_deployer::retract_framework_agents_filtered;
+use crate::core::agent_reset::ResetResult;
 use crate::core::workspace_liveness::{WorkspaceLiveness, workspace_liveness};
 use crate::session_manager::decommission::is_session_worktree;
 use crate::session_manager::{ManagedSessionState, SessionStore, StoreError};
@@ -128,31 +129,34 @@ pub enum WorkspaceSweepError {
     },
 }
 
-/// Reset the project-local agent roster of every intact session workspace.
+/// RETRACT the project-local bundled agents of every intact session workspace.
 ///
 /// Why: this is the #2508 fix's sweep entry point — `tm install --reset-agents
 /// --reset-agents-workspaces` calls it AFTER the normal user-level reset so a
-/// single invocation reconciles both destinations with the same
-/// adoption/backup semantics, each gated by its own project's manifest.
+/// single invocation reconciles both destinations. Since #4409 "reconcile a
+/// workspace" means REMOVE the bundled copies, not recompose them: bundled
+/// agents deploy exclusively into the tm-managed `CLAUDE_CONFIG_DIR` tier, and
+/// a project-tier copy OUTRANKS it, so recomposing one back into a live
+/// session's workspace would re-create the very shadow the flip removes.
 /// What: loads the session store at `<fw_root>/session-manager/sessions.json`,
 /// keeps sessions whose `state` is not [`ManagedSessionState::Decommissioned`]
 /// and whose `workspace_path` is not positively dead per
 /// [`crate::core::workspace_liveness::workspace_liveness`] (#4204 — a
 /// decommissioned or never-provisioned session has no `.claude/agents/` to
-/// reconcile, and neither does a gutted worktree husk), and for
-/// each one: resolves the harness manifest via [`ManifestSources::resolve`]
-/// (project override > user config > catalog > default — identical precedence
-/// to a real launch), builds the [`HarnessPlan`] via
-/// [`FrameworkPaths::for_managed_project`] (agent SOURCE stays at `fw_root`;
-/// only the deploy TARGET moves to the workspace's `.claude/agents/`), and
-/// calls [`reset_project_agents`] with `names` and the plan's `agent_selected`
-/// predicate. Returns one [`WorkspaceResetOutcome`] per swept workspace, in
-/// session-store iteration order.
+/// reconcile, and neither does a gutted worktree husk), and for each one calls
+/// [`retract_framework_agents_filtered`] against
+/// `<workspace>/.claude/agents/`, scoped to `names` when the operator named an
+/// agent set. Only manifest-tracked, FRAMEWORK-owned files are removed —
+/// hand-placed and user-owned agents survive byte-identical, exactly as on the
+/// session-launch retraction path. Returns one [`WorkspaceResetOutcome`] per
+/// swept workspace, in session-store iteration order, with the removals
+/// reported in [`ResetResult::retracted`].
 /// A workspace whose liveness could NOT be determined is served, not skipped,
 /// and logged at WARN — see [`crate::core::workspace_liveness`]'s invariant.
-/// Test: `sweep_resets_intact_workspace`, `sweep_skips_decommissioned_session`,
+/// Test: `sweep_retracts_intact_workspace`, `sweep_skips_decommissioned_session`,
 /// `sweep_skips_session_without_workspace`,
-/// `sweep_respects_per_workspace_manifest_exclude`,
+/// `sweep_retraction_honors_requested_names`,
+/// `sweep_never_removes_a_hand_placed_agent`,
 /// `sweep_skips_unowned_non_worktree_session`,
 /// `sweep_reports_session_whose_workspace_vanished`.
 pub async fn reset_active_workspace_agents(
@@ -163,7 +167,6 @@ pub async fn reset_active_workspace_agents(
     let mut store = SessionStore::load(&data_dir).await?;
     let sessions = store.all().await?;
 
-    let catalog_root = crate::content::catalog_root_for(fw_root);
     let mut outcomes = Vec::new();
 
     for session in sessions {
@@ -251,19 +254,25 @@ pub async fn reset_active_workspace_agents(
             continue;
         }
 
-        let sources = ManifestSources::resolve(workspace_path, fw_root, &catalog_root);
-        let manifest = resolve_manifest(&sources);
-        let fw = FrameworkPaths::for_managed_project(fw_root, workspace_path);
-        let plan = HarnessPlan::from_manifest(&manifest, &fw, &catalog_root);
-
-        let result =
-            reset_project_agents(&plan.agent_source, &fw.claude_agents_dir(), names, |n| {
-                plan.agent_selected(n)
-            })
-            .map_err(|source| WorkspaceSweepError::Reset {
-                tmux_name: session.tmux_name.clone(),
-                source,
-            })?;
+        // #4409: retract, never recompose. The workspace's `.claude/agents/`
+        // is spelled out from `workspace_path` rather than taken from a
+        // `FrameworkPaths` field, matching `prepare_session_inner` — this is a
+        // workspace operation and must not be reachable at a home tier.
+        // No harness plan is resolved: a project's `[agents]` selection decides
+        // what DEPLOYS, and nothing bundled deploys here any more, so the only
+        // scope that still applies is the operator's explicit `names`.
+        let retracted = retract_framework_agents_filtered(
+            &workspace_path.join(".claude").join("agents"),
+            |stem| names.is_none_or(|requested| requested.iter().any(|n| n == stem)),
+        )
+        .map_err(|source| WorkspaceSweepError::Reset {
+            tmux_name: session.tmux_name.clone(),
+            source,
+        })?;
+        let result = ResetResult {
+            retracted: retracted.removed,
+            ..ResetResult::default()
+        };
 
         outcomes.push(WorkspaceResetOutcome {
             tmux_name: session.tmux_name,
@@ -390,13 +399,34 @@ mod tests {
         }
     }
 
+    /// Simulate a workspace an OLDER (pre-#4409) binary provisioned: a full,
+    /// manifest-tracked bundled roster in `<workspace>/.claude/agents/`.
+    ///
+    /// Why: that is the exact state this sweep now exists to clear. Building it
+    /// through the real deployer (rather than hand-writing files) is what makes
+    /// the fixture's ownership manifest genuine, so the retraction under test is
+    /// exercised against a real ledger rather than a contrived one.
+    fn seed_legacy_workspace_roster(fw_root: &Path, workspace: &Path) {
+        crate::core::agent_deployer::deploy_agents(
+            &fw_root.join("framework").join("agents"),
+            &workspace.join(".claude").join("agents"),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn sweep_resets_intact_workspace() {
+    async fn sweep_retracts_intact_workspace() {
+        // #4409: the sweep REMOVES the shadowing bundled copies rather than
+        // recomposing them. Recomposing (the pre-#4409 behavior) re-created the
+        // project-tier shadow — into the workspaces of LIVE sessions — which is
+        // precisely what the flip exists to eliminate.
         let fw_base = TempDir::new().unwrap();
         let fw_root = fw_root_under(&fw_base);
         write_sources(&fw_root.join("framework").join("agents"));
         let workspace = TempDir::new().unwrap();
         make_linked_worktree(workspace.path());
+        seed_legacy_workspace_roster(&fw_root, workspace.path());
+        assert!(workspace.path().join(".claude/agents/engineer.md").exists());
 
         seed_sessions(
             &fw_root,
@@ -408,8 +438,83 @@ mod tests {
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].tmux_name, "tm-sweep-test");
-        assert_eq!(outcomes[0].result.recomposed.len(), 2);
-        assert!(workspace.path().join(".claude/agents/engineer.md").exists());
+        assert_eq!(outcomes[0].result.retracted.len(), 2);
+        assert!(
+            outcomes[0].result.recomposed.is_empty(),
+            "the sweep must never recompose a bundled agent into a workspace"
+        );
+        assert!(
+            !workspace.path().join(".claude/agents/engineer.md").exists(),
+            "the shadowing copy must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_retraction_honors_requested_names() {
+        // `--reset-agents <names>` still scopes the sweep: an agent the
+        // operator did not name stays put (file AND ledger entry).
+        let fw_base = TempDir::new().unwrap();
+        let fw_root = fw_root_under(&fw_base);
+        write_sources(&fw_root.join("framework").join("agents"));
+        let workspace = TempDir::new().unwrap();
+        make_linked_worktree(workspace.path());
+        seed_legacy_workspace_roster(&fw_root, workspace.path());
+
+        seed_sessions(
+            &fw_root,
+            vec![intact_session("tm-sweep-test", workspace.path())],
+        )
+        .await;
+
+        let names = vec!["engineer".to_string()];
+        let outcomes = reset_active_workspace_agents(&fw_root, Some(&names))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcomes[0].result.retracted,
+            vec!["engineer.md".to_string()]
+        );
+        assert!(!workspace.path().join(".claude/agents/engineer.md").exists());
+        assert!(
+            workspace
+                .path()
+                .join(".claude/agents/base-agent.md")
+                .exists(),
+            "an agent outside the requested scope must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_never_removes_a_hand_placed_agent() {
+        // The sweep can only remove what trusty-mpm itself deployed and
+        // recorded. An operator's own file is absent from the ledger and is
+        // therefore invisible to it — the same guarantee the launch-time
+        // retraction gives.
+        let fw_base = TempDir::new().unwrap();
+        let fw_root = fw_root_under(&fw_base);
+        write_sources(&fw_root.join("framework").join("agents"));
+        let workspace = TempDir::new().unwrap();
+        make_linked_worktree(workspace.path());
+        seed_legacy_workspace_roster(&fw_root, workspace.path());
+
+        let hand_placed = workspace.path().join(".claude/agents/my-own-agent.md");
+        let mine = "---\nname: my-own-agent\ndescription: mine\n---\n\nMine.\n";
+        fs::write(&hand_placed, mine).unwrap();
+
+        seed_sessions(
+            &fw_root,
+            vec![intact_session("tm-sweep-test", workspace.path())],
+        )
+        .await;
+
+        reset_active_workspace_agents(&fw_root, None).await.unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&hand_placed).unwrap(),
+            mine,
+            "a hand-placed agent must survive the sweep byte-identical"
+        );
     }
 
     #[tokio::test]
@@ -612,29 +717,36 @@ mod tests {
             "fixture must model the linked-worktree .git FILE this test exists for"
         );
 
+        seed_legacy_workspace_roster(&fw_root, &live);
         seed_sessions(&fw_root, vec![intact_session("tm-live-worktree", &live)]).await;
 
         let outcomes = reset_active_workspace_agents(&fw_root, None).await.unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].skipped_reason, None, "must NOT be refused");
-        assert_eq!(outcomes[0].result.recomposed.len(), 2);
+        assert_eq!(outcomes[0].result.retracted.len(), 2);
         assert!(
-            live.join(".claude/agents/engineer.md").exists(),
-            "a live linked worktree must still be served"
+            !live.join(".claude/agents/engineer.md").exists(),
+            "a live linked worktree must still be served (and therefore cleaned)"
         );
     }
 
     #[tokio::test]
-    async fn sweep_respects_per_workspace_manifest_exclude() {
-        // Issue #2462/#2508: a workspace whose PROJECT manifest excludes
-        // `engineer` must come back from the sweep WITHOUT engineer.md, and
-        // the exclusion must be visible in `deselected`.
+    async fn sweep_ignores_the_project_manifest_exclude() {
+        // Issue #2462/#2508 made the sweep honour a project's `[agents]
+        // exclude` because it was RECOMPOSING into that project's workspace,
+        // and resurrecting an agent the project excluded would have been wrong.
+        // #4409 inverts the situation: nothing bundled deploys into a workspace
+        // any more, so a project's selection governs nothing here — and a
+        // shadowing copy of an EXCLUDED agent is, if anything, more urgent to
+        // remove, not exempt. This pins that the sweep clears the whole
+        // framework-owned set regardless of the project manifest.
         let fw_base = TempDir::new().unwrap();
         let fw_root = fw_root_under(&fw_base);
         write_sources(&fw_root.join("framework").join("agents"));
         let workspace = TempDir::new().unwrap();
         make_linked_worktree(workspace.path());
+        seed_legacy_workspace_roster(&fw_root, workspace.path());
         let project_manifest_dir = workspace.path().join(".trusty-mpm");
         fs::create_dir_all(&project_manifest_dir).unwrap();
         fs::write(
@@ -652,14 +764,14 @@ mod tests {
         let outcomes = reset_active_workspace_agents(&fw_root, None).await.unwrap();
 
         assert_eq!(outcomes.len(), 1);
-        assert_eq!(
-            outcomes[0].result.recomposed,
-            vec!["base-agent.md".to_string()]
-        );
-        assert_eq!(outcomes[0].result.deselected, vec!["engineer".to_string()]);
+        assert_eq!(outcomes[0].result.retracted.len(), 2);
         assert!(
             !workspace.path().join(".claude/agents/engineer.md").exists(),
-            "a project-excluded agent must never land in that project's workspace"
+            "an excluded agent's shadowing copy must be retracted, not exempted"
+        );
+        assert!(
+            outcomes[0].result.deselected.is_empty(),
+            "no plan is consulted any more, so nothing can be reported deselected"
         );
     }
 }

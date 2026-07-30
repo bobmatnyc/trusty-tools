@@ -31,15 +31,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     only manifest-tracked, framework-owned files; hand-placed and user-owned
     files survive byte-identical, and a corrupt manifest aborts the retraction
     rather than guessing.
-  - `tm doctor`'s `agents` and `agent_skills` probes and the deployment-
-    completeness gate follow the roster to the new tier. Probing the workspace
-    tier after the flip would have reported every healthy install as broken and
-    driven the spawn/resume gate into a permanent repair loop.
-  - Known consequence: the agent deploy tier is machine-global, so a
-    per-project `[agents] exclude` no longer removes an agent from a session's
-    view — it only refrains from writing it, and a sibling project that selects
-    the agent still puts it there. Per-project agent SELECTION at a shared tier
-    is not solved by this change.
+  - `tm doctor`'s `agents` and `agent_skills` probes, `tm agent list`/`tm agent
+    show`, and the deployment-completeness gate follow the roster to the new
+    tier. Probing the workspace tier after the flip would have reported every
+    healthy install as broken and driven the spawn/resume gate into a permanent
+    repair loop; `tm agent list` would have reported an empty roster.
+  - `tm install --reset-agents --reset-agents-workspaces` now RETRACTS a
+    workspace's bundled agents instead of force-recomposing them. Recomposing
+    was correct while workspaces were a deploy destination; after the flip it
+    re-created, inside live sessions' workspaces, exactly the shadow this change
+    removes. The `--reset-agents <names>` scope is still honored, and removals
+    are reported on their own line.
+  - The agent deploy ledger's read-modify-write is now serialised across
+    processes by an advisory lock on a `.trusty-mpm-manifest.json.lock` sidecar,
+    and every atomic write stages through a per-process, per-attempt temp name
+    instead of a fixed `.tmp` sibling. Both were survivable while each workspace
+    had its own deploy directory; against ONE machine-global directory shared by
+    every concurrent session launch, sync-assets run, and `tm catalog apply`,
+    the fixed temp name lets two writers publish torn JSON and the unlocked
+    load-modify-write silently drops one writer's entries — after which the
+    files those entries described are treated as untracked and frozen, which is
+    #4408's failure shape reached by a race.
+  - Known consequences of a machine-global agent tier, neither solved here:
+    - A per-project `[agents] exclude` no longer removes an agent from a
+      session's view — it only refrains from writing it, and a sibling project
+      that selects the agent still puts it there.
+    - `tm catalog apply --prune` now deletes from the one directory EVERY live
+      session reads, mid-session, driven by the daemon-wide baseline manifest.
+      Before the flip it pruned `~/.claude/agents`, which no managed session
+      read, so the blast radius was effectively nil. `--prune` remains opt-in
+      and still only removes manifest-tracked managed files, but an operator
+      running it now affects every running session, not one workspace.
 
 ### Added
 

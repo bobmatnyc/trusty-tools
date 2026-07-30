@@ -1754,6 +1754,74 @@ fn prepare_session_default_deploys_all_seeded_agents() {
 
 #[test]
 #[serial_test::serial]
+fn prepare_session_never_retracts_the_operator_home_agents_tier() {
+    // Issue #4409, code-critic CRITICAL: the #4409 retraction must be a
+    // WORKSPACE operation. `prepare_session` is called with a HOME-TIER
+    // `FrameworkPaths::default()` on two production paths — non-git
+    // `tm session start` (`commands/session/start.rs`) and the TUI `/connect`
+    // (`client/http_client/session_connect.rs`) — where `fw.claude_agents_dir()`
+    // IS the operator's `~/.claude/agents`. Aiming retraction at that field
+    // deleted the roster, the ownership manifest, and the directory itself out
+    // of a Claude Code install trusty-mpm does not own. Binding the retraction
+    // to `project_dir` instead makes that structurally impossible; this pins it.
+    //
+    // `run_prepare_session_never_writes_real_home_claude_dirs` does NOT cover
+    // this: the standalone driver passes a MANAGED `fw`, so it never exercises
+    // the home-tier shape.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+    seed_bundled_agents(&fw);
+
+    // Stand in for a pre-#4409 `tm install`: a fully deployed, manifest-tracked
+    // bundled roster sitting in the operator's own `~/.claude/agents`.
+    let home_agents = fw.claude_agents_dir();
+    crate::core::agent_deployer::deploy_agents(&fw.agents, &home_agents).unwrap();
+    let before: Vec<String> = std::fs::read_dir(&home_agents)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        before.iter().any(|n| n == "rust-engineer.md"),
+        "fixture must genuinely deploy into the home tier, else this test is vacuous"
+    );
+    let body_before = std::fs::read_to_string(home_agents.join("rust-engineer.md")).unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        home_agents.is_dir(),
+        "prepare_session must not remove the operator's ~/.claude/agents directory"
+    );
+    let mut after: Vec<String> = std::fs::read_dir(&home_agents)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let mut before_sorted = before;
+    before_sorted.sort();
+    after.sort();
+    assert_eq!(
+        after, before_sorted,
+        "prepare_session must leave the operator's ~/.claude/agents untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home_agents.join("rust-engineer.md")).unwrap(),
+        body_before,
+        "every file in the operator's home tier must survive byte-identical"
+    );
+    assert!(
+        home_agents
+            .join(crate::core::agent_manifest::MANIFEST_FILE)
+            .is_file(),
+        "the home tier's ownership manifest must survive too"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn prepare_session_manifest_filters_agent_set() {
     // Why: HR-2 — a project manifest's `[agents] include` must restrict WHICH
     // agents the harness deploys.

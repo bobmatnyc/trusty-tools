@@ -585,7 +585,18 @@ fn prepare_session_inner(
     // forever — and nothing refreshes it any more. Only manifest-tracked,
     // framework-owned files are removed; hand-placed and user-owned files are
     // untouched. Non-fatal, like every other roster step here.
-    match retract_framework_agents(&fw.claude_agents_dir()) {
+    //
+    // The target is `project_dir`'s OWN `.claude/agents`, spelled out rather
+    // than taken from `fw.claude_agents_dir()`. Those are the same directory
+    // for a managed `fw` (that is exactly what `for_managed_workspace` sets),
+    // but `fw` is a home-tier `FrameworkPaths::default()` on the non-git
+    // `tm session start` and TUI `/connect` paths — where
+    // `fw.claude_agents_dir()` is the operator's `~/.claude/agents`, and
+    // retracting it would delete the roster out of a Claude Code install that
+    // has nothing to do with trusty-mpm. Retraction is a WORKSPACE operation;
+    // binding it to the workspace path makes that structural.
+    // Test: `prepare_session_never_retracts_the_operator_home_agents_tier`.
+    match retract_framework_agents(&project_dir.join(".claude").join("agents")) {
         Ok(retracted) if !retracted.removed.is_empty() => {
             tracing::info!(
                 project_dir = %project_dir.display(),

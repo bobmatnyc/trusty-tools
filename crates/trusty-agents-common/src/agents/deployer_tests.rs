@@ -720,6 +720,32 @@ fn retract_missing_dir_is_a_noop() {
 }
 
 #[test]
+fn retract_filtered_respects_predicate() {
+    // #4409: `tm install --reset-agents <names> --reset-agents-workspaces`
+    // names a scope, and the workspace half of that sweep is a retraction. An
+    // entry the predicate rejects must stay BOTH on disk and in the ledger —
+    // dropping it from the ledger while leaving the file would reclassify it as
+    // untracked on the next run.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+    deploy_agents(src.path(), tgt.path()).unwrap();
+
+    let result = retract_framework_agents_filtered(tgt.path(), |stem| stem == "engineer").unwrap();
+
+    assert_eq!(result.removed, vec!["engineer.md".to_string()]);
+    assert!(!tgt.path().join("engineer.md").exists());
+    assert!(
+        tgt.path().join("base-agent.md").exists(),
+        "an agent outside the requested scope must survive"
+    );
+    assert!(
+        AgentManifest::load(tgt.path()).is_managed("base-agent.md"),
+        "a skipped entry must stay tracked, or the next deploy sees it as untracked"
+    );
+}
+
+#[test]
 fn retract_refuses_on_corrupt_manifest() {
     // Deleting files on the strength of an unreadable ownership ledger is the
     // exact failure mode the manifest exists to prevent.

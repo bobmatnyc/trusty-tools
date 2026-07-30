@@ -29,6 +29,12 @@
 //! exactly the framework-owned entries this deployer wrote into a directory
 //! that is no longer a deploy destination, using the same ownership predicate,
 //! and never touches an untracked or user-owned file.
+//! Both directions run their WHOLE load-modify-save cycle under
+//! [`crate::agents::manifest::with_agent_manifest_lock`] (#4409): the agent
+//! deploy target is now one machine-global directory shared by every concurrent
+//! session launch, sync-assets run, and catalog apply, so an unlocked cycle
+//! loses one writer's ledger entries and the files they described are then
+//! treated as untracked and frozen — #4408's shape, reached by a race.
 //! Test: `cargo test -p trusty-agents-common agents::deployer` covers a new
 //! deploy, a preserved user-owned file, an unchanged file, atomic writes,
 //! corrupt manifest detection, (#3556) a stale-broken-copy refresh plus a
@@ -44,7 +50,7 @@ use crate::agents::builder::{AgentBuildError, compose_agent, source_chain};
 use crate::agents::frontmatter::validate_frontmatter;
 use crate::agents::manifest::{
     AgentManifest, MANIFEST_FILE, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write,
-    checksum,
+    checksum, manifest_lock_path, with_agent_manifest_lock,
 };
 use crate::agents::metadata::agent_metadata_from_str;
 
@@ -171,13 +177,42 @@ pub fn deploy_agents_filtered(
     target_dir: &Path,
     select: impl Fn(&str) -> bool,
 ) -> Result<DeployResult, AgentBuildError> {
-    let mut result = DeployResult::default();
-
     // No source directory means nothing to deploy — an empty result, not an
-    // error, so a fresh install with no agents still succeeds.
+    // error, so a fresh install with no agents still succeeds. Checked BEFORE
+    // taking the ledger lock so a no-op deploy neither blocks on a concurrent
+    // writer nor creates a lock sidecar in a directory it will not touch.
     if !source_dir.is_dir() {
-        return Ok(result);
+        return Ok(DeployResult::default());
     }
+
+    // #4409: the ENTIRE load-modify-save cycle runs under the directory's
+    // exclusive ledger lock. `target_dir` is now one machine-global directory
+    // shared by every concurrent session launch, sync-assets run, and
+    // `tm catalog apply`; without this, two writers that both load before
+    // either saves silently drop each other's entries, and the files those
+    // entries describe are then treated as untracked and frozen (the #4408
+    // shape, via a race). See `manifest::with_agent_manifest_lock`.
+    with_agent_manifest_lock(target_dir, || {
+        deploy_agents_locked(source_dir, target_dir, select)
+    })
+}
+
+/// The body of [`deploy_agents_filtered`], run while holding the ledger lock.
+///
+/// Why: split out so the critical section is a single expression the lock
+/// helper can wrap, and so the lock's scope is impossible to misread — every
+/// manifest load, file write, and manifest save in this function happens with
+/// the lock held.
+/// What: the compose/classify/write/save pipeline documented on
+/// [`deploy_agents_filtered`]. Never call it directly; it is unsafe against
+/// concurrent writers by construction.
+/// Test: covered by every `deploy_*` test through the public wrapper.
+fn deploy_agents_locked(
+    source_dir: &Path,
+    target_dir: &Path,
+    select: impl Fn(&str) -> bool,
+) -> Result<DeployResult, AgentBuildError> {
+    let mut result = DeployResult::default();
 
     // Detect manifest corruption before touching any file. A corrupt manifest
     // must surface as an error — resetting to empty would reclassify all
@@ -433,10 +468,53 @@ pub struct RetractResult {
 /// `retract_refuses_on_corrupt_manifest`,
 /// `retract_removes_drifted_framework_file`.
 pub fn retract_framework_agents(target_dir: &Path) -> Result<RetractResult, AgentBuildError> {
-    let mut result = RetractResult::default();
+    // Default policy: retract every framework-owned entry.
+    retract_framework_agents_filtered(target_dir, |_name| true)
+}
+
+/// Retract the framework-owned agents in `target_dir` whose stem `select`
+/// accepts.
+///
+/// Why: `tm install --reset-agents <names> --reset-agents-workspaces` names a
+/// specific agent scope, and the workspace half of that sweep is a RETRACTION
+/// since #4409 (there is nothing legitimate to recompose into a workspace any
+/// more). Honouring the operator's stated scope there needs the same
+/// stem-predicate seam [`deploy_agents_filtered`] already provides for the
+/// deploy direction, so the two mirror each other rather than diverging.
+/// What: identical to [`retract_framework_agents`] except a framework-owned
+/// entry whose `.md`-stripped stem `select` rejects is left on disk AND left in
+/// the manifest — it is neither removed nor reported, exactly as if it were not
+/// framework-owned. [`retract_framework_agents`] delegates here with an
+/// accept-all predicate, so the unfiltered behavior is unchanged.
+/// Test: `retract_filtered_respects_predicate`.
+pub fn retract_framework_agents_filtered(
+    target_dir: &Path,
+    select: impl Fn(&str) -> bool,
+) -> Result<RetractResult, AgentBuildError> {
+    // A directory that was never deployed into has nothing to retract. Checked
+    // before the lock so the common no-op neither blocks nor CREATES the
+    // directory (which `with_agent_manifest_lock` would, to place its sidecar)
+    // — materialising an empty `.claude/agents/` in every workspace on every
+    // launch would be a visible regression of its own.
     if !target_dir.is_dir() {
-        return Ok(result);
+        return Ok(RetractResult::default());
     }
+
+    // #4409: same exclusive ledger lock the deploy path takes — retraction is a
+    // load-modify-save of the very same document.
+    with_agent_manifest_lock(target_dir, || retract_locked(target_dir, select))
+}
+
+/// The body of [`retract_framework_agents_filtered`], run holding the lock.
+///
+/// Why/What: mirrors [`deploy_agents_locked`] — the critical section is one
+/// expression so the lock's scope cannot be misread. Never call it directly.
+/// Test: covered by every `retract_*` test through the public wrapper.
+fn retract_locked(
+    target_dir: &Path,
+    select: impl Fn(&str) -> bool,
+) -> Result<RetractResult, AgentBuildError> {
+    let mut result = RetractResult::default();
 
     let mut manifest = match AgentManifest::load_checked(target_dir) {
         ManifestLoad::Ok(m) => m,
@@ -462,12 +540,23 @@ pub fn retract_framework_agents(target_dir: &Path) -> Result<RetractResult, Agen
             result.preserved.push(filename);
             continue;
         }
+        if !select(filename.trim_end_matches(".md")) {
+            continue;
+        }
         match std::fs::remove_file(target_dir.join(&filename)) {
             Ok(()) => {}
             // Already gone (operator deleted it, or a previous partial run):
             // still drop the ledger entry so the manifest stops claiming it.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(AgentBuildError::Io(e)),
+            Err(e) => {
+                // Persist what we HAVE removed before surfacing the failure.
+                // Returning early with the pruned entries only in memory would
+                // leave the on-disk ledger claiming files that are already
+                // gone — a window the next run self-heals (`NotFound` above is
+                // tolerated), but an avoidable one.
+                save_pruned(&manifest, target_dir, &result);
+                return Err(AgentBuildError::Io(e));
+            }
         }
         manifest.managed.remove(&filename);
         result.removed.push(filename);
@@ -493,6 +582,17 @@ pub fn retract_framework_agents(target_dir: &Path) -> Result<RetractResult, Agen
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(AgentBuildError::Io(e)),
         }
+        // The lock sidecar we are holding is the one file guaranteed to be
+        // here, so "empty" means "nothing but the sidecar". Removing it while
+        // still holding the lock is safe on Unix — `unlink` drops the NAME, not
+        // the open file description the lock lives on — and the directory is
+        // being abandoned, so a writer blocked on the now-orphaned inode simply
+        // proceeds against a directory with nothing left to race over. Only
+        // reached when the retraction removed every tracked file AND no
+        // hand-placed file remains; anything else leaves the sidecar in place.
+        if only_the_lock_sidecar_remains(target_dir)? {
+            let _ = std::fs::remove_file(manifest_lock_path(target_dir));
+        }
         if std::fs::read_dir(target_dir)?.next().is_none() {
             // Best-effort: a concurrent writer racing us here is harmless.
             let _ = std::fs::remove_dir(target_dir);
@@ -505,6 +605,53 @@ pub fn retract_framework_agents(target_dir: &Path) -> Result<RetractResult, Agen
         other => AgentBuildError::FrontmatterParse(other.to_string()),
     })?;
     Ok(result)
+}
+
+/// Whether `target_dir` holds nothing but the ledger lock sidecar.
+///
+/// Why: the "return the workspace to pristine" step wants to know whether the
+/// retraction emptied the directory, but the caller is HOLDING a lock whose
+/// sidecar lives in that very directory — so a naive `read_dir().next().is_none()`
+/// is never true and the cleanup silently stops working the moment locking is
+/// introduced. Naming the exception keeps the emptiness test honest.
+/// What: `true` when every entry is [`manifest_lock_path`]'s file name; `false`
+/// when any other entry (a hand-placed agent, a user-owned file) remains.
+/// Test: `retract_clears_manifest_and_dir_when_nothing_remains`,
+/// `retract_preserves_untracked_hand_placed_file`.
+fn only_the_lock_sidecar_remains(target_dir: &Path) -> Result<bool, AgentBuildError> {
+    let sidecar = manifest_lock_path(target_dir);
+    let sidecar_name = sidecar.file_name();
+    for entry in std::fs::read_dir(target_dir)? {
+        if Some(entry?.file_name().as_os_str()) != sidecar_name {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Best-effort persist of a partially-pruned manifest on the retraction error
+/// path.
+///
+/// Why: a mid-loop `remove_file` failure (e.g. `EACCES` on file 4 of 6) must
+/// not leave the ledger claiming the files already deleted. The subsequent
+/// `Err` return is what the caller acts on; this write only narrows the
+/// inconsistency window, so its own failure is deliberately swallowed — there
+/// is nothing useful to do about it and it must not mask the original error.
+/// What: saves `manifest` when this run removed anything; a no-op otherwise.
+/// Test: covered via `retract_removes_framework_owned_only`'s ledger
+/// assertions (the success path uses the same `save`); the failure path is
+/// filesystem-permission-dependent and not simulated.
+fn save_pruned(manifest: &AgentManifest, target_dir: &Path, result: &RetractResult) {
+    if result.removed.is_empty() {
+        return;
+    }
+    if let Err(e) = manifest.save(target_dir) {
+        tracing::warn!(
+            dir = %target_dir.display(),
+            "could not persist the partially-pruned agent manifest after a retraction \
+             failure; the next run self-heals: {e}"
+        );
+    }
 }
 
 #[cfg(test)]

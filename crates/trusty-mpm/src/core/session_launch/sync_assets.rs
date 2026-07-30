@@ -77,6 +77,19 @@ pub struct SyncAssetsReport {
     /// `false` only on a write failure (disk full, permissions); non-fatal —
     /// the agent/skill sync above still counts as having run.
     pub output_style_synced: bool,
+    /// Why the #4409 workspace retraction could not run, if it failed.
+    ///
+    /// Why: a failed retraction means this workspace's `.claude/agents/` may
+    /// still be SHADOWING the canonical config-dir roster — the one condition
+    /// an operator running sync-assets needs told about. `prepare_session`
+    /// reports the same failure through `PrepReport::roster_errors`; leaving it
+    /// as a bare log line here made the two paths disagree about whether the
+    /// signal is worth surfacing.
+    /// What: `None` on success (including the common "nothing to retract"
+    /// no-op); `Some(detail)` when [`retract_framework_agents`] returned `Err`
+    /// — e.g. a corrupt ownership ledger, which it refuses to act on.
+    /// Test: `sync_assets_reports_retraction_failure_on_corrupt_manifest`.
+    pub retraction_error: Option<String>,
 }
 
 /// Re-run the roster + output-style deploy against an EXISTING session's
@@ -126,12 +139,25 @@ pub fn sync_session_assets(
         })
         .map_err(|e| SyncAssetsError::AgentDeploy(e.to_string()))?;
 
-    if let Err(err) = retract_framework_agents(&fw.claude_agents_dir()) {
-        tracing::warn!(
-            project_dir = %project_dir.display(),
-            "workspace bundled-agent retraction failed during sync-assets: {err}"
-        );
-    }
+    // Targets `project_dir`'s own `.claude/agents`, not `fw.claude_agents_dir()`
+    // — see the identical note in `prepare_session_inner`. Retraction is a
+    // WORKSPACE operation, and a home-tier `fw` would otherwise aim it at the
+    // operator's `~/.claude/agents`.
+    let retraction_error =
+        match retract_framework_agents(&project_dir.join(".claude").join("agents")) {
+            Ok(_) => None,
+            Err(err) => {
+                // Surfaced on the report, not just logged: whether a workspace is
+                // still shadowing the canonical roster is the one signal an
+                // operator running sync-assets actually needs, and the
+                // `prepare_session` path already reports it via `roster_errors`.
+                tracing::warn!(
+                    project_dir = %project_dir.display(),
+                    "workspace bundled-agent retraction failed during sync-assets: {err}"
+                );
+                Some(err.to_string())
+            }
+        };
 
     let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
     let skill_deploy: DeployStats = deploy_all_skill_tiers(
@@ -152,6 +178,7 @@ pub fn sync_session_assets(
         skills_deployed: skill_deploy.deployed,
         skills_skipped: skill_deploy.skipped,
         output_style_synced,
+        retraction_error,
     })
 }
 
@@ -380,6 +407,58 @@ mod tests {
         assert!(
             ws_fw.agent_deploy_dir().join("rust-engineer.md").exists(),
             "the canonical config-dir tier must carry the roster instead"
+        );
+    }
+
+    #[test]
+    fn sync_assets_reports_retraction_failure_on_corrupt_manifest() {
+        // Whether a workspace is still shadowing the canonical roster is the
+        // signal an operator running sync-assets needs. A bare log line meant
+        // the CLI and daemon route could not see it, while the
+        // `prepare_session` path reported the identical failure through
+        // `roster_errors` — an asymmetry on the one thing worth surfacing.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fw = FrameworkPaths::under(tmp.path().join("home"));
+        fw.trusty_mpm_root = None;
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(
+            bundled.join("rust-engineer.md"),
+            "---\nname: rust-engineer\n---\nv1",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut ws_fw = fw.clone();
+        ws_fw.claude_agents = project_dir.join(".claude").join("agents");
+        ws_fw.claude_skills = project_dir.join(".claude").join("skills");
+
+        // An unreadable ownership ledger in the workspace: retraction refuses
+        // to act on it (correctly), and that refusal must reach the report.
+        let legacy = project_dir.join(".claude").join("agents");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join(crate::core::agent_manifest::MANIFEST_FILE),
+            b"not valid json{{{",
+        )
+        .unwrap();
+
+        let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
+
+        assert!(
+            report
+                .retraction_error
+                .as_deref()
+                .is_some_and(|e| e.contains("corrupt")),
+            "the refusal must be reported, got: {:?}",
+            report.retraction_error
+        );
+        // The asset refresh itself still succeeded — retraction is non-fatal.
+        assert!(
+            report
+                .agents_deployed
+                .contains(&"rust-engineer.md".to_string())
         );
     }
 }

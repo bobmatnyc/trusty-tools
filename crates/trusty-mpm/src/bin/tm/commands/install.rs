@@ -443,13 +443,22 @@ pub(crate) fn reset_report_lines(
             "\u{2298} {name} (excluded by this workspace's manifest)"
         ));
     }
+    // #4409: the workspace sweep removes shadowing bundled copies rather than
+    // recomposing them, so its removals need their own line.
+    for file in &reset.retracted {
+        lines.push(format!(
+            "\u{2717} {file} (retracted — bundled agents live in the tm-managed config dir)"
+        ));
+    }
     lines.push(format!(
-        "reset summary: {} recomposed, {} adopted, {} backed up, {} not found, {} deselected",
+        "reset summary: {} recomposed, {} adopted, {} backed up, {} not found, \
+         {} deselected, {} retracted",
         reset.recomposed.len(),
         reset.adopted.len(),
         reset.backed_up.len(),
         reset.not_found.len(),
-        reset.deselected.len()
+        reset.deselected.len(),
+        reset.retracted.len()
     ));
     lines
 }

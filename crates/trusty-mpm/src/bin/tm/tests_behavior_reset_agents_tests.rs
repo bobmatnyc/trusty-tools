@@ -105,6 +105,7 @@ fn reset_report_lines_summarizes_counts() {
         backed_up: vec!["b.md".to_string()],
         not_found: vec!["missing-agent".to_string()],
         deselected: vec![],
+        retracted: vec![],
     };
 
     let lines = reset_report_lines(&result);
@@ -136,6 +137,7 @@ fn reset_report_lines_shows_deselected() {
         backed_up: vec![],
         not_found: vec![],
         deselected: vec!["engineer".to_string()],
+        retracted: vec![],
     };
 
     let lines = reset_report_lines(&result);
