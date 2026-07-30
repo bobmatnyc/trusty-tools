@@ -836,6 +836,23 @@ fn a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported()
         !prompt.contains("NAMED_WORKFLOW"),
         "the named override cannot also apply once its own section has a legacy file"
     );
+    // Not just "one override was scanned" — the SPECIFIC section that lost to
+    // the legacy file, so a miscounted or wrong-section regression cannot pass
+    // this test by accident. `warn_unapplied` is only ever handed the entries
+    // `resolve_pm_prompt_with_roster` still considers unapplied, and this is
+    // that entry: same section (`Workflow`), same host (`CLAUDE.md`).
+    let scanned = scan_project(tmp.path());
+    assert_eq!(scanned.overrides.len(), 1, "the named override was scanned");
+    assert_eq!(
+        scanned.overrides[0].section,
+        SectionId::Workflow,
+        "the reported override is the WORKFLOW one the legacy file shadowed"
+    );
+    assert_eq!(
+        scanned.overrides[0].host,
+        tmp.path().join("CLAUDE.md"),
+        "the reported override was authored in CLAUDE.md, not a legacy file"
+    );
 }
 
 #[test]
@@ -912,10 +929,19 @@ fn identity_core_and_search_stay_reported_unapplied_on_the_legacy_path() {
     let (prompt, source) = resolve(tmp.path());
     assert_eq!(source, PromptSource::Legacy);
     assert!(!prompt.contains("NAMED_CORE"));
+    // Not just "one override was scanned" — the SPECIFIC section that has no
+    // slot on this path, so a miscounted or wrong-section regression cannot
+    // pass this test by accident.
+    let scanned = scan_project(tmp.path());
     assert_eq!(
-        scan_project(tmp.path()).overrides.len(),
+        scanned.overrides.len(),
         1,
         "and it is still reported, never silently"
+    );
+    assert_eq!(
+        scanned.overrides[0].section,
+        SectionId::Core,
+        "the reported override is the CORE one this legacy path cannot honour"
     );
 }
 

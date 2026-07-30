@@ -567,7 +567,8 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
 ///
 /// What: `Some(body)` returns `body` (trimmed), followed by the roster when
 /// `roster` is `Some`; `None` defers to [`delegation_with_roster`] unchanged.
-/// Test: `named_agent_delegation_override_applies_when_an_unrelated_legacy_file_forces_the_legacy_path`.
+/// Test: `an_unrelated_legacy_file_does_not_shadow_a_named_delegation_override`
+/// (`claude_md_sections_tests.rs`).
 fn delegation_with_named_override(named_override: Option<&str>, roster: Option<&str>) -> String {
     match named_override {
         Some(body) => match roster {
