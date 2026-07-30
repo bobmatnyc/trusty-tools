@@ -589,41 +589,40 @@ jobs:
           find target/debug/deps -name '*.rcgu.o' -delete
           echo "After sweep:"; du -sh target/debug 2>/dev/null || true
 
-      # #4402: per-crate failure attribution without changing HOW tests run.
+      # #4402: per-crate failure attribution without changing HOW tests run
+      # or adding a second build.
       #
-      # First attempt used `cargo nextest run --workspace` for both execution
-      # and attribution, since nextest labels every PASS/FAIL line with its
-      # owning crate natively. Reverted: nextest isolates each test in its
-      # OWN process, which is stricter than `cargo test`'s one-process-per-
-      # binary model. That surfaced a real, pre-existing bug on this PR's own
-      # CI run — trusty-memory's `add_alias_round_trip_through_prompt_cache`
-      # and `dispatch_discover_aliases_inserts_new_and_dedupes` rely on a
-      # `TRUSTY_SKIP_PALACE_ENFORCEMENT` env var that some OTHER test in the
-      # same process happens to set as a side effect (crates/trusty-memory/
-      # src/tools/palace_ops.rs:88-101); both pass reliably under plain
-      # `cargo test` (confirmed on main) and fail under nextest's per-test
-      # isolation. That's a genuine trusty-memory test-isolation bug worth
-      # its own fix, but this PR is workflow-only, so switching the runner
-      # is not a safe way to land it here.
+      # Two earlier attempts both cost more than the ~48s they were meant to
+      # save:
+      #   1. `cargo nextest run --workspace` replacing this step entirely —
+      #      nextest isolates every test in its own process (stricter than
+      #      `cargo test`'s one-process-per-binary model), which surfaced a
+      #      real, pre-existing trusty-memory test-order bug on this PR's own
+      #      CI run (add_alias_round_trip_through_prompt_cache and
+      #      dispatch_discover_aliases_inserts_new_and_dedupes implicitly
+      #      depend on a TRUSTY_SKIP_PALACE_ENFORCEMENT env var some other
+      #      test happens to set as a side effect in the shared process —
+      #      crates/trusty-memory/src/tools/palace_ops.rs:88-101). Both pass
+      #      reliably under plain `cargo test` on main. Reverted rather than
+      #      ship a runner switch that can turn a green suite red on
+      #      ordering alone; this PR is workflow-only, so fixing that bug is
+      #      out of scope here.
+      #   2. `cargo nextest list --workspace` (metadata-only, no test
+      #      execution) to build a name-to-crate manifest cross-referenced
+      #      against `cargo test`'s unchanged output: safe from the
+      #      isolation issue above, but measured on this PR's own CI run,
+      #      `cargo nextest list` resolves its own build fingerprint that
+      #      doesn't match `cargo test --workspace --no-run`'s and forced a
+      #      ~91s recompile of trusty-agents + trusty-agents-local — worse
+      #      than the step it was replacing.
       #
-      # Instead: keep executing tests exactly as `cargo test --workspace`
-      # always has (below, unchanged in behavior aside from #4402 fixes 1-2),
-      # and get attribution by cross-referencing its own `test <name> ...
-      # FAILED` lines — which name each failing test unambiguously
-      # regardless of interleaved concurrent-binary output — against a
-      # name-to-crate manifest from `cargo nextest list`. `list` only
-      # inspects already-built binaries; it runs zero test code, so it can't
-      # reintroduce the isolation problem above.
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - name: Build per-crate test-name manifest (attribution only, no execution)
-        run: |
-          cargo nextest list --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
-            --message-format json > nextest-manifest.json
-
+      # This version needs neither: a Rust panic message self-reports its
+      # own source path (`thread '<test>' panicked at crates/<crate>/...`),
+      # naming both the failing test and its crate in one line cargo test
+      # already prints, with no dependency on cross-binary output ordering
+      # and no extra tool or build. See .github/scripts/
+      # attribute_test_failures.py for the full rationale and doctest
+      # handling.
       - name: cargo test --workspace
         run: |
           if cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
