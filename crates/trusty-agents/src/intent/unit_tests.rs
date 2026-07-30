@@ -57,33 +57,30 @@ fn self_questions_are_conversational() {
 
 #[test]
 fn action_verbs_only_signal_implementation_with_an_unambiguous_signal() {
-    // Code-critic CRITICAL follow-up (2026-07-29): "script" is an AMBIGUOUS
-    // context word (Research-only) now, so "Write a Python script" alone no
-    // longer reaches Implementation.
+    // #4319 OWNER DECISION (2026-07-29, final iteration): "script" is an
+    // AMBIGUOUS context word (Research-only), so "Write a Python script"
+    // alone no longer reaches Implementation.
     assert_eq!(
         classify_intent("Write a Python script"),
         IntentClass::Research
     );
-    // "fix" is a hard verb -> Implementation regardless (also has a
-    // repo-file token, doubly confirming it).
+    // "fix" carries NO special status anymore — this reaches Implementation
+    // ONLY because of the repo-file token "main.rs" (`has_unambiguous_technical_signal`),
+    // not because "fix" is a hard verb.
     assert_eq!(
         classify_intent("Fix the bug in main.rs"),
         IntentClass::Implementation
     );
-    // #4319 code-critic CRITICAL third follow-up (2026-07-29): "tests" is
-    // now an AMBIGUOUS context word too (the tiny "plain verb +
+    // "tests" is an AMBIGUOUS context word (the tiny "plain verb +
     // tests/release" Implementation exception was deleted — it reopened
     // the crash class on "check my blood tests") -> Research.
     assert_eq!(classify_intent("Run the tests"), IntentClass::Research);
     // Same for "release" ("check the release date of the movie").
     assert_eq!(classify_intent("Build the release"), IntentClass::Research);
-    // Code-critic CRITICAL fifth follow-up (2026-07-29): "implement" is a
-    // hard verb, but hard verbs now ALSO require corroboration ("intent"/
+    // "implement" carries no special status either now; "intent"/
     // "classification" are not `TECHNICAL_CONTEXT_WORDS` entries and there's
     // no other unambiguous signal — no research verb or question word
-    // either, so this falls all the way to the default) — "implement a new
-    // morning routine" is the exact proven-regression shape this closes.
-    // -> Conversational, not Implementation.
+    // either, so this falls all the way to the default -> Conversational.
     assert_eq!(
         classify_intent("Implement intent classification"),
         IntentClass::Conversational
@@ -101,14 +98,16 @@ fn slash_commands_are_implementation() {
 }
 
 #[test]
-fn greeting_plus_task_is_implementation() {
+fn file_token_wins_over_greeting_prefix_regardless_of_verb() {
     // "script" is ambiguous context, and this ends in "?" (a question) ->
     // Research, not Implementation.
     assert_eq!(
         classify_intent("hi, can you write a script that adds two numbers?"),
         IntentClass::Research
     );
-    // "fix" is a hard verb -> wins over the greeting prefix regardless.
+    // Reaches Implementation because of the repo-file token "src/main.rs"
+    // (`has_unambiguous_technical_signal`) — NOT because "fix" is special;
+    // no verb of any kind wins over a greeting prefix by itself anymore.
     assert_eq!(
         classify_intent("Hello, please fix the failing test in src/main.rs"),
         IntentClass::Implementation
@@ -138,13 +137,16 @@ fn long_descriptive_input_with_ambiguous_signals_routes_to_research() {
 }
 
 #[test]
-fn help_me_with_a_hard_verb_is_implementation() {
-    // "debug" is a hard verb -> Implementation. There is no "help me"
-    // special case in `classify_intent` (deleted — code-critic CRITICAL
-    // fourth follow-up, 2026-07-29; see `classifier_tests_2::help_me_*`).
+fn help_me_debug_an_issue_is_research_not_implementation() {
+    // #4319 OWNER DECISION (2026-07-29, final iteration): "debug" no longer
+    // carries special status. "issue" is a `TECHNICAL_CONTEXT_WORDS` entry,
+    // so "debug" (action verb) + "issue" (context word) -> Research, not
+    // Implementation. There is no "help me" special case in
+    // `classify_intent` either (deleted — code-critic CRITICAL fourth
+    // follow-up, 2026-07-29; see `classifier_regression_tests::help_me_*`).
     assert_eq!(
         classify_intent("help me debug this issue"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 
@@ -224,12 +226,16 @@ fn short_question_mark_is_research() {
 }
 
 #[test]
-fn action_verb_wins_over_question_word() {
-    // "how do I fix this bug" — starts with "how" but contains "fix"
-    // (action verb) -> Implementation.
+fn leading_question_word_wins_over_any_verb() {
+    // #4319 OWNER DECISION (2026-07-29, final iteration): a leading question
+    // word is checked BEFORE `has_unambiguous_technical_signal`, and no verb
+    // — hard or plain — is evidence for Implementation anymore. "how do I
+    // fix this bug" now lands on Research (formally rescinded as a
+    // must-work-Implementation case by the owner; see `classify_intent`'s
+    // doc comment history, round 7).
     assert_eq!(
         classify_intent("how do I fix this bug"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 

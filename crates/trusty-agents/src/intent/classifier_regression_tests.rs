@@ -2,7 +2,14 @@
 //!
 //! Why: Split from `classifier_tests.rs` per #366 to keep each test file under
 //! the 500-line cap; wired via `#[path]` from `intent/mod.rs` so `super::*`
-//! still resolves to the `intent` module.
+//! still resolves to the `intent` module. Renamed from `classifier_tests_2.rs`
+//! (#4319, round 7) so `scripts/check_line_cap.sh`'s `*_tests.rs` test-file
+//! classification applies (3000 SLOC cap) — this file is 100% `#[cfg(test)]`
+//! content and had crossed the 500-SLOC production cap after the round-7
+//! regression-test additions; the `_2` suffix in the old name was an
+//! oversight from the original #366 split that excluded it from the same
+//! test-file exemption its siblings (`classifier_tests.rs`,
+//! `classifier_property_tests.rs`, `unit_tests.rs`) already had.
 //! Test: This module is itself part of the classifier test coverage.
 
 use super::*;
@@ -17,38 +24,37 @@ fn question_word_not_first_does_not_trigger_research() {
 }
 
 // =====================================================================
-// Section 9: Priority rules — ONLY hard verbs (route::TCODE_HARD_VERBS:
-// fix/debug/implement/refactor) win over everything. A plain action verb
-// no longer does (code-critic CRITICAL follow-up, 2026-07-29) — it loses to
-// a leading question word, a research verb, and even a generic
-// technical-context word (which is AMBIGUOUS, not unambiguous evidence).
+// Section 9: Priority rules — #4319 OWNER DECISION (2026-07-29, final
+// iteration): NO verb, hard or plain, wins over anything anymore. A leading
+// question word or a research verb always wins over ANY verb (hard or
+// plain) because they're checked first; a verb plus a
+// `TECHNICAL_CONTEXT_WORDS` co-occurrence is Research, never Implementation
+// (round 6 proved that combination still crashes on ordinary sentences that
+// use the SAME words already in the list — see
+// `hard_verb_polysemy_with_everyday_sense_context_word_is_research_not_implementation`
+// below).
 // =====================================================================
 
 #[test]
-fn hard_verb_plus_corroboration_beats_question_word() {
-    // "fix" is a hard verb (route::TCODE_HARD_VERBS) CORROBORATED by "bug"
-    // (a TECHNICAL_CONTEXT_WORDS entry) -> wins even over the leading
-    // question word "how". Code-critic CRITICAL fifth follow-up
-    // (2026-07-29): a BARE hard verb no longer wins unconditionally (see
-    // `classifier_property_tests::hard_verbs_require_corroboration_against_genuinely_non_technical_objects`),
-    // so this specific sentence only still works BECAUSE of "bug", not
-    // because "fix" alone is exempt from the question-word check.
+fn leading_question_word_beats_any_verb_even_with_corroboration() {
+    // "fix" + "bug" (a TECHNICAL_CONTEXT_WORDS entry) used to win over the
+    // leading question word "how" under the round-6 hard-verb-corroboration
+    // design. Round 7 deleted that path entirely — the leading question
+    // word is checked BEFORE any technical-signal logic and no verb ever
+    // reaches Implementation, so this now lands on Research.
     assert_eq!(
         classify_intent("how do I fix this bug"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 
 #[test]
 fn plain_verb_loses_to_question_word_and_research_verb() {
-    // Code-critic CRITICAL follow-up (2026-07-29): a PLAIN verb ("write",
-    // "deploy") no longer wins over a leading question word or a research
-    // verb — question-word/research-verb detection is checked BEFORE the
-    // unambiguous-technical-signal gate now, precisely so a genuine
+    // A verb ("write", "deploy") never wins over a leading question word or
+    // a research verb — question-word/research-verb detection is checked
+    // BEFORE the unambiguous-technical-signal gate, precisely so a genuine
     // question ("what does X do") lands on Research rather than a
-    // coincidental lexical match forcing Implementation. See
-    // `classifier_property_tests::plain_action_verbs_never_reach_implementation_from_context_alone`
-    // for the full verb x template matrix.
+    // coincidental lexical match forcing Implementation.
     assert_eq!(
         classify_intent("what should I write here"),
         IntentClass::Research
@@ -64,34 +70,22 @@ fn plain_verb_loses_to_question_word_and_research_verb() {
 }
 
 #[test]
-fn corroborated_hard_verb_wins_over_research_verb() {
-    // Code-critic CRITICAL fifth follow-up (2026-07-29): "code"/"module" are
-    // NOT `TECHNICAL_CONTEXT_WORDS` entries, so the original versions of
-    // these two sentences ("review and fix the code", "analyze then
-    // refactor the module") no longer reach Implementation on the bare hard
-    // verb alone — see `hard_verb_without_corroboration_loses_to_research_verb`
-    // below for that corrected behavior. Rewritten here with a genuine
-    // `TECHNICAL_CONTEXT_WORDS` co-occurrence ("bug"/"auth") so the ORIGINAL
-    // property this test pins — a corroborated hard verb still wins over a
-    // research verb in the same sentence — has real coverage.
+fn verb_plus_context_word_never_beats_research_verb() {
+    // #4319 OWNER DECISION (2026-07-29, final iteration): these two used to
+    // pin "a corroborated hard verb wins over a research verb in the same
+    // sentence" (round 5/6). That property no longer exists — no verb ever
+    // reaches Implementation, so the research verb ("review"/"analyze")
+    // determines Research regardless of what else is in the sentence.
     assert_eq!(
         classify_intent("review and fix the login bug"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
     assert_eq!(
         classify_intent("analyze then refactor the auth module"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
-}
-
-#[test]
-fn hard_verb_without_corroboration_loses_to_research_verb() {
-    // The exact sentences from the pre-fifth-follow-up version of
-    // `corroborated_hard_verb_wins_over_research_verb` above: neither
-    // "code" nor "module" is a `TECHNICAL_CONTEXT_WORDS` entry, so with no
-    // OTHER unambiguous signal, the research verb ("review"/"analyze") wins
-    // instead of the hard verb ("fix"/"refactor") -- Research, not
-    // Implementation.
+    // Same outcome without any TECHNICAL_CONTEXT_WORDS co-occurrence at
+    // all — the research verb alone already guarantees Research.
     assert_eq!(
         classify_intent("review and fix the code"),
         IntentClass::Research
@@ -103,22 +97,23 @@ fn hard_verb_without_corroboration_loses_to_research_verb() {
 }
 
 #[test]
-fn only_hard_verb_wins_over_greeting_prefix() {
+fn unambiguous_signal_wins_over_greeting_prefix_regardless_of_verb() {
     // "script" is an AMBIGUOUS context word (Research-only) and this
-    // sentence ends in "?", so it lands on Research now, not Implementation
-    // — "hi, can you ...?" is a question, not a command.
+    // sentence ends in "?", so it lands on Research — "hi, can you ...?" is
+    // a question, not a command.
     assert_eq!(
         classify_intent("hi, can you write a script that adds two numbers?"),
         IntentClass::Research
     );
-    // "fix" is a hard verb -> always wins, even over the greeting prefix
-    // (also has a repo-file token, doubly confirming Implementation).
+    // Wins over the greeting prefix because of the repo-file token
+    // "src/main.rs" (`has_unambiguous_technical_signal`) — NOT because
+    // "fix" is special; no verb of any kind carries that weight anymore.
     assert_eq!(
         classify_intent("Hello, please fix the failing test in src/main.rs"),
         IntentClass::Implementation
     );
-    // "run" is plain and "tests" is an AMBIGUOUS context word now (the
-    // tiny "tests"/"release" Implementation exception was deleted — #4319
+    // "run" is plain and "tests" is an AMBIGUOUS context word (the tiny
+    // "tests"/"release" Implementation exception was deleted — #4319
     // code-critic CRITICAL third follow-up: it reopened the same crash
     // class on "check my blood tests"/"check the release date of the
     // movie") -> Research, not Implementation.
@@ -258,28 +253,35 @@ fn genuine_coding_request_still_reaches_implementation_and_tcode() {
 }
 
 #[test]
-fn code_critic_critical_hard_verb_gate_must_work_cases() {
-    // #4319 code-critic CRITICAL fifth follow-up (2026-07-29): the four
-    // sentences the critic required be verified BEFORE implementing the
-    // hard-verb corroboration gate, verbatim, each still Implementation:
-    // - "fix the login bug": "bug" is a TECHNICAL_CONTEXT_WORDS entry.
-    assert_eq!(
-        classify_intent("fix the login bug"),
-        IntentClass::Implementation
-    );
-    // - "/fix the thing": leading slash, unaffected by this gate entirely.
+fn owner_rescinded_hard_verb_gate_must_work_cases_updated_for_round_7() {
+    // #4319 OWNER DECISION (2026-07-29, final iteration — seventh
+    // follow-up): the four sentences code-critic's fifth follow-up required
+    // as Implementation for the (now-deleted) hard-verb-corroboration gate.
+    // The owner has FORMALLY RESCINDED that requirement for the two that
+    // depended on a word list — round 6 proved the gate they satisfied is
+    // structurally unsafe. The two that depend on a syntactic signal
+    // (repo-file token, leading slash) are UNCHANGED.
+    //
+    // - "fix the login bug": "bug" is only a TECHNICAL_CONTEXT_WORDS entry
+    //   (no repo-file token, no snake_case, no error marker) -> now Research
+    //   (verb + context word), a DELIBERATE contract change, not a
+    //   regression.
+    assert_eq!(classify_intent("fix the login bug"), IntentClass::Research);
+    // - "/fix the thing": leading slash, unaffected — still Implementation.
     assert_eq!(
         classify_intent("/fix the thing"),
         IntentClass::Implementation
     );
-    // - "debug the auth middleware": "auth"/"middleware" are both
-    //   TECHNICAL_CONTEXT_WORDS entries.
+    // - "debug the auth middleware": "auth"/"middleware" are only
+    //   TECHNICAL_CONTEXT_WORDS entries -> now Research, a DELIBERATE
+    //   contract change.
     assert_eq!(
         classify_intent("debug the auth middleware"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
     // - "fix main.rs": ".rs" is a repo-file extension ->
-    //   has_unambiguous_technical_signal.
+    //   has_unambiguous_technical_signal — still Implementation, unaffected
+    //   by the word-list deletion.
     assert_eq!(classify_intent("fix main.rs"), IntentClass::Implementation);
 }
 
@@ -461,23 +463,20 @@ fn greeting_prefix_word_count_boundary_at_six() {
 // =====================================================================
 
 #[test]
-fn help_me_reaches_implementation_only_via_a_hard_verb() {
-    // "debug" is a hard verb -> Implementation, with no "help me" special
-    // case needed at all.
+fn help_me_never_reaches_implementation_from_a_verb_alone() {
+    // #4319 OWNER DECISION (2026-07-29, final iteration): "debug" carries no
+    // special status anymore. "issue" is a TECHNICAL_CONTEXT_WORDS entry, so
+    // this lands on Research (verb + context word), not Implementation.
     assert_eq!(
         classify_intent("help me debug this issue"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
     // Code-critic CRITICAL fourth follow-up (2026-07-29): bare "help me"
     // (and "help me <anything signal-free>") used to be an UNCONDITIONAL
     // `Implementation` special case — pre-existing on `origin/main`, not
-    // introduced by any of the #4319 fix rounds, and undetected for five of
-    // them because the only prior test for this branch
-    // ("help me debug this issue") independently satisfied the hard-verb
-    // path too. Deleted outright (see `classify_intent`'s doc comment) —
-    // nothing else in the crate keys off this prefix, and every genuine
-    // "help me fix/debug/implement/refactor ..." request still reaches
-    // Implementation via the hard-verb path with no special case at all.
+    // introduced by any of the #4319 fix rounds. Deleted outright (see
+    // `classify_intent`'s doc comment) — nothing else in the crate keys off
+    // this prefix.
     assert_eq!(classify_intent("help me"), IntentClass::Conversational);
 }
 
@@ -527,23 +526,18 @@ fn code_critic_critical_help_me_phrases_never_reach_implementation() {
 }
 
 #[test]
-fn code_critic_critical_hard_verb_polysemy_never_reaches_implementation() {
-    // #4319 code-critic CRITICAL fifth follow-up (2026-07-29): these 9
-    // phrases, verbatim from the critic's report, all classified
-    // Implementation under the (until this fix) unconditional
-    // `route::TCODE_HARD_VERBS` win — fix/debug/implement/refactor are
-    // polysemous in ordinary English (fix a drink, fix my hair, fix
-    // breakfast, fix me up on a date; debug meaning troubleshoot a feeling;
-    // implement meaning adopt a habit; refactor meaning reorganize a
-    // non-code thing) just as much as the nouns in
-    // `code_critic_critical_ordinary_nouns_never_reach_implementation`
-    // above. Five rounds hardened this classifier against polysemous NOUNS
-    // and never audited the 4 hard VERBS for their own everyday sense —
-    // the existing property test only ever paired them with templates that
-    // still read as the repair sense ("fix something", "fix a script").
-    // None of these 9 carry a `TECHNICAL_CONTEXT_WORDS` co-occurrence or a
-    // `has_unambiguous_technical_signal` hit, so none should reach
-    // Implementation now that hard verbs require corroboration too.
+fn hard_verb_polysemy_with_no_context_word_is_conversational() {
+    // #4319 code-critic CRITICAL fifth follow-up (2026-07-29), verbatim:
+    // these 9 phrases pair a hard verb with a genuinely non-technical
+    // object carrying NO `TECHNICAL_CONTEXT_WORDS` token at all —
+    // fix/debug/implement/refactor are polysemous in ordinary English (fix
+    // a drink, fix my hair, fix breakfast, fix me up on a date; debug
+    // meaning troubleshoot a feeling; implement meaning adopt a habit;
+    // refactor meaning reorganize a non-code thing). Under the round-6
+    // design (a bare hard verb won unconditionally) all 9 crashed to
+    // Implementation. Round 7 deletes every verb-based path to
+    // Implementation entirely, so — with no context word present either —
+    // these fall all the way through to the Conversational default.
     let hard_verb_polysemy_phrases = [
         "fix a drink",
         "fix my hair",
@@ -556,10 +550,72 @@ fn code_critic_critical_hard_verb_polysemy_never_reaches_implementation() {
         "refactor my life",
     ];
     for s in hard_verb_polysemy_phrases {
+        assert_eq!(
+            classify_intent(s),
+            IntentClass::Conversational,
+            "'{s}' must NEVER reach Implementation, and lands on Conversational (no context word present)"
+        );
+    }
+}
+
+#[test]
+fn hard_verb_polysemy_with_everyday_sense_context_word_is_research_not_implementation() {
+    // #4319 code-critic CRITICAL SIXTH follow-up (2026-07-29): the round-6
+    // design ("hard verb + TECHNICAL_CONTEXT_WORDS co-occurrence" ->
+    // Implementation) was disproven by these ordinary sentences — the
+    // first 5 verbatim from the critic's report, the rest constructed by
+    // the same method (pairing a hard verb with an object that happens to
+    // contain a TECHNICAL_CONTEXT_WORDS token in its everyday, non-software
+    // sense) to cover the list systematically rather than narrowly. The
+    // verb+context-word rule cannot distinguish technical from everyday
+    // sense — that's exactly why it grants only `Research`, never
+    // `Implementation` (see `TECHNICAL_CONTEXT_WORDS`'s doc comment). None
+    // of these 29 sentences (this test's 24 plus the 5-phrase bare-verb set
+    // above rounds out the full regression) should ever reach
+    // Implementation; these 24 land on Research specifically, since each
+    // carries a genuine action-verb + context-word pairing.
+    let phrases = [
+        "fix my gym session",
+        "debug the incident report from the fender bender",
+        "fix the queue at the deli counter",
+        "refactor the outage in our friendship",
+        "debug my unresponsive teenager",
+        "fix the timeout on my microwave",
+        "debug the cache of old receipts in my wallet",
+        "implement a better config for my morning routine",
+        "refactor the script for the school play",
+        "fix the container of leftovers in the fridge",
+        "debug the database of family recipes in the cookbook",
+        "fix the credentials dispute with my landlord",
+        "implement a certificate ceremony for the kids' graduation",
+        "refactor the pipeline of dishes piling up in the sink",
+        "fix the token my kid uses for the arcade",
+        "debug the server at the restaurant who forgot our order",
+        "implement the deployment of lawn chairs for the barbecue",
+        "fix the middleware seat mix-up on our flight booking",
+        "refactor the frontend yard landscaping",
+        "debug the backend room of the antique shop",
+        "fix the production of the school musical",
+        "implement the staging of furniture before the open house",
+        "fix the mix-up with my blood tests appointment",
+        "fix the release date mix-up for the movie premiere",
+        "refactor the regression line on my daughter's science fair poster",
+        "fix the issue with my neighbor over the fence line",
+        "debug the exceptions my toddler makes to the bedtime rule",
+        "refactor the codebase of grandma's recipe box",
+        "fix the bugs in my garden",
+        "debug the crash of my toy drone",
+    ];
+    for s in phrases {
         assert_ne!(
             classify_intent(s),
             IntentClass::Implementation,
-            "'{s}' must NEVER reach Implementation — this is the exact crash class #4319 exists to eliminate"
+            "'{s}' must NEVER reach Implementation — the exact crash class round 6 reopened"
+        );
+        assert_eq!(
+            classify_intent(s),
+            IntentClass::Research,
+            "'{s}' should land on Research (ambiguous verb + context word)"
         );
     }
 }
@@ -667,11 +723,14 @@ fn normalize_empty_and_punctuation() {
 
 #[test]
 fn real_world_task_requests() {
-    // Code-critic CRITICAL follow-up (2026-07-29): "script"/"api"/
-    // "endpoint"/"staging" are all AMBIGUOUS context words now
-    // (Research-only) — a plain verb ("write"/"create"/"deploy") plus one
-    // of them is no longer sufficient for Implementation. Only "refactor"
-    // (a hard verb) still reaches Implementation unconditionally.
+    // #4319 OWNER DECISION (2026-07-29, final iteration): "script"/"api"/
+    // "endpoint"/"staging"/"database" are all AMBIGUOUS context words
+    // (Research-only) — a verb ("write"/"create"/"deploy"/"refactor") plus
+    // one of them is no longer sufficient for Implementation. No verb has
+    // special status anymore, including "refactor" — round 6 proved
+    // "refactor" + a TECHNICAL_CONTEXT_WORDS word ("database") is exactly
+    // the exploitable combination (see
+    // `hard_verb_polysemy_with_everyday_sense_context_word_is_research_not_implementation`).
     assert_eq!(
         classify_intent("Write a Python script that formats data as a markdown table"),
         IntentClass::Research
@@ -682,7 +741,7 @@ fn real_world_task_requests() {
     );
     assert_eq!(
         classify_intent("Refactor the database module to use connection pooling"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
     assert_eq!(
         classify_intent("Deploy the staging environment"),
