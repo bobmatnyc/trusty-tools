@@ -2395,3 +2395,71 @@ async fn claude_session_id_persists_on_session() {
         "claude_session_id must survive a store reload (#1744)"
     );
 }
+
+#[tokio::test]
+async fn clear_claude_session_id_if_clears_on_exact_match() {
+    // Why (#4337): SessionEnd must be able to un-correlate its OWN ended
+    // session so the NEXT SessionStart can freely re-correlate, instead of a
+    // stale id blocking re-correlation forever.
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_claude_session_id(&record.id, "uuid-abc-123")
+        .await
+        .expect("set_claude_session_id");
+
+    mgr.clear_claude_session_id_if(&record.id, "uuid-abc-123")
+        .await
+        .expect("clear_claude_session_id_if");
+
+    let reloaded = mgr.get(&record.id).await.expect("get after clear");
+    assert_eq!(
+        reloaded.claude_session_id, None,
+        "an exact-match clear must remove claude_session_id (#4337)"
+    );
+}
+
+#[tokio::test]
+async fn clear_claude_session_id_if_leaves_a_different_id_untouched() {
+    // Why (#4337): a SessionEnd for an id that is NO LONGER the stored one
+    // (a fresher SessionStart already overwrote it) must never clobber the
+    // fresher value — the exact-match guard is the whole point.
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_claude_session_id(&record.id, "uuid-current")
+        .await
+        .expect("set_claude_session_id");
+
+    // A stale/unrelated id no longer matches the stored one — must be a no-op.
+    mgr.clear_claude_session_id_if(&record.id, "uuid-stale")
+        .await
+        .expect("clear_claude_session_id_if");
+
+    let reloaded = mgr.get(&record.id).await.expect("get after no-op clear");
+    assert_eq!(
+        reloaded.claude_session_id.as_deref(),
+        Some("uuid-current"),
+        "clearing with a non-matching expected id must leave the stored id untouched (#4337)"
+    );
+}
