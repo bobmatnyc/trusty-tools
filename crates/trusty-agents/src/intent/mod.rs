@@ -338,29 +338,41 @@ pub(crate) fn normalize(input: &str) -> String {
 /// tool-armed loop (Research), or full subprocess pipeline (Implementation).
 ///
 /// What: Applies heuristics in priority order — empty, slash command,
-/// greeting, closing, self-question, hard-action-verb scan, research-verb/
-/// question-word scan, unambiguous-technical-signal scan, trailing question
-/// mark, action-verb-plus-generic-context-word (Research), technical-
-/// context-word-alone (Research), then defaults to `Conversational` when no
-/// positive signal fired.
+/// greeting, closing, self-question, hard-verb-plus-corroboration scan,
+/// research-verb/question-word scan, unambiguous-technical-signal scan,
+/// trailing question mark, action-verb-plus-generic-context-word (Research),
+/// technical-context-word-alone (Research), then defaults to
+/// `Conversational` when no positive signal fired.
 ///
 /// **THE COMPLETE, EXHAUSTIVE list of every `return IntentClass::Implementation`
 /// in this function — cross-check this list against the source before
-/// trusting it; a code-critic CRITICAL finding (2026-07-29) proved a FOURTH,
-/// undocumented path (an unconditional `"help me "` prefix match, pre-existing
-/// on `origin/main`) had quietly falsified an earlier "only 3 paths" claim
-/// here for five fix rounds, because the only test covering it
-/// (`"help me debug this issue"`) independently satisfied the hard-verb path
-/// too, so no test ever exercised a signal-free `"help me ..."`. That path is
-/// now DELETED (see below) rather than re-verified as safe, precisely
-/// because "re-verify a special case is safe" is how it survived five audits
-/// undetected:**
+/// trusting it; the phrase "N total paths, and only these" has been
+/// asserted wrong TWICE in this doc comment's own history (a 4th path — an
+/// unconditional `"help me "` prefix, pre-existing on `origin/main` —
+/// survived five audits because its only test independently satisfied
+/// path 2; path 2 itself was then asserted "unconditional" for a sixth
+/// round before a code-critic CRITICAL finding proved the 4 hard verbs are
+/// polysemous too — "fix a drink", "fix my hair", "debug why I feel
+/// anxious", "refactor my life" all previously reached `Implementation`
+/// unconditionally on the bare verb). Re-verifying a special case as "safe"
+/// by hand is exactly how both prior gaps survived; this enumeration is
+/// only as trustworthy as the NEXT reader's willingness to grep the actual
+/// `return IntentClass::Implementation` sites rather than trust this
+/// prose:**
 /// 1. A leading `/` (slash command) — explicit, unambiguous user intent.
-/// 2. A hard verb (`route::TCODE_HARD_VERBS`: fix/debug/implement/refactor),
-///    anywhere in the input — wins even over a leading question word.
-/// 3. `has_unambiguous_technical_signal` — a repo-file-shaped token, a
-///    snake_case identifier, or an explicit error/stack-trace marker,
-///    anywhere in the input.
+///    Still unconditional; slash commands carry no polysemy.
+/// 2. A hard verb (`route::TCODE_HARD_VERBS`: fix/debug/implement/refactor)
+///    **combined with corroboration** — `has_unambiguous_technical_signal`
+///    OR a `TECHNICAL_CONTEXT_WORDS` co-occurrence — anywhere in the input.
+///    Checked before the question-word/research-verb branch below, so
+///    corroborated hard verbs still win over a leading question word
+///    ("how do I fix this bug" -> Implementation via "fix" + "bug"). A
+///    BARE hard verb with no corroboration ("fix a drink", "refactor my
+///    life") no longer reaches `Implementation` — sixth follow-up,
+///    code-critic CRITICAL, 2026-07-29.
+/// 3. `has_unambiguous_technical_signal` alone (no verb required) — a
+///    repo-file-shaped token, a snake_case identifier, or an explicit
+///    error/stack-trace marker, anywhere in the input.
 ///
 /// There is no fourth path. In particular: word count is never evidence
 /// (original #4319); a bare `ACTION_VERBS` hit is never evidence on its own
@@ -371,15 +383,26 @@ pub(crate) fn normalize(input: &str) -> String {
 /// "tests"/"release" (third follow-up: "check my blood tests"/"check the
 /// release date of the movie" still crashed — see
 /// `has_unambiguous_technical_signal`'s doc comment for why that narrower
-/// exception was deleted rather than shrunk further); and an unconditional
-/// `"help me "` prefix is not either (fourth follow-up, code-critic
-/// CRITICAL, 2026-07-29 — pre-existing on `origin/main`, not introduced by
-/// any of the prior three: "help me plan my week" / "help me relax" / "help
-/// me write a poem" and 10 more ordinary requests-for-assistance all
-/// reached `Implementation` and crashed the subprocess pipeline; deleted
-/// outright — `"help me fix the login bug"` already reaches
-/// `Implementation` via the hard-verb path with no special case at all, and
-/// nothing else in the crate keys off this prefix).
+/// exception was deleted rather than shrunk further); an unconditional
+/// `"help me "` prefix is not either (fourth follow-up — pre-existing on
+/// `origin/main`, deleted outright: "help me plan my week" / "help me
+/// relax" / "help me write a poem" and 10 more ordinary
+/// requests-for-assistance all reached `Implementation`; `"help me fix the
+/// login bug"` already reaches `Implementation` via path 2 with no special
+/// case at all); and a BARE hard verb is not either (fifth/sixth
+/// follow-up — see path 2 above).
+///
+/// Residual risk, stated plainly rather than claimed away: `TECHNICAL_CONTEXT_WORDS`
+/// is a fixed, necessarily incomplete list. A sentence combining a hard verb
+/// with a genuinely novel polysemous noun NOT in that list, and no other
+/// unambiguous signal, could in principle still reach `Implementation`
+/// unintentionally (e.g. a domain word this list hasn't been taught yet).
+/// This is the same residual shape every word-list-based heuristic has; it
+/// is NOT the same failure class as the five prior rounds (each of those
+/// was a demonstrated, unconditional, verb-alone-or-prefix-alone path with
+/// no corroboration requirement at all). Any specific phrase found to slip
+/// through should be added as a NEW verified regression test, not silently
+/// patched into the word list without one.
 ///
 /// Every ambiguous case is biased toward `Research` instead: `dispatch_task`
 /// (the tm/Tcode bridge) stays reachable from `Research` because
@@ -394,7 +417,8 @@ pub(crate) fn normalize(input: &str) -> String {
 /// research verbs, question words, clear task verbs, slash commands, the
 /// #4319 long-conversational-input regression, and edge cases;
 /// `classifier_tests_2::*` pins the four decision buckets including the
-/// 14-sentence CRITICAL regression and the 13-phrase "help me" regression.
+/// 14-sentence ordinary-noun regression, the 13-phrase "help me" regression,
+/// and the 9-phrase hard-verb-polysemy regression.
 pub fn classify_intent(input: &str) -> IntentClass {
     let trimmed = input.trim();
 
@@ -463,28 +487,40 @@ pub fn classify_intent(input: &str) -> IntentClass {
         }
     }
 
-    // #4319 code-critic CRITICAL follow-up (2026-07-29): `Implementation`
-    // requires an UNAMBIGUOUS signal. Two tiers:
-    //
-    // 1. The 4 "hard" verbs reused from `route::TCODE_HARD_VERBS`
-    //    (fix/debug/implement/refactor) ALWAYS win — they're concrete
-    //    enough on their own that `route_task` already makes this exact
-    //    judgment for the SAME verbs. "how do I fix this bug" ->
-    //    Implementation.
-    //    "how do I fix this bug" -> Implementation because "fix" wins even
-    //    over the leading question word "how".
-    if words.iter().any(|w| route::TCODE_HARD_VERBS.contains(w)) {
+    // #4319 code-critic CRITICAL fifth follow-up (2026-07-29): the 4 "hard"
+    // verbs reused from `route::TCODE_HARD_VERBS` (fix/debug/implement/
+    // refactor) used to win UNCONDITIONALLY on a bare token match — but
+    // they're polysemous too: "fix a drink", "fix my hair", "fix breakfast",
+    // "debug why I feel anxious", "implement a new morning routine",
+    // "refactor my life" all previously classified `Implementation` and
+    // reached the subprocess crash, proven by executing the classifier.
+    // Five rounds hardened this classifier against polysemous NOUNS
+    // (`TECHNICAL_CONTEXT_WORDS`) and never audited the 4 verbs for their
+    // own ordinary sense. A hard verb now ALSO needs corroboration — either
+    // `has_unambiguous_technical_signal` (repo-file token / snake_case
+    // identifier / error-or-stack-trace marker) or a `TECHNICAL_CONTEXT_WORDS`
+    // co-occurrence — before it wins. "how do I fix this bug" ->
+    // Implementation because "fix" (hard verb) + "bug" (context word) both
+    // present, checked BEFORE the question-word branch below, so it still
+    // wins over the leading question word "how". Absent that corroboration,
+    // a hard verb now falls through to Research/Conversational like every
+    // other verb — same "wrong Research guess costs one hop, wrong
+    // Implementation guess crashes the chat" principle already applied to
+    // plain verbs, generic context words, and code-artifact nouns above.
+    if words.iter().any(|w| route::TCODE_HARD_VERBS.contains(w))
+        && (has_unambiguous_technical_signal(trimmed, &words) || has_technical_context_word(&words))
+    {
         return IntentClass::Implementation;
     }
 
     // Research signal: starts with question word OR contains a research
     // verb. Checked BEFORE `has_unambiguous_technical_signal` below (unlike
-    // the hard-verb check above) so a genuine QUESTION about an identifier —
-    // "what does run_pm_task do" — still lands on Research instead of the
-    // snake_case-identifier check alone forcing Implementation. Contrast
-    // "find all uses of delegate_to_agent": no leading question word, so it
-    // falls through to the identifier check below and correctly reaches
-    // Implementation.
+    // the hard-verb-plus-corroboration check above) so a genuine QUESTION
+    // about an identifier — "what does run_pm_task do" — still lands on
+    // Research instead of the snake_case-identifier check alone forcing
+    // Implementation. Contrast "find all uses of delegate_to_agent": no
+    // leading question word, so it falls through to the identifier check
+    // below and correctly reaches Implementation.
     if starts_with_question_word || has_research_verb {
         return IntentClass::Research;
     }

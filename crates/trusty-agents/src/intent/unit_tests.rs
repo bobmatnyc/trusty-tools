@@ -77,10 +77,16 @@ fn action_verbs_only_signal_implementation_with_an_unambiguous_signal() {
     assert_eq!(classify_intent("Run the tests"), IntentClass::Research);
     // Same for "release" ("check the release date of the movie").
     assert_eq!(classify_intent("Build the release"), IntentClass::Research);
-    // "implement" is a hard verb -> Implementation regardless.
+    // Code-critic CRITICAL fifth follow-up (2026-07-29): "implement" is a
+    // hard verb, but hard verbs now ALSO require corroboration ("intent"/
+    // "classification" are not `TECHNICAL_CONTEXT_WORDS` entries and there's
+    // no other unambiguous signal — no research verb or question word
+    // either, so this falls all the way to the default) — "implement a new
+    // morning routine" is the exact proven-regression shape this closes.
+    // -> Conversational, not Implementation.
     assert_eq!(
         classify_intent("Implement intent classification"),
-        IntentClass::Implementation
+        IntentClass::Conversational
     );
 }
 

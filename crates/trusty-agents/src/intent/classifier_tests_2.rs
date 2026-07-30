@@ -25,9 +25,14 @@ fn question_word_not_first_does_not_trigger_research() {
 // =====================================================================
 
 #[test]
-fn hard_verb_wins_over_question_word() {
-    // "fix" is a hard verb (route::TCODE_HARD_VERBS) -> always wins, even
-    // over the leading question word "how".
+fn hard_verb_plus_corroboration_beats_question_word() {
+    // "fix" is a hard verb (route::TCODE_HARD_VERBS) CORROBORATED by "bug"
+    // (a TECHNICAL_CONTEXT_WORDS entry) -> wins even over the leading
+    // question word "how". Code-critic CRITICAL fifth follow-up
+    // (2026-07-29): a BARE hard verb no longer wins unconditionally (see
+    // `classifier_property_tests::hard_verbs_require_corroboration_against_genuinely_non_technical_objects`),
+    // so this specific sentence only still works BECAUSE of "bug", not
+    // because "fix" alone is exempt from the question-word check.
     assert_eq!(
         classify_intent("how do I fix this bug"),
         IntentClass::Implementation
@@ -59,14 +64,41 @@ fn plain_verb_loses_to_question_word_and_research_verb() {
 }
 
 #[test]
-fn hard_verb_wins_over_research_verb() {
+fn corroborated_hard_verb_wins_over_research_verb() {
+    // Code-critic CRITICAL fifth follow-up (2026-07-29): "code"/"module" are
+    // NOT `TECHNICAL_CONTEXT_WORDS` entries, so the original versions of
+    // these two sentences ("review and fix the code", "analyze then
+    // refactor the module") no longer reach Implementation on the bare hard
+    // verb alone — see `hard_verb_without_corroboration_loses_to_research_verb`
+    // below for that corrected behavior. Rewritten here with a genuine
+    // `TECHNICAL_CONTEXT_WORDS` co-occurrence ("bug"/"auth") so the ORIGINAL
+    // property this test pins — a corroborated hard verb still wins over a
+    // research verb in the same sentence — has real coverage.
     assert_eq!(
-        classify_intent("review and fix the code"),
+        classify_intent("review and fix the login bug"),
         IntentClass::Implementation
     );
     assert_eq!(
-        classify_intent("analyze then refactor the module"),
+        classify_intent("analyze then refactor the auth module"),
         IntentClass::Implementation
+    );
+}
+
+#[test]
+fn hard_verb_without_corroboration_loses_to_research_verb() {
+    // The exact sentences from the pre-fifth-follow-up version of
+    // `corroborated_hard_verb_wins_over_research_verb` above: neither
+    // "code" nor "module" is a `TECHNICAL_CONTEXT_WORDS` entry, so with no
+    // OTHER unambiguous signal, the research verb ("review"/"analyze") wins
+    // instead of the hard verb ("fix"/"refactor") -- Research, not
+    // Implementation.
+    assert_eq!(
+        classify_intent("review and fix the code"),
+        IntentClass::Research
+    );
+    assert_eq!(
+        classify_intent("analyze then refactor the module"),
+        IntentClass::Research
     );
 }
 
@@ -223,6 +255,32 @@ fn genuine_coding_request_still_reaches_implementation_and_tcode() {
         crate::intent::route::route_task(task),
         crate::intent::route::BridgeRoute::Tcode
     );
+}
+
+#[test]
+fn code_critic_critical_hard_verb_gate_must_work_cases() {
+    // #4319 code-critic CRITICAL fifth follow-up (2026-07-29): the four
+    // sentences the critic required be verified BEFORE implementing the
+    // hard-verb corroboration gate, verbatim, each still Implementation:
+    // - "fix the login bug": "bug" is a TECHNICAL_CONTEXT_WORDS entry.
+    assert_eq!(
+        classify_intent("fix the login bug"),
+        IntentClass::Implementation
+    );
+    // - "/fix the thing": leading slash, unaffected by this gate entirely.
+    assert_eq!(
+        classify_intent("/fix the thing"),
+        IntentClass::Implementation
+    );
+    // - "debug the auth middleware": "auth"/"middleware" are both
+    //   TECHNICAL_CONTEXT_WORDS entries.
+    assert_eq!(
+        classify_intent("debug the auth middleware"),
+        IntentClass::Implementation
+    );
+    // - "fix main.rs": ".rs" is a repo-file extension ->
+    //   has_unambiguous_technical_signal.
+    assert_eq!(classify_intent("fix main.rs"), IntentClass::Implementation);
 }
 
 // =====================================================================
@@ -460,6 +518,44 @@ fn code_critic_critical_help_me_phrases_never_reach_implementation() {
         "help me calm down",
     ];
     for s in ordinary_help_me_phrases {
+        assert_ne!(
+            classify_intent(s),
+            IntentClass::Implementation,
+            "'{s}' must NEVER reach Implementation — this is the exact crash class #4319 exists to eliminate"
+        );
+    }
+}
+
+#[test]
+fn code_critic_critical_hard_verb_polysemy_never_reaches_implementation() {
+    // #4319 code-critic CRITICAL fifth follow-up (2026-07-29): these 9
+    // phrases, verbatim from the critic's report, all classified
+    // Implementation under the (until this fix) unconditional
+    // `route::TCODE_HARD_VERBS` win — fix/debug/implement/refactor are
+    // polysemous in ordinary English (fix a drink, fix my hair, fix
+    // breakfast, fix me up on a date; debug meaning troubleshoot a feeling;
+    // implement meaning adopt a habit; refactor meaning reorganize a
+    // non-code thing) just as much as the nouns in
+    // `code_critic_critical_ordinary_nouns_never_reach_implementation`
+    // above. Five rounds hardened this classifier against polysemous NOUNS
+    // and never audited the 4 hard VERBS for their own everyday sense —
+    // the existing property test only ever paired them with templates that
+    // still read as the repair sense ("fix something", "fix a script").
+    // None of these 9 carry a `TECHNICAL_CONTEXT_WORDS` co-occurrence or a
+    // `has_unambiguous_technical_signal` hit, so none should reach
+    // Implementation now that hard verbs require corroboration too.
+    let hard_verb_polysemy_phrases = [
+        "fix a drink",
+        "fix my hair",
+        "fix breakfast",
+        "fix me up with your friend",
+        "debug why I feel anxious",
+        "implement a new morning routine",
+        "implement better habits",
+        "refactor my schedule",
+        "refactor my life",
+    ];
+    for s in hard_verb_polysemy_phrases {
         assert_ne!(
             classify_intent(s),
             IntentClass::Implementation,

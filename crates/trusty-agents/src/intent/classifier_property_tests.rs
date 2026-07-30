@@ -124,16 +124,14 @@ fn slash_prefix_always_implementation() {
 }
 
 // =====================================================================
-// Invariant 5 (REVISED AGAIN, code-critic CRITICAL follow-up, 2026-07-29):
-// an action verb no longer unconditionally dominates, and — after the
-// critic PROVED (by executing the classifier, not reasoning about it) that
-// the previous "plain verb + ANY technical-context word" rule still crashed
-// the subprocess pipeline on ordinary sentences ("check my token balance") —
-// a plain verb can NO LONGER reach Implementation via a context word at
-// all. Only 4 of the 23 `ACTION_VERBS` entries (`route::TCODE_HARD_VERBS`:
-// fix/debug/implement/refactor) are unconditionally sufficient; the other
-// 19 NEVER reach Implementation from verb-plus-context alone, empirically
-// pinned across all 6 templates:
+// Invariant 5 (REVISED A THIRD TIME, code-critic CRITICAL follow-up,
+// 2026-07-29): an action verb no longer unconditionally dominates, and —
+// after the critic PROVED (by executing the classifier, not reasoning about
+// it) that the previous "plain verb + ANY technical-context word" rule
+// still crashed the subprocess pipeline on ordinary sentences ("check my
+// token balance") — a plain verb can NO LONGER reach Implementation via a
+// context word at all. The other 19 NEVER reach Implementation from
+// verb-plus-context alone, empirically pinned across all 6 templates:
 // - context-free ("{v} something", "please {v} the thing") -> Conversational
 // - question-shaped ("can you {v} it", "what should I {v}") -> Research
 //   (the leading question word wins, not the verb)
@@ -147,27 +145,108 @@ fn slash_prefix_always_implementation() {
 // if it's raining tomorrow" still hit Implementation) AND the corner the
 // FIRST follow-up reopened wider ("check my token balance" also still hit
 // Implementation, because "token" was treated as sufficient context).
+//
+// A FOURTH follow-up (code-critic CRITICAL, 2026-07-29) then proved the 4
+// `route::TCODE_HARD_VERBS` (fix/debug/implement/refactor) — previously
+// exempt from all of the above, winning UNCONDITIONALLY on a bare token
+// match — are polysemous too ("fix a drink", "debug why I feel anxious",
+// "refactor my life" all still crashed). The blind spot: the ORIGINAL
+// version of this exact test only ever exercised hard verbs against the
+// same 6 templates above, every one of which still reads as the repair
+// sense once a technical-context word is added ("hello, fix a script")
+// — nothing ever probed a hard verb against a genuinely non-technical
+// object. Hard verbs now behave IDENTICALLY to plain verbs across these 6
+// templates (both require corroboration; `hard_verbs_never_reach_implementation_from_bare_verb_alone`
+// below pins the 6-template matrix for hard verbs); the ONE remaining
+// difference is hard verbs win even over a LEADING question word/research
+// verb once corroborated (`hard_verb_plus_corroboration_beats_question_word`
+// in `classifier_tests_2.rs`), while corroborated plain verbs never do
+// (they only ever reach Research, per the second follow-up above).
 // =====================================================================
 
 #[test]
-fn hard_action_verbs_always_dominate() {
+fn hard_verbs_never_reach_implementation_from_bare_verb_alone() {
     let hard_verbs = ["fix", "debug", "implement", "refactor"];
-    let contexts = [
-        "{v} something",
-        "please {v} the thing",
+    let context_free = ["{v} something", "please {v} the thing"];
+    let never_implementation_without_corroboration = [
         "can you {v} it",
         "explain how to {v} a test",
         "what should I {v}",
-        "hello, {v} a script",
     ];
+
     for verb in &hard_verbs {
-        for ctx in &contexts {
+        for ctx in &context_free {
             let input = ctx.replace("{v}", verb);
             assert_eq!(
                 classify_intent(&input),
-                IntentClass::Implementation,
-                "hard verb '{}' in '{}' should be Implementation",
+                IntentClass::Conversational,
+                "hard verb '{}' in context-free '{}' should be Conversational, not Implementation",
                 verb,
+                input
+            );
+        }
+        for ctx in &never_implementation_without_corroboration {
+            let input = ctx.replace("{v}", verb);
+            assert_ne!(
+                classify_intent(&input),
+                IntentClass::Implementation,
+                "hard verb '{}' in '{}' must NEVER reach Implementation without corroboration",
+                verb,
+                input
+            );
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Research,
+                "hard verb '{}' in '{}' should land on Research",
+                verb,
+                input
+            );
+        }
+        // "hello, {v} a script" DOES reach Implementation — "script" is a
+        // TECHNICAL_CONTEXT_WORDS entry, so this is corroborated, not a
+        // bare-verb win. Included here (rather than a bare-verb template)
+        // specifically to confirm corroboration still works when present.
+        let corroborated = format!("hello, {verb} a script");
+        assert_eq!(
+            classify_intent(&corroborated),
+            IntentClass::Implementation,
+            "hard verb '{}' plus context word 'script' in '{}' SHOULD be Implementation",
+            verb,
+            corroborated
+        );
+    }
+}
+
+#[test]
+fn hard_verbs_require_corroboration_against_genuinely_non_technical_objects() {
+    // Code-critic CRITICAL fifth follow-up (2026-07-29): the blind spot that
+    // let hard verbs stay unconditional for six rounds — every existing
+    // test paired them with either a technical noun or a template that
+    // still read as the repair sense. This exercises each hard verb
+    // against objects with an UNAMBIGUOUSLY non-technical, everyday
+    // reading and NO other signal. None of these 36 combinations (4 verbs x
+    // 9 objects) should ever reach Implementation.
+    let hard_verbs = ["fix", "debug", "implement", "refactor"];
+    let non_technical_objects = [
+        "a drink",
+        "my hair",
+        "breakfast",
+        "my schedule",
+        "my life",
+        "a new morning routine",
+        "better habits",
+        "why I feel anxious",
+        "me up with your friend",
+    ];
+    for verb in &hard_verbs {
+        for obj in &non_technical_objects {
+            let input = format!("{verb} {obj}");
+            assert_ne!(
+                classify_intent(&input),
+                IntentClass::Implementation,
+                "hard verb '{}' with non-technical object '{}' ('{}') must NOT reach Implementation",
+                verb,
+                obj,
                 input
             );
         }

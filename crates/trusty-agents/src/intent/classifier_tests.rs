@@ -232,20 +232,35 @@ fn slash_command_with_whitespace_prefix() {
 // insufficient EVEN WITH a generic technical-context word alongside it
 // (that combination is ambiguous and lands on `Research`; see
 // `TECHNICAL_CONTEXT_WORDS`'s doc comment for the proven regression this
-// closes). Only 4 of the 23 entries — the hard verbs — still trigger
-// Implementation from the bare verb alone; the other 19 never do, from any
-// amount of generic context.
+// closes). None of the 23 entries — INCLUDING the 4 hard verbs, since the
+// fifth follow-up (code-critic CRITICAL, 2026-07-29: "fix a drink"/"debug
+// why I feel anxious"/"refactor my life" all previously crashed) — trigger
+// Implementation from the bare verb alone; ALL 23 need corroboration (hard
+// verbs: `has_unambiguous_technical_signal` OR a `TECHNICAL_CONTEXT_WORDS`
+// co-occurrence; the other 19: never, from any amount of generic context —
+// see `plain_action_verbs_never_trigger_implementation_from_context_alone`
+// below).
 
 #[test]
-fn hard_action_verbs_trigger_implementation_without_context() {
+fn hard_action_verbs_require_corroboration_too() {
     let hard_verbs = ["fix", "debug", "implement", "refactor"];
     for verb in &hard_verbs {
-        let input = format!("{} something now", verb);
-        assert_eq!(
-            classify_intent(&input),
+        // Bare verb, no corroboration -> must NOT reach Implementation.
+        let bare = format!("{} something now", verb);
+        assert_ne!(
+            classify_intent(&bare),
             IntentClass::Implementation,
-            "'{}' should trigger Implementation without extra context",
-            verb
+            "'{}' (bare hard verb, no corroboration) should NOT trigger Implementation",
+            bare
+        );
+        // Same verb, corroborated via a TECHNICAL_CONTEXT_WORDS entry
+        // ("bug") -> Implementation.
+        let corroborated = format!("{} the login bug", verb);
+        assert_eq!(
+            classify_intent(&corroborated),
+            IntentClass::Implementation,
+            "'{}' (hard verb + 'bug' corroboration) should trigger Implementation",
+            corroborated
         );
     }
 }
