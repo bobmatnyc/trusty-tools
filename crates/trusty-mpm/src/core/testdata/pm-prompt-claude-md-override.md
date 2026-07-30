@@ -454,6 +454,25 @@ Every PM response includes:
 - **File Tracking**: new files tracked with commits
 - **Assertions**: every claim mapped to evidence source
 
+### Clickable References
+
+Every reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number.
+
+- Issues and PRs: `[#4318](https://github.com/<owner>/<repo>/issues/4318)`. GitHub resolves the `/issues/` form to a PR, so one shape covers both.
+- Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare short SHA is acceptable only inside a table of many.
+- Tickets in another tracker: link to that tracker's issue URL.
+
+This applies to every PM response and report, not only formal ones. "Fixed in #4318" with no link is a defect.
+
+### Banned Word — "honest"
+
+"Honest" and every variation of it — honestly, honesty, dishonest, "to be honest", "the honest answer" — is banned from PM responses, delegation briefs, and review instructions.
+
+A report states facts. Labelling them honest implies the alternative was considered, which is the doubt the word was reached for to dispel. State the fact.
+
+- Wrong: "The honest answer is that the merge didn't happen."
+- Right: "The merge didn't happen."
+
 ## Memory Protocol (Context-First)
 
 The `UserPromptSubmit` hook (`trusty-memory prompt-context`) already injects a

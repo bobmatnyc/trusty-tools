@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/bobmatnyc/trusty-tools/schemas/instruction-package-v1.json",
+  "$id": "https://github.com/bobmatnyc/trusty-tools/schemas/instruction-package-v2.json",
   "title": "trusty-mpm instruction package",
   "description": "A PM instruction package: a section taxonomy carrying the customization-tier axis, plus an ORDERED block stream that composes to the PM system prompt. Ordering is array order — never map iteration order — so composition is byte-deterministic (SPEC-PMINSTR-01 / DOC-59 §4a, epic #4183, schema ticket #4184).",
   "type": "object",
@@ -8,8 +8,8 @@
   "required": ["schema_version", "package_id", "sections", "blocks"],
   "properties": {
     "schema_version": {
-      "description": "Schema major version. A package whose version this build does not implement is rejected outright — never partially interpreted; the version is checked BEFORE any field, so a newer package reports a version error rather than blaming one of its own valid keys. EVOLUTION POLICY: every object here sets `additionalProperties: false`, so unknown keys are errors, not ignored. Any field addition that can change composed bytes MUST bump this version. Adding a field while leaving the version at 1 is the one case strictness cannot protect against — an older build would compose a prompt missing the new field's effect and report success.",
-      "const": 1
+      "description": "Schema major version. A package whose version this build does not implement is rejected outright — never partially interpreted; the version is checked BEFORE any field, so a newer package reports a version error rather than blaming one of its own valid keys. EVOLUTION POLICY: every object here sets `additionalProperties: false`, so unknown keys are errors, not ignored. Any field addition that can change composed bytes MUST bump this version. Adding a field while leaving the version unchanged is the one case strictness cannot protect against — an older build would compose a prompt missing the new field's effect and report success. HISTORY: v1 (#4184) shipped `text` and `generated` bodies; v2 (#4318) adds the `file` body kind so an authored JSON manifest can reference bundled markdown instead of inlining 23 KB of prose on one line.",
+      "const": 2
     },
     "package_id": {
       "description": "Stable identifier for this package (e.g. `trusty-mpm/pm`). Identity only; it never affects composed bytes.",
@@ -76,7 +76,7 @@
       ]
     },
     "body": {
-      "description": "Where a block's markdown comes from. `text` is authored in the package; `generated` is supplied at composition time by the named generator.",
+      "description": "Where a block's markdown comes from. `text` is authored inline in the package; `file` names a markdown source bundled with the build; `generated` is supplied at composition time by the named generator.",
       "oneOf": [
         {
           "type": "object",
@@ -85,6 +85,20 @@
           "properties": {
             "kind": { "const": "text" },
             "text": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path"],
+          "description": "Schema v2 (#4318). The path is resolved against the build's compile-time `include_str!` table (`instruction_pipeline::SECTION_SOURCES`), NOT against the filesystem at composition time — so the delivered prompt never depends on what happens to be on disk, and a renamed section is a compile error rather than a silent content drop. A path the build does not bundle is a hard validation error. Prose therefore keeps living in reviewable markdown while this document carries only the manifest; `text` remains available for a rule authored in the manifest itself.",
+          "properties": {
+            "kind": { "const": "file" },
+            "path": {
+              "description": "Path relative to `assets/instructions/`, e.g. `sections/core.md`.",
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         {
@@ -127,9 +141,9 @@
   },
   "examples": [
     {
-      "schema_version": 1,
+      "schema_version": 2,
       "package_id": "trusty-mpm/example",
-      "description": "Minimal structurally-valid package. Content authoring is #4185; this example exists so the schema's own shape is executable and testable.",
+      "description": "Minimal structurally-valid package, exercising all three body kinds. The shipped instance is `pm-instruction-package.json`; this example exists so the schema's own shape stays executable and testable.",
       "trailing_newline": false,
       "sections": [
         {
@@ -216,7 +230,7 @@
         },
         {
           "section": "identity",
-          "body": { "kind": "text", "text": "## Identity" }
+          "body": { "kind": "file", "path": "sections/identity.md" }
         },
         {
           "section": "non-overridable-rules",

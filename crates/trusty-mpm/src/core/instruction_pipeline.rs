@@ -25,6 +25,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::core::delegation_authority::{generate_authority, scan_agents};
+use crate::core::instruction_package::SectionId;
 
 /// Separator placed between merged instruction sections.
 ///
@@ -83,6 +84,53 @@ pub(crate) const SECTION_NON_OVERRIDABLE_RULES: &str =
 pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
     include_str!("../assets/instructions/sections/framework-guaranteed-conventions.md");
 
+/// The compile-time table a schema-v2 `file` body resolves through.
+///
+/// Why: the instruction manifest (#4318) names its prose by path
+/// (`{"kind":"file","path":"sections/core.md"}`) so the bulk of the instructions
+/// keeps living in reviewable markdown rather than becoming one 23 KB JSON line
+/// — but a path resolved at *runtime* would put the delivered system prompt at
+/// the mercy of the filesystem and would let a renamed section ship as a silent
+/// content drop. Every entry here is an `include_str!` of a constant declared
+/// above, so the build stays hermetic and a missing section file is a compile
+/// error rather than a launch-time surprise.
+/// What: the eight canonical section sources, keyed by the path form the manifest
+/// uses — relative to `assets/instructions/`. Table order is irrelevant; the
+/// manifest's `blocks` array alone decides emission order.
+/// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
+pub(crate) const SECTION_SOURCES: [(&str, &str); 8] = [
+    ("sections/identity.md", SECTION_IDENTITY),
+    ("sections/core.md", SECTION_CORE),
+    ("sections/memory.md", SECTION_MEMORY),
+    ("sections/search.md", SECTION_SEARCH),
+    ("sections/workflow.md", WORKFLOW),
+    ("sections/agent-delegation.md", AGENT_DELEGATION),
+    (
+        "sections/non-overridable-rules.md",
+        SECTION_NON_OVERRIDABLE_RULES,
+    ),
+    (
+        "sections/framework-guaranteed-conventions.md",
+        SECTION_FRAMEWORK_CONVENTIONS,
+    ),
+];
+
+/// Resolve a manifest `file` body path to its embedded source.
+///
+/// Why: one lookup point means a path typo in the manifest becomes a named
+/// [`crate::core::instruction_package::ValidationError::UnknownFileSource`]
+/// instead of an empty block.
+/// What: a linear scan of [`SECTION_SOURCES`] — eight entries, called a handful
+/// of times per process, so a map would buy nothing and would reintroduce the
+/// iteration-order hazard the package format exists to avoid.
+/// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
+pub(crate) fn section_source(path: &str) -> Option<&'static str> {
+    SECTION_SOURCES
+        .iter()
+        .find(|(key, _)| *key == path)
+        .map(|(_, body)| *body)
+}
+
 /// The former `PM_INSTRUCTIONS.md` body, rebuilt from its three sections.
 ///
 /// Why: the legacy override assembly
@@ -101,12 +149,66 @@ pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
 pub(crate) fn pm_instructions() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        format!(
-            "{}\n\n{}\n\n{}\n",
-            SECTION_CORE.trim(),
-            SECTION_MEMORY.trim(),
-            SECTION_SEARCH.trim()
-        )
+        let run = manifest_run(&[SectionId::Core, SectionId::Memory, SectionId::Search])
+            .unwrap_or_else(|| {
+                format!(
+                    "{}\n\n{}\n\n{}",
+                    SECTION_CORE.trim(),
+                    SECTION_MEMORY.trim(),
+                    SECTION_SEARCH.trim()
+                )
+            });
+        format!("{run}\n")
+    });
+    &JOINED
+}
+
+/// Project a run of sections out of the bundled manifest.
+///
+/// Why: since #4318 the manifest may author a rule inline rather than in a
+/// section file, so rebuilding these strings from the `include_str!` constants
+/// would deliver that rule to package-composed sessions and silently withhold it
+/// from the legacy assembly and from [`assemble_system_prompt`]. Projecting the
+/// manifest keeps one source of truth for the *content*, while the constants stay
+/// as the retained fallback for the case where the manifest itself is unreadable.
+/// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
+/// manifest failed to parse or validate.
+/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_three_sections`.
+fn manifest_run(sections: &[SectionId]) -> Option<String> {
+    crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
+}
+
+/// The bundled workflow section, as authored in the manifest.
+///
+/// Why: the workflow section is no longer only `sections/workflow.md` — the
+/// manifest appends the opportunistic-fix rule as its own block. Every consumer
+/// must therefore ask the manifest, not the constant, or a project with a
+/// `WORKFLOW.md` override would be the only one to notice the difference.
+/// What: the authored workflow blocks joined as declared, trimmed; the raw
+/// `WORKFLOW` constant when the manifest is unreadable.
+/// Test: `workflow_section_carries_the_opportunistic_fix_rule`,
+/// `assemble_system_prompt_contains_all_sections`.
+pub(crate) fn workflow_section() -> &'static str {
+    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        manifest_run(&[SectionId::Workflow]).unwrap_or_else(|| WORKFLOW.trim().to_string())
+    });
+    &JOINED
+}
+
+/// The bundled delegation doctrine plus the roster-precedence note.
+///
+/// Why: #4318 moved the note's prose out of a Rust constant and into the manifest,
+/// where its position between the doctrine and the live roster is declared rather
+/// than formatted in by hand at two call sites.
+/// What: the authored `agent-delegation` blocks joined as declared — the section
+/// source followed by the note — trimmed. Falls back to the doctrine alone if the
+/// manifest is unreadable, which is the pre-#4069 shape.
+/// Test: `bundled_delegation_appends_deployed_roster`,
+/// `composed_prompt_carries_the_live_roster_and_the_precedence_note`.
+pub(crate) fn delegation_doctrine() -> &'static str {
+    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        manifest_run(&[SectionId::AgentDelegation])
+            .unwrap_or_else(|| AGENT_DELEGATION.trim().to_string())
     });
     &JOINED
 }
@@ -129,12 +231,20 @@ pub(crate) fn pm_instructions() -> &'static str {
 /// Test: `base_pm_is_its_three_sections`, `floor_carries_the_tool_priority_mandate`.
 pub(crate) fn base_pm() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        format!(
-            "{}\n\n{}\n\n{}\n",
-            SECTION_IDENTITY.trim(),
-            SECTION_NON_OVERRIDABLE_RULES.trim(),
-            SECTION_FRAMEWORK_CONVENTIONS.trim()
-        )
+        let run = manifest_run(&[
+            SectionId::Identity,
+            SectionId::NonOverridableRules,
+            SectionId::FrameworkGuaranteedConventions,
+        ])
+        .unwrap_or_else(|| {
+            format!(
+                "{}\n\n{}\n\n{}",
+                SECTION_IDENTITY.trim(),
+                SECTION_NON_OVERRIDABLE_RULES.trim(),
+                SECTION_FRAMEWORK_CONVENTIONS.trim()
+            )
+        });
+        format!("{run}\n")
     });
     &JOINED
 }
@@ -150,7 +260,13 @@ pub(crate) fn base_pm() -> &'static str {
 /// Trusty MCP tool-priority block.
 /// Test: `assemble_system_prompt_contains_all_sections`.
 pub fn assemble_system_prompt() -> String {
-    [pm_instructions(), WORKFLOW, AGENT_DELEGATION, base_pm()].join("\n\n---\n\n")
+    [
+        pm_instructions(),
+        workflow_section(),
+        AGENT_DELEGATION,
+        base_pm(),
+    ]
+    .join(SECTION_SEPARATOR)
 }
 
 /// Write the assembled system prompt to an explicit path.
@@ -494,426 +610,5 @@ fn merge_sections(framework: &str, authority: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// Write `<name>.md` into `dir` with the given raw content.
-    fn write_file(path: &PathBuf, content: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent");
-        }
-        fs::write(path, content).expect("write file");
-    }
-
-    /// Build a `PipelineInput` rooted at `tmp` with optional INSTRUCTIONS.md.
-    fn input_in(tmp: &TempDir) -> PipelineInput {
-        PipelineInput {
-            framework_instructions_path: tmp.path().join("INSTRUCTIONS.md"),
-            agents_dir: tmp.path().join("agents"),
-            claude_md_path: tmp.path().join("project").join("CLAUDE.md"),
-        }
-    }
-
-    #[test]
-    fn pipeline_full() {
-        // All inputs present → merged output contains the two framework
-        // sections in the documented 3 → 4 order. The project CLAUDE.md is
-        // deliberately NOT folded into `merged` (dead code removed — Claude
-        // Code loads CLAUDE.md natively and the real launch prompt never
-        // read this field for that content).
-        let tmp = TempDir::new().unwrap();
-        let input = input_in(&tmp);
-
-        write_file(
-            &input.framework_instructions_path,
-            "# Framework\n\nFRAMEWORK SECTION\n",
-        );
-        fs::create_dir_all(&input.agents_dir).unwrap();
-        write_file(
-            &input.agents_dir.join("engineer.md"),
-            "---\nname: engineer\nrole: engineer\ndescription: Builds things.\n---\n\n# Engineer\n",
-        );
-        write_file(&input.claude_md_path, "# Project\n\nPROJECT SECTION\n");
-
-        let out = build_instructions(&input).unwrap();
-        assert!(out.instructions_loaded);
-        assert_eq!(out.agent_count, 1);
-        assert!(
-            !out.claude_md_created,
-            "existing CLAUDE.md is not recreated"
-        );
-
-        let fw = out.merged.find("FRAMEWORK SECTION").expect("framework");
-        let auth = out
-            .merged
-            .find("## Delegation Authority")
-            .expect("authority");
-        assert!(fw < auth, "framework precedes delegation authority");
-        assert!(out.merged.contains("### engineer"));
-        assert!(
-            !out.merged.contains("PROJECT SECTION"),
-            "project CLAUDE.md content must not be folded into merged: {}",
-            out.merged
-        );
-    }
-
-    #[test]
-    fn pipeline_missing_instructions() {
-        // INSTRUCTIONS.md absent → pipeline still succeeds, instructions_loaded
-        // is false, and section 4 is still present.
-        let tmp = TempDir::new().unwrap();
-        let input = input_in(&tmp);
-        // No INSTRUCTIONS.md written.
-        fs::create_dir_all(&input.agents_dir).unwrap();
-        write_file(
-            &input.agents_dir.join("qa.md"),
-            "---\nname: qa\nrole: qa\ndescription: Tests things.\n---\n\n# QA\n",
-        );
-        write_file(&input.claude_md_path, "# Project\n\nPROJECT NOTES\n");
-
-        let out = build_instructions(&input).unwrap();
-        assert!(!out.instructions_loaded);
-        assert!(out.merged.contains("## Delegation Authority"));
-        assert!(!out.merged.contains("PROJECT NOTES"));
-        // No dangling separator at the very start.
-        assert!(!out.merged.starts_with("---"));
-    }
-
-    #[test]
-    fn pipeline_creates_claude_md() {
-        // CLAUDE.md absent → it is created as a side effect, claude_md_created
-        // is true, and the file on disk contains the stub — but the stub text
-        // is NOT folded into `merged` (dead code removed).
-        let tmp = TempDir::new().unwrap();
-        let input = input_in(&tmp);
-        write_file(&input.framework_instructions_path, "# Framework\n");
-        fs::create_dir_all(&input.agents_dir).unwrap();
-
-        assert!(!input.claude_md_path.exists());
-        let out = build_instructions(&input).unwrap();
-        assert!(out.claude_md_created);
-        assert!(input.claude_md_path.exists());
-
-        let on_disk = fs::read_to_string(&input.claude_md_path).unwrap();
-        assert!(on_disk.contains("# Project Instructions"));
-        assert!(on_disk.contains("trusty-mpm will never modify this file again"));
-        // The seeded stub carries the attribution convention so every new
-        // trusty-mpm project inherits the footer override at the framework
-        // level (issue #2876) rather than relying on a per-project hand-edit.
-        assert!(
-            on_disk.contains("🤖🤖🤖 Generated with trusty-mpm"),
-            "seeded stub must carry the attribution footer: {on_disk}"
-        );
-        assert!(
-            !out.merged.contains("# Project Instructions"),
-            "stub content must not be folded into merged: {}",
-            out.merged
-        );
-    }
-
-    #[test]
-    fn pipeline_claude_md_left_byte_identical() {
-        // Why (#2170): trusty-mpm must NEVER modify a target project's
-        // CLAUDE.md. An existing file — including one that happens to
-        // contain the literal delegation-block markers as ordinary operator
-        // text — must come back out of `build_instructions` completely
-        // untouched on disk, and its content must not leak into `merged`
-        // (dead code removed).
-        let tmp = TempDir::new().unwrap();
-        let input = input_in(&tmp);
-        write_file(&input.framework_instructions_path, "# Framework\n");
-        fs::create_dir_all(&input.agents_dir).unwrap();
-        let custom = "# My Project\n\nCUSTOM HAND-WRITTEN CONTENT\n";
-        write_file(&input.claude_md_path, custom);
-
-        let out = build_instructions(&input).unwrap();
-        assert!(!out.claude_md_created);
-        let on_disk = fs::read_to_string(&input.claude_md_path).unwrap();
-        assert_eq!(
-            on_disk, custom,
-            "pre-existing CLAUDE.md must be left byte-identical: {on_disk}"
-        );
-        assert!(
-            !on_disk.contains(DELEGATION_BLOCK_BEGIN),
-            "no delegation-directive block may be injected: {on_disk}"
-        );
-        assert!(
-            !out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"),
-            "project CLAUDE.md content must not be folded into merged: {}",
-            out.merged
-        );
-    }
-
-    #[test]
-    fn strip_delegation_block_removes_legacy_block() {
-        // Why (#2170 cleanup helper): a workspace polluted by the old #2125
-        // injection must have the fenced block removed, leaving the
-        // operator's own content untouched.
-        let polluted = format!(
-            "{DELEGATION_BLOCK_BEGIN}\n\nSome injected directive text.\n\n{DELEGATION_BLOCK_END}\n\n# My Project\n\nOperator notes.\n"
-        );
-        let cleaned = strip_delegation_block(&polluted);
-        assert!(!cleaned.contains(DELEGATION_BLOCK_BEGIN));
-        assert!(!cleaned.contains(DELEGATION_BLOCK_END));
-        assert!(!cleaned.contains("Some injected directive text."));
-        assert_eq!(cleaned, "# My Project\n\nOperator notes.\n");
-    }
-
-    #[test]
-    fn strip_delegation_block_noop_when_absent() {
-        // Why: a clean CLAUDE.md (the common case post-#2170) must be
-        // returned byte-identical.
-        let clean = "# My Project\n\nOperator notes.\n";
-        assert_eq!(strip_delegation_block(clean), clean);
-    }
-
-    #[test]
-    fn pm_instructions_is_its_three_sections() {
-        // #4183: the legacy PM body is RECONSTITUTED from the authored sections,
-        // never kept as a fourth copy on disk. If it ever became a copy again,
-        // an edit to `core.md` would reach the packaged composer and not the
-        // legacy override assembly — the split-brain this asserts against.
-        let body = pm_instructions();
-        assert_eq!(
-            body,
-            format!(
-                "{}\n\n{}\n\n{}\n",
-                SECTION_CORE.trim(),
-                SECTION_MEMORY.trim(),
-                SECTION_SEARCH.trim()
-            )
-        );
-        // The paragraph break is `Join::Blank`'s literal, which is what makes
-        // this string byte-identical to what the packaged composer emits.
-        assert!(body.contains("## Memory Protocol (Context-First)"));
-        assert!(body.contains("## Code Search Protocol (Context-First)"));
-        assert!(
-            !body.contains("## Context-First Protocol\n"),
-            "the merged Memory+Search block must not survive as a fourth copy"
-        );
-    }
-
-    #[test]
-    fn base_pm_is_its_three_sections() {
-        // Same no-second-copy property for the non-overridable floor, plus the
-        // one reordering #4183 makes: the tool-priority mandate travels with the
-        // other non-overridable rules and so now precedes the conventions.
-        let floor = base_pm();
-        assert_eq!(
-            floor,
-            format!(
-                "{}\n\n{}\n\n{}\n",
-                SECTION_IDENTITY.trim(),
-                SECTION_NON_OVERRIDABLE_RULES.trim(),
-                SECTION_FRAMEWORK_CONVENTIONS.trim()
-            )
-        );
-
-        let tool = floor
-            .find("## Trusty Tool Priority (Non-Overridable)")
-            .expect("the tool-priority mandate stays in the floor");
-        let conventions = floor
-            .find("## Framework-Guaranteed Conventions (Non-Overridable)")
-            .expect("the guaranteed conventions stay in the floor");
-        assert!(
-            tool < conventions,
-            "tool priority now rides with the non-overridable rules it belongs to"
-        );
-    }
-
-    #[test]
-    fn assemble_system_prompt_contains_all_sections() {
-        // Why: the assembled prompt is the contract `claude` receives; every
-        // bundled section must be present and joined with the `---` rule.
-        let prompt = assemble_system_prompt();
-        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-        assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# Agent Delegation Routing"));
-        // The Trusty tool-priority block now lives inside the BASE_PM floor.
-        assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
-        assert!(prompt.contains("\n\n---\n\n"));
-        // BASE_PM is the non-overridable floor: it must come last.
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base_pm");
-        let delegation = prompt
-            .find("# Agent Delegation Routing")
-            .expect("delegation");
-        assert!(base > delegation, "BASE_PM floor must be appended last");
-        // Ticketing-specific content was stripped from the bundled assets.
-        assert!(!prompt.contains("mcp__mcp-ticketer__"));
-        assert!(!prompt.contains("ticketing_agent"));
-    }
-
-    // Why serial + fake-HOME (extra sweep hit — review-gate report on top of
-    // #2459/#2460/#2461): `install_system_prompt()` resolves `dirs::home_dir()`
-    // internally and previously wrote straight into the REAL
-    // `$HOME/.trusty-mpm/framework/instructions/` — both polluting the
-    // developer's real home directory on every test run AND racing with any
-    // other test in this binary that redirects `HOME` to a temp dir
-    // concurrently (same class as `manifest_expands_tilde`, #2459). Redirect
-    // `HOME` to an isolated temp dir for the duration of the test and join
-    // the crate's shared `#[serial_test::serial]` lock so no other
-    // HOME-mutating test can interleave.
-    #[serial_test::serial]
-    #[test]
-    fn install_system_prompt_writes_file() {
-        // Why: `tm launch` depends on `install_system_prompt` regenerating
-        // INSTRUCTIONS.md; this asserts it writes a non-empty file under the
-        // expected `~/.trusty-mpm/framework/instructions/` path.
-        let fake_home = TempDir::new().expect("create fake home");
-        let prev_home = std::env::var("HOME").ok();
-        // SAFETY: serialized via `#[serial_test::serial]`, so no other test
-        // thread observes or mutates HOME concurrently. Restored below
-        // regardless of panics via the `HomeGuard` drop impl.
-        unsafe { std::env::set_var("HOME", fake_home.path()) };
-        struct HomeGuard(Option<String>);
-        impl Drop for HomeGuard {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(p) => unsafe { std::env::set_var("HOME", p) },
-                    None => unsafe { std::env::remove_var("HOME") },
-                }
-            }
-        }
-        let _guard = HomeGuard(prev_home);
-
-        let out = install_system_prompt().expect("install succeeds");
-        assert!(out.starts_with(fake_home.path()));
-        assert!(out.ends_with("INSTRUCTIONS.md"));
-        assert!(out.exists());
-        let on_disk = fs::read_to_string(&out).unwrap();
-        assert_eq!(on_disk, assemble_system_prompt());
-        assert!(!on_disk.is_empty());
-    }
-
-    #[test]
-    fn install_system_prompt_to_writes_assembled() {
-        // Why: `tm install` calls `install_system_prompt_to` pointing at the
-        // framework path so the assembled prompt (not the 4-line stub) is on
-        // disk immediately after install — regression for issue #383.
-        // What: asserts the file written by the path-parameterised helper
-        // equals `assemble_system_prompt()` and contains key PM headings.
-        // Test: call the helper against a temp path; read back and verify content.
-        let tmp = TempDir::new().unwrap();
-        let dest = tmp.path().join("instructions").join("INSTRUCTIONS.md");
-        install_system_prompt_to(&dest).expect("write succeeds");
-        assert!(
-            dest.exists(),
-            "INSTRUCTIONS.md must exist after install_system_prompt_to"
-        );
-        let on_disk = fs::read_to_string(&dest).unwrap();
-        assert_eq!(
-            on_disk,
-            assemble_system_prompt(),
-            "content must equal assembled prompt"
-        );
-        // The 4-line stub must NOT be present (regression guard for issue #383).
-        assert!(
-            !on_disk.trim().eq("# trusty-mpm Framework Instructions\n\nThis Claude Code instance is managed by trusty-mpm.\nDaemon endpoint: ${TRUSTY_MPM_URL:-http://localhost:7799}"),
-            "stub content must not be written — full assembled prompt required"
-        );
-        // Real PM sections must be present.
-        assert!(
-            on_disk.contains("# PM Agent -- Trusty MPM"),
-            "PM_INSTRUCTIONS section must be present"
-        );
-        assert!(
-            on_disk.contains("# BASE_PM Framework Floor"),
-            "BASE_PM floor must be present"
-        );
-    }
-
-    #[test]
-    fn primary_directive_mandate_not_duplicated_across_channels() {
-        // Issue #2647 (R2): the FULL mandate table (Prohibitions, Circuit
-        // Breakers, Delegation Map, PM Allowlist) must live in exactly ONE
-        // channel — the appended system prompt (`assemble_system_prompt`,
-        // always injected via `--append-system-prompt-file` on tm-driven
-        // spawns). Before this fix, every bundled output-style file (loaded
-        // independently via the Claude Code `outputStyle` settings key) ALSO
-        // carried a full, near-identical restatement of that table —
-        // duplicated tokens every session.
-        //
-        // Code-critic follow-up: `outputStyle` is deployed to
-        // `<project>/.claude/output-styles/*.md` + `settings.json`
-        // (`settings.rs`) and therefore applies to ANY `claude` launched in
-        // that directory — including a manual `claude` invocation that never
-        // receives `--append-system-prompt-file` at all
-        // (`runtime/claude_code.rs`). A style with NOTHING but a pointer to
-        // the appended prompt would leave such a launch with zero
-        // enforcement. So each style keeps a short, SELF-CONTAINED minimal
-        // mandate (PRIMARY DIRECTIVE statement, override-phrase list, a
-        // prohibition summary) alongside the pointer to the full table —
-        // this test asserts that block survived the dedup, not just that the
-        // heading sentinel is de-duplicated.
-        const SENTINEL: &str = "PRIMARY DIRECTIVE";
-        let assembled = assemble_system_prompt();
-        assert_eq!(
-            assembled.matches(SENTINEL).count(),
-            0,
-            "the appended system prompt must not carry a literal PRIMARY \
-             DIRECTIVE banner — the mandate lives there as Identity + \
-             Prohibitions content"
-        );
-
-        // The appended prompt must still carry the substantive, canonical
-        // mandate content — so the mandate can never silently vanish from
-        // BOTH channels at once just because the banner text moved.
-        assert!(
-            assembled.contains("## Prohibitions"),
-            "the appended prompt must carry the canonical Prohibitions table"
-        );
-        assert!(
-            assembled.contains("## Circuit Breakers"),
-            "the appended prompt must carry the canonical Circuit Breakers table"
-        );
-        assert!(
-            assembled.contains("don't delegate"),
-            "the appended prompt must carry at least one override phrase"
-        );
-
-        for style in crate::core::bundle::OUTPUT_STYLES {
-            let combined =
-                assembled.matches(SENTINEL).count() + style.content.matches(SENTINEL).count();
-            assert_eq!(
-                combined, 1,
-                "{}: PRIMARY DIRECTIVE sentinel must appear exactly once across \
-                 the appended prompt + this output style (one heading, never a \
-                 full restatement of the mandate TABLE) — got {combined}",
-                style.id
-            );
-
-            // Each style must still carry its OWN self-contained minimal
-            // mandate — the override-phrase list and a prohibition summary —
-            // so a manual `claude` launch (no --append-system-prompt-file)
-            // in a tm-provisioned workspace is never left with zero
-            // enforcement.
-            assert!(
-                style.content.contains("do this yourself"),
-                "{}: must carry its own self-contained override-phrase list",
-                style.id
-            );
-            assert!(
-                style.content.contains("Minimum prohibitions"),
-                "{}: must carry its own self-contained prohibition summary",
-                style.id
-            );
-        }
-    }
-
-    #[test]
-    fn pipeline_no_agents_still_succeeds() {
-        // An empty agents dir yields a zero agent_count and the "no agents"
-        // delegation section, but the pipeline still produces merged output.
-        let tmp = TempDir::new().unwrap();
-        let input = input_in(&tmp);
-        write_file(&input.framework_instructions_path, "# Framework\n");
-        fs::create_dir_all(&input.agents_dir).unwrap();
-
-        let out = build_instructions(&input).unwrap();
-        assert_eq!(out.agent_count, 0);
-        assert!(out.merged.to_lowercase().contains("no delegatable agents"));
-    }
-}
+#[path = "instruction_pipeline_tests.rs"]
+mod tests;

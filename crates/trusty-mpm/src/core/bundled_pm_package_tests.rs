@@ -23,11 +23,38 @@ use crate::core::instruction_overrides::{
     PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt,
     resolve_pm_prompt_with_roster, resolve_pm_prompt_with_source,
 };
-use crate::core::instruction_package::{OverrideTier, ValidationError};
+use crate::core::instruction_package::{
+    BlockBody, CustomizationTier, Generator, InstructionBlock, OverrideTier, SCHEMA_VERSION,
+    ValidationError,
+};
+use crate::core::instruction_pipeline::{
+    AGENT_DELEGATION, SECTION_CORE, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
+    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, SECTION_SOURCES, WORKFLOW,
+    section_source, workflow_section,
+};
 use crate::core::stack_profile::stack_profile_section;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
+
+/// The shipped manifest, parsed — the subject of nearly every test here.
+///
+/// Why: [`bundled_fallback_package`] returns a `Result` since #4318 because the
+/// package is now a parsed artifact rather than Rust code. Unwrapping once behind
+/// a named helper keeps that plumbing out of every assertion, and
+/// `bundled_manifest_parses_and_validates` is the test that gives the unwrap its
+/// licence.
+fn package_ref() -> &'static InstructionPackage {
+    bundled_fallback_package().expect("the bundled manifest parses and validates")
+}
+
+/// The authored markdown a block carries, or `None` for a generated block.
+fn authored(block: &InstructionBlock) -> Option<&str> {
+    block
+        .body
+        .authored()
+        .map(|body| body.expect("source resolves"))
+}
 
 /// The no-override composition, which every gate below is written against.
 ///
@@ -71,7 +98,7 @@ fn legacy_bundled_fallback(stack: &str, roster: &str, addendum: Option<&str>) ->
     assemble_sections(
         stack.to_string(),
         None,
-        WORKFLOW.trim().to_string(),
+        workflow_section().to_string(),
         delegation_with_roster(Some(roster)),
         addendum.map(str::to_string),
     )
@@ -142,11 +169,97 @@ fn composed_package_is_byte_identical_with_a_project_addendum() {
 }
 
 #[test]
+fn bundled_manifest_parses_and_validates() {
+    // THE LICENCE FOR EVERY UNWRAP IN THIS FILE, and the reason the degradation in
+    // `resolve_pm_prompt` is unreachable rather than routine (#4318): the shipped
+    // JSON manifest must parse, validate, and compose. A manifest that fails any of
+    // the three is a red CI run, never a shipped prompt.
+    let package = InstructionPackage::from_json(PM_PACKAGE_JSON)
+        .expect("the shipped manifest is valid schema-v2 JSON");
+    assert_eq!(package.validate(), Ok(()));
+    assert_eq!(package.schema_version, SCHEMA_VERSION);
+    assert_eq!(&package, package_ref());
+    assert!(
+        compose_bundled_fallback(FIXED_STACK, FIXED_ROSTER, None).is_ok(),
+        "the shipped manifest must compose"
+    );
+}
+
+#[test]
+fn manifest_prose_lives_in_markdown_not_in_the_json() {
+    // The point of the v2 `file` body kind. Inlining the sections would turn
+    // `core.md` into a single 23 KB JSON line and move the floor text out of the
+    // files `scripts/check_instruction_floor.sh` greps, so the manifest must stay
+    // small and must reference its bulk prose by path. The inline `text` blocks it
+    // DOES carry are short authored rules, not lifted section bodies.
+    assert!(
+        PM_PACKAGE_JSON.len() < SECTION_CORE.len(),
+        "the manifest ({} bytes) must be smaller than core.md ({} bytes) — prose \
+         belongs in markdown",
+        PM_PACKAGE_JSON.len(),
+        SECTION_CORE.len()
+    );
+    for (path, _) in SECTION_SOURCES {
+        assert!(
+            PM_PACKAGE_JSON.contains(path),
+            "{path} must be referenced by a `file` body"
+        );
+    }
+    for block in &package_ref().blocks {
+        if let BlockBody::Text { text } = &block.body {
+            assert!(
+                text.len() < 1_500,
+                "inline manifest text must be a short authored rule, not lifted prose \
+                 ({} bytes in {:?})",
+                text.len(),
+                block.section
+            );
+        }
+    }
+}
+
+#[test]
+fn every_section_source_resolves() {
+    // The `file` body table is the only thing standing between a renamed section
+    // and an empty block, so assert both directions: every table key resolves, and
+    // a path outside the table does not.
+    for (path, body) in SECTION_SOURCES {
+        assert_eq!(section_source(path), Some(body), "{path} must resolve");
+        assert!(!body.trim().is_empty(), "{path} must not be blank");
+    }
+    assert_eq!(section_source("sections/does-not-exist.md"), None);
+}
+
+#[test]
+fn unknown_file_source_is_rejected() {
+    // A mistyped path must be a named validation error, never a silently empty
+    // block — the #4196 shape (content referenced but never delivered).
+    let mut package = package_ref().clone();
+    let index = package
+        .blocks
+        .iter()
+        .position(|b| matches!(b.body, BlockBody::File { .. }))
+        .expect("the manifest uses file bodies");
+    package.blocks[index].body = BlockBody::File {
+        path: "sections/typo.md".to_string(),
+    };
+    let section = package.blocks[index].section;
+    assert_eq!(
+        package.validate(),
+        Err(ValidationError::UnknownFileSource {
+            index,
+            section,
+            path: "sections/typo.md".to_string(),
+        })
+    );
+}
+
+#[test]
 fn shipped_sections_build_and_validate() {
     // The package built from the compiled-in assets must satisfy every
     // structural invariant. This is what makes the `tracing::error!` fallback in
     // `resolve_pm_prompt` unreachable rather than routine.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     assert_eq!(package.validate(), Ok(()));
     assert_eq!(package.package_id, PACKAGE_ID);
     assert!(!package.trailing_newline);
@@ -176,10 +289,10 @@ fn package_round_trips_through_json() {
     // The composed prompt must survive serialization: a package that cannot be
     // written out and read back is not a source format, and the JSON form is
     // what #4183's authoring work will edit.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     let json = package.to_json().expect("serialize");
     let parsed = InstructionPackage::from_json(&json).expect("deserialize");
-    assert_eq!(parsed, package);
+    assert_eq!(&parsed, package);
 
     let inputs = CompositionInputs {
         agent_roster: FIXED_ROSTER.to_string(),
@@ -197,7 +310,7 @@ fn floor_blocks_are_the_contiguous_tail() {
     // The floor's guarantee is that it has the last word. `validate` enforces
     // it, but asserting the shape here localises a regression to block ordering
     // rather than to a validation error message.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     let first_floor = package
         .blocks
         .iter()
@@ -506,7 +619,7 @@ fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
 fn roster_is_required_and_never_droppable() {
     // #4196 regression gate at the package level: the computed roster must reach
     // the composed prompt. An empty roster is a hard error, not a quiet drop.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     assert_ne!(package.validate(), Err(ValidationError::RosterNotConsumed));
 
     let roster_block = package
@@ -582,7 +695,7 @@ fn every_authored_block_is_exactly_its_section_source() {
     // Kills the regression this PR exists to prevent from coming back: a block
     // whose text is assembled, excerpted or re-derived rather than being the
     // file. Any such block fails here even though the composed bytes may be fine.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     let expected: Vec<(SectionId, &str)> = vec![
         (SectionId::Core, SECTION_CORE),
         (SectionId::Memory, SECTION_MEMORY),
@@ -601,10 +714,10 @@ fn every_authored_block_is_exactly_its_section_source() {
     ];
 
     for (section, source) in expected {
-        let found = package.blocks.iter().any(|b| {
-            b.section == section
-                && matches!(&b.body, BlockBody::Text { text } if text == source.trim())
-        });
+        let found = package
+            .blocks
+            .iter()
+            .any(|b| b.section == section && authored(b) == Some(source));
         assert!(
             found,
             "section {section:?} must contribute its source file verbatim"
@@ -620,16 +733,15 @@ fn memory_and_search_are_independently_overridable() {
     // `2.` and orphaned a sentence that spoke for both. Authored sources are
     // what make the declared tier honest, so assert the shape that proves it —
     // each block stands alone, with its own heading and no dangling list index.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     for section in [SectionId::Memory, SectionId::Search] {
         let text = package
             .blocks
             .iter()
-            .find_map(|b| match (&b.body, b.section == section) {
-                (BlockBody::Text { text }, true) => Some(text.as_str()),
-                _ => None,
-            })
-            .expect("section contributes a text block");
+            .filter(|b| b.section == section)
+            .find_map(authored)
+            .expect("section contributes an authored block")
+            .trim();
         assert!(
             text.starts_with("## "),
             "{section:?} must open with its own heading, got {:?}",
@@ -648,20 +760,16 @@ fn floor_carries_the_tool_priority_mandate() {
     // from after the framework conventions to inside the non-overridable rules
     // it belongs to. It must still be IN the floor — that is what makes the
     // mandate non-overridable — so assert membership, not position.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     let rules = package
         .blocks
         .iter()
         .find(|b| b.section == SectionId::NonOverridableRules)
         .expect("the rules section contributes a block");
     assert!(rules.section.is_floor());
-    match &rules.body {
-        BlockBody::Text { text } => {
-            assert!(text.contains("## Trusty Tool Priority (Non-Overridable)"));
-            assert!(text.contains("mcp__trusty-search__search"));
-        }
-        other => panic!("the rules block must be authored text, got {other:?}"),
-    }
+    let text = authored(rules).expect("the rules block must be authored, not generated");
+    assert!(text.contains("## Trusty Tool Priority (Non-Overridable)"));
+    assert!(text.contains("mcp__trusty-search__search"));
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +782,7 @@ fn floor_sections_refuse_every_override_tier() {
     // tier — that is the entire content of the floor guarantee, and the check
     // #4247's resolver will consult. Stated over the SHIPPED package so it is a
     // fact about what we deliver, not about a hand-built fixture.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     for id in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
         let tier = package.section(id).expect("declared").customization_tier;
         assert_eq!(tier, CustomizationTier::Fixed, "{id:?} must be fixed");
@@ -693,7 +801,7 @@ fn content_sections_admit_project_but_not_user_overrides() {
     // advertised override file is PROJECT-scoped, so a `project`-tier section
     // must accept a project override and REJECT a user-tier one. Getting this
     // backwards is how one operator's machine config leaks into a shared repo.
-    let package = bundled_fallback_package();
+    let package = package_ref();
     for id in SectionId::CANONICAL.into_iter().filter(|id| !id.is_floor()) {
         let tier = package.section(id).expect("declared").customization_tier;
         assert_eq!(tier, CustomizationTier::Project, "{id:?} must be project");
@@ -713,17 +821,13 @@ fn every_advertised_override_file_maps_to_an_overridable_section() {
     // promising an override it must refuse. Reading the advertisement out of the
     // shipped floor text — rather than restating it — is what makes the two
     // unable to drift.
-    let package = bundled_fallback_package();
-    let floor = match &package
+    let package = package_ref();
+    let floor = package
         .blocks
         .iter()
-        .find(|b| b.section == SectionId::NonOverridableRules)
-        .expect("rules block")
-        .body
-    {
-        BlockBody::Text { text } => text.clone(),
-        other => panic!("expected text, got {other:?}"),
-    };
+        .filter(|b| b.section == SectionId::NonOverridableRules)
+        .find_map(authored)
+        .expect("rules block");
 
     for (file, section) in [
         (FILE_WORKFLOW, SectionId::Workflow),

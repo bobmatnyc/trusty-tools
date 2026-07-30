@@ -106,6 +106,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The bundled PM instruction package is now an **authored JSON manifest**, not a
+  Rust literal
+  ([#4318](https://github.com/bobmatnyc/trusty-tools/issues/4318), part of
+  [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)). Sections,
+  customization tiers, block order, joins, the declared generators, and the
+  roster-precedence note all live in
+  `assets/instructions/pm-instruction-package.json`;
+  `bundled_pm_package::bundled_fallback_package()` parses that file instead of
+  constructing an `InstructionPackage` in code, so there is no second place a
+  join or a block order can be edited. `InstructionPackage::from_json` had zero
+  non-test call sites before this and the shipped JSON Schema had no instance
+  under it — both are now live.
+
+  **Instruction-package schema v2**: adds a `{"kind":"file","path":"…"}` body
+  variant alongside `text` and `generated`. Prose keeps living in reviewable
+  markdown under `sections/`; the manifest references it by path and resolves it
+  through a compile-time `include_str!` table
+  (`instruction_pipeline::SECTION_SOURCES`), so the build stays hermetic, a
+  renamed section is a compile error, and `check_instruction_floor.sh` keeps
+  grepping real files. Inlining the prose instead would have turned `core.md`
+  into one 23 KB JSON line. The version bump is required by the format's own
+  evolution policy: a v1 build reading a v2 manifest rejects it loudly rather
+  than composing a prompt missing the new field's effect.
+
+  The mechanism half is byte-identical — all three composed-prompt goldens passed
+  unchanged before the content below was added.
+
+- PM instructions: three owner language rules, authored as inline `text` blocks
+  in the manifest rather than in markdown (owner order, 2026-07-29 — the 1.3
+  rules belong in JSON). Same family as the plain-prose rule from
+  [#4316](https://github.com/bobmatnyc/trusty-tools/pull/4316).
+
+  | rule | section | substance |
+  |---|---|---|
+  | Clickable References | `core` | issue/PR/ticket/commit references always render as clickable markdown links, never bare numbers |
+  | Banned Word — "honest" | `core` | "honest" and every variation is banned from PM responses, delegation briefs and review instructions; a report states facts, and labelling them honest implies the alternative was considered |
+  | Opportunistic Fixes | `workflow` | an easy fix found while working on a file is noted on the CURRENT issue and made in the same work — never a new issue; new issues are for genuinely separable schedulable work |
+
+  Delivered to every launch path, not just the packaged composer:
+  `pm_instructions()`, `base_pm()`, the new `workflow_section()` and
+  `delegation_doctrine()` now project the manifest through
+  `InstructionPackage::authored_run` instead of rebuilding from the section
+  constants, so the legacy `.trusty-mpm/` override assembly and the roster-free
+  `assemble_system_prompt()` (what `tm install` writes and `tm launch` passes to
+  `--append-system-prompt-file`) carry the same rules. Rebuilding from the
+  constants would have delivered a manifest-authored rule to one composer and
+  silently withheld it from the others. `core` and `workflow` remain
+  `customization_tier: project`, so a `CLAUDE.md` named-section override still
+  replaces them wholesale — visible in the regenerated
+  `pm-prompt-claude-md-override.md`, which correctly does NOT carry the workflow
+  rule.
+
 - `tm ls` STATE column: a row the daemon did not probe now renders
   `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
   never be misread as "assets fresh"
