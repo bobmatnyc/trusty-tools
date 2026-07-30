@@ -91,6 +91,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`tm doctor` no longer reports a serving daemon as unreachable (issue
+  #4005).** On 2026-07-26 it printed "trusty-memory unreachable at
+  127.0.0.1:7070" while MCP `memory_recall` / `memory_remember` succeeded
+  against that same daemon in the same minutes. Two causes, both fixed:
+  the probe was single-shot with a 2 s budget, and trusty-memory's `/health`
+  samples RSS/CPU behind a mutex and enumerates open file descriptors — work
+  the MCP path never touches — so under load `/health` could exceed a budget
+  real traffic never approached. The probe now allows 10 s, retries up to 3
+  times, and above all distinguishes a TIMEOUT (which proves nothing, so it
+  reports `Unknown`) from a REFUSED connection (which proves nothing is
+  listening, so it still reports `Fail`). Post-restart warm-up
+  (`daemon_state: "warming"`) now reports `Warn` rather than a hard failure.
+
+- **`tm doctor` no longer reports HEALTHY while the memory daemon is wedged
+  (issue #4001).** A 2xx from `/health` proves a listener accepted a socket,
+  not that the daemon is doing work — which is how doctor stayed green through
+  the entire #3992 incident. The memory probe now reads the daemon's own
+  worker-occupancy observation out of the response body and fails on a
+  reported wedge. A daemon too old to report that block is `Unknown`, not a
+  pass: doctor no longer claims health it has not observed.
+
 - **The test suite no longer writes trust-seed entries into the operator's real
   managed `.claude.json`**
   ([#4206](https://github.com/bobmatnyc/trusty-tools/issues/4206)): five tests
@@ -242,6 +263,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **`core::doctor::CheckStatus` gained an `Unknown` variant (issues #4005,
+  #4001).** This is a BREAKING change for any downstream exhaustive `match`
+  over the enum (E0004) and needs a MINOR bump, not a patch — the same trap
+  that forced the `trusty-analyze` 0.7.3 yank. Four in-workspace match sites
+  (Slack + Telegram formatters, the `tm doctor` CLI renderer) gained an arm.
+  `Unknown` ranks above `Warn` and below `Fail`, so a single indeterminate
+  check can never leave the aggregate report reading healthy.
 - bump to 1.2.3 ([#4229](https://github.com/bobmatnyc/trusty-tools/pull/4229)) ([`7c4f056`](https://github.com/bobmatnyc/trusty-tools/commit/7c4f05643508bd9ad04b9cf5ba77dead3cb4cfcb))
 
 ### Documentation

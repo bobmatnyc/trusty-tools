@@ -169,6 +169,10 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
                 match overall {
                     CheckStatus::Ok => "all checks passed",
                     CheckStatus::Warn => "passed with warnings",
+                    // Issue #4005: deliberately not phrased as a pass. A
+                    // check that could not be determined has not passed.
+                    CheckStatus::Unknown =>
+                        "one or more checks could not be determined — health is UNKNOWN",
                     CheckStatus::Fail => "one or more checks failed",
                 },
             );
@@ -366,13 +370,16 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
 /// Why: the `tm doctor` table marks each check with a glanceable symbol; one
 /// helper keeps the mapping consistent between the per-check lines and the
 /// overall verdict.
-/// What: `Ok → ✅`, `Warn → ⚠️`, `Fail → ❌`.
+/// What: `Ok → ✅`, `Warn → ⚠️`, `Unknown → ❔`, `Fail → ❌`.
 /// Test: covered indirectly by the `doctor` output.
 fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
     use trusty_mpm::core::doctor::CheckStatus;
     match status {
         CheckStatus::Ok => "\u{2705}",
         CheckStatus::Warn => "\u{26a0}\u{fe0f}",
+        // Never ✅ (issue #4005): an indeterminate check must not read as
+        // healthy at a glance.
+        CheckStatus::Unknown => "\u{2754}",
         CheckStatus::Fail => "\u{274c}",
     }
 }

@@ -297,3 +297,264 @@ async fn worktrees_with_orphan_is_warn() {
     assert!(check.message.contains("1 orphaned"));
     assert!(check.message.contains("tm session prune --worktrees"));
 }
+
+// ---- Issues #4005 / #4001: doctor must observe, not infer ----
+
+/// Spawn a throwaway HTTP listener that answers `GET /health` with `body`
+/// after waiting `delay`.
+///
+/// Why: the existing probe tests bind port 0 (which only ever refuses), so
+/// nothing in this suite could express "a daemon that IS serving". Both #4005
+/// (a serving daemon reported unreachable) and #4001 (a wedged daemon reported
+/// healthy) are about what doctor concludes from a REAL response, so the tests
+/// need a real socket. Hand-rolled over `TcpListener` to avoid pulling an HTTP
+/// server dependency into the test graph.
+/// What: binds an ephemeral port, returns its `host:port`, and serves the
+/// canned JSON to every connection until the test ends.
+/// Test: used by the #4005/#4001 tests below.
+async fn spawn_health_listener(body: serde_json::Value, delay: std::time::Duration) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let body = body.to_string();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                tokio::time::sleep(delay).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+    addr
+}
+
+/// A `/health` body from a healthy, fully-ready daemon.
+fn healthy_body() -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "daemon_state": "ready",
+        "worker": {"in_flight": 0, "wedged": false},
+    })
+}
+
+/// Why (issue #4001): THE false positive. During the #3992 incident six
+/// trusty-memory threads were parked in `concurrent_open::backoff_sleep_ms`
+/// with a `memory_remember` hung ~1800 s, and `tm doctor` reported HEALTHY the
+/// entire time — because it only ever asked "did the socket answer?". Here the
+/// listener is fully live and returns a clean HTTP 200; only the body reveals
+/// the wedge. Before this change doctor returned `Ok` for exactly this input.
+/// What: asserts a wedge-reporting daemon is NOT `Ok`, and that the message
+/// names the wedge so an operator is not sent looking elsewhere.
+/// Test: itself.
+#[tokio::test]
+async fn memory_wedged_worker_pool_is_not_ok() {
+    let body = serde_json::json!({
+        "status": "ok",
+        "daemon_state": "ready",
+        "worker": {"in_flight": 6, "oldest_age_secs": 1800, "wedged": true},
+    });
+    let addr = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let check = probe_health(
+        "memory",
+        "trusty-memory",
+        &format!("http://{addr}/health"),
+        &addr,
+    )
+    .await;
+
+    assert_ne!(
+        check.status,
+        CheckStatus::Ok,
+        "a live listener over a wedged worker pool must NOT report healthy: {}",
+        check.message
+    );
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert!(
+        check.message.contains("WEDGED"),
+        "message must name the wedge: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("1800"),
+        "message must carry the observed age: {}",
+        check.message
+    );
+}
+
+/// Why (issue #4005): THE false negative. A daemon that is genuinely serving
+/// must not be called unreachable just because `/health` is slower than the
+/// probe's budget — `/health` samples RSS/CPU and enumerates file descriptors,
+/// work the MCP path never does. This listener answers correctly but takes
+/// 2.5 s, which the old 2 s single-shot budget turned into
+/// "trusty-memory unreachable at ...".
+/// What: asserts a slow-but-serving daemon reports `Ok`.
+/// Test: itself.
+#[tokio::test]
+async fn memory_slow_but_serving_daemon_is_ok() {
+    let addr = spawn_health_listener(healthy_body(), std::time::Duration::from_millis(2500)).await;
+    let check = probe_health(
+        "memory",
+        "trusty-memory",
+        &format!("http://{addr}/health"),
+        &addr,
+    )
+    .await;
+
+    assert_eq!(
+        check.status,
+        CheckStatus::Ok,
+        "a serving daemon that is merely slow must not be reported unreachable: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("unreachable"),
+        "message must not claim unreachable: {}",
+        check.message
+    );
+}
+
+/// Why (issue #4005, warm-up case): the issue explicitly notes the failure may
+/// only reproduce right after a `tm` restart, and asks that the fix handle
+/// warm-up specifically rather than reporting a hard failure. A warming daemon
+/// is serving (recall falls back to the non-embedder path) so it is not a
+/// failure; it is not fully ready either, so it is not `Ok`.
+/// What: asserts warm-up is `Warn` — neither `Fail` nor `Ok`.
+/// Test: itself.
+#[tokio::test]
+async fn memory_warming_is_warn_not_fail() {
+    let body = serde_json::json!({
+        "status": "ok",
+        "daemon_state": "warming",
+        "worker": {"in_flight": 1, "oldest_age_secs": 2, "wedged": false},
+    });
+    let addr = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let check = probe_health(
+        "memory",
+        "trusty-memory",
+        &format!("http://{addr}/health"),
+        &addr,
+    )
+    .await;
+
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "post-restart warm-up must be a warning, not a failure: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("WARMING"),
+        "message must name the warm-up: {}",
+        check.message
+    );
+}
+
+/// Why (the unifying principle): a probe that times out has learned NOTHING.
+/// Rendering that as `Fail` is the #4005 false negative; rendering it as `Ok`
+/// would be a false positive. It must render as its own state, and that state
+/// must never be healthy.
+/// What: points the probe at a listener that accepts the connection and then
+/// never answers, and asserts `Unknown` — explicitly neither `Ok` nor `Fail`.
+/// Test: itself.
+#[tokio::test]
+async fn memory_timeout_is_unknown_not_fail() {
+    // Accept connections but never respond, so the probe times out rather
+    // than being refused.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock); // hold the socket open, answer nothing
+        }
+    });
+
+    let check = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        probe_health(
+            "memory",
+            "trusty-memory",
+            &format!("http://{addr}/health"),
+            &addr,
+        ),
+    )
+    .await
+    .expect("probe must stay bounded");
+
+    assert_eq!(
+        check.status,
+        CheckStatus::Unknown,
+        "a timed-out probe must be UNKNOWN, not a verdict: {}",
+        check.message
+    );
+    assert!(
+        check.message.contains("could not be determined"),
+        "message must say so plainly: {}",
+        check.message
+    );
+}
+
+/// Why (issue #4001, forward-compatibility): a daemon too old to report worker
+/// occupancy cannot support a healthy verdict — doctor has no observation to
+/// base one on. Claiming `Ok` there would reintroduce exactly the inference
+/// this fix removes.
+/// What: asserts a 2xx body with no `worker` block is `Unknown`.
+/// Test: itself.
+#[tokio::test]
+async fn health_body_without_worker_block_is_unknown() {
+    let body = serde_json::json!({"status": "ok", "daemon_state": "ready"});
+    let addr = spawn_health_listener(body, std::time::Duration::ZERO).await;
+    let check = probe_health(
+        "memory",
+        "trusty-memory",
+        &format!("http://{addr}/health"),
+        &addr,
+    )
+    .await;
+
+    assert_eq!(
+        check.status,
+        CheckStatus::Unknown,
+        "no worker observation means health is undetermined: {}",
+        check.message
+    );
+}
+
+/// Why: the aggregate verdict is what an operator actually reads. If a single
+/// `Unknown` could still fold into an `Ok` report, the third state would be
+/// cosmetic.
+/// What: asserts `Unknown` outranks `Ok` and `Warn` but not `Fail`.
+/// Test: itself.
+#[test]
+fn unknown_never_aggregates_to_ok() {
+    let report = DoctorReport::from_checks(vec![
+        DoctorCheck::new("a", CheckStatus::Ok, "fine"),
+        DoctorCheck::new("b", CheckStatus::Unknown, "no idea"),
+    ]);
+    assert_eq!(report.overall, CheckStatus::Unknown);
+
+    let with_warn = DoctorReport::from_checks(vec![
+        DoctorCheck::new("a", CheckStatus::Warn, "meh"),
+        DoctorCheck::new("b", CheckStatus::Unknown, "no idea"),
+    ]);
+    assert_eq!(with_warn.overall, CheckStatus::Unknown);
+
+    // A real failure still outranks an unknown — a known problem is more
+    // actionable than an undetermined one.
+    let with_fail = DoctorReport::from_checks(vec![
+        DoctorCheck::new("a", CheckStatus::Unknown, "no idea"),
+        DoctorCheck::new("b", CheckStatus::Fail, "broken"),
+    ]);
+    assert_eq!(with_fail.overall, CheckStatus::Fail);
+}

@@ -95,6 +95,16 @@ pub mod fd_metrics;
 /// bound resident RSS. Wired in `spawn_startup_tasks` next to the dream
 /// scheduler; configured via `TRUSTY_MEMORY_IDLE_EVICT_SECS`.
 pub mod idle_evict;
+/// Live worker-occupancy gauge for the palace open/write path.
+///
+/// Why (issue #4001): doctor could only observe *process* liveness — an HTTP
+/// listener that answers and lock files that look clean — so a daemon with
+/// every worker parked in `concurrent_open::backoff_sleep_ms` still reported
+/// HEALTHY. This tracks how long the oldest in-flight operation has been
+/// running, which is the cheapest signal that actually distinguishes "the
+/// process is up" from "work is moving".
+/// Test: `worker_liveness::tests`.
+pub mod worker_liveness;
 // Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
 //      surfaces. Gating them behind the `axum-server` feature is what lets
 //      library consumers (e.g. `open-mpm` linking only `MemoryMcpService`)
@@ -454,6 +464,33 @@ pub struct AppState {
     /// `tests::emit_persists_mutations_but_skips_status_changed` call
     /// `flush_activity_writes` to drain the counter before reading the log.
     pub pending_activity_writes: Arc<AtomicUsize>,
+    /// Live occupancy gauge for the palace open path (issue #4001).
+    ///
+    /// Why: during the #3992 incident six daemon threads sat parked in
+    /// `concurrent_open::backoff_sleep_ms` with a `memory_remember` hung
+    /// ~1800 s, while both doctors reported HEALTHY. Every existing signal —
+    /// HTTP liveness, fastembed cache state, lock-file staleness — describes
+    /// the *process*, not the *work*. This is the one field that can answer
+    /// "is anything actually moving?", and `/health` surfaces it so an
+    /// out-of-process doctor can report what the daemon actually observed
+    /// instead of inferring health from a cheap proxy.
+    /// What: an [`worker_liveness::WorkerLiveness`] slot table; one CAS on
+    /// entry and one store on exit per tracked operation, so the gauge cannot
+    /// itself become the load problem it exists to detect.
+    /// Test: `web::tests::health_tests::health_reports_wedged_worker_pool`.
+    pub worker_liveness: Arc<worker_liveness::WorkerLiveness>,
+    /// How long an operation may run before the pool is called wedged.
+    ///
+    /// Why this is state rather than an env read on the request path: `/health`
+    /// is polled once a second, so re-reading (and re-parsing) an environment
+    /// variable per request is needless work; resolving it once at construction
+    /// also makes the value a property of the daemon instead of a process-wide
+    /// global, which is what lets tests drive the wedge condition
+    /// deterministically instead of mutating shared env state and racing each
+    /// other.
+    /// What: defaults to [`worker_liveness::wedge_threshold`].
+    /// Test: `web::tests::health_tests::health_reports_wedged_worker_pool`.
+    pub wedge_threshold: std::time::Duration,
     /// In-memory cache mapping palace id → `Palace.name` (issue #228).
     ///
     /// Why: every `memory_remember` / `memory_note` write used to call
@@ -597,6 +634,8 @@ impl AppState {
             bm25_supervisor: None,
             palace_write_locks: Arc::new(dashmap::DashMap::new()),
             pending_activity_writes: Arc::new(AtomicUsize::new(0)),
+            worker_liveness: Arc::new(worker_liveness::WorkerLiveness::new()),
+            wedge_threshold: worker_liveness::wedge_threshold(),
             palace_names: Arc::new(dashmap::DashMap::new()),
             pin_project_map: Arc::new(dashmap::DashMap::new()),
             bm25_index_tx,

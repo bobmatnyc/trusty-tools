@@ -161,6 +161,39 @@ pub(super) struct HealthResponse {
     /// What: `"warming"` until the embedder init succeeds; `"ready"` once
     /// `spawn_startup_tasks` flips `AppState::daemon_readiness`.
     pub(super) daemon_state: String,
+    /// Live worker-pool occupancy (issue #4001).
+    ///
+    /// Why: this is the field that makes `/health` report what it OBSERVED
+    /// rather than what it assumed. Every other field describes the process;
+    /// this one describes the work. Without it an out-of-process doctor has no
+    /// way to tell a busy-but-healthy daemon from one whose every worker is
+    /// parked, which is why #3992 read as HEALTHY for the whole incident.
+    /// What: see [`WorkerHealth`].
+    pub(super) worker: WorkerHealth,
+}
+
+/// Worker-pool occupancy block of the `/health` payload (issue #4001).
+///
+/// Why: doctor must be able to distinguish three states, not two — healthy,
+/// wedged, and *unknown*. Reporting the raw `oldest_age_secs` alongside the
+/// `wedged` verdict lets a consumer form its own opinion, and lets an operator
+/// see a pool trending toward a wedge before it trips.
+/// What: in-flight count, age of the oldest outstanding operation (absent when
+/// idle), and the threshold-crossed verdict.
+/// Test: `health_reports_idle_worker_pool`, `health_reports_wedged_worker_pool`.
+#[derive(serde::Serialize)]
+pub(super) struct WorkerHealth {
+    /// Operations currently inside the palace open path.
+    pub(super) in_flight: usize,
+    /// Seconds the oldest outstanding operation has been running. Absent when
+    /// nothing is in flight — an idle pool has no age to report, and reporting
+    /// `0` would be indistinguishable from "a request just started".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) oldest_age_secs: Option<u64>,
+    /// True when `oldest_age_secs` exceeds
+    /// [`crate::worker_liveness::wedge_threshold`] — i.e. an operation has
+    /// blown past the bound that was supposed to release it.
+    pub(super) wedged: bool,
 }
 
 /// `GET /health[?probe=true]` — unauthenticated liveness probe with optional
@@ -218,6 +251,20 @@ pub(super) async fn health(
     // explicitly requests it via ?probe=true or ?deep=true. Without either
     // flag the handler returns "ok" immediately — cheap enough for 1 s LB
     // polling without ONNX embedder calls.
+    // Issue #4001: observe the worker pool BEFORE deciding the status. This is
+    // the whole point of the fix — a listener that answers proves the process
+    // is alive, not that work is moving, so the verdict must be derived from
+    // an actual observation of outstanding work. Reading the gauge is a
+    // handful of relaxed atomic loads; it adds no I/O and takes no lock, so it
+    // is safe on the cheap (non-probe) path that monitors poll every second.
+    let wedge_threshold = state.wedge_threshold;
+    let oldest_age = state.worker_liveness.oldest_age();
+    let worker = WorkerHealth {
+        in_flight: state.worker_liveness.in_flight(),
+        oldest_age_secs: oldest_age.map(|d| d.as_secs()),
+        wedged: oldest_age.is_some_and(|age| age > wedge_threshold),
+    };
+
     let (status, detail) = if query.wants_deep_probe() {
         match run_health_round_trip(&state).await {
             Ok(()) => ("ok".to_string(), None),
@@ -228,6 +275,31 @@ pub(super) async fn health(
         }
     } else {
         ("ok".to_string(), None)
+    };
+
+    // A wedged pool outranks whatever the round-trip concluded: if the oldest
+    // in-flight operation has blown past its bound, the daemon is not healthy
+    // no matter how cheerful the rest of the payload looks. Reported on the
+    // cheap path too — #3992 was invisible precisely because nobody was
+    // passing ?probe=true during the incident.
+    let (status, detail) = if worker.wedged {
+        let secs = worker.oldest_age_secs.unwrap_or_default();
+        tracing::warn!(
+            oldest_age_secs = secs,
+            in_flight = worker.in_flight,
+            "/health: worker pool appears wedged"
+        );
+        (
+            "wedged".to_string(),
+            Some(format!(
+                "oldest in-flight palace operation has been running {secs}s \
+                 (threshold {}s, {} in flight) — workers are not making progress",
+                wedge_threshold.as_secs(),
+                worker.in_flight
+            )),
+        )
+    } else {
+        (status, detail)
     };
 
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
@@ -252,6 +324,7 @@ pub(super) async fn health(
         fd_soft_limit,
         update_available,
         daemon_state,
+        worker,
     })
 }
 

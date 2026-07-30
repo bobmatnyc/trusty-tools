@@ -83,8 +83,34 @@ use doctor_push_guard::check_push_guard;
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
-/// a short bound turns "hung" into a clean `Fail`.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// a bounded probe turns "hung" into a clean verdict.
+///
+/// Raised from 2 s to 10 s for issue #4005. The old bound produced
+/// "trusty-memory unreachable at 127.0.0.1:7070" against a daemon whose MCP
+/// surface was verifiably serving in the same minutes: trusty-memory's
+/// `/health` samples process RSS/CPU behind a mutex and enumerates open file
+/// descriptors, none of which the MCP request path touches, so under load
+/// `/health` can exceed a budget that real traffic never approaches. The probe
+/// was measuring its own impatience. Note that the timeout is only half the
+/// fix — a timeout now resolves to [`CheckStatus::Unknown`] rather than a
+/// false `Fail` (see [`probe_health`]).
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Number of attempts a health probe makes before giving up.
+///
+/// Why (issue #4005): the probe was single-shot, so one unlucky sample — a GC
+/// pause, a burst of concurrent MCP traffic, the warm-up window right after a
+/// `tm` restart that the issue explicitly calls out — became a hard failure
+/// verdict with no second opinion. Two retries cost nothing on the healthy
+/// path (the first attempt succeeds and returns immediately) and remove the
+/// single-sample fragility on the unhealthy one.
+const PROBE_ATTEMPTS: usize = 3;
+
+/// Delay between health-probe attempts.
+///
+/// Why: long enough to let a transient spike pass, short enough that three
+/// attempts stay well inside an interactive `tm doctor` run.
+const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 /// The trusty-search index `tm doctor` expects to exist for this repo.
 const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
@@ -454,10 +480,11 @@ async fn check_worktrees(
 ///
 /// Why: memory recall and store route through trusty-memory; if it is down the
 /// PM silently loses its long-term memory, so the operator must know.
-/// What: resolves the service address via [`discover_addr`], issues a
-/// `GET /health` bounded by [`PROBE_TIMEOUT`], and reports `Ok` on a 2xx,
-/// `Fail` on any other status or a transport error.
-/// Test: `memory_unreachable_is_fail`.
+/// What: resolves the service address via [`discover_addr`], then delegates to
+/// [`probe_health`], which retries, distinguishes a refusal from a timeout, and
+/// reads the daemon's own worker-pool observation out of the response body.
+/// Test: `memory_unreachable_is_fail`, `memory_timeout_is_unknown_not_fail`,
+/// `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`.
 async fn check_memory(home: &Path) -> DoctorCheck {
     let dir = home.join(".trusty-memory");
     let default = TRUSTY_MEMORY_DEFAULT_ADDR
@@ -465,23 +492,226 @@ async fn check_memory(home: &Path) -> DoctorCheck {
         .expect("static default is valid");
     let env = std::env::var("TRUSTY_MEMORY_ADDR").ok();
     let addr = discover_addr(&dir, default, env.as_deref()).await;
-    match http_get_ok(&format!("http://{addr}/health")).await {
-        Ok(true) => DoctorCheck::new(
-            "memory",
-            CheckStatus::Ok,
-            format!("trusty-memory healthy at {addr}"),
-        ),
-        Ok(false) => DoctorCheck::new(
-            "memory",
-            CheckStatus::Fail,
-            format!("trusty-memory at {addr} returned a non-2xx status"),
-        ),
-        Err(e) => DoctorCheck::new(
-            "memory",
-            CheckStatus::Fail,
-            format!("trusty-memory unreachable at {addr}: {e}"),
-        ),
+    probe_health(
+        "memory",
+        "trusty-memory",
+        &format!("http://{addr}/health"),
+        &addr.to_string(),
+    )
+    .await
+}
+
+/// Outcome of one `/health` request attempt.
+///
+/// Why (issue #4005): the old code collapsed every non-success into a single
+/// `Err`, which is what made "timed out" and "connection refused" produce the
+/// same "unreachable" verdict despite meaning opposite things operationally.
+/// Naming the cases is what lets the caller be honest about which it saw.
+/// What: a 2xx with its parsed body, a non-2xx, a timeout, or a refusal.
+enum ProbeOutcome {
+    /// 2xx. The body is `None` when it could not be read or parsed as JSON.
+    Success(Option<serde_json::Value>),
+    /// The service answered, but not with a 2xx.
+    NonSuccess(u16),
+    /// No answer within [`PROBE_TIMEOUT`] — we learned nothing.
+    TimedOut,
+    /// Connection refused / DNS / other transport failure — nothing is there.
+    Unreachable(String),
+}
+
+/// Issue one `/health` request and classify the outcome.
+async fn probe_health_once(url: &str) -> ProbeOutcome {
+    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(e) => return ProbeOutcome::Unreachable(e.to_string()),
+    };
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            ProbeOutcome::Success(resp.json::<serde_json::Value>().await.ok())
+        }
+        Ok(resp) => ProbeOutcome::NonSuccess(resp.status().as_u16()),
+        Err(e) if e.is_timeout() => ProbeOutcome::TimedOut,
+        Err(e) => ProbeOutcome::Unreachable(e.to_string()),
     }
+}
+
+/// Probe a sidecar's `/health` and turn what was actually observed into a
+/// [`DoctorCheck`] (issues #4005, #4001).
+///
+/// Why: this function encodes the principle both issues share. Doctor used to
+/// infer health from a cheap proxy — "the socket answered" — instead of
+/// observing the thing it claims to report. That produced a false NEGATIVE
+/// when the proxy was merely slow (#4005) and a false POSITIVE when the
+/// listener was fine but every worker was parked (#4001). So: retry before
+/// concluding anything, separate "nothing is listening" from "nothing
+/// answered in time", and prefer the daemon's own observation of its workers
+/// over our inference from the status code.
+/// What: up to [`PROBE_ATTEMPTS`] attempts. Returns `Ok` only when the daemon
+/// positively reports a healthy worker pool; `Fail` on a refusal, a non-2xx,
+/// or a reported wedge; `Warn` while warming or degraded; and `Unknown` when
+/// every attempt timed out or the body carried no worker observation.
+/// Test: `memory_unreachable_is_fail`, `memory_timeout_is_unknown_not_fail`,
+/// `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`,
+/// `memory_slow_but_serving_daemon_is_ok`.
+async fn probe_health(check: &str, service: &str, url: &str, addr: &str) -> DoctorCheck {
+    let mut last_timeout = false;
+    let mut last_err: Option<String> = None;
+    let mut last_status: Option<u16> = None;
+
+    for attempt in 0..PROBE_ATTEMPTS {
+        match probe_health_once(url).await {
+            ProbeOutcome::Success(body) => {
+                return interpret_health(check, service, addr, body.as_ref());
+            }
+            ProbeOutcome::NonSuccess(code) => {
+                last_status = Some(code);
+                last_timeout = false;
+            }
+            ProbeOutcome::TimedOut => {
+                last_timeout = true;
+            }
+            ProbeOutcome::Unreachable(e) => {
+                last_err = Some(e);
+                last_timeout = false;
+            }
+        }
+        if attempt + 1 < PROBE_ATTEMPTS {
+            tokio::time::sleep(PROBE_RETRY_DELAY).await;
+        }
+    }
+
+    if last_timeout {
+        // Issue #4005: THE false negative. Do not claim the daemon is down —
+        // we never established that. A slow /health is exactly what a healthy
+        // daemon under load looks like from here.
+        return DoctorCheck::new(
+            check,
+            CheckStatus::Unknown,
+            format!(
+                "{service} at {addr} did not answer /health within {}s across {PROBE_ATTEMPTS} \
+                 attempts, but the connection was NOT refused — the daemon may be alive and \
+                 merely slow. Health could not be determined. Check the MCP surface before \
+                 restarting anything.",
+                PROBE_TIMEOUT.as_secs()
+            ),
+        );
+    }
+
+    if let Some(code) = last_status {
+        return DoctorCheck::new(
+            check,
+            CheckStatus::Fail,
+            format!("{service} at {addr} returned HTTP {code}"),
+        );
+    }
+
+    DoctorCheck::new(
+        check,
+        CheckStatus::Fail,
+        format!(
+            "{service} unreachable at {addr}: {}",
+            last_err.unwrap_or_else(|| "connection refused".to_string())
+        ),
+    )
+}
+
+/// Map a 2xx `/health` body to a status (issues #4001, #4005).
+///
+/// Why: a 2xx proves a listener accepted a socket, not that the daemon is
+/// doing work — which is precisely how #3992 kept `tm doctor` green for the
+/// duration of an incident in which six threads were parked and a
+/// `memory_remember` had been hung for ~1800 s. When the daemon reports its
+/// own worker occupancy, that observation wins over our inference.
+/// What: `Fail` on a reported wedge, `Warn` while warming or degraded,
+/// `Unknown` when no worker block is present (an older daemon, or an
+/// unreadable body — we cannot claim health we did not observe), `Ok`
+/// otherwise.
+/// Test: `memory_wedged_worker_pool_is_not_ok`, `memory_warming_is_warn_not_fail`,
+/// `health_body_without_worker_block_is_unknown`.
+fn interpret_health(
+    check: &str,
+    service: &str,
+    addr: &str,
+    body: Option<&serde_json::Value>,
+) -> DoctorCheck {
+    let Some(body) = body else {
+        return DoctorCheck::new(
+            check,
+            CheckStatus::Unknown,
+            format!(
+                "{service} at {addr} answered /health but the body was unreadable — the \
+                 listener is up; whether its workers are progressing is UNKNOWN"
+            ),
+        );
+    };
+
+    let worker = body.get("worker");
+    let wedged = worker
+        .and_then(|w| w.get("wedged"))
+        .and_then(serde_json::Value::as_bool);
+
+    match wedged {
+        Some(true) => {
+            let oldest = worker
+                .and_then(|w| w.get("oldest_age_secs"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            let in_flight = worker
+                .and_then(|w| w.get("in_flight"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            return DoctorCheck::new(
+                check,
+                CheckStatus::Fail,
+                format!(
+                    "{service} at {addr} is answering /health BUT reports a WEDGED worker \
+                     pool: oldest in-flight operation {oldest}s, {in_flight} in flight. The \
+                     listener responding does not mean writes are progressing (issue #3992)."
+                ),
+            );
+        }
+        None => {
+            return DoctorCheck::new(
+                check,
+                CheckStatus::Unknown,
+                format!(
+                    "{service} at {addr} is reachable but does not report worker-pool \
+                     occupancy (pre-#4001 build) — liveness confirmed, progress UNKNOWN"
+                ),
+            );
+        }
+        Some(false) => {}
+    }
+
+    // Issue #4005 explicitly calls out post-restart warm-up: it is a normal
+    // transient state, not a failure, and must not read as fully healthy either.
+    if body.get("daemon_state").and_then(|v| v.as_str()) == Some("warming") {
+        return DoctorCheck::new(
+            check,
+            CheckStatus::Warn,
+            format!(
+                "{service} at {addr} is WARMING UP (embedder initialising) — normal shortly after a restart"
+            ),
+        );
+    }
+
+    if body.get("status").and_then(|v| v.as_str()) == Some("degraded") {
+        let detail = body
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("no detail reported");
+        return DoctorCheck::new(
+            check,
+            CheckStatus::Warn,
+            format!("{service} at {addr} reports DEGRADED: {detail}"),
+        );
+    }
+
+    DoctorCheck::new(
+        check,
+        CheckStatus::Ok,
+        format!("{service} healthy at {addr}, workers progressing"),
+    )
 }
 
 /// Probe the trusty-search sidecar's health and the `trusty-mpm` index.
