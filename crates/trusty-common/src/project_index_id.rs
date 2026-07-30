@@ -109,9 +109,11 @@ const FALLBACK_LABEL: &str = "project";
 /// the account operating this checkout. All three are hashed; only `origin`
 /// (or the root basename) contributes to the readable label.
 ///
-/// Only `root` is immutable for the life of a content tree. `origin` and
-/// `operator` are both mutable git state — see the `Known limitation` block on
-/// [`Self::index_id`] for the enumerated drift cases and what they cost.
+/// `root` is the most stable of the three, but it is NOT immutable — it is
+/// fixed only under ordinary GIT operations (#4269). Renaming or moving the
+/// directory moves it, and `origin` and `operator` are both live git state.
+/// See the `Known limitation` block on [`Self::index_id`] for the enumerated
+/// drift cases and what each costs.
 /// Test: `sibling_clones_of_same_repo_derive_distinct_ids`,
 /// `linked_worktrees_of_same_repo_derive_distinct_ids`,
 /// `different_operators_derive_distinct_ids`.
@@ -197,9 +199,12 @@ impl ProjectIdentity {
     /// permanence.
     ///
     /// **Known limitation — which inputs are mutable, and what changes an id.**
-    /// Only `root` is fixed for the life of a content tree. Both other
-    /// components are live git/user state, so ordinary actions re-derive a
-    /// different id for the SAME tree. Each row is pinned by a test:
+    /// `root` is fixed only under ordinary GIT operations — NOT for the life of
+    /// a content tree (#4269). It moves whenever the directory does, and `mv` is
+    /// routine. Both other components are live git/user state, so ordinary
+    /// actions re-derive a different id for the SAME tree. Each row below is
+    /// pinned by a test; the four `root`/whole-triple movers named after the
+    /// table are pinned in #4269, not here:
     ///
     /// | Action | Component | Test |
     /// |---|---|---|
@@ -217,9 +222,36 @@ impl ProjectIdentity {
     /// deriving two ids over time wastes an index; two trees deriving one id
     /// merges unrelated codebases), and it cannot bite while the module has no
     /// call sites — but the wiring slice MUST NOT read this function as
-    /// permanent. Recommended shape for that slice: reconcile on `root`, which
-    /// is the only component that does not move, and treat an origin/operator
-    /// change as an alias-and-carry-forward rather than a new index.
+    /// permanent.
+    ///
+    /// **Do NOT reconcile on `root`** (#4269, corrected #4288). An earlier
+    /// version of this paragraph recommended exactly that, on the false premise
+    /// that `root` does not move. Four routine actions move it or the whole
+    /// triple, none of them a row in the table above, each verified against
+    /// this crate:
+    ///
+    /// | Action | Observed |
+    /// |---|---|
+    /// | `mv proj proj-renamed` | `acme-widget-88e6…` → `acme-widget-0bd2…` |
+    /// | GitHub repo rename | `acme-widget-6370…` → `acme-widget-renamed-b138…` |
+    /// | GitHub repo transfer | `acme-widget-6370…` → `newowner-widget-4d1e…` |
+    /// | `git remote remove origin` | `newowner-widget-4d1e…` → `widget-fa2a…` |
+    ///
+    /// The directory rename is the significant one: it is routine, it orphans
+    /// the registered index, and it removes the exact anchor the migration
+    /// slice was being told to reconcile on. `ProjectIdentity::digest` hashes
+    /// `path_bytes(&self.root)` and `label()` falls back to the root
+    /// basename, so `mv` moves BOTH halves of the id at once.
+    ///
+    /// Recommended shape for that slice instead: reconcile on an anchor GIT
+    /// itself maintains, and treat an origin/operator change as an
+    /// alias-and-carry-forward rather than a new index. The worktree
+    /// reconciliation in `trusty-mpm`'s `session_manager::worktree_reconcile`
+    /// (#4288) uses `(git rev-parse --git-common-dir, admin-dir basename)` for
+    /// this reason: it survives a directory move, a repo rename, a transfer,
+    /// and `git remote remove origin`, and when it does break — the repository
+    /// directory moved without `git worktree repair` — it breaks LOUDLY, where
+    /// a `root`-keyed scheme fails silently by re-deriving a fresh id.
     ///
     /// Also machine-local: `root` is an absolute path, so the same repo cloned
     /// on two machines derives two ids. That is correct for a partitioning key

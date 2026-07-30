@@ -50,6 +50,7 @@ pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod push_guard;
+pub(crate) mod reconcile_worktrees;
 pub(crate) mod rename;
 pub(crate) mod repair;
 pub(crate) mod serve_stdio;

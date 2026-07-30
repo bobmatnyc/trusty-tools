@@ -585,6 +585,44 @@ fn cli_prune_worktrees_discard_dirty_is_opt_in() {
     }
 }
 
+/// #4288: `reconcile-worktrees` parses, and defaults to the human-readable
+/// form.
+#[test]
+fn cli_parses_session_reconcile_worktrees() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "reconcile-worktrees"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::ReconcileWorktrees { json },
+        } => assert!(!json, "the default must be the readable report, not JSON"),
+        other => panic!("expected session reconcile-worktrees, got {other:?}"),
+    }
+    let as_json =
+        Cli::try_parse_from(["trusty-mpm", "session", "reconcile-worktrees", "--json"]).unwrap();
+    match as_json.command.unwrap() {
+        Command::Session {
+            action: SessionAction::ReconcileWorktrees { json },
+        } => assert!(json),
+        other => panic!("expected session reconcile-worktrees, got {other:?}"),
+    }
+}
+
+/// #4288: the reconcile verb has NO destructive flag — not `--force`, not
+/// `--discard-dirty`, not `--dry-run`.
+///
+/// Why: slice 3 is report-only, and the way a reporting verb stops being
+/// report-only is that someone adds a flag to it. `clap` rejecting these at
+/// parse time is the mechanical form of "there is no destructive form of this
+/// command", and this test turns any such addition red.
+#[test]
+fn cli_reconcile_worktrees_takes_no_destructive_flag() {
+    for flag in ["--force", "--discard-dirty", "--dry-run"] {
+        assert!(
+            Cli::try_parse_from(["trusty-mpm", "session", "reconcile-worktrees", flag]).is_err(),
+            "`reconcile-worktrees {flag}` must not parse — slice 3 writes nothing"
+        );
+    }
+}
+
 #[test]
 fn cli_parses_sessions_sync_assets() {
     // #2444: `sync-assets <id>` re-syncs ONE session.
@@ -955,6 +993,7 @@ fn ls_test_session(
         injection_status: None,
         unresumable: false,
         stale_assets: false,
+        stale_assets_unchecked: false,
         attached: false,
         slot: 0,
         deleted: false,

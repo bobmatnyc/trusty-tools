@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`project_index_id` documentation corrected**
+  ([#4269](https://github.com/bobmatnyc/trusty-tools/issues/4269), amended under
+  [#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288)). The module
+  stated without qualification that `root` is immutable and recommended that the
+  wiring/migration slice "reconcile on `root`". Four routine actions move it —
+  `mv proj`, a GitHub repo rename, a repo transfer, and `git remote remove
+  origin` — and reconciling on it would reintroduce the silent-orphan class the
+  identity work exists to remove. The immutability claims are now qualified
+  ("under ordinary git operations"), the four movers are documented, and the
+  recommendation points at a git-maintained anchor instead. The CHANGELOG's
+  hermeticity claim is likewise corrected: two callers CAN derive different ids
+  when `HOME`/`GIT_CONFIG_GLOBAL` differ and the repo sets no local
+  `user.email`. Documentation only — no code change.
+
 ### Added
 
 - `json_rmw`: cross-process locked read-modify-write for whole-file JSON
@@ -34,8 +50,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   path; registry reconciliation and migration of existing indexes are separate
   slices of #4207. No behaviour change for any existing caller.
 
-  Derivation is hermetic: it reads no environment variable, so two callers on one
-  tree (e.g. the launchd daemon and a shell CLI) cannot derive different ids. The
+  Derivation reads no environment variable of its own, but it is NOT fully
+  hermetic (corrected, #4269): `resolve_operator_identity` shells out to `git
+  config`, so two callers on one tree CAN derive different ids when `HOME` or
+  `GIT_CONFIG_GLOBAL` differ and the repo sets no local `user.email` — see
+  `project_index_id.rs`'s own note. The launchd daemon and a shell CLI are
+  precisely that pair, since the daemon runs under a plist environment while CLI
+  invocations inherit the shell's. Set a repo-local `user.email` to pin it. The
   `index_id()` docs enumerate exactly which inputs are mutable — `origin` moves on
   the first commit, on `git remote add origin`, and on a new root commit — each
   pinned by a test, so the migration slice inherits a true guarantee rather than an

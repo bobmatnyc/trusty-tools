@@ -234,17 +234,34 @@ impl fmt::Display for PruneFilter {
 /// Why: `decommission` (tear down a live/stopped session) and `remove` (drop an
 /// existing tombstone from the store) are semantically distinct outcomes; the
 /// caller wants to know which happened per session so a dry-run report is precise.
+/// A THIRD outcome exists since the decommission-side dirty-worktree guard: a
+/// record can be tombstoned while its in-project worktree is deliberately left
+/// on disk because it held unsaved work. Before this variant existed,
+/// `prune_managed` discarded the `bool` half of `decommission`'s
+/// `(SessionRecord, bool)` return, so `tm sessions prune --state stopped`
+/// printed the identical `decommissioned` line whether the worktree was
+/// removed or silently retained — the refusal was invisible at the one
+/// surface an operator actually reads.
 /// What: [`Decommissioned`](PruneAction::Decommissioned) — killed runtime +
-/// removed workspace + tombstoned; [`Removed`](PruneAction::Removed) — an existing
-/// `Decommissioned` tombstone was deleted from the store (compaction).
+/// removed workspace (or the workspace was already gone/never SM-owned) +
+/// tombstoned; [`DecommissionedWorktreeRetained`](PruneAction::DecommissionedWorktreeRetained)
+/// — tombstoned, but the worktree held unsaved work and was deliberately NOT
+/// removed (its path is echoed back on [`PrunedSession::retained_workspace_path`]);
+/// [`Removed`](PruneAction::Removed) — an existing `Decommissioned`/`Deleted`
+/// tombstone was deleted from the store (compaction).
 /// Test: asserted by `decommission_all_ephemeral_ignores_non_ephemeral` (the
-/// `Decommissioned` action) and `prune_decommissioned_compacts` (the `Removed`
-/// action).
+/// `Decommissioned` action), `prune_decommissioned_compacts` (the `Removed`
+/// action), and `prune_reports_dirty_worktree_retained` (the new variant).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PruneAction {
     /// The session was torn down (runtime killed, workspace removed, tombstoned).
     Decommissioned,
+    /// The session was tombstoned, but its in-project worktree held unsaved
+    /// work and was deliberately NOT removed — see
+    /// `worktree_safety::inspect_dirt`. The worktree remains on disk; its path
+    /// is echoed on `PrunedSession::retained_workspace_path`.
+    DecommissionedWorktreeRetained,
     /// An existing tombstone was deleted from the store (compaction).
     Removed,
 }
@@ -253,11 +270,14 @@ impl PruneAction {
     /// The canonical lowercase name of this action (for wire/log rendering).
     ///
     /// Why: HTTP/MCP responses and the CLI dry-run render the action per row.
-    /// What: `Decommissioned` → `"decommissioned"`, `Removed` → `"removed"`.
+    /// What: `Decommissioned` → `"decommissioned"`,
+    /// `DecommissionedWorktreeRetained` → `"decommissioned_worktree_retained"`,
+    /// `Removed` → `"removed"`.
     /// Test: `prune_outcome_serializes`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Decommissioned => "decommissioned",
+            Self::DecommissionedWorktreeRetained => "decommissioned_worktree_retained",
             Self::Removed => "removed",
         }
     }
@@ -269,7 +289,8 @@ impl PruneAction {
 /// id, tmux name, and prior state — before anything is destroyed.
 /// What: the session id, tmux name, the state the record was in, and the
 /// [`PruneAction`] applied (or that would be applied under `dry_run`).
-/// Test: `prune_dry_run_reports_without_mutating`.
+/// Test: `prune_dry_run_reports_without_mutating`,
+/// `prune_reports_dirty_worktree_retained`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PrunedSession {
     /// Managed session id (UUID string).
@@ -280,6 +301,18 @@ pub struct PrunedSession {
     pub state: String,
     /// What the prune did (or would do under `dry_run`).
     pub action: PruneAction,
+    /// The workspace path left on disk when `action` is
+    /// [`PruneAction::DecommissionedWorktreeRetained`]; `None` for every other
+    /// action (including a clean `Decommissioned`, whose workspace was
+    /// removed and therefore has no on-disk path left to report).
+    ///
+    /// Why: the previous version of this struct had no way to tell a caller
+    /// WHERE the retained work is — `decommission` itself now keeps
+    /// `workspace_path` on a retained record for exactly this reason (see
+    /// `decommission_with_root`'s tombstone comment), so this field just
+    /// surfaces that same path at the prune report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_workspace_path: Option<std::path::PathBuf>,
 }
 
 /// The result of a prune: which sessions were (or would be) affected (#1508).
@@ -552,11 +585,18 @@ impl SessionManager {
                 record.state,
                 ManagedSessionState::Decommissioned | ManagedSessionState::Deleted
             );
-            let action = if is_tombstone {
+            // Predicted action for the `dry_run` preview, and the default for
+            // a real run — overwritten below by the ACTUAL `decommission`
+            // result. A dry-run cannot know in advance whether a worktree
+            // will turn out dirty (`inspect_dirt` only runs as part of a real
+            // teardown attempt), so the preview stays optimistic here exactly
+            // as it did before this fix.
+            let mut action = if is_tombstone {
                 PruneAction::Removed
             } else {
                 PruneAction::Decommissioned
             };
+            let mut retained_workspace_path = None;
 
             if !dry_run {
                 if is_tombstone {
@@ -565,9 +605,27 @@ impl SessionManager {
                         warn!(id = %record.id, "prune: compaction remove failed: {e}; skipping");
                         continue;
                     }
-                } else if let Err(e) = self.decommission(&record.id, caller).await {
-                    warn!(id = %record.id, "prune: decommission failed: {e}; skipping");
-                    continue;
+                } else {
+                    match self.decommission(&record.id, caller).await {
+                        Ok((tombstone, workspace_removed)) => {
+                            // The dirty-worktree guard in `decommission` can
+                            // tombstone a record while deliberately leaving its
+                            // in-project worktree on disk. Surface that here
+                            // instead of reporting the same `Decommissioned`
+                            // line regardless of whether the worktree was
+                            // actually removed — the previous version of this
+                            // loop discarded the `bool` half of
+                            // `decommission`'s return entirely.
+                            if !workspace_removed && tombstone.workspace_path.is_some() {
+                                action = PruneAction::DecommissionedWorktreeRetained;
+                                retained_workspace_path = tombstone.workspace_path.clone();
+                            }
+                        }
+                        Err(e) => {
+                            warn!(id = %record.id, "prune: decommission failed: {e}; skipping");
+                            continue;
+                        }
+                    }
                 }
             }
 
@@ -576,6 +634,7 @@ impl SessionManager {
                 tmux_name: record.tmux_name.clone(),
                 state: record.state.to_string(),
                 action,
+                retained_workspace_path,
             });
         }
 

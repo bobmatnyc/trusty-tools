@@ -401,6 +401,12 @@ pub(crate) async fn session(
             crate::commands::managed::session_prune_worktrees(client, url, !force, discard_dirty)
                 .await?
         }
+        // #4288: the report-only inventory. No `force`/`dry_run` argument
+        // exists because the verb has no destructive form.
+        SessionAction::ReconcileWorktrees { json } => {
+            crate::commands::reconcile_worktrees::session_reconcile_worktrees(client, url, json)
+                .await?
+        }
         // #2444: re-sync a live session's (or every syncable session's)
         // deployed assets against the current catalog. Fleet-wide store
         // operation like `Prune`/`DecommissionEphemeral` above — direct HTTP,

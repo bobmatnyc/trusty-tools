@@ -490,4 +490,22 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         discard_dirty: bool,
     },
+    /// Report every git-registered worktree against `sessions.json` (#4288).
+    ///
+    /// Why: `prune-worktrees` shows only the reclaim CANDIDATES, so the
+    /// worktrees it excludes — 33 of 118 on the machine this was measured on,
+    /// six of them holding uncommitted work — are invisible. This verb reports
+    /// the whole inventory, keyed on git's own registry identity rather than on
+    /// a path shape (which misclassified 29% of them).
+    /// What: GETs `/api/v1/sessions/managed/reconcile-worktrees` and prints one
+    /// line per worktree — state, path, reason — plus the worktrees a later
+    /// slice would adopt. READ-ONLY: there is no `--force`, because there is
+    /// nothing here to force. Nothing is deleted, written, or migrated.
+    /// Test: `cli_parses_session_reconcile_worktrees`,
+    /// `cli_reconcile_worktrees_takes_no_destructive_flag`.
+    ReconcileWorktrees {
+        /// Print the full report as JSON instead of the one-line-per-row form.
+        #[arg(long)]
+        json: bool,
+    },
 }

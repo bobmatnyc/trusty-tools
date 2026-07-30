@@ -7,6 +7,84 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **The daemon now writes a real, best-effort log file, scoped per project
+  and port** (#4111). `--serve`'s detached child previously had
+  stdin/stdout/stderr all redirected to `/dev/null`, so a daemon crash was
+  completely undiagnosable — no `~/Library/Logs/trusty-agents/` directory
+  ever existed, unlike every other trusty-* daemon.
+  `service::start_service` now opens (and rotates, once past 10 MiB)
+  `~/Library/Logs/trusty-agents/daemon-<project-hash>-<port>.log` and
+  redirects the child's stderr to it instead of discarding it; stdin/stdout
+  are unchanged (`/dev/null` / `/dev/null`), preserving the existing "stdout
+  stays clean for MCP JSON-RPC framing" contract. Log setup is best-effort —
+  an unwritable log directory, a full disk, or a permissions problem falls
+  back to `Stdio::null()` rather than aborting the daemon spawn, so a
+  logging failure can never take down Concierge/Telegram/Slack with it. The
+  log path is keyed by BOTH a hash of the project root (mirroring
+  `pid_file_path()`'s own per-project identity — port alone didn't actually
+  prevent clobbering, since every project shares the same hardcoded default
+  port) and port, so two concurrently-running daemons don't interleave into
+  (or rotate-clobber) the same file. The daemon's own tracing setup
+  (`runtime::startup`) is unchanged — it already wrote to stderr in
+  non-interactive mode; the bug was purely the spawn call discarding that
+  stream.
+- **A failed task no longer renders a raw Rust error as if the assistant said
+  it, in either Tauri or browser/`pnpm dev` mode** (#4320). Both
+  `send_message` (Tauri `ui/src-tauri/src/task_commands.rs`) and its browser
+  fallback (`ui/src/lib/transport.ts`'s `fetchFallback` poll loop — the sole
+  narrative-delivery path in that mode) emitted `task-complete` for every
+  terminal poll response regardless of status, so a `status: "error"`
+  response's narrative — a raw failure string such as `subprocess exited
+  with status Some(1)`, or a Debug-formatted `anyhow::Error` — landed in
+  `ChatView.svelte`'s `task-complete` handler, which renders `narrative`
+  verbatim with no error framing. Both now emit `task-error` (the same
+  event, with the same `"Error: "`-prefixing handler, that transport
+  failures already use) for `status: "error"` responses; `partial`/
+  `cancelled` keep the existing `task-complete` framing since their
+  narratives are already user-facing text, not raw errors.
+
+### Added
+
+- **`GET /api/agents/:name/kg`, `/kg/subjects`, `/kg/all` and `/kg/count` — a
+  read-only proxy onto the Knowledge Graph of the memory palace the agent binds
+  via `[[stores]].palace`** (#4290). trusty-memory already owns every one of
+  these queries; this crate only maps agent → palace and passes the upstream
+  JSON through verbatim under `{palace, connected, data}`. An agent that binds
+  no palace, or a trusty-memory daemon that is down, returns `200` with
+  `connected: false` and a machine-readable `reason` — the same never-fail
+  posture `GET /api/agents/:name/stores` already has — so the Knowledge Graph
+  browser renders an empty state instead of an error. Assert and delete are
+  deliberately not proxied; editability is a separate ticket.
+- **Knowledge Graph browser — the UI leg of #4290.** A "Knowledge Graph"
+  button beside the Assistant selector in `ChatHeader` opens a dedicated
+  slide-over (`KnowledgeGraphBrowser.svelte`) over the active agent's one
+  bound palace: a filterable/sortable subject list with count badges,
+  drill-down into a subject's triples, and a paginated "all triples" mode —
+  porting `trusty-memory`'s `KG.svelte` interaction pattern into this app's
+  Foundry/Tailwind idiom (single palace, no picker). Read-only v1, hidden
+  entirely for Concierge (no `agent.toml`/`[[stores]]` binding). Renders six
+  explicit states rather than a generic spinner or empty list: loading,
+  connected with data, connected with a genuinely empty graph, `connected:
+  false` with its `reason`, a `config_error` surfaced alongside that, and the
+  fetch-helper's 404/network-error path. New `lib/kg.ts` client following
+  `fetchAgentStores`'s null-on-404/throw idiom; the SPA still never calls
+  trusty-memory directly.
+
+### Fixed
+
+- **Knowledge Graph browser: a mid-session daemon/palace failure now explains
+  itself instead of rendering as an empty graph** (#4290 code-review
+  finding). Only `bootstrap()`'s initial `/kg/subjects` call checked
+  `env.connected`; `loadAll`, `loadCount`, and `loadSubject` assigned
+  `env.data` unconditionally, so a `connected: false` response arriving AFTER
+  a successful bootstrap — trusty-memory restarts, the palace goes
+  unreachable — rendered as "0 active triples" / "No triples.", visually
+  identical to a genuinely empty, connected palace. All three now check
+  `env.connected` first and route into the same disconnected state
+  `bootstrap()` already shows, carrying the backend's `reason`.
+
 ### Changed
 
 - **An assistant's reachable sub-agent set is now an editable configuration
