@@ -9,576 +9,211 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`tm session reconcile-worktrees` — report-only worktree reconciliation on a
-  git-derived key** ([#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288),
-  slice 3 of [#4207](https://github.com/bobmatnyc/trusty-tools/issues/4207)).
-  Reconciles every git-registered worktree against `sessions.json` on the pair
-  `(git rev-parse --git-common-dir, admin-dir basename)` — git's own registry
-  identity — rather than on a path shape, which was measured misclassifying 34
-  of 118 worktrees (29%) on the dogfood machine. Each row is classified
-  `LIVE` / `ORPHANED` / `UNKNOWN` with the reason that produced it; `UNKNOWN`
-  dominates, so a path whose git identity cannot be established is never
-  reported reclaimable no matter what else points at it.
-  - The report includes the **excluded** set — 33 of the 118, invisible to every
-    other worktree surface today, six of them holding uncommitted work.
-  - It also **names** the worktrees a later slice would adopt, with the evidence
-    behind each inference. Nothing is written: no deletions, no sentinel writes,
-    no registry or record mutation, and the verb has no `--force`.
-  - Worktree enumeration now orders a NESTED worktree before the worktree that
-    contains it. The previous lexicographic order put a parent first, so
-    removing it took its children's directories and left dangling registry
-    entries behind.
-
-### Performance
-
-- `tm ls` no longer re-reads the whole fleet's deployed agent/skill trees on
-  every invocation ([#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)).
-  Two changes, both in `daemon::managed_routes::summary`:
-  - **`Stopped` sessions are no longer asset-staleness-probed on the LIST
-    path.** The probe costs ~95 `read_to_string` calls against a session's own
-    `.claude/{agents,skills}` tree, uncached, per invocation. On a measured
-    32-session fleet, 20 of those sessions were stopped and idle for days —
-    56% of the I/O — for a marker that is only actionable at resume. The
-    single-session `GET …/managed/{id}` path (what `tm session resume` reads)
-    still probes every meaningful state, so the signal is unchanged where it
-    is acted on. Measured on that fleet: 3,040 → 1,140 read attempts and
-    35.7 MiB → 15.0 MiB per listing.
-  - **The remaining per-session comparisons now run concurrently** on the
-    blocking pool via `JoinSet::spawn_blocking`, mirroring the `unresumable`
-    fan-out already used alongside them. The shared `CatalogHashes` compute
-    (#2444) stays a single sequential step — fanning it out would reinstate
-    the per-session recompose it exists to prevent.
-
-### Added
-
-- **`tm ls` / bare `tm` picker: auto-prune dead records + attached→active→stopped
-  ordering** (owner request 2026-07-29; hardened per code-critic WARN on
-  PR [#4384](https://github.com/bobmatnyc/trusty-tools/pull/4384)). Previously
-  a session flagged `unresumable` (its workspace verifiably gone from disk)
-  sat in the picker forever printing `DEAD: workspace removed; use [d<N>] to
-  remove the record` — the operator had to notice the row and type the number
-  manually. The picker's shared fetch path (`fetch_live_sessions`) now
-  auto-prunes `unresumable` records, hardened three ways after adversarial
-  review:
-  - **Record-only removal.** The auto-prune sweep POSTs the existing
-    `/decommission` route with `?record_only=true`, routing to the new
-    `SessionManager::decommission_record_only` — the removal branches are
-    skipped ENTIRELY, so the sweep can never delete filesystem content even
-    if a remounted volume brought a workspace back between the listing-time
-    probe and the decommission call. Manual `[d<N>]` keeps today's full
-    teardown behavior.
-  - **Two-sightings confirmation + a per-call cap.** A record is only
-    decommissioned once its `unresumable` flag has been observed on TWO
-    separate listings (tracked via a small persisted marker file under
-    `~/.trusty-mpm/`), and at most 5 confirmed records are decommissioned per
-    call — the rest are reported as "N more dead records pending
-    confirmation." A bad-mount day can no longer mass-tombstone an entire
-    fleet in one `tm ls`.
-  - **TTY gate.** `guided.rs`'s bare-`tm` picker now computes its
-    interactive/non-interactive decision BEFORE fetching sessions and passes
-    it through as `fetch_live_sessions`'s new `allow_auto_prune` parameter —
-    a scripted/piped/CI invocation of bare `tm` is now a pure read, exactly
-    like `tm ls`'s existing TTY gate.
-
-  A record whose worktree removal was previously refused because the tree
-  was dirty ([#4344](https://github.com/bobmatnyc/trusty-tools/pull/4344))
-  retains a `workspace_path` that still exists on disk, which means it can
-  never read `unresumable == true` in the first place — such records are
-  structurally excluded from auto-prune, never touched. Separately,
-  `sort_sessions` (shared by the static table and the picker) now groups rows
-  attached → active → everything else ABOVE whichever `recent`/`alpha`
-  secondary order was requested, so an attached or active session never
-  scrolls below a merely-recent stopped one.
-- **`CLAUDE.md` named-section instruction overrides — reader** (epic
-  [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183),
-  [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286)): a project can
-  now override one PM instruction section by marking it out inside its own
-  `CLAUDE.md`, instead of maintaining a second instruction surface under
-  `.trusty-mpm/`. New module `core::claude_md_sections`. The grammar, matched
-  whole-line:
-
-  ```
-  <!-- TRUSTY-MPM: WORKFLOW START v=1 -->
-  …override content…
-  <!-- TRUSTY-MPM: WORKFLOW END -->
-  ```
-
-  The token is the section id kebab-case uppercased (`CORE`, `MEMORY`, `SEARCH`,
-  `WORKFLOW`, `AGENT-DELEGATION`), matched case-insensitively; text outside
-  markers is ignored. Hosts scanned, in precedence order:
-  `<project>/CLAUDE.md`, then `<project>/.trusty-mpm/INSTRUCTIONS.md` —
-  `CLAUDE.md` wins a same-section collision, and a marked block in
-  `INSTRUCTIONS.md` is removed from the additive project addendum so it is
-  delivered once. A marker-free `INSTRUCTIONS.md` is passed through byte-for-byte
-  and keeps feeding the addendum exactly as before.
-
-  **The package is the sole authority on what may be overridden.** The new
-  `InstructionPackage::with_overrides` asks each section's declared
-  `customization_tier`, so the three floor sections (`identity`,
-  `non-overridable-rules`, `framework-guaranteed-conventions`) refuse every
-  `CLAUDE.md` override and compose byte-identically to no `CLAUDE.md` at all. An
-  override replaces only its section's authored text blocks — generated blocks
-  survive, so an `AGENT-DELEGATION` override rewrites the routing doctrine but
-  cannot suppress the live agent roster
-  ([#4196](https://github.com/bobmatnyc/trusty-tools/issues/4196)).
-
-  Nothing here fails a launch. A missing or unreadable `CLAUDE.md`, an unclosed
-  or nested marker pair, an unknown token, an unknown `v=`, an override aimed at
-  the floor, an empty body, and a package that stops validating all degrade to
-  the bundled section, each with a `warn!` naming the file, line and reason. A
-  missing `v=` is accepted as `v=1` for this release, with a warning. `tm` still
-  never writes a project's `CLAUDE.md`
-  ([#2170](https://github.com/bobmatnyc/trusty-tools/issues/2170)), now asserted
-  by test.
-
-  This ships the READER before the floor text that advertises the mechanism —
-  advertising an override no code reads is
-  [#381](https://github.com/bobmatnyc/trusty-tools/issues/381) verbatim. The five
-  `.trusty-mpm/` override files are untouched and keep working; a project still
-  carrying one composes through the sectionless legacy assembly, and its named
-  sections are reported unapplied rather than dropped in silence.
-
-  A third committed prompt snapshot, `testdata/pm-prompt-claude-md-override.md`,
-  makes the delivered shape of an override reviewable. Both existing goldens are
-  byte-unchanged.
-
-### Changed
-
-- The bundled PM instruction package is now an **authored JSON manifest**, not a
-  Rust literal
-  ([#4318](https://github.com/bobmatnyc/trusty-tools/issues/4318), part of
-  [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)). Sections,
-  customization tiers, block order, joins, the declared generators, and the
-  roster-precedence note all live in
-  `assets/instructions/pm-instruction-package.json`;
-  `bundled_pm_package::bundled_fallback_package()` parses that file instead of
-  constructing an `InstructionPackage` in code, so there is no second place a
-  join or a block order can be edited. `InstructionPackage::from_json` had zero
-  non-test call sites before this and the shipped JSON Schema had no instance
-  under it — both are now live.
-
-  **Instruction-package schema v2**: adds a `{"kind":"file","path":"…"}` body
-  variant alongside `text` and `generated`. Prose keeps living in reviewable
-  markdown under `sections/`; the manifest references it by path and resolves it
-  through a compile-time `include_str!` table
-  (`instruction_pipeline::SECTION_SOURCES`), so the build stays hermetic, a
-  renamed section is a compile error, and `check_instruction_floor.sh` keeps
-  grepping real files. Inlining the prose instead would have turned `core.md`
-  into one 23 KB JSON line. The version bump is required by the format's own
-  evolution policy: a v1 build reading a v2 manifest rejects it loudly rather
-  than composing a prompt missing the new field's effect.
-
-  The mechanism half is byte-identical — all three composed-prompt goldens passed
-  unchanged before the content below was added.
-
-- PM instructions: three owner language rules, authored as inline `text` blocks
-  in the manifest rather than in markdown (owner order, 2026-07-29 — the 1.3
-  rules belong in JSON). Same family as the plain-prose rule from
-  [#4316](https://github.com/bobmatnyc/trusty-tools/pull/4316).
-
-  | rule | section | substance |
-  |---|---|---|
-  | Clickable References | `core` | issue/PR/ticket/commit references always render as clickable markdown links, never bare numbers |
-  | Banned Word — "honest" | `core` | "honest" and every variation is banned from PM responses, delegation briefs and review instructions; a report states facts, and labelling them honest implies the alternative was considered |
-  | Opportunistic Fixes | `workflow` | an easy fix found while working on a file is noted on the CURRENT issue and made in the same work — never a new issue; new issues are for genuinely separable schedulable work |
-
-  Delivered to every launch path, not just the packaged composer:
-  `pm_instructions()`, `base_pm()`, the new `workflow_section()` and
-  `delegation_doctrine()` now project the manifest through
-  `InstructionPackage::authored_run` instead of rebuilding from the section
-  constants, so the legacy `.trusty-mpm/` override assembly and the roster-free
-  `assemble_system_prompt()` (what `tm install` writes and `tm launch` passes to
-  `--append-system-prompt-file`) carry the same rules. Rebuilding from the
-  constants would have delivered a manifest-authored rule to one composer and
-  silently withheld it from the others. `core` and `workflow` remain
-  `customization_tier: project`, so a `CLAUDE.md` named-section override still
-  replaces them wholesale — visible in the regenerated
-  `pm-prompt-claude-md-override.md`, which correctly does NOT carry the workflow
-  rule.
-
-- PM instructions (`assets/instructions/sections/core.md`, § Response Format):
-  new **Prose Style — Write Plainly** subsection. Lead with the point; short
-  sentences; no throat-clearing openers, no closing aphorisms, no
-  meta-commentary about the PM's own reasoning; plain words over inflated ones;
-  tables and bullets for status. Scoped to prose only — failures, corrections,
-  and bad news are still reported directly and in full, so the rule shortens
-  the wording and never the disclosure. Ships to every PM session via the
-  bundled instruction package; `core` is `customization_tier: project`, so a
-  project may still override it. Composed-prompt goldens regenerated.
-- `tm ls` STATE column: a row the daemon did not probe now renders
-  `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
-  never be misread as "assets fresh"
-  ([#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)). Backed by a
-  new additive wire field, `SessionSummary::stale_assets_unchecked`, whose
-  `false` default keeps an older daemon's (authoritative) verdicts rendering
-  exactly as before.
-- `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
-  set is now documented as DELIBERATELY unfiltered by session state, and pinned
-  by a new regression test `prune_spares_a_stopped_records_workspace`
-  ([#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288),
-  [#4207](https://github.com/bobmatnyc/trusty-tools/issues/4207)). No behavior
-  change — the construction is untouched. A `SessionRecord`'s state is
-  bookkeeping, not a liveness signal (a session measured running in tmux was
-  recorded `stopped` while holding uncommitted and unpushed work), so the
-  inviting `.filter(|r| r.state == Active)` tidy-up would make a live worktree
-  an orphan candidate. The test drives the real route and fails if that filter
-  is ever added.
-- `session_manager::prune`: `prune_orphaned_worktrees`'s `active_workspace_paths`
-  parameter is renamed **`in_use_workspace_paths`** (and its `initial_active` /
-  `fresh_active` locals to `initial_in_use` / `fresh_in_use`). Rename only, no
-  behavior change: the old name is what made `.filter(|r| r.state == Active)`
-  read as a tidy-up rather than a data-loss bug.
-- `session_manager::prune`: `phase2_fresh_snapshot_spares_a_record_the_caller_set_missed`
-  closes a pre-existing coverage hole — the Phase 2 `fresh_in_use` re-read, the
-  last check between a reclaimable candidate and deletion, had ZERO executed
-  coverage. The one test that named it builds its worktree with no ownership
-  sentinel, so the #3649 gate skipped it before Phase 2 ever ran; filtering
-  Phase 2 by state broke nothing in the suite.
-- `session_manager::prune`: the same pin extended to the two remaining unfiltered
-  reads on the AUTOMATIC orphan-GC path — the active set built in
-  `reap_orphaned_worktrees` (what the daemon's sweep loop calls on a timer, with
-  `dry_run: false` hardcoded and no preview) and the Phase 2 `fresh_active`
-  snapshot inside `prune_orphaned_worktrees` that re-reads the store immediately
-  before deletion. Both are now commented, and
-  `reap_spares_a_stopped_records_workspace` asserts end-to-end that a `Stopped`
-  record's worktree survives a real, deleting sweep. Measured and documented:
-  these two reads are defense-in-depth — neither is load-bearing alone, and only
-  narrowing BOTH actually deletes a live worktree. No behavior change.
-
-- **PM instructions are authored per section** (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)): the four monolithic assets (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `BASE_PM.md`) are replaced by one markdown source per section under `src/assets/instructions/sections/`, and `core::bundled_pm_package` builds its blocks from those files instead of cutting the monoliths at runtime (the `split_asset` / `Cut` machinery is gone). `instruction_pipeline::pm_instructions()` and `base_pm()` reconstitute the two multi-section strings the legacy override assembly still needs, so a section edit reaches BOTH composers and a project with a `.trusty-mpm/` override can no longer be frozen on stale instructions. Every existing override file (`INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`, `PM_INSTRUCTIONS_DEPLOYED.md`) keeps resolving exactly as before.
-- **Delivered-prompt content changes** (same epic). The Memory and Search guidance is lifted out of the middle of the Core body into two self-contained sections with their own headings — they were two halves of one numbered list, which made their declared `project` tier a false claim (replacing Memory alone left Search opening on a bare `2.`); they are now genuinely independently overridable. `## Trusty Tool Priority (Non-Overridable)` moves to sit with the other non-overridable rules, so it now precedes the framework-guaranteed conventions instead of following them — position only, still inside the floor, wording unchanged. The workflow section gains a **Sprint, then Harden** doctrine (sprint to feature-complete with targeted tests and no CI iteration loops; harden with the full suite, critic and release gates before publishing), including the causal claim that slow release *causes* WIP, the hard line that going fast never licenses turning red green by deleting coverage, and the close-and-fold rule at 3+ review rounds.
-- `core::pm_prompt_golden_tests`: committed snapshots of the fully composed PM prompt for both the packaged and legacy composers. #4249's byte-equality-against-the-old-prompt gate cannot survive a deliberate content change, so these replace it: any future edit to a section source surfaces as a reviewable prose diff in the PR rather than landing invisibly. Regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`.
-
-- `core::instruction_overrides`: the DEFAULT PM prompt — the bundled-fallback
-  configuration every project without a `.trusty-mpm/` section override receives
-  — is now composed through the typed `InstructionPackage`
-  (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)) instead
-  of a four-asset string concatenation. The new `core::bundled_pm_package` cuts
-  `PM_INSTRUCTIONS.md` into Core/Memory/Search blocks and `BASE_PM.md` into the
-  three absorbed floor blocks *at runtime*, deriving each block's join from the
-  exact bytes it removed, so re-sectioning an asset cannot move a byte and the
-  eight-section taxonomy now describes the prompt that actually ships. The
-  composed prompt is byte-identical to the previous assembly, gated by
-  `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`, which
-  reports the first differing byte offset with surrounding context on failure.
-  Scope is the bundled fallback ONLY: an `AGENT_DELEGATION.md` override
-  (replaces the section, so never consumes the computed roster) and
-  `PM_INSTRUCTIONS_DEPLOYED.md` (opaque body, no delegation section) are
-  currently inexpressible in the schema and stay on the legacy path by design —
-  neither `RosterNotConsumed` nor `SectionWithoutBlocks` is weakened to
-  accommodate them. The gate is asserted through `resolve_pm_prompt` itself with
-  a project-tier agent deployed, so the composed branch is a property of the test
-  rather than of the machine's `~/.claude/agents`, and `resolve_pm_prompt` now
-  logs which composer produced the prompt — the two are byte-identical by
-  contract, so the delivered string alone cannot tell you. The gate injects a
-  fixed roster rather than scanning the agent tiers per side: those tiers are
-  machine-global mutable state that live `tm` sessions rewrite at launch, so
-  scanning twice made the gate itself intermittently red with a message
-  indistinguishable from a real prompt regression.
-
-### Added
-
-- `daemon::bus`: the peer message bus foundation (DOC-60 §5.3) — the
-  daemon-side replacement for the assistant-to-assistant lane PR #4240 closed
-  under ADR-0024. Three pieces: the §11 **envelope schema** carrying all three
-  §6 identifiers (definition id, instance id, per-message caller identity), an
-  **instance registry** resolving `definition_id` → live `instance_id`, and a
-  **pub/sub HTTP surface** (`/api/v1/bus/instances`, `/publish`,
-  `/subscribe/{instance_id}`). Delivery is addressed per instance — each live
-  instance owns its channel — rather than broadcast-then-filtered, which is the
-  defect §2 identifies in the existing `/sessions/{id}/events` path. Both
-  addressing modes are supported: definition-addressed (§5.3 normative) and
-  direct **instance bypass**. A peer *request* is a distinct payload variant
-  from informational chat and carries an explicit accept/decline response, per
-  §5.3's normative decline-ability rule (ADR-0024's virtual-twin authority
-  principle). The durable §9 record rides the EXISTING `daemon::audit`
-  `AuditLogger` through a new `logs_dir/bus/` sibling stream — the logger gained
-  `for_stream` and a generic `log_record`, so there is no second JSONL writer.
-- **Instance-bypass failure mode: explicit error, never silent fallback.** When
-  a sender targets an `instance_id` that died between learning it and sending,
-  the bus returns `BusError::InstanceGone` (HTTP `410 Gone`) and does **not**
-  redirect to another live instance of the same definition — even when the
-  request also supplies a `definition_id`. A silent redirect would deliver to a
-  peer with no memory of the thread whose continuity motivated bypass in the
-  first place, and §4 requires failures reach the sender rather than being
-  dropped. `404` (definition has nothing running) and `409` (registered but no
-  subscriber) are separately distinguishable so a client can implement recovery
-  from the status alone.
-- **Caller identity is verified, not asserted.** `from` arrives client-asserted
-  over loopback HTTP, so the peer publish path (a) admits only
-  `kind: assistant_instance` senders, rejecting a `user`-kind publish with
-  `400`, and (b) resolves the claimed `instance_id` against a live registration
-  (`403 UnregisteredSender` when it does not resolve), then re-stamps
-  `definition_id` from the registry rather than trusting the caller's copy.
-  Without this, assistant A could publish to assistant B as `kind: "user"` and
-  B — which by §5.3's design cannot tell a lateral message from a user message
-  by shape — would read it as a user instruction and act on it, reconstituting
-  assistant-to-assistant delegation through the very bus ADR-0024 closed it
-  from. `403` is deliberately distinct from the recipient-side `410`: the fault
-  is the caller's own identity and the recovery is to register, not to
-  re-address.
-- The `edge` field is **derived** from the caller's kind (`CallerKind::peer_edge`,
-  a total match over the enum) rather than stamped as a constant, so §9 search
-  and §10 consolidation can actually tell the three §5 edges apart. Adding a
-  caller kind is a compile error until someone decides which edge it crosses.
-- **What the durable §9 log contains:** once a sender is verified, every
-  outcome is recorded — `Delivered` or `Dropped`. Requests rejected *before*
-  verification (malformed identity, disallowed caller kind, unverifiable
-  sender) are surfaced as `4xx` and leave no record: they never became
-  envelopes, and writing one would stamp an unverified — possibly forged —
-  identity into the log in the same shape as attributable traffic.
-- Instance ids are `<definition_id>~<8 hex>`, using an RFC 3986 *unreserved*
-  separator rather than DOC-60 §11's illustrative `#`: `#` is the URI fragment
-  delimiter, so a raw id in a path segment is truncated by conforming clients
-  before the request is sent. §11 self-declares as non-normative wire format.
-- Deferred, not built: the durable inbox and queue-not-spawn behavior (§7),
-  cross-project addressing (§12 Q4), retention policy (§12 Q1), and version-skew
-  negotiation (§12 Q2/Q5). Streaming token deltas stay on the existing per-crate
-  buses. The trusty-agents client and the peer-message tool are separate changes.
-
-- `core::instruction_package`: the sectioned-JSON instruction-package schema
-  ([#4184](https://github.com/bobmatnyc/trusty-tools/issues/4184), epic #4183) —
-  the eight-section taxonomy (Core, Memory, Search, Workflow, Agent Delegation
-  plus the absorbed BASE_PM floor sections Identity, Non-Overridable Rules,
-  Framework-Guaranteed Conventions), the `fixed | project | user`
-  customization-tier axis, an ordered block stream with explicit join literals,
-  structural validation, and a pure deterministic `compose`. The JSON Schema
-  ships as `assets/instructions/instruction-package.schema.json`. Types and
-  validation only — no instruction content is authored (#4185) and no build is
-  re-sourced (#4186); nothing in the session-launch path composes from it yet.
-  Every object in the package's deserialization path rejects unknown keys, and
-  the error names the offending key. Strictness is deliberate over
-  forward compatibility here: `validate` gates on `schema_version` before
-  inspecting any field, so lenient field handling could only ever matter for a
-  change that added a field while leaving the version at 1 — precisely the case
-  that must not be tolerated, since an older binary would then compose a prompt
-  missing the new field's effect and report success. Any field addition that can
-  change composed bytes must bump `SCHEMA_VERSION`. That version is now checked
-  *before* the package is deserialized, so a package from a later schema reports
-  the actionable "unsupported schema_version" rather than blaming one of its own
-  perfectly valid new keys. Floor blocks are
-  deliberately *not* constrained to canonical section order: `BASE_PM.md` places
-  `## Trusty Tool Priority` after `## Framework-Guaranteed Conventions`, so
-  requiring non-decreasing order would reject a faithful byte-identical lift of
-  that asset. A declared section must own at least one *non-optional* block.
-  Owning blocks is not the same as emitting: a section covered only by
-  `optional` blocks passed validation and still composed to nothing,
-  recreating the very silent-missing-section shape the coverage check exists
-  to prevent.
+- JSON instruction manifest (schema v2) with owner language rules ([#4386](https://github.com/bobmatnyc/trusty-tools/pull/4386)) ([`838d001`](https://github.com/bobmatnyc/trusty-tools/commit/838d00150e4ac1d2f31e5748bf8a85c05b4e78e7))
+  - Adds three owner language rules as inline `text` blocks: **Clickable
+    References** (`core` — issue/PR/ticket/commit references always render as
+    clickable links, never bare numbers), **Banned Word "honest"** (`core` —
+    banned from PM responses/delegation briefs/review instructions), and
+    **Opportunistic Fixes** (`workflow` — an easy fix found while working on a
+    file is made in the same work, never spun into a new issue).
+  - Schema v2 adds a `{"kind":"file","path":"…"}` body variant alongside
+    `text`/`generated`, resolved through a compile-time `include_str!` table
+    (`instruction_pipeline::SECTION_SOURCES`) so a renamed section is a
+    compile error.
+- reconcile worktrees on a git-derived key, report-only ([#4288](https://github.com/bobmatnyc/trusty-tools/pull/4288)) ([#4382](https://github.com/bobmatnyc/trusty-tools/pull/4382)) ([`7babc82`](https://github.com/bobmatnyc/trusty-tools/commit/7babc82f7353d67327e08626844b91c4eba5187b))
+  - Classifies every git-registered worktree `LIVE`/`ORPHANED`/`UNKNOWN` on
+    `(git rev-parse --git-common-dir, admin-dir basename)` rather than path
+    shape, which was measured misclassifying 34 of 118 worktrees (29%). The
+    report also names the **excluded** set (33 of 118, six holding
+    uncommitted work) and orders a nested worktree before its parent so
+    removing the parent no longer strands the child's registry entry.
+    Report-only: no deletions, no sentinel writes, no `--force`.
+  - Companion hardening commit for the same issue (test-only, not surfaced by
+    the automated changelog): `session_manager::prune`'s
+    `active_workspace_paths` parameter is renamed **`in_use_workspace_paths`**
+    (rename only — the old name made a `state == Active` filter read as a
+    tidy-up rather than the data-loss bug it would be), a pre-existing
+    zero-coverage hole in the Phase 2 `fresh_in_use` re-read is closed
+    (`phase2_fresh_snapshot_spares_a_record_the_caller_set_missed`), and the
+    same "deliberately unfiltered by session state" pin is extended to the
+    automatic orphan-GC sweep (`reap_orphaned_worktrees`, which runs on a
+    timer with `dry_run: false` hardcoded).
+- read named-section PM instruction overrides from CLAUDE.md ([#4324](https://github.com/bobmatnyc/trusty-tools/pull/4324)) ([`f165b92`](https://github.com/bobmatnyc/trusty-tools/commit/f165b92733f9d1cc8656e198359f35d599154b46))
+  - Grammar: `<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` … `<!-- TRUSTY-MPM: WORKFLOW END -->`.
+    Hosts scanned in precedence order — `CLAUDE.md` then
+    `.trusty-mpm/INSTRUCTIONS.md` — with `CLAUDE.md` winning a same-section
+    collision. The three floor sections (`identity`, `non-overridable-rules`,
+    `framework-guaranteed-conventions`) refuse every override. Nothing here
+    fails a launch: a missing/unreadable file, unclosed marker, unknown
+    token, or override aimed at the floor all degrade to the bundled section
+    with a `warn!`.
+- peer message bus foundation — envelope, pub/sub, instance registry ([#4261](https://github.com/bobmatnyc/trusty-tools/pull/4261)) ([`6ffe001`](https://github.com/bobmatnyc/trusty-tools/commit/6ffe001de257ccb4728720d90a11abc8f59a098a))
+  - Instance-bypass failure is explicit, never a silent fallback: targeting a
+    dead `instance_id` returns `410 Gone` and never redirects to another live
+    instance of the same definition; `404`/`409` are separately
+    distinguishable.
+  - Caller identity is verified, not asserted: the publish path admits only
+    `kind: assistant_instance` senders (`400` otherwise), resolves the
+    claimed `instance_id` against a live registration (`403
+    UnregisteredSender` if not), and re-stamps `definition_id` from the
+    registry rather than trusting the caller's copy.
+  - Instance ids use `<definition_id>~<8 hex>` (RFC 3986 unreserved `~`, not
+    DOC-60 §11's illustrative `#`, which a URI-fragment-aware client would
+    truncate).
+  - Deferred, not built: the durable inbox and queue-not-spawn behavior (§7),
+    cross-project addressing (§12 Q4), retention policy (§12 Q1), and
+    version-skew negotiation (§12 Q2/Q5).
+- author PM instructions as per-section sources ([#4183](https://github.com/bobmatnyc/trusty-tools/pull/4183)) ([#4264](https://github.com/bobmatnyc/trusty-tools/pull/4264)) ([`c41735d`](https://github.com/bobmatnyc/trusty-tools/commit/c41735dcba886c3518db3b522d2614cdf7ae90a4))
+  - Every existing `.trusty-mpm/` override file keeps resolving exactly as
+    before. Adds a **Sprint, then Harden** workflow doctrine: sprint to
+    feature-complete with targeted tests and no CI iteration loops; harden
+    with the full suite, critic, and release gates before publishing; going
+    fast never licenses turning red green by deleting coverage; close-and-fold
+    at 3+ review rounds.
+- compose the bundled-fallback PM prompt via InstructionPackage ([#4183](https://github.com/bobmatnyc/trusty-tools/pull/4183)) ([#4249](https://github.com/bobmatnyc/trusty-tools/pull/4249)) ([`eba04d6`](https://github.com/bobmatnyc/trusty-tools/commit/eba04d67ab940876f55638055a9b195cba5a3ea1))
+  - Composed prompt is byte-identical to the previous four-asset-concatenation
+    assembly, gated by a test that reports the first differing byte offset on
+    failure. Scope is the bundled fallback only — an `AGENT_DELEGATION.md`
+    override and `PM_INSTRUCTIONS_DEPLOYED.md` stay on the legacy path by
+    design. Adds committed golden-prompt snapshots for both composers
+    (regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`).
+- sectioned-JSON instruction package schema ([#4184](https://github.com/bobmatnyc/trusty-tools/pull/4184)) ([#4223](https://github.com/bobmatnyc/trusty-tools/pull/4223)) ([`99a1724`](https://github.com/bobmatnyc/trusty-tools/commit/99a17243866785b0b90f966631ad9d320b12b32c))
+  - `validate` gates on `schema_version` before inspecting any field, so a
+    package from a later schema reports "unsupported schema_version" instead
+    of blaming one of its own valid new keys. Floor blocks are deliberately
+    NOT constrained to canonical section order (a faithful lift of
+    `BASE_PM.md` places `Trusty Tool Priority` after
+    `Framework-Guaranteed Conventions`). A declared section must own at least
+    one non-optional block — a section covered only by `optional` blocks
+    passed validation and composed to nothing.
+- observe native subagent dispatches and give delegations a real lifecycle ([#4096](https://github.com/bobmatnyc/trusty-tools/pull/4096)) ([`6f7530e`](https://github.com/bobmatnyc/trusty-tools/commit/6f7530ef650d4b7dfe1acd5b61b01bcf0c7a0136))
+- hard-block git worktree add targeting /tmp, /private/tmp, /var/folders, or the scratchpad ([#3978](https://github.com/bobmatnyc/trusty-tools/pull/3978)) ([`bac23b8`](https://github.com/bobmatnyc/trusty-tools/commit/bac23b8090dfe9d6d5107133dfb7c3dfcdfb8fde))
 
 ### Fixed
 
-- The bare-`tm` in-place relaunch keeps the PM persona
-  ([#4336](https://github.com/bobmatnyc/trusty-tools/issues/4336)).
-  `compose_inplace_args` omitted `--append-system-prompt-file` by design, so the
-  one launch path that `exec`s `claude` directly — instead of sending a command
-  string to a tmux pane — restored the operator into vanilla Claude Code. It now
-  builds the prompt through the same `build_prompt_file` carrier `spawn` and
-  `spawn_resume` use (#2125, #2230), pushing the path as its own argv token
-  rather than through `prompt_file_flag`'s shell quoting, which would embed
-  literal quotes in a filename no shell is present to strip.
-- The argv and environment handed to that `exec` are now under test. The
-  `std::process::Command` construction moved out of `run_inplace_relaunch` into
-  a pure `build_inplace_exec_command`, leaving `exec` as a one-line untestable
-  tail. Previously the last step before process replacement — the step that
-  decides whether `--setting-sources project,local` and
-  `--dangerously-skip-permissions` reach `claude` at all — was the only launch
-  step in the codebase with no coverage, which is why #4336 could be reported
-  and not refuted from the suite. Guarded by
-  `inplace_exec_command_forwards_every_arg_in_order`,
-  `inplace_exec_command_scrubs_api_key_and_sets_auth_env`, and
-  `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
-- A subagent's `SessionStart` hook can no longer overwrite a managed session's
-  `claude_session_id` with its OWN Claude session UUID, and a legitimately
-  diverged id can no longer stay wrong forever
-  ([#4337](https://github.com/bobmatnyc/trusty-tools/issues/4337)). A subagent
-  sharing the PM's cwd is its own top-level Claude Code process and fires its
-  own `SessionStart`, which `correlate_session_start` matched to the PM's sole
-  Active managed session by cwd alone and blindly overwrote — so the next
-  in-place `--resume` would resume the subagent's transcript instead of the
-  PM's conversation. `correlate_session_start` (moved to the new
-  `daemon::api::session_start_correlation` module to stay under `api.rs`'s
-  frozen SLOC budget) now trusts only the FIRST correlation for a record; a
-  later `SessionStart` reporting a DIFFERENT id for the same cwd is accepted
-  only when the stored id's transcript no longer resolves to a live session
-  (`runtime::session_id_exists`, the same staleness check `spawn_resume`
-  already trusts) — otherwise refused and logged — while re-reporting the
-  SAME id (a legitimate `--resume` relaunch) remains a no-op success. The
-  common divergence case is handled even earlier: `SessionEnd` now clears the
-  field via the new exact-match-guarded `SessionManager::clear_claude_session_id_if`
-  (so a later, unrelated `SessionStart` is never compared against a dead id),
-  and `SessionManager::mark_reactivated` clears it outright, since a
-  reactivation always precedes a fresh top-level relaunch into that pane.
-- Daemon boot reconciliation no longer resurrects soft-deleted sessions.
-  `reconcile_on_boot` hand-rolled a
-  `matches!(record.state, ManagedSessionState::Decommissioned)` check instead
-  of asking the record's own `is_terminal()`, so every `Deleted` record (no
-  live tmux session, by definition) fell through to the "gone" branch and was
-  marked `Stopped` — resurrected — on every daemon restart. `is_terminal()` is
-  now the single source of truth, covering both `Decommissioned` and
-  `Deleted`.
-- `decommission` (and therefore `tm sessions prune --state stopped`, which
-  calls it per matching record) no longer force-deletes a dirty in-project
-  worktree. Removing an SM-created `.worktrees/<id>` ran `git worktree remove
-  --force` (falling back to `fs::remove_dir_all`) with no dirty check at all —
-  a live data-loss path for uncommitted/untracked work. This reuses the same
-  `worktree_safety::inspect_dirt` check the orphan-worktree sweep uses (the
-  #4091 dirty-worktree guard): a dirty candidate is now refused and reported,
-  and the session record still tombstones to `Decommissioned` so the skip is
-  never silent. Two follow-ups close the gap between that refusal and where
-  an operator would actually see it: (1) the tombstone no longer nulls
-  `workspace_path` when nothing was removed — every "skip removal" branch in
-  `decommission` leaves real content in place, and blanking the pointer would
-  strand it with nothing but a transient log line as a trail back to it; (2)
-  `tm sessions prune --state stopped` (and the underlying `PruneAction`) now
-  has a distinct `decommissioned_worktree_retained` outcome, with the
-  retained path echoed back, instead of printing the same `decommissioned`
-  line whether or not the worktree was actually deleted.
-- Bare `tm` no longer needs two runs after Claude Code backgrounds
-  ([#4335](https://github.com/bobmatnyc/trusty-tools/issues/4335)).
-  `nested_session_guard` fetched the managed-session list with a 2-second
-  timeout and a bare `.ok()?`. On a cold daemon the per-session `stale_assets`
-  pass over a large fleet exceeded that bound, the request was cancelled, and
-  the guard no-opped with nothing in any log to say it had not run — so bare
-  `tm` after an `/exit` (which BACKGROUNDS, never firing `SessionEnd`, leaving
-  the record `active` so the stopped-only gate correctly skips) fell through to
-  the picker and dead-ended on the #2678 switch-client refusal. A second run,
-  against a now-warm daemon, worked. Three changes, smallest lever first:
-  the managed-list endpoint takes `?slim=true` (folds into
-  [#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322)) to skip the
-  `stale_assets` probe for callers that never read the flag — the guard reads
-  name/pane_id/state/id and was paying for a filesystem-bound catalog compose
-  it discards; the guard's timeout goes 2s → 8s, still bounding a hung daemon
-  while clearing a cold-start listing; and the error arm is logged at debug via
-  the new `guard_managed_sessions`. Absent or malformed `slim` keeps the full
-  probe, so no existing client changes shape. The stopped-only gate in
-  `plan_inplace` is deliberately unchanged.
-- The per-project worktree opt-out is no longer silently conditional on the
-  daemon being up ([#4300](https://github.com/bobmatnyc/trusty-tools/issues/4300)).
-  `Project.worktree: false` ([#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455),
-  [#3781](https://github.com/bobmatnyc/trusty-tools/pull/3781)) was consulted at
-  exactly one decision point, inside the daemon's spawn route. Both CLI paths
-  that provision worktrees in the `tm` process itself — `tm launch`, which never
-  asks the daemon, and the daemon-unreachable bare-`tm` fallback, which runs
-  *because* the daemon is down — created a base clone and a per-session worktree
-  regardless. Both now consult the registry BEFORE `ensure_base_clone`, matching
-  the daemon's deliberate ordering, so an opted-out project gets neither a clone
-  nor a worktree and runs in its own checkout exactly as `spawn_managed_on_main`
-  would have given it. The decision itself moved from the `pub(super)`
-  `daemon::managed_routes::launch_on_main::worktree_enabled_for_origin` to
-  `project::worktree_policy`, which serves the daemon in-process and the CLI
-  out-of-process off the same `projects.json`. The `unwrap_or(true)` default is
-  unchanged (unset or unregistered still means worktrees ON, and an unreadable
-  registry fails safe to ON), and #3455's warn-never-refuse concurrency
-  behaviour is untouched.
-- Bare `tm` now resumes a session whose runtime has died, instead of switching
-  the operator into a bare shell
-  ([#3873](https://github.com/bobmatnyc/trusty-tools/issues/3873)). The picker's
-  resume planner decided "this session is live" from tmux SESSION existence
-  alone, which cannot see the common case where the tmux pane survives but the
-  `claude` inside it exited and the pane fell back to a login shell. That
-  `(active, tmux up)` pair fell through to `Attach`, so the first `tm` did a
-  `switch-client` into an idle shell and nothing else — the operator had to type
-  `tm` a SECOND time, from inside that pane, before a runtime came back.
-  `guided_resume::plan_resume` takes a third input, `runtime_live`, and maps
-  `(active/provisioning, tmux up, runtime dead)` onto the existing
-  `ReconcileThenRestart` recovery (`/runtime-stop` → `/resume` → attach), so the
-  first invocation does the whole job. `runtime_live` is resolved by the new
-  `session_runtime_live`, which reuses the daemon reaper's own
-  `daemon::runtime_reap::session_has_live_pane` primitive — and through it
-  `pane_runtime_exited`, the same `is_idle_shell` allowlist, and the same
-  `ProcessTreeProbe` child gate — against a session-scoped `tmux list-panes`, so
-  the CLI and the reaper cannot drift apart and the fix works whether or not the
-  60s reaper is healthy.
+- keep the PM persona on in-place relaunch and test the exec seam ([#4340](https://github.com/bobmatnyc/trusty-tools/pull/4340)) ([`714f33e`](https://github.com/bobmatnyc/trusty-tools/commit/714f33ed52f681b6d884a1c380c46935a8f2450a))
+  - `compose_inplace_args` omitted `--append-system-prompt-file`; now builds
+    the prompt through the same `build_prompt_file` carrier `spawn`/
+    `spawn_resume` use. The `std::process::Command` construction is now a
+    pure, tested `build_inplace_exec_command` — previously the last step
+    before process replacement had zero coverage, which is why this could be
+    reported and not refuted from the suite.
+- tm ls/picker auto-prunes dead records + groups attached-active-stopped ([#4384](https://github.com/bobmatnyc/trusty-tools/pull/4384)) ([`3dfcb65`](https://github.com/bobmatnyc/trusty-tools/commit/3dfcb6575cd6f3b49929a4dccffacacf3fb52828))
+  - Hardened three ways: **record-only removal** (POSTs `/decommission
+    ?record_only=true`, so the sweep can never delete filesystem content),
+    **two-sightings confirmation + a 5-per-call cap** (a record must read
+    `unresumable` on two separate listings before it's auto-decommissioned,
+    with the rest reported as "N more pending confirmation"), and a **TTY
+    gate** (a scripted/piped/CI invocation of bare `tm` is a pure read, same
+    as `tm ls`). `sort_sessions` now groups attached → active → everything
+    else above the requested secondary order.
+- stop a subagent SessionStart from clobbering claude_session_id ([#4339](https://github.com/bobmatnyc/trusty-tools/pull/4339)) ([`f634d27`](https://github.com/bobmatnyc/trusty-tools/commit/f634d27c9f11f8fb33851ee343f5dc6f26708803))
+  - `correlate_session_start` now trusts only the FIRST correlation for a
+    record; a later `SessionStart` with a different id is accepted only when
+    the stored id's transcript no longer resolves to a live session
+    (`runtime::session_id_exists`). `SessionEnd` now clears the field via
+    `SessionManager::clear_claude_session_id_if`, and `mark_reactivated`
+    clears it outright.
+- daemon boot no longer resurrects deleted sessions; decommission no longer force-deletes dirty worktrees ([#4344](https://github.com/bobmatnyc/trusty-tools/pull/4344)) ([`114de33`](https://github.com/bobmatnyc/trusty-tools/commit/114de3331230e16b77d6c6ebd22b056037c07824))
+  - `reconcile_on_boot` now asks the record's own `is_terminal()` instead of
+    a hand-rolled `Decommissioned`-only check, so `Deleted` records no longer
+    fall through to "gone" and get marked `Stopped`. `decommission` reuses
+    the #4091 dirty-worktree check (`worktree_safety::inspect_dirt`) before
+    removing an SM-created worktree; a dirty candidate is refused and
+    reported, never force-deleted. Two follow-ups: the tombstone no longer
+    nulls `workspace_path` when nothing was removed, and `tm sessions prune
+    --state stopped` reports a distinct `decommissioned_worktree_retained`
+    outcome instead of a plain `decommissioned` line either way.
+- tm ls cold-latency fix ([`1c54090`](https://github.com/bobmatnyc/trusty-tools/commit/1c5409007f012516fc936e71a4deee1cd2c7972d))
+  - Refs [#4322](https://github.com/bobmatnyc/trusty-tools/issues/4322) (does
+    not close it — a daemon-state accumulation follow-up remains). `tm ls`
+    took 4.9-9.4s cold on a 32-session fleet from blocking filesystem I/O:
+    `stale_assets_for_many` ran one `spawn_blocking` with a serial loop, each
+    iteration reading ~95 deployed agent/skill files per session. Two
+    changes in `daemon::managed_routes::summary`: `Stopped` sessions are no
+    longer asset-staleness-probed on the LIST path (56% of the I/O, for a
+    marker only actionable at resume — the single-session `GET
+    .../managed/{id}` path still probes everything), and the remaining
+    per-session comparisons now run concurrently via `JoinSet::spawn_blocking`.
+    Measured on that fleet: 3,040 → 1,140 `read_to_string` calls and 35.7 MiB
+    → 15.0 MiB per listing. The `tm ls` STATE column also now renders
+    `[assets ?]` for a row the daemon did not probe, via a new additive wire
+    field `SessionSummary::stale_assets_unchecked`, so the absence of
+    `[stale-assets]` can never be misread as "assets fresh".
+- make the nested-session guard survive a cold daemon ([#4343](https://github.com/bobmatnyc/trusty-tools/pull/4343)) ([`5f8b338`](https://github.com/bobmatnyc/trusty-tools/commit/5f8b3385f68fbf622b7f2410313357502b8c476a))
+  - Fixes [#4335](https://github.com/bobmatnyc/trusty-tools/issues/4335) —
+    bare `tm` needing two runs after Claude Code backgrounds. Three changes:
+    the managed-list endpoint takes `?slim=true` to skip the `stale_assets`
+    probe for callers (folds into #4322 above), the guard's timeout goes
+    2s → 8s, and the error arm now logs at debug via `guard_managed_sessions`.
+- resume a dead runtime instead of switching into a bare shell ([#4304](https://github.com/bobmatnyc/trusty-tools/pull/4304)) ([`aed8014`](https://github.com/bobmatnyc/trusty-tools/commit/aed80140d4c2179bdf360791b44a218ecf1b2498))
+  - `guided_resume::plan_resume` takes a third input, `runtime_live` (via the
+    daemon reaper's own `session_has_live_pane` primitive), so a live tmux
+    pane whose `claude` process died maps onto the existing
+    `ReconcileThenRestart` recovery instead of a plain attach. The verdict is
+    ANY-pane-live over the whole tmux session, not the stored `pane_id`
+    alone, and fails OPEN throughout. Known limitation: a split session with
+    one dead agent pane but another pane running a live non-shell command
+    (`vim`, `tail -f`) still reads as live and still attaches into the idle
+    pane. Because the reconcile is session-scoped (`kill_session`), the
+    restart now discloses it is about to destroy the whole tmux session.
+- honour the per-project worktree opt-out in both CLI paths ([#4303](https://github.com/bobmatnyc/trusty-tools/pull/4303)) ([`c11da9c`](https://github.com/bobmatnyc/trusty-tools/commit/c11da9cdaa9dc866698b0e846eb0553b8edde694))
+  - `Project.worktree: false` was consulted only inside the daemon's spawn
+    route; `tm launch` and the daemon-unreachable bare-`tm` fallback ignored
+    it. Both now consult the registry before `ensure_base_clone`, via the new
+    `project::worktree_policy` (serves daemon in-process and CLI
+    out-of-process off the same `projects.json`). The `unwrap_or(true)`
+    default is unchanged.
+- serialise projects.json writes across processes ([#4258](https://github.com/bobmatnyc/trusty-tools/pull/4258)) ([`623d6e3`](https://github.com/bobmatnyc/trusty-tools/commit/623d6e3ee7d93bde3e1d942a79d42f60f276e93c))
+  - The project-store upsert was an unsynchronised read-modify-write; two
+    interleaved writers could silently drop a registration or publish a
+    mangled `projects.json` (shared `.tmp` scratch path). All mutations now
+    run through `ProjectStore::mutate` under a cross-process file lock,
+    published atomically via `trusty_common::json_rmw`. `PATCH
+    /api/v1/projects/{name}` gets the same guarantee.
+- derive worktrees from git instead of walking five shapes ([#4207](https://github.com/bobmatnyc/trusty-tools/pull/4207)) ([#4224](https://github.com/bobmatnyc/trusty-tools/pull/4224)) ([`69871f1`](https://github.com/bobmatnyc/trusty-tools/commit/69871f13257846edb3109d96d5919dc33b1c851d))
+  - Uses `git worktree list --porcelain` instead of five hard-coded location
+    shapes. The owning checkout is now resolved with `git rev-parse
+    --git-common-dir` instead of a guessed grandparent directory — the old
+    guess disowned worktrees physically inside `.base/.worktrees/` but
+    registered to the parent repo, making them structurally unreclaimable.
+    `tm session prune --worktrees` and the daemon orphan-GC no longer propose
+    a plain (non-git-registered) directory. Reclamation is now bounded by a
+    structural containment rule — a candidate must be a strict descendant of
+    the managed project directory that registered it — since deriving
+    discovery from git widened candidates to anything registered anywhere
+    under the projects root (on the dogfood machine this admitted five of
+    the operator's own long-lived checkouts). A git-`locked` worktree is
+    never enumerated for reclamation (the removal path previously treated a
+    lock refusal as a generic failure and fell back to deleting the
+    directory outright, defeating the lock).
+- safe deregister on DELETE /indexes/:id + restore-derived stages on POST /indexes ([#4218](https://github.com/bobmatnyc/trusty-tools/pull/4218)) ([`59674a0`](https://github.com/bobmatnyc/trusty-tools/commit/59674a07d5b8fb74db4374d32dddaf9ae3674921))
+- stop two paths writing into a destroyed worktree ([#4204](https://github.com/bobmatnyc/trusty-tools/pull/4204)) ([#4209](https://github.com/bobmatnyc/trusty-tools/pull/4209)) ([`7973aa5`](https://github.com/bobmatnyc/trusty-tools/commit/7973aa5a94c5418ed836578a1621a5e09b1e09a5))
+- deploy launch/connect/meta-launch agents into a tier --setting-sources loads ([#4205](https://github.com/bobmatnyc/trusty-tools/pull/4205)) ([`5a68695`](https://github.com/bobmatnyc/trusty-tools/commit/5a686959b360f6b1f12c0e79b6d59fb1b4c2bacd))
+- deliver the computed agent roster to the PM prompt ([#4196](https://github.com/bobmatnyc/trusty-tools/pull/4196)) ([`5bf231b`](https://github.com/bobmatnyc/trusty-tools/commit/5bf231b9d085c113bb2b1f48480324023d49475e))
+- correct two wrong instructions in bundled assets (index_id, ticket routing) ([`f2b79b3`](https://github.com/bobmatnyc/trusty-tools/commit/f2b79b3add708dd31b9f88b2494aa9891ec49ebc))
+- refuse cross-branch git push from managed worktrees ([#2867](https://github.com/bobmatnyc/trusty-tools/pull/2867)) ([#4090](https://github.com/bobmatnyc/trusty-tools/pull/4090)) ([`8d89ca1`](https://github.com/bobmatnyc/trusty-tools/commit/8d89ca1c6d7476a2f7aaa1687c427d48a5dd4513))
+- refuse to reclaim a worktree holding unsaved work ([#4091](https://github.com/bobmatnyc/trusty-tools/pull/4091)) ([`dc6bc2a`](https://github.com/bobmatnyc/trusty-tools/commit/dc6bc2a844c7502a03cdaa552f2ab5caddf354d2))
+- isolate $HOME in every test that seeds ~/.claude.json ([#4120](https://github.com/bobmatnyc/trusty-tools/pull/4120)) ([`898ec26`](https://github.com/bobmatnyc/trusty-tools/commit/898ec260f397b5915dd8805c6ca2bd2ecd5106bf))
+- stream Bedrock via ConverseStream ([#3767](https://github.com/bobmatnyc/trusty-tools/pull/3767)) ([#4112](https://github.com/bobmatnyc/trusty-tools/pull/4112)) ([`49dd042`](https://github.com/bobmatnyc/trusty-tools/commit/49dd042ae5727c1f0e70d8008279e8006e714123))
+- stop bare tm from misreporting a managed pane as 'not a git project' ([#4061](https://github.com/bobmatnyc/trusty-tools/pull/4061)) ([#4065](https://github.com/bobmatnyc/trusty-tools/pull/4065)) ([`6c868e9`](https://github.com/bobmatnyc/trusty-tools/commit/6c868e99f1c62bad2078666a31d23aeae0b55a4b))
+- serialize concurrent ~/.claude.json trust seeds ([#4075](https://github.com/bobmatnyc/trusty-tools/pull/4075)) ([`707a09d`](https://github.com/bobmatnyc/trusty-tools/commit/707a09dc631cad17a7fbc754f659d8de45a6f1c6))
+- emit ChatEvent::Error on failed SSE streams and restore streaming sampling parity ([#3980](https://github.com/bobmatnyc/trusty-tools/pull/3980)) ([`207fa8d`](https://github.com/bobmatnyc/trusty-tools/commit/207fa8de54ddb0361bf6aecc53c079096a5b5f72))
+- scan .claude/worktrees for orphans + stop .gitignore fallthrough ([#3974](https://github.com/bobmatnyc/trusty-tools/pull/3974)) ([`cb299bb`](https://github.com/bobmatnyc/trusty-tools/commit/cb299bba75a0c9ff66bbc2719571ce2991482047))
+- gate MCP trust-set membership on actual pin success, not the toggle (fifth instance) ([#3951](https://github.com/bobmatnyc/trusty-tools/pull/3951)) ([`58fcca6`](https://github.com/bobmatnyc/trusty-tools/commit/58fcca684a51528dac2801e669f437917e27ee21))
+- gate trusty-memory/trusty-search trust on the manifest toggle actually being on ([#3946](https://github.com/bobmatnyc/trusty-tools/pull/3946)) ([`df51741`](https://github.com/bobmatnyc/trusty-tools/commit/df5174178f7084d830e4d23d1ca41bfe0016b471))
+- tm launch no longer auto-trusts every committed .mcp.json MCP server ([#3940](https://github.com/bobmatnyc/trusty-tools/pull/3940)) ([`88fc6f4`](https://github.com/bobmatnyc/trusty-tools/commit/88fc6f49301ed3fd83e876021e07b3339a9080d6))
+- daemon-managed sessions now trust the project's own trusty-mpm MCP server ([#3924](https://github.com/bobmatnyc/trusty-tools/pull/3924)) ([`385aeff`](https://github.com/bobmatnyc/trusty-tools/commit/385aeff78cf4cac00c3ecd0207ce0d24af2ae0d3))
+- pause/resume skills load deferred MCP tool before calling it ([#3919](https://github.com/bobmatnyc/trusty-tools/pull/3919)) ([`39451cf`](https://github.com/bobmatnyc/trusty-tools/commit/39451cf69b8dfef81e7bddb19532f17f09d6c99b))
 
-  The verdict is the ANY-PANE-LIVE question over the whole tmux session, not a
-  check of the record's stored `pane_id`: a managed session can be manually split
-  (#2463), and a session with one idle pane beside a live agent pane must never
-  reach the destructive branch. Fails OPEN throughout — a blank session name, a
-  failed `tmux` call, a listing that cannot be fully parsed, or a listing with no
-  pane attributable to the session all assume the runtime is live and preserve
-  the previous attach behavior. Parsing is strict (exactly three non-empty
-  tab-separated fields with a numeric pid) specifically so a missing or
-  unparseable pid cannot collapse the two-gate check down to `is_idle_shell`
-  alone: `has_live_child(None)` returns `false`, which is right for the daemon's
-  non-destructive reconcile (#2023 A) but not for a CLI path that drives a
-  session kill.
+### Changed
 
-  Known limitation, deliberately accepted: any-pane-live is also what bounds the
-  fix. A SPLIT session whose agent pane died but which still has some other pane
-  running a non-shell command (a `vim`, a `tail -f`) reads as live, so bare `tm`
-  still attaches into the idle agent pane there. #3873 is fixed for the
-  single-pane case and for splits whose panes are all idle shells, but not for a
-  split with an unrelated live process — narrowing the question back to one pane
-  would require per-pane runtime identity that the stored `pane_id` cannot supply
-  reliably enough to gate a session kill on.
+- bump to 1.2.3 ([#4229](https://github.com/bobmatnyc/trusty-tools/pull/4229)) ([`7c4f056`](https://github.com/bobmatnyc/trusty-tools/commit/7c4f05643508bd9ad04b9cf5ba77dead3cb4cfcb))
 
-  Because that reconcile reaches `SessionManager::stop` →
-  `graceful_terminate_runtime` → `kill_session`, which is **session-scoped**, the
-  restart now discloses that it is about to destroy the whole tmux session — all
-  windows, panes, and scrollback — whenever tmux is live, matching what the plain
-  `Restart` branch already did for the same situation. Stopped/Errored records
-  (whose panes are idle shells too) keep taking the plain `Restart` path, and the
-  decommissioned/deleted tombstone refusal still runs first.
+### Documentation
 
-  `commands::managed_tests`: `session_resume_headless_active_live_tmux_skips_restart_and_attach`
-  created its scratch tmux session with a bare `tmux new-session -d`, which lands
-  the pane on a login shell — since #3873 that is a DEAD runtime, so the fixture
-  no longer expressed the live-session case the test asserts about. It now runs
-  an explicit long-lived command, and a new counterpart
-  (`session_resume_headless_dead_runtime_reconciles_and_restarts`) drives the
-  dead-runtime shape end-to-end against a real daemon, proving the reconcile
-  actually reaches `/runtime-stop` + `/resume` rather than being a silent no-op.
-  Both wait for the pane's liveness reading to STABILISE (three agreeing probes)
-  before acting: a freshly created pane transiently reports a live child while
-  the shell initialises, which otherwise made both tests depend on the
-  developer's dotfiles. Their tmux names are now process-unique, since the two
-  bin targets can run concurrently and share the machine-global tmux namespace.
-
-- Concurrent `tm` processes no longer lose (or corrupt) `projects.json` entries.
-  The project-store upsert was an unsynchronised read-modify-write of the whole
-  file — two processes interleaving read/read/write/write silently dropped one
-  registration while both callers saw success, and because every writer shared
-  one fixed `projects.json.tmp` scratch path, overlapping writes could publish a
-  mangled document that no longer parsed. All mutations now run through
-  `ProjectStore::mutate`, which performs the whole cycle inside a cross-process
-  file lock and publishes atomically via `trusty_common::json_rmw`. `PATCH
-  /api/v1/projects/{name}` gets the same guarantee: its fetch→mutate→persist
-  runs under one held lock instead of two separate store calls. A failed lock is
-  an error, never an unsynchronised write.
-
-- Worktree discovery is derived from `git worktree list --porcelain` instead of
-  walking five hard-coded location shapes, so a session worktree is found
-  wherever it lives rather than only where someone remembered to look (#4207
-  slice 1).
-- The checkout that owns a worktree is now resolved with
-  `git rev-parse --git-common-dir` instead of being guessed as the candidate's
-  grandparent directory. Worktrees physically inside `.base/.worktrees/` but
-  registered to the parent repository were previously disowned by that guess
-  and were structurally unreclaimable — never deleted, never reportable (#4207,
-  underlying defect of #4204).
-- `tm session prune --worktrees` and the daemon orphan-GC no longer propose a
-  plain directory as a reclaim candidate. A directory git does not register is
-  not trusty-mpm's to remove.
-- Worktree reclamation is bounded by a structural containment rule: a candidate
-  must be a strict descendant of the managed project directory whose git
-  registry named it. Deriving discovery from git (above) widened what could be
-  proposed for deletion from five path shapes to anything registered anywhere
-  under the projects root — on this machine that admitted five of the
-  operator's own long-lived checkouts, leaving the ownership sentinel as the
-  only thing between enumeration and an unattended removal. Your own checkouts
-  and any worktree you park beside a managed project are now excluded by
-  position rather than by a list of names, so a new one is excluded the day you
-  create it. Location remains irrelevant *within* a project, so no reclaim
-  capability is lost (#4207).
-- A git-`locked` worktree is never enumerated for reclamation. Git itself
-  respects the lock — `git worktree remove --force` refuses it — but the
-  removal path treats that refusal as a generic git failure and falls back to
-  deleting the directory outright, which defeats the lock and strands git's
-  registry entry. Excluding locked worktrees from enumeration is the only place
-  `git worktree lock` is actually honoured (#4207).
-
----
+- add a plain-speaking prose rule to the PM instructions ([#4316](https://github.com/bobmatnyc/trusty-tools/pull/4316)) ([`899a949`](https://github.com/bobmatnyc/trusty-tools/commit/899a949aaee9776010ecfb7acfa3c087d195ce3a))
+- fix stale `.invalid` fixture-convention pointer ([#4308](https://github.com/bobmatnyc/trusty-tools/pull/4308)) ([`098ab27`](https://github.com/bobmatnyc/trusty-tools/commit/098ab270a0580f0849a53f64e44b958878475ede))
 ## [1.2.3] — 2026-07-28
 
 PATCH: merge-and-local-install only, no crates.io publish.
