@@ -5,6 +5,16 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- `agents::deployer` now re-deploys a corrupted bundled agent instead of freezing it as user-modified (closes [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)). A manifest entry whose origin is framework-owned (`Origin::Bundled`, the `InstallPolicy::Overwrite` tier) is refreshed from the bundle whenever its on-disk checksum drifts — a mismatch there means corruption or drift, never user ownership. Previously ANY checksum mismatch was read as "the user edited this file", which is unrecoverable for a bundled asset: corrupt content can never checksum-match again, so a 32-byte `v1` stub that replaced the real 25KB `rust-engineer.md` was permanently misclassified as a user edit and skipped by every subsequent deploy and by `tm validate --repair`, dropping the agent from the session roster for the life of the workspace. The user-owned tier is unchanged — an untracked file, and a tracked entry with `Origin::User`/`Origin::Registry`, are still preserved byte-for-byte. Each overwrite-on-mismatch repair logs the file, the expected and found checksums, and the on-disk byte count.
+
+### Added
+
+- `agents::manifest::Origin::is_framework_owned` — names the two install-ownership tiers so the deployer branches on declared ownership rather than on checksum mismatch alone (#4408).
+
 ## [0.3.0] — 2026-07-21
 
 ### Fixed

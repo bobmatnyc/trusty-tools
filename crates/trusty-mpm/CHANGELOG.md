@@ -91,6 +91,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A corrupted bundled agent is re-deployed instead of frozen forever (closes
+  [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)).** When the
+  deployed copy of a bundled agent drifts from the checksum the deploy manifest
+  recorded, the file is now refreshed from the bundle rather than classified as
+  a user edit and skipped. Previously a degenerate 32-byte stub that replaced
+  `rust-engineer.md` in a workspace's `.claude/agents/` was unrecoverable —
+  neither a redeploy nor `tm validate --repair` could reach it — so every
+  session in that workspace lost the agent from its roster ("Agent type not
+  found") permanently. Hand-placed and user-owned agent files are untouched.
 - **`tm doctor` no longer reports a serving daemon as unreachable (issue
   #4005).** On 2026-07-26 it printed "trusty-memory unreachable at
   127.0.0.1:7070" while MCP `memory_recall` / `memory_remember` succeeded

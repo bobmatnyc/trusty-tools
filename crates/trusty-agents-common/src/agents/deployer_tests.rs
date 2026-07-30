@@ -4,8 +4,9 @@
 //! Why: moved verbatim from `trusty-mpm::core::agent_deployer`'s inline
 //! `#[cfg(test)] mod tests` (#2892) — behavior-preserving extraction, not a
 //! rewrite.
-//! What: covers a new deploy, a skipped user-modified file, an unchanged
-//! file, a user-owned file, atomic writes, corrupt-manifest detection, the
+//! What: covers a new deploy, a preserved user-owned file, an unchanged
+//! file, the #4408 corrupted-bundled-file repair and its user-owned guard,
+//! atomic writes, corrupt-manifest detection, the
 //! HR-1 enrichment deploy path, the HR-2 filtered-select predicate, the
 //! DOC-42 `declared_skills` population, and per-agent compose-failure
 //! isolation.
@@ -58,30 +59,104 @@ fn deploy_new_agent() {
     );
 }
 
+/// The literal degenerate stub from the #4408 incident: a `name:`-only
+/// frontmatter with a body of `v1`, no `description:` — 32 bytes that Claude
+/// Code still counts as a deployed agent while the roster reports
+/// "Agent type not found".
+const CORRUPT_STUB: &str = "---\nname: engineer\n---\n\nv1\n";
+
 #[test]
-fn deploy_skips_user_modified() {
-    // A managed file the user edited must be skipped, not overwritten.
+fn deploy_redeploys_corrupted_bundled_file() {
+    // #4408 regression: a manifest entry with a FRAMEWORK-owned origin
+    // (bundled = the Overwrite tier) whose on-disk content has been replaced
+    // by a degenerate stub must be re-deployed from the bundle, not frozen as
+    // "user-modified". Before this fix the checksum mismatch was read as a
+    // user edit, so the corrupted agent could never be repaired — not by a
+    // redeploy, not by `tm validate --repair` — for the life of the workspace.
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_sources(src.path());
 
-    // First deploy establishes the manifest.
+    // First deploy establishes the manifest with origin = Bundled.
     deploy_agents(src.path(), tgt.path()).unwrap();
+    let good = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
+    assert!(good.contains("Engineer content."));
+    assert_eq!(
+        AgentManifest::load(tgt.path()).managed["engineer.md"].origin,
+        Origin::Bundled
+    );
 
-    // User edits the deployed engineer file.
-    fs::write(
-        tgt.path().join("engineer.md"),
-        "---\nname: engineer\n---\n\nUSER HAND-EDIT\n",
-    )
-    .unwrap();
+    // Corruption: the deployed copy is replaced by the 32-byte stub while the
+    // manifest still records the checksum of the real content.
+    fs::write(tgt.path().join("engineer.md"), CORRUPT_STUB).unwrap();
 
-    // Second deploy must preserve the user's edit.
     let result = deploy_agents(src.path(), tgt.path()).unwrap();
-    assert!(result.skipped.contains(&"engineer.md".to_string()));
-    assert!(!result.deployed.contains(&"engineer.md".to_string()));
+    assert!(
+        result.deployed.contains(&"engineer.md".to_string()),
+        "a corrupted bundled agent must be re-deployed, got: {result:?}"
+    );
+    assert!(!result.skipped.contains(&"engineer.md".to_string()));
 
-    let still = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
-    assert!(still.contains("USER HAND-EDIT"));
+    // The real content is back, byte-for-byte, and the manifest agrees with it.
+    let repaired = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
+    assert_eq!(repaired, good, "bundled content must be restored exactly");
+    assert!(
+        AgentManifest::load(tgt.path()).checksum_matches("engineer.md", &repaired),
+        "manifest checksum must match the repaired file"
+    );
+
+    // Idempotent: a third deploy sees a matching checksum and does nothing.
+    let third = deploy_agents(src.path(), tgt.path()).unwrap();
+    assert!(third.unchanged.contains(&"engineer.md".to_string()));
+    assert!(third.deployed.is_empty());
+}
+
+#[test]
+fn deploy_preserves_modified_user_owned_entry() {
+    // #4408 guard: the user-protection carve-out is intentional for the
+    // user-owned (seed-once) tier and must survive the fix — a manifest entry
+    // with `Origin::User` whose content was modified is preserved
+    // byte-identical across deploy, and reported as skipped.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    // Seed a user-owned manifest entry whose on-disk content diverges from
+    // both the recorded checksum and the fresh composition.
+    let user_content = "---\nname: engineer\n---\n\nUSER HAND-EDIT — KEEP ME\n";
+    fs::write(tgt.path().join("engineer.md"), user_content).unwrap();
+    let mut manifest = AgentManifest::default();
+    manifest.managed.insert(
+        "engineer.md".to_string(),
+        ManifestEntry {
+            source_chain: vec!["engineer".to_string()],
+            checksum: checksum("something else entirely"),
+            deployed_at: "2026-01-01T00:00:00Z".to_string(),
+            origin: Origin::User,
+        },
+    );
+    manifest.save(tgt.path()).unwrap();
+
+    // Two deploys, to prove the preservation is stable and not one-shot.
+    for _ in 0..2 {
+        let result = deploy_agents(src.path(), tgt.path()).unwrap();
+        assert!(
+            result.skipped.contains(&"engineer.md".to_string()),
+            "user-owned entry must be skipped, got: {result:?}"
+        );
+        assert!(!result.deployed.contains(&"engineer.md".to_string()));
+        assert_eq!(
+            fs::read_to_string(tgt.path().join("engineer.md")).unwrap(),
+            user_content,
+            "user-owned content must survive byte-identical"
+        );
+    }
+
+    // Its origin is untouched — the deploy never re-registers a skipped file.
+    assert_eq!(
+        AgentManifest::load(tgt.path()).managed["engineer.md"].origin,
+        Origin::User
+    );
 }
 
 #[test]
@@ -356,7 +431,7 @@ fn declared_skills_empty_when_agent_declares_none() {
 #[test]
 fn declared_skills_populated_even_when_deploy_is_skipped() {
     // The declaration is a property of the SOURCE composition, not of
-    // this run's write outcome — even a user-modified (skipped) agent's
+    // this run's write outcome — even a user-owned (skipped) agent's
     // declared skills must still surface for co-deployment purposes.
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
@@ -365,10 +440,10 @@ fn declared_skills_populated_even_when_deploy_is_skipped() {
         "---\nname: code-critic\nrole: qa\nskills: [code-review-standards]\n---\n\n# Critic\n",
     )
     .unwrap();
-    deploy_agents(src.path(), tgt.path()).unwrap();
+    // A user-owned file (untracked by the manifest) sharing the agent's name.
     fs::write(
         tgt.path().join("code-critic.md"),
-        "---\nname: code-critic\n---\n\nUSER HAND-EDIT\n",
+        "---\nname: code-critic\n---\n\nUSER OWNED\n",
     )
     .unwrap();
 

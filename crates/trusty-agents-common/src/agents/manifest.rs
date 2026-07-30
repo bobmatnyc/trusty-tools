@@ -121,6 +121,28 @@ pub enum Origin {
     User,
 }
 
+impl Origin {
+    /// Whether this origin marks a FRAMEWORK-owned file (the `Overwrite`
+    /// install tier) rather than a user-owned one (the `SeedOnce` tier).
+    ///
+    /// Why: issue #4408. The two-variant install policy says framework-owned
+    /// bundled assets are refreshed from the bundle on every deploy, while
+    /// user-owned assets are seeded once and never clobbered. Without this
+    /// distinction the deployer read ANY checksum mismatch as "the user edited
+    /// this file", which is fatal for a bundled asset: once its content
+    /// corrupts it can never checksum-match again, so the corruption is
+    /// permanently misclassified as a user edit and the file is frozen —
+    /// unrecoverable by redeploy or `tm validate --repair`.
+    /// What: `true` only for [`Origin::Bundled`]. [`Origin::User`] is
+    /// user-authored by definition, and [`Origin::Registry`] is treated
+    /// conservatively as user-owned (the operator pulled it deliberately), so
+    /// both keep the preserve-on-mismatch behavior.
+    /// Test: `origin_framework_ownership_tiers`.
+    pub fn is_framework_owned(self) -> bool {
+        matches!(self, Origin::Bundled)
+    }
+}
+
 /// One managed agent file's deployment record.
 ///
 /// Why: deploy decisions ("safe to overwrite?", "user-modified?") need the
@@ -424,6 +446,15 @@ mod tests {
             .insert("engineer.md".into(), sample_entry());
         assert!(manifest.is_managed("engineer.md"));
         assert!(!manifest.is_managed("user-agent.md"));
+    }
+
+    #[test]
+    fn origin_framework_ownership_tiers() {
+        // #4408: only `Bundled` is the framework-owned (Overwrite) tier; the
+        // user-owned tiers keep the preserve-on-mismatch behavior.
+        assert!(Origin::Bundled.is_framework_owned());
+        assert!(!Origin::User.is_framework_owned());
+        assert!(!Origin::Registry.is_framework_owned());
     }
 
     #[test]
