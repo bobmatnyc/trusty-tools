@@ -79,3 +79,7 @@ trusty-progress = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
+# test-util enables Tokio's paused clock (`#[tokio::test(start_paused = true)]`)
+# used by `detect_does_not_hang_on_an_unresponsive_shadowing_binary` so the
+# health gate's 10s probe timeout is exercised on the virtual clock.
+tokio = { workspace = true, features = ["test-util"] }

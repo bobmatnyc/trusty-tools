@@ -140,8 +140,11 @@ tempfile = { workspace = true }
 # `bedrock-client`.
 
 [dev-dependencies]
-# Async test runtime (events, build_info, perf async tests, tools tests)
-tokio = { workspace = true }
+# Async test runtime (events, build_info, perf async tests, tools tests).
+# test-util enables Tokio's paused clock (`tokio::time::pause`) used by
+# `events_connect_hang_is_bounded_by_connect_timeout_not_infinite` to wait out
+# `CONNECT_TIMEOUT` on the virtual clock instead of 10s of real time.
+tokio = { workspace = true, features = ["test-util"] }
 # HTTP router test-only helper (`tower::util::ServiceExt::oneshot`) for
 # driving the `tcode serve --http` axum router without a real socket (#2053).
 tower = { workspace = true }

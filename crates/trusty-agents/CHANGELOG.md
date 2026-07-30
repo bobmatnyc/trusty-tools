@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **`discover_one_returns_none_on_timeout` now runs on Tokio's paused clock
+  instead of sleeping out the real 15s `DISCOVERY_TIMEOUT`** — 15.015s to
+  0.00s, removing what was the single slowest test in the workspace (of
+  20,317). `#[tokio::test(start_paused = true)]` still spawns the real
+  unresponsive `sleep 3600` server and still fires the real, unmodified
+  15s constant; the runtime just auto-advances to the deadline rather than
+  waiting for it. Coverage is verified preserved, not assumed: with the
+  `tokio::time::timeout` removed from `discover_one` the test fails, and a
+  new elapsed-time assertion additionally fails if `None` ever comes back
+  from an early spawn failure rather than from the deadline expiring — a
+  paused-clock test that no longer exercises the timeout would otherwise
+  pass green.
+
 ### Fixed
 
 - **The daemon now writes a real, best-effort log file, scoped per project

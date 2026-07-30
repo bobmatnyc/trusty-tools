@@ -210,12 +210,22 @@ done"#,
     /// block discovery indefinitely (or for the full chained-60s worst
     /// case) — `DISCOVERY_TIMEOUT` must actually fire.
     /// What: Point a spec at `sleep 3600` (never speaks the MCP protocol);
-    /// assert `discover_one` returns `None` well before the OS would kill
-    /// the process on its own. Uses a shortened effective wait by relying on
-    /// `DISCOVERY_TIMEOUT`'s real value — this test's own timeout wrapper
-    /// only guards against the assertion itself hanging in CI.
+    /// assert `discover_one` returns `None`, and that it did so by exhausting
+    /// `DISCOVERY_TIMEOUT` rather than by some unrelated early failure (a
+    /// spawn error would also produce `None`, but at ~zero elapsed time).
+    /// This test's own outer timeout wrapper only guards against the
+    /// assertion itself hanging.
+    ///
+    /// `start_paused = true` runs this on Tokio's virtual clock: the real
+    /// `sleep 3600` child still never speaks, so the runtime goes idle and
+    /// Tokio auto-advances straight to the next timer deadline —
+    /// `DISCOVERY_TIMEOUT` fires against the real, unmodified 15s constant
+    /// but costs no wall-clock (was the workspace's slowest test at 15.0s).
+    /// Removing the `tokio::time::timeout` from `discover_one` still fails
+    /// this test: the discovery future would stay pending forever, the outer
+    /// wrapper below would fire instead, and `expect` would panic.
     /// Test: This test.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[cfg(unix)]
     async fn discover_one_returns_none_on_timeout() {
         let spec = McpServerSpec {
@@ -226,15 +236,22 @@ done"#,
             source: SpecSource::ConfigService,
         };
 
+        let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(DISCOVERY_TIMEOUT + Duration::from_secs(10), async {
             discover_one(&spec).await
         })
         .await
         .expect("discover_one must respect DISCOVERY_TIMEOUT, not hang indefinitely");
+        let elapsed = started.elapsed();
 
         assert!(
             result.is_none(),
             "a server that never speaks MCP must be skipped, not treated as discovered"
+        );
+        assert!(
+            elapsed >= DISCOVERY_TIMEOUT,
+            "`None` must come from `DISCOVERY_TIMEOUT` expiring, but discovery gave up after \
+             only {elapsed:?} — the timeout path was not the one exercised"
         );
     }
 }
