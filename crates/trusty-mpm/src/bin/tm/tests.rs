@@ -1072,10 +1072,12 @@ fn cli_parses_daemon_defaults() {
             addr,
             tailscale,
             mcp,
+            force,
         } => {
             assert_eq!(addr.to_string(), "127.0.0.1:7880");
             assert!(!tailscale);
             assert!(!mcp);
+            assert!(!force);
         }
         other => panic!("expected Daemon, got {other:?}"),
     }
@@ -1086,6 +1088,17 @@ fn cli_parses_daemon_tailscale() {
     let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--tailscale"]).unwrap();
     match cli.command.unwrap() {
         Command::Daemon { tailscale, .. } => assert!(tailscale),
+        other => panic!("expected Daemon, got {other:?}"),
+    }
+}
+
+/// Issue #4397: `tm daemon --force` must parse — the bare-CLI opt-in past the
+/// #2486 unsupervised-launchd guard.
+#[test]
+fn cli_parses_daemon_force() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--force"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Daemon { force, .. } => assert!(force),
         other => panic!("expected Daemon, got {other:?}"),
     }
 }

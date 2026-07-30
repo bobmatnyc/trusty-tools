@@ -452,7 +452,8 @@ async fn main() -> anyhow::Result<()> {
             addr,
             tailscale,
             mcp,
-        }) => run_daemon(addr, tailscale, mcp).await,
+            force,
+        }) => run_daemon(addr, tailscale, mcp, force).await,
         Some(Command::Supervisor {
             addr,
             interval,

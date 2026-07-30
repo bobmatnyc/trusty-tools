@@ -487,6 +487,14 @@ pub(crate) enum Command {
         /// Run as an MCP server over stdio instead of the HTTP daemon.
         #[arg(long)]
         mcp: bool,
+        /// Start even when a trusty-mpm launchd unit is registered but this
+        /// process is NOT launchd-supervised (issue #4397, the bare-CLI
+        /// counterpart of #2486's MCP-bridge `no_spawn` guard). Without this,
+        /// `run_daemon` refuses to start in that hazardous state — it means a
+        /// launchd unit exists and `launchctl kickstart`/`bootstrap` is the
+        /// correct way to bring the daemon back, not a bare `tm daemon`.
+        #[arg(long)]
+        force: bool,
     },
     /// Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206).
     ///

@@ -91,6 +91,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Bare `tm daemon` bypassed the #2486 unsupervised-spawn guard (closes
+  [#4397](https://github.com/bobmatnyc/trusty-tools/issues/4397)).** The
+  guard against a launchd-managed daemon being duplicated by an unsupervised
+  spawn previously existed only on the MCP-bridge path
+  (`serve_stdio.rs`'s `no_spawn`); `run_daemon` (the bare-CLI path, invoked
+  directly or by a launchd plist) never consulted it, so `tm daemon` run by
+  hand walked straight past the same hazard — observed live as PID 35895
+  serving a stale 1.2.3 image since 2026-07-29 while the on-disk binary was
+  1.3.0. `run_daemon` now refuses to start when a trusty-mpm launchd unit is
+  registered but this process is not launchd-supervised, unless the operator
+  passes the new `tm daemon --force` opt-in.
 - **A corrupted bundled agent is re-deployed instead of frozen forever (closes
   [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)).** When the
   deployed copy of a bundled agent drifts from the checksum the deploy manifest
