@@ -21,7 +21,7 @@ measurements. **The measurements are the deliverable.** No harness is being buil
 | E | mise + Rust reality check | **ANSWERED — assumption was broken, see E** | measured |
 | F | TCC / permission dialogs, headless | **ANSWERED — mic preflight, not network, see F** | measured |
 | G | Timings & disk | **MOSTLY ANSWERED — see G** | measured |
-| H | Compile-speed calibration | NOT YET MEASURED | — |
+| H | Compile-speed calibration | **ANSWERED — 131 s, not 20–55 min. See H** | measured |
 | I | Suspend/resume | NOT YET MEASURED | — |
 
 > **Headline finding (see B/E):** the baked golden image
@@ -418,7 +418,61 @@ resizing will read the pre-expansion number.
 
 ---
 
-## H, I — NOT YET MEASURED
+## H. Compile-speed calibration — **the 20–55 min/crate estimate is wrong by 10–25×**
+
+Test: `cargo install tga --locked` on `probe-h`, a fresh clone of the golden with a
+**cold** cargo registry (the golden carries rustup but no downloaded crates), at the
+**default guest sizing of 4 vCPU / 8 GB**.
+
+```
+=== guest config ===
+logicalcpu=4 mem_gb=8
+/dev/disk2s1s1    74Gi    12Gi    43Gi    22%    /
+=== H1 BUILD: cargo install tga --locked  (4 vCPU / 8 GB) ===
+   Compiling rusqlite v0.39.0
+   Compiling trusty-common v0.24.1
+   Compiling indicatif v0.17.11
+   Compiling rayon v1.12.0
+   Compiling tera v1.20.1
+   Compiling csv v1.4.0
+   Compiling futures v0.3.32
+   Compiling uuid v1.23.1
+   Compiling git2 v0.20.4
+   Compiling tga v2.9.4
+    Finished `release` profile [optimized] target(s) in 2m 11s
+  Installing /Users/admin/.cargo/bin/tga
+   Installed package `tga v2.9.4` (executable `tga`)
+GUEST_BUILD_SEC=131
+GUEST_BUILD_RC=0
+--- installed binary ---
+-rwxr-xr-x  1 admin  staff  22771088 Jul 30 22:28 /Users/admin/.cargo/bin/tga
+tga 2.9.4
+HOST_SAW_RC=0
+```
+
+**131 seconds, cold registry, on the smallest guest configuration, including dependency
+download, a full release build of ~300 crates, and linking a 22.7 MB binary.**
+
+Current design docs estimate **20–55 minutes per crate**. The measured figure is
+**2m 11s** — the estimate is high by roughly **10–25×**. Those numbers were extrapolated,
+never measured, and should be discarded.
+
+### Disk cost of a real workload
+
+```
+=== host free (KB) before ===  561359340
+=== host free (KB) after  ===  560047392
+```
+
+A full cold-registry `cargo install` diverges the clone by **1,311,948 KB ≈ 1.25 GiB**.
+Combined with the ~104 KB idle clone cost from G, host capacity is:
+
+* idle clones: effectively unbounded
+* clones that have each done a full from-source install: **~400** at 536 GiB free
+
+Disk is not a binding constraint for this harness.
+
+## I — NOT YET MEASURED
 
 ---
 
