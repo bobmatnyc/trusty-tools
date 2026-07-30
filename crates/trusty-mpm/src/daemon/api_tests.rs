@@ -1662,6 +1662,276 @@ async fn session_start_hook_correlates_claude_id() {
     );
 }
 
+// `session_start_hook_does_not_overwrite_with_different_id` (the original
+// #4337 fix's test) is superseded by `session_start_hook_still_refuses_a_live_subagent_id`
+// below, which additionally seeds a real transcript fixture so the id is
+// genuinely "live" under the #4337 re-sync gate added in review — a fake id
+// with no on-disk transcript would otherwise read as stale and get accepted.
+
+#[tokio::test]
+async fn session_start_hook_reasserting_same_id_is_a_noop() {
+    // Why (#4337): the guard must not be so strict that it breaks the
+    // legitimate case — a `--resume <id>` relaunch preserves the SAME Claude
+    // Code session UUID, so its SessionStart re-reports the identical id. That
+    // must still succeed (as a no-op write), not be treated as a conflicting
+    // report.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-correlate-reassert-same");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let claude_id = "550e8400-e29b-41d4-a716-446655440012";
+    for _ in 0..2 {
+        let post = HookPost {
+            session_id: claude_id.to_string(),
+            event: HookEvent::SessionStart,
+            payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+        };
+        let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+            .await
+            .expect("SessionStart must succeed");
+    }
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get managed session");
+    assert_eq!(
+        record.claude_session_id.as_deref(),
+        Some(claude_id),
+        "reasserting the SAME claude_session_id must remain a no-op success, not be blocked (#4337)"
+    );
+}
+
+/// RAII guard that redirects `$HOME` to a temp dir and restores it on drop
+/// (including panic) — mirrors `runtime::claude_code_tests::HomeGuard`.
+///
+/// Why (#4337): `stored_id_still_live` (`session_start_correlation.rs`)
+/// resolves the managed `CLAUDE_CONFIG_DIR` via `dirs::home_dir()`. Tests
+/// that need to fabricate a "this id's transcript still exists" fixture must
+/// redirect `$HOME` to a throwaway dir instead of writing under the
+/// developer's real `~/.trusty-tools`. Pair with `#[serial]` since it
+/// mutates process-global env.
+struct HomeGuard {
+    prev: Option<String>,
+    tmp: tempfile::TempDir,
+}
+impl HomeGuard {
+    fn set() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: callers are #[serial], so no other test thread reads HOME
+        // concurrently; Drop restores the prior value even on panic.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        Self { prev, tmp }
+    }
+    fn path(&self) -> &std::path::Path {
+        self.tmp.path()
+    }
+}
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.prev {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Seed a fake Claude Code session transcript file so
+/// `runtime::session_id_exists` (and therefore `stored_id_still_live`)
+/// reports `id` as still live for `cwd`, under the `$HOME` a [`HomeGuard`]
+/// redirected.
+///
+/// What: `<home>/.trusty-tools/trusty-mpm/claude-config/projects/<encoded
+/// cwd>/<id>.jsonl`, mirroring `managed_claude_config_dir` +
+/// `encode_project_dir`'s `/` → `-` encoding.
+fn seed_fake_transcript(home: &std::path::Path, cwd: &std::path::Path, id: &str) {
+    let encoded = cwd.to_str().expect("utf8 cwd").replace('/', "-");
+    let dir = home
+        .join(".trusty-tools")
+        .join("trusty-mpm")
+        .join("claude-config")
+        .join("projects")
+        .join(encoded);
+    std::fs::create_dir_all(&dir).expect("create fake projects dir");
+    std::fs::write(dir.join(format!("{id}.jsonl")), "{}").expect("write fake transcript");
+}
+
+#[tokio::test]
+#[serial]
+async fn session_start_hook_still_refuses_a_live_subagent_id() {
+    // Why (#4337, critic finding 2): the subagent-overwrite guard must hold
+    // even with the stale-id re-sync gate in place — a subagent's own
+    // transcript exists and is live for as long as it runs, so its
+    // SessionStart must still be refused, never mistaken for a stale-id
+    // re-sync.
+    let home = HomeGuard::set();
+    let ws = std::path::PathBuf::from("/tmp/test-ws-correlate-live-refused");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let pm_claude_id = "550e8400-e29b-41d4-a716-446655440020";
+    let post = HookPost {
+        session_id: pm_claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("PM SessionStart must succeed");
+
+    // Simulate the PM's own transcript actually existing and being LIVE.
+    seed_fake_transcript(home.path(), &ws, pm_claude_id);
+
+    let subagent_claude_id = "550e8400-e29b-41d4-a716-446655440021";
+    let post = HookPost {
+        session_id: subagent_claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("subagent SessionStart must still be accepted at the HTTP layer");
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get managed session");
+    assert_eq!(
+        record.claude_session_id.as_deref(),
+        Some(pm_claude_id),
+        "a subagent's SessionStart must be refused while the PM's own transcript is still \
+         live, even with the #4337 stale-id re-sync gate in place"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn session_start_hook_re_correlates_a_stale_id() {
+    // Why (#4337, critic finding 2): once the stored id's transcript no
+    // longer resolves (pruned, moved, or never made it to disk), a
+    // differently-reported SessionStart must be ACCEPTED, not refused
+    // forever — otherwise a legitimately-diverged id (e.g. a `--continue`
+    // fallback assigning a new UUID) could never self-heal.
+    let _home = HomeGuard::set();
+    let ws = std::path::PathBuf::from("/tmp/test-ws-correlate-stale-resync");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let stale_id = "550e8400-e29b-41d4-a716-446655440030";
+    let post = HookPost {
+        session_id: stale_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("first SessionStart must succeed");
+
+    // No transcript file is ever seeded for `stale_id` under the redirected
+    // $HOME — it never resolves, simulating a pruned/never-flushed session.
+    let new_id = "550e8400-e29b-41d4-a716-446655440031";
+    let post = HookPost {
+        session_id: new_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("second SessionStart must succeed");
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get managed session");
+    assert_eq!(
+        record.claude_session_id.as_deref(),
+        Some(new_id),
+        "a differently-reported id must be accepted once the stored one no longer \
+         resolves to a live transcript (#4337)"
+    );
+}
+
+#[tokio::test]
+async fn session_end_hook_clears_claude_session_id() {
+    // Why (#4337): SessionEnd is Claude Code's own signal that this
+    // conversation ended — the daemon must clear claude_session_id so a
+    // LATER, unrelated SessionStart is never compared against a dead id
+    // (which the stale-id re-sync gate could otherwise keep refusing forever
+    // if that dead id happened to still resolve on disk).
+    let ws = std::path::PathBuf::from("/tmp/test-ws-session-end-clears-id");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let claude_id = "550e8400-e29b-41d4-a716-446655440040";
+    {
+        let mgr = state.session_manager().await;
+        mgr.set_claude_session_id(&managed_id, claude_id)
+            .await
+            .expect("set claude_session_id");
+    }
+
+    let post = HookPost {
+        session_id: claude_id.to_string(),
+        event: HookEvent::SessionEnd,
+        payload: serde_json::json!({}),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("ingest_hook(SessionEnd) must succeed");
+
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .get(&managed_id)
+        .await
+        .expect("get managed session after SessionEnd");
+    assert_eq!(
+        record.claude_session_id, None,
+        "SessionEnd must clear claude_session_id (#4337)"
+    );
+}
+
+#[tokio::test]
+async fn session_start_hook_ordering_race_self_heals_via_session_end() {
+    // Why (#4337, critic finding 3): if a subagent's SessionStart wins the
+    // race and lands FIRST — the record has no claude_session_id yet, so its
+    // id is (unavoidably) taken as the first correlation — the wrong id must
+    // not stay locked in forever. Once that SAME subagent's own SessionEnd
+    // later fires, the record must self-heal back to `None` (a safe state
+    // that falls back to `--continue` on the next resume), rather than
+    // permanently squatting on a subagent's transcript.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-ordering-race-self-heal");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    let subagent_claude_id = "550e8400-e29b-41d4-a716-446655440050";
+    let post = HookPost {
+        session_id: subagent_claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("subagent SessionStart (winning the race) must succeed");
+
+    {
+        let mgr = state.session_manager().await;
+        let record = mgr.get(&managed_id).await.expect("get after race");
+        assert_eq!(
+            record.claude_session_id.as_deref(),
+            Some(subagent_claude_id),
+            "the first correlation for a fresh record is unavoidably whoever wins the race"
+        );
+    }
+
+    // The subagent's own SessionEnd later fires — the record must self-heal.
+    let post = HookPost {
+        session_id: subagent_claude_id.to_string(),
+        event: HookEvent::SessionEnd,
+        payload: serde_json::json!({}),
+    };
+    let _ = ingest_hook(State(Arc::clone(&state)), Json(post))
+        .await
+        .expect("subagent SessionEnd must succeed");
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get after self-heal");
+    assert_eq!(
+        record.claude_session_id, None,
+        "a race-won wrong id must self-heal to None once its own session ends, not stay \
+         locked in forever (#4337)"
+    );
+}
+
 #[tokio::test]
 async fn session_end_hook_marks_managed_stopped() {
     // Why (#1744): ingest_hook(SessionEnd) must call handle_session_end, which

@@ -244,87 +244,11 @@ pub async fn run_stages(project_root: &std::path::Path) -> Vec<StageOutcome> {
 mod tests {
     use super::*;
     use crate::commands::ensure::ENV_TEST_LOCK as ENV_LOCK;
-    use trusty_common::DATA_DIR_OVERRIDE_ENV;
-
-    /// Spawn a one-shot TCP server that answers the first request with a fixed
-    /// HTTP response, and return its `host:port`.
-    ///
-    /// Why: standing up a real `reqwest` round-trip against a controlled
-    /// response lets the stage logic be tested end-to-end without a live daemon.
-    /// What: binds an ephemeral loopback port, accepts one connection, reads the
-    /// request, writes `response_body` wrapped in a 200 (or the raw status line
-    /// when `raw` is set), and returns the bound address.
-    async fn stub_once(status_line: &'static str, body: &'static str) -> String {
-        stub_seq(vec![(status_line, body)]).await
-    }
-
-    /// Spawn a TCP server that answers a *sequence* of requests, one fixed
-    /// response per accepted connection in order.
-    ///
-    /// Why: the palace-create stage issues two requests (an existence GET then a
-    /// create POST); covering the "created" branch needs a stub that 404s the
-    /// GET then 200s the POST.
-    /// What: binds an ephemeral loopback port, accepts `responses.len()`
-    /// connections, and writes each `(status_line, body)` in turn.
-    async fn stub_seq(responses: Vec<(&'static str, &'static str)>) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            for (status_line, body) in responses {
-                if let Ok((mut sock, _)) = listener.accept().await {
-                    // Drain the request up to (and including) the end-of-headers
-                    // marker before replying. A single fixed-size read can split
-                    // a request whose `root_path` body is long, which used to
-                    // race the write and flake CI; reading until `\r\n\r\n` (or
-                    // EOF) consumes the whole header block deterministically. We
-                    // don't need the body — only that the request is fully sent.
-                    let mut acc = Vec::with_capacity(2048);
-                    let mut chunk = [0u8; 2048];
-                    loop {
-                        match sock.read(&mut chunk).await {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                acc.extend_from_slice(&chunk[..n]);
-                                if acc.windows(4).any(|w| w == b"\r\n\r\n") {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    let resp = format!(
-                        "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                } else {
-                    break;
-                }
-            }
-        });
-        addr
-    }
-
-    fn stub_data_dir(app: &str, addr: &str) -> std::path::PathBuf {
-        let tmp = std::env::temp_dir().join(format!(
-            "tctl-ensure-setup-{}-{}-{}",
-            app,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
-        }
-        trusty_common::write_daemon_addr(app, addr).unwrap();
-        tmp
-    }
+    // #4246: the stub-server + stubbed-data-dir vehicle these tests grew is now
+    // shared with `probe_http`/`verify_tail` — one copy, in `test_support`.
+    use crate::commands::test_support::{
+        clear_data_dir_override, stub_data_dir, stub_empty_data_dir, stub_once, stub_seq,
+    };
 
     /// Why: a fresh registration (`created:true`) must report `changed = true`.
     /// What: stub returns `{"created":true}`; assert the outcome.
@@ -338,11 +262,7 @@ mod tests {
         let out = register_index(&client, std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        clear_data_dir_override(&dir);
         assert_eq!(out.stage, STAGE_INDEX);
         assert!(out.ok);
         assert!(out.changed);
@@ -361,11 +281,7 @@ mod tests {
         let out = register_index(&client, std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        clear_data_dir_override(&dir);
         assert!(out.ok);
         assert!(!out.changed);
     }
@@ -383,11 +299,7 @@ mod tests {
         let out = register_index(&client, std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        clear_data_dir_override(&dir);
         assert!(!out.ok);
     }
 
@@ -398,28 +310,12 @@ mod tests {
     #[tokio::test]
     async fn register_index_daemon_down() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "tctl-ensure-down-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
-        }
+        let tmp = stub_empty_data_dir("tctl-ensure-down");
         let client = build_client().unwrap();
         let out = register_index(&client, std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
+        clear_data_dir_override(&tmp);
         assert!(out.ok);
         assert!(!out.changed);
         assert!(out.detail.contains("not running"));
@@ -432,28 +328,12 @@ mod tests {
     #[tokio::test]
     async fn create_palace_daemon_down() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "tctl-ensure-pdown-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&tmp).unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
-        }
+        let tmp = stub_empty_data_dir("tctl-ensure-pdown");
         let client = build_client().unwrap();
         let out = create_palace(&client, std::path::Path::new("/tmp/widget"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
+        clear_data_dir_override(&tmp);
         assert_eq!(out.stage, STAGE_PALACE);
         assert!(out.ok);
         assert!(!out.changed);
@@ -477,11 +357,7 @@ mod tests {
         let out = create_palace(&client, std::path::Path::new("/tmp/widget"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        clear_data_dir_override(&dir);
         assert_eq!(out.stage, STAGE_PALACE);
         assert!(out.ok, "detail: {}", out.detail);
         assert!(out.changed);
@@ -500,11 +376,7 @@ mod tests {
         let out = create_palace(&client, std::path::Path::new("/tmp/widget"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        clear_data_dir_override(&dir);
         assert!(out.ok);
         assert!(!out.changed);
         assert!(out.detail.contains("already exists"));
@@ -528,11 +400,7 @@ mod tests {
         let out = create_palace(&client, std::path::Path::new("/tmp/widget"))
             .await
             .unwrap();
-        unsafe {
-            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+        clear_data_dir_override(&dir);
         assert!(!out.ok);
     }
 }

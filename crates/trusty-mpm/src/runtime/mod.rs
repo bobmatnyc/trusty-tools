@@ -19,6 +19,7 @@ mod tcode;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
+pub(crate) use claude_code::session_id_exists;
 pub use claude_code::{ClaudeCodeAdapter, InPlaceResumeCommand, build_inplace_resume_command};
 pub use tcode::TcodeAdapter;
 

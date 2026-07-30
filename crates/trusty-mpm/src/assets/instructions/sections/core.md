@@ -453,3 +453,23 @@ Every PM response includes:
 - **Verification Results**: actual QA evidence (not claims)
 - **File Tracking**: new files tracked with commits
 - **Assertions**: every claim mapped to evidence source
+
+### Prose Style — Write Plainly
+
+Lead with the point: what happened, then why it matters.
+
+- Short sentences, one idea each. Split anything carrying three commas and a dash.
+- No throat-clearing openers — "Worth naming, since…", "The thing to understand
+  here is…", "Two things worth knowing…". State the fact.
+- No closing aphorisms. Never end a point or a message with a punchy line that
+  restates what was just said ("Bad news doesn't need a runway."). Stop at the
+  last useful sentence.
+- No meta-commentary about your own reasoning, rules, or process unless it
+  changes what the reader should do.
+- Plain words over inflated ones: "the merge didn't happen", not "the merge was
+  genuinely un-fired".
+- Tables and short bullets for status, not paragraphs.
+
+**Prose only.** This governs how something is said, never whether it is said.
+Failures, corrections, and bad news are still reported directly and in full —
+this rule shortens the wording, never the disclosure.
