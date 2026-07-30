@@ -189,16 +189,39 @@ const SELF_QUESTIONS: &[&str] = &[
 /// `Implementation` now requires an UNAMBIGUOUS signal only (see
 /// `has_unambiguous_technical_signal` below) — a hard verb, a slash command,
 /// a repo-file-shaped token, a snake_case identifier, or an explicit
-/// error/stack-trace marker. This word list no longer feeds `Implementation`
-/// AT ALL (except via the tiny, separately-declared
-/// `CODE_ARTIFACT_IMPLEMENTATION_WORDS` exception below) — it now ONLY
-/// distinguishes `Research` from `Conversational`, where the blast radius of
-/// a wrong guess is near zero (in-process, tool-armed, no subprocess either
-/// way). Kept broad deliberately for that reason: a verb-less bug report
-/// ("the login page has been broken...") or a plain-verb-plus-generic-noun
-/// sentence ("check my token balance") both correctly land on `Research`,
-/// never `Conversational` (silently dropping a real signal) and never
-/// `Implementation` (crashing).
+/// error/stack-trace marker. This word list NEVER feeds `Implementation` —
+/// it now ONLY distinguishes `Research` from `Conversational`, where the
+/// blast radius of a wrong guess is near zero (in-process, tool-armed, no
+/// subprocess either way). Kept broad deliberately for that reason: a
+/// verb-less bug report ("the login page has been broken...") or a
+/// plain-verb-plus-generic-noun sentence ("check my token balance") both
+/// correctly land on `Research`, never `Conversational` (silently dropping a
+/// real signal) and never `Implementation` (crashing).
+///
+/// #4319 THIRD follow-up (code-critic, 2026-07-29): a prior version of this
+/// fix carved out a tiny `CODE_ARTIFACT_IMPLEMENTATION_WORDS` exception
+/// (`"tests"`/`"release"`) that ALSO fed `Implementation`, specifically so
+/// "run the tests"/"build the release" kept working. That exception was
+/// itself proven unsafe by the same method (executing the classifier): "check
+/// my blood tests" and "check the release date of the movie" are ordinary
+/// English that hit NONE of rows 1-7's unambiguous signals, so they also
+/// reached `Implementation` — the exact same crash class, just narrower.
+/// There is no word-list-based way to distinguish "the tests" (a software
+/// test suite) from "blood tests" using only the words `verb`+`tests`, so
+/// the Implementation-gating exception is deleted outright rather than
+/// narrowed further: `Implementation` is reachable ONLY via rows 1-7.
+/// `"tests"`/`"release"` move INTO this list instead — the same
+/// near-zero-blast-radius role every other entry here already has (they
+/// now only ever produce `Research`, same as "check my blood tests"). "run
+/// the tests"/"build the release" now classify `Research` — verified (see
+/// `classifier_tests_2::bucket_2_*`) that `dispatch_task` (and therefore
+/// `route_task`'s Tcode destination) remains reachable from `Research`:
+/// `ctrl::pm_task::dispatch::history::run_pm_task_with_history` registers
+/// `PmBridgeTool` unconditionally for any non-`Conversational`
+/// classification (see that function's tool-registry section) — only
+/// `Conversational` skips tool registration entirely. A wrong `Research`
+/// guess costs one extra decision hop (the PM must choose to call
+/// `dispatch_task`), never a crash.
 const TECHNICAL_CONTEXT_WORDS: &[&str] = &[
     "broken",
     "failing",
@@ -244,27 +267,9 @@ const TECHNICAL_CONTEXT_WORDS: &[&str] = &[
     "container",
     "script",
     "codebase",
+    "tests",
+    "release",
 ];
-
-/// #4319 (code-critic CRITICAL follow-up): a TINY, deliberately separate
-/// exception — the ONLY code-artifact nouns allowed to gate `Implementation`
-/// (not just `Research`) when paired with a plain verb, and ONLY because
-/// "run the tests"/"build the release" are a non-negotiable requirement
-/// (owner-verified working, must not regress) with no other unambiguous
-/// signal available: neither sentence has a hard verb, a file path, a
-/// snake_case identifier, or an error marker.
-///
-/// Why kept separate from `TECHNICAL_CONTEXT_WORDS` rather than folded in:
-/// this list DOES feed `Implementation`, so it must stay as small as
-/// possible and be reviewed on its own — adding a third word here should
-/// feel uncomfortable. "tests"/"release" are themselves imperfect (a
-/// "release" can mean a movie release; "tests" can mean school exams), but
-/// in the shape "VERB the ARTIFACT" with nothing else in the sentence, they
-/// overwhelmingly mean a software test suite / build artifact in this
-/// product's actual traffic. Also reused by `route::route_task`'s
-/// `run`/`build` gate (`super::CODE_ARTIFACT_IMPLEMENTATION_WORDS`) so the
-/// two routers agree.
-const CODE_ARTIFACT_IMPLEMENTATION_WORDS: &[&str] = &["tests", "release"];
 
 /// #4319 (code-critic CRITICAL follow-up): True when `input` carries an
 /// UNAMBIGUOUS technical signal — the ONLY evidence base for
@@ -332,26 +337,34 @@ pub(crate) fn normalize(input: &str) -> String {
 /// What: Applies heuristics in priority order — empty, slash command,
 /// greeting, closing, self-question, hard-action-verb scan (wins outright,
 /// any length — `route::TCODE_HARD_VERBS`: fix/debug/implement/refactor),
-/// unambiguous-technical-signal scan (see `has_unambiguous_technical_signal`
-/// — repo-file token, snake_case identifier, error/stack-trace marker),
-/// the tiny action-verb-plus-code-artifact-noun exception
-/// (`CODE_ARTIFACT_IMPLEMENTATION_WORDS`: "tests"/"release"),
-/// research-verb/question-word scan, trailing question mark, "help me",
+/// research-verb/question-word scan, unambiguous-technical-signal scan (see
+/// `has_unambiguous_technical_signal` — repo-file token, snake_case
+/// identifier, error/stack-trace marker; THE ONLY OTHER path to
+/// `Implementation`), trailing question mark, "help me",
 /// action-verb-plus-generic-context-word (Research — AMBIGUOUS, not
 /// Implementation), technical-context-word-alone (Research), then defaults
 /// to `Conversational` when no positive signal fired.
 /// `Implementation` requires an UNAMBIGUOUS signal ONLY (#4319 code-critic
-/// CRITICAL, 2026-07-29 second follow-up) — word count is never evidence
-/// (original #4319), a bare `ACTION_VERBS` hit is never evidence on its own
-/// (first follow-up), and neither is a plain verb plus a generic context
-/// word like "token"/"session"/"config" (this follow-up: "check my token
-/// balance" still crashed the subprocess pipeline under the first
-/// follow-up's design). Every ambiguous case is biased toward `Research`
-/// instead: `src/ctrl/pm_task/dispatch/history.rs` shows `Research` and the
-/// `Conversational` fallthrough share the SAME in-process tool-armed loop,
-/// structurally distinct from `Implementation`'s re-exec-as-subprocess — a
-/// wrong `Research` guess costs a slightly heavier in-process turn; a wrong
-/// `Implementation` guess crashes the chat.
+/// CRITICAL, 2026-07-29 — three iterations, each proven wrong by executing
+/// the classifier before landing on this one): word count is never evidence
+/// (original #4319); a bare `ACTION_VERBS` hit is never evidence on its own
+/// (first follow-up: "can you check if it's raining tomorrow" still
+/// crashed); neither is a plain verb plus a generic context word like
+/// "token"/"session"/"config" (second follow-up: "check my token balance"
+/// still crashed); and neither is a plain verb plus a code-artifact noun
+/// like "tests"/"release" (third follow-up: "check my blood tests"/"check
+/// the release date of the movie" still crashed — see
+/// `has_unambiguous_technical_signal`'s doc comment for why that narrower
+/// exception was deleted rather than shrunk further). Every ambiguous case
+/// is biased toward `Research` instead: `dispatch_task` (the tm/Tcode
+/// bridge) stays reachable from `Research` because
+/// `ctrl::pm_task::dispatch::history::run_pm_task_with_history` registers
+/// it unconditionally for any non-`Conversational` classification (its only
+/// intent-based branch is a `Conversational`-only fast-path skip) — a wrong
+/// `Research` guess costs one extra decision hop (the PM must choose to
+/// call `dispatch_task`), while a wrong `Implementation` guess (in the
+/// paths that DO distinguish them, e.g. `api::server::handlers`'s
+/// subprocess-workflow branch) crashes the chat.
 /// Test: `tests::*` below covers greetings, closings, self-questions,
 /// research verbs, question words, clear task verbs, slash commands, the
 /// #4319 long-conversational-input regression, and edge cases;
@@ -454,22 +467,32 @@ pub fn classify_intent(input: &str) -> IntentClass {
     // 2. `has_unambiguous_technical_signal` — a repo-file-shaped token, a
     //    snake_case identifier, or an explicit error/stack-trace marker —
     //    wins regardless of any verb at all, now that a leading question
-    //    word/research verb has already been ruled out above.
+    //    word/research verb has already been ruled out above. THIS IS THE
+    //    ONLY OTHER PATH TO `Implementation` (#4319 code-critic CRITICAL
+    //    THIRD follow-up, 2026-07-29): a prior version of this fix also
+    //    carved out a tiny "plain verb + tests/release" exception here so
+    //    "run the tests"/"build the release" kept classifying
+    //    Implementation. That exception was itself proven unsafe by the
+    //    same method (executing the classifier): "check my blood tests" and
+    //    "check the release date of the movie" are ordinary English that
+    //    reach no OTHER unambiguous signal, so they also reached
+    //    Implementation — the same crash class, just narrower. There is no
+    //    word-list-based way to tell "the tests" (a software test suite)
+    //    apart from "blood tests" using only the words verb+"tests", so the
+    //    exception is deleted rather than narrowed further. "run the
+    //    tests"/"build the release" now classify Research (see
+    //    `classifier_tests_2::bucket_2_*`) — verified that `dispatch_task`
+    //    (and therefore route_task's Tcode destination) remains reachable
+    //    from Research: `run_pm_task_with_history` (this crate's
+    //    `ctrl::pm_task::dispatch::history`) registers `PmBridgeTool`
+    //    unconditionally for any non-Conversational classification (see
+    //    that function's tool-registry section, ~line 447) — Research and
+    //    Implementation were ALREADY tool-equivalent there before this
+    //    change; only the API server's separate subprocess-workflow
+    //    branch (`api::server::handlers`) distinguished them, and that
+    //    subprocess spawn is exactly what #4319 exists to avoid triggering
+    //    on a guess.
     if has_unambiguous_technical_signal(trimmed, &words) {
-        return IntentClass::Implementation;
-    }
-
-    // Tiny, deliberately narrow exception (see `CODE_ARTIFACT_IMPLEMENTATION_WORDS`'s
-    // doc comment): "run the tests" / "build the release" have no OTHER
-    // unambiguous signal (no hard verb, no file token, no identifier, no
-    // error marker) but are a non-negotiable requirement. A plain action
-    // verb plus one of these 2 words is the ONLY other path to
-    // Implementation.
-    if has_action_verb
-        && words
-            .iter()
-            .any(|w| CODE_ARTIFACT_IMPLEMENTATION_WORDS.contains(w))
-    {
         return IntentClass::Implementation;
     }
 

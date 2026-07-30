@@ -71,7 +71,7 @@ fn hard_verb_wins_over_research_verb() {
 }
 
 #[test]
-fn hard_verb_and_artifact_exception_win_over_greeting_prefix() {
+fn only_hard_verb_wins_over_greeting_prefix() {
     // "script" is an AMBIGUOUS context word (Research-only) and this
     // sentence ends in "?", so it lands on Research now, not Implementation
     // — "hi, can you ...?" is a question, not a command.
@@ -85,12 +85,12 @@ fn hard_verb_and_artifact_exception_win_over_greeting_prefix() {
         classify_intent("Hello, please fix the failing test in src/main.rs"),
         IntentClass::Implementation
     );
-    // "run" is plain, but "tests" is the tiny CODE_ARTIFACT_IMPLEMENTATION_WORDS
-    // exception -> still Implementation.
-    assert_eq!(
-        classify_intent("hey, run the tests"),
-        IntentClass::Implementation
-    );
+    // "run" is plain and "tests" is an AMBIGUOUS context word now (the
+    // tiny "tests"/"release" Implementation exception was deleted — #4319
+    // code-critic CRITICAL third follow-up: it reopened the same crash
+    // class on "check my blood tests"/"check the release date of the
+    // movie") -> Research, not Implementation.
+    assert_eq!(classify_intent("hey, run the tests"), IntentClass::Research);
 }
 
 #[test]
@@ -209,14 +209,14 @@ fn issue_4319_reproducer_long_conversational_check_in_is_not_implementation() {
 
 #[test]
 fn genuine_coding_request_still_reaches_implementation_and_tcode() {
-    // #4319 code-critic HIGH-1: pins the direction the fallback narrowing
+    // #4319: pins the direction every narrowing pass on this classifier
     // must NOT regress — a real coding request must still classify
-    // Implementation (via the unconditional-on-length ACTION_VERBS path)
+    // Implementation (here via the hard verb "fix", `route::TCODE_HARD_VERBS`)
     // AND still route to Tcode once handed to `route_task` (the deterministic
     // router `dispatch_task` uses once something is already headed to a
-    // backend — see `intent::route`). Uses a sentence carrying both an
-    // action verb and a repo-file token, so both stages are exercised
-    // together end to end.
+    // backend — see `intent::route`). Uses a sentence carrying both a hard
+    // verb and a repo-file token, so both stages are exercised together end
+    // to end, unaffected by any of the ambiguity-narrowing fixes above.
     let task = "fix the failing test in src/auth_middleware.rs";
     assert_eq!(classify_intent(task), IntentClass::Implementation);
     assert_eq!(
@@ -260,33 +260,51 @@ fn bucket_1_casual_phrasing_with_action_verb_is_not_implementation() {
 }
 
 #[test]
-fn bucket_2_short_imperative_coding_request_is_implementation_and_routes_to_tcode() {
-    // "run the tests" / "build the release": both PLAIN verbs, but paired
-    // with a genuine technical-context word ("tests"/"release") in a short,
-    // unambiguous imperative. Must reach Implementation AND still route to
-    // Tcode via `route_task` -- these are exactly the coding requests the
-    // owner actively uses "run coding projects from inside chat" for.
+fn bucket_2_short_imperative_coding_request_is_research_but_can_still_reach_tcode() {
+    // #4319 code-critic CRITICAL third follow-up (2026-07-29): "run the
+    // tests" / "build the release" no longer classify Implementation. The
+    // tiny "plain verb + tests/release" exception that used to grant them
+    // Implementation was deleted — it was proven, by the same
+    // execute-the-classifier method, to reopen the crash class one level
+    // down ("check my blood tests", "check the release date of the movie"
+    // are ordinary English that also hit that exception). Both verbs are
+    // PLAIN (not `route::TCODE_HARD_VERBS`) and neither sentence has any
+    // OTHER unambiguous signal (no file token, no snake_case identifier, no
+    // error/stack-trace marker), so both now correctly land on Research.
     for task in ["run the tests", "build the release"] {
         assert_eq!(
             classify_intent(task),
-            IntentClass::Implementation,
-            "'{task}' should be Implementation"
+            IntentClass::Research,
+            "'{task}' should be Research, not Implementation"
         );
     }
-    // route_task's original GENERIC_CODE_VERBS (write/add/create) didn't
-    // include "run"/"build", so before this fix these two fell through to
-    // its OWNER-LOCKED Tm default — contradicting the requirement that a
-    // real coding request routes to Tcode end to end. Added "run"/"build"
-    // to `route::GENERIC_CODE_VERBS` (precedence rule 3: wins only when no
-    // Tm signal is present, same softness as write/add/create) to close
-    // that gap.
+    // Verified end-to-end (not assumed): a Research classification does NOT
+    // lose the ability to reach trusty-code. `dispatch_task` (`PmBridgeTool`)
+    // is registered unconditionally in
+    // `ctrl::pm_task::dispatch::history::run_pm_task_with_history`'s
+    // tool-armed loop for ANY non-Conversational classification — that
+    // function's only intent-based branch is a Conversational-only
+    // fast-path skip, so Research and Implementation were ALREADY
+    // tool-equivalent there before this change. The PM can still choose to
+    // call `dispatch_task("run the tests")` when it judges the work
+    // warrants it; `route_task` then applies its own independent
+    // Tm-vs-Tcode signal detection to that call, same as it always has.
+    //
+    // For THESE two exact phrasings specifically, `route_task` itself has
+    // no stronger signal than `classify_intent` did (neither "tests" nor
+    // "release" is a `route::TCODE_WORDS`/`TCODE_PHRASES` entry), so
+    // `dispatch_task("run the tests")` currently resolves to the
+    // OWNER-LOCKED `Tm` default — same as it would for any other
+    // signal-sparse task description, and unchanged by this fix (route_task
+    // never had special "tests"/"release" handling of its own before the
+    // now-deleted shared exception).
     assert_eq!(
         crate::intent::route::route_task("run the tests"),
-        crate::intent::route::BridgeRoute::Tcode
+        crate::intent::route::BridgeRoute::Tm
     );
     assert_eq!(
         crate::intent::route::route_task("build the release"),
-        crate::intent::route::BridgeRoute::Tcode
+        crate::intent::route::BridgeRoute::Tm
     );
 }
 
@@ -322,18 +340,28 @@ fn bucket_4_signal_free_conversation_is_conversational() {
 
 #[test]
 fn code_critic_critical_ordinary_nouns_never_reach_implementation() {
-    // #4319 code-critic CRITICAL (2026-07-29): these 12 sentences, verbatim
-    // from the critic's report, all returned Implementation under the
-    // FIRST follow-up's "plain verb + ANY technical-context word is
-    // sufficient" rule — reaching `task_runner.rs`'s literal
+    // #4319 code-critic CRITICAL (2026-07-29): these 14 sentences, verbatim
+    // from the critic's reports, all returned Implementation under a
+    // now-superseded design and reached `task_runner.rs`'s literal
     // `subprocess exited with status {:?}` on completely ordinary
-    // conversation. Each pairs a plain ACTION_VERBS verb with a common
-    // polysemous English noun (token, production, staging, credentials,
-    // session, queue, container, timeout, exceptions, incident, config)
-    // that also happens to be a legitimate technical term — proving that
-    // "plain verb + generic context word" cannot be unambiguous evidence
-    // for Implementation, only for Research (see `TECHNICAL_CONTEXT_WORDS`'s
+    // conversation.
+    //
+    // The first 12 pair a plain ACTION_VERBS verb with a common polysemous
+    // English noun (token, production, staging, credentials, session,
+    // queue, container, timeout, exceptions, incident, config) that also
+    // happens to be a legitimate technical term — proving that "plain verb
+    // + generic context word" cannot be unambiguous evidence for
+    // Implementation, only for Research (see `TECHNICAL_CONTEXT_WORDS`'s
     // doc comment for the inverted-default fix this pins).
+    //
+    // The last 2 ("check my blood tests", "check the release date of the
+    // movie") were added after a NARROWER version of that same bug was found
+    // one level down: a since-deleted tiny "plain verb + tests/release"
+    // exception (kept only for "run the tests"/"build the release") also
+    // let ordinary sentences using "tests"/"release" in their everyday
+    // (medical exam / film release) sense reach Implementation. See
+    // `has_unambiguous_technical_signal`'s doc comment for why that
+    // exception was deleted outright rather than narrowed further.
     let ordinary_sentences_with_technical_sounding_nouns = [
         "check my token balance",
         "check the production schedule for the play",
@@ -347,6 +375,8 @@ fn code_critic_critical_ordinary_nouns_never_reach_implementation() {
         "list the exceptions to the dress code",
         "check the incident report from the fender bender",
         "delete the old config from my calendar invite",
+        "check my blood tests",
+        "check the release date of the movie",
     ];
     for s in ordinary_sentences_with_technical_sounding_nouns {
         assert_ne!(

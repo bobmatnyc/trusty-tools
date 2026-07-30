@@ -56,7 +56,7 @@ fn self_questions_are_conversational() {
 }
 
 #[test]
-fn action_verbs_signal_implementation() {
+fn action_verbs_only_signal_implementation_with_an_unambiguous_signal() {
     // Code-critic CRITICAL follow-up (2026-07-29): "script" is an AMBIGUOUS
     // context word (Research-only) now, so "Write a Python script" alone no
     // longer reaches Implementation.
@@ -70,16 +70,13 @@ fn action_verbs_signal_implementation() {
         classify_intent("Fix the bug in main.rs"),
         IntentClass::Implementation
     );
-    // "tests" is the tiny CODE_ARTIFACT_IMPLEMENTATION_WORDS exception.
-    assert_eq!(
-        classify_intent("Run the tests"),
-        IntentClass::Implementation
-    );
-    // "release" is the other half of that same tiny exception.
-    assert_eq!(
-        classify_intent("Build the release"),
-        IntentClass::Implementation
-    );
+    // #4319 code-critic CRITICAL third follow-up (2026-07-29): "tests" is
+    // now an AMBIGUOUS context word too (the tiny "plain verb +
+    // tests/release" Implementation exception was deleted — it reopened
+    // the crash class on "check my blood tests") -> Research.
+    assert_eq!(classify_intent("Run the tests"), IntentClass::Research);
+    // Same for "release" ("check the release date of the movie").
+    assert_eq!(classify_intent("Build the release"), IntentClass::Research);
     // "implement" is a hard verb -> Implementation regardless.
     assert_eq!(
         classify_intent("Implement intent classification"),
@@ -123,13 +120,12 @@ fn single_ambiguous_word_is_conversational() {
 #[test]
 fn long_descriptive_input_with_ambiguous_signals_routes_to_research() {
     // Code-critic CRITICAL follow-up (2026-07-29): this sentence contains
-    // the ACTION_VERBS entry "test" (singular, as in "integration test" —
-    // NOT the plural "tests" the tiny CODE_ARTIFACT_IMPLEMENTATION_WORDS
-    // exception matches) plus several ambiguous TECHNICAL_CONTEXT_WORDS
-    // ("failing", "auth", "middleware", "staging", "token"). A plain verb
-    // plus generic context words is AMBIGUOUS, not unambiguous evidence of
-    // a coding request -> Research, never Implementation (word count itself
-    // is also never evidence for Implementation, see the original #4319 fix).
+    // the ACTION_VERBS entry "test" (singular, as in "integration test")
+    // plus several ambiguous TECHNICAL_CONTEXT_WORDS ("failing", "auth",
+    // "middleware", "staging", "token"). A plain verb plus generic context
+    // words is AMBIGUOUS, not unambiguous evidence of a coding request ->
+    // Research, never Implementation (word count itself is also never
+    // evidence for Implementation, see the original #4319 fix).
     let long = "the failing integration test for the auth middleware on staging \
                 seems related to the recent token refresh changes from last week";
     assert_eq!(classify_intent(long), IntentClass::Research);

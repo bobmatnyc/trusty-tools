@@ -13,13 +13,35 @@ fn hard_verb_alone_routes_tcode() {
 }
 
 #[test]
-fn run_and_build_generic_verbs_route_tcode_with_no_tm_signal() {
+fn run_and_build_route_tcode_with_a_genuine_tcode_signal() {
     // Owner-approved #4319 follow-up (2026-07-29): "run"/"build" added to
-    // GENERIC_CODE_VERBS so these short imperative coding requests route to
-    // Tcode end to end, matching `intent::classify_intent`'s Implementation
-    // classification for the same sentences.
-    assert_eq!(route_task("run the tests"), BridgeRoute::Tcode);
-    assert_eq!(route_task("build the release"), BridgeRoute::Tcode);
+    // GENERIC_CODE_VERBS, gated on a genuine `has_tcode_lexical_signal` hit
+    // (repo-file token / error-marker / TCODE_PHRASES / TCODE_WORDS)
+    // co-occurring in the same input.
+    // "patch" is a `TCODE_WORDS` entry (not a repo-file token, not a hard
+    // verb) so this exercises rule 3's run/build gate specifically.
+    assert_eq!(
+        route_task("run the build after you patch the code"),
+        BridgeRoute::Tcode
+    );
+    // "failing test" is a `TCODE_PHRASES` entry.
+    assert_eq!(
+        route_task("build the release, there's a failing test"),
+        BridgeRoute::Tcode
+    );
+}
+
+#[test]
+fn run_and_build_alone_no_longer_route_tcode_without_that_signal() {
+    // #4319 code-critic CRITICAL third follow-up (2026-07-29): the shared
+    // "tests"/"release" exception that let "run the tests"/"build the
+    // release" route Tcode without any OTHER Tcode signal was deleted (see
+    // `route_task`'s rule-3 doc comment) — it mirrored a
+    // `intent::classify_intent` exception that was itself proven to reopen
+    // the #4319 crash class one level down. These now fall through to the
+    // OWNER-LOCKED Tm default, same as any other signal-sparse task text.
+    assert_eq!(route_task("run the tests"), BridgeRoute::Tm);
+    assert_eq!(route_task("build the release"), BridgeRoute::Tm);
 }
 
 #[test]
@@ -30,8 +52,7 @@ fn run_and_build_require_a_real_technical_signal_not_just_the_bare_verb() {
     // "I'll run by the store after work", "let's build rapport with the
     // client", "run point on this deal") and must NOT route Tcode just
     // because the bare word matched `GENERIC_CODE_VERBS` — they now require
-    // a genuine `has_tcode_lexical_signal` hit or a
-    // `CODE_ARTIFACT_IMPLEMENTATION_WORDS` co-occurrence in the SAME input.
+    // a genuine `has_tcode_lexical_signal` hit in the SAME input.
     assert_ne!(route_task("run to the store"), BridgeRoute::Tcode);
     assert_eq!(route_task("run to the store"), BridgeRoute::Tm);
     assert_ne!(

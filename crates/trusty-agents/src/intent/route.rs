@@ -170,22 +170,27 @@ pub fn route_task(task: &str) -> BridgeRoute {
     // sufficient protection for them, `run`/`build` additionally require a
     // genuine Tcode-flavored co-occurrence in the SAME input before they
     // win: `has_tcode_lexical_signal` (a repo-file token, error/stack-trace
-    // marker, `TCODE_PHRASES` substring, or `TCODE_WORDS` token), OR one of
-    // `super::CODE_ARTIFACT_IMPLEMENTATION_WORDS` (the SAME tiny
-    // "tests"/"release" exception `intent::classify_intent` uses — shared,
-    // not reinvented — so "run the tests"/"build the release" still route
-    // Tcode; neither word is in `TCODE_WORDS`/`TCODE_PHRASES`, which are
-    // scoped to bug/error vocabulary, not code-artifact nouns). `write`/
+    // marker, `TCODE_PHRASES` substring, or `TCODE_WORDS` token). `write`/
     // `add`/`create` keep the original, softer rule (Tm-signal veto only) —
     // narrowing them too is out of this fix's scope and unproven to be a
     // problem today.
+    //
+    // #4319 code-critic CRITICAL THIRD follow-up (2026-07-29): an earlier
+    // version of this gate ALSO accepted a shared "tests"/"release"
+    // exception (mirroring a matching `intent::classify_intent` carve-out)
+    // so "run the tests"/"build the release" still routed Tcode without a
+    // `has_tcode_lexical_signal` hit. That shared exception was deleted —
+    // it was proven to reopen the same crash class one level down (see
+    // `intent::has_unambiguous_technical_signal`'s doc comment) — so
+    // "run the tests"/"build the release" now fall through to the Tm
+    // default here too, same as any other signal-free text. This is
+    // consistent, not a regression specific to this router: `route_task`'s
+    // Tm-on-tie default already applied to most natural-language task
+    // descriptions with no `TCODE_WORDS`/file-token/Tm-word hit, before any
+    // of these fixes existed.
     let has_run_or_build = words.iter().any(|w| *w == "run" || *w == "build");
     if has_run_or_build {
-        if has_tcode_lexical_signal(task)
-            || words
-                .iter()
-                .any(|w| super::CODE_ARTIFACT_IMPLEMENTATION_WORDS.contains(w))
-        {
+        if has_tcode_lexical_signal(task) {
             return BridgeRoute::Tcode;
         }
     } else if words.iter().any(|w| GENERIC_CODE_VERBS.contains(w)) {
