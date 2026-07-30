@@ -59,13 +59,29 @@ pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
 /// When invoked without a subcommand (#1708) the guided default fires:
 /// the daemon's in-project spawn path is called for the current directory,
 /// reconnecting to an existing session or provisioning a new worktree.
+///
+/// Why (#4398): `infer_subcommands` lets users type any unambiguous prefix of
+/// a subcommand name (`tm sta` for `status`, `tm proj list` for `project
+/// list`) instead of the full spelling. clap applies this at all 3 nesting
+/// levels (top-level `Command`, and every nested action enum under
+/// `cli::actions`) from this single global setting. It is a separate matching
+/// path from the 5 existing `#[arg(short)]` option-short attributes, so there
+/// is zero collision risk with those. Exact matches always win over inferred
+/// prefixes, so the `hook`/`hooks`, `project`/`projects`, `session`/
+/// `sessions`, and `status`/`statusline` pairs keep resolving to their exact
+/// name rather than erroring as ambiguous. `-v` for `--version` and an
+/// explicit `sess` alias are deliberately out of scope here — see #4398.
+/// What: enables clap's automatic subcommand-prefix inference across the
+/// whole `tm` CLI surface.
+/// Test: `cli_infers_abbreviated_subcommands`, `cli_exact_match_wins_over_prefix_ambiguity`.
 #[derive(Debug, Parser)]
 #[command(
     name = "trusty-mpm",
     version,
     about = "trusty-mpm — unified binary",
     subcommand_required = false,
-    arg_required_else_help = false
+    arg_required_else_help = false,
+    infer_subcommands = true
 )]
 pub(crate) struct Cli {
     /// Base URL of the trusty-mpm daemon (used by the thin CLI subcommands).

@@ -1103,6 +1103,134 @@ fn cli_parses_daemon_force() {
     }
 }
 
+/// Issue #4398: `infer_subcommands` lets an unambiguous prefix of a
+/// subcommand name stand in for the full spelling, at every nesting level.
+#[test]
+fn cli_infers_abbreviated_subcommands() {
+    // Top level, no nested action: "doc" only ever prefixes "doctor".
+    let cli = Cli::try_parse_from(["trusty-mpm", "doc"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            prune_stale_skills: false
+        }
+    ));
+
+    // Top level, no other command starts with "heal".
+    let cli = Cli::try_parse_from(["trusty-mpm", "heal"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Health));
+
+    // Top level, no other command starts with "rest" ("register" is "reg").
+    let cli = Cli::try_parse_from(["trusty-mpm", "rest"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Restart));
+
+    // Inference also propagates into a nested action subcommand.
+    let cli = Cli::try_parse_from(["trusty-mpm", "gen", "cap"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Generate { .. }));
+
+    // Inference applies at the nested-action level too: "project ini" for
+    // "project init".
+    let cli = Cli::try_parse_from(["trusty-mpm", "project", "ini"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Project {
+            action: ProjectAction::Init { dir },
+        } => assert_eq!(dir, None),
+        other => panic!("expected Command::Project(Init), got {other:?}"),
+    }
+}
+
+/// Issue #4398: `infer_subcommands` must never break an EXACT match, even
+/// when that exact name is also a valid prefix of a sibling command name
+/// (`hook`/`hooks`, `project`/`projects`, `session`/`sessions`,
+/// `status`/`statusline`). clap resolves exact matches before falling back
+/// to prefix inference, so all 8 of these keep resolving to their own
+/// command rather than erroring out as an ambiguous prefix.
+#[test]
+fn cli_exact_match_wins_over_prefix_ambiguity() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "status"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Status));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "statusline"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Statusline));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook { pm_guard: false }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "hooks", "clean"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Hooks { .. }));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "project", "list"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Project {
+            action: ProjectAction::List
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "projects", "list"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Projects { .. }));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "start"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Session { .. }));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "start"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Sessions { .. }));
+}
+
+/// #4431 critic HIGH fix: proves the vulnerability precondition AND the
+/// runtime guard together close the gap. clap's `infer_subcommands` still
+/// resolves every one of these abbreviated prefixes to the HIDDEN
+/// `Command::InternalSpawnDisclaimed` variant (`hide = true` only suppresses
+/// `--help`, it does not exempt a subcommand from prefix inference) — but
+/// `commands::spawn_disclaimed::invoked_literally`, which `main` calls on the
+/// RAW argv before ever reaching the disclaimed-spawn leaf, rejects every one
+/// of them because the operator did not type the exact, full subcommand
+/// name. The exact spelling still parses AND passes the guard, so
+/// `disclaim_pane_command`'s own literal self-invocation keeps working.
+#[test]
+fn cli_infers_internal_spawn_disclaimed_but_runtime_guard_rejects_abbreviations() {
+    for prefix in ["int", "inte", "internal"] {
+        let raw_argv: Vec<String> = vec!["trusty-mpm".into(), prefix.into(), "claude".into()];
+        let cli = Cli::try_parse_from(raw_argv.clone()).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::InternalSpawnDisclaimed { .. })),
+            "expected clap to still infer {prefix:?} to InternalSpawnDisclaimed"
+        );
+        assert!(
+            !crate::commands::spawn_disclaimed::invoked_literally(&raw_argv),
+            "the runtime guard must reject the abbreviated prefix {prefix:?}"
+        );
+    }
+
+    let raw_argv: Vec<String> = vec![
+        "trusty-mpm".into(),
+        "internal-spawn-disclaimed".into(),
+        "claude".into(),
+    ];
+    let cli = Cli::try_parse_from(raw_argv.clone()).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::InternalSpawnDisclaimed { .. })
+    ));
+    assert!(crate::commands::spawn_disclaimed::invoked_literally(
+        &raw_argv
+    ));
+}
+
+/// #4431 critic MEDIUM: `tm ins` (an unambiguous prefix of `install` only —
+/// no other top-level command starts with "ins") must keep resolving to
+/// `Command::Install`, confirming the new disclaim-shim guard is scoped to
+/// that one hidden variant and does not collaterally affect ordinary
+/// abbreviation elsewhere on the CLI surface.
+#[test]
+fn cli_infers_ins_to_install_unaffected_by_disclaim_guard() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ins"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Install { .. }));
+}
+
 #[test]
 fn cli_parses_supervisor() {
     let cli = Cli::try_parse_from(["trusty-mpm", "supervisor"]).unwrap();

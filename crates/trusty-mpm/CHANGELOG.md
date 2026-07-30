@@ -9,6 +9,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `tm` CLI accepts unambiguous abbreviated subcommands, e.g. `tm doc` for `tm doctor` ([#4398](https://github.com/bobmatnyc/trusty-tools/issues/4398))
+  - Turns on clap's `infer_subcommands` for the top-level `Cli`, propagating to every nested action enum. Exact matches still win over prefix inference, so ambiguous-prefix pairs (`hook`/`hooks`, `project`/`projects`, `session`/`sessions`, `status`/`statusline`) keep resolving to their own exact command.
+
+### Fixed
+
+- Abbreviated-subcommand inference (#4398) made the hidden `internal-spawn-disclaimed` shim reachable via any unambiguous prefix (`tm int`, `tm inte`, `tm internal`), which would `posix_spawn` an arbitrary program with macOS TCC responsibility disclaimed. `main` now rejects any invocation whose raw first argv token isn't the exact, full subcommand name before the shim ever runs, while the daemon's own literal self-invocation keeps working unchanged.
 - JSON instruction manifest (schema v2) with owner language rules ([#4386](https://github.com/bobmatnyc/trusty-tools/pull/4386)) ([`838d001`](https://github.com/bobmatnyc/trusty-tools/commit/838d00150e4ac1d2f31e5748bf8a85c05b4e78e7))
   - Adds three owner language rules as inline `text` blocks: **Clickable
     References** (`core` — issue/PR/ticket/commit references always render as

@@ -208,8 +208,21 @@ async fn main() -> anyhow::Result<()> {
     // `posix_spawn` + wait that exits with the child's code and never talks to
     // the daemon. (Emitted into the pane command by
     // `trusty_mpm::core::spawn_disclaim::disclaim_pane_command`.)
-    if let Some(Command::InternalSpawnDisclaimed { argv }) = cli.command {
-        return commands::spawn_disclaimed::run(argv);
+    if let Some(Command::InternalSpawnDisclaimed { argv: spawn_argv }) = cli.command {
+        // #4398 HIGH (critic review on PR #4431): `infer_subcommands` makes
+        // clap resolve ANY unambiguous prefix of "internal-spawn-disclaimed"
+        // to this hidden variant — see `commands::spawn_disclaimed::
+        // invoked_literally`'s doc for the full rationale. Reject anything
+        // that didn't arrive via the exact, full spelling before ever
+        // reaching the disclaimed-spawn leaf.
+        if !commands::spawn_disclaimed::invoked_literally(&argv) {
+            eprintln!(
+                "error: '{}' must be invoked by its exact name, not an abbreviation",
+                trusty_mpm::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND
+            );
+            std::process::exit(2);
+        }
+        return commands::spawn_disclaimed::run(spawn_argv);
     }
 
     // Long-running daemon mode: init file-rotating tracing + bug-capture layer
