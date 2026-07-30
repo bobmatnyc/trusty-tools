@@ -485,7 +485,7 @@ async fn probe_url(client: &reqwest::Client, base: &str) -> ProbeOutcome {
 /// be `None`. A read error is treated as "no recorded address" — it is not
 /// evidence about the daemon.
 /// Test: `tests::resolve_probe_bases_reads_http_addr`,
-/// `tests::resolve_probe_bases_none_for_unknown_binary`.
+/// `tests::probe_no_address_when_nothing_resolves`.
 pub fn resolve_probe_bases(app: &str, binary: &str) -> (Option<String>, Option<String>) {
     let recorded = trusty_common::read_daemon_addr(app)
         .ok()
