@@ -196,8 +196,8 @@ fn log_dir() -> PathBuf {
 /// formatted as 16 lowercase hex digits. Not cryptographic — collision
 /// resistance for a handful of concurrently-open local projects is all this
 /// needs, and matches the low-stakes, best-effort nature of a log filename.
-/// Test: `project_log_discriminator_differs_by_project`,
-/// `project_log_discriminator_is_deterministic`.
+/// Test: `project_log_discriminator_is_deterministic`,
+/// `project_log_discriminator_is_16_lowercase_hex_chars`.
 fn project_log_discriminator() -> String {
     use std::hash::{Hash, Hasher};
     let root = crate::ctrl::detect_self_project()
