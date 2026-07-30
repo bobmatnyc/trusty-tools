@@ -88,14 +88,43 @@ const RAW_TCODE_MARKERS: &[&str] = &["error:"];
 /// (precedence rule 3) — deliberately softer than `TCODE_HARD_VERBS` because
 /// "write up the project roadmap" should NOT out-rank "project"/"roadmap".
 ///
-/// `run`/`build` added (owner-approved #4319 follow-up, 2026-07-29): once
-/// `intent::classify_intent` was tightened to require technical context
-/// before a plain verb like "run"/"build" reaches `Implementation`, "run the
-/// tests"/"build the release" correctly classify Implementation — but they
-/// were then falling to `route_task`'s Tm default (no matching Tcode
-/// signal), contradicting the owner's explicit requirement that these
-/// short imperative coding requests still route to Tcode end to end.
+/// `run`/`build` added (owner-approved #4319 follow-up, 2026-07-29): the
+/// owner declared "run the tests"/"build the release" -> `Tcode` a
+/// non-negotiable requirement, but without these two words in
+/// `GENERIC_CODE_VERBS`, `route_task` had no Tcode signal for either
+/// sentence at all and fell to the Tm default. See
+/// `RUN_BUILD_TCODE_ARTIFACT_WORDS` below for the additional narrowing
+/// `run`/`build` specifically need before this rule fires for them.
 const GENERIC_CODE_VERBS: &[&str] = &["write", "add", "create", "run", "build"];
+
+/// route.rs-LOCAL ONLY exception (code-critic HIGH correction, 2026-07-29):
+/// code-artifact nouns that let `run`/`build` win rule 3 even without a
+/// `has_tcode_lexical_signal` hit — the ONLY way `route_task` currently
+/// resolves "run the tests"/"build the release" to `Tcode`.
+///
+/// Why this is safe HERE but was NOT safe as a shared
+/// `intent::classify_intent` exception: `route_task` only ever runs after
+/// the LLM has already decided to call `dispatch_task`, and it picks
+/// between two backends that both execute safely (`Tm` orchestration vs
+/// `Tcode` direct coding) — a wrong guess here is a misrouted backend, not
+/// a crash. `classify_intent`'s equivalent exception was deleted because a
+/// wrong guess THERE could reach `task_runner.rs`'s subprocess-spawn crash
+/// path (`"check my blood tests"`, `"check the release date of the movie"`
+/// both hit that shared exception and both crashed) — that specific risk
+/// does not exist in this module. Do NOT re-share this list with
+/// `intent::classify_intent`; that module's `Implementation` gate stays
+/// zero-exception (see `intent::has_unambiguous_technical_signal`'s doc
+/// comment).
+/// What: matched via exact word-token equality against normalized input,
+/// same as `GENERIC_CODE_VERBS`/`TCODE_WORDS`. Deliberately tiny — "tests"/
+/// "release" are themselves imperfect (a "release" can mean a movie
+/// release), but in "run/build the ARTIFACT" with no other signal, they
+/// overwhelmingly mean a software test suite / build artifact in this
+/// product's actual traffic, and any false positive here still lands on a
+/// non-crashing backend choice.
+/// Test: `route_tests::run_and_build_route_tcode_via_local_artifact_exception`,
+/// `route_tests::run_and_build_require_a_real_technical_signal_not_just_the_bare_verb`.
+const RUN_BUILD_TCODE_ARTIFACT_WORDS: &[&str] = &["tests", "release"];
 
 /// Tm single-token signal set.
 const TM_WORDS: &[&str] = &[
@@ -170,27 +199,37 @@ pub fn route_task(task: &str) -> BridgeRoute {
     // sufficient protection for them, `run`/`build` additionally require a
     // genuine Tcode-flavored co-occurrence in the SAME input before they
     // win: `has_tcode_lexical_signal` (a repo-file token, error/stack-trace
-    // marker, `TCODE_PHRASES` substring, or `TCODE_WORDS` token). `write`/
-    // `add`/`create` keep the original, softer rule (Tm-signal veto only) —
-    // narrowing them too is out of this fix's scope and unproven to be a
-    // problem today.
+    // marker, `TCODE_PHRASES` substring, or `TCODE_WORDS` token), OR the
+    // narrow `run`/`build`-specific exception below. `write`/`add`/`create`
+    // keep the original, softer rule (Tm-signal veto only) — narrowing them
+    // too is out of this fix's scope and unproven to be a problem today.
     //
-    // #4319 code-critic CRITICAL THIRD follow-up (2026-07-29): an earlier
-    // version of this gate ALSO accepted a shared "tests"/"release"
-    // exception (mirroring a matching `intent::classify_intent` carve-out)
-    // so "run the tests"/"build the release" still routed Tcode without a
-    // `has_tcode_lexical_signal` hit. That shared exception was deleted —
-    // it was proven to reopen the same crash class one level down (see
-    // `intent::has_unambiguous_technical_signal`'s doc comment) — so
-    // "run the tests"/"build the release" now fall through to the Tm
-    // default here too, same as any other signal-free text. This is
-    // consistent, not a regression specific to this router: `route_task`'s
-    // Tm-on-tie default already applied to most natural-language task
-    // descriptions with no `TCODE_WORDS`/file-token/Tm-word hit, before any
-    // of these fixes existed.
+    // #4319 code-critic CRITICAL THIRD follow-up (2026-07-29) THEN
+    // code-critic HIGH correction (same day): this gate's "tests"/"release"
+    // exception was briefly SHARED with `intent::classify_intent` (mirrored
+    // via a `super::` reference into that module), then deleted from BOTH
+    // places when the shared version was proven to reopen the #4319 crash
+    // class one level down ("check my blood tests", "check the release date
+    // of the movie" — see `intent::has_unambiguous_technical_signal`'s doc
+    // comment). Deleting it here too was a mistake: `route_task` only ever
+    // runs AFTER the LLM has already chosen to call `dispatch_task`, and it
+    // picks between two SAFE, non-crashing backends (`Tm` vs `Tcode`) — the
+    // "blood tests" ambiguity that forces zero-exception on
+    // `classify_intent` (where a wrong guess reaches a real subprocess
+    // crash) does not apply here; a wrong guess in THIS function costs a
+    // misrouted backend, never a crash. The owner separately declared "run
+    // the tests"/"build the release" -> Tcode non-negotiable, and that
+    // requirement was never actually retracted. So the exception is
+    // restored HERE, ROUTE.RS-LOCAL ONLY (`RUN_BUILD_TCODE_ARTIFACT_WORDS`
+    // below) — NOT reinstated in `classify_intent`, which stays
+    // zero-exception.
     let has_run_or_build = words.iter().any(|w| *w == "run" || *w == "build");
     if has_run_or_build {
-        if has_tcode_lexical_signal(task) {
+        if has_tcode_lexical_signal(task)
+            || words
+                .iter()
+                .any(|w| RUN_BUILD_TCODE_ARTIFACT_WORDS.contains(w))
+        {
             return BridgeRoute::Tcode;
         }
     } else if words.iter().any(|w| GENERIC_CODE_VERBS.contains(w)) {

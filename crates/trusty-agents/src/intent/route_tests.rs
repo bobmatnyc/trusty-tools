@@ -32,16 +32,18 @@ fn run_and_build_route_tcode_with_a_genuine_tcode_signal() {
 }
 
 #[test]
-fn run_and_build_alone_no_longer_route_tcode_without_that_signal() {
-    // #4319 code-critic CRITICAL third follow-up (2026-07-29): the shared
-    // "tests"/"release" exception that let "run the tests"/"build the
-    // release" route Tcode without any OTHER Tcode signal was deleted (see
-    // `route_task`'s rule-3 doc comment) — it mirrored a
-    // `intent::classify_intent` exception that was itself proven to reopen
-    // the #4319 crash class one level down. These now fall through to the
-    // OWNER-LOCKED Tm default, same as any other signal-sparse task text.
-    assert_eq!(route_task("run the tests"), BridgeRoute::Tm);
-    assert_eq!(route_task("build the release"), BridgeRoute::Tm);
+fn run_and_build_route_tcode_via_local_artifact_exception() {
+    // Code-critic HIGH correction (2026-07-29): a shared "tests"/"release"
+    // exception between this router and `intent::classify_intent` was
+    // briefly deleted from BOTH places (over-correction — the "blood tests"
+    // ambiguity that forces zero-exception on `classify_intent` doesn't
+    // apply here, since `route_task` only ever picks between two SAFE,
+    // non-crashing backends). Restored HERE, route.rs-LOCAL ONLY
+    // (`RUN_BUILD_TCODE_ARTIFACT_WORDS`) — the owner's non-negotiable
+    // requirement that "run the tests"/"build the release" route Tcode was
+    // never actually retracted.
+    assert_eq!(route_task("run the tests"), BridgeRoute::Tcode);
+    assert_eq!(route_task("build the release"), BridgeRoute::Tcode);
 }
 
 #[test]
