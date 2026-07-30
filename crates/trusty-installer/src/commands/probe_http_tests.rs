@@ -377,9 +377,21 @@ fn reconcile_all_refused_stays_refused() {
 /// Test: This is the test.
 #[tokio::test]
 async fn probe_distinguishes_failure_causes() {
-    // Sub-second bounds so the Timeout case does not add the production 5s to
-    // every test run; `build_probe_client_with` keeps `.no_proxy()`.
-    let client = build_probe_client_with(Duration::from_millis(500), Duration::from_millis(400))
+    // Bounds well under the production 5s so the Timeout case stays cheap, but
+    // with the CONNECT bound deliberately an order of magnitude SHORTER than the
+    // whole-request bound. That ordering is load-bearing for what the `silent`
+    // case below proves: the peer completes the TCP handshake and then goes
+    // quiet, so the deadline that must fire is the REQUEST one, reached while
+    // waiting to READ. The previous bounds were inverted (connect 500ms >
+    // request 400ms), which made the connect bound unreachable dead config and
+    // left the case unable to distinguish a read timeout from a connect timeout
+    // — the two are indistinguishable downstream, because
+    // `classify_transport_error` tests `is_timeout()` before `is_connect()` and
+    // hyper-util reports a connect timeout as `io::ErrorKind::TimedOut`, so both
+    // land on `Timeout`. A loopback connect completes in microseconds, so 250ms
+    // is ~1000x headroom while 2s leaves the read path an 8x margin over it.
+    // `build_probe_client_with` keeps `.no_proxy()`.
+    let client = build_probe_client_with(Duration::from_millis(250), Duration::from_secs(2))
         .expect("probe client builds");
 
     let refused = dead_addr();
@@ -680,6 +692,65 @@ fn member_health_maps_every_variant() {
         }
         .member_health(),
         MemberHealth::HealthyVersionOk
+    );
+}
+
+/// Why: pins the deliberate ASYMMETRY between the display vocabulary and the
+/// repair gate, which is otherwise a trap: `health_string()` and
+/// `is_confirmed_down()` disagree by design, and a future caller who conflates
+/// them ("it says `down`, so restart it") reintroduces #4246 in one line.
+/// `NoAddress` is the sharpest case — it reports `down` on purpose, because
+/// mapping it to `unknown` would make `VerifyTailReport::build` and `status`'s
+/// exit code report `VERIFIED` for a member whose address never resolved, yet
+/// nothing was ever observed about it so there is nothing to repair.
+///
+/// Asserting the asymmetry EXISTS (rather than only asserting each view
+/// separately, as the two sibling tests do) is what stops it being quietly
+/// "tidied" into equivalence: if someone makes the sets coincide, this fails.
+/// What: asserts `NoAddress` specifically maps to `down` while not being
+/// confirmed-down; then, over every `down`-rendering variant, that the
+/// confirmed-down set is a STRICT subset — non-empty on both sides.
+/// Test: This is the test.
+#[test]
+fn down_health_string_is_not_a_kickstart_licence() {
+    // The named trap, spelled out: `down` for display, no repair authorisation.
+    assert_eq!(ProbeOutcome::NoAddress.health_string(), "down");
+    assert!(
+        !ProbeOutcome::NoAddress.is_confirmed_down(),
+        "NoAddress reports `down` but observed NOTHING — it must never authorise \
+         a kickstart. If this ever flips, `tctl install` can hard-restart a member \
+         whose address simply failed to resolve."
+    );
+
+    let down_renderers = [
+        ProbeOutcome::NoAddress,
+        ProbeOutcome::Refused,
+        ProbeOutcome::Timeout,
+        ProbeOutcome::HttpError { status: 502 },
+        ProbeOutcome::BadEnvelope {
+            got: "<html>squatter</html>".to_owned(),
+        },
+        ProbeOutcome::ProbeFailed {
+            detail: "no runtime".to_owned(),
+        },
+    ];
+    let (repairable, benign): (Vec<_>, Vec<_>) = down_renderers
+        .iter()
+        .inspect(|o| {
+            assert_eq!(o.health_string(), "down", "{o:?} must render `down`");
+        })
+        .partition(|o| o.is_confirmed_down());
+
+    assert!(
+        !benign.is_empty(),
+        "the invariant under test is that `down` does NOT imply confirmed-down; if \
+         every down-rendering variant is confirmed-down, the display string has \
+         become a repair authorisation and #4246's gate is gone"
+    );
+    assert!(
+        !repairable.is_empty(),
+        "the mirror property: some `down` MUST still authorise repair, or a \
+         genuinely dead daemon is never kickstarted (#2498)"
     );
 }
 

@@ -201,24 +201,79 @@ pub(crate) async fn stub_hang() -> String {
     addr
 }
 
+/// The loopback port [`dead_addr`] hands out — reserved, privileged, and used by
+/// no trusty daemon.
+///
+/// Why: port 1 (`tcpmux`) is in the privileged range, so an unprivileged process
+/// — which is what `cargo test` is, locally and on CI — cannot bind it even by
+/// accident (`bind` fails `EACCES`). No trusty daemon is anywhere near it either:
+/// the stable set lives in `7070..=7891` (`docs/architecture/port-assignments.md`),
+/// so this cannot repeat the collision class that made hardcoding a port
+/// unattractive in the first place. A closed loopback port answers `connect` with
+/// an immediate RST, so the refusal is both certain and sub-millisecond.
+const DEAD_PORT: u16 = 1;
+
+/// How long [`dead_addr`] waits while proving its address really refuses.
+///
+/// Why: a loopback RST arrives in microseconds, so this bound is never reached in
+/// practice — it exists only so that an environment which silently BLACKHOLES the
+/// port (a packet filter dropping SYNs instead of rejecting them) fails fast with
+/// a diagnosis rather than hanging the suite.
+const DEAD_ADDR_PROOF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// A loopback `host:port` guaranteed to REFUSE a connection.
 ///
 /// Why: the confirmed-down half of the probe taxonomy needs a deterministic
-/// "nothing is listening" address. Hardcoding a port risks colliding with a real
-/// daemon on the developer's machine (this workspace has had three port
-/// collisions); binding an ephemeral port and immediately releasing it yields an
-/// address the OS has just confirmed is free. Deliberately sync (`std::net`) so
-/// it is usable from both `#[test]` and `#[tokio::test]`.
-/// What: binds `127.0.0.1:0`, records the address, drops the listener, and
-/// returns the address.
+/// "nothing is listening" address, because `ProbeOutcome::Refused` is what
+/// authorises `launchctl kickstart -k`.
+///
+/// This used to bind an ephemeral port, record the address, drop the listener and
+/// return it — which is a TOCTOU race, not a guarantee: between the drop and the
+/// caller's `connect`, the OS is free to hand that same port to anything asking
+/// for an ephemeral one (including a sibling stub in the same test binary, since
+/// `cargo test` runs tests concurrently). When it did, the expected refusal became
+/// a successful connection and the #4246 regression guards
+/// (`probe_distinguishes_failure_causes`,
+/// `verify_one_kickstarts_a_genuinely_down_launchd_daemon`) failed for a reason
+/// that had nothing to do with the code under test.
+///
+/// Two seemingly-obvious repairs do NOT work, both measured rather than assumed:
+/// - **Holding the listener open but never calling `accept`** does not refuse at
+///   all. The kernel completes the handshake from the listen backlog, so the
+///   connect SUCCEEDS and the probe classifies it `Timeout` — which is what
+///   [`stub_hang`] is for, and the opposite of what this helper must produce.
+/// - **Holding a socket bound but never calling `listen`** drops the SYN on
+///   macOS; the connect hangs to its own deadline rather than being refused, so
+///   again `Timeout`, not `Refused`.
+///
+/// So the address is a fixed port that can never be listening instead of one that
+/// merely happened to be free, and the helper VERIFIES that before returning:
+/// the guarantee in this doc comment is asserted, not asserted-by-comment. A
+/// violated precondition is a loud panic naming the port, rather than a silent
+/// wrong-outcome flake in whichever test happened to draw it. Deliberately sync
+/// (`std::net`) so it is usable from both `#[test]` and `#[tokio::test]`.
+///
+/// # Postconditions
+/// The returned address refused a connection microseconds ago, and — unlike an
+/// ephemeral port — cannot subsequently be claimed by an unprivileged listener.
 /// Test: `probe_http::tests::probe_distinguishes_failure_causes`,
 /// `probe_http::tests::probe_port_walked_daemon_is_healthy`,
 /// `verify_tail::tests::verify_one_kickstarts_a_genuinely_down_launchd_daemon`.
 pub(crate) fn dead_addr() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
-    addr
+    let sock = std::net::SocketAddr::from(([127, 0, 0, 1], DEAD_PORT));
+    match std::net::TcpStream::connect_timeout(&sock, DEAD_ADDR_PROOF_TIMEOUT) {
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => sock.to_string(),
+        Ok(_) => panic!(
+            "dead_addr's contract is violated: something is LISTENING on {sock}. The \
+             confirmed-down tests cannot be trusted until that listener is gone."
+        ),
+        Err(e) => panic!(
+            "dead_addr expected an immediate connection refusal from {sock}, got {e:?} \
+             ({}). A packet filter that DROPS rather than rejects loopback SYNs would \
+             turn every Refused assertion into a Timeout.",
+            e.kind()
+        ),
+    }
 }
 
 /// Point `resolve_data_dir` at a throwaway directory with NO `http_addr` in it.
