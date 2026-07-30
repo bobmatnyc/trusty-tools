@@ -51,6 +51,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`tm ls` / bare `tm` picker: auto-prune dead records + attached→active→stopped
+  ordering** (owner request 2026-07-29). Previously a session flagged
+  `unresumable` (its workspace verifiably gone from disk) sat in the picker
+  forever printing `DEAD: workspace removed; use [d<N>] to remove the record`
+  — the operator had to notice the row and type the number manually. The
+  picker's shared fetch path (`fetch_live_sessions`) now auto-decommissions
+  every `unresumable` record through the existing `/decommission` route (the
+  same dirty-worktree-gated teardown path
+  [#4344](https://github.com/bobmatnyc/trusty-tools/pull/4344) hardened —
+  never a raw `fs::remove` or a hand-edited store entry) and prints a one-line
+  `tm: pruned N dead record(s) (workspace gone)` summary. A record whose
+  worktree removal was previously refused because the tree was dirty retains
+  a `workspace_path` that still exists on disk, which means it can never read
+  `unresumable == true` in the first place — such records are structurally
+  excluded from auto-prune, never touched. Separately, `sort_sessions` (shared
+  by the static table and the picker) now groups rows attached → active →
+  everything else ABOVE whichever `recent`/`alpha` secondary order was
+  requested, so an attached or active session never scrolls below a
+  merely-recent stopped one.
 - **`CLAUDE.md` named-section instruction overrides — reader** (epic
   [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183),
   [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286)): a project can
