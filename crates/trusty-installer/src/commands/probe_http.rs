@@ -272,8 +272,10 @@ pub fn build_probe_client() -> reqwest::Result<reqwest::Client> {
 /// Why: the `Timeout` arm of the failure taxonomy has to be provable, and a test
 /// that waits out the production [`REQUEST_TIMEOUT`] would add 5 seconds to
 /// every run. Parameterising the bounds keeps the production defaults in ONE
-/// place ([`build_probe_client`]) while letting the timeout test drive a
-/// sub-second bound against a deliberately silent peer.
+/// place ([`build_probe_client`]) while letting the timeout test drive much
+/// shorter ones against a deliberately silent peer. The caller is expected to
+/// pass `connect` ≪ `request`, so that a silent peer's verdict is reached on the
+/// READ path rather than on the handshake.
 /// What: same client as [`build_probe_client`] — `.no_proxy()` included, since
 /// the proxy test needs both bounds AND the flag — with `connect`/`request`
 /// substituted.

@@ -377,9 +377,21 @@ fn reconcile_all_refused_stays_refused() {
 /// Test: This is the test.
 #[tokio::test]
 async fn probe_distinguishes_failure_causes() {
-    // Sub-second bounds so the Timeout case does not add the production 5s to
-    // every test run; `build_probe_client_with` keeps `.no_proxy()`.
-    let client = build_probe_client_with(Duration::from_millis(500), Duration::from_millis(400))
+    // Bounds well under the production 5s so the Timeout case stays cheap, but
+    // with the CONNECT bound deliberately an order of magnitude SHORTER than the
+    // whole-request bound. That ordering is load-bearing for what the `silent`
+    // case below proves: the peer completes the TCP handshake and then goes
+    // quiet, so the deadline that must fire is the REQUEST one, reached while
+    // waiting to READ. The previous bounds were inverted (connect 500ms >
+    // request 400ms), which made the connect bound unreachable dead config and
+    // left the case unable to distinguish a read timeout from a connect timeout
+    // — the two are indistinguishable downstream, because
+    // `classify_transport_error` tests `is_timeout()` before `is_connect()` and
+    // hyper-util reports a connect timeout as `io::ErrorKind::TimedOut`, so both
+    // land on `Timeout`. A loopback connect completes in microseconds, so 250ms
+    // is ~1000x headroom while 2s leaves the read path an 8x margin over it.
+    // `build_probe_client_with` keeps `.no_proxy()`.
+    let client = build_probe_client_with(Duration::from_millis(250), Duration::from_secs(2))
         .expect("probe client builds");
 
     let refused = dead_addr();
