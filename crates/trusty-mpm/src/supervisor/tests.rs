@@ -350,6 +350,32 @@ fn metrics_surfaces_pending_decisions() {
     assert_eq!(m.pending_decisions[0].question, "Merge PR #42?");
 }
 
+/// #4400 defense in depth: a terminal (`Decommissioned`/`Deleted`) record
+/// that still carries a stale `pending_decision` — e.g. one persisted before
+/// the decommission-path fix landed, or not yet swept by the boot backfill —
+/// must never be surfaced in the human-confirmation queue. A dead entry next
+/// to a real T4 gate is indistinguishable and trains operators to ignore the
+/// whole queue.
+#[test]
+fn metrics_filters_pending_decisions_on_terminal_states() {
+    let records = vec![
+        rec(
+            ManagedSessionState::Decommissioned,
+            Some("stale — never acted on"),
+        ),
+        rec(ManagedSessionState::Deleted, Some("also stale")),
+        rec(ManagedSessionState::Active, Some("Merge PR #42?")),
+    ];
+    let m = FleetMetrics::from_records(&records);
+    assert_eq!(
+        m.pending_decisions.len(),
+        1,
+        "terminal-state pending_decisions must be filtered out: {:?}",
+        m.pending_decisions
+    );
+    assert_eq!(m.pending_decisions[0].question, "Merge PR #42?");
+}
+
 #[test]
 fn metrics_last_activity_is_max() {
     let early = Utc::now() - chrono::Duration::hours(2);

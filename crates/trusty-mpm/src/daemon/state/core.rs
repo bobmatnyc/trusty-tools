@@ -692,11 +692,14 @@ impl DaemonState {
                         let n_adopted = report.adopted.len();
                         let n_stopped = report.stopped.len();
                         let n_external = report.external_adopted.len();
-                        if n_adopted > 0 || n_stopped > 0 || n_external > 0 {
+                        let n_stale_decisions = report.stale_decisions_cleared.len();
+                        if n_adopted > 0 || n_stopped > 0 || n_external > 0 || n_stale_decisions > 0
+                        {
                             tracing::info!(
                                 adopted = n_adopted,
                                 stopped = n_stopped,
                                 external = n_external,
+                                stale_decisions_cleared = n_stale_decisions,
                                 "session-manager reconcile complete"
                             );
                         }

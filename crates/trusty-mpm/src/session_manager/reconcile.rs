@@ -79,6 +79,23 @@ impl SessionManager {
             // and must be used here so a future terminal variant can never
             // slip past this check again the way `Deleted` did.
             if record.state.is_terminal() {
+                // #4400 backfill: rows tombstoned before the decommission-path
+                // fix landed can still carry a stale `pending_decision` (the
+                // `FleetMetrics` filter is defense in depth, not a cure — the
+                // stored field itself should not linger either). One-time
+                // clear on the next boot reconcile, since this loop already
+                // visits every record.
+                if record.pending_decision.is_some() || record.proposed_default.is_some() {
+                    record.pending_decision = None;
+                    record.proposed_default = None;
+                    report.stale_decisions_cleared.push(record.id.to_string());
+                    warn!(
+                        id = %record.id,
+                        name = %record.tmux_name,
+                        "reconcile: cleared stale pending_decision on terminal record (#4400 backfill)"
+                    );
+                    guard.upsert(record).await?;
+                }
                 continue;
             }
 

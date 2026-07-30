@@ -108,6 +108,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   1.3.0. `run_daemon` now refuses to start when a trusty-mpm launchd unit is
   registered but this process is not launchd-supervised, unless the operator
   passes the new `tm daemon --force` opt-in.
+- **Decommissioning (or soft-deleting) a session no longer leaves a phantom
+  `pending_decision` behind (closes
+  [#4400](https://github.com/bobmatnyc/trusty-tools/issues/4400)).**
+  `supervisor_status` was reporting decommissioned sessions in
+  `pending_decisions` indefinitely — two sessions that never ran sat in the
+  human-confirmation queue for 19 days after being torn down. Both terminal
+  paths — `decommission_with_root` and `delete_record` — now clear
+  `pending_decision`/`proposed_default` unconditionally; `FleetMetrics`
+  additionally filters the surfaced list to non-terminal states as defense in
+  depth; and the boot-time reconcile sweep backfills (clears) the stale field
+  on any terminal record persisted before this fix.
 - **A corrupted bundled agent is re-deployed instead of frozen forever (closes
   [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)).** When the
   deployed copy of a bundled agent drifts from the checksum the deploy manifest

@@ -171,6 +171,10 @@ pub struct ReconcileReport {
     pub stopped: Vec<String>,
     /// Managed tmux sessions (`tm-`/`tmpm-`/`trusty-mpm-`) that the store did not know about.
     pub external_adopted: Vec<String>,
+    /// Session ids of terminal (`Decommissioned`/`Deleted`) records whose
+    /// stale `pending_decision`/`proposed_default` were cleared this boot
+    /// (#4400 backfill for rows tombstoned before the decommission-path fix).
+    pub stale_decisions_cleared: Vec<String>,
 }
 
 /// Manages the lifecycle of daemon-owned tmux sessions.

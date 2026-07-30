@@ -118,7 +118,16 @@ impl FleetMetrics {
                     m.decommissioned += 1
                 }
             }
-            if let Some(ref question) = r.pending_decision {
+            // #4400: filter to non-terminal states regardless of whether
+            // `pending_decision` is actually cleared on the decommission path
+            // (defense in depth) — a `Decommissioned`/`Deleted` tombstone can
+            // never be acted on by a human, and existing rows persisted
+            // before the decommission-path fix landed still carry the stale
+            // field. Surfacing a dead entry here trains operators to ignore
+            // the one queue whose entire purpose is to stop and wait.
+            if !r.state.is_terminal()
+                && let Some(ref question) = r.pending_decision
+            {
                 m.pending_decisions.push(PendingDecision {
                     session_id: r.id.to_string(),
                     tmux_name: r.tmux_name.clone(),

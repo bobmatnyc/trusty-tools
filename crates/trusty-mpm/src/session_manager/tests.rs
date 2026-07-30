@@ -1062,6 +1062,81 @@ async fn manager_reconcile_skips_deleted() {
     );
 }
 
+/// #4400 backfill: a terminal (`Decommissioned`) record persisted BEFORE the
+/// decommission-path fix landed — still carrying a stale `pending_decision`/
+/// `proposed_default` — must have both cleared by the next boot reconcile,
+/// and the clear must be reported in `ReconcileReport::stale_decisions_cleared`.
+///
+/// Why: `supervisor_status`'s human-confirmation queue must not accumulate
+/// phantom T4 gates from rows that predate the fix; the reconcile-on-boot
+/// sweep is the one-time backfill mechanism for those existing rows.
+/// What: seeds a Decommissioned record with `pending_decision` set, runs
+/// `reconcile_on_boot`, asserts both fields are cleared, the state stays
+/// Decommissioned (not resurrected), and the id appears in the report.
+#[tokio::test]
+async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let stale = SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: "tmpm-stale-decision".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "throwaway verification - will be decommissioned immediately".into(),
+        state: ManagedSessionState::Decommissioned,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: Some(
+            "T4: irreversible or security-sensitive operation; human confirmation required".into(),
+        ),
+        proposed_default: Some("use cursor".into()),
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: None,
+    };
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(stale.clone()).await.unwrap();
+    }
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+    assert!(
+        report
+            .stale_decisions_cleared
+            .contains(&stale.id.to_string()),
+        "backfill must report the cleared record id; report: {:?}",
+        report
+    );
+
+    let after = mgr.get(&stale.id).await.unwrap();
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Decommissioned,
+        "backfill must not resurrect a terminal record's state"
+    );
+    assert!(
+        after.pending_decision.is_none(),
+        "stale pending_decision must be cleared by the boot backfill"
+    );
+    assert!(
+        after.proposed_default.is_none(),
+        "stale proposed_default must be cleared by the boot backfill"
+    );
+}
+
 #[tokio::test]
 async fn manager_send_input() {
     let dir = crate::test_support::hermetic_temp_dir();
