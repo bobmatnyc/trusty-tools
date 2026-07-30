@@ -589,40 +589,55 @@ jobs:
           find target/debug/deps -name '*.rcgu.o' -delete
           echo "After sweep:"; du -sh target/debug 2>/dev/null || true
 
-      # #4402: nextest gives every test native per-crate/per-binary failure
-      # attribution (the `trusty-common update::tests::foo` prefix on every
-      # PASS/FAIL line) for free. That capability used to require a
-      # dedicated `cargo test -p trusty-review` step (closes #950), now
-      # removed, which re-ran ~1,550 already-covered tests AND forced a full
-      # recompile of trusty-common + tga + trusty-review (`-p` resolves a
-      # different feature-unification set than `--workspace`, invalidating
-      # the cache `--workspace` had just built) — nextest gives that same
-      # attribution for every crate, not just trusty-review, without either
-      # cost. nextest reuses the exact binaries
-      # `cargo test --workspace --no-run` above already built and linked
-      # (verified locally: running nextest immediately after a `--no-run`
-      # build triggers zero recompilation), so this is not itself a second
-      # build. `--no-fail-fast` matches `cargo test`'s default (nextest's own
-      # default is fail-fast, which would silently under-report failures
-      # relative to today's baseline).
+      # #4402: per-crate failure attribution without changing HOW tests run.
       #
-      # `update::tests::cache_fresh_returns_some_when_newer` is skipped here
-      # and run separately below — see that step for why.
+      # First attempt used `cargo nextest run --workspace` for both execution
+      # and attribution, since nextest labels every PASS/FAIL line with its
+      # owning crate natively. Reverted: nextest isolates each test in its
+      # OWN process, which is stricter than `cargo test`'s one-process-per-
+      # binary model. That surfaced a real, pre-existing bug on this PR's own
+      # CI run — trusty-memory's `add_alias_round_trip_through_prompt_cache`
+      # and `dispatch_discover_aliases_inserts_new_and_dedupes` rely on a
+      # `TRUSTY_SKIP_PALACE_ENFORCEMENT` env var that some OTHER test in the
+      # same process happens to set as a side effect (crates/trusty-memory/
+      # src/tools/palace_ops.rs:88-101); both pass reliably under plain
+      # `cargo test` (confirmed on main) and fail under nextest's per-test
+      # isolation. That's a genuine trusty-memory test-isolation bug worth
+      # its own fix, but this PR is workflow-only, so switching the runner
+      # is not a safe way to land it here.
+      #
+      # Instead: keep executing tests exactly as `cargo test --workspace`
+      # always has (below, unchanged in behavior aside from #4402 fixes 1-2),
+      # and get attribution by cross-referencing its own `test <name> ...
+      # FAILED` lines — which name each failing test unambiguously
+      # regardless of interleaved concurrent-binary output — against a
+      # name-to-crate manifest from `cargo nextest list`. `list` only
+      # inspects already-built binaries; it runs zero test code, so it can't
+      # reintroduce the isolation problem above.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
 
-      - name: cargo nextest run --workspace
+      - name: Build per-crate test-name manifest (attribution only, no execution)
         run: |
-          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
-            --no-fail-fast -- --skip update::tests::cache_fresh_returns_some_when_newer
+          cargo nextest list --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
+            --message-format json > nextest-manifest.json
 
-      # nextest does not run doctests (a documented limitation), so they get
-      # their own step to keep 100% of today's coverage. This reuses the
-      # same build artifacts; it is not a second compile.
-      - name: cargo test --doc --workspace
-        run: cargo test --doc --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
+      - name: cargo test --workspace
+        run: |
+          if cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
+              -- --skip update::tests::cache_fresh_returns_some_when_newer 2>&1 | tee test-output.log; then
+            test_status=0
+          else
+            test_status=${PIPESTATUS[0]}
+          fi
+          if [ "$test_status" -ne 0 ]; then
+            echo "::group::Per-crate failure attribution (closes #950, via #4402)"
+            python3 .github/scripts/attribute_test_failures.py
+            echo "::endgroup::"
+            exit "$test_status"
+          fi
 
       # trusty-common's cache_fresh_returns_some_when_newer needs CI unset
       # (see check_throttled in crates/trusty-common/src/update/mod.rs: it
