@@ -1103,6 +1103,83 @@ fn cli_parses_daemon_force() {
     }
 }
 
+/// Issue #4398: `infer_subcommands` lets an unambiguous prefix of a
+/// subcommand name stand in for the full spelling, at every nesting level.
+#[test]
+fn cli_infers_abbreviated_subcommands() {
+    // Top level, no nested action: "doc" only ever prefixes "doctor".
+    let cli = Cli::try_parse_from(["trusty-mpm", "doc"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            prune_stale_skills: false
+        }
+    ));
+
+    // Top level, no other command starts with "heal".
+    let cli = Cli::try_parse_from(["trusty-mpm", "heal"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Health));
+
+    // Top level, no other command starts with "rest" ("register" is "reg").
+    let cli = Cli::try_parse_from(["trusty-mpm", "rest"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Restart));
+
+    // Inference also propagates into a nested action subcommand.
+    let cli = Cli::try_parse_from(["trusty-mpm", "gen", "cap"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Generate { .. }));
+
+    // Inference applies at the nested-action level too: "project ini" for
+    // "project init".
+    let cli = Cli::try_parse_from(["trusty-mpm", "project", "ini"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Project {
+            action: ProjectAction::Init { dir },
+        } => assert_eq!(dir, None),
+        other => panic!("expected Command::Project(Init), got {other:?}"),
+    }
+}
+
+/// Issue #4398: `infer_subcommands` must never break an EXACT match, even
+/// when that exact name is also a valid prefix of a sibling command name
+/// (`hook`/`hooks`, `project`/`projects`, `session`/`sessions`,
+/// `status`/`statusline`). clap resolves exact matches before falling back
+/// to prefix inference, so all 8 of these keep resolving to their own
+/// command rather than erroring out as an ambiguous prefix.
+#[test]
+fn cli_exact_match_wins_over_prefix_ambiguity() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "status"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Status));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "statusline"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Statusline));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook { pm_guard: false }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "hooks", "clean"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Hooks { .. }));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "project", "list"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Project {
+            action: ProjectAction::List
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "projects", "list"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Projects { .. }));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "start"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Session { .. }));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "start"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Sessions { .. }));
+}
+
 #[test]
 fn cli_parses_supervisor() {
     let cli = Cli::try_parse_from(["trusty-mpm", "supervisor"]).unwrap();
