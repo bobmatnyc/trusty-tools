@@ -152,9 +152,9 @@ use super::managed_routes::{
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
     get_managed_session, get_project_registry_route, get_session_activity, list_managed_sessions,
     list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_router,
-    prune_managed_route, prune_worktrees_route, reactivate_managed_session,
-    register_project_registry_route, rename_managed_session, resume_managed_session,
-    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
+    prune_managed_route, reactivate_managed_session, register_project_registry_route,
+    rename_managed_session, resume_managed_session, send_to_session, spawn_session,
+    stop_managed_session, stop_managed_session_runtime,
 };
 // Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36),
 // and the peer message bus (`/api/v1/bus/*`, DOC-60 §5.3) — both self-contained
@@ -294,12 +294,10 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             post(decommission_ephemeral_route),
         )
         .route("/api/v1/sessions/managed/prune", post(prune_managed_route))
-        // #1840: orphaned worktree prune. Literal segment registered BEFORE the
-        // `/{id}` param route.
-        .route(
-            "/api/v1/sessions/managed/prune-worktrees",
-            post(prune_worktrees_route),
-        )
+        // #1840 orphaned-worktree prune + #4288 report-only reconcile, owned as
+        // a pair by `managed_routes::reconcile`. Both are literal segments, so
+        // they are matched ahead of the `/{id}` param route below.
+        .merge(super::managed_routes::reconcile::worktree_routes())
         // #1586: fleet-by-project view. Literal `/fleet` registered BEFORE the
         // `/{id}` param route so it is never captured as an id (axum prefers
         // literal matches, but ordering makes the intent explicit).

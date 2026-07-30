@@ -195,6 +195,21 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
           // empty narrative.
           const rawNarrative = typeof resp.narrative === 'string' ? resp.narrative : '';
           const narrative = rawNarrative.length > 0 ? rawNarrative : JSON.stringify(resp);
+          // #4320 (browser-fallback twin of the Tauri `send_message` fix in
+          // `task_commands.rs`): a `status: "error"` response's narrative is
+          // a raw failure string (e.g. "subprocess exited with status
+          // Some(1)"), not user-facing prose. This poll loop is the SOLE
+          // narrative-delivery path in browser/dev mode — `eventBridge.ts`'s
+          // `session_done` deliberately emits nothing and defers here — so
+          // without this branch every failed task rendered its raw error as
+          // if the assistant said it, via the same `task-complete` handler
+          // that skips the "Error: " prefix. Route it through `task-error`
+          // (the same event/prefix the submit- and poll-failure branches
+          // above already use) and reject, instead of resolving.
+          if (resp.status === 'error') {
+            emitWeb('task-error', { task_id: id, error: narrative });
+            throw new Error(narrative);
+          }
           emitWeb('task-complete', {
             id,
             narrative,

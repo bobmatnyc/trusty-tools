@@ -10,11 +10,14 @@
 //!
 //! What: A small struct (`ServiceState`) plus async helpers for
 //! pid-file IO, liveness probing, daemon spawn (detached child with
-//! null stdio), and graceful shutdown via `kill(1)`.
+//! stdin/stdout on `/dev/null` and stderr redirected to a rotating log
+//! file — see `daemon_log_path`, #4111), and graceful shutdown via
+//! `kill(1)`.
 //!
 //! Test: `cargo test --lib service::` covers pid-file roundtrip,
-//! port-default constants, and missing-file behavior. End-to-end
-//! daemon spawn is exercised manually via `trusty-agents --service start`.
+//! port-default constants, missing-file behavior, and log-rotation
+//! behavior. End-to-end daemon spawn is exercised manually via
+//! `trusty-agents --service start`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -155,16 +158,189 @@ pub async fn is_service_running(port: u16) -> bool {
     health_ok(port).await
 }
 
+/// Directory the daemon's log file lives under: `~/Library/Logs/trusty-agents/`.
+///
+/// Why (#4111): every other trusty-* daemon in this workspace writes to
+/// `~/Library/Logs/<name>/` (e.g. trusty-search's `launchd_log_dir()` in
+/// `crates/trusty-search/src/commands/service.rs`), but trusty-agents isn't
+/// launchd-managed — it self-spawns via `start_service` below rather than
+/// running as a `LaunchAgent` — so it never got a log directory at all.
+/// This gives it the same directory naming convention without requiring
+/// launchd.
+/// What: `dirs::home_dir()` (falling back to `.` if unresolvable, matching
+/// the fallback already used elsewhere in this crate, e.g.
+/// `runtime::startup`'s REPL log path) joined with `Library/Logs/trusty-agents`.
+fn log_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library")
+        .join("Logs")
+        .join("trusty-agents")
+}
+
+/// A short, stable, filesystem-safe discriminator for the CURRENT project —
+/// the SAME identity `pid_file_path()` already uses
+/// (`crate::ctrl::detect_self_project()`, falling back to cwd), hashed down
+/// to a fixed-width hex string so it can live in a flat filename.
+///
+/// Why (code-critic MEDIUM correction on #4111): the first cut of
+/// `daemon_log_path` was keyed on `port` alone. `DEFAULT_SERVICE_PORT` is a
+/// hardcoded `8080` shared by every project, so in the common case (no
+/// explicit `--port` override) every project's daemon still wrote
+/// `daemon-8080.log` — the exact clobbering #4111 was supposed to fix stayed
+/// unresolved, and the doc comment's "matches the per-project pid-file
+/// model" claim was false (the pid file is keyed on project path, this was
+/// keyed on port). Hashing `detect_self_project()`'s result gives the log
+/// path the SAME identity axis the pid file already uses.
+/// What: `DefaultHasher` over the canonicalized project root (or cwd),
+/// formatted as 16 lowercase hex digits. Not cryptographic — collision
+/// resistance for a handful of concurrently-open local projects is all this
+/// needs, and matches the low-stakes, best-effort nature of a log filename.
+/// Test: `project_log_discriminator_is_deterministic`,
+/// `project_log_discriminator_is_16_lowercase_hex_chars`.
+fn project_log_discriminator() -> String {
+    use std::hash::{Hash, Hasher};
+    let root = crate::ctrl::detect_self_project()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Full path to the daemon's rotating log file for a given `port`.
+///
+/// Why: Single source of truth for both `start_service` (which opens it
+/// for the child's stderr) and any future `--service logs` / doctor check
+/// that wants to locate it. Scoped by BOTH project (`project_log_discriminator`,
+/// code-critic MEDIUM correction on #4111 — mirrors `pid_file_path()`'s own
+/// per-project identity) AND `port`, so neither two different projects on
+/// the shared default port, nor the same project running two ports at once,
+/// interleave their output into one file or clobber each other's rotation
+/// backup.
+/// What: `<log_dir>/daemon-<project-hash>-<port>.log`.
+/// Test: `daemon_log_path_ends_with_expected_components`,
+/// `daemon_log_path_differs_by_port`,
+/// `project_log_discriminator_is_deterministic`,
+/// `project_log_discriminator_is_16_lowercase_hex_chars`.
+pub fn daemon_log_path(port: u16) -> PathBuf {
+    log_dir().join(format!("daemon-{}-{port}.log", project_log_discriminator()))
+}
+
+/// Size threshold (bytes) at which `rotate_log_if_oversized` moves the
+/// current log out of the way. 10 MiB comfortably covers weeks of `info`-level
+/// daemon output before rotating.
+const ROTATE_AT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Rotate `path` out of the way if it has grown past `ROTATE_AT_BYTES`.
+///
+/// Why (#4111): `--serve` daemons commonly run for weeks, so a log file
+/// that is never rotated grows unbounded. Every other trusty-* daemon
+/// bounds its `~/Library/Logs/<name>/stderr.log` via a `newsyslog` config
+/// installed alongside its LaunchAgent (see
+/// `crates/trusty-search/src/commands/log_rotation.rs`: `ROTATION_SIZE_KB`
+/// / `ROTATION_KEEP`) — that mechanism can't be reused as-is here because
+/// it depends on launchd owning the file handle (an external tool rotates
+/// the inode; launchd reopens the path on next write). trusty-agents opens
+/// its own log file directly, so a rotate-on-(re)start check achieves a
+/// bounded-growth outcome for this daemon's shape without needing a
+/// LaunchAgent.
+///
+/// IMPORTANT (code-critic MEDIUM correction on #4111): this function is
+/// only called once, at spawn time in `start_service`, NOT periodically
+/// from inside the running daemon. The actual guarantee is therefore
+/// "bounded ACROSS restarts, not within a single run" — a daemon that
+/// stays up for weeks without ever being restarted still grows its log
+/// unbounded until the next `/service start`. A background rotator inside
+/// the running process would close that gap but isn't implemented; if the
+/// unbounded-single-run growth becomes a real problem, that's the fix to
+/// reach for.
+/// What: keeps exactly one previous generation (`daemon-<port>.log.1`,
+/// overwriting any older one) once the current file exceeds
+/// `ROTATE_AT_BYTES`. A file that doesn't exist yet, or any rename I/O
+/// error, is silently ignored — log housekeeping must never block daemon
+/// startup.
+/// Test: `rotate_log_renames_oversized_file`,
+/// `rotate_log_leaves_small_file_alone`.
+fn rotate_log_if_oversized(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return; // doesn't exist yet — nothing to rotate
+    };
+    if meta.len() < ROTATE_AT_BYTES {
+        return;
+    }
+    let backup = path.with_extension("log.1");
+    let _ = std::fs::rename(path, &backup);
+}
+
+/// Attempt to open the daemon's log file for append, creating its parent
+/// directory and rotating an oversized generation first.
+///
+/// Why (code-critic HIGH-2 on #4111): log setup must never block daemon
+/// startup — the same "must never block startup" principle
+/// `rotate_log_if_oversized` already follows by swallowing its own I/O
+/// errors. An unwritable `~/Library/Logs`, a full disk, or a permissions
+/// problem must not abort the whole daemon spawn: EVERYTHING behind
+/// `start_service` (Concierge, Telegram, Slack) depends on it starting.
+/// Returning `Option` instead of `Result` — and never using `?` — makes
+/// "give up gracefully" the only path available to the caller; there is no
+/// error variant left to accidentally propagate.
+/// What: `None` on ANY failure (parent dir uncreatable, or the file
+/// unopenable) — logged once via `tracing::warn!` so the failure is at
+/// least visible if logging itself is reachable, but never returned as an
+/// error. `Some(file)` on success. The caller (`start_service`) falls back
+/// to `Stdio::null()` on `None` — exactly the pre-#4111 behavior.
+/// Test: `open_daemon_log_file_succeeds_for_writable_path`,
+/// `open_daemon_log_file_returns_none_when_parent_is_blocked_by_a_file`.
+fn open_daemon_log_file(log_path: &Path) -> Option<std::fs::File> {
+    let parent = log_path.parent()?;
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        tracing::warn!(
+            error = %e,
+            dir = %parent.display(),
+            "could not create daemon log dir; daemon will run without a log file"
+        );
+        return None;
+    }
+    rotate_log_if_oversized(log_path);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        Ok(file) => Some(file),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %log_path.display(),
+                "could not open daemon log file; daemon will run without a log file"
+            );
+            None
+        }
+    }
+}
+
 /// Spawn `trusty-agents --serve` as a detached child process.
 ///
 /// Why: `/service start` should return immediately while the API
 /// continues serving in the background. Detached stdio + `std::process`
 /// (not tokio) avoids both terminal-control contamination and runtime
 /// re-entry from the REPL's tokio context.
-/// What: Resolves the current binary via `current_exe()`, spawns it
-/// with `--serve --port <port>`, redirects all three stdio streams to
-/// `/dev/null`, persists the pid file, then polls `/api/health` for up
-/// to 3 seconds. Returns the recorded `ServiceState` on success.
+/// What: Resolves the current binary via `current_exe()`, spawns it with
+/// `--serve --port <port>`. stdin/stdout stay redirected to `/dev/null`
+/// (`runtime::startup`'s tracing setup writes to stderr precisely so
+/// stdout stays clean for MCP JSON-RPC framing — nothing in `--serve` mode
+/// needs stdin, and this spawn call must not disturb that contract).
+/// stderr (#4111) is redirected to the rotating file at `daemon_log_path()`
+/// instead of `/dev/null` — the child's own tracing initialization is
+/// unchanged (it already writes to stderr in non-interactive mode; the bug
+/// was purely this spawn call discarding that stream). Log setup
+/// (`open_daemon_log_file`) is best-effort (code-critic HIGH-2 on #4111):
+/// any failure falls back to `Stdio::null()` rather than aborting the
+/// spawn, so an unwritable log directory can never prevent the daemon —
+/// and therefore Concierge/Telegram/Slack — from starting. Persists the
+/// pid file, then polls `/api/health` for up to 3 seconds. Returns the
+/// recorded `ServiceState` on success.
 pub async fn start_service(port: u16) -> Result<ServiceState> {
     if is_service_running(port).await {
         // Idempotent: if the service is already running on this port, treat
@@ -188,6 +364,16 @@ pub async fn start_service(port: u16) -> Result<ServiceState> {
     let exe = std::env::current_exe().context("resolving current executable path")?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+    // #4111 (best-effort, code-critic HIGH-2): open (and rotate, if
+    // oversized) the daemon's log file BEFORE spawning, so the child
+    // inherits an already-open handle for its stderr. ANY failure here
+    // falls back to `Stdio::null()` — log housekeeping must never prevent
+    // the daemon from starting.
+    let log_path = daemon_log_path(port);
+    let stderr_stdio = open_daemon_log_file(&log_path)
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::null);
+
     let child = std::process::Command::new(&exe)
         .arg("--serve")
         .arg("--port")
@@ -195,7 +381,7 @@ pub async fn start_service(port: u16) -> Result<ServiceState> {
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr_stdio)
         .spawn()
         .with_context(|| format!("spawning {} --serve", exe.display()))?;
 
@@ -419,5 +605,123 @@ mod tests {
     async fn health_ok_returns_false_for_unbound_port() {
         // 1 is reserved + nothing should be listening on 1 at user level.
         assert!(!health_ok(1).await);
+    }
+
+    // ---- #4111: daemon log file ----
+
+    #[test]
+    fn daemon_log_path_ends_with_expected_components() {
+        let p = daemon_log_path(8080);
+        let s = p.to_string_lossy();
+        assert!(s.contains("Library/Logs/trusty-agents/daemon-"), "{s}");
+        assert!(s.ends_with("-8080.log"), "{s}");
+    }
+
+    #[test]
+    fn daemon_log_path_differs_by_port() {
+        // code-critic MEDIUM (#4111): two concurrently-running daemons on
+        // different ports must not share a log file (or a rotation backup).
+        assert_ne!(daemon_log_path(8080), daemon_log_path(8081));
+    }
+
+    #[test]
+    fn project_log_discriminator_is_deterministic() {
+        assert_eq!(project_log_discriminator(), project_log_discriminator());
+    }
+
+    #[test]
+    fn project_log_discriminator_is_16_lowercase_hex_chars() {
+        let d = project_log_discriminator();
+        assert_eq!(d.len(), 16, "{d}");
+        assert!(
+            d.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn rotate_log_leaves_small_file_alone() {
+        let dir = std::env::temp_dir().join(format!("ta-log-test-small-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("daemon.log");
+        std::fs::write(&path, b"tiny log line\n").unwrap();
+
+        rotate_log_if_oversized(&path);
+
+        assert!(path.exists(), "small file should not be rotated away");
+        assert!(!path.with_extension("log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_renames_oversized_file() {
+        let dir = std::env::temp_dir().join(format!("ta-log-test-big-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("daemon.log");
+        // Write past ROTATE_AT_BYTES so rotation triggers.
+        let oversized = vec![b'x'; (ROTATE_AT_BYTES + 1) as usize];
+        std::fs::write(&path, &oversized).unwrap();
+
+        rotate_log_if_oversized(&path);
+
+        assert!(
+            !path.exists(),
+            "oversized log should have been renamed away"
+        );
+        let backup = path.with_extension("log.1");
+        assert!(backup.exists(), "rotated backup should exist");
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().len(),
+            oversized.len() as u64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotate_log_missing_file_is_a_noop() {
+        let path = std::env::temp_dir().join(format!(
+            "ta-log-test-missing-{}-daemon.log",
+            std::process::id()
+        ));
+        // Doesn't exist — must not panic, and must not create anything.
+        rotate_log_if_oversized(&path);
+        assert!(!path.exists());
+    }
+
+    // ---- code-critic HIGH-2 (#4111): best-effort log open ----
+
+    #[test]
+    fn open_daemon_log_file_succeeds_for_writable_path() {
+        let dir = std::env::temp_dir().join(format!("ta-log-open-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("daemon.log");
+
+        let file = open_daemon_log_file(&path);
+
+        assert!(file.is_some(), "expected a file handle for a writable path");
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_daemon_log_file_returns_none_when_parent_is_blocked_by_a_file() {
+        // Empirically forces `create_dir_all` to fail: a regular file
+        // sitting where a directory component needs to be.
+        let dir = std::env::temp_dir().join(format!("ta-log-open-blocked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocking_file = dir.join("blocking");
+        std::fs::write(&blocking_file, b"not a directory").unwrap();
+        let log_path = blocking_file.join("nested").join("daemon.log");
+
+        let file = open_daemon_log_file(&log_path);
+
+        assert!(
+            file.is_none(),
+            "expected None (never a propagated error) when a path component \
+             is a regular file, not a directory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

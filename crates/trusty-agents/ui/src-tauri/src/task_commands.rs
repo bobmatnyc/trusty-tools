@@ -262,8 +262,7 @@ pub async fn send_message(
             continue;
         }
 
-        // Terminal state. Emit complete (even on error-status responses so
-        // ChatView can display the failure narrative).
+        // Terminal state.
         //
         // #3063: `PmResponse::cancelled()` (crates/trusty-agents/src/api/
         // types.rs) always sets narrative to the fixed string "Task
@@ -275,6 +274,30 @@ pub async fn send_message(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+
+        // #4320: a `status: "error"` response's narrative is a raw failure
+        // string (e.g. "subprocess exited with status Some(1)", or a
+        // Debug-formatted `anyhow::Error` — see
+        // `crates/trusty-agents/src/api/server/task_runner.rs`'s
+        // `run_task`), not user-facing prose. It must go through the SAME
+        // `task-error` framing this command already uses for the timeout
+        // branch above — ChatView's `task-complete` handler
+        // (`ui/src/components/ChatView.svelte`) renders `narrative` verbatim
+        // as if the assistant said it, while its `task-error` handler
+        // prefixes with "Error: ". `partial`/`cancelled` keep the existing
+        // `task-complete` framing: their narratives are already user-facing
+        // (a cancellation notice, or a best-effort partial result), not raw
+        // error text.
+        if status == "error" {
+            let _ = app.emit(
+                "task-error",
+                ErrorEvent {
+                    task_id: &task_id,
+                    error: &narrative,
+                },
+            );
+            return Err(narrative);
+        }
 
         let _ = app.emit("task-complete", &response);
         return Ok(narrative);

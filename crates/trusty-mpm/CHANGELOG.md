@@ -7,6 +7,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`tm session reconcile-worktrees` — report-only worktree reconciliation on a
+  git-derived key** ([#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288),
+  slice 3 of [#4207](https://github.com/bobmatnyc/trusty-tools/issues/4207)).
+  Reconciles every git-registered worktree against `sessions.json` on the pair
+  `(git rev-parse --git-common-dir, admin-dir basename)` — git's own registry
+  identity — rather than on a path shape, which was measured misclassifying 34
+  of 118 worktrees (29%) on the dogfood machine. Each row is classified
+  `LIVE` / `ORPHANED` / `UNKNOWN` with the reason that produced it; `UNKNOWN`
+  dominates, so a path whose git identity cannot be established is never
+  reported reclaimable no matter what else points at it.
+  - The report includes the **excluded** set — 33 of the 118, invisible to every
+    other worktree surface today, six of them holding uncommitted work.
+  - It also **names** the worktrees a later slice would adopt, with the evidence
+    behind each inference. Nothing is written: no deletions, no sentinel writes,
+    no registry or record mutation, and the verb has no `--force`.
+  - Worktree enumeration now orders a NESTED worktree before the worktree that
+    contains it. The previous lexicographic order put a parent first, so
+    removing it took its children's directories and left dangling registry
+    entries behind.
+
 ### Performance
 
 - `tm ls` no longer re-reads the whole fleet's deployed agent/skill trees on
@@ -84,6 +106,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- PM instructions (`assets/instructions/sections/core.md`, § Response Format):
+  new **Prose Style — Write Plainly** subsection. Lead with the point; short
+  sentences; no throat-clearing openers, no closing aphorisms, no
+  meta-commentary about the PM's own reasoning; plain words over inflated ones;
+  tables and bullets for status. Scoped to prose only — failures, corrections,
+  and bad news are still reported directly and in full, so the rule shortens
+  the wording and never the disclosure. Ships to every PM session via the
+  bundled instruction package; `core` is `customization_tier: project`, so a
+  project may still override it. Composed-prompt goldens regenerated.
 - `tm ls` STATE column: a row the daemon did not probe now renders
   `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
   never be misread as "assets fresh"
@@ -91,7 +122,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   new additive wire field, `SessionSummary::stale_assets_unchecked`, whose
   `false` default keeps an older daemon's (authoritative) verdicts rendering
   exactly as before.
-
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
   set is now documented as DELIBERATELY unfiltered by session state, and pinned
   by a new regression test `prune_spares_a_stopped_records_workspace`

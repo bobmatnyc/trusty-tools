@@ -100,21 +100,43 @@ impl StableMember {
     /// [`ManageStrategy::Launchd`]. `required` is passed straight through —
     /// see [`stable_set`] for the current REQUIRED/OPTIONAL assignment.
     /// Test: Exercised by [`stable_set`] and `tests::mpm_uses_own_verb`.
+    ///
+    /// #4246: the strategy derivation itself moved out to
+    /// [`manage_strategy_for`], because `tctl up`'s `BootMember` (which carries no
+    /// `manage` field) now needs the SAME rule to route through the one shared
+    /// probe — two copies of "is this member launchd or self-managed?" is exactly
+    /// how the two divergent probes came about.
     fn new(crate_name: &str, binary: &str, daemon: bool, required: bool) -> Self {
-        let manage = if !daemon {
-            ManageStrategy::None
-        } else if binary == "trusty-mpm" {
-            ManageStrategy::OwnVerb
-        } else {
-            ManageStrategy::Launchd
-        };
         Self {
             crate_name: crate_name.to_owned(),
             binary: binary.to_owned(),
             daemon,
-            manage,
+            manage: manage_strategy_for(binary, daemon),
             required,
         }
+    }
+}
+
+/// Derive a member's lifecycle [`ManageStrategy`] from its binary name and
+/// daemon flag.
+///
+/// Why: `tctl status`/`stack`/the verify tail read `StableMember::manage`, but
+/// `tctl up` works from a `BootMember`, which has no such field — so routing `up`
+/// through the one shared health probe (#4246) needs the rule as a standalone
+/// function rather than a `StableMember` constructor detail. Keeping it in ONE
+/// place is the point: the divergent `SystemRunner::probe` this replaces existed
+/// precisely because "how is this member managed?" was answered twice.
+/// What: a non-daemon is [`ManageStrategy::None`]; trusty-mpm is
+/// [`ManageStrategy::OwnVerb`] (process-managed, not launchd); every other daemon
+/// is [`ManageStrategy::Launchd`].
+/// Test: `tests::manage_strategy_for_matches_the_stable_set`.
+pub fn manage_strategy_for(binary: &str, daemon: bool) -> ManageStrategy {
+    if !daemon {
+        ManageStrategy::None
+    } else if binary == "trusty-mpm" {
+        ManageStrategy::OwnVerb
+    } else {
+        ManageStrategy::Launchd
     }
 }
 
@@ -317,6 +339,35 @@ mod tests {
     /// NOT launchd-managed (#1332 decision 3); its lifecycle strategy must be
     /// `OwnVerb` so `tctl start|stop|restart` drives `trusty-mpm start|stop`
     /// rather than a non-existent launchd job.
+    /// Why (#4246): `manage_strategy_for` is now the single rule two callers
+    /// share — `StableMember::new` and `tctl up`'s `SystemRunner::probe`. If they
+    /// ever disagreed, `tctl up` would probe trusty-mpm over HTTP while
+    /// `tctl status` reported it `unknown`, which is the divergence this
+    /// extraction exists to make impossible.
+    /// What: asserts the function agrees with every `manage` field the canonical
+    /// [`stable_set`] carries, plus the non-daemon case.
+    /// Test: This is the test.
+    #[test]
+    fn manage_strategy_for_matches_the_stable_set() {
+        for m in stable_set() {
+            assert_eq!(
+                manage_strategy_for(&m.binary, m.daemon),
+                m.manage,
+                "{} disagrees with its own stable-set entry",
+                m.binary
+            );
+        }
+        assert_eq!(
+            manage_strategy_for("trusty-mpm", true),
+            ManageStrategy::OwnVerb
+        );
+        assert_eq!(
+            manage_strategy_for("trusty-search", true),
+            ManageStrategy::Launchd
+        );
+        assert_eq!(manage_strategy_for("tga", false), ManageStrategy::None);
+    }
+
     /// What: Asserts mpm is in the set, is a daemon, and uses `OwnVerb`.
     /// Test: This is the test.
     #[test]

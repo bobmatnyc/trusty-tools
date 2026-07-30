@@ -366,45 +366,46 @@ fn enumerate_excludes_a_worktree_parked_beside_the_project() {
 /// That same masking is why the strictness is pinned HERE rather than through
 /// [`enumerate_registered_worktrees`] — an enumeration-level test would keep
 /// passing with the `!=` deleted, making it a guard no test defends. Driving
-/// [`collect_from_anchor`] directly lets the boundary be set to a path that IS
+/// [`scan_from_anchor`] directly lets the boundary be set to a path that IS
 /// in the registry, so the `!=` is the only thing that can exclude it.
+///
+/// #4288 strengthened this: the scan now carries the verdict as a VALUE, so the
+/// test asserts the exclusion RULE that fired ([`Admission::OutsideProject`])
+/// rather than mere absence from a set — a much harder assertion to satisfy by
+/// accident.
 #[test]
-fn collect_from_anchor_never_yields_the_containment_boundary_itself() {
+fn scan_from_anchor_never_admits_the_containment_boundary_itself() {
     let fixture = GitWorktreeFixture::new();
     let wt = fixture.add_worktree("session-a");
     let canonical_wt = std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone());
     let canonical_root = std::fs::canonicalize(&fixture.repos_root).expect("canonical root");
     let canonical_repo = std::fs::canonicalize(&fixture.repo).expect("canonical repo");
 
-    // Control: bounded by the real project, the worktree IS collected — so the
+    let admission_under_boundary = |boundary: &std::path::Path| -> Admission {
+        let mut collected = std::collections::BTreeSet::new();
+        scan_from_anchor(&fixture.repo, &canonical_root, boundary, &mut collected);
+        collected
+            .into_iter()
+            .find(|(path, _, _)| path == &canonical_wt)
+            .map(|(_, _, key)| key.admission)
+            .expect("the worktree must be SCANNED under either boundary")
+    };
+
+    // Control: bounded by the real project, the worktree IS admitted — so the
     // exclusion below cannot be attributed to the anchor or the registry.
-    let mut collected = std::collections::BTreeSet::new();
-    collect_from_anchor(
-        &fixture.repo,
-        &canonical_root,
-        &canonical_repo,
-        &mut collected,
-    );
-    assert!(
-        collected.contains(&canonical_wt),
-        "control: bounded by the project, a real in-project worktree must be \
-         collected; got {collected:?}"
+    assert_eq!(
+        admission_under_boundary(&canonical_repo),
+        Admission::Admitted,
+        "control: bounded by the project, a real in-project worktree must be admitted"
     );
 
     // Now make the worktree its OWN boundary: it is no longer a STRICT
-    // descendant, and must not be collected.
-    let mut collected = std::collections::BTreeSet::new();
-    collect_from_anchor(
-        &fixture.repo,
-        &canonical_root,
-        &canonical_wt,
-        &mut collected,
-    );
-    assert!(
-        !collected.contains(&canonical_wt),
+    // descendant, and must not be admitted.
+    assert_eq!(
+        admission_under_boundary(&canonical_wt),
+        Admission::OutsideProject,
         "a path equal to its containment boundary must never be a candidate — \
-         this is what keeps the operator's project checkout unselectable; got \
-         {collected:?}"
+         this is what keeps the operator's project checkout unselectable"
     );
 }
 
@@ -490,4 +491,116 @@ fn enumerate_ignores_a_worktree_whose_directory_is_gone() {
 fn enumerate_missing_repos_root_is_empty() {
     let tmp = tempfile::tempdir().expect("tempdir");
     assert!(enumerate_registered_worktrees(&tmp.path().join("nope")).is_empty());
+}
+
+// ── the full scan and its exclusion reasons (#4288) ──────────────────────
+
+/// Every registered worktree the scan drops must come back with the reason it
+/// was dropped (#4288 in-scope item 2).
+///
+/// Why: `enumerate_registered_worktrees` returns only admitted paths, so 33 of
+/// the 118 registered worktrees on the dogfood machine — including the two
+/// landmines #4288 documents, six of them holding uncommitted work — are
+/// invisible to every operator surface. Reconciliation cannot report what
+/// enumeration silently discards. This asserts the scan reports BOTH sets and
+/// names the rule that fired, not just a count.
+#[test]
+fn scan_reports_the_excluded_set_with_reasons() {
+    let fixture = GitWorktreeFixture::new();
+    let admitted = fixture.add_worktree("admitted-one");
+    let locked = fixture.add_worktree("locked-one");
+    fixture.lock_worktree(&locked);
+    let outside = fixture.add_worktree_at(&fixture.repos_root.join("owner"), "beside-the-project");
+
+    let scan = scan_registered_worktrees(&fixture.repos_root);
+    let verdict = |p: &std::path::Path| -> Admission {
+        let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        scan.iter()
+            .find(|s| s.path == c)
+            .unwrap_or_else(|| panic!("scan must report {}; got {scan:?}", c.display()))
+            .admission
+    };
+
+    assert_eq!(verdict(&admitted), Admission::Admitted);
+    assert_eq!(verdict(&locked), Admission::Locked);
+    assert_eq!(verdict(&outside), Admission::OutsideProject);
+    assert_eq!(verdict(&fixture.repo), Admission::MainCheckout);
+    assert_eq!(
+        Admission::Locked.reason(),
+        "excluded: git-locked by the operator"
+    );
+
+    // The admitted subset is exactly what `enumerate` still returns — the scan
+    // widened what is REPORTED, never what is proposed for deletion.
+    let enumerated = enumerate_registered_worktrees(&fixture.repos_root);
+    let admitted_from_scan: Vec<_> = scan
+        .iter()
+        .filter(|s| s.admission == Admission::Admitted)
+        .map(|s| s.path.clone())
+        .collect();
+    assert_eq!(admitted_from_scan.len(), 1, "got {admitted_from_scan:?}");
+    assert_eq!(enumerated.len(), 1, "got {enumerated:?}");
+    assert_eq!(enumerated[0], admitted_from_scan[0]);
+}
+
+/// Two worktrees under the SAME path prefix, registered in DIFFERENT
+/// registries, are each attributed to the registry that actually holds them
+/// (#4288).
+///
+/// Why: this is the decisive counterexample from #4288 — path shape
+/// misclassifies 29% of worktrees, and the proof is two sibling directories
+/// inside `.base/.worktrees/` whose registries differ. A rule reading `/.base/`
+/// out of the path maps both to the base clone and is wrong about one of them.
+#[test]
+fn scan_reports_both_registries_for_the_same_path_prefix() {
+    let fixture = GitWorktreeFixture::new();
+    let base_owned = fixture.add_base_clone_worktree("in-base-registry");
+    let base_worktrees_dir = fixture.repo.join(".base").join(".worktrees");
+    let repo_owned = fixture.add_worktree_at(&base_worktrees_dir, "in-repo-registry");
+
+    let scan = scan_registered_worktrees(&fixture.repos_root);
+    let registry_of = |p: &std::path::Path| -> std::path::PathBuf {
+        let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        scan.iter()
+            .find(|s| s.path == c)
+            .unwrap_or_else(|| panic!("scan must report {}", c.display()))
+            .registry_root
+            .clone()
+    };
+
+    let base_root = std::fs::canonicalize(fixture.repo.join(".base")).expect("canonical .base");
+    let repo_root = std::fs::canonicalize(&fixture.repo).expect("canonical repo");
+    assert_eq!(registry_of(&base_owned), base_root);
+    assert_eq!(registry_of(&repo_owned), repo_root);
+    assert_ne!(
+        base_root, repo_root,
+        "the two registries must genuinely differ, or this test proves nothing"
+    );
+}
+
+/// A worktree nested inside another worktree is enumerated BEFORE its
+/// container (#4288 in-scope item 4).
+///
+/// Why: the pre-#4288 order came out of a `BTreeSet<PathBuf>`, which sorts a
+/// parent before its children. Nine registered worktrees on the dogfood machine
+/// sit inside another registered worktree; removing the parent first takes the
+/// child's directory with it and leaves git holding a dangling registry entry.
+#[test]
+fn enumerate_orders_nested_worktree_before_its_parent() {
+    let fixture = GitWorktreeFixture::new();
+    let parent = fixture.add_worktree("outer");
+    let child = fixture.add_nested_worktree(&parent, ".claude/worktrees", "inner");
+
+    let found = enumerate_registered_worktrees(&fixture.repos_root);
+    let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+    let idx = |p: &std::path::Path| {
+        found
+            .iter()
+            .position(|f| f == &canonical(p))
+            .unwrap_or_else(|| panic!("{} must be enumerated; got {found:?}", p.display()))
+    };
+    assert!(
+        idx(&child) < idx(&parent),
+        "the nested worktree must precede its container; got {found:?}"
+    );
 }
