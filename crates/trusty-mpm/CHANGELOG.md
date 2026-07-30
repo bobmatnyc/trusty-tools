@@ -51,6 +51,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`tm ls` / bare `tm` picker: auto-prune dead records + attached→active→stopped
+  ordering** (owner request 2026-07-29; hardened per code-critic WARN on
+  PR [#4384](https://github.com/bobmatnyc/trusty-tools/pull/4384)). Previously
+  a session flagged `unresumable` (its workspace verifiably gone from disk)
+  sat in the picker forever printing `DEAD: workspace removed; use [d<N>] to
+  remove the record` — the operator had to notice the row and type the number
+  manually. The picker's shared fetch path (`fetch_live_sessions`) now
+  auto-prunes `unresumable` records, hardened three ways after adversarial
+  review:
+  - **Record-only removal.** The auto-prune sweep POSTs the existing
+    `/decommission` route with `?record_only=true`, routing to the new
+    `SessionManager::decommission_record_only` — the removal branches are
+    skipped ENTIRELY, so the sweep can never delete filesystem content even
+    if a remounted volume brought a workspace back between the listing-time
+    probe and the decommission call. Manual `[d<N>]` keeps today's full
+    teardown behavior.
+  - **Two-sightings confirmation + a per-call cap.** A record is only
+    decommissioned once its `unresumable` flag has been observed on TWO
+    separate listings (tracked via a small persisted marker file under
+    `~/.trusty-mpm/`), and at most 5 confirmed records are decommissioned per
+    call — the rest are reported as "N more dead records pending
+    confirmation." A bad-mount day can no longer mass-tombstone an entire
+    fleet in one `tm ls`.
+  - **TTY gate.** `guided.rs`'s bare-`tm` picker now computes its
+    interactive/non-interactive decision BEFORE fetching sessions and passes
+    it through as `fetch_live_sessions`'s new `allow_auto_prune` parameter —
+    a scripted/piped/CI invocation of bare `tm` is now a pure read, exactly
+    like `tm ls`'s existing TTY gate.
+
+  A record whose worktree removal was previously refused because the tree
+  was dirty ([#4344](https://github.com/bobmatnyc/trusty-tools/pull/4344))
+  retains a `workspace_path` that still exists on disk, which means it can
+  never read `unresumable == true` in the first place — such records are
+  structurally excluded from auto-prune, never touched. Separately,
+  `sort_sessions` (shared by the static table and the picker) now groups rows
+  attached → active → everything else ABOVE whichever `recent`/`alpha`
+  secondary order was requested, so an attached or active session never
+  scrolls below a merely-recent stopped one.
 - **`CLAUDE.md` named-section instruction overrides — reader** (epic
   [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183),
   [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286)): a project can

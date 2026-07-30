@@ -343,24 +343,60 @@ fn session_matches_term(s: &ManagedSessionSummary, needle_lower: &str) -> bool {
     .any(|field| field.to_lowercase().contains(needle_lower))
 }
 
-/// Sort `sessions` in place per [`SessionSortArg`] (#3483).
+/// The attached→active→everything-else group a session belongs in (owner
+/// request 2026-07-29).
+///
+/// Why: Bob's ask — the listing should group attached sessions first, then
+/// active ones, then the rest (stopped/errored/provisioning/etc.) — ABOVE
+/// whatever `recent`/`alpha` secondary order the operator picked, so a
+/// session they're actively connected to never scrolls below a merely-recent
+/// stopped one.
+/// What: `0` when `s.attached` (a client is connected RIGHT NOW — the
+/// strongest signal, mirrors [`session_picker_render::state_color`]'s own
+/// precedence); `1` for `state == "active"` (not attached); `2` for every
+/// other state. Lower sorts first.
+/// Test: `sort_sessions_recent_groups_attached_before_active_before_stopped`,
+/// `sort_sessions_alpha_groups_attached_before_active_before_stopped`.
+fn group_rank(s: &ManagedSessionSummary) -> u8 {
+    if s.attached {
+        0
+    } else if s.state == "active" {
+        1
+    } else {
+        2
+    }
+}
+
+/// Sort `sessions` in place per [`SessionSortArg`] (#3483), grouped
+/// attached→active→everything-else (owner request 2026-07-29).
 ///
 /// Why: shared by the static table (`tm ls` / `tm sessions ls`) and the
 /// interactive picker so both views order sessions identically.
-/// What: `Recent` sorts descending by [`recency_key`] (most recent first);
-/// `Alpha` sorts ascending, case-insensitively, by `name`. Both use the
-/// stable `sort_by`, so equal keys preserve the daemon's original relative
-/// order.
+/// What: primary key is [`group_rank`] (attached, then active, then the
+/// rest); within each group, `Recent` sorts descending by [`recency_key`]
+/// (most recent first) and `Alpha` sorts ascending, case-insensitively, by
+/// `name`. Both use the stable `sort_by`, so equal keys preserve the
+/// daemon's original relative order.
 /// Test: `sort_sessions_recent_orders_by_last_activity`,
 /// `sort_sessions_recent_falls_back_to_created_at`,
-/// `sort_sessions_alpha_orders_by_name_case_insensitive`.
+/// `sort_sessions_alpha_orders_by_name_case_insensitive`,
+/// `sort_sessions_recent_groups_attached_before_active_before_stopped`,
+/// `sort_sessions_alpha_groups_attached_before_active_before_stopped`.
 pub(crate) fn sort_sessions(sessions: &mut [ManagedSessionSummary], sort: SessionSortArg) {
     match sort {
         SessionSortArg::Recent => {
-            sessions.sort_by(|a, b| recency_key(b).cmp(recency_key(a)));
+            sessions.sort_by(|a, b| {
+                group_rank(a)
+                    .cmp(&group_rank(b))
+                    .then_with(|| recency_key(b).cmp(recency_key(a)))
+            });
         }
         SessionSortArg::Alpha => {
-            sessions.sort_by_key(|s| s.name.to_lowercase());
+            sessions.sort_by(|a, b| {
+                group_rank(a)
+                    .cmp(&group_rank(b))
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
         }
     }
 }
@@ -390,19 +426,50 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 /// Why: the interactive picker (both call sites) needs the deserialized, filtered
 /// session list; combining the GET and the parse keeps re-fetch-after-detach a
 /// single call and guarantees identical scoping to the static list.
-/// What: [`fetch_managed_raw`] then [`parse_scoped_sessions`]. The picker always
-/// requests live-only (`all = false`) — a decommissioned tombstone is never a
-/// resume target.
+/// What: [`fetch_managed_raw`] then [`parse_scoped_sessions`], then — ONLY
+/// when `allow_auto_prune` is `true` —
+/// [`super::session_picker_prune::auto_prune_dead_records`] (owner request
+/// 2026-07-29): every session the daemon flags `unresumable` (workspace
+/// verifiably gone) on TWO consecutive listings is torn down automatically
+/// (capped per call), instead of sitting in the list forever printing "use
+/// [d<N>] to remove the record". `allow_auto_prune` exists because auto-prune
+/// is destructive-adjacent — every call site MUST explicitly decide (critic
+/// HIGH finding #3): pass `true` only when the listing is genuinely
+/// interactive (a real TTY), never for a scripted/piped/non-interactive
+/// invocation. When `false`, this is a pure read: the raw parsed list is
+/// returned unchanged, no marker file is touched, no HTTP call beyond the
+/// initial GET is made.
 /// Test: HTTP path in `tests/session_manager_mvp.rs`; the parse/filter seam is
-/// unit-tested via `parse_scoped_sessions`.
+/// unit-tested via `parse_scoped_sessions`; the auto-prune seam by
+/// `auto_prune_dead_records_*` in `tests_behavior_d_tests.rs`.
 pub(crate) async fn fetch_live_sessions(
     client: &reqwest::Client,
     url: &str,
     source_id: Option<&str>,
     all: bool,
+    allow_auto_prune: bool,
 ) -> anyhow::Result<Vec<ManagedSessionSummary>> {
     let raw = fetch_managed_raw(client, url, source_id).await?;
-    parse_scoped_sessions(&raw, all)
+    let sessions = parse_scoped_sessions(&raw, all)?;
+    if !allow_auto_prune {
+        return Ok(sessions);
+    }
+    let outcome = super::session_picker_prune::auto_prune_dead_records(client, url, sessions).await;
+    if outcome.pruned > 0 {
+        eprintln!(
+            "tm: pruned {} dead record{} (workspace gone)",
+            outcome.pruned,
+            if outcome.pruned == 1 { "" } else { "s" }
+        );
+    }
+    if outcome.pending > 0 {
+        eprintln!(
+            "tm: {} more dead record{} pending confirmation",
+            outcome.pending,
+            if outcome.pending == 1 { "" } else { "s" }
+        );
+    }
+    Ok(outcome.kept)
 }
 
 /// Find the 0-based position in `sessions` whose stable `slot` equals `n`
@@ -952,7 +1019,11 @@ pub(crate) async fn run_tty_picker(
         // #1809: the shared fetch path applies the same live-only tombstone filter.
         // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
         // never drifts from the one the operator picked against.
-        sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
+        // `allow_auto_prune = true`: this loop only ever runs once the picker
+        // is ALREADY confirmed interactive (see `should_show_picker`/`tty_gate`
+        // at the call sites that reach here) — every re-fetch stays interactive.
+        sessions =
+            fetch_live_sessions(client, url, scope.source_id.as_deref(), false, true).await?;
         sessions = filter_sessions_by_term(sessions, scope.term.as_deref());
         sort_sessions(&mut sessions, scope.sort);
     }
@@ -1031,7 +1102,9 @@ pub(crate) async fn run_ls_connector(
     // Interactive stream: fetch the live sessions once. On any fetch error
     // (daemon unreachable, HTTP failure) fall back to the static renderer so the
     // operator sees the same actionable error rather than a bare picker crash.
-    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
+    // `allow_auto_prune = true`: `stdin_tty && stdout_tty` was just confirmed
+    // by the pre-gate above (critic HIGH finding #3).
+    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false, true).await {
         Ok(s) => s,
         Err(_) => {
             return super::managed::session_ls(

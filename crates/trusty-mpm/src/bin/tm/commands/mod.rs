@@ -58,6 +58,7 @@ pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
 pub(crate) mod session_picker;
+pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
 pub(crate) mod slack;

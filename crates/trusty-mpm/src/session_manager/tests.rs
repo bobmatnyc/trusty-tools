@@ -743,7 +743,7 @@ async fn manager_decommission_removes_workspace() {
 
     // Decommission using the injectable root — no unsafe env mutation.
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path(), None)
+        .decommission_with_root(&record.id, managed_root.path(), None, false)
         .await
         .expect("decommission");
 
@@ -773,6 +773,82 @@ async fn manager_decommission_removes_workspace() {
     let after = mgr.get(&record.id).await.unwrap();
     assert_eq!(after.state, ManagedSessionState::Decommissioned);
     assert!(after.workspace_path.is_none());
+}
+
+/// `decommission_record_only` (owner request 2026-07-29, critic HIGH finding
+/// #1) NEVER removes filesystem content — a remount-race stand-in: the
+/// workspace directory genuinely EXISTS (and holds real content) at call
+/// time, exactly as it would if a network/removable volume remounted between
+/// the `tm ls` auto-prune's listing-time probe and this call. The directory
+/// and its content must survive untouched, even though the record IS
+/// tombstoned to `Decommissioned`.
+///
+/// Why: this is the auto-prune sweep's actual safety net — [`is_unresumable`]
+/// can only observe "absent right now," never "will stay absent," so the
+/// call that ACTS on that observation must be structurally incapable of
+/// deleting anything, not merely re-check-and-hope.
+/// What: same fixture as [`manager_decommission_removes_workspace`] (a real,
+/// owned, populated workspace dir), but calls `decommission_with_root` with
+/// `record_only = true`. Asserts `workspace_removed == false`, the directory
+/// AND its sentinel file still exist on disk, the tombstone is
+/// `Decommissioned`, and — because the path is STILL on disk — the record's
+/// `workspace_path` is retained (not nulled), mirroring the #4344
+/// dirty-retained boundary.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_record_only_never_removes_existing_workspace() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root
+        .path()
+        .join("owner")
+        .join("repo")
+        .join("remount-race-session-id");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    std::fs::write(workspace_path.join("sentinel.txt"), "still here").unwrap();
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned: SM provisioned via clone
+        )
+        .await
+        .expect("create");
+
+    let (tombstone, workspace_removed) = mgr
+        .decommission_with_root(&record.id, managed_root.path(), None, true)
+        .await
+        .expect("record-only decommission");
+
+    assert!(
+        !workspace_removed,
+        "record_only must never report a removal"
+    );
+    assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
+    assert!(
+        workspace_path.exists(),
+        "the workspace directory must survive a record-only decommission"
+    );
+    assert!(
+        workspace_path.join("sentinel.txt").exists(),
+        "real content inside the workspace must survive untouched"
+    );
+    assert_eq!(
+        tombstone.workspace_path.as_deref(),
+        Some(workspace_path.as_path()),
+        "workspace_path must be RETAINED (not nulled) since the directory is \
+         still genuinely on disk — mirrors the #4344 dirty-retained boundary"
+    );
 }
 
 // Build a minimal Active session record for reconcile tests (avoids repeating
