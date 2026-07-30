@@ -194,6 +194,11 @@ name = "tagent"
 path = "src/main.rs"
 
 [dev-dependencies]
+# test-util enables Tokio's paused clock (`#[tokio::test(start_paused = true)]`)
+# used by `discover_one_returns_none_on_timeout` to exercise the real 15s
+# `DISCOVERY_TIMEOUT` on the virtual clock. Declared explicitly rather than
+# relying on `tokio-test` happening to pull the same feature in.
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-test = "0.4"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

@@ -433,6 +433,11 @@ fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
 /// `SESSION_STREAM_MAX_RECONNECTS` (every attempt would hang the same way,
 /// ~1 minute total) — observing the FIRST `ConnectionLost` is sufficient
 /// proof the connect attempt is bounded by `CONNECT_TIMEOUT`, not infinite.
+///
+/// The `CONNECT_TIMEOUT` wait itself runs on Tokio's virtual clock, but only
+/// after the accept is confirmed on the real one — see the `tokio::time::pause()`
+/// call below for why the ordering is load-bearing and a blanket
+/// `start_paused = true` is not a valid substitute here.
 #[tokio::test]
 async fn events_connect_hang_is_bounded_by_connect_timeout_not_infinite() {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -440,12 +445,14 @@ async fn events_connect_hang_is_bounded_by_connect_timeout_not_infinite() {
     let listener = tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
     let addr = listener.local_addr().expect("local_addr");
 
+    let (accepted_tx, mut accepted_rx) = unbounded_channel();
     // Accept connections forever, never writing/closing — `mem::forget`
     // keeps each accepted socket's fd open (dropping it would close the
     // connection, which reqwest would see as a fast, distinct failure mode,
     // not the hang this test targets).
     let accept_task = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
+            let _ = accepted_tx.send(());
             std::mem::forget(stream);
         }
     });
@@ -457,6 +464,25 @@ async fn events_connect_hang_is_bounded_by_connect_timeout_not_infinite() {
     let (tx, mut rx) = unbounded_channel();
 
     let pump_task = tokio::spawn(async move { state.pump_session_events("s-1", &tx).await });
+
+    // Wait — on the REAL clock — until the listener has actually accepted the
+    // connection. This is what makes the pause below safe: the "TCP accepted,
+    // headers never sent" precondition is established for real, not assumed.
+    // A blind `#[tokio::test(start_paused = true)]` here is NOT equivalent —
+    // measured, it lost the accept on 6 of 10 runs (Tokio auto-advances the
+    // clock while the handshake is still in flight), silently downgrading
+    // this from the #3494 shape to a plain connect timeout while still
+    // passing, since both produce a "connection failed" reason.
+    accepted_rx
+        .recv()
+        .await
+        .expect("listener must accept the pump's connection");
+
+    // Only now switch to the virtual clock: the connection is up and the
+    // daemon will never send headers, so the runtime goes idle and Tokio
+    // auto-advances straight to `CONNECT_TIMEOUT` at no wall-clock cost
+    // (this test was 10.0s of pure waiting).
+    tokio::time::pause();
 
     // CONNECT_TIMEOUT (10s) plus slack — comfortably short of the ~1 minute
     // a full 5-reconnect exhaustion would take, but generous enough that

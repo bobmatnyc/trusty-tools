@@ -317,8 +317,16 @@ mod tests {
     /// i.e. forever, for a shell shim blocked on stdin or any other hung
     /// `--version` invocation, on the very step meant to make failure loud
     /// right after the health gate passed.
+    ///
+    /// `start_paused = true` puts the TIMEOUTS on Tokio's virtual clock while
+    /// the `sleep 30` child still runs on the real one — the child is really
+    /// spawned and really never answers, so the runtime goes idle and Tokio
+    /// auto-advances to the probe's 10s deadline at no wall-clock cost (was
+    /// 10.0s). The `elapsed` assertion below is what keeps that honest: it
+    /// proves `None` came from the probe timing out after a full 10s, not
+    /// from an early spawn failure that never exercised the hang at all.
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn detect_does_not_hang_on_an_unresponsive_shadowing_binary() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -350,6 +358,7 @@ mod tests {
         // Bound the WHOLE test well under what an indefinite hang would look
         // like (the pre-fix behaviour), but comfortably above the 10s
         // internal health-gate timeout `detect` now goes through.
+        let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             detect(
@@ -361,12 +370,20 @@ mod tests {
         )
         .await
         .expect("detect must return within 20s, never hang on an unresponsive shadowing binary");
+        let elapsed = started.elapsed();
 
         let report = result.expect("the shadow itself must still be reported");
         assert_eq!(report.shadowing_path, early_dir.join("tm"));
         assert_eq!(
             report.shadowing_version, None,
             "an unprobeable (timed-out) shadowing binary must degrade to None, not block"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_secs(10),
+            "`shadowing_version: None` must come from the health gate's 10s probe timeout \
+             expiring, but `detect` gave up after only {elapsed:?} — the probe never ran \
+             against the hanging binary at all, so this test would no longer catch the \
+             un-timed-out `installed_version` regression"
         );
     }
 
