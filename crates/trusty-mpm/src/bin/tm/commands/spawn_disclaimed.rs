@@ -23,6 +23,34 @@
 
 use anyhow::Context as _;
 
+/// Whether the raw process argv shows this shim was invoked by its EXACT,
+/// full subcommand name — not an abbreviated prefix clap's
+/// `infer_subcommands` (#4398) resolved to it.
+///
+/// Why (#4431 critic review, HIGH): `infer_subcommands` makes clap resolve
+/// any unambiguous prefix of a subcommand name to that command, and it walks
+/// HIDDEN subcommands too — `#[command(hide = true)]` on
+/// `Command::InternalSpawnDisclaimed` only suppresses the name from
+/// `--help`, it does not exempt it from prefix matching. Since [`run`]
+/// unconditionally `posix_spawn`s `argv[0]` with macOS TCC responsibility
+/// disclaimed (#2997), letting an abbreviation (`tm int <program>`, `tm
+/// inte`, `tm internal`) reach it would spawn an arbitrary process through
+/// this internal, hidden escape hatch. `main` calls this BEFORE dispatching
+/// to [`run`], using the raw `std::env::args()` captured before clap ever
+/// ran inference — `argv[1]` is the first token the operator actually typed,
+/// at the position clap resolved to this variant.
+/// What: `true` only when `argv.get(1)` is exactly
+/// [`trusty_mpm::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND`].
+/// `disclaim_pane_command`'s own self-invocation always emits the full
+/// spelling, so this keeps that literal path working unchanged.
+/// Test: `invoked_literally_accepts_exact_name`,
+/// `invoked_literally_rejects_abbreviated_prefixes`,
+/// `invoked_literally_rejects_missing_token`.
+pub(crate) fn invoked_literally(argv: &[String]) -> bool {
+    argv.get(1).map(String::as_str)
+        == Some(trusty_mpm::core::spawn_disclaim::PANE_DISCLAIM_SUBCOMMAND)
+}
+
 /// Spawn `argv[0]` with `argv[1..]` disclaimed and exit with its status code.
 ///
 /// Why: this is the leaf of the #2997 fix — the one process that actually sets
@@ -85,5 +113,42 @@ mod tests {
             err.to_string().contains("requires a program"),
             "unexpected error: {err}"
         );
+    }
+
+    /// #4431 critic HIGH fix: the exact, full subcommand name — the only form
+    /// `disclaim_pane_command`'s own self-invocation ever emits — must keep
+    /// passing the guard.
+    #[test]
+    fn invoked_literally_accepts_exact_name() {
+        let argv = vec![
+            "tm".to_string(),
+            "internal-spawn-disclaimed".to_string(),
+            "claude".to_string(),
+            "-p".to_string(),
+        ];
+        assert!(invoked_literally(&argv));
+    }
+
+    /// #4431 critic HIGH fix: `infer_subcommands` (#4398) makes clap resolve
+    /// any of these abbreviated prefixes to `Command::InternalSpawnDisclaimed`
+    /// (hidden subcommands are inferred too) — the guard must reject every
+    /// one of them so none can reach the disclaimed-spawn leaf.
+    #[test]
+    fn invoked_literally_rejects_abbreviated_prefixes() {
+        for prefix in ["int", "inte", "internal"] {
+            let argv = vec!["tm".to_string(), prefix.to_string(), "claude".to_string()];
+            assert!(
+                !invoked_literally(&argv),
+                "abbreviated prefix {prefix:?} must not pass the literal-invocation guard"
+            );
+        }
+    }
+
+    /// A bare `tm` (no subcommand token at all) must not panic or vacuously
+    /// pass — `argv.get(1)` is `None`, which never equals the literal name.
+    #[test]
+    fn invoked_literally_rejects_missing_token() {
+        let argv = vec!["tm".to_string()];
+        assert!(!invoked_literally(&argv));
     }
 }

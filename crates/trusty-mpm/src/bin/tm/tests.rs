@@ -1180,6 +1180,57 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
     assert!(matches!(cli.command.unwrap(), Command::Sessions { .. }));
 }
 
+/// #4431 critic HIGH fix: proves the vulnerability precondition AND the
+/// runtime guard together close the gap. clap's `infer_subcommands` still
+/// resolves every one of these abbreviated prefixes to the HIDDEN
+/// `Command::InternalSpawnDisclaimed` variant (`hide = true` only suppresses
+/// `--help`, it does not exempt a subcommand from prefix inference) — but
+/// `commands::spawn_disclaimed::invoked_literally`, which `main` calls on the
+/// RAW argv before ever reaching the disclaimed-spawn leaf, rejects every one
+/// of them because the operator did not type the exact, full subcommand
+/// name. The exact spelling still parses AND passes the guard, so
+/// `disclaim_pane_command`'s own literal self-invocation keeps working.
+#[test]
+fn cli_infers_internal_spawn_disclaimed_but_runtime_guard_rejects_abbreviations() {
+    for prefix in ["int", "inte", "internal"] {
+        let raw_argv: Vec<String> = vec!["trusty-mpm".into(), prefix.into(), "claude".into()];
+        let cli = Cli::try_parse_from(raw_argv.clone()).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::InternalSpawnDisclaimed { .. })),
+            "expected clap to still infer {prefix:?} to InternalSpawnDisclaimed"
+        );
+        assert!(
+            !crate::commands::spawn_disclaimed::invoked_literally(&raw_argv),
+            "the runtime guard must reject the abbreviated prefix {prefix:?}"
+        );
+    }
+
+    let raw_argv: Vec<String> = vec![
+        "trusty-mpm".into(),
+        "internal-spawn-disclaimed".into(),
+        "claude".into(),
+    ];
+    let cli = Cli::try_parse_from(raw_argv.clone()).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::InternalSpawnDisclaimed { .. })
+    ));
+    assert!(crate::commands::spawn_disclaimed::invoked_literally(
+        &raw_argv
+    ));
+}
+
+/// #4431 critic MEDIUM: `tm ins` (an unambiguous prefix of `install` only —
+/// no other top-level command starts with "ins") must keep resolving to
+/// `Command::Install`, confirming the new disclaim-shim guard is scoped to
+/// that one hidden variant and does not collaterally affect ordinary
+/// abbreviation elsewhere on the CLI surface.
+#[test]
+fn cli_infers_ins_to_install_unaffected_by_disclaim_guard() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ins"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Install { .. }));
+}
+
 #[test]
 fn cli_parses_supervisor() {
     let cli = Cli::try_parse_from(["trusty-mpm", "supervisor"]).unwrap();
