@@ -162,14 +162,9 @@ crates/trusty-code/src/agents/config.rs	agent_config_runner_kind
 crates/trusty-code/src/agents/config.rs	agent_config_system_prompt
 crates/trusty-code/src/events.rs	ast_operation_round_trips_through_subscribe
 crates/trusty-code/src/jsonrpc/error.rs	rpc_error_domain_sets_error_type_in_data
-crates/trusty-code/src/llm/client_trait.rs	llm_client_implements_trait
 crates/trusty-code/src/llm/debug_capture/mod.rs	from_env_directory_gets_fresh_per_run_file
 crates/trusty-code/src/llm/debug_capture/mod.rs	from_env_opens_literal_file_path
 crates/trusty-code/src/llm/debug_capture/mod.rs	record_serialises_full_request_and_response
-crates/trusty-code/src/llm/error.rs	llm_error_display
-crates/trusty-code/src/llm/response.rs	assistant_message_text_and_tool_calls
-crates/trusty-code/src/llm/response.rs	chat_response_first_text_content
-crates/trusty-code/src/llm/response.rs	chat_response_first_tool_calls
 crates/trusty-code/src/perf/mod.rs	collector_records_skills_considered
 crates/trusty-code/src/perf/mod.rs	collector_totals_sum_phases
 crates/trusty-code/src/perf/mod.rs	cost_usd_known_model
