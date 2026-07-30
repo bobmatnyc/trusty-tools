@@ -635,4 +635,66 @@ resume failure permanently wedges that VM name until someone manually intervenes
 
 ## Host state left behind
 
-*(to be finalised at end of probe)*
+A cleanup pass (branch `probe/tart-golden-image-cleanup`, off this commit) recovered the
+wedged `probe-h` (see section J above) and then removed every probe-created VM.
+
+**Before:**
+
+```
+$ tart list
+Source Name                    Disk Size Accessed       State
+local  probe-calib-analyze     80        3 minutes ago  running
+local  probe-h                 80        51 seconds ago running   (wedged/suspended prior to this run — see section J)
+local  probe-h2-scaled         80        55 seconds ago stopped
+local  tahoe-base               50        42 minutes ago stopped
+local  trusty-toolchain-20260730 80      5 minutes ago  stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                  50 1 week ago stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1...           50 1 week ago stopped
+
+$ df -h /
+Filesystem       Size   Used  Avail Capacity  Mounted on
+/dev/disk3s1s1   926Gi  16Gi  522Gi 3%        /
+```
+
+Note `probe-calib-analyze` was not in this probe's original known-VM list but was
+clearly probe-created (name prefix, running, untracked in any "keep" list) — treated as
+in-scope and removed along with the rest.
+
+**Actions taken:**
+
+* Unwedged `probe-h` — already fixed by a prior session before this pass started
+  (see section J); independently verified still healthy (`tart ip` → `192.168.64.7`,
+  ping succeeded) before deleting it.
+* `tart stop probe-h` then `tart delete probe-h`, `tart delete probe-h2-scaled`,
+  `tart delete probe-calib-analyze` — all probe-created VMs removed.
+* `tart delete trusty-toolchain-20260730` — **deleted as confirmed-broken.** This is
+  the golden image from section B/G with the missing `~/.zshenv` (`cargo` → exit 127 in
+  a fresh clone). Confirmed before deletion: name `trusty-toolchain-20260730`, listed
+  disk size 80 GB (allocated), actual on-disk usage 31 GiB (`du -sh`). Deleting it now
+  so it can't later be mistaken for a working golden image.
+* `tahoe-base` and both OCI-sourced base images were left untouched, as instructed —
+  `tahoe-base` is the owner's base image, not probe-created.
+
+**After:**
+
+```
+$ tart list
+Source Name                                     Disk Size Accessed      State
+local  tahoe-base                               50        3 minutes ago stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                50 1 week ago stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1...         50 1 week ago stopped
+
+$ df -h /
+Filesystem       Size   Used  Avail Capacity  Mounted on
+/dev/disk3s1s1   926Gi  16Gi  530Gi 3%        /
+```
+
+Free space on `/` went from 522 GiB to 530 GiB (+8 GiB reclaimed). The gain is smaller
+than the sum of nominal disk sizes because these were APFS copy-on-write clones sharing
+blocks with `tahoe-base`/the OCI base images; only each clone's diverged blocks were
+actually reclaimed.
+
+**Host state remaining after this pass:** only `tahoe-base` (owner's base image, 50 GB
+nominal / not touched) and the two `ghcr.io/cirruslabs/macos-tahoe-base` OCI-sourced
+entries (pulled base images, not clones) remain. No probe-created VMs, no golden image,
+no throwaway/calibration clones left on the host.
