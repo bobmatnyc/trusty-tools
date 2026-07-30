@@ -17,6 +17,8 @@ mod core;
 // #4022: the bundling tier — declared last so leaf rows are always inserted
 // before the bundles that name them.
 mod functions;
+// #4170 (epic #4167): the L0-only GitHub PR/CI surface.
+mod github;
 mod gworkspace;
 mod knowledge;
 mod ops;
@@ -70,6 +72,7 @@ pub fn all() -> Vec<&'static SkillDef> {
         .iter()
         .chain(ops::TABLE)
         .chain(knowledge::TABLE)
+        .chain(github::TABLE)
         .chain(gworkspace::TABLE)
         .chain(platform::TABLE)
         .chain(prose::TABLE)

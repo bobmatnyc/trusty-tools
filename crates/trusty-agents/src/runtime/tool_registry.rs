@@ -567,6 +567,19 @@ pub(super) fn build_registry_for_agent(
 /// `l0_grant_fails_closed_for_malformed_tier_declaration`,
 /// `tainted_delegation_cannot_widen_into_the_l0_grant`,
 /// `l1_cannot_reach_the_l0_grant_through_an_untiered_intermediary`.
+///
+/// `delegator_tier` ALSO decides whether the GitHub PR/CI inspection tools
+/// (#4170, epic #4167) are registered at all: `crate::tools::gh_tools::gh_tools`
+/// yields them only for `AgentTier::L0Orchestration` and an empty vector
+/// otherwise — the same tier-gated-at-construction shape #4171 uses for the
+/// session-state surface above. Registration is the enforcement boundary for
+/// that grant — see `tools::gh_tools`'s module doc comment.
+/// Test: `l1_persona_declaring_gh_tools_is_granted_none_through_the_real_path`,
+/// `l0_persona_declaring_gh_tools_is_granted_them_through_the_real_path`,
+/// `unrecognized_tier_declaration_denies_gh_tools_through_the_real_path`,
+/// `gh_tools_follow_the_kind_derivation_when_no_tier_is_declared`,
+/// `assistant_tier_registry_omits_gh_tools_for_l1`,
+/// `assistant_tier_registry_includes_gh_tools_for_l0`.
 pub(crate) fn build_assistant_tier_registry(
     delegator_allow: Option<&[String]>,
     delegator_tier: crate::agents::AgentTier,
@@ -582,6 +595,14 @@ pub(crate) fn build_assistant_tier_registry(
     }
 
     reg.register(Arc::new(BraveSearchTool::from_env()));
+
+    // #4170 (epic #4167): the L0-only GitHub PR/CI inspection surface. The
+    // tier gate is INSIDE `gh_tools`, which returns an empty vector for any
+    // tier other than `AgentTier::L0Orchestration` — so this loop is a no-op
+    // for every L1 persona, and an L1 persona declaring `gh_pr_view` (or
+    // `gh_*`, or `*`) in `[tools].allow` matches nothing in this registry and
+    // is granted nothing by `scope_assistant_allowed_tools` below.
+    crate::tools::gh_tools::register(&mut reg, delegator_tier, &cwd);
 
     // #3555 delegate-resolve follow-up: previously this was a single
     // hand-rolled `cwd.join(".trusty-agents").join("agents")` — invisible to

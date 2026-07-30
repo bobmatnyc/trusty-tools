@@ -1744,3 +1744,236 @@ async fn assistant_tier_registry_delegation_fails_closed_without_a_whitelist() {
         result.content()
     );
 }
+
+// --- #4170 (epic #4167): the L0-only GitHub PR/CI surface, proven through the
+// REAL registry-construction path ---
+//
+// Why these are here and not only in `tools::gh_tools::tests`: the factory's
+// own tier check is easy to prove in isolation, and equally easy to render
+// irrelevant by a call site that never consults it. These tests therefore
+// exercise the SAME chain `run_subagent` executes for a persona —
+// `AgentConfig::by_name` (via a `TAGENT_CONFIG_DIR` override, exactly as
+// `deployed_assistant_config_survives_scoping_with_delegate_to_agent` does)
+// -> `cfg.agent.tier()` -> `build_registry_for_agent` -> the REAL
+// `scope_assistant_allowed_tools` glob translation — so the assertion is
+// about what a persona ACTUALLY receives, not about a helper's return value.
+
+/// Write a persona TOML whose `[tools].allow` asks for the whole GitHub
+/// surface plus the widest possible wildcard, and resolve it through the real
+/// loader + registry + scoping chain.
+///
+/// Why: `allow = ["*", "gh_*", <every literal name>]` is the most generous
+/// declaration a persona author could possibly write. If the tier gate holds
+/// against THAT, it holds against anything narrower — and using the literal
+/// names from `GH_TOOL_NAMES` means a tool added to the factory without a tier
+/// check is caught here rather than slipping through a stale hand-copied list.
+/// What: Returns the tool names the persona is actually granted.
+/// Test: used by `l1_persona_declaring_gh_tools_is_granted_none_through_the_real_path`,
+/// `l0_persona_declaring_gh_tools_is_granted_them_through_the_real_path`,
+/// `unrecognized_tier_declaration_denies_gh_tools_through_the_real_path`,
+/// `gh_tools_follow_the_kind_derivation_when_no_tier_is_declared`.
+fn granted_tools_for_persona_with_tier(tier_line: &str) -> Vec<String> {
+    use crate::agents::AgentConfig;
+    use crate::agents::tests::loading::ENV_LOCK;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let allow = crate::tools::gh_tools::GH_TOOL_NAMES
+        .iter()
+        .map(|n| format!("\"{n}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        tmp.path().join("gh-probe.toml"),
+        format!(
+            "[agent]\nname = \"gh-probe\"\nrole = \"assistant\"\n{tier_line}\
+             model = \"m\"\ndescription = \"d\"\n\n[llm]\ntemperature = 0.2\n\
+             max_tokens = 1024\n\n[tools]\nallow = [\"*\", \"gh_*\", {allow}]\n\n\
+             [system_prompt]\ncontent = \"x\"\n"
+        ),
+    )
+    .unwrap();
+
+    // SAFETY: guarded by ENV_LOCK, the same convention every other
+    // TAGENT_CONFIG_DIR mutator in this crate follows.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
+    }
+    let cfg = AgentConfig::by_name("gh-probe");
+    let cfg = cfg.expect("probe persona must resolve via the real loader");
+    let reg = build_registry_for_agent(
+        "gh-probe",
+        &cfg.agent.role,
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        cfg.tools.allow.as_deref(),
+        cfg.agent.tier(),
+        // The same expression `run_subagent` passes (#4314's editable
+        // reachable-set whitelist) — this probe declares no `[subagents]`
+        // section, so it resolves to `None` and reaches nothing, which is
+        // irrelevant to the gh surface but keeps the call on the real path.
+        cfg.subagents.delegate_allowed.as_deref(),
+    );
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let reg = reg.expect("an assistant-role persona always gets a registry");
+    scope_assistant_allowed_tools(
+        true,
+        cfg.tools.allowed.clone(),
+        cfg.tools.allow.as_deref(),
+        Some(&reg),
+    )
+    .unwrap_or_default()
+}
+
+#[test]
+fn l1_persona_declaring_gh_tools_is_granted_none_through_the_real_path() {
+    // THE requirement: grantable to L0 only, enforced in code. This persona
+    // declares every GitHub tool by name AND `gh_*` AND `*`, and still gets
+    // none of them, because the registry it is scoped against never contained
+    // them.
+    let kept = granted_tools_for_persona_with_tier("tier = \"l1\"\n");
+    assert!(
+        !kept.is_empty(),
+        "sanity: an `allow = [\"*\"]` persona must be granted SOMETHING, else \
+         this test would pass vacuously"
+    );
+    for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+        assert!(
+            !kept.iter().any(|k| k == name),
+            "an L1 persona obtained {name} despite the tier gate; granted: {kept:?}"
+        );
+    }
+}
+
+#[test]
+fn l0_persona_declaring_gh_tools_is_granted_them_through_the_real_path() {
+    // The counter-test that keeps the one above honest: the identical chain
+    // with `tier = "l0"` DOES yield the surface, so the L1 denial is the tier
+    // gate at work and not a registration bug affecting everyone.
+    let kept = granted_tools_for_persona_with_tier("tier = \"l0\"\n");
+    for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+        assert!(
+            kept.iter().any(|k| k == name),
+            "an L0 persona must receive {name}; granted: {kept:?}"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_tier_declaration_denies_gh_tools_through_the_real_path() {
+    // Fail closed: an unrecognized `tier =` value resolves to `L1Standard` via
+    // `AgentInfo::tier()` (#4200) and must therefore deny — never "grant
+    // because we could not tell", and never fall THROUGH to the assistant-kind
+    // derivation ADR-0024 decision 3 (PR #4296) added. This probe persona is
+    // assistant-kind, so a fall-through would show up here as a grant.
+    for tier_line in [
+        "tier = \"L0-ish\"\n",
+        "tier = \"not-l0\"\n",
+        "tier = \"bogus\"\n",
+        "tier = \"l1\"\n",
+    ] {
+        let kept = granted_tools_for_persona_with_tier(tier_line);
+        for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+            assert!(
+                !kept.iter().any(|k| k == name),
+                "tier line {tier_line:?} granted {name}; an unrecognized tier must deny"
+            );
+        }
+    }
+}
+
+/// The DERIVED case, after ADR-0024 decision 3 (PR #4296, on `main`): with no
+/// usable `tier =` declaration the tier is a function of the agent's KIND.
+///
+/// Why this lives here: #4170 was written when an absent tier meant L1, so the
+/// spellings below used to be deny cases. They are now GRANT cases for
+/// assistant-kind — not because this PR widened anything (`gh_tools` still
+/// returns an empty vector for every tier but L0), but because `main` changed
+/// which personas are L0. Pinning it at the grant site means a future change to
+/// that population fails here instead of silently redefining this surface's
+/// reach. The tools remain read-only in every case — see
+/// `gh_surface_registers_no_mutating_tool_even_for_l0`.
+#[test]
+fn gh_tools_follow_the_kind_derivation_when_no_tier_is_declared() {
+    for tier_line in ["", "tier = \"\"\n", "tier = \"   \"\n"] {
+        let kept = granted_tools_for_persona_with_tier(tier_line);
+        for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+            assert!(
+                kept.iter().any(|k| k == name),
+                "tier line {tier_line:?} on an assistant-kind persona derives L0 \
+                 (ADR-0024 decision 3) and must grant {name}; granted: {kept:?}"
+            );
+        }
+    }
+
+    // And the sub-agent kinds it must NOT reach. A researcher is L1 by
+    // derivation, and `build_registry_for_agent` does not even route it into
+    // the assistant-tier registry, so the surface is absent twice over.
+    let reg = build_registry_for_agent(
+        "research-agent",
+        "researcher",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+        crate::agents::AgentTier::L1Standard,
+        None,
+    )
+    .expect("sub-agent builds a registry");
+    for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+        assert!(
+            !reg.contains(name),
+            "a sub-agent kind must never hold {name}"
+        );
+    }
+}
+
+#[test]
+fn assistant_tier_registry_omits_gh_tools_for_l1() {
+    // The narrower registration-level statement, on the function the
+    // `--direct`/`--agent` subprocess path calls.
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard, None);
+    assert!(
+        reg.contains("git_log") || reg.contains("web_search"),
+        "sanity: the L1 registry is not empty"
+    );
+    for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+        assert!(!reg.contains(name), "{name} must not be registered for L1");
+    }
+}
+
+#[test]
+fn assistant_tier_registry_includes_gh_tools_for_l0() {
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L0Orchestration, None);
+    for name in crate::tools::gh_tools::GH_TOOL_NAMES {
+        assert!(reg.contains(name), "{name} must be registered for L0");
+    }
+}
+
+#[test]
+fn gh_surface_registers_no_mutating_tool_even_for_l0() {
+    // #4170 forbids quietly granting merge power. Asserted against the real
+    // L0 registry rather than the factory, so a future edit that adds a
+    // mutating tool at THIS call site is caught too.
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L0Orchestration, None);
+    for name in [
+        "gh_pr_merge",
+        "gh_pr_create",
+        "gh_pr_comment",
+        "gh_pr_edit",
+        "gh_pr_close",
+        "gh_workflow_run",
+        "gh_run_rerun",
+    ] {
+        assert!(
+            !reg.contains(name),
+            "{name} is a mutating capability and must not be registered"
+        );
+    }
+}

@@ -1990,6 +1990,21 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
                          review it deliberately.",
                         crate::tools::l0_exec::L0_SHELL_EXEC
                     );
+                    // #4170: and for the L0-only GitHub PR/CI surface. Same
+                    // glob reasoning; every name checked, so a tool added to
+                    // `GH_TOOL_NAMES` is covered without editing this test.
+                    for gh in crate::tools::gh_tools::GH_TOOL_NAMES {
+                        assert!(
+                            !crate::ctrl::pm_task::match_any_glob(
+                                gh,
+                                std::slice::from_ref(granted)
+                            ),
+                            "'{name}' declares '{granted}' in [tools].allow, which matches \
+                             the L0-only GitHub tool '{gh}' — as an L0 persona it would \
+                             hold it. That is a capability change, not a side effect: \
+                             review it deliberately."
+                        );
+                    }
                 }
             }
         } else {

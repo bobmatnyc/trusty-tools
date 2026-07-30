@@ -223,14 +223,26 @@ pub async fn run_pm_task_with_persona(
                     }
                 }
             }
-            if let Ok(repo) = crate::git::GitRepo::open(
-                &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ) {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Ok(repo) = crate::git::GitRepo::open(&cwd) {
                 for tool in crate::tools::git_tools::git_tools(repo.root.clone()) {
                     registry.register(tool);
                 }
             }
             register_ticketing_tools(&mut registry).await;
+            // #4170 (epic #4167): the L0-only GitHub PR/CI inspection surface.
+            // Registered on BOTH assistant dispatch paths — this one and
+            // `runtime::tool_registry::build_assistant_tier_registry` — because
+            // registering in only one is exactly the divergence #3745 item C
+            // had to fix for izzie's tools. Unlike `delegator_tier` below, this
+            // reads `persona_cfg.agent.tier()` DIRECTLY rather than through the
+            // `role == "assistant"` branch: this is a capability grant, not a
+            // delegation edge, so it must fail closed for every persona whose
+            // tier does not explicitly resolve to L0 — including one carrying
+            // an unexpected `role`. `gh_tools::register` denies any non-L0
+            // tier, so an L1 persona declaring `gh_*` finds nothing in
+            // `all_names` for `filter_persona_tool_names` to keep.
+            crate::tools::gh_tools::register(&mut registry, persona_cfg.agent.tier(), project_path);
 
             // #3285: tool parity with the session path
             // (`run_pm_task_with_history`) — delegation, CTRL
