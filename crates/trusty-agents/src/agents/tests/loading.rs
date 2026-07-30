@@ -1973,6 +1973,23 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
                          becoming L0 would GRANT it, which is a capability change this \
                          PR does not carry. Review it deliberately."
                     );
+                    // #4173: the same zero-delta claim for the L0-only
+                    // shell/build/test executor. Matched as a GLOB, not by
+                    // equality, because `[tools].allow` entries are glob
+                    // patterns — a persona declaring `l0_*` or `*` would reach
+                    // the shell just as surely as one naming it outright, and
+                    // an equality check would miss both.
+                    assert!(
+                        !crate::ctrl::pm_task::match_any_glob(
+                            crate::tools::l0_exec::L0_SHELL_EXEC,
+                            std::slice::from_ref(granted)
+                        ),
+                        "'{name}' declares '{granted}' in [tools].allow, which matches the \
+                         L0-only execution grant '{}' — as an L0 persona it would hold a \
+                         real shell. That is a capability change, not a side effect: \
+                         review it deliberately.",
+                        crate::tools::l0_exec::L0_SHELL_EXEC
+                    );
                 }
             }
         } else {

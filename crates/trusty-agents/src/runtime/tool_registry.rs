@@ -550,6 +550,23 @@ pub(super) fn build_registry_for_agent(
 /// assistant persona now ships a seeded `[subagents].delegate_allowed`.
 /// Test: `assistant_tier_registry_delegation_honors_the_reachable_whitelist`,
 /// `assistant_tier_registry_delegation_fails_closed_without_a_whitelist`.
+///
+/// `delegator_tier` ALSO decides the #4173 execution grant (epic #4167): it is
+/// the ONLY input to `tools::l0_exec::l0_execution_tools`, which registers
+/// `l0_shell_exec` for `AgentTier::L0Orchestration` and NOTHING for
+/// `AgentTier::L1Standard`. That makes the grant unreachable for L1 by
+/// construction rather than by allow-list convention, and unreachable
+/// transitively too: the grant follows the SPAWNED agent's own resolved tier,
+/// `DelegateToAgentTool`'s gate already refuses every L1->L0 hop, and an
+/// inbound delegation taint can only ever intersect with what a registry
+/// actually holds (`scope_for_delegation`), so a tainted spawn into an L1
+/// registry cannot conjure a tool that registry never registered.
+/// Test: `l0_grant_absent_from_l1_assistant_registry`,
+/// `l0_grant_present_in_l0_assistant_registry`,
+/// `l1_persona_declaring_the_l0_grant_does_not_receive_it`,
+/// `l0_grant_fails_closed_for_malformed_tier_declaration`,
+/// `tainted_delegation_cannot_widen_into_the_l0_grant`,
+/// `l1_cannot_reach_the_l0_grant_through_an_untiered_intermediary`.
 pub(crate) fn build_assistant_tier_registry(
     delegator_allow: Option<&[String]>,
     delegator_tier: crate::agents::AgentTier,
@@ -646,6 +663,22 @@ pub(crate) fn build_assistant_tier_registry(
     // via `scope_assistant_allowed_tools` (only izzie opts in), so other
     // assistant-tier personas are unaffected.
     for tool in crate::tools::izzie::izzie_tools() {
+        reg.register(tool);
+    }
+
+    // #4173 (epic #4167): the L0-orchestration shell/build/test grant. Unlike
+    // every other block in this function, this one is NOT "register it and let
+    // `[tools].allow` decide" — `l0_execution_tools` returns an EMPTY vector
+    // for `AgentTier::L1Standard`, so an L1 persona that declares
+    // `l0_shell_exec` in its `[tools].allow` (or matches it with a `*` glob)
+    // still gets nothing: the name never enters `schemas()`, so it cannot
+    // survive `scope_assistant_allowed_tools`'s intersection, and `dispatch`
+    // has nothing registered under it either. The tier reaching us here is
+    // `AgentInfo::tier()`, which fails closed — absent/blank/unrecognized
+    // `tier` values are already `L1Standard` by the time they arrive. See
+    // `tools::l0_exec` for why the tier gate (not the command text) is the
+    // security boundary.
+    for tool in crate::tools::l0_exec::l0_execution_tools(delegator_tier, cwd.clone()) {
         reg.register(tool);
     }
 

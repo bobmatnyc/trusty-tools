@@ -304,4 +304,18 @@ pub(super) static TABLE: &[SkillDef] = &[
         System,
         None,
     ),
+    // --- L0 orchestration execution grant (#4173, epic #4167) -------------
+    // One skill per tool, per the owner ruling. Listing the skill here does
+    // NOT grant it: `tools::l0_exec::l0_execution_tools` refuses to register
+    // the tool at all for any agent that is not L0-orchestration tier, so an
+    // L1 persona naming this skill (or the tool) resolves to nothing.
+    tool_skill(
+        "orchestration-shell-run",
+        "Run a Build, Test or Shell Command",
+        "Run a build, test suite, or shell command in the project working tree \
+         and return the exit code with combined output. Orchestration tier only.",
+        "l0_shell_exec",
+        Action,
+        None,
+    ),
 ];
