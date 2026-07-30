@@ -1,145 +1,39 @@
 //! Shared member-probing primitives (health, version envelope, config spawn).
 //!
-//! Why: `status`, `stack health`, `stack doctor`, `doctor --self-check`, and
-//! `config` all shell out to a member's DOC-1 contract verbs and classify the
-//! result. Hoisting the spawn + parse + classification into one module keeps the
-//! command handlers thin and means the (pure) classification logic is unit-tested
-//! once rather than duplicated per command (DRY; CLAUDE.md 500-SLOC cap).
+//! Why: `status`, `stack health`, `stack doctor`, `doctor --self-check`, `up` and
+//! the install verify tail all need one member's health verdict, and `config` /
+//! `doctor` also forward a member's `--json` contract verb. Hoisting resolution +
+//! probe + classification into one module keeps the command handlers thin and
+//! means the decision logic is unit-tested once rather than per command (DRY;
+//! CLAUDE.md 500-SLOC cap).
+//!
+//! #4246: [`probe_member_health`] used to spawn `<binary> health --json` — a
+//! contract no shipped daemon implements — and collapse every failure into
+//! `down`, which then drove `launchctl kickstart -k` against healthy daemons. It
+//! now delegates to the HTTP `/health` transport in [`super::probe_http`] and
+//! returns a TYPED [`ProbeOutcome`] so the destructive repair can be gated on a
+//! real transport-level observation. `classify_health_json` and the
+//! `output_with_timeout` subprocess wrapper it needed were deleted with the
+//! transport they served.
 //!
 //! What:
-//! - [`probe_member_health`] / [`classify_health_json`] / [`health_string`]:
-//!   the launchd-daemon health probe (`<binary> health --json`), strategy-aware
-//!   so process-managed members (trusty-mpm) that lack a `health --json` verb
-//!   are reported `unknown` rather than falsely `down`.
+//! - [`probe_member_health`] / [`health_string`]: the strategy-aware daemon
+//!   health probe. Process-managed members (trusty-mpm) are reported
+//!   `Unprobeable` rather than falsely `down`.
 //! - [`spawn_member_json`]: spawn `<binary> <verb> --json` and return parsed JSON.
 //! - [`validate_version_envelope`]: the DOC-1 conformance check used by
 //!   `doctor --self-check` (asserts `contract_version` + `verbs[]`).
 //!
-//! Test: `tests` covers `classify_health_json`, `health_string`,
-//! `validate_version_envelope`, and the strategy gating in `probe_member_health`
-//! (the parse/classify halves; the subprocess spawn itself is side-effecting).
+//! Test: `tests` covers `health_string`, `validate_version_envelope`, the
+//! strategy gating in `probe_member_health`, and (against a stub server) the
+//! launchd arm end-to-end — a path no test executed before #4246.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
+use super::probe_http::{probe_member_http_blocking, ProbeOutcome};
 use super::stable_set::ManageStrategy;
 use super::up::member::MemberHealth;
-use super::up::system_runner::classify_status;
-
-/// Bound on how long a single `<binary> health --json` subprocess may run
-/// before it is treated as a hung probe (#3875).
-///
-/// Why: [`super::verify_tail`]'s poll-until-ready loop bounds the NUMBER of
-/// probe attempts (`bounded_attempts`/`POLL_MAX_ATTEMPTS`) and the AGGREGATE
-/// wall-clock budget across all members, but every one of those bounds
-/// assumed a single probe call itself returns promptly. VM evidence (#3875)
-/// showed `tctl install` hanging >6 minutes at "waiting for trusty-search to
-/// start..." with a genuinely-dead daemon: the child `health --json` process
-/// itself never exited (e.g. blocked on a half-open socket to the dead
-/// daemon), so `Command::output()` — which blocks until EOF on both pipes —
-/// never returned, defeating every attempt/aggregate bound above it.
-/// What: 10s — generous for a live daemon's near-instant `health --json`
-/// reply, short enough that a single hung probe can never itself consume more
-/// than a small slice of `verify_tail`'s ~120s aggregate budget.
-const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Run `cmd`, killing it and returning a timeout error if it has not exited
-/// within `timeout` (#3875).
-///
-/// Why: `std::process::Command::output()` has no built-in timeout — a hung
-/// child (dead daemon, wedged health check) blocks the caller forever. This
-/// wraps spawn + a bounded `try_wait` poll, killing the child on expiry, so
-/// no caller of a subprocess health probe can hang indefinitely.
-/// What: spawns `cmd` with piped stdout/stderr, drains both pipes
-/// concurrently on background threads (so a chatty child can never deadlock
-/// on a full pipe buffer while we're only polling `try_wait`), and polls
-/// `try_wait` every 25ms. On timeout, kills + reaps the child, then gives the
-/// reader threads a short (200ms) bounded grace period to observe EOF (killing
-/// the child closes our end of its pipes, so this is normally near-instant)
-/// before giving up and detaching them — a genuinely stuck grandchild-held
-/// pipe never turns a bounded probe into an unbounded one. On normal exit,
-/// joins the reader threads and returns the collected `Output`.
-/// Test: `tests::output_with_timeout_returns_output_for_fast_command`,
-/// `tests::output_with_timeout_kills_hung_command`,
-/// `tests::output_with_timeout_repeated_timeouts_stay_bounded`.
-fn output_with_timeout(
-    mut cmd: Command,
-    timeout: Duration,
-) -> std::io::Result<std::process::Output> {
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn()?;
-
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = stdout_pipe {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = stderr_pipe {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            // #3897 code-critic LOW: reclaim the reader threads on the
-            // timeout path too, not just the success path below — otherwise
-            // every timed-out probe silently detaches two threads. `kill` +
-            // `wait` above closes OUR end of the pipes; in the overwhelmingly
-            // common case (no grandchild inherited the fd) that alone makes
-            // the readers' `read_to_end` see EOF within microseconds, so a
-            // short bounded grace period reclaims them without making the
-            // timeout path itself block noticeably longer. If a grandchild
-            // somehow still holds the pipe open past the grace period, we
-            // deliberately stop waiting (never turn a bounded probe into an
-            // unbounded one) — the readers are dropped/detached and the
-            // process is short-lived (`tctl` exits once verify_tail
-            // finishes), so the worst case is a handful of stray threads for
-            // the remainder of THIS invocation, never an unbounded
-            // accumulation across probes.
-            let join_deadline = Instant::now() + Duration::from_millis(200);
-            while Instant::now() < join_deadline
-                && (!stdout_handle.is_finished() || !stderr_handle.is_finished())
-            {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if stdout_handle.is_finished() {
-                let _ = stdout_handle.join();
-            }
-            if stderr_handle.is_finished() {
-                let _ = stderr_handle.join();
-            }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("command timed out after {timeout:?}"),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    };
-
-    let stdout = stdout_handle.join().unwrap_or_default();
-    let stderr = stderr_handle.join().unwrap_or_default();
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
 
 /// Whether `path` exists and is executable (unix) / a regular file (other
 /// platforms) — the concrete-file half of [`resolve_binary_path`]'s #3876
@@ -201,25 +95,6 @@ pub mod health_str {
     pub const UNKNOWN: &str = "unknown";
 }
 
-/// Classify a daemon's `health --json` stdout bytes into a [`MemberHealth`].
-///
-/// Why: Isolating the parse + classification as a pure function makes the
-/// fallback policy testable without spawning a subprocess. Unparseable output is
-/// `Down`, not `HealthyStale` — "if in doubt, degraded".
-/// What: Parses `bytes` as JSON; on success maps the `status` field via
-/// `classify_status` (defaulting to `down` when the field is absent). On a parse
-/// failure returns `Down`.
-/// Test: `tests::unparseable_health_is_down`, `tests::parsed_status_classifies`.
-pub fn classify_health_json(bytes: &[u8]) -> MemberHealth {
-    match serde_json::from_slice::<serde_json::Value>(bytes) {
-        Ok(v) => {
-            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("down");
-            classify_status(status)
-        }
-        Err(_) => MemberHealth::Down,
-    }
-}
-
 /// Map a [`MemberHealth`] to the rollup commands' coarse string.
 ///
 /// Why: The reports use a flat string vocabulary; centralise the mapping so
@@ -238,38 +113,47 @@ pub fn health_string(h: MemberHealth) -> &'static str {
 
 /// Probe a member's health, honouring its lifecycle [`ManageStrategy`].
 ///
-/// Why: The launchd daemons advertise `<binary> health --json`, but a
-/// process-managed member (trusty-mpm) has NO top-level `health --json` verb
-/// (verified in `crates/trusty-mpm/src/bin/tm/cli.rs`). Probing it with the
-/// standard verb would always fail and falsely report `down`; returning a flat
-/// `unknown` string instead keeps the rollup honest without claiming a false
-/// verdict in either direction.
-/// What: returns `not_installed` when [`resolve_binary_path`] finds the binary
-/// neither on `PATH` NOR in the default install directory (#3876). For a
-/// `Launchd` member, spawns `<resolved path> health --json` under a bounded
-/// timeout (#3875) and classifies the envelope. For an `OwnVerb` member,
-/// returns `unknown` (health is not probeable via the standard contract). For
-/// `None` (non-daemon), returns `unknown` too (callers should not ask, but it
-/// is a safe default).
-/// Test: `tests::own_verb_member_is_unknown`; the launchd spawn is side-effecting
-/// and its parse half is covered by `classify_health_json`.
-pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> String {
-    let Some(bin_path) = resolve_binary_path(binary) else {
-        return health_str::NOT_INSTALLED.to_owned();
-    };
+/// Why (#4246): this is THE health probe every `tctl` rollup and the install
+/// verify tail agree on. It used to spawn `<binary> health --json`, a contract no
+/// shipped daemon implements, so every daemon read `down` while every one of them
+/// was answering `GET /health` — and that false `down` drove `launchctl kickstart
+/// -k`, hard-restarting a healthy stack on every `tctl install`. It now probes
+/// over HTTP and returns a TYPED outcome instead of a flat `String`, because the
+/// only safe basis for a destructive repair is a transport-level observation
+/// ([`ProbeOutcome::is_confirmed_down`]) — a distinction a `String` cannot carry.
+///
+/// # Postconditions
+/// - A binary resolvable on neither `PATH` nor the default install directory is
+///   [`ProbeOutcome::NotInstalled`] (#3876) — the probe never runs.
+/// - A `Launchd` member is probed over HTTP via [`super::probe_http`].
+/// - An `OwnVerb`/`None` member is [`ProbeOutcome::Unprobeable`], rendering
+///   `unknown`, and can therefore never be kickstarted.
+///
+/// What: resolves the binary, then dispatches on `manage`. The `app` name handed
+/// to the transport is the BINARY name — the `http_addr` discovery file is keyed
+/// by app name, and `crate_name == binary == app name` holds for every stable-set
+/// daemon (see `stable_set`; the one member where it does not, trusty-mpm which
+/// ships both `tm` and `trusty-mpm`, takes the `OwnVerb` arm and is never
+/// probed).
+/// Test: `tests::own_verb_member_is_unknown`,
+/// `tests::probe_member_health_serves_from_http_addr`,
+/// `tests::probe_member_health_refused_when_nothing_listens`.
+pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> ProbeOutcome {
+    if resolve_binary_path(binary).is_none() {
+        return ProbeOutcome::NotInstalled;
+    }
     match manage {
-        ManageStrategy::Launchd => {
-            let mut cmd = Command::new(&bin_path);
-            cmd.args(["health", "--json"]);
-            let out = output_with_timeout(cmd, HEALTH_PROBE_TIMEOUT);
-            let health = match out {
-                Ok(out) if out.status.success() => classify_health_json(&out.stdout),
-                Ok(_) | Err(_) => MemberHealth::Down,
-            };
-            health_string(health).to_owned()
-        }
-        // Process-managed (mpm) / non-daemon: no standard health verb.
-        ManageStrategy::OwnVerb | ManageStrategy::None => health_str::UNKNOWN.to_owned(),
+        ManageStrategy::Launchd => probe_member_http_blocking(binary, binary),
+        // #4246: trusty-mpm (`OwnVerb`) is DELIBERATELY left unprobed and
+        // reported `unknown`, even though it does answer `/health` on 7880.
+        // It is `required: true` (`stable_set`), and `unknown` is the only
+        // verdict `VerifyTailReport::build` and `status`'s exit code tolerate —
+        // so probing it would flip `tctl status` to exit 2 and `tctl install` to
+        // NOT VERIFIED for every user who simply has not started mpm. Enabling
+        // it is a separate, user-visible policy change, tracked separately.
+        // `None` (non-daemon) never reaches here in production (callers filter on
+        // `m.daemon`) but shares the safe default.
+        ManageStrategy::OwnVerb | ManageStrategy::None => ProbeOutcome::Unprobeable,
     }
 }
 
@@ -354,31 +238,6 @@ pub fn validate_version_envelope(v: &serde_json::Value) -> VersionConformance {
 mod tests {
     use super::*;
 
-    /// Why: Unparseable health output means the daemon is BROKEN, not stale.
-    /// What: Feeds non-JSON / empty bytes; asserts `Down`.
-    /// Test: This is the test.
-    #[test]
-    fn unparseable_health_is_down() {
-        assert_eq!(classify_health_json(b"not json"), MemberHealth::Down);
-        assert_eq!(classify_health_json(b""), MemberHealth::Down);
-    }
-
-    /// Why: Valid JSON must classify via the shared `classify_status` vocabulary.
-    /// What: Feeds healthy / stale / field-less JSON; asserts each mapping.
-    /// Test: This is the test.
-    #[test]
-    fn parsed_status_classifies() {
-        assert_eq!(
-            classify_health_json(br#"{"status":"healthy"}"#),
-            MemberHealth::HealthyVersionOk
-        );
-        assert_eq!(
-            classify_health_json(br#"{"status":"stale"}"#),
-            MemberHealth::HealthyStale
-        );
-        assert_eq!(classify_health_json(br#"{"x":1}"#), MemberHealth::Down);
-    }
-
     /// Why: The health-string mapping is the rollup vocabulary; pin it.
     /// What: Asserts each `MemberHealth` → string.
     /// Test: This is the test.
@@ -390,87 +249,92 @@ mod tests {
         assert_eq!(health_string(MemberHealth::NotInstalled), "not_installed");
     }
 
-    /// Why: A process-managed member (mpm) lacks a `health --json` verb, so its
-    /// health must be `unknown`, never a false `down`/`healthy`. Pin the gating
-    /// independent of whether the binary happens to be installed by skipping the
-    /// PATH check via the strategy branch (we only assert the OwnVerb arm).
-    /// What: When the binary is absent it reads `not_installed`; when present it
-    /// would read `unknown`. We assert the value is one of those two — never a
-    /// launchd verdict — to keep the test environment-independent.
+    /// Why: an absent binary must short-circuit to `NotInstalled` BEFORE any
+    /// probe runs — resolution failure is a fact about the filesystem, not
+    /// evidence about a daemon, and probing anyway would waste a connect bound
+    /// per member on a partially-installed stack.
+    /// What: a deliberately-fake binary name yields `NotInstalled` for every
+    /// strategy.
+    /// Test: This is the test.
+    #[test]
+    fn absent_binary_is_not_installed_for_every_strategy() {
+        for manage in [
+            ManageStrategy::Launchd,
+            ManageStrategy::OwnVerb,
+            ManageStrategy::None,
+        ] {
+            assert_eq!(
+                probe_member_health("definitely-not-a-real-binary-xyz", manage),
+                ProbeOutcome::NotInstalled,
+                "{manage:?}"
+            );
+        }
+    }
+
+    /// Why (#4246): trusty-mpm is `required: true`, and `unknown` is the only
+    /// verdict `VerifyTailReport::build` and `status`'s exit code tolerate — so
+    /// the `OwnVerb` arm staying `Unprobeable` is what keeps `tctl status` from
+    /// exiting 2, and `tctl install` from printing NOT VERIFIED, for every user
+    /// who has simply not started mpm. Deliberately unchanged by this fix; pin
+    /// it so a well-meaning follow-up cannot flip it silently.
+    /// What: an INSTALLED binary probed with `OwnVerb` is `Unprobeable` and
+    /// renders `unknown`, never a launchd verdict.
     /// Test: This is the test.
     #[test]
     fn own_verb_member_is_unknown() {
-        let h = probe_member_health("definitely-not-a-real-binary-xyz", ManageStrategy::OwnVerb);
-        // Absent binary short-circuits to not_installed before the strategy arm.
-        assert_eq!(h, health_str::NOT_INSTALLED);
-    }
-
-    /// Why (#3875): a fast, well-behaved command must return its real output
-    /// through the timeout wrapper — the wrapper must not alter normal
-    /// (non-hung) behaviour.
-    /// What: runs `/bin/echo hello` (or `cmd /C echo hello` on non-unix) under
-    /// a generous timeout; asserts success + the expected stdout.
-    /// Test: This is the test.
-    #[test]
-    fn output_with_timeout_returns_output_for_fast_command() {
-        let mut cmd = Command::new("echo");
-        cmd.arg("hello");
-        let out = output_with_timeout(cmd, Duration::from_secs(5)).expect("echo should run");
-        assert!(out.status.success());
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
-    }
-
-    /// Why (#3875): the entire point of the wrapper is that a hung child must
-    /// never block the caller past the bound — this is the regression test for
-    /// the VM hang (`tctl install` stuck >6 min at "waiting for trusty-search
-    /// to start...").
-    /// What: runs `sleep 60` under a 1s timeout; asserts the call returns
-    /// (rather than hanging) and yields a `TimedOut` error, well within a
-    /// generous wall-clock assertion.
-    /// Test: This is the test.
-    #[test]
-    fn output_with_timeout_kills_hung_command() {
-        let mut cmd = Command::new("sleep");
-        cmd.arg("60");
-        let start = Instant::now();
-        let err = output_with_timeout(cmd, Duration::from_secs(1))
-            .expect_err("a 60s sleep must not complete within a 1s timeout");
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "timeout wrapper took far longer than its 1s bound: {:?}",
-            start.elapsed()
+        let outcome = probe_member_health(
+            crate::commands::test_support::PROBEABLE_BINARY,
+            ManageStrategy::OwnVerb,
         );
+        assert_eq!(outcome, ProbeOutcome::Unprobeable);
+        assert_eq!(outcome.health_string(), health_str::UNKNOWN);
+        assert!(!outcome.is_confirmed_down());
     }
 
-    /// Why (#3897 code-critic LOW): a timed-out probe must reclaim its
-    /// reader threads within a small bounded grace period, not just detach
-    /// them forever — otherwise every kickstart/verify probe against a
-    /// genuinely-dead daemon leaks two threads. Killing the child closes our
-    /// end of its pipes, so (absent a grandchild inheriting the fd) the
-    /// readers see EOF almost immediately; running several timeouts back to
-    /// back proves the per-call grace period isn't itself compounding into
-    /// unbounded wall-clock growth.
-    /// What: runs 3 back-to-back 1s-bound timeouts against `sleep 60`;
-    /// asserts each is `TimedOut` and the TOTAL elapsed stays well under
-    /// `3 * (timeout + grace-period + overhead)`, i.e. no call is silently
-    /// blocking on the previous call's reader threads.
+    /// Why (#4246): THE path no test in this crate ever executed — the launchd
+    /// arm end-to-end, from `resolve_binary_path` through `http_addr` discovery
+    /// to the HTTP round trip. `tctl status` reported six healthy daemons as
+    /// `down` for months precisely because nothing exercised it.
+    /// What: plants an `http_addr` pointing at a stub answering
+    /// `{"status":"ok"}` and asserts the probe reports it serving/`healthy`.
     /// Test: This is the test.
     #[test]
-    fn output_with_timeout_repeated_timeouts_stay_bounded() {
-        let start = Instant::now();
-        for _ in 0..3 {
-            let mut cmd = Command::new("sleep");
-            cmd.arg("60");
-            let err = output_with_timeout(cmd, Duration::from_secs(1))
-                .expect_err("a 60s sleep must not complete within a 1s timeout");
-            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "3 sequential 1s timeouts took far longer than expected: {:?}",
-            start.elapsed()
+    fn probe_member_health_serves_from_http_addr() {
+        use crate::commands::test_support as ts;
+        let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let addr = ts::stub_seq_blocking(vec![("HTTP/1.1 200 OK", r#"{"status":"ok"}"#)]);
+        let dir = ts::stub_data_dir(ts::PROBEABLE_BINARY, &addr);
+        let outcome = probe_member_health(ts::PROBEABLE_BINARY, ManageStrategy::Launchd);
+        ts::clear_data_dir_override(&dir);
+
+        assert_eq!(
+            outcome,
+            ProbeOutcome::Serving {
+                status: "ok".to_owned(),
+                version: None,
+            }
         );
+        assert_eq!(outcome.health_string(), health_str::HEALTHY);
+    }
+
+    /// Why (#4246): the mirror — a member whose recorded address refuses must
+    /// still reach `Refused`, or the fix would trade a false `down` for a stack
+    /// that is never repaired. This is the ONLY outcome (with `Timeout`) allowed
+    /// to authorise a kickstart.
+    /// What: plants an `http_addr` pointing at a released ephemeral port and
+    /// asserts `Refused` + `is_confirmed_down`.
+    /// Test: This is the test.
+    #[test]
+    fn probe_member_health_refused_when_nothing_listens() {
+        use crate::commands::test_support as ts;
+        let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = ts::stub_data_dir(ts::PROBEABLE_BINARY, &ts::dead_addr());
+        let outcome = probe_member_health(ts::PROBEABLE_BINARY, ManageStrategy::Launchd);
+        ts::clear_data_dir_override(&dir);
+
+        assert_eq!(outcome, ProbeOutcome::Refused);
+        assert!(outcome.is_confirmed_down());
+        assert_eq!(outcome.health_string(), health_str::DOWN);
     }
 
     /// Why (#3876): the verify table must not report a genuinely-installed
