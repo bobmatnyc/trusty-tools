@@ -20,9 +20,9 @@ measurements. **The measurements are the deliverable.** No harness is being buil
 | D | Non-interactive access mechanics | **ANSWERED — see D** | measured |
 | E | mise + Rust reality check | **ANSWERED — assumption was broken, see E** | measured |
 | F | TCC / permission dialogs, headless | **ANSWERED — mic preflight, not network, see F** | measured |
-| G | Timings & disk | **MOSTLY ANSWERED — see G** | measured |
+| G | Timings & disk | **ANSWERED — see G and I** | measured |
 | H | Compile-speed calibration | **ANSWERED — 131 s, not 20–55 min. See H** | measured |
-| I | Suspend/resume | NOT YET MEASURED | — |
+| I | Suspend/resume | **ANSWERED — resume is BROKEN, see I** | measured |
 
 > **Headline finding (see B/E):** the baked golden image
 > `trusty-toolchain-20260730` does **not** actually have a working non-interactive
@@ -472,7 +472,71 @@ Combined with the ~104 KB idle clone cost from G, host capacity is:
 
 Disk is not a binding constraint for this harness.
 
-## I — NOT YET MEASURED
+## I. Suspend/resume — **BROKEN. Do not build a strategy on it.**
+
+`tart suspend` exists and *appears* to work. **Resume fails, reproducibly.**
+
+Attempt 1:
+
+```
+### I-A: COLD BOOT from stopped (baseline), timed
+COLD_BOOT_TO_READY_MS=17993
+### I-C: suspend, then WAIT for the tart run process to exit
+suspend cmd rc=0
+SUSPEND_TOTAL_MS=2308
+run pid still alive? NO
+local  probe-h   80  33   2 seconds ago  suspended
+### I-D: RESUME, timed to agent-ready
+RESUME FAILED
+restoring VM state from a snapshot...
+Error Domain=VZErrorDomain Code=12 "The virtual machine failed to restore with error
+“invalid argument”." UserInfo={NSLocalizedFailure=An error occurred while restoring the
+virtual machine., NSLocalizedFailureReason=The virtual machine failed to restore with
+error “invalid argument”.}
+```
+
+Attempt 2, with a 5 s settle before suspending in case of an unflushed-state race:
+
+```
+suspend rc=0
+local  probe-h   80  33   2 seconds ago  suspended
+### resume attempt 2
+RESUME FAILED AGAIN
+restoring VM state from a snapshot...
+Error Domain=VZErrorDomain Code=12 "The virtual machine failed to restore with error
+“invalid argument”."
+### final state
+local  probe-h   80  33   1 second ago   suspended
+```
+
+Findings:
+
+* Suspend itself completes in ~2.3 s and correctly transitions the VM to `suspended`.
+* **Restore fails every time** with `VZErrorDomain Code=12` on this host
+  (Darwin 25.5) and this image. Suspend/resume is **not** a usable fast-start strategy.
+* **A failed restore leaves the VM wedged in `suspended` state**, where `tart run`
+  keeps re-attempting the restore and keeps failing. A harness would need explicit
+  recovery for this state.
+* **`tart suspend` is asynchronous.** The command returns in ~0.3 s while the VM is still
+  `running`; the state only settles once the owning `tart run` process exits. Racing it
+  produces `VM "probe-h" is already running!`. Any automation must wait for the `tart
+  run` process to exit rather than trusting the suspend command's return.
+
+### The good news: cold boot is cheap, so resume is not needed
+
+`tart clone` + cold boot is already fast enough that suspend/resume buys little:
+
+| Path | Time |
+|---|---|
+| clone golden | 0.31 s |
+| **first** boot of a fresh clone | 34.4 s (includes APFS container expansion) |
+| **subsequent** cold boot of the same VM | **18.0 s** |
+
+Note the first boot of a fresh clone costs roughly **2× a later boot** — the one-time
+APFS container expansion and first-boot work land there. Budget ~35 s for a clean VM
+from nothing.
+
+**Clone-and-boot is the clean-VM strategy. Suspend/resume is off the table.**
 
 ---
 
