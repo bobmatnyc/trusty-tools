@@ -135,9 +135,27 @@ jobs:
             /usr/local/share/boost /usr/local/share/powershell \
             /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
             /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo docker image prune --all --force || true
           sudo apt-get clean || true
           sudo rm -rf /var/lib/apt/lists/* || true
+          # docker image prune reclaims only ~2GB (verified in job logs) but
+          # costs 78-181s (avg ~125s) of wall time on every run — it lists
+          # and deletes every pre-pulled runner image layer by layer. #4402:
+          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
+          # already comfortably above the ~27GB peak the `test` job needs
+          # before the .rcgu.o sweep below runs (that sweep, not this prune,
+          # is the actual #3668 remedy). Gate the prune on measured headroom
+          # instead of removing it outright, so it still fires as a safety
+          # net if a future runner image or heavier test suite erodes the
+          # margin.
+          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
+          avail_gb=$(( avail_kb / 1024 / 1024 ))
+          echo "Avail after SDK purge: ${avail_gb}G"
+          if [ "$avail_gb" -lt 25 ]; then
+            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
+            sudo docker image prune --all --force || true
+          else
+            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
+          fi
           echo "After:"; df -h /
 
       - name: Install stable toolchain with clippy
@@ -243,9 +261,27 @@ jobs:
             /usr/local/share/boost /usr/local/share/powershell \
             /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
             /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo docker image prune --all --force || true
           sudo apt-get clean || true
           sudo rm -rf /var/lib/apt/lists/* || true
+          # docker image prune reclaims only ~2GB (verified in job logs) but
+          # costs 78-181s (avg ~125s) of wall time on every run — it lists
+          # and deletes every pre-pulled runner image layer by layer. #4402:
+          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
+          # already comfortably above the ~27GB peak the `test` job needs
+          # before the .rcgu.o sweep below runs (that sweep, not this prune,
+          # is the actual #3668 remedy). Gate the prune on measured headroom
+          # instead of removing it outright, so it still fires as a safety
+          # net if a future runner image or heavier test suite erodes the
+          # margin.
+          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
+          avail_gb=$(( avail_kb / 1024 / 1024 ))
+          echo "Avail after SDK purge: ${avail_gb}G"
+          if [ "$avail_gb" -lt 25 ]; then
+            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
+            sudo docker image prune --all --force || true
+          else
+            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
+          fi
           echo "After:"; df -h /
 
       # trusty-agents's git tests (list_branches_includes_current) assert that the
@@ -553,22 +589,74 @@ jobs:
           find target/debug/deps -name '*.rcgu.o' -delete
           echo "After sweep:"; du -sh target/debug 2>/dev/null || true
 
+      # #4402: per-crate failure attribution without changing HOW tests run
+      # or adding a second build.
+      #
+      # Two earlier attempts both cost more than the ~48s they were meant to
+      # save:
+      #   1. `cargo nextest run --workspace` replacing this step entirely —
+      #      nextest isolates every test in its own process (stricter than
+      #      `cargo test`'s one-process-per-binary model), which surfaced a
+      #      real, pre-existing trusty-memory test-order bug on this PR's own
+      #      CI run (add_alias_round_trip_through_prompt_cache and
+      #      dispatch_discover_aliases_inserts_new_and_dedupes implicitly
+      #      depend on a TRUSTY_SKIP_PALACE_ENFORCEMENT env var some other
+      #      test happens to set as a side effect in the shared process —
+      #      crates/trusty-memory/src/tools/palace_ops.rs:88-101). Both pass
+      #      reliably under plain `cargo test` on main. Reverted rather than
+      #      ship a runner switch that can turn a green suite red on
+      #      ordering alone; this PR is workflow-only, so fixing that bug is
+      #      out of scope here.
+      #   2. `cargo nextest list --workspace` (metadata-only, no test
+      #      execution) to build a name-to-crate manifest cross-referenced
+      #      against `cargo test`'s unchanged output: safe from the
+      #      isolation issue above, but measured on this PR's own CI run,
+      #      `cargo nextest list` resolves its own build fingerprint that
+      #      doesn't match `cargo test --workspace --no-run`'s and forced a
+      #      ~91s recompile of trusty-agents + trusty-agents-local — worse
+      #      than the step it was replacing.
+      #
+      # This version needs neither: a Rust panic message self-reports its
+      # own source path (`thread '<test>' panicked at crates/<crate>/...`),
+      # naming both the failing test and its crate in one line cargo test
+      # already prints, with no dependency on cross-binary output ordering
+      # and no extra tool or build. See .github/scripts/
+      # attribute_test_failures.py for the full rationale and doctest
+      # handling.
       - name: cargo test --workspace
-        # Unset CI so trusty-common's update::check_throttled runs the
-        # cache-freshness code path. The function returns None immediately
-        # when CI is non-empty; tests like cache_fresh_returns_some_when_newer
-        # expect the cache path (is_some), which requires CI to be unset.
-        # We set CI="" here to shadow the global CI=true injected by the runner.
-        env:
-          CI: ""
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
+        run: |
+          if cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
+              -- --skip update::tests::cache_fresh_returns_some_when_newer 2>&1 | tee test-output.log; then
+            test_status=0
+          else
+            test_status=${PIPESTATUS[0]}
+          fi
+          if [ "$test_status" -ne 0 ]; then
+            echo "::group::Per-crate failure attribution (closes #950, via #4402)"
+            python3 .github/scripts/attribute_test_failures.py
+            echo "::endgroup::"
+            exit "$test_status"
+          fi
 
-      # Explicit per-crate step so trusty-review failures are individually
-      # attributed in the GitHub Actions UI (closes #950).
-      - name: cargo test -p trusty-review
+      # trusty-common's cache_fresh_returns_some_when_newer needs CI unset
+      # (see check_throttled in crates/trusty-common/src/update/mod.rs: it
+      # returns None whenever CI is non-empty, and this test expects the
+      # live cache-freshness path instead). Previously CI="" was applied to
+      # the WHOLE `cargo test --workspace` invocation above, which flipped
+      # cargo's fingerprint for every crate in the workspace and forced an
+      # unrelated recompile of trusty-agents + trusty-agents-local (#4402).
+      # Scoping the override to a single `-p trusty-common` invocation
+      # contains that recompile to trusty-common alone (measured locally:
+      # ~3s) instead of cascading workspace-wide. `--features update-check`
+      # is required: that module is `#[cfg(feature = "update-check")]`-gated
+      # and only gets pulled in under `--workspace` via other crates'
+      # feature unification, not under a bare `-p trusty-common` build.
+      - name: cargo test -p trusty-common (cache-freshness, CI unset)
         env:
           CI: ""
-        run: cargo test -p trusty-review
+        run: |
+          cargo test -p trusty-common --lib --features update-check \
+            update::tests::cache_fresh_returns_some_when_newer -- --exact
 
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
@@ -598,9 +686,27 @@ jobs:
             /usr/local/share/boost /usr/local/share/powershell \
             /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
             /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo docker image prune --all --force || true
           sudo apt-get clean || true
           sudo rm -rf /var/lib/apt/lists/* || true
+          # docker image prune reclaims only ~2GB (verified in job logs) but
+          # costs 78-181s (avg ~125s) of wall time on every run — it lists
+          # and deletes every pre-pulled runner image layer by layer. #4402:
+          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
+          # already comfortably above the ~27GB peak the `test` job needs
+          # before the .rcgu.o sweep below runs (that sweep, not this prune,
+          # is the actual #3668 remedy). Gate the prune on measured headroom
+          # instead of removing it outright, so it still fires as a safety
+          # net if a future runner image or heavier test suite erodes the
+          # margin.
+          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
+          avail_gb=$(( avail_kb / 1024 / 1024 ))
+          echo "Avail after SDK purge: ${avail_gb}G"
+          if [ "$avail_gb" -lt 25 ]; then
+            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
+            sudo docker image prune --all --force || true
+          else
+            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
+          fi
           echo "After:"; df -h /
 
       - name: Install Rust 1.91 toolchain
@@ -929,9 +1035,27 @@ jobs:
             /usr/local/share/boost /usr/local/share/powershell \
             /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
             /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo docker image prune --all --force || true
           sudo apt-get clean || true
           sudo rm -rf /var/lib/apt/lists/* || true
+          # docker image prune reclaims only ~2GB (verified in job logs) but
+          # costs 78-181s (avg ~125s) of wall time on every run — it lists
+          # and deletes every pre-pulled runner image layer by layer. #4402:
+          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
+          # already comfortably above the ~27GB peak the `test` job needs
+          # before the .rcgu.o sweep below runs (that sweep, not this prune,
+          # is the actual #3668 remedy). Gate the prune on measured headroom
+          # instead of removing it outright, so it still fires as a safety
+          # net if a future runner image or heavier test suite erodes the
+          # margin.
+          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
+          avail_gb=$(( avail_kb / 1024 / 1024 ))
+          echo "Avail after SDK purge: ${avail_gb}G"
+          if [ "$avail_gb" -lt 25 ]; then
+            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
+            sudo docker image prune --all --force || true
+          else
+            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
+          fi
           echo "After:"; df -h /
 
       - name: Install stable toolchain
