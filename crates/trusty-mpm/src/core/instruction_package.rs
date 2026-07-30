@@ -56,6 +56,22 @@
 //! [`SCHEMA_VERSION`]**. Strict rejection is what makes that policy enforceable
 //! rather than advisory.
 //!
+//! Version history:
+//!
+//! | version | change | ticket |
+//! |---|---|---|
+//! | 1 | initial format: `text` and `generated` bodies | #4184 |
+//! | 2 | adds the `file` body kind | #4318 |
+//!
+//! v2 exists because #4318 made the bundled package an *authored JSON artifact*
+//! rather than a Rust literal, and inlining every section's prose would have
+//! turned `sections/core.md` into a single 23 KB JSON line. A `file` body names a
+//! bundled markdown source instead; resolution goes through the compile-time
+//! [`crate::core::instruction_pipeline::SECTION_SOURCES`] table, so the build
+//! stays hermetic and a renamed section is a compile error. The bump is mandatory
+//! under the policy above: a v1 build reading a v2 manifest would reject the
+//! unknown `kind`, which is the correct loud failure.
+//!
 //! Floor block ordering is deliberately *not* constrained to canonical section
 //! order — see `validate_floor_is_last` for the asset evidence.
 //!
@@ -76,7 +92,7 @@ use serde::{Deserialize, Serialize};
 /// a silently truncated system prompt.
 /// What: the integer matched against [`InstructionPackage::schema_version`].
 /// Test: `rejects_unsupported_schema_version`.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The JSON Schema document describing this format, embedded at compile time.
 ///
@@ -294,8 +310,20 @@ impl Join {
 ///
 /// Why: separating authored text from host-supplied generated content lets
 /// validation insist that generated content is actually consumed.
-/// What: `Text` carries markdown authored in the package; `Generated` names the
-/// generator that supplies it.
+/// What: `Text` carries markdown authored in the package; `File` names a bundled
+/// markdown source resolved through the compile-time
+/// [`crate::core::instruction_pipeline::SECTION_SOURCES`] table; `Generated`
+/// names the generator that supplies it.
+///
+/// `File` is the schema-v2 addition (#4318). It exists because the two obvious
+/// alternatives are both bad: inlining `sections/core.md` verbatim turns 23 KB of
+/// reviewable prose into one unreadable JSON line and moves the floor text out of
+/// the files `scripts/check_instruction_floor.sh` greps, while resolving the path
+/// on the filesystem at launch would make the delivered system prompt depend on
+/// what happens to be on disk. Resolving through `include_str!` keeps the prose in
+/// markdown, keeps the build hermetic, and makes a renamed section a compile error.
+/// `Text` remains fully expressible, and is how a rule authored *in the manifest*
+/// — rather than in a section file — is carried.
 ///
 /// `deny_unknown_fields` is load-bearing, not decoration. Without it a key
 /// misplaced *inside* `body` — `{"kind":"text","text":"…","join_before":"blank"}`
@@ -316,11 +344,45 @@ pub enum BlockBody {
         /// The markdown body. Trimmed before emission.
         text: String,
     },
+    /// Markdown read from a bundled section source, named by path.
+    File {
+        /// Path relative to `assets/instructions/`, e.g. `sections/core.md`.
+        /// Must be a key of
+        /// [`crate::core::instruction_pipeline::SECTION_SOURCES`]; anything else
+        /// is [`ValidationError::UnknownFileSource`]. Trimmed before emission.
+        path: String,
+    },
     /// Markdown supplied at composition time by a named generator.
     Generated {
         /// Which composition-time input supplies this block.
         generator: Generator,
     },
+}
+
+impl BlockBody {
+    /// The authored markdown this body carries, before trimming.
+    ///
+    /// Why: `Text` and `File` differ only in where the bytes are stored, and
+    /// every caller that cares about authored content — validation, composition,
+    /// [`InstructionPackage::authored_run`], and the `CLAUDE.md` override
+    /// application — must treat them identically. One accessor is what stops the
+    /// v2 addition from having to be remembered at four call sites, which is
+    /// exactly how a `File` block would otherwise become silently
+    /// non-overridable.
+    /// What: `None` for [`BlockBody::Generated`]; `Some(Ok(markdown))` for an
+    /// authored body; `Some(Err(path))` for a `File` body naming a source that is
+    /// not in the bundled table.
+    /// Test: `file_body_resolves_through_the_bundled_table`,
+    /// `unknown_file_source_is_rejected`.
+    pub fn authored(&self) -> Option<Result<&str, &str>> {
+        match self {
+            BlockBody::Text { text } => Some(Ok(text.as_str())),
+            BlockBody::File { path } => {
+                Some(crate::core::instruction_pipeline::section_source(path).ok_or(path.as_str()))
+            }
+            BlockBody::Generated { .. } => None,
+        }
+    }
 }
 
 /// One unit of the ordered composition stream.
@@ -453,21 +515,40 @@ pub enum ValidationError {
     /// The package emits nothing.
     #[error("blocks must not be empty")]
     NoBlocks,
-    /// A `text` block whose content is blank.
-    #[error("block {index} ({section:?}) has empty text; remove it instead")]
-    EmptyText {
+    /// An authored (`text` or `file`) block whose content is blank.
+    #[error("block {index} ({section:?}) has an empty authored body; remove it instead")]
+    EmptyAuthoredBody {
         /// Index into `blocks`.
         index: usize,
         /// The owning section.
         section: SectionId,
     },
-    /// A `text` block marked optional.
-    #[error("block {index} ({section:?}) is a text block and may not be `optional`")]
-    OptionalTextBlock {
+    /// An authored (`text` or `file`) block marked optional.
+    #[error("block {index} ({section:?}) is an authored block and may not be `optional`")]
+    OptionalAuthoredBlock {
         /// Index into `blocks`.
         index: usize,
         /// The owning section.
         section: SectionId,
+    },
+    /// A `file` block naming a source that is not bundled with this build.
+    ///
+    /// Why a hard error and not an empty block: a renamed or mistyped section
+    /// path is the #4196 shape exactly — content that exists, is referenced, and
+    /// never reaches the prompt. The manifest is embedded at compile time, so
+    /// this is caught by `bundled_manifest_parses_and_validates` in CI and can
+    /// never be reached by a shipped build.
+    #[error(
+        "block {index} ({section:?}) references section source `{path}`, which this build \
+         does not bundle"
+    )]
+    UnknownFileSource {
+        /// Index into `blocks`.
+        index: usize,
+        /// The owning section.
+        section: SectionId,
+        /// The unresolvable path as authored.
+        path: String,
     },
     /// No block consumes [`Generator::AgentRoster`].
     #[error(
@@ -523,6 +604,15 @@ pub enum CompositionError {
     /// The package failed [`InstructionPackage::validate`].
     #[error("invalid instruction package: {0}")]
     Invalid(#[from] ValidationError),
+    /// The bundled manifest could not be parsed or validated (#4318).
+    ///
+    /// Distinct from [`Self::Invalid`]: that one carries a typed defect in a
+    /// package the caller already holds, while this one says the JSON artifact
+    /// never became a package at all. Unreachable for the shipped manifest —
+    /// `bundled_manifest_parses_and_validates` gates it in CI — and the caller
+    /// degrades to the legacy assembly rather than emitting a partial prompt.
+    #[error("bundled instruction manifest is unusable: {0}")]
+    Manifest(String),
     /// A non-optional generated block had no content to emit.
     #[error(
         "block {index} requires generator {generator:?} but it supplied no content; \
@@ -650,19 +740,30 @@ impl InstructionPackage {
         }
 
         for (index, block) in self.blocks.iter().enumerate() {
-            if let BlockBody::Text { text } = &block.body {
-                if text.trim().is_empty() {
-                    return Err(ValidationError::EmptyText {
+            let Some(authored) = block.body.authored() else {
+                continue;
+            };
+            let body = match authored {
+                Ok(body) => body,
+                Err(path) => {
+                    return Err(ValidationError::UnknownFileSource {
                         index,
                         section: block.section,
+                        path: path.to_string(),
                     });
                 }
-                if block.optional {
-                    return Err(ValidationError::OptionalTextBlock {
-                        index,
-                        section: block.section,
-                    });
-                }
+            };
+            if body.trim().is_empty() {
+                return Err(ValidationError::EmptyAuthoredBody {
+                    index,
+                    section: block.section,
+                });
+            }
+            if block.optional {
+                return Err(ValidationError::OptionalAuthoredBlock {
+                    index,
+                    section: block.section,
+                });
             }
         }
 
@@ -824,7 +925,11 @@ impl InstructionPackage {
 
         for (index, block) in self.blocks.iter().enumerate() {
             let resolved: Option<&str> = match &block.body {
-                BlockBody::Text { text } => Some(text.as_str()),
+                BlockBody::Text { .. } | BlockBody::File { .. } => match block.body.authored() {
+                    Some(Ok(body)) => Some(body),
+                    // `validate` above rejects an unresolvable `file` path.
+                    _ => unreachable!("validate rejects unknown file sources"),
+                },
                 BlockBody::Generated { generator } => match generator {
                     Generator::AgentRoster => Some(inputs.agent_roster.as_str()),
                     Generator::StackProfile => inputs.stack_profile.as_deref(),
@@ -838,8 +943,8 @@ impl InstructionPackage {
                     continue;
                 }
                 let BlockBody::Generated { generator } = &block.body else {
-                    // Blank text blocks are rejected by `validate`.
-                    unreachable!("validate rejects blank text blocks");
+                    // Blank authored blocks are rejected by `validate`.
+                    unreachable!("validate rejects blank authored blocks");
                 };
                 return Err(CompositionError::MissingGeneratedInput {
                     index,
@@ -858,6 +963,61 @@ impl InstructionPackage {
             out.push('\n');
         }
         Ok(out)
+    }
+
+    /// Concatenate the AUTHORED blocks of `sections`, in block order.
+    ///
+    /// Why: the legacy assembly in
+    /// [`crate::core::instruction_overrides::assemble_sections`] and the
+    /// roster-free [`crate::core::instruction_pipeline::assemble_system_prompt`]
+    /// both need whole multi-section runs as one string, and neither can call
+    /// [`Self::compose`] — one composes a different configuration, the other has
+    /// no agent roster to satisfy the required `agent-roster` generator. Before
+    /// #4318 they rebuilt those runs from the `include_str!` constants directly,
+    /// which was fine only while every byte of prose lived in a section file. Now
+    /// that the manifest may author a rule inline, rebuilding from the constants
+    /// would deliver that rule to package-composed sessions and silently withhold
+    /// it from every other path — a content split-brain. Projecting the manifest
+    /// is what keeps ONE source of truth.
+    ///
+    /// What: walks `blocks` in array order, keeps blocks owned by `sections` whose
+    /// body is authored ([`BlockBody::Text`] or [`BlockBody::File`]), trims each,
+    /// and joins with each block's declared [`Join`] — skipping the join on the
+    /// first emitted block, exactly as [`Self::compose`] does. `generated` blocks
+    /// are skipped: they have no authored bytes, and their host inputs are folded
+    /// in by the callers separately. An unresolvable `file` path is skipped rather
+    /// than panicking, because [`Self::validate`] already rejects it at the one
+    /// place that matters.
+    ///
+    /// Determinism: same guarantees as [`Self::compose`] — array order, declared
+    /// joins, no map iteration, no I/O.
+    ///
+    /// Test: `authored_run_projects_blocks_in_order_with_joins`,
+    /// `authored_run_skips_generated_blocks`,
+    /// `pm_instructions_is_its_three_sections`.
+    pub fn authored_run(&self, sections: &[SectionId]) -> String {
+        let mut out = String::new();
+        let mut emitted = false;
+
+        for block in &self.blocks {
+            if !sections.contains(&block.section) {
+                continue;
+            }
+            let Some(Ok(body)) = block.body.authored() else {
+                continue;
+            };
+            let body = body.trim();
+            if body.is_empty() {
+                continue;
+            }
+            if emitted {
+                out.push_str(block.join_before.as_str());
+            }
+            out.push_str(body);
+            emitted = true;
+        }
+
+        out
     }
 }
 

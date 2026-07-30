@@ -509,7 +509,13 @@ fn projects_dir_for(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
 /// Test: `session_id_exists_true_for_real_jsonl_file`,
 /// `session_id_exists_false_for_missing_id`,
 /// `session_id_exists_false_when_projects_dir_absent`.
-fn session_id_exists(cwd: &Path, config_dir: Option<&Path>, id: &str) -> bool {
+///
+/// `pub(crate)` (#4337): the daemon's `SessionStart` correlation
+/// (`daemon::api::session_start_correlation`) reuses this SAME staleness
+/// check to decide whether a managed session's already-stored
+/// `claude_session_id` may be replaced by a differently-reported one, so the
+/// two call sites can never disagree about what "stale" means.
+pub(crate) fn session_id_exists(cwd: &Path, config_dir: Option<&Path>, id: &str) -> bool {
     match projects_dir_for(config_dir) {
         Some(projects_dir) => session_id_exists_in(cwd, &projects_dir, id),
         None => false,

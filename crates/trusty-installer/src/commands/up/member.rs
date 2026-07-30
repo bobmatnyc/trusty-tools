@@ -1,10 +1,12 @@
 //! Per-member ensure: CHECK → act → VERIFY (DOC-12 §3 STAGE ensure).
 //!
 //! Why: Every always-on stage step follows the identical idempotent shape from
-//! DOC-12 §3.4: CHECK `<binary> health --json` → if healthy no-op; if down
+//! DOC-12 §3.4: CHECK the member's health → if healthy no-op; if down
 //! `<binary> start`; if missing auto-install (always-on only); then VERIFY with
-//! `<binary> health --json`. Centralising the shape keeps the stage code thin
-//! and lets the actual process execution be mocked for unit tests.
+//! a second health check. Centralising the shape keeps the stage code thin and
+//! lets the actual process execution be mocked for unit tests. (#4246: the CHECK
+//! is an HTTP `GET /health` via the one shared probe, not the `health --json`
+//! subprocess verb this doc used to name — no daemon implements that.)
 //!
 //! What: Defines the `Runner` trait (probe presence / health / start / install
 //! a member) so the orchestrator can run against the real OS or a test double,
@@ -43,7 +45,7 @@ pub enum MemberHealth {
 /// Abstraction over the OS actions `ensure_member` performs on a member binary.
 ///
 /// Why: The orchestrator shells out to each member's contract verbs
-/// (`health --json`, `start`) and to the installer. Hiding that behind a trait
+/// (health probe, `start`) and to the installer. Hiding that behind a trait
 /// makes the §3.4 control flow unit-testable without spawning real daemons.
 ///
 /// What: Three operations, each keyed by the member's `binary` / `id`:
@@ -52,10 +54,11 @@ pub enum MemberHealth {
 ///
 /// Test: `super::tests::ScriptedRunner` implements this for the matrix tests.
 pub trait Runner {
-    /// Probe the member's liveness via its `health --json` contract verb.
+    /// Probe the member's liveness.
     ///
     /// Why: This is both the CHECK (before acting) and the VERIFY (after acting)
-    /// step of §3.4.
+    /// step of §3.4. #4246: `SystemRunner` implements it over HTTP `/health` via
+    /// the one shared probe; the test doubles script it directly.
     /// What: Returns the `MemberHealth` verdict for `member`.
     /// Test: scripted in `super::tests`.
     fn probe(&self, member: &BootMember) -> MemberHealth;

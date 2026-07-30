@@ -35,22 +35,189 @@ fn optional_row(member: &str, health: &str) -> VerifyRow {
     }
 }
 
-/// Why: only a `down` LAUNCHD daemon is the #2498 failure signature.
-/// What: asserts the truth table across health x manage-strategy.
+/// A [`StableMember`] shaped like the launchd daemons #4246 is about.
+///
+/// Why: the two `verify_one_with` tests need a member whose strategy is
+/// `Launchd` (so the kickstart branch is reachable) and whose binary is
+/// resolvable but has no documented port or live daemon — see
+/// `test_support::PROBEABLE_BINARY` for why that combination is required.
+fn launchd_member(binary: &str) -> StableMember {
+    StableMember {
+        crate_name: binary.to_owned(),
+        binary: binary.to_owned(),
+        daemon: true,
+        manage: ManageStrategy::Launchd,
+        required: true,
+    }
+}
+
+/// Recording [`Kickstarter`] fake (#4246) — the seam that makes "did this
+/// restart a healthy daemon?" an assertable question. Never touches `launchctl`.
+#[derive(Default)]
+struct FakeKickstarter {
+    calls: std::cell::RefCell<Vec<String>>,
+}
+
+impl Kickstarter for FakeKickstarter {
+    fn kickstart(&self, binary: &str) -> bool {
+        self.calls.borrow_mut().push(binary.to_owned());
+        true
+    }
+}
+
+/// Why: only a CONFIRMED-down LAUNCHD daemon is the #2498 failure signature.
+/// #4246 changed the input from a hand-typed string to a typed `ProbeOutcome`
+/// and the condition to `is_confirmed_down` — a transport-level observation.
+/// What: asserts the truth table across outcome x manage-strategy, including the
+/// mirror property that a genuinely-refusing daemon IS still repaired.
 /// Test: This is the test.
 #[test]
-fn needs_kickstart_only_for_down_launchd() {
-    assert!(needs_kickstart(health_str::DOWN, ManageStrategy::Launchd));
+fn needs_kickstart_only_for_confirmed_down_launchd() {
+    for confirmed in [ProbeOutcome::Refused, ProbeOutcome::Timeout] {
+        assert!(
+            needs_kickstart(&confirmed, ManageStrategy::Launchd),
+            "{confirmed:?} on a launchd member must still be repaired"
+        );
+        assert!(!needs_kickstart(&confirmed, ManageStrategy::OwnVerb));
+        assert!(!needs_kickstart(&confirmed, ManageStrategy::None));
+    }
+
+    let serving = ProbeOutcome::Serving {
+        status: "ok".to_owned(),
+        version: None,
+    };
+    assert!(!needs_kickstart(&serving, ManageStrategy::Launchd));
     assert!(!needs_kickstart(
-        health_str::HEALTHY,
+        &ProbeOutcome::NotInstalled,
         ManageStrategy::Launchd
     ));
     assert!(!needs_kickstart(
-        health_str::NOT_INSTALLED,
+        &ProbeOutcome::Unprobeable,
         ManageStrategy::Launchd
     ));
-    assert!(!needs_kickstart(health_str::DOWN, ManageStrategy::OwnVerb));
-    assert!(!needs_kickstart(health_str::DOWN, ManageStrategy::None));
+}
+
+/// Why: THE #4246 gate. A schema mismatch, an unusable response, a squatter on a
+/// documented port, or a local probe failure all mean *something* answered (or
+/// that we never looked) — restarting on any of them is a guess, and
+/// `kickstart -k` costs trusty-search's unflushed HNSW vectors. Before the fix
+/// every one of these was literally the string `"down"` and fired the restart.
+/// What: asserts each non-transport outcome is refused a kickstart even on a
+/// `Launchd` member — the strategy that CAN be kickstarted.
+/// Test: This is the test.
+#[test]
+fn needs_kickstart_never_fires_on_a_schema_problem() {
+    for benign in [
+        ProbeOutcome::BadEnvelope {
+            got: r#"{"daemon":"running"}"#.to_owned(),
+        },
+        ProbeOutcome::HttpError { status: 500 },
+        ProbeOutcome::NoAddress,
+        ProbeOutcome::ProbeFailed {
+            detail: "no runtime".to_owned(),
+        },
+        ProbeOutcome::Serving {
+            status: "degraded".to_owned(),
+            version: None,
+        },
+    ] {
+        assert!(
+            !needs_kickstart(&benign, ManageStrategy::Launchd),
+            "{benign:?} must never authorise `launchctl kickstart -k`"
+        );
+    }
+}
+
+/// Why: **THE regression test for #4246's actual harm.** Every `tctl install`
+/// hard-restarted a fully healthy stack, because `probe_member_health` shelled
+/// out to a `health --json` verb no daemon implements, read the failure as
+/// `down`, and `verify_one` kickstarted on it. The pre-existing
+/// `needs_kickstart_only_for_down_launchd` passed the whole time, because it fed
+/// the predicate a hand-typed `"down"` — the predicate was never wrong; the probe
+/// manufactured its input. Only a test that runs the REAL probe against a stubbed
+/// healthy daemon and then asserts the restart decision closes that loop.
+///
+/// What: plants a real `http_addr` pointing at a stub answering
+/// `200 {"status":"ok"}`, runs `verify_one_with` for a `Launchd` member with the
+/// full poll budget, and asserts ZERO kickstart calls — plus a `healthy` row with
+/// no down-state diagnosis and no bootstrap fallback, so no `launchctl` was
+/// touched at all.
+/// Test: This is the test.
+#[test]
+fn verify_one_does_not_kickstart_a_healthy_launchd_daemon() {
+    use crate::commands::test_support as ts;
+    let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let addr = ts::stub_seq_blocking(vec![(
+        "HTTP/1.1 200 OK",
+        r#"{"status":"ok","version":"0.39.0"}"#,
+    )]);
+    let dir = ts::stub_data_dir(ts::PROBEABLE_BINARY, &addr);
+
+    let kicks = FakeKickstarter::default();
+    let row = verify_one_with(
+        &launchd_member(ts::PROBEABLE_BINARY),
+        AGGREGATE_POLL_BUDGET,
+        &kicks,
+    );
+    ts::clear_data_dir_override(&dir);
+
+    assert!(
+        kicks.calls.borrow().is_empty(),
+        "a healthy daemon must NEVER be kickstarted — got {:?}",
+        kicks.calls.borrow()
+    );
+    assert_eq!(row.health, health_str::HEALTHY);
+    assert!(!row.kickstarted);
+    assert_eq!(row.down_state, None, "a healthy member needs no diagnosis");
+    assert!(!row.verify_bootstrapped);
+    assert!(!row.budget_exhausted);
+}
+
+/// Why: the mirror of the test above, so the fix cannot degenerate into "never
+/// repair anything" — the #2498 failure signature (`launchctl bootstrap`
+/// succeeded, `RunAtLoad` never fired) must STILL be repaired. This is the
+/// regression that a naive "gate on confirmed-down without changing the
+/// transport" would have shipped: an outage that persists.
+///
+/// What: plants an `http_addr` pointing at a released ephemeral port (so the
+/// probe genuinely observes `Refused`), and asserts exactly one kickstart for
+/// this member. `remaining_budget` is 1s deliberately: `bounded_attempts(1s)` is
+/// 1, so the post-kickstart poll takes exactly one more probe and ZERO
+/// `POLL_INTERVAL` sleeps, keeping the test fast. The trailing `NotLoaded`
+/// diagnosis comes from a read-only `launchctl list` against a label that exists
+/// nowhere, and the #3841 fallback is a no-op because no plist is present — so
+/// nothing here bootstraps or restarts a real service.
+/// Test: This is the test.
+#[test]
+fn verify_one_kickstarts_a_genuinely_down_launchd_daemon() {
+    use crate::commands::test_support as ts;
+    let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = ts::stub_data_dir(ts::PROBEABLE_BINARY, &ts::dead_addr());
+
+    let kicks = FakeKickstarter::default();
+    let row = verify_one_with(
+        &launchd_member(ts::PROBEABLE_BINARY),
+        Duration::from_secs(1),
+        &kicks,
+    );
+    ts::clear_data_dir_override(&dir);
+
+    assert_eq!(
+        kicks.calls.borrow().as_slice(),
+        [ts::PROBEABLE_BINARY.to_owned()],
+        "a genuinely refusing daemon must still get its one #2498 kickstart"
+    );
+    assert!(row.kickstarted);
+    assert_eq!(row.health, health_str::DOWN);
+    assert_eq!(
+        row.down_state,
+        Some(DownState::NotLoaded),
+        "an unloaded label diagnoses as NotLoaded on every platform"
+    );
+    assert!(
+        !row.verify_bootstrapped,
+        "with no plist on disk the #3841 fallback must not run"
+    );
 }
 
 /// Why: the JSON envelope is a contract; pin its shape.

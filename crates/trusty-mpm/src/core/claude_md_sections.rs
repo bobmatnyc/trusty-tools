@@ -571,14 +571,21 @@ pub enum Rejection {
 
 /// Apply one override to a package, or say why it may not be applied.
 ///
-/// What: replaces the section's FIRST [`BlockBody::Text`] block with the
-/// override body and drops that section's remaining text blocks, leaving every
-/// [`BlockBody::Generated`] block untouched. That asymmetry is the point: a
-/// generated block is host-computed content the project cannot author, so an
-/// `AGENT-DELEGATION` override rewrites the routing doctrine but CANNOT suppress
-/// the live agent roster (#4196 in override form).
+/// What: replaces the section's FIRST *authored* block — [`BlockBody::Text`] or,
+/// since schema v2, [`BlockBody::File`] — with the override body and drops that
+/// section's remaining authored blocks, leaving every [`BlockBody::Generated`]
+/// block untouched. That asymmetry is the point: a generated block is
+/// host-computed content the project cannot author, so an `AGENT-DELEGATION`
+/// override rewrites the routing doctrine but CANNOT suppress the live agent
+/// roster (#4196 in override form).
+///
+/// Matching on "authored" rather than on `Text` alone is load-bearing after
+/// #4318: every bundled section is now a `file` body, so a `Text`-only match would
+/// have made every section silently non-overridable — `NoTextBlock` for the whole
+/// taxonomy, an advertised-but-unread override, issue #381 verbatim.
 /// Test: `agent_delegation_override_keeps_the_generated_roster`,
-/// `floor_sections_refuse_every_named_section_override`.
+/// `floor_sections_refuse_every_named_section_override`,
+/// `content_sections_accept_a_project_override`.
 fn apply_one(
     package: &InstructionPackage,
     over: &SectionOverride,
@@ -601,16 +608,15 @@ fn apply_one(
     let mut next = package.clone();
     let mut replaced = false;
     next.blocks.retain_mut(|block| {
-        if block.section != section {
+        if block.section != section || block.body.authored().is_none() {
             return true;
         }
-        let BlockBody::Text { text } = &mut block.body else {
-            return true;
-        };
         if replaced {
             return false;
         }
-        *text = body.to_string();
+        block.body = BlockBody::Text {
+            text: body.to_string(),
+        };
         replaced = true;
         true
     });

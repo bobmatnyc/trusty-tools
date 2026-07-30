@@ -6,8 +6,9 @@
 //!
 //! What: For each stable-set member, reports the installed version (via
 //! `<binary> --version`) and — for daemons — a coarse health verdict (via the
-//! shared `probe::probe_member_health`, strategy-aware so process-managed
-//! members like trusty-mpm report `unknown` rather than a false `down`).
+//! shared `probe::probe_member_health` — an HTTP `GET /health` probe since
+//! #4246, strategy-aware so process-managed members like trusty-mpm report
+//! `unknown` rather than a false `down`).
 //! Renders a human table or a `--json` envelope. Returns exit 0 when every
 //! daemon is healthy (or absent/unknown-but-reported), 2 when a daemon is down.
 //!
@@ -106,7 +107,13 @@ pub fn run(json: bool) -> i32 {
     for m in stable_set() {
         let installed = installed_version(&m.binary);
         let (health, daemon) = if m.daemon {
-            (probe_member_health(&m.binary, m.manage), true)
+            // #4246: the probe is now typed; `status` renders only the flat word.
+            (
+                probe_member_health(&m.binary, m.manage)
+                    .health_string()
+                    .to_owned(),
+                true,
+            )
         } else {
             (
                 if installed.is_some() {

@@ -26,7 +26,7 @@
 use std::path::Path;
 
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_SEPARATOR, WORKFLOW, base_pm, pm_instructions,
+    AGENT_DELEGATION, SECTION_SEPARATOR, base_pm, pm_instructions,
 };
 
 /// Directory under the project root that holds the override files.
@@ -344,7 +344,12 @@ pub(crate) fn resolve_pm_prompt_with_roster(
         }
     };
 
-    let workflow = workflow_override.unwrap_or_else(|| WORKFLOW.trim().to_string());
+    // The bundled workflow comes from the manifest, not the raw section constant:
+    // the manifest appends the opportunistic-fix rule as its own block, and a
+    // project that overrides nothing must receive the identical bytes here and on
+    // the packaged path (#4318).
+    let workflow = workflow_override
+        .unwrap_or_else(|| crate::core::instruction_pipeline::workflow_section().to_string());
 
     crate::core::claude_md_sections::warn_unapplied(&named);
     (
@@ -393,9 +398,10 @@ pub(crate) fn assemble_sections(
     join_sections(sections)
 }
 
-/// Note slotted between the bundled doctrine and the live roster.
+/// The DEFAULT delegation section: bundled routing doctrine + the live roster.
 ///
-/// Why: it resolves two ambiguities the append creates, both raised in review.
+/// THE ROSTER-PRECEDENCE NOTE, slotted between the doctrine and the roster,
+/// resolves two ambiguities the append creates, both raised in review.
 ///
 /// (1) PRECEDENCE. The retained asset contradicts the roster on concrete points
 /// — it calls the generic `ops` agent DEPRECATED while the roster lists `ops`,
@@ -415,21 +421,14 @@ pub(crate) fn assemble_sections(
 /// instruction is the shape that cannot silently under-advertise; a failed
 /// dispatch is self-correcting, a missing agent is not.
 ///
-/// What: a Markdown blockquote stating the roster wins on WHICH agents exist,
-/// and to re-route rather than retry on an unknown-agent-type error.
-///
-/// `pub(crate)` since #4183: [`crate::core::bundled_pm_package`] emits it as its
-/// own delegation-section block, so both composers use the identical literal.
-/// Test: `bundled_delegation_appends_deployed_roster`.
-pub(crate) const ROSTER_PRECEDENCE_NOTE: &str = "\
-> The live roster below is authoritative for WHICH agents exist and what each handles; the \
-tables above are routing doctrine only. Where the two disagree, trust the roster.\n\
->\n\
-> Depending on how this session was launched, a listed agent may not be loadable. If a \
-dispatch fails with an unknown agent type, re-route to the closest listed alternative — do \
-not retry the same agent.";
-
-/// The DEFAULT delegation section: bundled routing doctrine + the live roster.
+/// The note is a Markdown blockquote stating the roster wins on WHICH agents
+/// exist, and to re-route rather than retry on an unknown-agent-type error. Since
+/// #4318 its prose is authored in the instruction manifest
+/// (`assets/instructions/pm-instruction-package.json`) as the delegation section's
+/// second block, not as a Rust literal — so its position relative to the doctrine
+/// and the roster is *declared*, and both composers read the same bytes without a
+/// second copy. [`crate::core::instruction_pipeline::delegation_doctrine`]
+/// projects doctrine-plus-note back out as one string.
 ///
 /// Why (#4069): the delegation section is meant to be constructed from what is
 /// actually deployed, and `build_instructions` does compute that roster via
@@ -447,20 +446,24 @@ not retry the same agent.";
 /// This is the FALLBACK only: a project/user `AGENT_DELEGATION.md` override
 /// still replaces the whole section, unchanged, exactly as documented.
 ///
-/// What: returns the trimmed bundled asset, with the rendered
-/// `## Delegation Authority` block from
+/// What: returns the manifest's delegation doctrine (asset plus the precedence
+/// note) with the rendered `## Delegation Authority` block from
 /// [`crate::core::delegation_authority::deployed_roster_section`] appended when
-/// any agent is deployed. With no deployed agents the asset is returned alone
-/// (pre-#4069 behaviour). Takes the already-rendered roster rather than scanning
-/// itself (#4183) so `resolve_pm_prompt` scans the agent tiers exactly once
-/// whichever composition path it takes.
+/// any agent is deployed. With no deployed agents the asset is returned alone,
+/// without the note — the note only makes sense above a roster (pre-#4069
+/// behaviour). Takes the already-rendered roster rather than scanning itself
+/// (#4183) so `resolve_pm_prompt` scans the agent tiers exactly once whichever
+/// composition path it takes.
 /// Test: `bundled_delegation_appends_deployed_roster`,
 /// `no_overrides_uses_bundled`, `agent_delegation_override_replaces`.
 pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
-    let bundled = AGENT_DELEGATION.trim();
     match roster {
-        Some(roster) => format!("{bundled}\n\n{ROSTER_PRECEDENCE_NOTE}\n\n{}", roster.trim()),
-        None => bundled.to_string(),
+        Some(roster) => format!(
+            "{}\n\n{}",
+            crate::core::instruction_pipeline::delegation_doctrine(),
+            roster.trim()
+        ),
+        None => AGENT_DELEGATION.trim().to_string(),
     }
 }
 

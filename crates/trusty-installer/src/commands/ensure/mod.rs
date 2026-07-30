@@ -34,15 +34,17 @@ pub mod report;
 
 /// Process-wide lock serialising tests that mutate global env vars.
 ///
-/// Why: several ensure submodule tests set/remove `TRUSTY_DATA_DIR_OVERRIDE`,
-/// `TCTL_ENSURE_WAIT_*`, etc. Those are process-global, so tests in different
-/// modules would race each other. A single crate-shared lock — held for the
-/// duration of each env-mutating test across every ensure submodule — serialises
-/// them so the assertions are deterministic.
-/// What: a `Mutex<()>` accessible to every ensure submodule's test code.
+/// Why: this used to be defined here, because `ensure`'s submodules were the
+/// only env-mutating tests in the crate. #4246 gave `probe_http` and
+/// `verify_tail` the same need, so the lock (and the stub-server helpers that go
+/// with it) moved to `commands::test_support`. Re-exported under the original
+/// path so the existing `use crate::commands::ensure::ENV_TEST_LOCK` imports in
+/// `daemon`, `project_setup` and `readiness` keep working — there is still
+/// exactly ONE lock in the process, which is the whole point.
+/// What: a re-export of [`crate::commands::test_support::ENV_TEST_LOCK`].
 /// Test: used by the env-mutating tests in `daemon`, `project_setup`, `readiness`.
 #[cfg(test)]
-pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use crate::commands::test_support::ENV_TEST_LOCK;
 
 use crate::commands::runtime::block_on;
 use mcp_patch::MCP_FILE;

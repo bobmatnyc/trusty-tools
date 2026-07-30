@@ -28,6 +28,8 @@ pub mod plist_label;
 pub mod port;
 pub mod prereqs;
 pub mod probe;
+// #4246: the HTTP `/health` transport behind every health verdict.
+pub mod probe_http;
 pub mod progress_ui;
 pub mod runtime;
 pub mod self_update;
@@ -37,6 +39,9 @@ pub mod sign;
 pub mod stable_set;
 pub mod stack;
 pub mod status;
+// #4246: stub servers + stubbed data dir shared by the probe/verify tests.
+#[cfg(test)]
+pub mod test_support;
 pub mod tmux_gap;
 pub mod ui;
 pub mod up;

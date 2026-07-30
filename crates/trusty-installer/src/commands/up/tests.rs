@@ -450,8 +450,31 @@ fn classify_status_maps_known_values() {
     assert_eq!(classify_status("healthy"), MemberHealth::HealthyVersionOk);
     assert_eq!(classify_status("OK"), MemberHealth::HealthyVersionOk);
     assert_eq!(classify_status("stale"), MemberHealth::HealthyStale);
+    assert_eq!(classify_status("degraded"), MemberHealth::HealthyStale);
     assert_eq!(classify_status("down"), MemberHealth::Down);
-    assert_eq!(classify_status("anything-else"), MemberHealth::Down);
+    // #4246: an unrecognised word is a DISPLAY `down` only — it can no longer
+    // authorise a kickstart (see `ProbeOutcome::is_confirmed_down`). The token
+    // here is deliberately gibberish; it used to be "anything-else", which
+    // silently asserted that spec words like "running" were down too.
+    assert_eq!(classify_status("zzz-not-a-status-word"), MemberHealth::Down);
+}
+
+/// Why (#4246): the pre-fix vocabulary omitted `running`/`serving`, so a daemon
+/// reporting DOC-1 D4's literal status vocabulary read as `down` — a false
+/// negative built into the classifier, which the old
+/// `classify_status("anything-else") == Down` assertion defended.
+/// What: asserts every word the spec + the six shipped daemons actually use
+/// classifies as serving, case-insensitively.
+/// Test: This is the test.
+#[test]
+fn classify_status_accepts_spec_vocabulary() {
+    for word in ["ok", "OK", "healthy", "ready", "running", "Serving"] {
+        assert_eq!(
+            classify_status(word),
+            MemberHealth::HealthyVersionOk,
+            "`{word}` must classify as serving, not down"
+        );
+    }
 }
 
 // ── §6 claude-code flow ─────────────────────────────────────────────────────────

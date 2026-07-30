@@ -144,6 +144,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The bundled PM instruction package is now an **authored JSON manifest**, not a
+  Rust literal
+  ([#4318](https://github.com/bobmatnyc/trusty-tools/issues/4318), part of
+  [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)). Sections,
+  customization tiers, block order, joins, the declared generators, and the
+  roster-precedence note all live in
+  `assets/instructions/pm-instruction-package.json`;
+  `bundled_pm_package::bundled_fallback_package()` parses that file instead of
+  constructing an `InstructionPackage` in code, so there is no second place a
+  join or a block order can be edited. `InstructionPackage::from_json` had zero
+  non-test call sites before this and the shipped JSON Schema had no instance
+  under it — both are now live.
+
+  **Instruction-package schema v2**: adds a `{"kind":"file","path":"…"}` body
+  variant alongside `text` and `generated`. Prose keeps living in reviewable
+  markdown under `sections/`; the manifest references it by path and resolves it
+  through a compile-time `include_str!` table
+  (`instruction_pipeline::SECTION_SOURCES`), so the build stays hermetic, a
+  renamed section is a compile error, and `check_instruction_floor.sh` keeps
+  grepping real files. Inlining the prose instead would have turned `core.md`
+  into one 23 KB JSON line. The version bump is required by the format's own
+  evolution policy: a v1 build reading a v2 manifest rejects it loudly rather
+  than composing a prompt missing the new field's effect.
+
+  The mechanism half is byte-identical — all three composed-prompt goldens passed
+  unchanged before the content below was added.
+
+- PM instructions: three owner language rules, authored as inline `text` blocks
+  in the manifest rather than in markdown (owner order, 2026-07-29 — the 1.3
+  rules belong in JSON). Same family as the plain-prose rule from
+  [#4316](https://github.com/bobmatnyc/trusty-tools/pull/4316).
+
+  | rule | section | substance |
+  |---|---|---|
+  | Clickable References | `core` | issue/PR/ticket/commit references always render as clickable markdown links, never bare numbers |
+  | Banned Word — "honest" | `core` | "honest" and every variation is banned from PM responses, delegation briefs and review instructions; a report states facts, and labelling them honest implies the alternative was considered |
+  | Opportunistic Fixes | `workflow` | an easy fix found while working on a file is noted on the CURRENT issue and made in the same work — never a new issue; new issues are for genuinely separable schedulable work |
+
+  Delivered to every launch path, not just the packaged composer:
+  `pm_instructions()`, `base_pm()`, the new `workflow_section()` and
+  `delegation_doctrine()` now project the manifest through
+  `InstructionPackage::authored_run` instead of rebuilding from the section
+  constants, so the legacy `.trusty-mpm/` override assembly and the roster-free
+  `assemble_system_prompt()` (what `tm install` writes and `tm launch` passes to
+  `--append-system-prompt-file`) carry the same rules. Rebuilding from the
+  constants would have delivered a manifest-authored rule to one composer and
+  silently withheld it from the others. `core` and `workflow` remain
+  `customization_tier: project`, so a `CLAUDE.md` named-section override still
+  replaces them wholesale — visible in the regenerated
+  `pm-prompt-claude-md-override.md`, which correctly does NOT carry the workflow
+  rule.
+
+- PM instructions (`assets/instructions/sections/core.md`, § Response Format):
+  new **Prose Style — Write Plainly** subsection. Lead with the point; short
+  sentences; no throat-clearing openers, no closing aphorisms, no
+  meta-commentary about the PM's own reasoning; plain words over inflated ones;
+  tables and bullets for status. Scoped to prose only — failures, corrections,
+  and bad news are still reported directly and in full, so the rule shortens
+  the wording and never the disclosure. Ships to every PM session via the
+  bundled instruction package; `core` is `customization_tier: project`, so a
+  project may still override it. Composed-prompt goldens regenerated.
 - `tm ls` STATE column: a row the daemon did not probe now renders
   `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
   never be misread as "assets fresh"
@@ -151,7 +212,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   new additive wire field, `SessionSummary::stale_assets_unchecked`, whose
   `false` default keeps an older daemon's (authoritative) verdicts rendering
   exactly as before.
-
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
   set is now documented as DELIBERATELY unfiltered by session state, and pinned
   by a new regression test `prune_spares_a_stopped_records_workspace`
@@ -308,6 +368,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- A subagent's `SessionStart` hook can no longer overwrite a managed session's
+  `claude_session_id` with its OWN Claude session UUID, and a legitimately
+  diverged id can no longer stay wrong forever
+  ([#4337](https://github.com/bobmatnyc/trusty-tools/issues/4337)). A subagent
+  sharing the PM's cwd is its own top-level Claude Code process and fires its
+  own `SessionStart`, which `correlate_session_start` matched to the PM's sole
+  Active managed session by cwd alone and blindly overwrote — so the next
+  in-place `--resume` would resume the subagent's transcript instead of the
+  PM's conversation. `correlate_session_start` (moved to the new
+  `daemon::api::session_start_correlation` module to stay under `api.rs`'s
+  frozen SLOC budget) now trusts only the FIRST correlation for a record; a
+  later `SessionStart` reporting a DIFFERENT id for the same cwd is accepted
+  only when the stored id's transcript no longer resolves to a live session
+  (`runtime::session_id_exists`, the same staleness check `spawn_resume`
+  already trusts) — otherwise refused and logged — while re-reporting the
+  SAME id (a legitimate `--resume` relaunch) remains a no-op success. The
+  common divergence case is handled even earlier: `SessionEnd` now clears the
+  field via the new exact-match-guarded `SessionManager::clear_claude_session_id_if`
+  (so a later, unrelated `SessionStart` is never compared against a dead id),
+  and `SessionManager::mark_reactivated` clears it outright, since a
+  reactivation always precedes a fresh top-level relaunch into that pane.
 - Daemon boot reconciliation no longer resurrects soft-deleted sessions.
   `reconcile_on_boot` hand-rolled a
   `matches!(record.state, ManagedSessionState::Decommissioned)` check instead

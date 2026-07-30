@@ -415,9 +415,9 @@ fn over(section: SectionId, body: &str) -> SectionOverride {
 fn with_overrides_of_nothing_is_the_identity() {
     // The property the two existing goldens rest on: a project with no
     // `CLAUDE.md` composes exactly the package it always did.
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     let (result, rejected) = package.with_overrides(&[]);
-    assert_eq!(result, package);
+    assert_eq!(&result, package);
     assert_eq!(rejected, vec![]);
 }
 
@@ -426,14 +426,14 @@ fn floor_sections_refuse_every_named_section_override() {
     // The structural guarantee: the package's `customization_tier` is the only
     // authority, and it says `fixed` for all three floor sections. No list in
     // the reader is consulted, so none can drift out of sync with this.
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     for section in [
         SectionId::Identity,
         SectionId::NonOverridableRules,
         SectionId::FrameworkGuaranteedConventions,
     ] {
         let (result, rejected) = package.with_overrides(&[over(section, "SUBVERTED")]);
-        assert_eq!(result, package, "{section:?} must be untouched");
+        assert_eq!(&result, package, "{section:?} must be untouched");
         assert_eq!(
             rejected,
             vec![Rejection::NotOverridable {
@@ -446,7 +446,7 @@ fn floor_sections_refuse_every_named_section_override() {
 
 #[test]
 fn content_sections_accept_a_project_override() {
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     for section in [
         SectionId::Core,
         SectionId::Memory,
@@ -456,20 +456,31 @@ fn content_sections_accept_a_project_override() {
     ] {
         let (result, rejected) = package.with_overrides(&[over(section, "REPLACED_BODY")]);
         assert_eq!(rejected, vec![], "{section:?} is tier project");
-        assert_ne!(result, package, "{section:?} must actually change");
+        assert_ne!(&result, package, "{section:?} must actually change");
+        // Every bundled section is a schema-v2 `file` body, so this also pins the
+        // property #4318 could have silently broken: an override must replace an
+        // authored block whether that block is inline `text` or a `file`
+        // reference, and must collapse the section to exactly one authored block.
         let texts: Vec<&str> = result
             .blocks
             .iter()
             .filter(|b| b.section == section)
             .filter_map(|b| match &b.body {
                 BlockBody::Text { text } => Some(text.as_str()),
-                BlockBody::Generated { .. } => None,
+                BlockBody::File { .. } | BlockBody::Generated { .. } => None,
             })
             .collect();
         assert_eq!(
             texts,
             vec!["REPLACED_BODY"],
-            "{section:?} keeps exactly one text block"
+            "{section:?} keeps exactly one authored block, rewritten as inline text"
+        );
+        assert!(
+            !result
+                .blocks
+                .iter()
+                .any(|b| b.section == section && matches!(b.body, BlockBody::File { .. })),
+            "{section:?} must not keep a file body alongside the override"
         );
         result.validate().expect("overridden package validates");
     }
@@ -479,7 +490,7 @@ fn content_sections_accept_a_project_override() {
 fn agent_delegation_override_keeps_the_generated_roster() {
     // The #4196 shape in override form: a project must be able to rewrite the
     // routing doctrine WITHOUT being able to suppress the live agent roster.
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     let (result, rejected) = package.with_overrides(&[over(
         SectionId::AgentDelegation,
         "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER",
@@ -499,7 +510,7 @@ fn agent_delegation_override_keeps_the_generated_roster() {
 
 #[test]
 fn one_bad_override_does_not_discard_a_good_one() {
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     let (result, rejected) = package.with_overrides(&[
         over(SectionId::Identity, "SUBVERTED"),
         over(SectionId::Workflow, "CUSTOM_WORKFLOW"),
@@ -522,7 +533,7 @@ fn one_bad_override_does_not_discard_a_good_one() {
 
 #[test]
 fn application_order_is_canonical_not_authoring_order() {
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     let forwards = package.with_overrides(&[
         over(SectionId::Core, "C"),
         over(SectionId::Workflow, "W"),
@@ -540,9 +551,9 @@ fn application_order_is_canonical_not_authoring_order() {
 fn an_empty_override_body_is_rejected_by_the_applier_too() {
     // Belt to the scanner's braces: even if an empty body reached this far it
     // would keep the bundled section rather than blank it.
-    let package = bundled_fallback_package();
+    let package = bundled_fallback_package().expect("manifest parses");
     let (result, rejected) = package.with_overrides(&[over(SectionId::Workflow, "  \n ")]);
-    assert_eq!(result, package);
+    assert_eq!(&result, package);
     assert_eq!(
         rejected,
         vec![Rejection::EmptyBody {
@@ -556,7 +567,7 @@ fn a_section_with_no_text_block_has_nothing_to_override() {
     // Contrived package: Workflow's only block is generated, so there is no
     // authored text for an override to replace. Rejected rather than injected
     // at some arbitrary position.
-    let mut package = bundled_fallback_package();
+    let mut package = bundled_fallback_package().expect("manifest parses").clone();
     for b in &mut package.blocks {
         if b.section == SectionId::Workflow {
             b.body = BlockBody::Generated {
@@ -579,7 +590,7 @@ fn an_override_that_would_leave_a_section_silent_is_rejected() {
     // Contrived package: Workflow's only text block is `optional`, so applying
     // the override would produce a section that composes to nothing whenever it
     // is dropped. Rejected — the bundled section is kept instead.
-    let mut package = bundled_fallback_package();
+    let mut package = bundled_fallback_package().expect("manifest parses").clone();
     for b in &mut package.blocks {
         if b.section == SectionId::Workflow {
             b.optional = true;
@@ -600,7 +611,7 @@ fn an_undeclared_section_is_rejected_and_the_package_is_reverted() {
     // Contrived package whose taxonomy is missing Workflow: the override has
     // nowhere declared to land, and the final validation then refuses the whole
     // thing — degrading to the package as supplied, never to a broken one.
-    let mut package = bundled_fallback_package();
+    let mut package = bundled_fallback_package().expect("manifest parses").clone();
     package.sections.retain(|s| s.id != SectionId::Workflow);
 
     let (result, rejected) = package.with_overrides(&[over(SectionId::Workflow, "X")]);
@@ -626,7 +637,7 @@ fn an_override_that_cannot_validate_is_discarded_and_the_package_reverts() {
     // diagnosis, the final validation then refuses the whole, and the package as
     // supplied comes back. Applying an override must never make things worse
     // than not applying it.
-    let mut package = bundled_fallback_package();
+    let mut package = bundled_fallback_package().expect("manifest parses").clone();
     package.blocks.push(InstructionBlock {
         section: SectionId::Memory,
         body: BlockBody::Text {

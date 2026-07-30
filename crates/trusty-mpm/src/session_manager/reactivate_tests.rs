@@ -73,6 +73,49 @@ async fn mark_reactivated_flips_stopped_to_active() {
     assert_eq!(after.state, ManagedSessionState::Active);
 }
 
+/// `mark_reactivated` must clear a lingering `claude_session_id` (#4337).
+///
+/// Why: a reactivation always precedes the client `exec`-ing a fresh `claude`
+/// back into this SAME pane, so the id captured before the pane went idle is
+/// guaranteed to belong to a conversation that already ended. Leaving it in
+/// place would let the daemon's `SessionStart` correlation compare the
+/// pane's brand-new top-level session against a dead id under the (narrower)
+/// stale-transcript re-sync gate instead of taking the plain "no existing
+/// id" path.
+/// What: creates a session, stops it, sets `claude_session_id`, reactivates,
+/// and asserts the reloaded record's id is `None`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn mark_reactivated_clears_stale_claude_session_id() {
+    let dir = TempDir::new().unwrap();
+    let workspace_dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(workspace_dir.path().to_owned()),
+            None,
+            Some(workspace_dir.path().to_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_claude_session_id(&record.id, "uuid-pre-reactivate")
+        .await
+        .expect("set_claude_session_id");
+    mgr.stop(&record.id).await.expect("stop");
+
+    mgr.mark_reactivated(&record.id).await.expect("reactivate");
+
+    let after = mgr.get(&record.id).await.unwrap();
+    assert_eq!(
+        after.claude_session_id, None,
+        "mark_reactivated must clear claude_session_id (#4337)"
+    );
+}
+
 /// `mark_reactivated` must also flip a `Decommissioned` record back to `Active`
 /// IN PLACE, with no tmux mutation (#2777).
 ///
