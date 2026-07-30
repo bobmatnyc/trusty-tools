@@ -538,6 +538,87 @@ from nothing.
 
 **Clone-and-boot is the clean-VM strategy. Suspend/resume is off the table.**
 
+### J. Unwedge procedure for a stuck-`suspended` VM — **verified, reproducible fix**
+
+A follow-up cleanup pass found `probe-h` still wedged from the resume failures above
+(`tart run` kept re-attempting the restore and kept failing, exactly as predicted in I).
+Before touching `probe-h` itself, the fix was proven end-to-end on a disposable clone
+(`cleanup-unwedge-test`, cloned from `tahoe-base`, deleted immediately after) so the
+procedure below is empirically confirmed, not guessed:
+
+```
+$ tart clone tahoe-base cleanup-unwedge-test          # 0.x s, CoW clone
+$ tart run --no-graphics cleanup-unwedge-test &       # cold boot
+$ tart ip cleanup-unwedge-test                        # 192.168.64.10 — confirmed running
+
+$ tart suspend cleanup-unwedge-test
+rc=0 → state settles to `suspended` once the `tart run` process exits (~3 s)
+
+$ tart run --no-graphics cleanup-unwedge-test         # attempt 1: resume
+restoring VM state from a snapshot...
+Error Domain=VZErrorDomain Code=12 "The virtual machine failed to restore with error
+“invalid argument”."
+rc=1 — state stays `suspended`
+
+$ tart run --no-graphics cleanup-unwedge-test         # attempt 2: resume, same result
+restoring VM state from a snapshot...
+Error Domain=VZErrorDomain Code=12 "...invalid argument..."
+rc=1 — confirms the wedge is reproducible and does not clear on retry
+```
+
+Root cause of the wedge: `tart`'s VM directory
+(`~/.tart/vms/<name>/`) contains a `state.vzvmsave` snapshot file once suspended, and
+`tart list` derives the `suspended` state purely from that file's presence. As long as
+it's there, `tart run` unconditionally tries to restore from it — and the restore is
+what's broken (VZError 12), so every retry fails the same way. There is no CLI flag to
+force a cold boot over a restore.
+
+**The fix — move the snapshot file out of the way so `tart run` has nothing to restore
+from:**
+
+```
+$ mv ~/.tart/vms/cleanup-unwedge-test/state.vzvmsave \
+     ~/.tart/vms/cleanup-unwedge-test/state.vzvmsave.bak
+
+$ tart list | grep cleanup-unwedge-test
+local  cleanup-unwedge-test   50  31  in 0 seconds  stopped   # state flips to `stopped` immediately, just from the rename
+
+$ tart run --no-graphics cleanup-unwedge-test &       # retry — this time cold boots
+$ tart ip cleanup-unwedge-test
+192.168.64.10                                          # running and pingable within ~20 s
+
+$ tart stop cleanup-unwedge-test && tart delete cleanup-unwedge-test   # throwaway cleaned up immediately
+```
+
+Confirmed: `ping -c 2 192.168.64.10` succeeded (0% loss) after the fix, so this is a
+real cold boot, not a stale `running` label.
+
+**Unwedge procedure (general form):**
+
+```
+mv ~/.tart/vms/<name>/state.vzvmsave ~/.tart/vms/<name>/state.vzvmsave.bak
+tart run --no-graphics <name>
+```
+
+This is destructive to the suspended-state snapshot (the guest loses whatever
+in-memory state it had at suspend time and comes back via a fresh cold boot of the
+same disk), which is fine given I already established suspend/resume is not a viable
+strategy — the goal here is just to get the VM back to a usable `stopped`/`running`
+state, not to preserve the snapshot.
+
+`probe-h` itself was independently found already recovered by the time this pass
+started: its directory already contained `state.vzvmsave.bak` (not `state.vzvmsave`)
+and its `tart run --no-graphics probe-h` process (PID 40976, launched 7:02PM) was live,
+with `tart ip probe-h` → `192.168.64.7` and `ping` succeeding. This matches the fix
+above exactly, so a prior session evidently applied it but stopped before committing
+its notes — this section is that missing writeup, now verified independently on a
+disposable VM rather than taken on faith.
+
+**Recommendation for the harness:** if a suspend/resume path is ever revisited despite
+the finding in section I, the unwedge step above must be built in as automatic recovery
+before any `tart run` retry on a VM found in `suspended` state — otherwise a single
+resume failure permanently wedges that VM name until someone manually intervenes.
+
 ---
 
 ## What this changes about the design
