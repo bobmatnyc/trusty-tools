@@ -5,18 +5,22 @@
 //! manifest. Without a repair path the user sees confusing deploy failures and
 //! must manually poke at `~/.claude/agents/`. This command provides a single,
 //! safe recovery entry point.
-//! What: `repair_deploy` removes `.tmp` orphans from `~/.claude/agents/` and
-//! skill subdirs under `~/.claude/skills/`, validates both manifests, and —
-//! with `--force` — resets a corrupt agent manifest to a clean empty state so
-//! the next `tm install` performs a full re-deploy.
+//! What: `repair_deploy` removes `.tmp` orphans from the AGENT deploy tier
+//! (`FrameworkPaths::agent_deploy_dir()` — the tm-managed `CLAUDE_CONFIG_DIR`
+//! since #4409, not `~/.claude/agents/`) and from skill subdirs under
+//! `~/.claude/skills/`, validates both manifests, and — with `--force` —
+//! resets a corrupt agent manifest to a clean empty state so the next
+//! `tm install` performs a full re-deploy. The agent half MUST follow the
+//! deploy tier: every "run `tm repair deploy` to recover" message the deployer
+//! and retraction emit is about the ledger in THAT directory, so repairing the
+//! old location would leave the operator with no way out of a corrupt ledger.
 //! Test: `cli_parses_repair_deploy` covers argument parsing; the integration
 //! test `repair_deploy_removes_stale_tmps` exercises the full flow.
 
 use std::path::{Path, PathBuf};
 
-use trusty_mpm::core::agent_manifest::{
-    AgentManifest, MANIFEST_FILE, ManifestLoad, repair_stale_tmp,
-};
+use trusty_mpm::core::agent_manifest::{AgentManifest, MANIFEST_FILE, ManifestLoad};
+use trusty_mpm::core::paths::FrameworkPaths;
 use trusty_mpm::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
 
 /// `tm repair deploy` handler.
@@ -25,7 +29,7 @@ use trusty_mpm::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
 /// scenarios: a stale `.tmp` left after an interrupted atomic rename, and a
 /// corrupt manifest left by an interrupted or truncated JSON write.
 ///
-/// What: removes `*.tmp` orphans from `~/.claude/agents/` and all skill
+/// What: removes `*.tmp` orphans from the agent deploy tier and all skill
 /// subdirs under `~/.claude/skills/`, then validates both manifests. With
 /// `--force`, resets a corrupt manifest to empty so the next `tm install`
 /// performs a full re-deploy. Prints a line per action; exits 0 even when
@@ -36,7 +40,9 @@ pub(crate) fn repair_deploy(force: bool) -> anyhow::Result<()> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
     let claude_dir = home.join(".claude");
-    let agents_dir = claude_dir.join("agents");
+    // #4409: the agent ledger this command repairs lives in the tm-managed
+    // deploy tier now. Skills are unchanged by that issue and stay here.
+    let agents_dir = FrameworkPaths::default().agent_deploy_dir();
     let skills_dir = claude_dir.join("skills");
 
     // ── Step 1: remove stale .tmp files from agents directory ──────────────
@@ -122,11 +128,27 @@ pub(crate) fn repair_deploy(force: bool) -> anyhow::Result<()> {
 
 /// Remove `*.tmp` orphans from `dir`, returning the paths that were removed.
 ///
-/// Why: `atomic_write` stages via `<path>.tmp`; a crash after `fs::write` but
-/// before `fs::rename` leaves a `.tmp` orphan that should be cleaned up.
-/// What: reads `dir` (non-error if absent), removes any file whose name ends
-/// with `.tmp`, and returns the list of removed paths.
-/// Test: covered by `repair_removes_stale_tmps`.
+/// Why: `atomic_write` stages via a scratch sibling; a crash after `fs::write`
+/// but before `fs::rename` leaves it behind. This is the cleaner for those
+/// orphans.
+/// What: reads `dir` (non-error if absent), removes any regular file whose name
+/// ends with `.tmp`, and returns the paths it ACTUALLY unlinked.
+///
+/// Removes `entry.path()` directly rather than round-tripping through a derived
+/// "base" path (issue #4409). The previous implementation computed
+/// `path.with_extension("")` and handed that to `repair_stale_tmp`, which
+/// re-derived `base.with_extension("tmp")` — a round-trip that only reconstructs
+/// the OLD fixed `<name>.tmp` naming. Against the per-attempt
+/// `<name>.<pid>.<nanos>.tmp` scratch names `atomic_write` writes now,
+/// `with_extension` strips only the last dot-segment, so the reconstruction
+/// never matched, nothing was unlinked — and the path was pushed onto `removed`
+/// regardless, so `tm repair deploy` reported cleaning files it had left on
+/// disk. A repair command that reports work it did not do is worse than one
+/// that does nothing. The exact path is already in hand; the indirection bought
+/// nothing and hid that bug.
+/// Test: `repair_deploy_removes_stale_tmps`,
+/// `repair_removes_per_attempt_temp_orphans`,
+/// `remove_tmp_orphans_reports_only_what_it_unlinked`.
 fn remove_tmp_orphans(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
     if !dir.is_dir() {
@@ -138,12 +160,18 @@ fn remove_tmp_orphans(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         let name_str = name.to_string_lossy();
         if name_str.ends_with(".tmp") && entry.file_type()?.is_file() {
             let path = entry.path();
-            // Use repair_stale_tmp to share the canonical removal logic.
-            // The `.tmp` path here *is* the temp itself, so derive the
-            // logical "base" path by stripping the `.tmp` extension.
-            let base = path.with_extension("");
-            repair_stale_tmp(&base)?;
-            removed.push(path);
+            match std::fs::remove_file(&path) {
+                // Only a real unlink counts as removed.
+                Ok(()) => removed.push(path),
+                // Raced by another repair run or by the writer's own cleanup.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to remove stale temp file {}: {e}",
+                        path.display()
+                    ));
+                }
+            }
         }
     }
     Ok(removed)
@@ -205,6 +233,61 @@ mod tests {
         fs::create_dir_all(agents_dir).unwrap();
         // Simulate a stale .tmp orphan from a crashed atomic write.
         fs::write(agents_dir.join("engineer.tmp"), "incomplete content").unwrap();
+    }
+
+    #[test]
+    fn repair_removes_per_attempt_temp_orphans() {
+        // #4409 regression: `atomic_write` stages through
+        // `<name>.<pid>.<nanos>.tmp`, and the old cleaner derived a "base" via
+        // `with_extension("")` then re-derived `base.with_extension("tmp")` —
+        // which only reconstructs the OLD fixed `<name>.tmp`. Nothing was
+        // unlinked, yet the path was still reported as removed, so
+        // `tm repair deploy` claimed a directory was clean while the orphans
+        // sat there.
+        //
+        // The orphans here are produced by the REAL `temp_path`, so this test
+        // cannot drift from the naming the writer actually emits.
+        let dir = TempDir::new().unwrap();
+        let manifest_orphan =
+            trusty_mpm::core::agent_manifest::temp_path(&dir.path().join(MANIFEST_FILE));
+        let agent_orphan =
+            trusty_mpm::core::agent_manifest::temp_path(&dir.path().join("engineer.md"));
+        fs::write(&manifest_orphan, "half-written json").unwrap();
+        fs::write(&agent_orphan, "half-written agent").unwrap();
+        // A real deployed agent that must survive.
+        fs::write(dir.path().join("engineer.md"), "real agent").unwrap();
+
+        let removed = remove_tmp_orphans(dir.path()).unwrap();
+
+        assert!(
+            !manifest_orphan.exists() && !agent_orphan.exists(),
+            "both per-attempt orphans must actually be unlinked"
+        );
+        assert_eq!(
+            removed.len(),
+            2,
+            "the report must name exactly what was unlinked: {removed:?}"
+        );
+        assert!(
+            dir.path().join("engineer.md").exists(),
+            "a real deployed agent must never be removed"
+        );
+    }
+
+    #[test]
+    fn remove_tmp_orphans_reports_only_what_it_unlinked() {
+        // The count is the other half of the bug: the old code pushed onto
+        // `removed` unconditionally, so the report was true by construction
+        // regardless of what happened on disk.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("engineer.md"), "real agent").unwrap();
+
+        let removed = remove_tmp_orphans(dir.path()).unwrap();
+
+        assert!(
+            removed.is_empty(),
+            "a directory with no orphans must report none removed: {removed:?}"
+        );
     }
 
     #[test]

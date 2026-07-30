@@ -593,7 +593,9 @@ pub fn detect_for_framework(
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
 
-    let agents_dir = fw.claude_agents_dir();
+    // #4409: agent staleness is measured against the tier agents deploy into
+    // (the tm-managed config dir); skills still deploy per-workspace.
+    let agents_dir = fw.agent_deploy_dir();
     let skills_dir = fw.claude_skills_dir();
     let deployed_agents = AgentManifest::load(&agents_dir);
     let deployed_skills = SkillManifest::load(&skills_dir);

@@ -101,7 +101,7 @@ fn fully_provisioned(base: &Path) -> FrameworkPaths {
     seed_agent_source(&fw, &["engineer", "BASE-AGENT"]);
     seed_skill_source(&fw, &["tm-doctor"]);
 
-    let agents_dir = fw.claude_agents_dir();
+    let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     // #3556: deployed fixtures must carry real (valid) frontmatter now
     // that `validate_agents` strict-YAML-checks every present file —
@@ -171,7 +171,7 @@ fn validate_filtered_but_manifest_matching_workspace_has_no_gaps() {
     )
     .unwrap();
 
-    let agents_dir = fw.claude_agents_dir();
+    let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join("rust-engineer.md"),
@@ -222,7 +222,7 @@ fn validate_entry_missing_on_disk_but_in_manifest_is_still_a_gap() {
     fw.trusty_mpm_root = None;
     // No seed_agent_source call — the plan's bundled source stays empty.
 
-    let agents_dir = fw.claude_agents_dir();
+    let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(agents_dir.join("rust-engineer.md"), "agent").unwrap();
     let mut agent_manifest = AgentManifest::default();
@@ -263,7 +263,7 @@ fn validate_stale_broken_frontmatter_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
     std::fs::write(
-        fw.claude_agents_dir().join("engineer.md"),
+        fw.agent_deploy_dir().join("engineer.md"),
         "---\nname: engineer\ndescription: Rust 2024 edition specialist: memory-safe systems\n---\n\nBody.\n",
     )
     .unwrap();
@@ -288,7 +288,7 @@ fn validate_well_formed_agent_is_not_flagged() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
     std::fs::write(
-        fw.claude_agents_dir().join("engineer.md"),
+        fw.agent_deploy_dir().join("engineer.md"),
         "---\nname: engineer\ndescription: \"Rust 2024 edition specialist: memory-safe systems\"\n---\n\nBody.\n",
     )
     .unwrap();
@@ -308,7 +308,7 @@ fn validate_well_formed_agent_is_not_flagged() {
 fn validate_missing_agent_manifest_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
-    std::fs::remove_file(fw.claude_agents_dir().join(agent_manifest::MANIFEST_FILE)).unwrap();
+    std::fs::remove_file(fw.agent_deploy_dir().join(agent_manifest::MANIFEST_FILE)).unwrap();
     let report = validate_workspace(&fw);
     assert!(report.gaps.contains(&DeploymentGap::AgentManifestMissing));
 }
@@ -317,7 +317,7 @@ fn validate_missing_agent_manifest_is_a_gap() {
 fn validate_missing_agent_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let fw = fully_provisioned(tmp.path());
-    std::fs::remove_file(fw.claude_agents_dir().join("engineer.md")).unwrap();
+    std::fs::remove_file(fw.agent_deploy_dir().join("engineer.md")).unwrap();
     let report = validate_workspace(&fw);
     assert!(
         report

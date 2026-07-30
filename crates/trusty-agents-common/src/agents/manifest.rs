@@ -65,6 +65,40 @@ pub enum ManifestLoad {
     Corrupt(String),
 }
 
+/// Scratch path for one [`atomic_write`] attempt — unique per writer, per
+/// attempt.
+///
+/// Why (#4409): a SHARED temp name is itself a corruption bug. Before this the
+/// staging path was a fixed `<path>.tmp`, which was survivable while every
+/// deploy target was a per-workspace directory — but #4409 moved the agent
+/// deploy target to ONE machine-global directory that every concurrent session
+/// launch, `sync-assets` run, and `tm catalog apply` writes. Two writers then
+/// interleave into that single scratch file and `rename` publishes the mangled
+/// result: a torn manifest (which the spawn/resume gate reports as
+/// `AgentManifestCorrupt`, and which retraction then refuses to act on) or a
+/// torn agent file. Uniqueness per attempt removes that class of failure
+/// entirely, independently of any lock. Exactly the reasoning — and the naming
+/// scheme — `trusty_common::json_rmw::temp_path` adopted after the identical
+/// fixed-`projects.json.tmp` corruption (#3502).
+/// What: `<file_name>.<pid>.<nanos>.tmp`, alongside the target so the publish
+/// stays a same-filesystem `rename`.
+///
+/// Public so tests — including `tm`'s orphan-cleaner tests in another crate —
+/// can build a scratch file using the SAME generator the writer uses, instead
+/// of hand-writing a filename that can silently drift from it. Note there is no
+/// such thing as "the temp path for X": every call returns a fresh name, which
+/// is exactly why an orphan cleaner must scan for `*.tmp` rather than derive.
+/// Test: `atomic_write_temp_names_are_unique_per_attempt`.
+pub fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{nanos}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
 /// Atomically write `content` to `path` using a temp-then-rename swap.
 ///
 /// Why: a crash between writing content and writing the manifest (or within
@@ -72,33 +106,95 @@ pub enum ManifestLoad {
 /// would cause the next deploy to read garbage and reclassify managed files.
 /// Using a temp file in the same directory guarantees the rename is atomic on
 /// any POSIX filesystem (both paths on the same mount point).
-/// What: writes `content` to `<path>.tmp`, then renames onto `path`. The
-/// `.tmp` suffix is chosen to be predictable so a repair command can detect
-/// and clean up stale temp files if a crash interrupted a previous rename.
-/// Test: `atomic_write_leaves_old_intact_on_interrupted_write`.
+/// What: writes `content` to a [`temp_path`] unique to this process and
+/// attempt, then renames onto `path`. A failed write removes the scratch file
+/// rather than leaving it behind.
+/// Test: `atomic_write_leaves_old_intact_on_interrupted_write`,
+/// `atomic_write_temp_names_are_unique_per_attempt`.
 pub fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)?;
+    let tmp = temp_path(path);
+    if let Err(e) = std::fs::write(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ManifestError::Io(e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ManifestError::Io(e));
+    }
     Ok(())
 }
 
-/// Remove a stale `.tmp` sibling if present (left by an interrupted write).
+/// Sidecar lock-file path serialising one directory's agent ledger.
 ///
-/// Why: `atomic_write` stages via `<path>.tmp`; a crash after `fs::write` but
-/// before `fs::rename` leaves a `.tmp` orphan. `repair_stale_tmp` removes it
-/// so the directory stays tidy after a `tm repair deploy` run.
-/// What: if `<path>.tmp` exists, removes it. Non-existence is silently
-/// ignored; IO errors are propagated.
-/// Test: `repair_stale_tmp_removes_orphan`.
-pub fn repair_stale_tmp(path: &std::path::Path) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    match std::fs::remove_file(&tmp) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(ManifestError::Io(e)),
-    }
+/// Why: named once so the lock helper and any future repair tooling cannot
+/// disagree about which file serialises a deploy directory. Locking the ledger
+/// document itself would not work: the lock would be lost across the `rename`
+/// that publishes each new version, because the renamed-over inode — and any
+/// lock held on it — is discarded. A stable sidecar survives every publish.
+/// Same reasoning and same convention as `trusty_common::json_rmw::lock_path`.
+/// What: `<dir>/.trusty-mpm-manifest.json.lock`.
+/// Test: `manifest_lock_path_is_a_sidecar`.
+pub fn manifest_lock_path(target_dir: &Path) -> std::path::PathBuf {
+    target_dir.join(format!("{MANIFEST_FILE}.lock"))
 }
+
+/// Run `f` holding the exclusive cross-process lock on `target_dir`'s ledger.
+///
+/// Why (#4409): the deployer's cycle is load manifest → write files → save
+/// manifest, and since #4409 that runs against ONE machine-global directory
+/// rather than a per-workspace one. Two concurrent writers each read the ledger
+/// before either writes, so the second `save` publishes a document missing the
+/// first's entries — and the files those lost entries describe then fall into
+/// `deploy_agents_filtered`'s UNTRACKED branch on the next run, get classified
+/// `untracked_modified`, and are skipped from then on. That is the #4408 freeze
+/// shape, reached by a race instead of by corruption. An in-process `Mutex`
+/// cannot fix it, because the writers are separate processes.
+///
+/// What: creates `target_dir` and the [`manifest_lock_path`] sidecar if absent,
+/// takes a `flock(2)`-style advisory EXCLUSIVE lock on it (blocking until
+/// available), runs `f`, and releases the lock on every exit path including
+/// panics (RAII). `f` must perform the WHOLE load-modify-save cycle — the
+/// lost-update window opens at the load, not at the save. A scope/closure API
+/// rather than a returned guard because `fd_lock`'s guard borrows its `RwLock`,
+/// so the two cannot be moved out together; this is also the shape
+/// `trusty_common::json_rmw::update` settled on.
+///
+/// Advisory, not mandatory: a writer that bypasses this helper is not blocked,
+/// so every load-modify-save of a ledger must go through it. Blocking: callers
+/// on an async runtime must use a blocking-safe thread. Not reentrant — a
+/// nested call on the same directory self-deadlocks.
+///
+/// Lock acquisition failure is an `Err`, never a silent unlocked fallthrough:
+/// proceeding without the lock reinstates exactly the race this closes.
+/// Test: `manifest_lock_serialises_concurrent_writers`,
+/// `manifest_lock_path_is_a_sidecar`.
+pub fn with_agent_manifest_lock<T, E, F>(target_dir: &Path, f: F) -> std::result::Result<T, E>
+where
+    E: From<ManifestError>,
+    F: FnOnce() -> std::result::Result<T, E>,
+{
+    std::fs::create_dir_all(target_dir).map_err(|e| E::from(ManifestError::Io(e)))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(manifest_lock_path(target_dir))
+        .map_err(|e| E::from(ManifestError::Io(e)))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = lock.write().map_err(|e| E::from(ManifestError::Io(e)))?;
+    f()
+}
+
+// `repair_stale_tmp(path)` was removed with #4409. It derived a single scratch
+// path from a target (`path.with_extension("tmp")`), which only worked while
+// staging used ONE fixed name per target. [`temp_path`] is now unique per
+// process and per attempt, so "the temp file for this target" is no longer a
+// derivable path and any such API is a silent no-op waiting to happen — it was
+// exactly that in `tm repair deploy`, which reported removing orphans it had
+// left on disk. Orphan cleanup is now a directory scan for `*.tmp` that unlinks
+// what it finds (`tm`'s `repair::remove_tmp_orphans`), which needs no
+// target-to-temp derivation at all.
 
 /// Current on-disk manifest schema version.
 const MANIFEST_VERSION: u32 = 1;
@@ -391,38 +487,36 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_old_intact_on_interrupted_write() {
-        // Simulate: staged .tmp exists (crash before rename) — original must
-        // still be readable. This test simulates what the OS guarantees: the
-        // rename is atomic, so even if we had crashed after writing .tmp, the
-        // old file would be intact. We verify that a stale .tmp left by a
-        // previous crash is cleaned up by repair_stale_tmp.
+        // A staged scratch file from a crash before `rename` must leave the
+        // original readable — that is what the atomic rename buys.
+        //
+        // The scratch path comes from the REAL `temp_path`, not a hand-written
+        // `path.with_extension("tmp")` (#4409). Modelling the filename by hand
+        // is what let the old fixed-name assumption survive undetected in
+        // `tm repair deploy` long after `atomic_write` stopped producing it.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("manifest.json");
         fs::write(&path, "original content").unwrap();
 
-        // Simulate a stale .tmp orphan from a crashed previous write.
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, "incomplete new content").unwrap();
-
-        // The original file is still present and readable.
-        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
-
-        // repair_stale_tmp removes the orphan.
-        repair_stale_tmp(&path).unwrap();
+        let orphan = temp_path(&path);
+        fs::write(&orphan, "incomplete new content").unwrap();
         assert!(
-            !tmp_path.exists(),
-            "stale .tmp must be removed by repair_stale_tmp"
+            orphan
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".tmp"),
+            "the orphan cleaner matches on the `.tmp` suffix: {}",
+            orphan.display()
         );
-        // Original remains untouched.
-        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
-    }
 
-    #[test]
-    fn repair_stale_tmp_is_idempotent_when_no_tmp() {
-        // Calling repair_stale_tmp when no .tmp exists must not error.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("manifest.json");
-        assert!(repair_stale_tmp(&path).is_ok());
+        // The original file is still present and readable despite the orphan.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
+
+        // A later successful write publishes over it and leaves the original
+        // intact until the rename completes.
+        atomic_write(&path, "new content").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
     }
 
     #[test]
@@ -455,6 +549,109 @@ mod tests {
         assert!(Origin::Bundled.is_framework_owned());
         assert!(!Origin::User.is_framework_owned());
         assert!(!Origin::Registry.is_framework_owned());
+    }
+
+    #[test]
+    fn manifest_lock_path_is_a_sidecar() {
+        // #4409: the lock must be a stable sibling, not the ledger itself —
+        // a lock on the document is discarded by the rename that publishes
+        // each new version.
+        let dir = Path::new("/some/agents");
+        assert_eq!(
+            manifest_lock_path(dir),
+            dir.join(".trusty-mpm-manifest.json.lock")
+        );
+    }
+
+    #[test]
+    fn atomic_write_temp_names_are_unique_per_attempt() {
+        // #4409: a FIXED scratch name is the corruption bug itself once the
+        // target is one machine-global directory — two writers interleave into
+        // the single temp file and rename the mangled result over the real one.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join(MANIFEST_FILE);
+        let a = temp_path(&target);
+        let b = temp_path(&target);
+        assert_ne!(a, b, "two attempts must not share a scratch path");
+        assert!(
+            a.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "the scratch name must carry the writer's pid: {}",
+            a.display()
+        );
+        assert_eq!(
+            a.parent(),
+            target.parent(),
+            "publish must stay a same-fs rename"
+        );
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_scratch_behind() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join(MANIFEST_FILE);
+        atomic_write(&target, "{}").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{}");
+        let leftovers: Vec<String> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "stale scratch files: {leftovers:?}");
+    }
+
+    #[test]
+    fn manifest_lock_serialises_concurrent_writers() {
+        // #4409: the load-modify-save cycle must be serialised, or two writers
+        // that both load before either saves silently drop each other's
+        // entries — and the files those lost entries described are then
+        // classified untracked and frozen (#4408's shape, via a race).
+        //
+        // Each thread does a full load → insert → save under the lock. With no
+        // lock, interleaving loses updates; with it, both entries survive.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        AgentManifest::default().save(&dir).unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    with_agent_manifest_lock::<(), ManifestError, _>(&dir, || {
+                        let mut m = AgentManifest::load(&dir);
+                        m.managed.insert(format!("agent-{i}.md"), sample_entry());
+                        // Widen the window an unlocked implementation would
+                        // lose updates in, so this test is not timing-lucky.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        m.save(&dir)
+                    })
+                    .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_manifest = AgentManifest::load(&dir);
+        assert_eq!(
+            final_manifest.managed.len(),
+            8,
+            "every writer's entry must survive: {:?}",
+            final_manifest.managed.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn manifest_lock_releases_so_a_second_acquisition_succeeds() {
+        // The lock is RAII: a completed critical section must not leave the
+        // directory locked, or the next deploy in this process deadlocks.
+        let tmp = TempDir::new().unwrap();
+        for _ in 0..3 {
+            with_agent_manifest_lock::<(), ManifestError, _>(tmp.path(), || Ok(())).unwrap();
+        }
     }
 
     #[test]

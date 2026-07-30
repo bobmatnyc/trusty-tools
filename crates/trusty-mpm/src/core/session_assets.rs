@@ -117,7 +117,7 @@ pub fn session_plan(record: &SessionRecord) -> (FrameworkPaths, HarnessPlan) {
 /// rationale. Reads only this session's OWN deployed manifest + on-disk
 /// files; performs zero catalog I/O.
 /// What: loads this session's deployed [`AgentManifest`]/[`SkillManifest`]
-/// from `fw.claude_agents_dir()`/`fw.claude_skills_dir()` and delegates to
+/// from `fw.agent_deploy_dir()`/`fw.claude_skills_dir()` and delegates to
 /// [`CatalogHashes::detect`] with `plan`'s selection predicates.
 /// Test: `session_asset_staleness_with_catalog_matches_uncached_result`.
 pub fn session_asset_staleness_with_catalog(
@@ -125,7 +125,9 @@ pub fn session_asset_staleness_with_catalog(
     plan: &HarnessPlan,
     catalog: &CatalogHashes,
 ) -> StalenessReport {
-    let agents_dir = fw.claude_agents_dir();
+    // #4409: agents are deployed to (and therefore drift in) the tm-managed
+    // config-dir tier; skills remain per-workspace.
+    let agents_dir = fw.agent_deploy_dir();
     let skills_dir = fw.claude_skills_dir();
     let deployed_agents = crate::core::agent_manifest::AgentManifest::load(&agents_dir);
     let deployed_skills = crate::core::skill_manifest::SkillManifest::load(&skills_dir);
@@ -252,7 +254,7 @@ mod tests {
         let workspace = home.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let session_fw = FrameworkPaths::for_managed_workspace(&workspace);
-        deploy_agents_filtered(&bundled, &session_fw.claude_agents_dir(), |_| true).unwrap();
+        deploy_agents_filtered(&bundled, &session_fw.agent_deploy_dir(), |_| true).unwrap();
 
         let record = make_record(Some(workspace.clone()), workspace);
         assert!(
@@ -276,7 +278,7 @@ mod tests {
         let workspace = home.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let session_fw = FrameworkPaths::for_managed_workspace(&workspace);
-        deploy_agents_filtered(&bundled, &session_fw.claude_agents_dir(), |_| true).unwrap();
+        deploy_agents_filtered(&bundled, &session_fw.agent_deploy_dir(), |_| true).unwrap();
 
         let record = make_record(Some(workspace.clone()), workspace);
         assert!(!session_assets_stale(&record));
@@ -322,7 +324,7 @@ mod tests {
         let workspace = home.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let session_fw = FrameworkPaths::for_managed_workspace(&workspace);
-        deploy_agents_filtered(&bundled, &session_fw.claude_agents_dir(), |_| true).unwrap();
+        deploy_agents_filtered(&bundled, &session_fw.agent_deploy_dir(), |_| true).unwrap();
         // Catalog drifts after deploy, so both paths must agree it is stale.
         std::fs::write(bundled.join("rust-engineer.md"), "v2 body").unwrap();
 

@@ -478,8 +478,11 @@ mod tests {
     /// compiled-in bundle unconditionally, overwriting any hand-seeded file),
     /// runs `run_prepare_session` against a `repo/` under a SEPARATE temp dir,
     /// then asserts (a) `$HOME/.claude/agents` and `$HOME/.claude/skills` do
-    /// not exist and (b) `repo/.claude/agents/regression-agent.md` exists and
-    /// `repo/.claude/skills/` was populated with at least one deployed skill.
+    /// not exist, (b) the agent landed in the tm-managed `CLAUDE_CONFIG_DIR`
+    /// tier and NOT in `repo/.claude/agents` (issue #4409 moved the bundled
+    /// agent destination off the workspace), and (c) `repo/.claude/skills/`
+    /// was populated with at least one deployed skill — skills are still
+    /// project-local.
     /// Test: itself.
     #[test]
     #[serial_test::serial]
@@ -523,12 +526,20 @@ mod tests {
             "run_prepare_session must NOT write to the real $HOME/.claude/skills (issue #1927)"
         );
 
+        // Issue #4409: the bundled agent must land in the tm-managed
+        // `CLAUDE_CONFIG_DIR` tier, never in the workspace. A copy under
+        // `repo/.claude/agents` would shadow the canonical roster.
+        let agent_tier =
+            crate::core::paths::FrameworkPaths::for_managed_project(&managed_root, &repo)
+                .agent_deploy_dir();
         assert!(
-            repo.join(".claude")
-                .join("agents")
-                .join("regression-agent.md")
-                .exists(),
-            "run_prepare_session must deploy agents to repo/.claude/agents (project-local, DOC-24)"
+            agent_tier.join("regression-agent.md").exists(),
+            "run_prepare_session must deploy agents to the tm-managed config tier ({}) — #4409",
+            agent_tier.display()
+        );
+        assert!(
+            !repo.join(".claude").join("agents").exists(),
+            "run_prepare_session must NOT deploy bundled agents into the workspace (#4409)"
         );
         let deployed_skills_dir = repo.join(".claude").join("skills");
         let has_deployed_skill = deployed_skills_dir

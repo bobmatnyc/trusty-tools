@@ -59,16 +59,19 @@ pub(super) fn check_instructions(project_dir: Option<&Path>) -> DoctorCheck {
     }
 }
 
-/// Probe agent deployment under `~/.claude/agents/`.
+/// Probe agent deployment under the tm-managed `CLAUDE_CONFIG_DIR/agents/`.
 ///
 /// Why: without deployed agent files Claude Code has nothing to delegate to;
-/// the daemon also expects an ownership manifest alongside them.
+/// the daemon also expects an ownership manifest alongside them. Issue #4409
+/// moved that roster out of `~/.claude/agents` and out of every workspace's
+/// `.claude/agents` into the one tm-managed tier, so this probe follows it —
+/// checking the old location would report a healthy install as broken.
 /// What: `Fail` when the directory is absent or holds no `.md` files; `Warn`
 /// when agents are present but the manifest JSON is missing; `Ok` when both
 /// agent files and the manifest are present.
 /// Test: `agents_missing_dir_is_fail`, `agents_without_manifest_is_warn`.
 pub(super) fn check_agents(paths: &FrameworkPaths) -> DoctorCheck {
-    let dir = paths.claude_agents_dir();
+    let dir = paths.agent_deploy_dir();
     let md_count = count_files_with_extension(&dir, "md");
     if md_count == 0 {
         return DoctorCheck::new(
@@ -294,8 +297,8 @@ mod tests {
     #[test]
     fn agents_missing_dir_is_fail() {
         let tmp = tempfile::tempdir().unwrap();
-        // `FrameworkPaths::under` derives `<base>/.claude/agents`, which does
-        // not exist under a fresh temp dir.
+        // `FrameworkPaths::under` derives the managed config-dir agents tier
+        // (#4409), which does not exist under a fresh temp dir.
         let paths = FrameworkPaths::under(tmp.path());
         let check = check_agents(&paths);
         assert_eq!(check.status, CheckStatus::Fail);
@@ -305,7 +308,7 @@ mod tests {
     fn agents_without_manifest_is_warn() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         std::fs::write(agents.join("engineer.md"), "agent").unwrap();
         let check = check_agents(&paths);
@@ -316,7 +319,7 @@ mod tests {
     fn agents_with_manifest_is_ok() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         std::fs::write(agents.join("engineer.md"), "agent").unwrap();
         std::fs::write(agents.join(MANIFEST_FILE), "{}").unwrap();

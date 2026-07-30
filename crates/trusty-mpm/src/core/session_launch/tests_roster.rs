@@ -41,7 +41,7 @@ fn prepare_session_continues_after_agent_deploy_failure() {
     // `deploy_agents_filtered` to proceed past its "missing source" no-op and
     // reach the manifest load at the TARGET directory below.
     std::fs::create_dir_all(fw.agent_source_dir()).unwrap();
-    let agents_dir = fw.claude_agents_dir();
+    let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(
         agents_dir.join(crate::core::agent_manifest::MANIFEST_FILE),

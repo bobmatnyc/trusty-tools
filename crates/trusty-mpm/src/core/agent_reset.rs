@@ -17,23 +17,20 @@
 //! content differs from BOTH the manifest's last-known checksum (if any) AND
 //! the fresh composition is backed up to `<file>.bak-<unix_nanos>` before
 //! being overwritten, so no content is ever silently discarded.
-//! [`reset_project_agents`] (issue #2508) is the ROSTER-safe variant: it
-//! narrows the reset to a resolved harness plan's `agent_selected` roster
-//! BEFORE delegating to [`reset_agents`], so it never resurrects an agent
-//! the target's manifest deliberately excludes. It is NOT, by itself,
-//! workspace-OWNERSHIP-safe — it will happily force-recompose files into
-//! whatever `target_dir` it is given. The caller owns verifying that
-//! `target_dir` is a workspace trusty-mpm actually provisioned before
-//! calling this function; [`crate::core::agent_reset_workspace::
-//! reset_active_workspace_agents`] is the caller that does so (issue #1511
-//! incident class — see that module's doc comment for the ownership gate).
+//! A `reset_project_agents` variant, which narrowed the same recompose to a
+//! project's harness roster, was DELETED with #4409: the workspace sweep was
+//! its only caller, and that sweep now retracts rather than recomposes. A
+//! public function that force-recomposes the bundled roster into an arbitrary
+//! directory is exactly the shadow-creating footgun #4409 exists to remove, so
+//! it is gone rather than left callable.
+//! CONCURRENCY (#4409): [`reset_agents`] now targets the ONE machine-global
+//! agent tier, so its whole load-modify-save runs under the shared ledger lock
+//! ([`crate::core::agent_manifest::with_agent_manifest_lock`]) — see
+//! [`reset_agents_locked`].
 //! Test: `reset_writes_all_by_default`, `reset_filters_by_name`,
 //! `reset_adopts_matching_untracked_file`, `reset_backs_up_diverged_file`,
 //! `reset_recomposes_without_backup_when_matching_manifest_checksum`,
-//! `reset_reports_unknown_names`,
-//! `reset_project_agents_respects_plan_selection`,
-//! `reset_project_agents_reports_deselected_requested_name`,
-//! `reset_project_agents_defaults_to_all_selected`.
+//! `reset_reports_unknown_names`.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +38,7 @@ use crate::core::agent_builder::{AgentBuildError, compose_agent, source_chain};
 use crate::core::agent_deployer::is_agent_file;
 use crate::core::agent_manifest::{
     AgentManifest, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write, checksum,
+    with_agent_manifest_lock,
 };
 
 /// Summary of one [`reset_agents`] run.
@@ -65,11 +63,27 @@ pub struct ResetResult {
     pub backed_up: Vec<String>,
     /// Requested names with no matching source agent file.
     pub not_found: Vec<String>,
-    /// Requested names that exist in the source but were rejected by the
-    /// target harness's `agent_selected` roster filter (issue #2508/#2462).
-    /// Only ever populated by [`reset_project_agents`] — always empty for a
-    /// plain [`reset_agents`] call, which has no roster filter to apply.
+    /// Requested names that exist in the source but were rejected by a
+    /// harness roster filter (issue #2508/#2462).
+    ///
+    /// Retained for the report's shape, but no longer populated by anything:
+    /// its only producer was `reset_project_agents`, deleted with #4409 (see
+    /// the module doc). Always empty today.
     pub deselected: Vec<String>,
+    /// Filenames REMOVED from a workspace because bundled agents no longer
+    /// belong there (issue #4409).
+    ///
+    /// Why: the `--reset-agents-workspaces` sweep stopped recomposing the
+    /// bundled roster into `<workspace>/.claude/agents/` — the project tier
+    /// outranks the tm-managed config tier, so recomposing would re-create the
+    /// shadow #4409 exists to clear. The sweep retracts instead, and the
+    /// operator still needs to see what it removed.
+    /// What: populated only by
+    /// [`crate::core::agent_reset_workspace::reset_active_workspace_agents`];
+    /// always empty for [`reset_agents`], which writes rather than removes.
+    /// Test: `sweep_retracts_intact_workspace`,
+    /// `reset_report_lines_shows_retracted`.
+    pub retracted: Vec<String>,
 }
 
 /// Suffix template for reset backups: `<file>.bak-<unix_nanos>`.
@@ -127,11 +141,44 @@ pub fn reset_agents(
     target_dir: &Path,
     names: Option<&[String]>,
 ) -> Result<ResetResult, AgentBuildError> {
-    let mut result = ResetResult::default();
-
+    // Checked before the lock so a no-op reset neither blocks on a concurrent
+    // writer nor creates a lock sidecar in a directory it will not touch,
+    // matching `deploy_agents_filtered`.
     if !source_dir.is_dir() {
-        return Ok(result);
+        return Ok(ResetResult::default());
     }
+
+    // #4409: `tm install --reset-agents` now targets `agent_deploy_dir()` — the
+    // ONE machine-global tier — so this load-modify-save races every concurrent
+    // session launch's `deploy_agents_locked`. Unlocked, the two lose each
+    // other's ledger entries, and the files those entries described are then
+    // classified untracked and skipped from then on (#4408's freeze shape, via
+    // a race). This is the highest-traffic writer that runs against live
+    // sessions, so it takes the same exclusive ledger lock the deploy and
+    // retract paths do.
+    with_agent_manifest_lock(target_dir, || {
+        reset_agents_locked(source_dir, target_dir, names)
+    })
+}
+
+/// The body of [`reset_agents`], run while holding the ledger lock.
+///
+/// Why: split out so the critical section is a single expression the lock
+/// helper wraps, and so the lock's scope is impossible to misread — every
+/// manifest load, file write, and manifest save happens with the lock held.
+/// Mirrors `deploy_agents_locked`/`retract_locked` in the shared deployer.
+/// What: the compose/backup/recompose/save pipeline documented on
+/// [`reset_agents`]. Never call it directly; it is unsafe against concurrent
+/// writers by construction, and calling it from inside another
+/// `with_agent_manifest_lock` on the same directory would self-deadlock
+/// (`flock` on a second descriptor in the same process blocks).
+/// Test: covered by every `reset_*` test through the public wrapper.
+fn reset_agents_locked(
+    source_dir: &Path,
+    target_dir: &Path,
+    names: Option<&[String]>,
+) -> Result<ResetResult, AgentBuildError> {
+    let mut result = ResetResult::default();
 
     let mut manifest = match AgentManifest::load_checked(target_dir) {
         ManifestLoad::Ok(m) => m,
@@ -231,9 +278,9 @@ pub fn reset_agents(
 
 /// List the `.md` agent stems directly under `source_dir`, sorted.
 ///
-/// Why: [`reset_agents`] and [`reset_project_agents`] both need the same
-/// "what can be reset" enumeration; factoring it out keeps the scan logic
-/// single-sourced.
+/// Why: [`reset_agents`] needs a "what can be reset" enumeration; keeping the
+/// scan in one place means the name filter and the reset itself can never
+/// disagree about which stems exist.
 /// What: reads `source_dir`, keeps regular files [`is_agent_file`] accepts,
 /// strips the `.md` suffix, and returns the sorted stems.
 /// Test: exercised indirectly by every `reset_*` test.
@@ -251,76 +298,6 @@ fn available_agent_names(source_dir: &Path) -> std::io::Result<Vec<String>> {
     }
     available.sort_unstable();
     Ok(available)
-}
-
-/// Force-recompose agent files into a target `.claude/agents/` dir,
-/// respecting a harness plan's deploy-roster selection (issue #2508). This
-/// function is ROSTER-safe, NOT workspace-ownership-safe — see the caller
-/// contract below.
-///
-/// Why: [`reset_agents`] alone is unsafe to point at a project/session-worktree
-/// target — a project's resolved [`crate::core::manifest::HarnessPlan`] may
-/// `exclude` an agent from that harness's roster (issue #2462's root cause:
-/// `[agents].exclude` is the SAME predicate `deploy_agents_filtered` honors for
-/// session/worktree launches). Resetting "all bundled agents" into a project dir
-/// without that filter would silently resurrect an agent the operator
-/// deliberately excluded, trading the #2508 staleness bug for a roster-exclusion
-/// regression (flagged in the #2508/#2462 cross-review). This function threads
-/// the SAME `agent_selected` predicate `prepare_session` uses, so a project-level
-/// reset can never deploy an agent that harness's own launch path would not.
-/// What: computes the candidate set exactly as [`reset_agents`] does (every
-/// available source agent, or the caller's `names` filter), then narrows it to
-/// stems `agent_selected` accepts — any requested name the plan rejects is
-/// recorded in [`ResetResult::deselected`] instead of being silently dropped —
-/// and delegates the actual compose/backup/adopt/write logic to [`reset_agents`]
-/// with that narrowed set (so the two entry points can never diverge in
-/// backup/adoption semantics).
-///
-/// CALLER CONTRACT (issue #1511 incident class): this function does NOT check
-/// whether `target_dir` belongs to a workspace trusty-mpm actually
-/// provisioned — it will force-recompose into whatever directory it is
-/// given. A local-path/adopted session's workspace is the operator's REAL,
-/// long-lived checkout, not a disposable trusty-mpm clone/worktree. The
-/// CALLER must verify workspace ownership (`workspace_owned ||
-/// is_session_worktree(path)` — the same predicate
-/// `session_manager::decommission` and `session_manager::search_gc` gate on)
-/// BEFORE calling this function.
-/// [`crate::core::agent_reset_workspace::reset_active_workspace_agents`] is
-/// the only caller that sweeps multiple sessions, and it enforces this gate.
-/// Test: `reset_project_agents_respects_plan_selection`,
-/// `reset_project_agents_reports_deselected_requested_name`,
-/// `reset_project_agents_defaults_to_all_selected`.
-pub fn reset_project_agents(
-    source_dir: &Path,
-    target_dir: &Path,
-    names: Option<&[String]>,
-    agent_selected: impl Fn(&str) -> bool,
-) -> Result<ResetResult, AgentBuildError> {
-    if !source_dir.is_dir() {
-        return Ok(ResetResult::default());
-    }
-    let available = available_agent_names(source_dir)?;
-    let candidates: Vec<String> = match names {
-        None => available.clone(),
-        Some(requested) => requested.to_vec(),
-    };
-
-    let mut deselected = Vec::new();
-    let mut effective = Vec::new();
-    for name in candidates {
-        // A name absent from `available` is left for `reset_agents` to report
-        // as `not_found` — only a plan REJECTION is `deselected` here.
-        if available.contains(&name) && !agent_selected(&name) {
-            deselected.push(name);
-        } else {
-            effective.push(name);
-        }
-    }
-    deselected.sort_unstable();
-
-    let mut result = reset_agents(source_dir, target_dir, Some(&effective))?;
-    result.deselected = deselected;
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -502,61 +479,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, ResetResult::default());
-    }
-
-    #[test]
-    fn reset_project_agents_respects_plan_selection() {
-        // Issue #2508 cross-warning: a project-level reset must never write an
-        // agent the harness plan excludes, even with no explicit `names` filter.
-        let src = TempDir::new().unwrap();
-        let tgt = TempDir::new().unwrap();
-        write_sources(src.path());
-
-        let result =
-            reset_project_agents(src.path(), tgt.path(), None, |name| name != "engineer").unwrap();
-
-        assert_eq!(result.recomposed, vec!["base-agent.md".to_string()]);
-        assert_eq!(result.deselected, vec!["engineer".to_string()]);
-        assert!(
-            !tgt.path().join("engineer.md").exists(),
-            "a plan-excluded agent must never be written to a project dir"
-        );
-    }
-
-    #[test]
-    fn reset_project_agents_reports_deselected_requested_name() {
-        // An explicitly-requested name the plan rejects is reported as
-        // `deselected`, not silently dropped or conflated with `not_found`.
-        let src = TempDir::new().unwrap();
-        let tgt = TempDir::new().unwrap();
-        write_sources(src.path());
-
-        let result = reset_project_agents(
-            src.path(),
-            tgt.path(),
-            Some(&["engineer".to_string()]),
-            |name| name != "engineer",
-        )
-        .unwrap();
-
-        assert!(result.recomposed.is_empty());
-        assert!(result.not_found.is_empty(), "engineer DOES exist in source");
-        assert_eq!(result.deselected, vec!["engineer".to_string()]);
-    }
-
-    #[test]
-    fn reset_project_agents_defaults_to_all_selected() {
-        // A plan that selects everything must behave exactly like a plain
-        // `reset_agents(..., None)` — zero regression for the common case.
-        let src = TempDir::new().unwrap();
-        let tgt = TempDir::new().unwrap();
-        write_sources(src.path());
-
-        let result = reset_project_agents(src.path(), tgt.path(), None, |_| true).unwrap();
-
-        assert_eq!(result.recomposed.len(), 2);
-        assert!(result.deselected.is_empty());
-        assert!(tgt.path().join("engineer.md").exists());
-        assert!(tgt.path().join("base-agent.md").exists());
     }
 }

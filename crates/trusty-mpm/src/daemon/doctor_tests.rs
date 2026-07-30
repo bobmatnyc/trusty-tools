@@ -55,18 +55,18 @@ async fn search_unreachable_is_fail() {
 }
 
 #[tokio::test]
-async fn agents_check_scopes_to_managed_workspace_when_project_given() {
-    // Issue #2149: a managed session deploys its roster under
-    // `<workspace>/.claude/agents/` (issue #1931), NOT the operator's
-    // `$HOME/.claude/agents/`. Before this fix `run_doctor` always probed
-    // `FrameworkPaths::default()` (the home tier) even when a `project_dir`
-    // was supplied, so a managed workspace with a completely empty/broken
-    // roster could report a false `agents` `Ok` purely because the
-    // OPERATOR's own `$HOME/.claude/agents/` happened to be populated —
-    // silently missing the exact provisioning gap this issue is about.
-    // A fresh, empty `project_dir` with NO `.claude/agents/` at all must
-    // now `Fail`, regardless of whatever the real test-runner's home
-    // directory holds.
+async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
+    // Issue #4409 supersedes #2149's workspace scoping for AGENTS: bundled
+    // agents no longer deploy per-workspace at all, so probing
+    // `<workspace>/.claude/agents/` would now report every healthy install as
+    // broken. The probe must name the tm-managed `CLAUDE_CONFIG_DIR` tier —
+    // the ONE place a bundled agent can legitimately be — even when a
+    // `project_dir` is supplied.
+    //
+    // The status itself is deliberately not asserted: the deploy tier is
+    // machine-global, so a provisioned workstation and a bare CI runner
+    // legitimately disagree. `doctor_fs_checks`'s `agents_*` tests cover every
+    // status branch hermetically.
     let project = tempfile::tempdir().unwrap();
     let report = run_doctor(Some(project.path()), None, &[]).await;
     let agents_check = report
@@ -74,41 +74,31 @@ async fn agents_check_scopes_to_managed_workspace_when_project_given() {
         .iter()
         .find(|c| c.name == "agents")
         .expect("agents check present");
-    assert_eq!(agents_check.status, CheckStatus::Fail);
-    // The message must name the WORKSPACE-scoped path, not the operator's
-    // home directory, proving the probe was scoped to `project_dir`.
-    let expected_dir = project.path().join(".claude").join("agents");
+
+    let workspace_tier = project.path().join(".claude").join("agents");
+    assert!(
+        !agents_check
+            .message
+            .contains(&workspace_tier.display().to_string()),
+        "the agents probe must not read the workspace tier any more: {}",
+        agents_check.message
+    );
+
+    // Asserted as a relative suffix, not an absolute path: the deploy tier is
+    // home-relative, and sibling `#[serial]` tests move `$HOME` around, so
+    // resolving it a second time here would race them.
+    let expected_suffix = std::path::Path::new(".trusty-tools")
+        .join(crate::core::trusty_tools_config::CRATE_NAME)
+        .join(crate::core::trusty_tools_config::MANAGED_CLAUDE_CONFIG_SUBDIR)
+        .join("agents");
     assert!(
         agents_check
             .message
-            .contains(&expected_dir.display().to_string()),
-        "message must name the workspace-scoped agents dir: {}",
+            .contains(&expected_suffix.display().to_string()),
+        "message must name the tm-managed agent deploy tier (…/{}): {}",
+        expected_suffix.display(),
         agents_check.message
     );
-}
-
-#[tokio::test]
-async fn agents_check_ok_when_managed_workspace_roster_populated() {
-    // The positive counterpart: a project-scoped roster (with its manifest)
-    // must report `Ok`, proving the probe reads the WORKSPACE tier rather
-    // than always falling through to the home tier.
-    let project = tempfile::tempdir().unwrap();
-    let agents_dir = project.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(agents_dir.join("engineer.md"), "agent").unwrap();
-    std::fs::write(
-        agents_dir.join(crate::core::agent_manifest::MANIFEST_FILE),
-        "{}",
-    )
-    .unwrap();
-
-    let report = run_doctor(Some(project.path()), None, &[]).await;
-    let agents_check = report
-        .checks
-        .iter()
-        .find(|c| c.name == "agents")
-        .expect("agents check present");
-    assert_eq!(agents_check.status, CheckStatus::Ok);
 }
 
 #[tokio::test]

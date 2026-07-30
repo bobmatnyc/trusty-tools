@@ -149,13 +149,18 @@ async fn sync_route_redeploys_stale_agent() {
         serde_json::json!(["rust-engineer.md"]),
         "the freshly-deployed agent must be reported: {json}"
     );
+    // #4409: the agent lands in the tm-managed config-dir tier, never in the
+    // session workspace.
     assert!(
-        workspace
-            .join(".claude")
-            .join("agents")
+        FrameworkPaths::for_managed_workspace(&workspace)
+            .agent_deploy_dir()
             .join("rust-engineer.md")
             .exists(),
-        "the agent must actually land on disk in the session workspace"
+        "the agent must actually land on disk in the tm-managed agent tier"
+    );
+    assert!(
+        !workspace.join(".claude").join("agents").exists(),
+        "sync-assets must not deploy bundled agents into the workspace (#4409)"
     );
 }
 

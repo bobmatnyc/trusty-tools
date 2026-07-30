@@ -94,6 +94,26 @@ impl From<std::io::Error> for AgentBuildError {
     }
 }
 
+/// Lift a ledger failure into the deploy pipeline's error type.
+///
+/// Why: the deployer and the retraction path both wrap ledger I/O, and both
+/// hand-rolled the identical match. `with_agent_manifest_lock` additionally
+/// REQUIRES this conversion (`E: From<ManifestError>`) to report a lock failure
+/// as the caller's own error type (#4409). One impl keeps the mapping from
+/// drifting between call sites.
+/// What: an `Io` ledger error stays `Io` (preserving the `source()` chain); a
+/// JSON failure becomes [`AgentBuildError::FrontmatterParse`], which is the
+/// pipeline's existing "a document we own is malformed" variant.
+/// Test: exercised by every deploy/retract path that touches the manifest.
+impl From<crate::agents::manifest::ManifestError> for AgentBuildError {
+    fn from(err: crate::agents::manifest::ManifestError) -> Self {
+        match err {
+            crate::agents::manifest::ManifestError::Io(io) => Self::Io(io),
+            other => Self::FrontmatterParse(other.to_string()),
+        }
+    }
+}
+
 /// A case-folded index of `*.md` files in a source directory.
 ///
 /// Why: base template files use UPPERCASE stems (`BASE-QA.md`) while

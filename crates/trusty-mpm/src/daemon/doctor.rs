@@ -179,17 +179,20 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// `active_workspace_paths` is the full set of workspace paths currently
 /// registered to live sessions.
 ///
-/// Issue #2149: `check_agents`/`check_skills` are ALSO scoped by
-/// `project_dir` when it is supplied. A managed session (#1931) deploys its
-/// roster under `<workspace>/.claude/{agents,skills}`, not the operator's
-/// `$HOME/.claude` — probing only the home-tier directories previously let a
-/// managed workspace with a completely empty roster report a false `agents`
-/// `Ok` (because the operator's OWN `$HOME/.claude/agents/` was populated),
-/// silently missing the exact provisioning gap this issue is about. With no
-/// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
-/// [`FrameworkPaths::default`] still probes the home tier.
+/// Issue #2149: `check_skills` is ALSO scoped by `project_dir` when it is
+/// supplied. A managed session (#1931) deploys its SKILLS under
+/// `<workspace>/.claude/skills`, not the operator's `$HOME/.claude` — probing
+/// only the home-tier directory previously let a managed workspace with a
+/// completely empty roster report a false `Ok` (because the operator's OWN
+/// `$HOME/.claude/` was populated), silently missing the exact provisioning
+/// gap that issue is about.
+///
+/// Issue #4409 removes AGENTS from that scoping: bundled agents deploy into
+/// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
+/// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
+/// is the same directory whether or not a `project_dir` was supplied.
 /// Test: `run_doctor_produces_twenty_two_checks`,
-/// `agents_check_scopes_to_managed_workspace_when_project_given`.
+/// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
