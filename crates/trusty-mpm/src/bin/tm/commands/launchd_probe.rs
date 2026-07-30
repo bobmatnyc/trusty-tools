@@ -88,6 +88,29 @@ pub(crate) fn compute_no_spawn(plist_exists: bool) -> bool {
     plist_exists
 }
 
+/// Pure decision: should the bare `tm daemon` CLI path refuse to start?
+///
+/// Why (issue #4397): the #2486 guard was wired only into the MCP-bridge's
+/// `no_spawn` path (`compute_no_spawn`, consulted from `serve_stdio.rs`).
+/// `run_daemon` (the bare-CLI path, invoked directly or by a launchd plist)
+/// never consulted any guard, so `tm daemon` run by hand walked straight past
+/// the same hazard: a launchd unit is registered, but THIS process was not
+/// started by launchd — the orphan-daemon signature `compute_supervised`
+/// already detects. `compute_no_spawn` itself is unsuitable here because it
+/// only takes `plist_exists` — applied directly to `run_daemon` it would also
+/// refuse the legitimate case where launchd itself is the one invoking
+/// `tm daemon`. This function instead keys off `supervised` (which already
+/// folds in `is_launchd_supervised`), plus an explicit opt-in.
+/// What: `true` (refuse) exactly when `!supervised && !force` — i.e. a
+/// launchd unit exists, this process isn't the one launchd started, and the
+/// operator did not pass `--force`.
+/// Test: `compute_daemon_refuse_true_when_unsupervised_and_not_forced`,
+/// `compute_daemon_refuse_false_when_supervised`,
+/// `compute_daemon_refuse_false_when_forced`.
+pub(crate) fn compute_daemon_refuse(supervised: bool, force: bool) -> bool {
+    !supervised && !force
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +148,24 @@ mod tests {
     #[test]
     fn compute_no_spawn_false_when_no_plist() {
         assert!(!compute_no_spawn(false));
+    }
+
+    #[test]
+    fn compute_daemon_refuse_true_when_unsupervised_and_not_forced() {
+        assert!(compute_daemon_refuse(false, false));
+    }
+
+    #[test]
+    fn compute_daemon_refuse_false_when_supervised() {
+        // Supervised (either no plist, or launchd-supervised) always proceeds,
+        // regardless of `force`.
+        assert!(!compute_daemon_refuse(true, false));
+        assert!(!compute_daemon_refuse(true, true));
+    }
+
+    #[test]
+    fn compute_daemon_refuse_false_when_forced() {
+        // The hazardous state, but the operator explicitly opted in.
+        assert!(!compute_daemon_refuse(false, true));
     }
 }

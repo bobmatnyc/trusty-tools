@@ -6,8 +6,12 @@
 //! while co-locating the helpers that are only meaningful together.
 //! What: `run_daemon` (the `daemon` subcommand handler) plus private helpers.
 //! Test: `cli_parses_daemon_*` parse tests; `run_daemon_rejects_tailscale_flag`
-//! covers the deprecation error; the bind/serve path is exercised by the
-//! daemon e2e suite.
+//! covers the deprecation error; the #4397 bare-CLI guard's decision table is
+//! covered hermetically by `commands::launchd_probe::tests::
+//! compute_daemon_refuse_*` (`apply_supervision_signal` itself probes real
+//! launchd/filesystem state, so it is not hermetically fakeable here — see
+//! the daemon e2e suite for the wired-up behaviour); the bind/serve path is
+//! likewise exercised by the daemon e2e suite.
 
 use std::net::SocketAddr;
 
@@ -21,14 +25,24 @@ use std::net::SocketAddr;
 /// listener — `trusty-console` is the sole HTTP surface reachable off-host,
 /// via its own `--tailscale`/Funnel modes.
 /// What: rejects `--tailscale` up front with an actionable error (see
-/// [`tailscale_deprecated_error`]); in MCP mode delegates straight to
+/// [`tailscale_deprecated_error`]); refuses to start when a launchd unit is
+/// registered but this process isn't launchd-supervised and `--force` was
+/// not passed (issue #4397, see [`apply_supervision_signal`] and
+/// [`unsupervised_daemon_error`]); in MCP mode delegates straight to
 /// `run_mcp`; otherwise binds `addr` (falling back to `127.0.0.1:0` on
 /// `AddrInUse`), writes the lock file, registers a Ctrl-C handler that
 /// removes the lock, then serves the API on the primary (loopback) listener.
 /// Test: `cli_parses_daemon_*` cover flag parsing; `run_daemon_rejects_
-/// tailscale_flag` covers the deprecation error; the bind/serve path is
-/// exercised by the daemon e2e suite.
-pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> anyhow::Result<()> {
+/// tailscale_flag` covers the deprecation error; the #4397 guard's decision
+/// table is covered hermetically by `commands::launchd_probe::tests::
+/// compute_daemon_refuse_*`; the bind/serve path is exercised by the daemon
+/// e2e suite.
+pub(crate) async fn run_daemon(
+    addr: SocketAddr,
+    tailscale: bool,
+    mcp: bool,
+    force: bool,
+) -> anyhow::Result<()> {
     use std::io::ErrorKind;
 
     // ADR-0011 loopback-only doctrine (#3330): the secondary Tailscale
@@ -60,7 +74,15 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
     // the MCP-mode early return and the HTTP-serving path below carry it on
     // `GET /health`. See `crate::commands::launchd_probe` for the full
     // restart-race rationale and the pure decision table.
-    apply_supervision_signal(&state);
+    let supervised = apply_supervision_signal(&state);
+
+    // #4397: the #2486 guard previously existed only on the MCP-bridge's
+    // `no_spawn` path (`serve_stdio.rs`) — a bare `tm daemon` invocation
+    // walked straight past the same hazard. Refuse here too unless the
+    // operator explicitly opts in with `--force`.
+    if crate::commands::launchd_probe::compute_daemon_refuse(supervised, force) {
+        return Err(unsupervised_daemon_error());
+    }
 
     if mcp {
         return trusty_mpm::daemon::run_mcp(state).await;
@@ -188,13 +210,15 @@ async fn wait_for_shutdown_signal() {
 /// all" into the single safe/hazardous signal `GET /health` exposes.
 /// What: probes for a trusty-mpm launchd plist, combines it with
 /// `trusty_common::update::is_launchd_supervised()`, stores the result on
-/// `state` via [`trusty_mpm::daemon::DaemonState::set_supervised`], and logs a
-/// `tracing::warn!` exactly once at startup when the result is hazardous.
+/// `state` via [`trusty_mpm::daemon::DaemonState::set_supervised`], logs a
+/// `tracing::warn!` exactly once at startup when the result is hazardous, and
+/// returns the `supervised` bool so the caller can also gate startup on it
+/// (issue #4397).
 /// Test: the pure decision table is covered by
 /// `crate::commands::launchd_probe::tests`; this wrapper is side-effect-only
 /// (env/filesystem probes + a state mutation) and is exercised via the daemon
 /// e2e suite's boot path.
-fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) {
+fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
     let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
     let is_launchd = trusty_common::update::is_launchd_supervised();
     let supervised = crate::commands::launchd_probe::compute_supervised(is_launchd, plist_exists);
@@ -207,6 +231,36 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) {
              (or `com.trusty.mpm`) to let launchd own the daemon."
         );
     }
+    supervised
+}
+
+/// Build the error returned when `run_daemon` refuses to start on the
+/// bare-CLI path because a launchd unit is registered but this process is not
+/// launchd-supervised (issue #4397, the bare-CLI counterpart of #2486's
+/// MCP-bridge `no_spawn` guard).
+///
+/// Why: silently starting anyway (the pre-#4397 behaviour) creates exactly
+/// the orphan-daemon hazard #2486 was meant to prevent — a duplicate,
+/// unsupervised daemon that can hold a stale binary indefinitely (observed:
+/// PID 35895 serving a stale 1.2.3 image since 2026-07-29 while the on-disk
+/// binary was 1.3.0). The error names both remedies: let launchd own the
+/// daemon via `launchctl kickstart`/`bootstrap`, or explicitly opt in with
+/// `--force` when the operator really does want an unsupervised run (e.g.
+/// local dev alongside a supervised instance on a different port).
+/// What: returns an `anyhow::Error` with the actionable message; kept as a
+/// separate function so the message text has exactly one source of truth for
+/// both the runtime call site and any future caller.
+/// Test: `unsupervised_daemon_error_names_remedies` below.
+fn unsupervised_daemon_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "refusing to start: a trusty-mpm launchd unit is registered but this \
+         process was not started by launchd (issue #2486/#4397) — starting \
+         anyway would create a duplicate, unsupervised daemon that can hold a \
+         stale binary indefinitely. Use \
+         `launchctl kickstart -k gui/$(id -u)/com.trusty.mpm.supervisor` (or \
+         `com.trusty.mpm`) to let launchd own the daemon, or pass \
+         `tm daemon --force` to start unsupervised anyway."
+    )
 }
 
 /// Spawn the SUPERVISED Telegram bot as a background task when a token is
@@ -286,12 +340,25 @@ mod tests {
     #[tokio::test]
     async fn run_daemon_rejects_tailscale_flag() {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let err = run_daemon(addr, true, false)
+        let err = run_daemon(addr, true, false, false)
             .await
             .expect_err("--tailscale must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("trusty-console"), "message was: {msg}");
         assert!(msg.contains("ADR-0011"), "message was: {msg}");
         assert!(msg.contains("#3330"), "message was: {msg}");
+    }
+
+    /// Issue #4397: the bare-CLI refusal message must name both remedies —
+    /// the `launchctl kickstart` recipe and the `--force` opt-in — so an
+    /// operator hitting it has an immediate next step either way.
+    #[test]
+    fn unsupervised_daemon_error_names_remedies() {
+        let msg = unsupervised_daemon_error().to_string();
+        assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
+        assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
+        assert!(msg.contains("--force"), "message was: {msg}");
+        assert!(msg.contains("#2486"), "message was: {msg}");
+        assert!(msg.contains("#4397"), "message was: {msg}");
     }
 }
