@@ -650,19 +650,30 @@ fn audit_summary_names_tier_and_allowed_roots() {
     );
 }
 
-/// The SHIPPED-PERSONA consequence of this PR landing after ADR-0024
+/// The TIER-DERIVATION consequence of this PR landing after ADR-0024
 /// decision 3 (PR #4296) — recorded as a reviewed fact, not left implicit.
 ///
 /// Why: ADR-0024's "Capability grants: zero observable delta" analysis was
 /// written while #4170/#4172/#4173 were still open, and it holds for the other
 /// two — their tools are gated by NAME, and no bundled assistant's
-/// `[tools].allow` matches one. It does NOT hold for this PR. `git_log` and
-/// `git_status` ARE in the shipped `izzie` / `personal-assistant` allow-lists,
-/// so those personas — assistant-kind, therefore L0 by derivation — go from a
+/// `[tools].allow` matches one. It did NOT hold for this PR: `git_log` and
+/// `git_status` were in the shipped `izzie` / `personal-assistant` allow-lists,
+/// so those personas — assistant-kind, therefore L0 by derivation — went from a
 /// single-tenant git surface to a cross-project one bounded by the operator's
-/// own `projects.json`. That is a real, if bounded, widening of what an
-/// untrusted-content-ingesting persona can read, and it should fail this test
-/// (and be re-reviewed) rather than change silently again.
+/// own `projects.json`. Untrusted-content-ingesting personas sitting one hop
+/// from a cross-project read primitive was not intended, and the owner removed
+/// the grant on 2026-07-30: `izzie`, `personal-assistant` and the base
+/// `assistant` no longer reach either tool, while `cto-assistant` re-declares
+/// all four as a deliberate carve-out. That end state is pinned by
+/// `agents::tests::loading::bundled_personas_pin_git_reach`, NOT here.
+///
+/// This test is about TIER DERIVATION, not about any persona's allow-list: it
+/// asserts that an assistant-kind config with no declared tier resolves L0 and
+/// therefore a bounded cross-project SCOPE. That mechanism is unchanged and
+/// still worth pinning — a future persona granted a git tool would inherit
+/// exactly this scope — which is why the fixture below is synthetic
+/// (`izzie-shaped`) rather than the real `izzie`, and why removing the shipped
+/// grant did not and should not have made this test fail.
 ///
 /// What: an assistant-kind persona with no declared tier, over a registry
 /// holding one active sibling repo, resolves a CROSS-PROJECT scope that

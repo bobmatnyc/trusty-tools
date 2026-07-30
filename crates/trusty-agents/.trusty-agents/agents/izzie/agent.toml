@@ -88,8 +88,6 @@ palace = "owner-profile"
 allow = [
   # delegation (PR A, epic #3052)
   "delegate_to_agent",
-  # git
-  "git_log", "git_status",
   # meeting notes
   "granola_*",
   # web search

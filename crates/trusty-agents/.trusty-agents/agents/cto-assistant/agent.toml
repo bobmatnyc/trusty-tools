@@ -63,8 +63,8 @@ palace = "cto"
 
 
 [tools]
-# CTO-specific DELTAS only — the base `assistant` already grants git_log,
-# git_status, granola_*, web_search, delegate_to_agent, and the full
+# CTO-specific DELTAS only — the base `assistant` already grants granola_*,
+# web_search, delegate_to_agent, and the full
 # gworkspace Gmail/Calendar/Drive/Docs/Sheets/Slides/Tasks surface (unioned
 # in automatically). BLACK-BOX POSTURE (PR A): session_list, session_status,
 # session_send, project_list, agent_delegate (trusty-mpm proxied tools),
@@ -72,7 +72,18 @@ palace = "cto"
 # DELIBERATELY EXCLUDED — do not re-add them here (see
 # `../assistant/agent.toml` for the rationale).
 allow = [
-    # #255: branch listing + commit search beyond the base's git_log/git_status.
+    # DELIBERATE CARVE-OUT (owner, 2026-07-30): all four git tools, declared
+    # HERE rather than inherited. The base `assistant` dropped
+    # `git_log`/`git_status` in the same change because they reached every
+    # overlay — including `izzie`, who ingests untrusted Gmail/Drive content
+    # and must not sit one hop from a cross-project read primitive. The CTO
+    # assistant is a CODING assistant, not a mail-ingesting one, so the owner
+    # chose to keep its git surface intact rather than accept a silent
+    # capability regression. Re-declaring here is what makes that choice
+    # explicit and reviewable instead of a side effect of the base edit.
+    # #255: branch listing + commit search, alongside the two the base no
+    # longer supplies.
+    "git_log", "git_status",
     "git_branches", "git_search_commits",
     # ADR-0024 decision 4 (owner, 2026-07-29): the four direct ticket-tool
     # grants (`ticket_search`, `list_tickets`, `get_ticket`, `create_ticket`)

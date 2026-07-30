@@ -2036,6 +2036,113 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
     );
 }
 
+/// The owner's 2026-07-30 decision on git reach, pinned against the REAL
+/// bundled roster and the REAL `extends` resolution.
+///
+/// Why: PR #4222 gave L0-tier agents cross-project git scoping, and ADR-0024
+/// decision 3 (PR #4296) made an undeclared `tier =` derive from agent KIND —
+/// so every assistant-kind persona resolves L0. Together those moved
+/// `git_log`/`git_status` from a single-tenant git surface to a CROSS-PROJECT
+/// one bounded only by the operator's `projects.json`. `izzie` ingests
+/// untrusted content (Gmail, Drive, Calendar), which put untrusted input one
+/// hop from a cross-project read primitive — a prompt-injection exfiltration
+/// shape. The grant was removed, and this test is what keeps it removed.
+///
+/// A per-file assertion would NOT be sufficient and this is the whole reason
+/// the test resolves configs instead of reading TOML: `izzie/agent.toml`
+/// declares `extends = "assistant"`, and `merge_extends` UNIONS `[tools].allow`
+/// base-first with no subtractive key anywhere in `ToolsConfig`. Deleting the
+/// two entries from izzie's own files therefore changed NOTHING on its own —
+/// the base kept re-granting them through the union, and only stripping
+/// `assistant/agent.toml` too made izzie's resolved surface actually clean.
+/// Any future test of this property that reads files rather than resolving
+/// them would go green while the hole stayed open.
+///
+/// The `cto-assistant` half is not symmetry, it is the deliberate CARVE-OUT:
+/// the owner chose to keep all four git tools there because it is a coding
+/// assistant, not a mail-ingesting one, so it re-declares them itself now that
+/// the base no longer supplies them. Pinned so a later "cleanup" of that
+/// apparently-redundant re-declaration fails loudly instead of silently
+/// regressing a capability that was explicitly retained.
+///
+/// What: resolves all four personas through `AgentConfig::by_name` (the same
+/// dispatch loader production uses, directory package shadowing flat file) and
+/// asserts reachability per tool via `match_any_glob` — the real matching
+/// semantics, so a persona that re-grants reach by widening a pattern to
+/// `git_*` or `*` fails this test exactly as an explicit re-add would.
+/// Test: This function IS the test.
+#[test]
+fn bundled_personas_pin_git_reach() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    // (persona, the git tools it is intended to reach — exhaustive)
+    let expected: [(&str, &[&str]); 4] = [
+        ("izzie", &[]),
+        ("personal-assistant", &[]),
+        ("assistant", &[]),
+        (
+            "cto-assistant",
+            &[
+                "git_log",
+                "git_status",
+                "git_branches",
+                "git_search_commits",
+            ],
+        ),
+    ];
+    // Every git tool named anywhere in the roster, so "reaches nothing" is
+    // asserted against the full set rather than only the two that moved.
+    const ALL_GIT_TOOLS: [&str; 4] = [
+        "git_log",
+        "git_status",
+        "git_branches",
+        "git_search_commits",
+    ];
+
+    for (name, intended) in expected {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{name}' must resolve: {e}"));
+
+        // An absent `allow` means UNRESTRICTED, which would make every
+        // assertion below vacuously wrong rather than failing — check it.
+        let allow = cfg.tools.allow.as_deref().unwrap_or_else(|| {
+            panic!("'{name}' must ship a restricted [tools].allow, not an absent one")
+        });
+
+        for tool in ALL_GIT_TOOLS {
+            let reaches = crate::ctrl::pm_task::match_any_glob(tool, allow);
+            if intended.contains(&tool) {
+                assert!(
+                    reaches,
+                    "'{name}' must still reach '{tool}' — this is the deliberate \
+                     carve-out (owner, 2026-07-30), not leftover redundancy. If the \
+                     base stopped supplying it, re-declare it in this persona's own \
+                     [tools].allow rather than deleting the expectation."
+                );
+            } else {
+                assert!(
+                    !reaches,
+                    "'{name}' resolves git tool '{tool}', which it must NOT: as an \
+                     assistant-kind (therefore L0) persona this is CROSS-PROJECT git \
+                     reach bounded only by projects.json, and '{name}' handles \
+                     untrusted content. Resolved allow-list: {allow:?}. Note the \
+                     grant may be INHERITED — `extends` unions base-first, so check \
+                     `assistant/agent.toml` too, not just this persona's file."
+                );
+            }
+        }
+    }
+}
+
 /// ADR-0024 decision 4 sub-answer (a), the MIGRATION half: every bundled
 /// assistant persona ships a seeded `[subagents].delegate_allowed`.
 ///

@@ -76,8 +76,19 @@ allow = [
   # in-process (tagent -> tagent), without exposing internal mechanics to
   # the user. See `delegate_to_agent` (`src/tools/delegate.rs`).
   "delegate_to_agent",
-  # git
-  "git_log", "git_status",
+  # NO git tools on the base (owner, 2026-07-30). `git_log`/`git_status` used
+  # to live here and were UNIONED into every overlay. PR #4222 gave L0-tier
+  # agents cross-project git scoping, and ADR-0024 decision 3 made an
+  # undeclared tier derive from KIND — so assistant-kind personas resolve L0
+  # and these two went from a single-tenant git surface to a cross-project one
+  # bounded only by the operator's `projects.json`. `izzie` ingests UNTRUSTED
+  # content (Gmail/Drive/Calendar), so that put untrusted input one hop from a
+  # cross-project read primitive: a prompt-injection exfiltration shape. Still
+  # read-only and registry-bounded, but the reach was new and unintended.
+  # Personas that genuinely need git RE-DECLARE it themselves — see
+  # `../cto-assistant/agent.toml`, which is a coding assistant, not a
+  # mail-ingesting one. Do not restore a git grant to this base file.
+  # Pinned by `bundled_personas_pin_git_reach` (agents/tests/loading.rs).
   # OKG builder (epic #3052): grow this assistant's own knowledge graph from
   # real sources — a directory of documents, a Gmail query window, a Drive
   # folder — idempotently and additively. Generic capability (every user
