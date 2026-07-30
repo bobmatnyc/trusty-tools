@@ -250,6 +250,7 @@ context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
 |---|---|---|
 | `trusty-search` / `trusty-embedderd` | **off** (pre-PR hook behavior) | **on** (pre-PR script behavior) |
 | `trusty-mpm` | **on** | **on** |
+| `trusty-agents` (`tagent`) | N/A — not a `tctl install` member (#4277) | **on** |
 
 trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
 library-validation restriction has not yet been empirically verified safe for
