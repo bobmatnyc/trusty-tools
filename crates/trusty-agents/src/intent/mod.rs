@@ -204,13 +204,15 @@ const SELF_QUESTIONS: &[&str] = &[
 /// "run the tests"/"build the release" kept working. That exception was
 /// itself proven unsafe by the same method (executing the classifier): "check
 /// my blood tests" and "check the release date of the movie" are ordinary
-/// English that hit NONE of rows 1-7's unambiguous signals, so they also
-/// reached `Implementation` — the exact same crash class, just narrower.
-/// There is no word-list-based way to distinguish "the tests" (a software
-/// test suite) from "blood tests" using only the words `verb`+`tests`, so
-/// the Implementation-gating exception is deleted outright rather than
-/// narrowed further: `Implementation` is reachable ONLY via rows 1-7.
-/// `"tests"`/`"release"` move INTO this list instead — the same
+/// English that hit none of `classify_intent`'s unambiguous signals (see
+/// that function's doc comment for the CURRENT, authoritative, exhaustive
+/// list of every path to `Implementation` — do not restate or duplicate the
+/// list here; it drifted out of sync once already), so they also reached
+/// `Implementation` — the exact same crash class, just narrower. There is no
+/// word-list-based way to distinguish "the tests" (a software test suite)
+/// from "blood tests" using only the words `verb`+`tests`, so the
+/// Implementation-gating exception is deleted outright rather than narrowed
+/// further. `"tests"`/`"release"` move INTO this list instead — the same
 /// near-zero-blast-radius role every other entry here already has (they
 /// now only ever produce `Research`, same as "check my blood tests"). "run
 /// the tests"/"build the release" now classify `Research` — verified (see
@@ -334,30 +336,53 @@ pub(crate) fn normalize(input: &str) -> String {
 /// Why: Lets `submit_task` and `run_pm_task_with_session` route each input
 /// to its cheapest viable path — direct reply (Conversational), in-process
 /// tool-armed loop (Research), or full subprocess pipeline (Implementation).
+///
 /// What: Applies heuristics in priority order — empty, slash command,
-/// greeting, closing, self-question, hard-action-verb scan (wins outright,
-/// any length — `route::TCODE_HARD_VERBS`: fix/debug/implement/refactor),
-/// research-verb/question-word scan, unambiguous-technical-signal scan (see
-/// `has_unambiguous_technical_signal` — repo-file token, snake_case
-/// identifier, error/stack-trace marker; THE ONLY OTHER path to
-/// `Implementation`), trailing question mark, "help me",
-/// action-verb-plus-generic-context-word (Research — AMBIGUOUS, not
-/// Implementation), technical-context-word-alone (Research), then defaults
-/// to `Conversational` when no positive signal fired.
-/// `Implementation` requires an UNAMBIGUOUS signal ONLY (#4319 code-critic
-/// CRITICAL, 2026-07-29 — three iterations, each proven wrong by executing
-/// the classifier before landing on this one): word count is never evidence
+/// greeting, closing, self-question, hard-action-verb scan, research-verb/
+/// question-word scan, unambiguous-technical-signal scan, trailing question
+/// mark, action-verb-plus-generic-context-word (Research), technical-
+/// context-word-alone (Research), then defaults to `Conversational` when no
+/// positive signal fired.
+///
+/// **THE COMPLETE, EXHAUSTIVE list of every `return IntentClass::Implementation`
+/// in this function — cross-check this list against the source before
+/// trusting it; a code-critic CRITICAL finding (2026-07-29) proved a FOURTH,
+/// undocumented path (an unconditional `"help me "` prefix match, pre-existing
+/// on `origin/main`) had quietly falsified an earlier "only 3 paths" claim
+/// here for five fix rounds, because the only test covering it
+/// (`"help me debug this issue"`) independently satisfied the hard-verb path
+/// too, so no test ever exercised a signal-free `"help me ..."`. That path is
+/// now DELETED (see below) rather than re-verified as safe, precisely
+/// because "re-verify a special case is safe" is how it survived five audits
+/// undetected:**
+/// 1. A leading `/` (slash command) — explicit, unambiguous user intent.
+/// 2. A hard verb (`route::TCODE_HARD_VERBS`: fix/debug/implement/refactor),
+///    anywhere in the input — wins even over a leading question word.
+/// 3. `has_unambiguous_technical_signal` — a repo-file-shaped token, a
+///    snake_case identifier, or an explicit error/stack-trace marker,
+///    anywhere in the input.
+///
+/// There is no fourth path. In particular: word count is never evidence
 /// (original #4319); a bare `ACTION_VERBS` hit is never evidence on its own
 /// (first follow-up: "can you check if it's raining tomorrow" still
 /// crashed); neither is a plain verb plus a generic context word like
 /// "token"/"session"/"config" (second follow-up: "check my token balance"
-/// still crashed); and neither is a plain verb plus a code-artifact noun
-/// like "tests"/"release" (third follow-up: "check my blood tests"/"check
-/// the release date of the movie" still crashed — see
+/// still crashed); neither is a plain verb plus a code-artifact noun like
+/// "tests"/"release" (third follow-up: "check my blood tests"/"check the
+/// release date of the movie" still crashed — see
 /// `has_unambiguous_technical_signal`'s doc comment for why that narrower
-/// exception was deleted rather than shrunk further). Every ambiguous case
-/// is biased toward `Research` instead: `dispatch_task` (the tm/Tcode
-/// bridge) stays reachable from `Research` because
+/// exception was deleted rather than shrunk further); and an unconditional
+/// `"help me "` prefix is not either (fourth follow-up, code-critic
+/// CRITICAL, 2026-07-29 — pre-existing on `origin/main`, not introduced by
+/// any of the prior three: "help me plan my week" / "help me relax" / "help
+/// me write a poem" and 10 more ordinary requests-for-assistance all
+/// reached `Implementation` and crashed the subprocess pipeline; deleted
+/// outright — `"help me fix the login bug"` already reaches
+/// `Implementation` via the hard-verb path with no special case at all, and
+/// nothing else in the crate keys off this prefix).
+///
+/// Every ambiguous case is biased toward `Research` instead: `dispatch_task`
+/// (the tm/Tcode bridge) stays reachable from `Research` because
 /// `ctrl::pm_task::dispatch::history::run_pm_task_with_history` registers
 /// it unconditionally for any non-`Conversational` classification (its only
 /// intent-based branch is a `Conversational`-only fast-path skip) — a wrong
@@ -369,7 +394,7 @@ pub(crate) fn normalize(input: &str) -> String {
 /// research verbs, question words, clear task verbs, slash commands, the
 /// #4319 long-conversational-input regression, and edge cases;
 /// `classifier_tests_2::*` pins the four decision buckets including the
-/// 12-sentence CRITICAL regression.
+/// 14-sentence CRITICAL regression and the 13-phrase "help me" regression.
 pub fn classify_intent(input: &str) -> IntentClass {
     let trimmed = input.trim();
 
@@ -468,9 +493,16 @@ pub fn classify_intent(input: &str) -> IntentClass {
     //    snake_case identifier, or an explicit error/stack-trace marker —
     //    wins regardless of any verb at all, now that a leading question
     //    word/research verb has already been ruled out above. THIS IS THE
-    //    ONLY OTHER PATH TO `Implementation` (#4319 code-critic CRITICAL
-    //    THIRD follow-up, 2026-07-29): a prior version of this fix also
-    //    carved out a tiny "plain verb + tests/release" exception here so
+    //    LAST OF THE 3 TOTAL PATHS TO `Implementation` (slash command, hard
+    //    verb, this) — see `classify_intent`'s doc comment for the
+    //    authoritative, exhaustive enumeration; do not restate the count
+    //    here, it drifted out of sync once already (a 4th, undocumented
+    //    unconditional `"help me "` path survived 5 fix rounds because
+    //    every prior enumeration was re-asserted by hand instead of
+    //    cross-checked against the actual `return` sites — see that
+    //    function's doc comment for the full account). (#4319 code-critic
+    //    CRITICAL THIRD follow-up, 2026-07-29): a prior version of this fix
+    //    also carved out a tiny "plain verb + tests/release" exception here so
     //    "run the tests"/"build the release" kept classifying
     //    Implementation. That exception was itself proven unsafe by the
     //    same method (executing the classifier): "check my blood tests" and
@@ -502,12 +534,6 @@ pub fn classify_intent(input: &str) -> IntentClass {
         return IntentClass::Research;
     }
 
-    // "help me ..." is an implementation request even though "help" alone
-    // isn't a verb we list (to avoid catching "help?").
-    if normalized.starts_with("help me ") || normalized == "help me" {
-        return IntentClass::Implementation;
-    }
-
     // #4319 code-critic CRITICAL follow-up: a plain `ACTION_VERBS` hit PLUS
     // a generic technical-context word ("check my token balance", "check
     // the staging area before the wedding") is AMBIGUOUS, not unambiguous —
@@ -535,13 +561,22 @@ pub fn classify_intent(input: &str) -> IntentClass {
     // No positive evidence of ANY kind -> default to the cheap conversational
     // path. Word count alone is NEVER evidence for `Implementation` (#4319);
     // neither is a bare `ACTION_VERBS` hit, nor a plain verb plus a generic
-    // context word (both first/second follow-up corrections above).
+    // context word (first/second/third follow-up corrections above), nor an
+    // unconditional `"help me "` prefix (fourth follow-up — deleted, not
+    // narrowed; see `classify_intent`'s doc comment).
     //
-    // Genuine coding requests are unaffected: they carry a hard verb, an
-    // unambiguous technical signal, a slash command, or (for "run the
-    // tests"/"build the release" specifically) the tiny code-artifact-noun
-    // exception, so `route_task` -> `ProcessPmBridge::run_tcode` still fires
-    // for real work.
+    // Genuine coding requests carrying a hard verb, an unambiguous technical
+    // signal, or a slash command still classify `Implementation` here and
+    // still reach Tcode via `route_task` -> `ProcessPmBridge::run_tcode`.
+    // "run the tests"/"build the release" specifically now classify
+    // `Research` instead (no unambiguous signal in either sentence) — see
+    // this function's doc comment for why that's still safe: `dispatch_task`
+    // stays reachable from `Research`, and `route::route_task` carries its
+    // OWN narrow "tests"/"release" exception (route.rs-local, NOT mirrored
+    // here) so a `dispatch_task` call for either sentence still resolves to
+    // `Tcode` — a misrouted backend choice there costs a wrong (but still
+    // non-crashing) backend, never a subprocess crash, which is why that
+    // exception is safe in `route.rs` but was NOT safe here.
     IntentClass::Conversational
 }
 

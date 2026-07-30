@@ -132,7 +132,10 @@ fn long_descriptive_input_with_ambiguous_signals_routes_to_research() {
 }
 
 #[test]
-fn help_me_is_implementation() {
+fn help_me_with_a_hard_verb_is_implementation() {
+    // "debug" is a hard verb -> Implementation. There is no "help me"
+    // special case in `classify_intent` (deleted — code-critic CRITICAL
+    // fourth follow-up, 2026-07-29; see `classifier_tests_2::help_me_*`).
     assert_eq!(
         classify_intent("help me debug this issue"),
         IntentClass::Implementation

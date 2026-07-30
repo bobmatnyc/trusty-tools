@@ -288,23 +288,22 @@ fn bucket_2_short_imperative_coding_request_is_research_but_can_still_reach_tcod
     // tool-equivalent there before this change. The PM can still choose to
     // call `dispatch_task("run the tests")` when it judges the work
     // warrants it; `route_task` then applies its own independent
-    // Tm-vs-Tcode signal detection to that call, same as it always has.
+    // Tm-vs-Tcode signal detection to that call.
     //
-    // For THESE two exact phrasings specifically, `route_task` itself has
-    // no stronger signal than `classify_intent` did (neither "tests" nor
-    // "release" is a `route::TCODE_WORDS`/`TCODE_PHRASES` entry), so
-    // `dispatch_task("run the tests")` currently resolves to the
-    // OWNER-LOCKED `Tm` default — same as it would for any other
-    // signal-sparse task description, and unchanged by this fix (route_task
-    // never had special "tests"/"release" handling of its own before the
-    // now-deleted shared exception).
+    // Code-critic HIGH correction (2026-07-29): `route_task` carries its OWN
+    // route.rs-LOCAL "tests"/"release" exception
+    // (`RUN_BUILD_TCODE_ARTIFACT_WORDS` — never shared with
+    // `classify_intent`, which stays zero-exception), restored after the
+    // owner's non-negotiable "route to Tcode" requirement for these two
+    // exact phrasings was found to have never actually been retracted. So
+    // both still resolve to `Tcode`, not the `Tm` default.
     assert_eq!(
         crate::intent::route::route_task("run the tests"),
-        crate::intent::route::BridgeRoute::Tm
+        crate::intent::route::BridgeRoute::Tcode
     );
     assert_eq!(
         crate::intent::route::route_task("build the release"),
-        crate::intent::route::BridgeRoute::Tm
+        crate::intent::route::BridgeRoute::Tcode
     );
 }
 
@@ -404,12 +403,24 @@ fn greeting_prefix_word_count_boundary_at_six() {
 // =====================================================================
 
 #[test]
-fn help_me_is_implementation() {
+fn help_me_reaches_implementation_only_via_a_hard_verb() {
+    // "debug" is a hard verb -> Implementation, with no "help me" special
+    // case needed at all.
     assert_eq!(
         classify_intent("help me debug this issue"),
         IntentClass::Implementation
     );
-    assert_eq!(classify_intent("help me"), IntentClass::Implementation);
+    // Code-critic CRITICAL fourth follow-up (2026-07-29): bare "help me"
+    // (and "help me <anything signal-free>") used to be an UNCONDITIONAL
+    // `Implementation` special case — pre-existing on `origin/main`, not
+    // introduced by any of the #4319 fix rounds, and undetected for five of
+    // them because the only prior test for this branch
+    // ("help me debug this issue") independently satisfied the hard-verb
+    // path too. Deleted outright (see `classify_intent`'s doc comment) —
+    // nothing else in the crate keys off this prefix, and every genuine
+    // "help me fix/debug/implement/refactor ..." request still reaches
+    // Implementation via the hard-verb path with no special case at all.
+    assert_eq!(classify_intent("help me"), IntentClass::Conversational);
 }
 
 #[test]
@@ -420,6 +431,41 @@ fn help_alone_is_conversational() {
 #[test]
 fn help_question_mark_is_research() {
     assert_eq!(classify_intent("help?"), IntentClass::Research);
+}
+
+#[test]
+fn code_critic_critical_help_me_phrases_never_reach_implementation() {
+    // #4319 code-critic CRITICAL fourth follow-up (2026-07-29): these 13
+    // phrases, verbatim from the critic's report, all classified
+    // Implementation under the pre-existing (not introduced by any #4319
+    // fix round) unconditional "help me " prefix special case, reaching
+    // `handlers.rs`'s subprocess-spawn `run_task` and the literal
+    // `subprocess exited with status Some(1)` crash on completely ordinary
+    // requests for assistance. None of these carry a hard verb, a repo-file
+    // token, a snake_case identifier, or an error/stack-trace marker, so
+    // none should ever reach Implementation.
+    let ordinary_help_me_phrases = [
+        "help me plan my week",
+        "help me decide what to eat",
+        "help me relax",
+        "help me sleep",
+        "help me feel better",
+        "help me write a poem",
+        "help me pick a name",
+        "help me get ready for the party",
+        "help me pack for my trip",
+        "help me choose a gift",
+        "help me with my homework",
+        "help me think through this decision",
+        "help me calm down",
+    ];
+    for s in ordinary_help_me_phrases {
+        assert_ne!(
+            classify_intent(s),
+            IntentClass::Implementation,
+            "'{s}' must NEVER reach Implementation — this is the exact crash class #4319 exists to eliminate"
+        );
+    }
 }
 
 // =====================================================================
