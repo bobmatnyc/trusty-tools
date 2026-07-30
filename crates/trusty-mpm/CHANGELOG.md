@@ -42,6 +42,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     re-created, inside live sessions' workspaces, exactly the shadow this change
     removes. The `--reset-agents <names>` scope is still honored, and removals
     are reported on their own line.
+  - `tm repair deploy` follows the agent ledger to the new tier and actually
+    removes the scratch files it reports. It previously derived a "base" path
+    from each `*.tmp` orphan and re-derived the old fixed `<name>.tmp` from it,
+    which never matches the per-process scratch names below — so it unlinked
+    nothing while still printing every orphan as removed. It now unlinks the
+    path it found and reports only what it actually deleted.
+  - EVERY writer of the shared agent ledger — session launch, sync-assets,
+    retraction, `tm install --reset-agents`, and `tm catalog apply --prune` —
+    now performs its read-modify-write under the lock below. `reset_agents` and
+    `prune_agents` were the two that ran unlocked against the shared directory,
+    which is the highest-traffic race with a concurrent session launch.
   - The agent deploy ledger's read-modify-write is now serialised across
     processes by an advisory lock on a `.trusty-mpm-manifest.json.lock` sidecar,
     and every atomic write stages through a per-process, per-attempt temp name
@@ -62,6 +73,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
       read, so the blast radius was effectively nil. `--prune` remains opt-in
       and still only removes manifest-tracked managed files, but an operator
       running it now affects every running session, not one workspace.
+
+### Removed
+
+- `core::agent_reset::reset_project_agents` — force-recomposed the bundled roster into an arbitrary directory, narrowed by a project's harness roster ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). The workspace sweep was its only caller and now retracts instead, leaving it with zero production callers. A public function that writes the bundled roster into a workspace is exactly the shadow-creating footgun this change removes, so it is deleted rather than left callable. `ResetResult::deselected` is retained for the report's shape but is no longer populated by anything.
 
 ### Added
 

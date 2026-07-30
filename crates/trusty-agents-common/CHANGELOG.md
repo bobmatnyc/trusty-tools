@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Removed
+
+- `agents::manifest::repair_stale_tmp` ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). It derived ONE scratch path from a target (`path.with_extension("tmp")`), which only holds while staging uses a single fixed name per target. With the per-process, per-attempt scratch names below there is no such thing as "the temp path for X", so the function was a silent no-op — and it made `tm repair deploy` report removing orphans it had left on disk, because `with_extension` strips only the last dot-segment and the round-trip never reconstructed the real name. Orphan cleanup is a `*.tmp` directory scan now, which needs no target-to-temp derivation.
+
 ### Fixed
 
 - `agents::manifest::atomic_write` stages through a per-process, per-attempt scratch path (`<file>.<pid>.<nanos>.tmp`) instead of a fixed `<file>.tmp` sibling, and removes the scratch file on a failed write ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). A shared temp name is a corruption bug in its own right: two writers interleave into the one scratch file and `rename` publishes the mangled result — a torn manifest (surfacing as `AgentManifestCorrupt` in the spawn/resume gate) or a torn agent file. Survivable while every deploy target was per-workspace; not once the target is a single machine-global directory. Same reasoning and naming scheme `trusty_common::json_rmw` adopted after the identical fixed-`projects.json.tmp` corruption (#3502).

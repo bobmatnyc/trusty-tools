@@ -82,8 +82,14 @@ pub enum ManifestLoad {
 /// fixed-`projects.json.tmp` corruption (#3502).
 /// What: `<file_name>.<pid>.<nanos>.tmp`, alongside the target so the publish
 /// stays a same-filesystem `rename`.
+///
+/// Public so tests — including `tm`'s orphan-cleaner tests in another crate —
+/// can build a scratch file using the SAME generator the writer uses, instead
+/// of hand-writing a filename that can silently drift from it. Note there is no
+/// such thing as "the temp path for X": every call returns a fresh name, which
+/// is exactly why an orphan cleaner must scan for `*.tmp` rather than derive.
 /// Test: `atomic_write_temp_names_are_unique_per_attempt`.
-fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
+pub fn temp_path(path: &std::path::Path) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -180,22 +186,15 @@ where
     f()
 }
 
-/// Remove a stale `.tmp` sibling if present (left by an interrupted write).
-///
-/// Why: `atomic_write` stages via `<path>.tmp`; a crash after `fs::write` but
-/// before `fs::rename` leaves a `.tmp` orphan. `repair_stale_tmp` removes it
-/// so the directory stays tidy after a `tm repair deploy` run.
-/// What: if `<path>.tmp` exists, removes it. Non-existence is silently
-/// ignored; IO errors are propagated.
-/// Test: `repair_stale_tmp_removes_orphan`.
-pub fn repair_stale_tmp(path: &std::path::Path) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    match std::fs::remove_file(&tmp) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(ManifestError::Io(e)),
-    }
-}
+// `repair_stale_tmp(path)` was removed with #4409. It derived a single scratch
+// path from a target (`path.with_extension("tmp")`), which only worked while
+// staging used ONE fixed name per target. [`temp_path`] is now unique per
+// process and per attempt, so "the temp file for this target" is no longer a
+// derivable path and any such API is a silent no-op waiting to happen — it was
+// exactly that in `tm repair deploy`, which reported removing orphans it had
+// left on disk. Orphan cleanup is now a directory scan for `*.tmp` that unlinks
+// what it finds (`tm`'s `repair::remove_tmp_orphans`), which needs no
+// target-to-temp derivation at all.
 
 /// Current on-disk manifest schema version.
 const MANIFEST_VERSION: u32 = 1;
@@ -488,38 +487,36 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_old_intact_on_interrupted_write() {
-        // Simulate: staged .tmp exists (crash before rename) — original must
-        // still be readable. This test simulates what the OS guarantees: the
-        // rename is atomic, so even if we had crashed after writing .tmp, the
-        // old file would be intact. We verify that a stale .tmp left by a
-        // previous crash is cleaned up by repair_stale_tmp.
+        // A staged scratch file from a crash before `rename` must leave the
+        // original readable — that is what the atomic rename buys.
+        //
+        // The scratch path comes from the REAL `temp_path`, not a hand-written
+        // `path.with_extension("tmp")` (#4409). Modelling the filename by hand
+        // is what let the old fixed-name assumption survive undetected in
+        // `tm repair deploy` long after `atomic_write` stopped producing it.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("manifest.json");
         fs::write(&path, "original content").unwrap();
 
-        // Simulate a stale .tmp orphan from a crashed previous write.
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, "incomplete new content").unwrap();
-
-        // The original file is still present and readable.
-        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
-
-        // repair_stale_tmp removes the orphan.
-        repair_stale_tmp(&path).unwrap();
+        let orphan = temp_path(&path);
+        fs::write(&orphan, "incomplete new content").unwrap();
         assert!(
-            !tmp_path.exists(),
-            "stale .tmp must be removed by repair_stale_tmp"
+            orphan
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".tmp"),
+            "the orphan cleaner matches on the `.tmp` suffix: {}",
+            orphan.display()
         );
-        // Original remains untouched.
-        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
-    }
 
-    #[test]
-    fn repair_stale_tmp_is_idempotent_when_no_tmp() {
-        // Calling repair_stale_tmp when no .tmp exists must not error.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("manifest.json");
-        assert!(repair_stale_tmp(&path).is_ok());
+        // The original file is still present and readable despite the orphan.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
+
+        // A later successful write publishes over it and leaves the original
+        // intact until the rename completes.
+        atomic_write(&path, "new content").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
     }
 
     #[test]

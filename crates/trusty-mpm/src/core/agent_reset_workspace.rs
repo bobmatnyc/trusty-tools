@@ -82,23 +82,24 @@ use crate::session_manager::{ManagedSessionState, SessionStore, StoreError};
 /// sessions can see exactly which ones were touched and which were
 /// deliberately excluded by the #1511 ownership gate.
 /// What: the session's tmux name (human-identifiable), its workspace path,
-/// the [`ResetResult`] `reset_project_agents` produced for it (empty/default
-/// when skipped), and `skipped_reason` — `None` for a normal reset, `Some`
-/// human-readable explanation when the ownership gate rejected this session.
-/// Test: `sweep_resets_intact_workspace`,
+/// the [`ResetResult`] the retraction produced for it (empty/default when
+/// skipped — see [`ResetResult::retracted`]), and `skipped_reason` — `None`
+/// for a normal sweep, `Some` human-readable explanation when the ownership
+/// gate rejected this session.
+/// Test: `sweep_retracts_intact_workspace`,
 /// `sweep_skips_unowned_non_worktree_session`.
 #[derive(Debug, Clone)]
 pub struct WorkspaceResetOutcome {
     /// The session's tmux name (e.g. `tm-quiet-falcon`).
     pub tmux_name: String,
-    /// The workspace/worktree directory the reset targeted (or would have).
+    /// The workspace/worktree directory the sweep targeted (or would have).
     pub workspace_path: PathBuf,
-    /// The reset result for this workspace's `.claude/agents/`. Default
+    /// The retraction result for this workspace's `.claude/agents/`. Default
     /// (all-empty) when `skipped_reason` is `Some`.
     pub result: ResetResult,
     /// `Some(reason)` when the #1511 ownership gate excluded this session
-    /// from the reset — the workspace was NOT touched. `None` for a normal
-    /// reset attempt.
+    /// from the sweep — the workspace was NOT touched. `None` for a normal
+    /// sweep attempt.
     pub skipped_reason: Option<String>,
 }
 
@@ -108,9 +109,9 @@ pub struct WorkspaceResetOutcome {
 /// and each workspace's agent reset); a typed error lets the CLI distinguish
 /// "could not even enumerate sessions" from "one workspace's reset failed".
 /// What: `Store` wraps a [`StoreError`] loading `sessions.json`; `Reset` wraps
-/// an [`AgentBuildError`] from one workspace's [`reset_project_agents`] call,
-/// tagged with the tmux name that failed so the operator knows which session
-/// to investigate.
+/// an [`AgentBuildError`] from one workspace's
+/// [`retract_framework_agents_filtered`] call, tagged with the tmux name that
+/// failed so the operator knows which session to investigate.
 /// Test: surfaced indirectly; the happy path is covered by this module's
 /// other tests.
 #[derive(Debug, thiserror::Error)]
@@ -363,9 +364,9 @@ mod tests {
     /// What: writes a one-line `gitdir:` pointer file, mirroring both real
     /// `git worktree add` output and
     /// `provisioner::workspace::FakeGitBackend::worktree_add`.
-    /// Test: used by `sweep_resets_intact_workspace`,
+    /// Test: used by `sweep_retracts_intact_workspace`,
     /// `sweep_serves_live_linked_worktree_with_git_file`,
-    /// `sweep_respects_per_workspace_manifest_exclude`.
+    /// `sweep_ignores_the_project_manifest_exclude`.
     fn make_linked_worktree(dir: &Path) {
         fs::write(
             dir.join(".git"),

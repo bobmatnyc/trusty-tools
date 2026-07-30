@@ -128,9 +128,39 @@ fn reset_report_lines_summarizes_counts() {
 }
 
 #[test]
+fn reset_report_lines_shows_retracted() {
+    // Issue #4409: the workspace sweep REMOVES shadowing bundled copies rather
+    // than recomposing them, so its removals need their own reported line —
+    // otherwise `--reset-agents-workspaces` prints an all-zero summary while
+    // having deleted files, which reads as a no-op.
+    let result = trusty_mpm::core::agent_reset::ResetResult {
+        recomposed: vec![],
+        adopted: vec![],
+        backed_up: vec![],
+        not_found: vec![],
+        deselected: vec![],
+        retracted: vec!["engineer.md".to_string(), "qa.md".to_string()],
+    };
+
+    let lines = reset_report_lines(&result);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("engineer.md") && l.contains("retracted")),
+        "lines = {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("2 retracted")),
+        "the summary must count retractions: lines = {lines:?}"
+    );
+}
+
+#[test]
 fn reset_report_lines_shows_deselected() {
-    // Issue #2508: a `reset_project_agents` result that DESELECTED a
+    // Issue #2508: a roster-filtered result that DESELECTED a
     // manifest-excluded agent must surface it distinctly, not silently.
+    // (No production caller populates `deselected` since #4409 removed
+    // `reset_project_agents`; the renderer keeps handling it.)
     let result = trusty_mpm::core::agent_reset::ResetResult {
         recomposed: vec!["base-agent.md".to_string()],
         adopted: vec![],
