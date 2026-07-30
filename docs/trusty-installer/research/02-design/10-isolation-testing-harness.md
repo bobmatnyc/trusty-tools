@@ -6,6 +6,26 @@
 **Gated by:** [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted) — only conformant members can be installed/rolled-up/asserted; `tctl doctor --self-check` (DOC-6 §8) is reused as the per-member conformance gate.
 **Cross-ref:** [DOC-0](./00-naming-and-doc-charter.md), [DOC-3](./03-scope-model.md) (Accepted)
 
+## Amendments
+
+- **2026-07-30** — §7.3 revised, owner-approved: the scenario driver **and**
+  assertions move from an `#[ignore]`-tagged Rust integration test in-workspace to
+  **bash under `scripts/vmtest/`**, outside the Cargo workspace, run ad-hoc/manually
+  rather than via `cargo test`. Rationale and the two preserved constraints
+  (JSON-only oracle, `cargo install`-only) are in §7.3.
+- **2026-07-30** — `trusty-controller` renamed `trusty-installer` throughout this
+  document, per [ADR-0013](../../../adr/0013-rename-trusty-controller-to-trusty-installer.md)
+  (Accepted, 2026-06-26; supersedes ADR-0006). `crates/trusty-controller` no longer
+  exists; the CLI binary is `trusty-installer` (alias `tctl`, retained per ADR-0013
+  for one release cycle).
+- **2026-07-30** — Verified corrections folded in: MSRV toolchain-pin inconsistency
+  note (§7.2), `tctl install`/`trusty-installer install` cannot install from source
+  — warning added (§7.1), `trusty-mpm` is `publish = false` (source-install-only
+  scope caveat, §7.1), `trusty-git-analytics` publishes as `tga` (§7.1), the repo
+  cannot be built from a read-only source tree — five `build.rs` files write into
+  `$CARGO_MANIFEST_DIR` (§7.2 constraint), and no `mise.toml`/`.mise.toml` exists in
+  the repo — the harness must define the guest toolchain itself (§7.2).
+
 ## Purpose
 
 Specify how a maintainer tests install/upgrade of the whole stack in a vanilla
@@ -46,7 +66,7 @@ machine is the worst possible place to validate that, because it already has:
 - **uv** installed (same — the orchestrator hard-dep §5 path is never seen),
 - **stack binaries already on PATH** (so `tctl install` short-circuits to its
   idempotent no-op §1.5 instead of doing a real install),
-- **pre-existing `~/.config/trusty-controller/` state, launch agents, indexes,
+- **pre-existing `~/.config/trusty-installer/` state, launch agents, indexes,
   palaces, and `.mcp.json` entries** (so "configured/exists/fresh" project ladder
   rungs are already climbed and the ensure pass §2 never does real work),
 - a populated **embedding-model cache** and warm CARGO build caches.
@@ -83,7 +103,7 @@ and asserts on machine output, never scraped human text.
            by running `tctl install` BEFORE this step — see §5 assertion A0.)
                                           │
   STEP 1  install the controller         ▼
-          cargo install trusty-controller --locked     (cdhash-safe, §3 / §7)
+          cargo install trusty-installer --locked     (cdhash-safe, §3 / §7)
           → `tctl` is now on PATH; it carries the embedded BOM (DOC-2 §2).
                                           │
   STEP 2  UUC2 — zero-knowledge install  ▼
@@ -243,7 +263,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh                          # uv
 
 This rustup+uv first step is the **executable mirror of DOC-8 §1.1's STEP 0**
 product on-ramp (install Rust via the rustup one-liner, then `cargo install
-trusty-controller`): the harness is the executable expression of the same
+trusty-installer`): the harness is the executable expression of the same
 vanilla-machine bootstrap, so the product flow is no longer harness-only and the
 two are aligned.
 
@@ -264,8 +284,8 @@ cache consistent; a `cp` over an on-PATH binary can SIGKILL the next exec with
 `EXC_CRASH / CODESIGNING` (looks like an OOM, is not). **The harness honours this
 inside the VM exactly as a real install would:** it installs/upgrades every cargo
 member via `tctl install`/`tctl upgrade` (which compose `cargo install … --locked`,
-DOC-8 §1.3), and the harness's own STEP 1 controller bootstrap is
-`cargo install trusty-controller --locked` — **never** a `cp` of a pre-built binary
+DOC-8 §1.3), and the harness's own STEP 1 installer bootstrap is
+`cargo install trusty-installer --locked` — **never** a `cp` of a pre-built binary
 from the host into the VM's PATH. This means the harness is also a regression gate
 *for the cdhash-safety property itself*: if a future change introduced a copy-into-PATH
 shortcut, the post-install `health --json` probe would catch the SIGKILL'd daemon
@@ -330,7 +350,7 @@ and explicitly deferred the harness-level choice to DOC-10. The resolution:
 - **First step (STEP 0):** identical to macOS — `curl … sh.rustup.rs | sh` for cargo
   and `curl … astral.sh/uv | sh` for uv, plus `apt-get install -y build-essential
   pkg-config libssl-dev` (the exact system deps `ci.yml` installs). Then STEP 1
-  (`cargo install trusty-controller --locked`) onward is platform-identical (DOC-8
+  (`cargo install trusty-installer --locked`) onward is platform-identical (DOC-8
   §6: install + ensure are platform-identical; only supervision diverges).
 
 ### 5. What the harness asserts (beyond "green")
@@ -441,9 +461,9 @@ recommendation, fitting alongside the existing workflows (`ci.yml`, `release.yml
 
 | Leg | Where | When | Rationale |
 |---|---|---|---|
-| **Linux container** (foreground supervision, §4) | GitHub Actions, `container:` or a `services`-less Ubuntu job (mirrors `al2023-build.yml`/`ci.yml`) | **every PR** (path-filtered to `crates/trusty-controller/**` + the harness + the BOM) | cheap Linux minutes; catches install/upgrade regressions on the **foreground/fallback** branch on every change |
+| **Linux container** (foreground supervision, §4) | GitHub Actions, `container:` or a `services`-less Ubuntu job (mirrors `al2023-build.yml`/`ci.yml`) | **every PR** (path-filtered to `crates/trusty-installer/**` + `scripts/vmtest/**` (§7.3) + the BOM) | cheap Linux minutes; catches install/upgrade regressions on the **foreground/fallback** branch on every change |
 | **systemd-user (per-PR)** (the real Linux v1 product path, §4.1) | a **standard GitHub-hosted ubuntu runner** (a real login session — it has `systemctl --user`, no privileged systemd-in-container or VM needed) | **every PR** (path-filtered, same filter as the container leg) | the real Linux v1 product supervision path (DOC-8 Resolved-Decision-6 is systemd-user) must be gated per-PR, not only on the nightly VM; the foreground-container leg above covers only the fallback branch |
-| **macOS smoke (per-PR)** (minimal primary-target gate, §3) | GitHub-hosted `macos-14` runner | **every PR** (path-filtered, same filter as the Linux legs) | macOS is the primary target (spec §172–173) and the cdhash `cp`-into-PATH SIGKILL trap is the nastiest, hardest-to-diagnose failure — both need per-PR signal. A SMALL smoke: `cargo install trusty-controller --locked` → daemon comes up under launchd → `health --json` == `running` → **cdhash assertion** (the on-PATH binary execs without SIGKILL via `cargo install`'s atomic-rename path; the forbidden `cp`-over path is NOT used) → one `restart` (`bootout`→`bootstrap`) → `health` again. NOT the full §2 acceptance scenario (which stays nightly, next row). Costs a few bounded macOS minutes per PR — the trade-off is catching a silent cdhash/supervision regression pre-merge instead of discovering it nightly post-merge. |
+| **macOS smoke (per-PR)** (minimal primary-target gate, §3) | GitHub-hosted `macos-14` runner | **every PR** (path-filtered, same filter as the Linux legs) | macOS is the primary target (spec §172–173) and the cdhash `cp`-into-PATH SIGKILL trap is the nastiest, hardest-to-diagnose failure — both need per-PR signal. A SMALL smoke: `cargo install trusty-installer --locked` → daemon comes up under launchd → `health --json` == `running` → **cdhash assertion** (the on-PATH binary execs without SIGKILL via `cargo install`'s atomic-rename path; the forbidden `cp`-over path is NOT used) → one `restart` (`bootout`→`bootstrap`) → `health` again. NOT the full §2 acceptance scenario (which stays nightly, next row). Costs a few bounded macOS minutes per PR — the trade-off is catching a silent cdhash/supervision regression pre-merge instead of discovering it nightly post-merge. |
 | **macOS** (the full §2 MUC2 acceptance run, §3) | GitHub-hosted `macos-14` runner (the runner *is* the isolation host, §3.2) **or** self-hosted tart | **nightly + manual `workflow_dispatch`** (NOT every PR) | macOS minutes are costly; the nightly run is the **full §2 acceptance scenario + teardown** — distinct from the minimal per-PR smoke above — catching the deeper macOS-specific regressions without taxing every PR |
 | **Maintainer local** (MUC1) | `tart` VM on the maintainer's Mac; Docker for Linux | **on demand** (a `make` target / script the maintainer invokes) | the spec's MUC1 — test before cutting a stack version, without touching the real machine |
 | **systemd-user VM** (optional deeper validation, §4.1) | full Linux VM (lima/cloud), manual | **manual/nightly if shipped in v1** | an **additional** deeper validation atop the per-PR systemd-user-runner leg above; the runner leg already covers the product path on every PR, so the VM leg is now optional (Open Question 2) rather than the sole systemd-user gate |
@@ -472,12 +492,12 @@ Two modes, both supported; the harness selects via a flag
 
 - **`released` (the default for CI regression + maintainer "is the published stack
   installable?"):** the harness installs from **crates.io** exactly as a real user
-  would — `cargo install trusty-controller --locked` pulls the published controller
+  would — `cargo install trusty-installer --locked` pulls the published installer
   (carrying its embedded BOM), and `tctl install` then `cargo install`s each
   published member at its BOM pin. This is the truest UUC2 test (it exercises the
   real install source, including the committed `ui-dist/` bundle so `SKIP_UI_BUILD`
   is unnecessary — DOC-8 §1.3). The **N-1 → N upgrade** (STEP 5) is tested by seeding
-  the env at a prior published stack tuple (install controller `@N-1`, then upgrade
+  the env at a prior published stack tuple (install installer `@N-1`, then upgrade
   to `N`).
 - **`worktree` (for testing an unreleased change before cutting a stack version):**
   the harness `cargo install --path`es the freshly-built binaries from the current
@@ -490,6 +510,25 @@ In **both** modes the install into the isolated env goes through `cargo install
 --locked` (never a host→VM binary copy), preserving the cdhash invariant (§3.4) and
 matching exactly what DOC-8/DOC-9 do in production.
 
+> **Warning — `tctl install` / `trusty-installer install` cannot install from
+> source.** `install_one()` (`crates/trusty-installer/src/commands/install.rs`) is
+> prebuilt-tarball-first with a fallback to `cargo install <crate> --locked` against
+> **crates.io**; there is no `--path` code path. `tctl install` therefore MUST NOT
+> be used to drive the `worktree` mode above — invoking it there would silently
+> overwrite the source-built binaries under test with released ones. `worktree` mode
+> installs each member directly via `cargo install --path`, never through
+> `tctl install`.
+
+> **Scope caveat — `trusty-mpm` cannot be covered by `released` mode.**
+> `trusty-mpm` has `publish = false`, so `cargo install trusty-mpm` is impossible
+> from crates.io; the harness can only source it via `cargo install --path`
+> (i.e. `worktree` mode), regardless of which mode is under test for the rest of
+> the stack.
+
+> **Naming caveat — `trusty-git-analytics` publishes as `tga`.** The crates.io
+> package name (and therefore the `cargo install` invocation) is `cargo install
+> tga`, not `cargo install trusty-git-analytics`.
+
 #### 7.2 Provisioning + teardown + reproducibility
 
 - **Provision:** macOS — `tart clone <vanilla-base> <run>` + `tart run` (or, in CI,
@@ -499,40 +538,101 @@ matching exactly what DOC-8/DOC-9 do in production.
 - **Teardown:** macOS — `tart stop && tart delete <run>` (disposable clone); Linux —
   the container exits and `--rm` removes it. **Never** touches the maintainer's real
   machine (MUC1): all state (cargo bins, launch agents on the VM, indexes, palaces,
-  `.config/trusty-controller`) lives inside the disposable VM/container.
+  `.config/trusty-installer`) lives inside the disposable VM/container.
 - **Reproducibility:** pin (a) the base image tag, (b) the toolchain version
-  (rustup installs the workspace MSRV `1.91`, matching `ci.yml`'s
+  (rustup installs the workspace MSRV floor `1.91`, matching the MSRV CI jobs'
   `dtolnay/rust-toolchain@1.91`), (c) the stack tuple under test (the BOM
   `stack_version`), and (d) the captured claude-mpm pin (§6). A run is fully
   described by `(base_image_tag, stack_version, source_mode, target_os)`.
+  **Known in-repo inconsistency worth recording:** most regular (non-MSRV) CI jobs
+  build against `@stable`, and `crates/trusty-git-analytics/rust-toolchain.toml`
+  pins `channel = "stable"` — only the dedicated MSRV jobs use `@1.91`. The harness
+  should pin `1.91` regardless (it is validating the MSRV floor, not day-to-day
+  `stable` drift), but should not assume the rest of the repo's tooling is
+  uniformly pinned to `1.91`.
+- **Constraint — the repo cannot be built from a read-only source tree.** Five
+  `build.rs` files write into `$CARGO_MANIFEST_DIR` rather than `$OUT_DIR`:
+  `crates/trusty-agents/build.rs`, `crates/trusty-memory/build.rs`,
+  `crates/trusty-console/build.rs`, `crates/trusty-analyze/build.rs`, and
+  `crates/trusty-search/build.rs` (the last additionally runs `Command::new("make")
+  .arg("release-prep").current_dir(&crate_root)`). Consequence: the host repo must
+  **never** be mounted into the guest for `worktree` mode — read-write would mutate
+  the host's `target/` and source tree (breaking host/guest isolation), and
+  read-only would fail the build outright. The harness must **copy** the source
+  tree to guest-local disk before building.
+- **Constraint — no in-repo `mise` config to drive.** There is no
+  `mise.toml`/`.mise.toml` anywhere in the repo, so the harness cannot lean on an
+  in-tree `mise` config to provision the guest toolchain; it must define the guest
+  toolchain (rustup channel/version, `uv`, system deps) itself, as STEP 0 (§3.3/§4.2)
+  already does.
 
-#### 7.3 Where the harness lives
+#### 7.3 Where the harness lives (revised 2026-07-30 — see Amendments)
 
-Recommendation (see Open Question 4):
+**The scenario driver AND the assertions both live as bash under
+`scripts/vmtest/`, outside the Cargo workspace**, run ad-hoc/manually rather than
+via `cargo test`. This reverses the earlier Rust-integration-test recommendation
+(see the superseded text preserved in Resolved Decision 4, and the amendment note
+at the top of this document); the reasoning is owner-approved and explicit:
 
-- **The scenario driver + assertions live as an `#[ignore]`-tagged integration
-  test**, following the **strong in-tree precedent** the grounding found: the
-  trusty-search baseline suite (`crates/trusty-search/tests/baseline_trusty_tools.rs`)
-  and especially **`crates/trusty-search/tests/bundled_install.rs`** already shell
-  out to `cargo install --root <tempdir>` from a Rust `#[ignore]` test and assert on
-  the result. DOC-10's driver is the cross-tool generalization of that pattern. It
-  belongs in **`crates/trusty-controller/tests/isolation_harness.rs`** (the
-  controller crate owns the flow it validates), `#[ignore]`-tagged and run with
-  `cargo test -p trusty-controller --test isolation_harness -- --include-ignored`
-  (matching the repo convention for slow integration tests, CLAUDE.md).
-- **The VM/container provisioning + teardown live as scripts** under
-  `crates/trusty-controller/tests/isolation/` (or `scripts/isolation/`): a thin
-  `provision-macos.sh` (tart) / `provision-linux.sh` (docker) and the `make`
-  targets §6b names. The Rust test asserts; the shell scripts wrap the VM lifecycle
-  (Rust is awkward for `tart`/`docker` orchestration; shell is the right tool, and
-  the repo already keeps operational scripts in `scripts/`).
-- **The CI wiring lives in `.github/workflows/isolation.yml`** (§6b).
+- **The owner requires the installation-testing harness be separate from existing
+  test infrastructure and run ad-hoc/manually, not via `cargo test`.** The harness
+  is a maintainer-invoked, VM/container-provisioning acceptance run (§2, §6b), not
+  a fast unit/integration test a contributor runs on every `cargo test`. Keeping it
+  structurally outside the workspace makes that separation explicit rather than a
+  convention someone has to remember.
+- **The root `Cargo.toml` uses `members = ["crates/*"]`, so any directory under
+  `crates/` is auto-included in the workspace.** A Rust test crate placed under
+  `crates/` — the original recommendation
+  (`crates/trusty-installer/tests/isolation_harness.rs`) — would be automatically
+  swept into `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+  the 500-SLOC `.rs` line-cap lint, the test-pointer lint, the SLD lint, and the
+  publish-guard, even `#[ignore]`-tagged (ignored tests still compile and are still
+  linted). A Rust test crate under `crates/` therefore **cannot** satisfy the
+  owner's separation requirement — membership in the workspace is structural, not
+  opt-in.
+- **Shell is unencumbered by the same tooling.** The line-cap lint covers `.rs`
+  files only, and there is no shellcheck hook in this repo's CI. A `scripts/vmtest/`
+  tree of bash scripts sits entirely outside `cargo test`, `cargo clippy`, and every
+  Rust-specific lint gate, which is exactly the isolation the owner asked for.
 
-So: **assertions in Rust** (reusing the `bundled_install.rs`/baseline precedent and
-the `trusty_common::contract` envelope types to parse `--json`), **VM lifecycle in
-shell**, **scheduling in a new GitHub workflow** — all net-new (the harness itself
-is net-new; only the `cargo install`-in-a-test and daemon-foreground-start patterns
-are reused).
+**The following two constraints from the original (Rust) design survive the
+Rust→bash move unchanged and remain binding on the bash implementation:**
+
+- **The assertion oracle reads only machine-readable `--json` output** — `tctl
+  stack doctor --json`, `tctl version --json`, `<binary> health --json`, etc. (§2.1,
+  §5) — parsed with a JSON tool (e.g. `jq`) inside the bash driver. It **never**
+  scrapes human-readable text output. This is unchanged by the language switch: the
+  oracle's precision came from the `--json` contract (DOC-4/DOC-5), not from Rust's
+  type system, so bash-plus-`jq` preserves it exactly.
+- **Installs go via `cargo install` / `cargo install --locked` / `cargo install
+  --path` only — never `cp` a binary into PATH** (the cdhash-safety invariant, §3.4).
+  The bash driver must shell out to `cargo install` for every install/upgrade step,
+  exactly as the Rust driver would have.
+
+**Layout:**
+
+- **`scripts/vmtest/`** — the scenario driver (drives §2's STEP 0–6 via `tctl`/
+  `trusty-installer` non-interactively), the assertion helpers (§2.1/§5, `--json` +
+  `jq`), and the VM/container provisioning + teardown scripts (`provision-macos.sh`
+  (tart), `provision-linux.sh` (docker)) all live together here, outside
+  `crates/` and outside the Cargo workspace. A maintainer invokes it directly
+  (e.g. `scripts/vmtest/run.sh --target macos|linux --source
+  released|worktree`) or via the `make isolation-macos` / `make isolation-linux`
+  targets §6b names, which simply shell out to these scripts.
+- **The CI wiring, if/when added, lives in `.github/workflows/isolation.yml`**
+  (§6b) and invokes `scripts/vmtest/run.sh` directly — it does **not** invoke
+  `cargo test`.
+- **A `.cirrus.yml` wrapper remains possible later**, since the guest-side payload
+  is plain bash and Cirrus CI's model (clone → run script → assert) maps directly
+  onto `scripts/vmtest/`'s provision/run/teardown shape (tart's own vendor, Cirrus
+  Labs, is Cirrus-CI-native). **Cirrus CLI is not used now** — this is noted as a
+  future option, not a current dependency.
+
+So: **assertions and scenario driver in bash** (still parsing the
+`trusty_common::contract` `--json` shapes, just via `jq` instead of Rust structs),
+**VM lifecycle in bash alongside them**, **scheduling (if added) in a GitHub
+workflow that shells out to the bash scripts** — all net-new and all outside the
+Cargo workspace, satisfying the owner's separation requirement.
 
 ---
 
@@ -584,7 +684,7 @@ existing integration-test patterns confirmed).
 | **launchd is per-user** | Root CLAUDE.md + DOC-8 §6: launch agents load into `gui/$(id -u)` (uid-keyed, not `$HOME`-keyed); `trusty_common::launchd` `bootstrap`/`bootout`. | §3: a clean `$HOME` is **not** isolation on macOS — needs a separate uid (VM / fresh runner). |
 | **macOS cdhash caveat** | Root CLAUDE.md: never `cp` over an on-PATH binary; `cargo install` atomic-rename is cdhash-safe; a `cp` SIGKILLs the next exec. | §3.4: the harness installs via `cargo install`/`tctl` only, never copies host→VM; it doubles as a regression gate for the property. |
 | **Existing CI** | `.github/workflows/{ci.yml,release.yml,al2023-build.yml,line-cap.yml}`. `ci.yml` = fmt/clippy/test/msrv on `ubuntu-latest`, MSRV `dtolnay/rust-toolchain@1.91`, `SKIP_UI_BUILD=1` global. `release.yml` builds on **`macos-14`** (Apple-Silicon) — the project already pays for hosted macOS minutes. `al2023-build.yml` runs in an `amazonlinux:2023` **container**, rustup inside, path-filtered + `workflow_dispatch`. | §6b: a new `isolation.yml` fits the established shape — cheap Linux container job per-PR, expensive macOS job nightly/manual, exactly mirroring `al2023-build.yml`'s "expensive, path-filtered, dispatchable" precedent. `macos-14` runner = the macOS isolation host. |
-| **Existing integration-test patterns** | `#[ignore]`-tagged tests shelling out: `bundled_install.rs` runs `cargo install --root <tempdir>` and asserts binaries exist; `baseline_trusty_tools.rs` hits a live daemon started `--foreground &`, discovered via `daemon_url()`. Run with `-- --include-ignored`. | §7.3: the harness driver generalizes `bundled_install.rs` (cargo-install-in-a-test) + the baseline suite (foreground daemon + live `--json` probe). Lives in `crates/trusty-controller/tests/isolation_harness.rs`, `#[ignore]`. |
+| **Existing integration-test patterns** | `#[ignore]`-tagged tests shelling out: `bundled_install.rs` runs `cargo install --root <tempdir>` and asserts binaries exist; `baseline_trusty_tools.rs` hits a live daemon started `--foreground &`, discovered via `daemon_url()`. Run with `-- --include-ignored`. | §7.3: the harness driver takes the same *pattern* (cargo-install-then-assert, foreground daemon + live `--json` probe) but not the same *mechanism* — per the 2026-07-30 revision it lives as bash under `scripts/vmtest/`, outside the Cargo workspace, not as a Rust `#[ignore]` test (the owner's separation-from-`cargo test` requirement rules out anything under `crates/*`). |
 | **Linux supervision** | DOC-8 §6 / Resolved Decision 6: systemd-user where present, else foreground/daemonless (`<binary> serve`). Daemons support foreground (`trusty-search start --foreground &`, used by the baseline suite). | §4: container harness uses **foreground/daemonless** (no systemd in a stock container); systemd-user validated on a full Linux VM, manual/nightly. Resolves DOC-8 Q6 for the harness. |
 | **macOS VM tooling** | **None in-tree** (no Dockerfile, no tart/lima config). `tart`/`lima`/`UTM`/`Anka` are external ecosystem tools. | §3.2: tart recommended (Apple-Silicon native, CI-standard, disposable lifecycle); lima/UTM/Anka as fallbacks; all net-new. |
 | **`uv` orchestrator install** | DOC-6 §5: `uv tool install claude-mpm`; version "pinned at implementation". | §6: the harness *is* the implementation that pins it — installs unpinned, captures the resolved version, freezes it as the asserted BOM pin. |
@@ -631,10 +731,9 @@ existing integration-test patterns confirmed).
       where it lives) (§7)
 - [x] **Owner: resolve the decisions** (all 6 approved, 2026-06-09)
 - [ ] Team review → ready to implement
-- [ ] *(implementation-time)* build `crates/trusty-controller/tests/isolation_harness.rs`
-      + `tests/isolation/provision-{macos,linux}.sh` + `make` targets, reusing the
-      `bundled_install.rs`/baseline-suite patterns and the `trusty_common::contract`
-      `--json` parsers
+- [ ] *(implementation-time)* build `scripts/vmtest/run.sh` (scenario driver +
+      assertions, bash + `jq`) + `scripts/vmtest/provision-{macos,linux}.sh` +
+      `make` targets, outside the Cargo workspace (§7.3, revised 2026-07-30)
 - [ ] *(implementation-time)* add `.github/workflows/isolation.yml` (linux-container
       per-PR, path-filtered; macos nightly + `workflow_dispatch`), mirroring
       `al2023-build.yml`
@@ -673,11 +772,17 @@ All six decisions were approved by the owner (owner-approved, 2026-06-09).
    (DOC-6 §5 bump-in-lockstep). This satisfies cross-repo dependency on DOC-6.
 
 4. **Harness location — Rust test + shell provisioning + new workflow (§7.3).**
-   *Approved as drafted.* Assertions live in
-   `crates/trusty-controller/tests/isolation_harness.rs` (`#[ignore]`-tagged,
+   *Approved as drafted, 2026-06-09.* **Superseded 2026-07-30 (owner-approved) —
+   see the Amendments section and §7.3.** As originally approved: assertions would
+   live in `crates/trusty-installer/tests/isolation_harness.rs` (`#[ignore]`-tagged,
    generalizing `bundled_install.rs` and the baseline suite); VM/container
-   provisioning and teardown in shell scripts under `crates/trusty-controller/tests/isolation/`
-   (or `scripts/isolation/`); CI scheduling in a new `.github/workflows/isolation.yml`.
+   provisioning and teardown in shell scripts under
+   `crates/trusty-installer/tests/isolation/` (or `scripts/isolation/`); CI
+   scheduling in a new `.github/workflows/isolation.yml`. This location was later
+   reversed because `crates/*` is auto-swept into the Cargo workspace (root
+   `Cargo.toml` `members = ["crates/*"]`), which the owner's separation
+   requirement rules out — see §7.3 for the current (bash, `scripts/vmtest/`)
+   decision.
 
 5. **CI cadence — macOS nightly + `workflow_dispatch`; Linux every PR (§6b).**
    *Approved as drafted.* The Linux container leg runs **every PR** (cheap, path-filtered
