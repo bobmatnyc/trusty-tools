@@ -14,17 +14,27 @@
 //! the defaults for any section that has no override.
 //! Named sections (#4183 / #4286): a project may instead mark out an override
 //! inside its `CLAUDE.md`, read by [`crate::core::claude_md_sections`]. Those
-//! apply on the packaged composition path only — the legacy string assembly has
-//! no sections to replace — so an override that cannot be honoured is reported
+//! compose cleanly on the packaged path; on the legacy string assembly (forced
+//! by the presence of any of the five files below) `WORKFLOW`, `MEMORY` and
+//! `AGENT-DELEGATION` are still individually addressable slots, so a named
+//! override for one of THOSE sections lands there too, UNLESS the project's own
+//! same-section legacy file is what forced the branch — that file still wins
+//! (#4399: an unrelated legacy file must never shadow an unrelated named
+//! override). `IDENTITY`/`CORE`/`SEARCH` have no such slot — they live inside
+//! the single opaque `pm_instructions()` blob — so those genuinely cannot be
+//! honoured on this path, and, like a same-section collision, that is reported
 //! by `warn_unapplied` rather than dropped in silence. The five override file
 //! constants below are unchanged and keep working.
 //!
 //! Test: the `tests` module exercises every documented file, the BASE_PM floor
 //! invariant, and the robustness fallbacks (missing/empty/unreadable files);
-//! `claude_md_sections_tests.rs` covers the named-section wiring end to end.
+//! `claude_md_sections_tests.rs` covers the named-section wiring end to end,
+//! including the #4399 non-shadowing guarantee.
 
 use std::path::Path;
 
+use crate::core::claude_md_sections::ProjectOverrides;
+use crate::core::instruction_package::SectionId;
 use crate::core::instruction_pipeline::{
     AGENT_DELEGATION, SECTION_SEPARATOR, base_pm, pm_instructions,
 };
@@ -124,6 +134,14 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// replaceable, preserving the framework-floor guarantee `BASE_PM.md` itself
 /// states. Sections are joined with [`SECTION_SEPARATOR`].
 ///
+/// #4399: within branch (2), "WORKFLOW (override or bundled)" and its two
+/// siblings each additionally fall back to a CLAUDE.md named-section override
+/// for that SAME section before reaching the bundled default — so a legacy
+/// file that forces this branch for one section (say `AGENT_DELEGATION.md`)
+/// can no longer shadow a CLAUDE.md override authored for a DIFFERENT,
+/// unrelated section (say `WORKFLOW`). A legacy file still wins over a named
+/// override for its OWN section — that collision is deliberate and unchanged.
+///
 /// Per-project stack profile: in **both** branches an auto-derived
 /// [`crate::core::stack_profile::stack_profile_section`] block is folded in right
 /// after the PM body. It states the project's detected stack (or a neutral
@@ -159,7 +177,12 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// `pm_deployed_replaces_body_but_keeps_base_floor`,
 /// `memory_override_is_slotted_after_pm_instructions`,
 /// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
-/// and the robustness tests.
+/// the robustness tests, and (#4399, in `claude_md_sections_tests.rs`)
+/// `an_unrelated_legacy_file_does_not_shadow_a_named_section_override`,
+/// `a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported`,
+/// `an_unrelated_legacy_file_does_not_shadow_a_named_memory_override`,
+/// `an_unrelated_legacy_file_does_not_shadow_a_named_delegation_override`,
+/// `identity_core_and_search_stay_reported_unapplied_on_the_legacy_path`.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
     // `info!`, deliberately: this is the operator-visible record of WHICH
@@ -282,11 +305,43 @@ pub(crate) fn resolve_pm_prompt_with_roster(
         .map(|body| crate::core::claude_md_sections::strip_marker_blocks(&body))
         .filter(|body| !body.is_empty());
 
+    // #4399: which legacy file, if any, forced this branch is tracked per
+    // section BEFORE any of the three `Option`s below are consumed, so the
+    // final `warn_unapplied` report can tell "shadowed by this project's own
+    // same-section legacy file" (unavoidable — the file IS the override) apart
+    // from "shadowed only because an UNRELATED legacy file forced this whole
+    // branch" (the #4399 bug: that must not happen any more).
+    let workflow_has_legacy_file = workflow_override.is_some();
+    let memory_has_legacy_file = memory_override.is_some();
+    let delegation_has_legacy_file = delegation_override.is_some();
+
+    // A CLAUDE.md named-section override for a section with NO active
+    // same-section legacy file must still land, even though an unrelated
+    // legacy file forced this string-assembled branch (#4399) — otherwise, for
+    // example, an `AGENT_DELEGATION.md` file silently drops a `WORKFLOW` named
+    // override that has nothing to do with it. Only the three sections this
+    // legacy assembly can independently address (`Workflow`, `Memory`,
+    // `AgentDelegation`) are representable here; `Identity`/`Core`/`Search`
+    // stay inside the opaque `pm_instructions()` blob and remain reported as
+    // unapplied on this path, exactly as before.
+    let named_section = |id: SectionId| {
+        named
+            .overrides
+            .iter()
+            .find(|o| o.section == id)
+            .map(|o| o.body.clone())
+    };
+    let named_workflow = named_section(SectionId::Workflow);
+    let named_memory = named_section(SectionId::Memory);
+    let named_delegation = named_section(SectionId::AgentDelegation);
+
     let delegation = match delegation_override {
         // See #4183 — configuration 2 is deliberately still on the legacy path:
         // an `AGENT_DELEGATION.md` override replaces the whole section and so
         // never consumes the computed roster, which `RosterNotConsumed` exists
-        // to forbid. Follow-up on the epic, not a check to relax.
+        // to forbid. Follow-up on the epic, not a check to relax. It also wins
+        // over a same-section CLAUDE.md override — one file, one winner, same
+        // as before #4399.
         Some(body) => body,
         None => {
             let roster = roster_source();
@@ -340,18 +395,45 @@ pub(crate) fn resolve_pm_prompt_with_roster(
                 }
             }
 
-            delegation_with_roster(roster.as_deref())
+            // #4399: no legacy `AGENT_DELEGATION.md` claimed this section, so a
+            // CLAUDE.md `AGENT-DELEGATION` named override (if any) must still
+            // apply here — an unrelated `WORKFLOW.md`/`MEMORY.md` legacy file
+            // forcing this branch is not a reason to fall back to the bundled
+            // doctrine.
+            delegation_with_named_override(named_delegation.as_deref(), roster.as_deref())
         }
     };
 
     // The bundled workflow comes from the manifest, not the raw section constant:
     // the manifest appends the opportunistic-fix rule as its own block, and a
     // project that overrides nothing must receive the identical bytes here and on
-    // the packaged path (#4318).
+    // the packaged path (#4318). #4399: a same-section `WORKFLOW.md` still wins;
+    // otherwise an unrelated legacy file must not drop a named `WORKFLOW` override.
     let workflow = workflow_override
+        .or(named_workflow)
         .unwrap_or_else(|| crate::core::instruction_pipeline::workflow_section().to_string());
+    // #4399: same rule for `MEMORY.md` versus a named `MEMORY` override.
+    let memory_override = memory_override.or(named_memory);
 
-    crate::core::claude_md_sections::warn_unapplied(&named);
+    // Only report a named override as genuinely unapplied: a same-section
+    // legacy file legitimately wins (that section IS what the file replaces),
+    // and `Identity`/`Core`/`Search` have no slot in this string assembly. Any
+    // OTHER section landed above and must not be reported as dropped.
+    let unapplied = ProjectOverrides {
+        overrides: named
+            .overrides
+            .iter()
+            .filter(|o| match o.section {
+                SectionId::Workflow => workflow_has_legacy_file,
+                SectionId::Memory => memory_has_legacy_file,
+                SectionId::AgentDelegation => delegation_has_legacy_file,
+                _ => true,
+            })
+            .cloned()
+            .collect(),
+        diagnostics: Vec::new(),
+    };
+    crate::core::claude_md_sections::warn_unapplied(&unapplied);
     (
         assemble_sections(stack, memory_override, workflow, delegation, addendum),
         PromptSource::Legacy,
@@ -464,6 +546,35 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
             roster.trim()
         ),
         None => AGENT_DELEGATION.trim().to_string(),
+    }
+}
+
+/// The AGENT-DELEGATION section body when no legacy `AGENT_DELEGATION.md` file
+/// forced full replacement, honoring a CLAUDE.md named-section override if the
+/// project authored one (#4399).
+///
+/// Why: an unrelated legacy file (`WORKFLOW.md`/`MEMORY.md`) can force
+/// [`resolve_pm_prompt_with_roster`] onto this string-assembled branch even
+/// though the project never touched `AGENT_DELEGATION.md`. Before #4399 that
+/// meant a CLAUDE.md `AGENT-DELEGATION` override was silently dropped in favor
+/// of [`delegation_with_roster`]'s bundled doctrine — the project's override
+/// was declined for a reason that has nothing to do with delegation. This
+/// mirrors [`crate::core::instruction_package::InstructionPackage::with_overrides`]'s
+/// authored/generated split for the SAME section on the packaged path: the
+/// override replaces the bundled doctrine (and its roster-precedence note),
+/// while the live roster — host-computed, never authored by a project — still
+/// follows when any agent is deployed.
+///
+/// What: `Some(body)` returns `body` (trimmed), followed by the roster when
+/// `roster` is `Some`; `None` defers to [`delegation_with_roster`] unchanged.
+/// Test: `named_agent_delegation_override_applies_when_an_unrelated_legacy_file_forces_the_legacy_path`.
+fn delegation_with_named_override(named_override: Option<&str>, roster: Option<&str>) -> String {
+    match named_override {
+        Some(body) => match roster {
+            Some(roster) => format!("{}\n\n{}", body.trim(), roster.trim()),
+            None => body.trim().to_string(),
+        },
+        None => delegation_with_roster(roster),
     }
 }
 

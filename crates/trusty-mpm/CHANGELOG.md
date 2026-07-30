@@ -119,6 +119,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   additionally filters the surfaced list to non-terminal states as defense in
   depth; and the boot-time reconcile sweep backfills (clears) the stale field
   on any terminal record persisted before this fix.
+- **An unrelated legacy `.trusty-mpm/` override file no longer shadows every
+  CLAUDE.md named-section override (closes
+  [#4399](https://github.com/bobmatnyc/trusty-tools/issues/4399)).**
+  Previously, if ANY ONE of the four replace-semantics legacy files
+  (`PM_INSTRUCTIONS_DEPLOYED.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`,
+  `MEMORY.md`) was present, the whole prompt fell back to the sectionless
+  legacy assembly, and every CLAUDE.md named-section override was reported
+  "not applied" — including sections the legacy file had nothing to do with
+  (an `AGENT_DELEGATION.md` file silently dropped a `WORKFLOW` override
+  authored in `CLAUDE.md`). `WORKFLOW`, `MEMORY` and `AGENT-DELEGATION` are
+  now independently addressable on that legacy path too: a named override for
+  one of those sections lands unless the project's own same-section legacy
+  file is what forced the branch, in which case that file still wins,
+  unchanged. `IDENTITY`/`CORE`/`SEARCH` have no independent slot in the legacy
+  string assembly and remain reported as unapplied, never silently dropped.
 - **A corrupted bundled agent is re-deployed instead of frozen forever (closes
   [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)).** When the
   deployed copy of a bundled agent drifts from the checksum the deploy manifest
