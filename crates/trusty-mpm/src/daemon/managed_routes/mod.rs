@@ -42,6 +42,7 @@ pub mod provision_status;
 pub mod proxy;
 pub mod prune;
 mod reactivate;
+pub mod reconcile;
 pub mod rename;
 mod resume_error;
 mod session_summary;
