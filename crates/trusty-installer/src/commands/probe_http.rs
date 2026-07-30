@@ -184,7 +184,26 @@ impl ProbeOutcome {
     /// we hold no actual health information. `down` is the honest verdict — and
     /// it is now safe to say, because the kickstart is gated on
     /// [`Self::is_confirmed_down`], not on this string.
-    /// Test: `tests::health_string_maps_every_variant`.
+    ///
+    /// # Invariant — this string is for DISPLAY ONLY
+    /// `health_string() == "down"` does **NOT** imply
+    /// [`Self::is_confirmed_down`], and that gap is deliberate rather than an
+    /// oversight. `NoAddress`, `HttpError`, `BadEnvelope` and `ProbeFailed` all
+    /// render `down` while being explicitly NOT confirmed-down: each means
+    /// "something answered, or we never looked", which is not evidence that a
+    /// process is dead. The two views answer different questions — this one asks
+    /// *what should we report*, [`Self::is_confirmed_down`] asks *may we destroy
+    /// state*.
+    ///
+    /// So this string MUST NOT be used to authorise a destructive action
+    /// (`launchctl kickstart -k`, a restart, a teardown). Gating on
+    /// `health_string() == "down"` would re-merge exactly the causes
+    /// [`ProbeOutcome`] exists to keep apart, restoring the #4246 harm: a
+    /// `NoAddress` member (address never resolved) or a squatter's
+    /// `BadEnvelope` would once again hard-restart a daemon nobody has shown to
+    /// be down. Authorise on the VARIANT, via [`Self::is_confirmed_down`].
+    /// Test: `tests::health_string_maps_every_variant`,
+    /// `tests::down_health_string_is_not_a_kickstart_licence`.
     pub fn health_string(&self) -> &'static str {
         use super::probe::health_str;
         match self {
@@ -238,7 +257,23 @@ impl ProbeOutcome {
     /// never hits the timeout — which is exactly why the gate and the transport
     /// had to land together rather than in sequence.
     /// What: `true` iff `Refused` or `Timeout`.
+    ///
+    /// # Invariant — this is NARROWER than [`Self::health_string`]`() == "down"`
+    /// The two are deliberately NOT equivalent, and callers must not treat them
+    /// as interchangeable. Four variants — `NoAddress`, `HttpError`,
+    /// `BadEnvelope`, `ProbeFailed` — report `down` for display while returning
+    /// `false` here. `NoAddress` is the sharpest example: it reports `down`
+    /// on purpose (mapping it to `unknown` would make
+    /// `VerifyTailReport::build` and `status`'s exit code print `VERIFIED` for a
+    /// member whose address was never resolved), yet it is emphatically not
+    /// grounds for a restart, because nothing was ever observed.
+    ///
+    /// This asymmetry is the whole safety mechanism, so it is pinned by a test
+    /// rather than left to be rediscovered: any future caller reaching for the
+    /// display string to decide whether to repair something is reintroducing
+    /// #4246 and must use this predicate instead.
     /// Test: `tests::only_transport_failures_are_confirmed_down`,
+    /// `tests::down_health_string_is_not_a_kickstart_licence`,
     /// `verify_tail::tests::verify_one_does_not_kickstart_a_healthy_launchd_daemon`.
     pub fn is_confirmed_down(&self) -> bool {
         matches!(self, Self::Refused | Self::Timeout)

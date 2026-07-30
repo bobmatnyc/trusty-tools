@@ -695,6 +695,65 @@ fn member_health_maps_every_variant() {
     );
 }
 
+/// Why: pins the deliberate ASYMMETRY between the display vocabulary and the
+/// repair gate, which is otherwise a trap: `health_string()` and
+/// `is_confirmed_down()` disagree by design, and a future caller who conflates
+/// them ("it says `down`, so restart it") reintroduces #4246 in one line.
+/// `NoAddress` is the sharpest case — it reports `down` on purpose, because
+/// mapping it to `unknown` would make `VerifyTailReport::build` and `status`'s
+/// exit code report `VERIFIED` for a member whose address never resolved, yet
+/// nothing was ever observed about it so there is nothing to repair.
+///
+/// Asserting the asymmetry EXISTS (rather than only asserting each view
+/// separately, as the two sibling tests do) is what stops it being quietly
+/// "tidied" into equivalence: if someone makes the sets coincide, this fails.
+/// What: asserts `NoAddress` specifically maps to `down` while not being
+/// confirmed-down; then, over every `down`-rendering variant, that the
+/// confirmed-down set is a STRICT subset — non-empty on both sides.
+/// Test: This is the test.
+#[test]
+fn down_health_string_is_not_a_kickstart_licence() {
+    // The named trap, spelled out: `down` for display, no repair authorisation.
+    assert_eq!(ProbeOutcome::NoAddress.health_string(), "down");
+    assert!(
+        !ProbeOutcome::NoAddress.is_confirmed_down(),
+        "NoAddress reports `down` but observed NOTHING — it must never authorise \
+         a kickstart. If this ever flips, `tctl install` can hard-restart a member \
+         whose address simply failed to resolve."
+    );
+
+    let down_renderers = [
+        ProbeOutcome::NoAddress,
+        ProbeOutcome::Refused,
+        ProbeOutcome::Timeout,
+        ProbeOutcome::HttpError { status: 502 },
+        ProbeOutcome::BadEnvelope {
+            got: "<html>squatter</html>".to_owned(),
+        },
+        ProbeOutcome::ProbeFailed {
+            detail: "no runtime".to_owned(),
+        },
+    ];
+    let (repairable, benign): (Vec<_>, Vec<_>) = down_renderers
+        .iter()
+        .inspect(|o| {
+            assert_eq!(o.health_string(), "down", "{o:?} must render `down`");
+        })
+        .partition(|o| o.is_confirmed_down());
+
+    assert!(
+        !benign.is_empty(),
+        "the invariant under test is that `down` does NOT imply confirmed-down; if \
+         every down-rendering variant is confirmed-down, the display string has \
+         become a repair authorisation and #4246's gate is gone"
+    );
+    assert!(
+        !repairable.is_empty(),
+        "the mirror property: some `down` MUST still authorise repair, or a \
+         genuinely dead daemon is never kickstarted (#2498)"
+    );
+}
+
 /// Why: THE gate. `launchctl kickstart -k` is destructive — no `ExitTimeOut` in
 /// the shared plist renderer means launchd SIGKILLs 20s after SIGTERM, inside
 /// trusty-search's ≥30s-per-index flush budget — so only an observation at the
