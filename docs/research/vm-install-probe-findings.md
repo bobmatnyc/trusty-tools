@@ -16,10 +16,10 @@ measurements. **The measurements are the deliverable.** No harness is being buil
 |---|----------|--------|------------|
 | A | Base image inventory | **ANSWERED** — see A below | measured |
 | B | `tart exec` viability / exit-code propagation | **ANSWERED — fully viable, see B** | measured |
-| C | Tahoe "Local Network" permission vs SSH | NOT YET MEASURED | — |
-| D | Non-interactive access mechanics | NOT YET MEASURED | — |
+| C | Tahoe "Local Network" permission vs SSH | **ANSWERED — does NOT block, see C** | measured |
+| D | Non-interactive access mechanics | **ANSWERED — see D** | measured |
 | E | mise + Rust reality check | **ANSWERED — assumption was broken, see E** | measured |
-| F | TCC / permission dialogs, headless | PARTIAL — `--no-graphics` boots and provisions | partial |
+| F | TCC / permission dialogs, headless | **ANSWERED — mic preflight, not network, see F** | measured |
 | G | Timings & disk | **MOSTLY ANSWERED — see G** | measured |
 | H | Compile-speed calibration | NOT YET MEASURED | — |
 | I | Suspend/resume | NOT YET MEASURED | — |
@@ -244,12 +244,113 @@ tart exec "$VM" /bin/zsh -c 'export PATH="$HOME/.cargo/bin:$PATH"; cargo --versi
 
 ---
 
-## F. TCC / headless — PARTIAL
+## C. Tahoe "Local Network" permission — ANSWERED: **it does not block anything**
 
-`tart run --no-graphics` boots the guest successfully and the guest agent becomes
-responsive; a full mise + rustup provisioning run completed headless with **no observed
-TCC dialog**. A graphical-vs-headless comparison and an explicit check for dialogs is
-NOT YET MEASURED.
+This was expected to be the finding that disqualified the whole approach. It is not.
+
+```
+### C1: tart ip
+IP=[192.168.64.7] rc=0
+### C2: is sshd even listening in the guest
+		"com.openssh.sshd" => enabled
+tcp4       0      0  *.22    *.*    LISTEN
+tcp6       0      0  *.22    *.*    LISTEN
+### C3: raw TCP reachability from host, 5s timeout
+nc rc=0
+### C6: ping
+64 bytes from 192.168.64.7: icmp_seq=1 ttl=64 time=1.049 ms
+2 packets transmitted, 2 packets received, 0.0% packet loss
+```
+
+`ssh` completes a full key exchange and reaches the authentication stage:
+
+```
+debug1: SSH2_MSG_SERVICE_ACCEPT received
+debug1: Authentications that can continue: publickey,password,keyboard-interactive
+admin@192.168.64.7: Permission denied (publickey,password,keyboard-interactive).
+```
+
+That is an **authentication** failure (we had not yet installed a key), not a network
+block. A Local Network denial severs traffic at the packet level — we would never have
+seen ICMP replies, a TCP accept, or an SSH KEX.
+
+**No GUI prompt appeared and none was needed.** A unified-log sweep for local-network /
+TCC denials over the test window returned no denial for networking. No permission dialog
+gated the run, and nothing was clicked through.
+
+### Important caveat on generalising this
+
+macOS attributes Local Network permission to the **responsible app**, not to the process
+making the syscall. Here the responsible app is iTerm2:
+
+```
+responsible={TCCDProcess: identifier=com.googlecode.iterm2, ...
+             responsible_path=/Applications/iTerm.app/Contents/MacOS/iTerm2},
+accessing={TCCDProcess: identifier=com.apple.Virtualization.VirtualMachine, ...}
+```
+
+iTerm2 evidently already holds the necessary grant on this host. **A harness launched
+under a different responsible app — a LaunchAgent, a CI runner, a different terminal —
+could still be prompted on first use.** `tart exec` uses vsock and has no such
+dependency, so it remains the safer transport even though SSH works here.
+
+---
+
+## D. Non-interactive access mechanics — ANSWERED
+
+```
+### D1: is sshpass available on the host?
+sshpass ABSENT on host
+### D2: inject an authorized_key via tart exec -i (no network, no password)
+injected; authorized_keys now:
+       1
+inject rc=0
+### D3: key-based non-interactive login
+Warning: Permanently added '192.168.64.7' (ED25519) to the list of known hosts.
+SSH_OK
+admin
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+zsh:1: command not found: cargo
+ssh rc=127
+### D4: exit code propagation over ssh
+host saw 7
+```
+
+* **Key injection via `tart exec -i` works and is the clean bootstrap.** It needs no
+  network, no password, and no `sshpass` — which matters, because **`sshpass` is not
+  installed on the host** and installing it would violate the no-host-changes constraint.
+* Key-based non-interactive login then works, and **SSH propagates exit codes** (7).
+* `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` handles host-key churn
+  across clones — clones share a host key, and the only output is a benign warning.
+* **SSH's non-interactive PATH is even barer than `tart exec`'s:**
+  `/usr/bin:/bin:/usr/sbin:/sbin`. It does not even contain `/opt/homebrew/bin`, so
+  **`mise`, `brew` and `gh` are all invisible over SSH too**, not just `cargo`. Anything
+  driving the guest over SSH must set PATH explicitly.
+
+---
+
+## F. TCC / headless — ANSWERED (with a surprise)
+
+`tart run --no-graphics` boots the guest successfully, the guest agent becomes
+responsive in ~34 s, and a full mise + rustup provisioning run completes headless. **No
+TCC dialog blocked provisioning.**
+
+However, starting a VM **does** raise a TCC request — for the **microphone**:
+
+```
+AUTHREQ_CTX: msgID=611.231, service=kTCCServiceAudioCapture, preflight=yes
+AUTHREQ_ATTRIBUTION: attribution={
+  responsible={identifier=com.googlecode.iterm2, responsible_path=/Applications/iTerm.app/...},
+  accessing={identifier=com.apple.Virtualization.VirtualMachine, ...}}
+AUTHREQ_RESULT: msgID=611.231, authValue=1, authReason=0
+```
+
+`Virtualization.framework` preflights `kTCCServiceAudioCapture` even for a
+`--no-graphics` guest. Here it resolved to `authValue=1` (allowed) with no prompt because
+the responsible app already held the grant. **On a host where the responsible app has no
+microphone grant, this is a candidate for a first-run GUI prompt.** It did not block this
+probe, but a harness should be aware that a mic prompt — not a network prompt — is the
+dialog most likely to appear.
 
 ---
 
@@ -317,7 +418,7 @@ resizing will read the pre-expansion number.
 
 ---
 
-## C, D, H, I — NOT YET MEASURED
+## H, I — NOT YET MEASURED
 
 ---
 
