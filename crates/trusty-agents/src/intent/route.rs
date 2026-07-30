@@ -130,9 +130,12 @@ const TM_PHRASES: &[&str] = &["pull request", "status of", "across repos"];
 /// What: applies the precedence order in the module docs: (1) a repo-file
 /// token or a hard Tcode verb wins outright; (2) else any Tm signal wins;
 /// (3) else a generic code verb (with no Tm signal already ruled out by (2))
-/// routes Tcode; (4) else the side with more matched signals wins; (5) a tie
-/// (including zero signals on both sides, and empty/whitespace-only input)
-/// falls back to the OWNER-LOCKED default, `Tm`.
+/// AND a genuine Tcode lexical signal (code-critic MEDIUM, 2026-07-29 —
+/// `run`/`build` alone are common non-coding verbs; see
+/// `run_generic_verb_requires_tcode_signal` below) routes Tcode; (4) else the
+/// side with more matched signals wins; (5) a tie (including zero signals on
+/// both sides, and empty/whitespace-only input) falls back to the
+/// OWNER-LOCKED default, `Tm`.
 /// Test: `route_tests::*`.
 pub fn route_task(task: &str) -> BridgeRoute {
     let raw_lower = task.to_lowercase();
@@ -145,12 +148,8 @@ pub fn route_task(task: &str) -> BridgeRoute {
 
     // Rule 1: repo-file token or a hard Tcode verb wins outright, even over
     // Tm vocabulary in the same sentence.
-    let has_repo_file_token = REPO_FILE_EXTENSIONS
-        .iter()
-        .any(|ext| raw_lower.contains(ext))
-        || raw_lower.contains(REPO_FILE_PATH_TOKEN);
     let has_hard_tcode_verb = words.iter().any(|w| TCODE_HARD_VERBS.contains(w));
-    if has_repo_file_token || has_hard_tcode_verb {
+    if has_repo_file_token(task) || has_hard_tcode_verb {
         return BridgeRoute::Tcode;
     }
 
@@ -163,7 +162,33 @@ pub fn route_task(task: &str) -> BridgeRoute {
 
     // Rule 3: a generic code verb routes Tcode — only reachable here because
     // rule 2 already proved there is no competing Tm signal.
-    if words.iter().any(|w| GENERIC_CODE_VERBS.contains(w)) {
+    //
+    // Code-critic MEDIUM (2026-07-29): `run`/`build` are common non-coding
+    // verbs ("run to the store", "build rapport with the client", "run point
+    // on this deal") — unlike `write`/`add`/`create`, which stayed in the
+    // original design because a Tm signal veto (rule 2) was judged
+    // sufficient protection for them, `run`/`build` additionally require a
+    // genuine Tcode-flavored co-occurrence in the SAME input before they
+    // win: `has_tcode_lexical_signal` (a repo-file token, error/stack-trace
+    // marker, `TCODE_PHRASES` substring, or `TCODE_WORDS` token), OR one of
+    // `super::CODE_ARTIFACT_IMPLEMENTATION_WORDS` (the SAME tiny
+    // "tests"/"release" exception `intent::classify_intent` uses — shared,
+    // not reinvented — so "run the tests"/"build the release" still route
+    // Tcode; neither word is in `TCODE_WORDS`/`TCODE_PHRASES`, which are
+    // scoped to bug/error vocabulary, not code-artifact nouns). `write`/
+    // `add`/`create` keep the original, softer rule (Tm-signal veto only) —
+    // narrowing them too is out of this fix's scope and unproven to be a
+    // problem today.
+    let has_run_or_build = words.iter().any(|w| *w == "run" || *w == "build");
+    if has_run_or_build {
+        if has_tcode_lexical_signal(task)
+            || words
+                .iter()
+                .any(|w| super::CODE_ARTIFACT_IMPLEMENTATION_WORDS.contains(w))
+        {
+            return BridgeRoute::Tcode;
+        }
+    } else if words.iter().any(|w| GENERIC_CODE_VERBS.contains(w)) {
         return BridgeRoute::Tcode;
     }
 
@@ -180,6 +205,42 @@ pub fn route_task(task: &str) -> BridgeRoute {
     } else {
         BridgeRoute::Tm
     }
+}
+
+/// True when `input` carries a repo-file-shaped token: a known source
+/// extension (`.rs`/`.ts`/`.py`) or the `src/` path token, checked against
+/// the RAW (pre-normalization) lowercased input — `intent::normalize` maps
+/// `.`/`/` to whitespace and would destroy these as tokens.
+///
+/// `pub(crate)` (code-critic direction, 2026-07-29) so
+/// `intent::classify_intent`'s unambiguous-signal gate can reuse this exact
+/// check instead of a second implementation.
+/// Test: `route_tests::has_repo_file_token_*`.
+pub(crate) fn has_repo_file_token(input: &str) -> bool {
+    let raw_lower = input.to_lowercase();
+    REPO_FILE_EXTENSIONS
+        .iter()
+        .any(|ext| raw_lower.contains(ext))
+        || raw_lower.contains(REPO_FILE_PATH_TOKEN)
+}
+
+/// True when `input` carries an explicit error/stack-trace marker: the raw
+/// `error:` substring, or one of `TCODE_PHRASES` ("unit test", "failing
+/// test", "stack trace") as a substring of the normalized text.
+///
+/// Why: these are UNAMBIGUOUS — unlike a bare `TCODE_WORDS` token (e.g.
+/// "bug", "patch"), a literal `error:` prefix or a "stack trace"/"failing
+/// test" phrase essentially never appears in non-technical writing.
+/// `pub(crate)` (code-critic direction, 2026-07-29) so
+/// `intent::classify_intent`'s unambiguous-signal gate can reuse this exact
+/// check — "reuse `route::stack_trace_and_error_marker`, do not write a
+/// second detector" — instead of a second implementation.
+/// Test: `route_tests::has_error_or_stack_trace_marker_*`.
+pub(crate) fn has_error_or_stack_trace_marker(input: &str) -> bool {
+    let raw_lower = input.to_lowercase();
+    let normalized = normalize(input);
+    RAW_TCODE_MARKERS.iter().any(|m| raw_lower.contains(m))
+        || TCODE_PHRASES.iter().any(|p| normalized.contains(p))
 }
 
 /// Count how many words in `list` appear (exact token match) in `words`.

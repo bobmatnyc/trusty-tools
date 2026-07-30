@@ -226,33 +226,20 @@ fn slash_command_with_whitespace_prefix() {
 // Section 6: Exhaustive ACTION_VERBS constant coverage
 // =====================================================================
 
-// Owner-approved #4319 follow-up (2026-07-29): a bare `ACTION_VERBS` hit is
-// no longer unconditionally sufficient for `Implementation` — see
-// `classify_intent`'s doc comment and `has_technical_context_signal`. This
-// splits the old single exhaustive-coverage test into two, reflecting the
-// ACTUAL new contract rather than deleting coverage to get green:
-// - 8 of the 23 entries still trigger Implementation from the bare verb
-//   alone (4 `route::TCODE_HARD_VERBS`, plus write/test/rename/compile,
-//   each of which independently self-satisfies its own technical-context
-//   requirement — see `every_action_verb_that_self_satisfies_context`).
-// - The remaining 15 are common in ordinary conversation with a
-//   non-coding meaning ("check if it's raining", "list your goals for
-//   today") and must NOT trigger Implementation without it — see
-//   `plain_action_verbs_require_technical_context`.
+// Code-critic CRITICAL follow-up (2026-07-29): `Implementation` now
+// requires an UNAMBIGUOUS signal (see `classify_intent`'s doc comment and
+// `has_unambiguous_technical_signal`) — a bare `ACTION_VERBS` hit is
+// insufficient EVEN WITH a generic technical-context word alongside it
+// (that combination is ambiguous and lands on `Research`; see
+// `TECHNICAL_CONTEXT_WORDS`'s doc comment for the proven regression this
+// closes). Only 4 of the 23 entries — the hard verbs — still trigger
+// Implementation from the bare verb alone; the other 19 never do, from any
+// amount of generic context.
 
 #[test]
-fn every_action_verb_that_self_satisfies_context() {
-    let always_implementation = [
-        "fix",
-        "debug",
-        "implement",
-        "refactor", // route::TCODE_HARD_VERBS
-        "write",
-        "rename",
-        "compile", // also in route::TCODE_WORDS
-        "test",    // also in TECHNICAL_CONTEXT_WORDS (documented corner case)
-    ];
-    for verb in &always_implementation {
+fn hard_action_verbs_trigger_implementation_without_context() {
+    let hard_verbs = ["fix", "debug", "implement", "refactor"];
+    for verb in &hard_verbs {
         let input = format!("{} something now", verb);
         assert_eq!(
             classify_intent(&input),
@@ -264,32 +251,46 @@ fn every_action_verb_that_self_satisfies_context() {
 }
 
 #[test]
-fn plain_action_verbs_require_technical_context() {
+fn plain_action_verbs_never_trigger_implementation_from_context_alone() {
     let plain_verbs = [
-        "create", "build", "run", "add", "update", "delete", "deploy", "generate", "show", "list",
-        "find", "search", "remove", "install", "check",
+        "write", "create", "build", "run", "add", "update", "delete", "test", "deploy", "generate",
+        "show", "list", "find", "search", "remove", "rename", "install", "compile", "check",
     ];
     for verb in &plain_verbs {
-        let input = format!("{} something now", verb);
+        // No context at all.
+        let bare = format!("{} something now", verb);
         assert_ne!(
-            classify_intent(&input),
+            classify_intent(&bare),
             IntentClass::Implementation,
-            "'{}' alone (no technical context) should NOT trigger Implementation",
+            "'{}' alone (no context) should NOT trigger Implementation",
             verb
+        );
+        // WITH a generic technical-context word — still must not reach
+        // Implementation (this is the exact proven regression: a plain
+        // verb plus a generic noun is ambiguous, not unambiguous).
+        let with_context = format!("{} the session token now", verb);
+        assert_ne!(
+            classify_intent(&with_context),
+            IntentClass::Implementation,
+            "'{}' plus a generic context word ('{}') should still NOT trigger Implementation",
+            verb,
+            with_context
         );
     }
 }
 
 #[test]
 fn action_verb_case_insensitive() {
-    assert_eq!(
-        classify_intent("WRITE A SCRIPT"),
-        IntentClass::Implementation
-    );
+    // "WRITE A SCRIPT" no longer reaches Implementation — "script" is an
+    // AMBIGUOUS context word (Research-only), not an unambiguous signal.
+    assert_eq!(classify_intent("WRITE A SCRIPT"), IntentClass::Research);
     assert_eq!(classify_intent("Fix The Bug"), IntentClass::Implementation);
+    // "Deploy to production" — "production" is likewise ambiguous context
+    // (Research-only): a plain verb + generic noun is ambiguous, not
+    // unambiguous evidence of a coding request.
     assert_eq!(
         classify_intent("Deploy to production"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 

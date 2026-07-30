@@ -17,8 +17,9 @@
 //! - Invariants: totality (never panics), determinism, whitespace invariance
 //! - Slash prefix always Implementation
 //! - Action verb / technical-context interaction across all verb x context
-//!   combinations (8 self-satisfying verbs always dominate; 15 plain verbs
-//!   need external context — owner-approved #4319 follow-up, 2026-07-29)
+//!   combinations (4 hard verbs always dominate; the other 19 NEVER reach
+//!   Implementation from context alone — code-critic CRITICAL follow-up,
+//!   2026-07-29)
 //! - Word count boundary sweep (1-30 words, all Conversational absent
 //!   verb/question signals — #4319)
 //! - Constant-list completeness guards (count, lowercase, no duplicates, no overlap)
@@ -123,42 +124,34 @@ fn slash_prefix_always_implementation() {
 }
 
 // =====================================================================
-// Invariant 5 (REVISED, owner-approved #4319 follow-up, 2026-07-29): an
-// action verb no longer unconditionally dominates. It now splits into two
-// groups, empirically pinned against all 6 context templates:
+// Invariant 5 (REVISED AGAIN, code-critic CRITICAL follow-up, 2026-07-29):
+// an action verb no longer unconditionally dominates, and — after the
+// critic PROVED (by executing the classifier, not reasoning about it) that
+// the previous "plain verb + ANY technical-context word" rule still crashed
+// the subprocess pipeline on ordinary sentences ("check my token balance") —
+// a plain verb can NO LONGER reach Implementation via a context word at
+// all. Only 4 of the 23 `ACTION_VERBS` entries (`route::TCODE_HARD_VERBS`:
+// fix/debug/implement/refactor) are unconditionally sufficient; the other
+// 19 NEVER reach Implementation from verb-plus-context alone, empirically
+// pinned across all 6 templates:
+// - context-free ("{v} something", "please {v} the thing") -> Conversational
+// - question-shaped ("can you {v} it", "what should I {v}") -> Research
+//   (the leading question word wins, not the verb)
+// - research-verb-bearing ("explain how to {v} a test") -> Research (the
+//   research verb "explain" wins)
+// - technical-context-word-bearing ("hello, {v} a script") -> Research
+//   (AMBIGUOUS: verb + generic context word is Research, never
+//   Implementation — this is the exact fix for the proven regression)
 //
-// - 8 of the 23 `ACTION_VERBS` entries self-satisfy their own
-//   technical-context requirement regardless of template (4
-//   `route::TCODE_HARD_VERBS`, plus write/test/rename/compile — each
-//   independently also present in `route::TCODE_WORDS` or
-//   `TECHNICAL_CONTEXT_WORDS`) -> Implementation in all 6 templates.
-// - The remaining 15 are plain, common-in-conversation verbs that need
-//   an EXTERNAL technical-context word to reach Implementation. Across
-//   the same 6 templates: the 2 context-free ones ("{v} something",
-//   "please {v} the thing") land Conversational; the 2 question-shaped
-//   ones ("can you {v} it", "what should I {v}") land Research (the
-//   verb doesn't win, so the leading question word does); the 2
-//   context-bearing ones ("explain how to {v} a test", "hello, {v} a
-//   script") land Implementation via the "test"/"script" context words.
-//
-// This was a corner the original #4319 fix left open: casual phrasing
-// containing one of these 23 words ("can you check if it's raining
-// tomorrow", "I'll run by the store after work") still hit
-// `Implementation` and the crash this whole fix exists to prevent.
+// This closes the corner the ORIGINAL #4319 fix left open ("can you check
+// if it's raining tomorrow" still hit Implementation) AND the corner the
+// FIRST follow-up reopened wider ("check my token balance" also still hit
+// Implementation, because "token" was treated as sufficient context).
 // =====================================================================
 
 #[test]
-fn self_satisfying_action_verbs_always_dominate() {
-    let always_implementation = [
-        "fix",
-        "debug",
-        "implement",
-        "refactor",
-        "write",
-        "test",
-        "rename",
-        "compile",
-    ];
+fn hard_action_verbs_always_dominate() {
+    let hard_verbs = ["fix", "debug", "implement", "refactor"];
     let contexts = [
         "{v} something",
         "please {v} the thing",
@@ -167,13 +160,13 @@ fn self_satisfying_action_verbs_always_dominate() {
         "what should I {v}",
         "hello, {v} a script",
     ];
-    for verb in &always_implementation {
+    for verb in &hard_verbs {
         for ctx in &contexts {
             let input = ctx.replace("{v}", verb);
             assert_eq!(
                 classify_intent(&input),
                 IntentClass::Implementation,
-                "self-satisfying verb '{}' in '{}' should be Implementation",
+                "hard verb '{}' in '{}' should be Implementation",
                 verb,
                 input
             );
@@ -182,16 +175,18 @@ fn self_satisfying_action_verbs_always_dominate() {
 }
 
 #[test]
-fn plain_action_verbs_need_context_across_all_templates() {
+fn plain_action_verbs_never_reach_implementation_from_context_alone() {
     let plain_verbs = [
-        "create", "build", "run", "add", "update", "delete", "deploy", "generate", "show", "list",
-        "find", "search", "remove", "install", "check",
+        "write", "create", "build", "run", "add", "update", "delete", "test", "deploy", "generate",
+        "show", "list", "find", "search", "remove", "rename", "install", "compile", "check",
     ];
-    // (template, expected) — expected depends on what ELSE fires once the
-    // action-verb-alone gate no longer does.
     let context_free = ["{v} something", "please {v} the thing"];
-    let question_shaped = ["can you {v} it", "what should I {v}"];
-    let context_bearing = ["explain how to {v} a test", "hello, {v} a script"];
+    let never_implementation = [
+        "can you {v} it",
+        "explain how to {v} a test",
+        "what should I {v}",
+        "hello, {v} a script",
+    ];
 
     for verb in &plain_verbs {
         for ctx in &context_free {
@@ -204,22 +199,19 @@ fn plain_action_verbs_need_context_across_all_templates() {
                 input
             );
         }
-        for ctx in &question_shaped {
+        for ctx in &never_implementation {
             let input = ctx.replace("{v}", verb);
-            assert_eq!(
+            assert_ne!(
                 classify_intent(&input),
-                IntentClass::Research,
-                "plain verb '{}' in question-shaped '{}' should be Research (leading question word wins), not Implementation",
+                IntentClass::Implementation,
+                "plain verb '{}' in '{}' must NEVER reach Implementation from context alone",
                 verb,
                 input
             );
-        }
-        for ctx in &context_bearing {
-            let input = ctx.replace("{v}", verb);
             assert_eq!(
                 classify_intent(&input),
-                IntentClass::Implementation,
-                "plain verb '{}' in context-bearing '{}' SHOULD be Implementation (technical-context word present)",
+                IntentClass::Research,
+                "plain verb '{}' in '{}' should land on Research",
                 verb,
                 input
             );

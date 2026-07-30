@@ -23,6 +23,29 @@ fn run_and_build_generic_verbs_route_tcode_with_no_tm_signal() {
 }
 
 #[test]
+fn run_and_build_require_a_real_technical_signal_not_just_the_bare_verb() {
+    // Code-critic MEDIUM (2026-07-29): proven regression — `route_task` and
+    // `classify_intent` used to disagree on plainly non-coding text.
+    // "run"/"build" alone are common non-coding verbs ("run to the store",
+    // "I'll run by the store after work", "let's build rapport with the
+    // client", "run point on this deal") and must NOT route Tcode just
+    // because the bare word matched `GENERIC_CODE_VERBS` — they now require
+    // a genuine `has_tcode_lexical_signal` hit or a
+    // `CODE_ARTIFACT_IMPLEMENTATION_WORDS` co-occurrence in the SAME input.
+    assert_ne!(route_task("run to the store"), BridgeRoute::Tcode);
+    assert_eq!(route_task("run to the store"), BridgeRoute::Tm);
+    assert_ne!(
+        route_task("I'll run by the store after work"),
+        BridgeRoute::Tcode
+    );
+    assert_ne!(
+        route_task("let's build rapport with the client"),
+        BridgeRoute::Tcode
+    );
+    assert_ne!(route_task("run point on this deal"), BridgeRoute::Tcode);
+}
+
+#[test]
 fn run_generic_verb_still_loses_to_tm_signal() {
     // Precedence rule 2 (Tm signal) still beats rule 3 (generic verb) —
     // "run" joining GENERIC_CODE_VERBS must not out-rank real Tm vocabulary,

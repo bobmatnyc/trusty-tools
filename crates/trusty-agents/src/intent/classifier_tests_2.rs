@@ -17,42 +17,49 @@ fn question_word_not_first_does_not_trigger_research() {
 }
 
 // =====================================================================
-// Section 9: Priority rules — action verb wins over everything
+// Section 9: Priority rules — ONLY hard verbs (route::TCODE_HARD_VERBS:
+// fix/debug/implement/refactor) win over everything. A plain action verb
+// no longer does (code-critic CRITICAL follow-up, 2026-07-29) — it loses to
+// a leading question word, a research verb, and even a generic
+// technical-context word (which is AMBIGUOUS, not unambiguous evidence).
 // =====================================================================
 
 #[test]
-fn action_verb_wins_over_question_word() {
-    // "fix" is a hard verb (route::TCODE_HARD_VERBS) -> always wins.
+fn hard_verb_wins_over_question_word() {
+    // "fix" is a hard verb (route::TCODE_HARD_VERBS) -> always wins, even
+    // over the leading question word "how".
     assert_eq!(
         classify_intent("how do I fix this bug"),
         IntentClass::Implementation
     );
-    // "write" self-satisfies its own technical-context requirement — it's
-    // also a `route::TCODE_WORDS` entry — so it still wins over the
-    // question word even with no other context in the sentence.
+}
+
+#[test]
+fn plain_verb_loses_to_question_word_and_research_verb() {
+    // Code-critic CRITICAL follow-up (2026-07-29): a PLAIN verb ("write",
+    // "deploy") no longer wins over a leading question word or a research
+    // verb — question-word/research-verb detection is checked BEFORE the
+    // unambiguous-technical-signal gate now, precisely so a genuine
+    // question ("what does X do") lands on Research rather than a
+    // coincidental lexical match forcing Implementation. See
+    // `classifier_property_tests::plain_action_verbs_never_reach_implementation_from_context_alone`
+    // for the full verb x template matrix.
     assert_eq!(
         classify_intent("what should I write here"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
-    // Owner-approved #4319 follow-up (2026-07-29): "deploy" is a PLAIN verb
-    // with no technical context here ("this" names nothing concrete), so it
-    // no longer unconditionally wins over the leading question word --
-    // falls through to "where" -> Research. (Previously Implementation
-    // under the old "any action verb always wins" contract; see
-    // `plain_action_verbs_need_context_across_all_templates` in
-    // classifier_property_tests.rs for the full verb x template matrix.)
     assert_eq!(
         classify_intent("where should I deploy this"),
+        IntentClass::Research
+    );
+    assert_eq!(
+        classify_intent("explain how to write a test"),
         IntentClass::Research
     );
 }
 
 #[test]
-fn action_verb_wins_over_research_verb() {
-    assert_eq!(
-        classify_intent("explain how to write a test"),
-        IntentClass::Implementation
-    );
+fn hard_verb_wins_over_research_verb() {
     assert_eq!(
         classify_intent("review and fix the code"),
         IntentClass::Implementation
@@ -64,15 +71,22 @@ fn action_verb_wins_over_research_verb() {
 }
 
 #[test]
-fn action_verb_wins_over_greeting_prefix() {
+fn hard_verb_and_artifact_exception_win_over_greeting_prefix() {
+    // "script" is an AMBIGUOUS context word (Research-only) and this
+    // sentence ends in "?", so it lands on Research now, not Implementation
+    // — "hi, can you ...?" is a question, not a command.
     assert_eq!(
         classify_intent("hi, can you write a script that adds two numbers?"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
+    // "fix" is a hard verb -> always wins, even over the greeting prefix
+    // (also has a repo-file token, doubly confirming Implementation).
     assert_eq!(
         classify_intent("Hello, please fix the failing test in src/main.rs"),
         IntentClass::Implementation
     );
+    // "run" is plain, but "tests" is the tiny CODE_ARTIFACT_IMPLEMENTATION_WORDS
+    // exception -> still Implementation.
     assert_eq!(
         classify_intent("hey, run the tests"),
         IntentClass::Implementation
@@ -80,11 +94,11 @@ fn action_verb_wins_over_greeting_prefix() {
 }
 
 #[test]
-fn write_a_review_is_implementation() {
-    assert_eq!(
-        classify_intent("write a review"),
-        IntentClass::Implementation
-    );
+fn write_a_review_is_research_not_implementation() {
+    // "review" is a RESEARCH_VERBS entry, checked before any
+    // context/artifact-word logic — a plain verb ("write") no longer wins
+    // over it (code-critic CRITICAL follow-up, 2026-07-29).
+    assert_eq!(classify_intent("write a review"), IntentClass::Research);
 }
 
 // =====================================================================
@@ -307,6 +321,43 @@ fn bucket_4_signal_free_conversation_is_conversational() {
 }
 
 #[test]
+fn code_critic_critical_ordinary_nouns_never_reach_implementation() {
+    // #4319 code-critic CRITICAL (2026-07-29): these 12 sentences, verbatim
+    // from the critic's report, all returned Implementation under the
+    // FIRST follow-up's "plain verb + ANY technical-context word is
+    // sufficient" rule — reaching `task_runner.rs`'s literal
+    // `subprocess exited with status {:?}` on completely ordinary
+    // conversation. Each pairs a plain ACTION_VERBS verb with a common
+    // polysemous English noun (token, production, staging, credentials,
+    // session, queue, container, timeout, exceptions, incident, config)
+    // that also happens to be a legitimate technical term — proving that
+    // "plain verb + generic context word" cannot be unambiguous evidence
+    // for Implementation, only for Research (see `TECHNICAL_CONTEXT_WORDS`'s
+    // doc comment for the inverted-default fix this pins).
+    let ordinary_sentences_with_technical_sounding_nouns = [
+        "check my token balance",
+        "check the production schedule for the play",
+        "check the staging area before the wedding",
+        "update my credentials at the DMV",
+        "find my token for the parking meter",
+        "check my session times for yoga",
+        "add me to the queue at the deli",
+        "check the container garden this weekend",
+        "check the timeout rule in basketball",
+        "list the exceptions to the dress code",
+        "check the incident report from the fender bender",
+        "delete the old config from my calendar invite",
+    ];
+    for s in ordinary_sentences_with_technical_sounding_nouns {
+        assert_ne!(
+            classify_intent(s),
+            IntentClass::Implementation,
+            "'{s}' must NEVER reach Implementation — this is the exact crash class #4319 exists to eliminate"
+        );
+    }
+}
+
+#[test]
 fn greeting_prefix_word_count_boundary_at_six() {
     assert_eq!(
         classify_intent("hello my dear old trusted friend"),
@@ -352,10 +403,9 @@ fn case_insensitivity() {
         classify_intent("EXPLAIN the architecture"),
         IntentClass::Research
     );
-    assert_eq!(
-        classify_intent("WRITE A SCRIPT"),
-        IntentClass::Implementation
-    );
+    // "script" is an AMBIGUOUS context word (Research-only, not an
+    // unambiguous signal) — code-critic CRITICAL follow-up, 2026-07-29.
+    assert_eq!(classify_intent("WRITE A SCRIPT"), IntentClass::Research);
 }
 
 #[test]
@@ -385,10 +435,10 @@ fn apostrophe_preserved() {
 #[test]
 fn mixed_punctuation_normalized() {
     assert_eq!(classify_intent("Hello!!!"), IntentClass::Conversational);
-    assert_eq!(
-        classify_intent("Write...a...script"),
-        IntentClass::Implementation
-    );
+    // "script" is ambiguous context (Research-only); normalization strips
+    // the dots into whitespace either way, so this pins that punctuation
+    // handling doesn't change the (now Research) outcome.
+    assert_eq!(classify_intent("Write...a...script"), IntentClass::Research);
 }
 
 #[test]
@@ -398,10 +448,7 @@ fn unicode_lowercasing() {
 
 #[test]
 fn tabs_and_newlines_treated_as_whitespace() {
-    assert_eq!(
-        classify_intent("write\ta\nscript"),
-        IntentClass::Implementation
-    );
+    assert_eq!(classify_intent("write\ta\nscript"), IntentClass::Research);
 }
 
 // =====================================================================
@@ -448,13 +495,18 @@ fn normalize_empty_and_punctuation() {
 
 #[test]
 fn real_world_task_requests() {
+    // Code-critic CRITICAL follow-up (2026-07-29): "script"/"api"/
+    // "endpoint"/"staging" are all AMBIGUOUS context words now
+    // (Research-only) — a plain verb ("write"/"create"/"deploy") plus one
+    // of them is no longer sufficient for Implementation. Only "refactor"
+    // (a hard verb) still reaches Implementation unconditionally.
     assert_eq!(
         classify_intent("Write a Python script that formats data as a markdown table"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
     assert_eq!(
         classify_intent("Create a REST API endpoint for user registration"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
     assert_eq!(
         classify_intent("Refactor the database module to use connection pooling"),
@@ -462,7 +514,7 @@ fn real_world_task_requests() {
     );
     assert_eq!(
         classify_intent("Deploy the staging environment"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 
