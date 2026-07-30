@@ -165,6 +165,158 @@ fn schema_enums_match_rust_enums() {
 }
 
 #[test]
+fn schema_body_kinds_match_rust_variants() {
+    // The v2 drift gate (#4318). `$defs.body` is a `oneOf` of tagged objects
+    // rather than an `enum`, so `schema_enums_match_rust_enums` cannot see it —
+    // and the whole cost of the version bump is that the two spellings of the
+    // body kinds must agree. A `file` variant in Rust with no schema branch, or
+    // the reverse, is a package that validates in one place and fails in the
+    // other.
+    let schema: serde_json::Value = serde_json::from_str(SCHEMA_JSON).expect("schema is JSON");
+    let kinds: Vec<String> = schema["$defs"]["body"]["oneOf"]
+        .as_array()
+        .expect("body is a oneOf")
+        .iter()
+        .map(|branch| {
+            branch["properties"]["kind"]["const"]
+                .as_str()
+                .expect("each branch pins a kind const")
+                .to_string()
+        })
+        .collect();
+
+    let rust: Vec<String> = [
+        BlockBody::Text {
+            text: "x".to_string(),
+        },
+        BlockBody::File {
+            path: "sections/identity.md".to_string(),
+        },
+        BlockBody::Generated {
+            generator: Generator::AgentRoster,
+        },
+    ]
+    .iter()
+    .map(|body| {
+        serde_json::to_value(body).expect("serializes")["kind"]
+            .as_str()
+            .expect("tagged")
+            .to_string()
+    })
+    .collect();
+
+    assert_eq!(
+        kinds, rust,
+        "schema body kinds must match the Rust variants"
+    );
+}
+
+#[test]
+fn file_body_resolves_through_the_bundled_table() {
+    // A `file` body must compose to the referenced source, trimmed — the same
+    // bytes an inline `text` block carrying that file would have produced. That
+    // equivalence is what makes the v2 addition a pure authoring convenience
+    // rather than a second content channel.
+    let source = crate::core::instruction_pipeline::SECTION_IDENTITY;
+    let mut package = fixture();
+    package.blocks[8] = InstructionBlock {
+        section: SectionId::Identity,
+        body: BlockBody::File {
+            path: "sections/identity.md".to_string(),
+        },
+        join_before: Join::Rule,
+        optional: false,
+    };
+
+    assert_eq!(package.validate(), Ok(()));
+    let composed = package.compose(&inputs()).expect("composes");
+    assert!(composed.contains(source.trim()));
+
+    // And the equivalence, stated directly.
+    let mut inline = fixture();
+    inline.blocks[8] = text(SectionId::Identity, source.trim());
+    assert_eq!(composed, inline.compose(&inputs()).expect("composes"));
+}
+
+#[test]
+fn unknown_file_source_is_a_named_validation_error() {
+    // A mistyped path must name the path, not compose to an empty block (#4196's
+    // shape: content referenced but never delivered).
+    let mut package = fixture();
+    package.blocks[8].body = BlockBody::File {
+        path: "sections/nope.md".to_string(),
+    };
+    assert_eq!(
+        package.validate(),
+        Err(ValidationError::UnknownFileSource {
+            index: 8,
+            section: SectionId::Identity,
+            path: "sections/nope.md".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_file_block_may_not_be_optional() {
+    // Same rule as a text block: only a generator's output may be dropped.
+    let mut package = fixture();
+    package.blocks[8].body = BlockBody::File {
+        path: "sections/identity.md".to_string(),
+    };
+    package.blocks[8].optional = true;
+    assert_eq!(
+        package.validate(),
+        Err(ValidationError::OptionalAuthoredBlock {
+            index: 8,
+            section: SectionId::Identity,
+        })
+    );
+}
+
+#[test]
+fn authored_run_projects_blocks_in_order_with_joins() {
+    // `authored_run` is what keeps the legacy assembly and the roster-free
+    // installer prompt on the SAME content as the packaged composer (#4318). It
+    // must reproduce `compose`'s ordering and whitespace rules exactly: array
+    // order, declared joins, no join before the first emitted block.
+    let mut package = fixture();
+    package.blocks[2].join_before = Join::Blank;
+
+    assert_eq!(
+        package.authored_run(&[SectionId::Core]),
+        format!("CORE-A{}CORE-B", Join::Blank.as_str()),
+        "blocks join with their own declared separator, first one bare"
+    );
+    assert_eq!(
+        package.authored_run(&[SectionId::Core, SectionId::Memory]),
+        format!(
+            "CORE-A{SECTION_SEPARATOR}MEMORY{}CORE-B",
+            Join::Blank.as_str()
+        ),
+        "block order, not the order of the requested sections"
+    );
+    assert_eq!(package.authored_run(&[]), "");
+}
+
+#[test]
+fn authored_run_skips_generated_blocks() {
+    // A generated block has no authored bytes; its host input is folded in by the
+    // caller. Emitting a placeholder here would put unresolved content into the
+    // legacy prompt.
+    let package = fixture();
+    assert_eq!(
+        package.authored_run(&[SectionId::AgentDelegation]),
+        "",
+        "the delegation section is roster-only in this fixture"
+    );
+    assert_eq!(
+        package.authored_run(&[SectionId::Core]),
+        format!("CORE-A{SECTION_SEPARATOR}CORE-B"),
+        "the stack-profile and addendum generators contribute nothing"
+    );
+}
+
+#[test]
 fn schema_example_deserializes_validates_and_round_trips() {
     // Why (acceptance criterion of #4184): the Rust types must deserialize the
     // committed schema, and the round trip must be lossless — tooling that
@@ -507,7 +659,7 @@ fn rejects_blank_text_block() {
     pkg.blocks[0] = text(SectionId::Core, "   \n\t ");
     assert_eq!(
         pkg.validate().unwrap_err(),
-        ValidationError::EmptyText {
+        ValidationError::EmptyAuthoredBody {
             index: 0,
             section: SectionId::Core,
         }
@@ -523,7 +675,7 @@ fn rejects_optional_text_block() {
     pkg.blocks[0].optional = true;
     assert_eq!(
         pkg.validate().unwrap_err(),
-        ValidationError::OptionalTextBlock {
+        ValidationError::OptionalAuthoredBlock {
             index: 0,
             section: SectionId::Core,
         }

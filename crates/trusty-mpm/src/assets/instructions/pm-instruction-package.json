@@ -1,0 +1,148 @@
+{
+  "schema_version": 2,
+  "package_id": "trusty-mpm.pm.bundled-fallback",
+  "description": "The DEFAULT PM instruction package (#4318). This file — not a Rust literal — is the authored manifest: the section taxonomy with its customization tiers, the ordered block stream, every join, and the declared composition-time generators. Bulk prose lives in `sections/*.md` and is referenced by `file` bodies; a rule authored here rather than in a section file uses a `text` body. Composition is byte-deterministic for a given manifest and roster (see `instruction_package::InstructionPackage::compose`). Deliberately carries NO `$schema` key: every object in the format sets `additionalProperties: false` / `deny_unknown_fields`, so an unrecognised key is a hard parse error rather than dropped instruction content. Validate against `instruction-package.schema.json` out of band.",
+  "trailing_newline": false,
+  "sections": [
+    {
+      "id": "identity",
+      "title": "Identity",
+      "customization_tier": "fixed",
+      "description": "Who the PM is. Framework floor."
+    },
+    {
+      "id": "core",
+      "title": "Core PM Instructions",
+      "customization_tier": "project",
+      "description": "Core operating instructions, including response format and prose rules."
+    },
+    {
+      "id": "memory",
+      "title": "Memory Protocol",
+      "customization_tier": "project"
+    },
+    {
+      "id": "search",
+      "title": "Code Search Protocol",
+      "customization_tier": "project"
+    },
+    {
+      "id": "workflow",
+      "title": "Workflow",
+      "customization_tier": "project",
+      "description": "The phase workflow, including the sprint-then-harden doctrine."
+    },
+    {
+      "id": "agent-delegation",
+      "title": "Agent Delegation",
+      "customization_tier": "project",
+      "description": "Routing doctrine; the live roster is appended by the `agent-roster` generator."
+    },
+    {
+      "id": "non-overridable-rules",
+      "title": "Non-Overridable Rules",
+      "customization_tier": "fixed",
+      "description": "Non-overridable rules, the customization contract, and the Trusty tool-priority mandate. Framework floor."
+    },
+    {
+      "id": "framework-guaranteed-conventions",
+      "title": "Framework-Guaranteed Conventions",
+      "customization_tier": "fixed",
+      "description": "Attribution footer, documentation proportionality, ticket attribution. Framework floor."
+    }
+  ],
+  "blocks": [
+    {
+      "section": "core",
+      "join_before": "rule",
+      "body": { "kind": "file", "path": "sections/core.md" }
+    },
+    {
+      "section": "core",
+      "join_before": "blank",
+      "body": {
+        "kind": "text",
+        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number.\n\n- Issues and PRs: `[#4318](https://github.com/<owner>/<repo>/issues/4318)`. GitHub resolves the `/issues/` form to a PR, so one shape covers both.\n- Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare short SHA is acceptable only inside a table of many.\n- Tickets in another tracker: link to that tracker's issue URL.\n\nThis applies to every PM response and report, not only formal ones. \"Fixed in #4318\" with no link is a defect."
+      }
+    },
+    {
+      "section": "core",
+      "join_before": "blank",
+      "body": {
+        "kind": "text",
+        "text": "### Banned Word — \"honest\"\n\n\"Honest\" and every variation of it — honestly, honesty, dishonest, \"to be honest\", \"the honest answer\" — is banned from PM responses, delegation briefs, and review instructions.\n\nA report states facts. Labelling them honest implies the alternative was considered, which is the doubt the word was reached for to dispel. State the fact.\n\n- Wrong: \"The honest answer is that the merge didn't happen.\"\n- Right: \"The merge didn't happen.\""
+      }
+    },
+    {
+      "section": "memory",
+      "join_before": "blank",
+      "body": { "kind": "file", "path": "sections/memory.md" }
+    },
+    {
+      "section": "search",
+      "join_before": "blank",
+      "body": { "kind": "file", "path": "sections/search.md" }
+    },
+    {
+      "section": "core",
+      "join_before": "rule",
+      "body": { "kind": "generated", "generator": "stack-profile" },
+      "optional": true
+    },
+    {
+      "section": "workflow",
+      "join_before": "rule",
+      "body": { "kind": "file", "path": "sections/workflow.md" }
+    },
+    {
+      "section": "workflow",
+      "join_before": "blank",
+      "body": {
+        "kind": "text",
+        "text": "## Opportunistic Fixes\n\nAn easy fix discovered while working on a file is noted on the CURRENT issue and made in the same work. Never file a new issue for it.\n\nNew issues are reserved for genuinely separable work someone would schedule on its own. Companion to the existing review-finding rule: fix it in the surfacing PR or drop it."
+      }
+    },
+    {
+      "section": "agent-delegation",
+      "join_before": "rule",
+      "body": { "kind": "file", "path": "sections/agent-delegation.md" }
+    },
+    {
+      "section": "agent-delegation",
+      "join_before": "blank",
+      "body": {
+        "kind": "text",
+        "text": "> The live roster below is authoritative for WHICH agents exist and what each handles; the tables above are routing doctrine only. Where the two disagree, trust the roster.\n>\n> Depending on how this session was launched, a listed agent may not be loadable. If a dispatch fails with an unknown agent type, re-route to the closest listed alternative — do not retry the same agent."
+      }
+    },
+    {
+      "section": "agent-delegation",
+      "join_before": "blank",
+      "body": { "kind": "generated", "generator": "agent-roster" }
+    },
+    {
+      "section": "core",
+      "join_before": "rule",
+      "body": { "kind": "generated", "generator": "project-addendum" },
+      "optional": true
+    },
+    {
+      "section": "identity",
+      "join_before": "rule",
+      "body": { "kind": "file", "path": "sections/identity.md" }
+    },
+    {
+      "section": "non-overridable-rules",
+      "join_before": "blank",
+      "body": { "kind": "file", "path": "sections/non-overridable-rules.md" }
+    },
+    {
+      "section": "framework-guaranteed-conventions",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/framework-guaranteed-conventions.md"
+      }
+    }
+  ]
+}

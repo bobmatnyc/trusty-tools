@@ -1,24 +1,34 @@
-//! The bundled-fallback PM prompt, expressed as an [`InstructionPackage`].
+//! The bundled-fallback PM prompt, loaded from the authored JSON manifest.
 //!
-//! Why: #4184 landed the sectioned-JSON package type and #4249 made it the
-//! composer for the DEFAULT PM prompt — the one every project with no
-//! `.trusty-mpm/` override receives. Both steps were mechanical: the package was
-//! still built by *cutting the legacy monolithic assets at runtime*, so the
-//! eight-section taxonomy described text that was authored as four blobs. This
-//! module now builds the package from **per-section sources** — one markdown
-//! file per [`SectionId`] under `assets/instructions/sections/` — which is what
-//! makes a section an editable, independently overridable unit rather than a
-//! documented offset into someone else's file (#4183).
+//! Why: #4184 landed the sectioned-JSON package type, #4249 made it the composer
+//! for the DEFAULT PM prompt, and #4183 split the prose into one markdown file per
+//! [`SectionId`]. One thing stayed wrong through all three: the package itself was
+//! still a **Rust literal**. Sections, tiers, block order, joins and generators
+//! were expressed as a `vec![]` in this file, `InstructionPackage::from_json` had
+//! zero non-test call sites, and the shipped JSON Schema was a type contract with
+//! no instance under it — while other tickets recorded "the composed instructions
+//! payload is generated from the instruction package JSON" as settled fact. #4318
+//! makes that true: the manifest is now
+//! `assets/instructions/pm-instruction-package.json`, embedded here at compile
+//! time, and this module only parses and composes it.
 //!
-//! What changed with the sourcing swap, and what did not:
+//! What the swap changed, and what it did not:
 //!
-//! * GONE — `split_asset`, the `Cut` tables, and the marker-uniqueness guards.
-//!   A marker that could silently relocate cannot exist when there is no marker;
-//!   the section boundary is now the file boundary. A mis-authored section is
-//!   caught by [`InstructionPackage::validate`] instead (an empty file is
-//!   `EmptyText`, a missing one fails to compile at `include_str!`).
-//! * UNCHANGED — the block stream's order, joins, and the composition mechanism.
-//!   [`InstructionPackage::compose`] is untouched by this module.
+//! * GONE — the `sections()` / `authored()` / `generated()` builders. There is no
+//!   second place where block order or a join can be edited, so the manifest and
+//!   the delivered prompt cannot disagree.
+//! * NEW — `file` bodies (schema v2). The manifest names its prose by path and
+//!   resolves it through the compile-time
+//!   [`crate::core::instruction_pipeline::SECTION_SOURCES`] table, so the bulk
+//!   text keeps living in reviewable markdown, the build stays hermetic, and a
+//!   renamed section is a compile error rather than an empty block.
+//! * NEW — inline `text` bodies now carry authored RULES, not just the
+//!   roster-precedence note: the clickable-links, banned-word and
+//!   opportunistic-fix rules are authored in the manifest itself (owner order,
+//!   2026-07-29: the 1.3 rules belong in JSON, not markdown).
+//! * UNCHANGED — [`InstructionPackage::compose`], the block order, and every join.
+//!   The mechanism half of #4318 is byte-identical to what #4183 shipped; the
+//!   golden diff carries content only.
 //!
 //! Scope — deliberately ONE of the three configurations
 //! [`crate::core::instruction_overrides::resolve_pm_prompt`] can emit:
@@ -38,222 +48,112 @@
 //! check is weakened here, and both configurations keep resolving exactly as
 //! they do today.
 //!
-//! THE BYTE-EQUALITY CONTRACT, and why it survives a content change. #4249's
-//! acceptance gate was byte-equality against the *pre-#4249* prompt, and that
-//! gate is necessarily gone here: this PR changes the delivered prompt on
-//! purpose. What remains — and is still asserted — is byte-equality between the
-//! TWO COMPOSERS: the packaged path and the legacy assembly must agree for the
-//! same inputs. That stays true without any pasted duplication, because
-//! [`crate::core::instruction_pipeline::pm_instructions`] and
-//! [`crate::core::instruction_pipeline::base_pm`] reconstitute the legacy
-//! multi-section strings *from these same section files*, joining them with the
-//! literal [`Join::Blank`] emits. Editing a section therefore moves both
-//! composers together; it cannot move one.
+//! NO SPLIT-BRAIN, which is the thing #4318 could most easily have broken. Once a
+//! rule may be authored in the manifest, rebuilding the legacy multi-section
+//! strings from the `include_str!` constants would deliver that rule to
+//! package-composed sessions and withhold it from configurations 2 and 3 and from
+//! `assemble_system_prompt`. So those callers no longer rebuild from constants —
+//! [`crate::core::instruction_pipeline::pm_instructions`],
+//! [`crate::core::instruction_pipeline::base_pm`],
+//! [`crate::core::instruction_pipeline::workflow_section`] and
+//! [`crate::core::instruction_pipeline::delegation_doctrine`] project the SAME
+//! manifest through [`InstructionPackage::authored_run`]. Editing the manifest
+//! moves every composer together; it cannot move one.
 //!
-//! What replaces the removed gate for CONTENT is
-//! `pm_prompt_golden_tests.rs`: a committed snapshot of the fully composed
-//! prompt for both configurations. Every future edit to a section file shows up
-//! there as a reviewable prose diff, which is the property #4183's acceptance
-//! criteria ask for and which byte-equality against a frozen legacy string could
-//! never provide.
+//! FAILURE BEHAVIOUR. The manifest is embedded, and
+//! `bundled_manifest_parses_and_validates` proves it parses, validates and
+//! composes — so a shipped build cannot reach the error path. If it somehow did,
+//! [`bundled_fallback_package`] returns `Err` and `resolve_pm_prompt_with_roster`
+//! logs it loudly and degrades to the legacy assembly built from the retained
+//! `include_str!` constants: a prompt missing only the manifest-authored inline
+//! rules, never a truncated one.
+//!
+//! What guards CONTENT is `pm_prompt_golden_tests.rs`: a committed snapshot of the
+//! fully composed prompt for all three configurations. Every edit to a section
+//! file or to the manifest shows up there as a reviewable prose diff.
 //!
 //! Test: `bundled_pm_package_tests.rs`.
 
+use std::sync::LazyLock;
+
 use crate::core::claude_md_sections::{Rejection, SectionOverride};
-use crate::core::instruction_overrides::ROSTER_PRECEDENCE_NOTE;
 use crate::core::instruction_package::{
-    BlockBody, CompositionError, CompositionInputs, CustomizationTier, Generator, InstructionBlock,
-    InstructionPackage, InstructionSection, Join, SCHEMA_VERSION, SectionId,
-};
-use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_CORE, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
-    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, WORKFLOW,
+    CompositionError, CompositionInputs, InstructionPackage, SectionId,
 };
 
-/// Stable identity of the package this module builds.
+/// Stable identity of the package this module ships.
+///
+/// Checked against the loaded manifest, so pointing [`PM_PACKAGE_JSON`] at the
+/// wrong JSON file is a named error rather than a differently-shaped prompt.
 pub(crate) const PACKAGE_ID: &str = "trusty-mpm.pm.bundled-fallback";
 
-/// The declared eight-section taxonomy with the tiers this build ships.
+/// The authored manifest, embedded at compile time.
 ///
-/// Why: tiers are not decoration — they are the machine-readable statement of
-/// which `.trusty-mpm/` override files the floor advertises, and they are what
-/// #4247 will enforce. Now that each section has its own source file, the claim
-/// "a project may replace this one" is finally true of the artifact as well as
-/// of the schema: replacing Memory alone no longer orphans half a numbered list,
-/// which was the constraint the runtime-cut model recorded and could not fix.
-/// What: [`SectionId::CANONICAL`] paired with its tier and title. The five
-/// content sections are `project` because every advertised override file is
-/// project-scoped; the three floor sections are `fixed` because
-/// `resolve_pm_prompt` appends the floor last under every branch.
-/// Test: `every_advertised_override_file_maps_to_an_overridable_section`,
-/// `floor_sections_refuse_every_override_tier`,
-/// `content_sections_admit_project_but_not_user_overrides`.
-fn sections() -> Vec<InstructionSection> {
-    let declare = |id: SectionId, title: &str, tier: CustomizationTier| InstructionSection {
-        id,
-        title: title.to_string(),
-        customization_tier: tier,
-        description: None,
-    };
-    vec![
-        declare(SectionId::Identity, "Identity", CustomizationTier::Fixed),
-        declare(
-            SectionId::Core,
-            "Core PM Instructions",
-            CustomizationTier::Project,
-        ),
-        declare(
-            SectionId::Memory,
-            "Memory Protocol",
-            CustomizationTier::Project,
-        ),
-        declare(
-            SectionId::Search,
-            "Code Search Protocol",
-            CustomizationTier::Project,
-        ),
-        declare(SectionId::Workflow, "Workflow", CustomizationTier::Project),
-        declare(
-            SectionId::AgentDelegation,
-            "Agent Delegation",
-            CustomizationTier::Project,
-        ),
-        declare(
-            SectionId::NonOverridableRules,
-            "Non-Overridable Rules",
-            CustomizationTier::Fixed,
-        ),
-        declare(
-            SectionId::FrameworkGuaranteedConventions,
-            "Framework-Guaranteed Conventions",
-            CustomizationTier::Fixed,
-        ),
-    ]
-}
+/// Why: embedding means the delivered system prompt never depends on what is on
+/// disk at launch, and a manifest deleted or renamed in a refactor is a build
+/// failure rather than a silently degraded prompt.
+/// What: the raw bytes of `assets/instructions/pm-instruction-package.json`.
+/// Test: `bundled_manifest_parses_and_validates`.
+pub(crate) const PM_PACKAGE_JSON: &str =
+    include_str!("../assets/instructions/pm-instruction-package.json");
 
-/// A block whose content is an authored section source, trimmed.
-fn authored(section: SectionId, text: &str, join_before: Join) -> InstructionBlock {
-    InstructionBlock {
-        section,
-        body: BlockBody::Text {
-            text: text.trim().to_string(),
-        },
-        join_before,
-        optional: false,
+/// The parsed manifest, or the parse/validation failure, computed once.
+///
+/// Parsing on every session launch would be wasted work, and re-parsing is the
+/// kind of thing that quietly becomes a per-message cost. `LazyLock` also means
+/// the failure is computed once and reported identically everywhere.
+static BUNDLED: LazyLock<Result<InstructionPackage, String>> = LazyLock::new(|| {
+    let package = InstructionPackage::from_json(PM_PACKAGE_JSON).map_err(|err| err.to_string())?;
+    if package.package_id != PACKAGE_ID {
+        return Err(format!(
+            "manifest declares package_id `{}`, expected `{PACKAGE_ID}`",
+            package.package_id
+        ));
     }
-}
+    package.validate().map_err(|err| err.to_string())?;
+    Ok(package)
+});
 
-/// A block whose content arrives at composition time from a named generator.
-fn generated(
-    section: SectionId,
-    generator: Generator,
-    join_before: Join,
-    optional: bool,
-) -> InstructionBlock {
-    InstructionBlock {
-        section,
-        body: BlockBody::Generated { generator },
-        join_before,
-        optional,
-    }
-}
-
-/// Build the bundled-fallback package from the authored section sources.
+/// The bundled-fallback instruction package.
 ///
-/// Why: this is the executable statement of what the DEFAULT PM prompt is made
-/// of. Reading this one function answers "which section does this text belong
-/// to, and who may override it?" — and, since #4183's sourcing swap, the answer
-/// is a file you can open rather than a byte range.
+/// Why: this is the single entry point to "what the DEFAULT PM prompt is made
+/// of". It returns a `Result` (#4318) because the answer now comes from a parsed
+/// artifact rather than from Rust code that could not fail — and a parse failure
+/// must be reportable rather than papered over with a partial package.
 ///
-/// What, in emission order: Core, Memory and Search (the former
-/// `PM_INSTRUCTIONS.md`, now three files); the derived stack profile; Workflow;
-/// the delegation section — bundled doctrine, the roster-precedence note, and
-/// the live roster; the optional project addendum; then the three floor
-/// sections. Infallible by construction: every source is `include_str!`d, so a
-/// missing section is a compile error rather than a runtime one — which is why
-/// this returns a package rather than a `Result`.
+/// What: the manifest parsed and structurally validated once, borrowed. `Err`
+/// carries the rendered parse or validation error. Unreachable for the shipped
+/// manifest; see the module docs for the degradation path.
 ///
-/// Joins are chosen so the composed output is byte-identical to
-/// [`crate::core::instruction_overrides::assemble_sections`] for the same
-/// inputs: [`Join::Rule`] at every top-level boundary (the literal
-/// [`crate::core::instruction_pipeline::SECTION_SEPARATOR`]), [`Join::Blank`]
-/// wherever a former monolith held two sections in one string. The two
-/// generator-backed project inputs are `optional` because the legacy assembly
-/// likewise drops an empty section rather than emitting a dangling `---`. The
-/// agent roster is NOT optional — losing it is #4196.
-///
-/// Test: `shipped_sections_build_and_validate`,
+/// Test: `bundled_manifest_parses_and_validates`,
+/// `shipped_sections_build_and_validate`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
-pub(crate) fn bundled_fallback_package() -> InstructionPackage {
-    let blocks = vec![
-        // The former `PM_INSTRUCTIONS.md`, now three independently editable
-        // sources. `Join::Blank` reproduces the paragraph break that separated
-        // them inside the monolith.
-        authored(SectionId::Core, SECTION_CORE, Join::Rule),
-        authored(SectionId::Memory, SECTION_MEMORY, Join::Blank),
-        authored(SectionId::Search, SECTION_SEARCH, Join::Blank),
-        // Auto-derived framework context, not a user override (#1971). Optional
-        // only so an empty profile is dropped exactly as `join_sections` drops it.
-        generated(SectionId::Core, Generator::StackProfile, Join::Rule, true),
-        authored(SectionId::Workflow, WORKFLOW, Join::Rule),
-        // Delegation: bundled doctrine, the precedence note, then the LIVE
-        // roster (#4069/#4196). The roster block is non-optional by contract.
-        authored(SectionId::AgentDelegation, AGENT_DELEGATION, Join::Rule),
-        authored(
-            SectionId::AgentDelegation,
-            ROSTER_PRECEDENCE_NOTE,
-            Join::Blank,
-        ),
-        generated(
-            SectionId::AgentDelegation,
-            Generator::AgentRoster,
-            Join::Blank,
-            false,
-        ),
-        // Additive `.trusty-mpm/INSTRUCTIONS.md` rules, when the project has any.
-        generated(
-            SectionId::Core,
-            Generator::ProjectAddendum,
-            Join::Rule,
-            true,
-        ),
-        // The non-overridable floor, always last. `Join::Blank` between the three
-        // reproduces the paragraph breaks that separated them inside `BASE_PM.md`.
-        authored(SectionId::Identity, SECTION_IDENTITY, Join::Rule),
-        authored(
-            SectionId::NonOverridableRules,
-            SECTION_NON_OVERRIDABLE_RULES,
-            Join::Blank,
-        ),
-        authored(
-            SectionId::FrameworkGuaranteedConventions,
-            SECTION_FRAMEWORK_CONVENTIONS,
-            Join::Blank,
-        ),
-    ];
+pub(crate) fn bundled_fallback_package() -> Result<&'static InstructionPackage, &'static str> {
+    BUNDLED.as_ref().map_err(String::as_str)
+}
 
-    InstructionPackage {
-        schema_version: SCHEMA_VERSION,
-        package_id: PACKAGE_ID.to_string(),
-        description: Some(
-            "Default PM instruction package: authored section sources plus the live agent roster."
-                .to_string(),
-        ),
-        // `resolve_pm_prompt` emits no trailing newline; the prompt is embedded,
-        // not written as a file.
-        trailing_newline: false,
-        sections: sections(),
-        blocks,
-    }
+/// The authored bytes of `sections`, projected out of the bundled manifest.
+///
+/// Why: the legacy assembly and the roster-free `assemble_system_prompt` need
+/// whole multi-section runs as one string and cannot call `compose`. Routing them
+/// through the manifest is what keeps a manifest-authored rule from reaching only
+/// the packaged path — see the module docs' split-brain note.
+/// What: [`InstructionPackage::authored_run`] over the bundled manifest, or `None`
+/// when the manifest is unreadable so the caller can fall back to its retained
+/// `include_str!` constants.
+/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_three_sections`.
+pub(crate) fn authored_run(sections: &[SectionId]) -> Option<String> {
+    bundled_fallback_package()
+        .ok()
+        .map(|package| package.authored_run(sections))
 }
 
 /// Compose the bundled-fallback PM prompt, applying named-section overrides.
 ///
 /// Why: the single entry point `resolve_pm_prompt` calls for configuration 1.
-/// Keeping build and compose together means the caller cannot compose a package
-/// it did not build, and cannot forget an input — the roster is a required
-/// argument, so the #4196 "computed but never delivered" shape is not
-/// expressible here.
+/// Keeping load and compose together means the caller cannot compose a package it
+/// did not load, and cannot forget an input — the roster is a required argument,
+/// so the #4196 "computed but never delivered" shape is not expressible here.
 ///
 /// `CLAUDE.md` named sections (#4183 / #4286) arrive here rather than through a
 /// second string-splice, because this is the only composer that HAS sections and
@@ -261,14 +161,12 @@ pub(crate) fn bundled_fallback_package() -> InstructionPackage {
 /// `customization_tier` for permission. The floor refuses a `CLAUDE.md` override
 /// for exactly the reason it refuses every other one: it is tier `fixed`.
 ///
-/// What: builds the package, applies `overrides`, then composes with `stack`
-/// (the derived stack profile), `roster` (the rendered `## Delegation Authority`
-/// block, required) and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All
-/// are trimmed by the composer. Declined overrides come back alongside the
-/// result so the caller can report them. With an empty `overrides` slice the
-/// result is byte-identical to the pre-#4286 composition — `with_overrides` then
-/// returns a clone — and to `instruction_overrides`' legacy assembly for the
-/// same inputs; see the module docs.
+/// What: loads the manifest, applies `overrides`, then composes with `stack` (the
+/// derived stack profile), `roster` (the rendered `## Delegation Authority` block,
+/// required) and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All are
+/// trimmed by the composer. Declined overrides come back alongside the result so
+/// the caller can report them. A manifest that failed to parse surfaces as
+/// [`CompositionError::Manifest`] with no rejections.
 ///
 /// Test: `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`,
@@ -279,7 +177,11 @@ pub(crate) fn compose_bundled_fallback_with_overrides(
     addendum: Option<&str>,
     overrides: &[SectionOverride],
 ) -> (Result<String, CompositionError>, Vec<Rejection>) {
-    let (package, rejected) = bundled_fallback_package().with_overrides(overrides);
+    let bundled = match bundled_fallback_package() {
+        Ok(package) => package,
+        Err(err) => return (Err(CompositionError::Manifest(err.to_string())), Vec::new()),
+    };
+    let (package, rejected) = bundled.with_overrides(overrides);
     let composed = package.compose(&CompositionInputs {
         agent_roster: roster.to_string(),
         stack_profile: Some(stack.to_string()),
