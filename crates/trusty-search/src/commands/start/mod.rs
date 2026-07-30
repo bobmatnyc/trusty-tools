@@ -30,6 +30,14 @@ mod swap_back_watchdog;
 #[cfg(test)]
 mod tests;
 
+// Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
+// coverage (fast deterministic tests + an opt-in real-hardware soak). A
+// sibling of `tests` rather than folded into it because `tests.rs` is
+// owned by an in-flight PR (the Apple-Silicon default-flip) this work must
+// not conflict with.
+#[cfg(test)]
+mod swap_back_cycle_soak_tests;
+
 // Public entry point consumed by `commands/mod.rs`.
 pub use daemon::handle_start;
 
