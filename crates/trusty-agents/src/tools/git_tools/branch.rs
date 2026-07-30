@@ -1,17 +1,18 @@
 //! Branch-oriented git tools: list, create, and checkout branches.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::agents::CrossProjectScope;
 use crate::git;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
-use super::helpers::{fn_schema, open_repo};
+use super::helpers::{open_scoped_repo, scoped_root, scoped_schema};
 
 pub(super) struct GitBranchesTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -20,7 +21,8 @@ impl ToolExecutor for GitBranchesTool {
         "git_branches"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_branches",
             "List local branches (and optionally remote-tracking branches) with current-branch and upstream metadata.",
             json!({
@@ -38,7 +40,7 @@ impl ToolExecutor for GitBranchesTool {
             .get("include_remote")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let repo = match open_repo(&self.root) {
+        let repo = match open_scoped_repo(&self.scope, &args, "git_branches") {
             Ok(r) => r,
             Err(e) => return ToolResult::err(e),
         };
@@ -61,7 +63,7 @@ impl ToolExecutor for GitBranchesTool {
 }
 
 pub(super) struct GitCreateBranchTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -70,7 +72,8 @@ impl ToolExecutor for GitCreateBranchTool {
         "git_create_branch"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_create_branch",
             "Create a new local branch from HEAD and check it out.",
             json!({
@@ -87,7 +90,11 @@ impl ToolExecutor for GitCreateBranchTool {
         let Some(name) = args.get("name").and_then(Value::as_str) else {
             return ToolResult::err("'name' is required");
         };
-        match git::branch::create_branch(name, &self.root).await {
+        let root = match scoped_root(&self.scope, &args, "git_create_branch") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::branch::create_branch(name, &root).await {
             Ok(out) => ToolResult::ok(out),
             Err(e) => ToolResult::err(format!("git_create_branch failed: {e}")),
         }
@@ -95,7 +102,7 @@ impl ToolExecutor for GitCreateBranchTool {
 }
 
 pub(super) struct GitCheckoutTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -104,7 +111,8 @@ impl ToolExecutor for GitCheckoutTool {
         "git_checkout"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_checkout",
             "Check out an existing branch, tag, or commit.",
             json!({
@@ -121,7 +129,11 @@ impl ToolExecutor for GitCheckoutTool {
         let Some(target) = args.get("target").and_then(Value::as_str) else {
             return ToolResult::err("'target' is required");
         };
-        match git::branch::checkout(target, &self.root).await {
+        let root = match scoped_root(&self.scope, &args, "git_checkout") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::branch::checkout(target, &root).await {
             Ok(out) => ToolResult::ok(out),
             Err(e) => ToolResult::err(format!("git_checkout failed: {e}")),
         }

@@ -223,12 +223,21 @@ pub async fn run_pm_task_with_persona(
                     }
                 }
             }
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            if let Ok(repo) = crate::git::GitRepo::open(&cwd) {
-                for tool in crate::tools::git_tools::git_tools(repo.root.clone()) {
-                    registry.register(tool);
-                }
-            }
+            // #4172 (epic #4167): resolve THIS persona's cross-project reach
+            // once, and hand the same value to both consumers below — the git
+            // tool surface and `vector_search`'s tier-2 index list. The tier
+            // comes from #4200's fail-closed `AgentInfo::tier`, so an L1
+            // persona (and any persona whose `tier` is absent, blank, or
+            // unrecognized) resolves to the single-tenant scope and every
+            // downstream surface is byte-identical to pre-#4172. The allow-set
+            // for an L0 persona is bounded to the on-disk project registry —
+            // see `crate::agents::cross_project` for the full rule and for why
+            // `[[stores]]`'s one-store ceiling (DOC-54 §5.1) is untouched.
+            let cross_project_scope = crate::tools::git_tools::register_scoped_git_tools(
+                &mut registry,
+                &persona_cfg.agent,
+            )
+            .await;
             register_ticketing_tools(&mut registry).await;
             // #4170 (epic #4167): the L0-only GitHub PR/CI inspection surface.
             // Registered on BOTH assistant dispatch paths — this one and
@@ -368,15 +377,25 @@ pub async fn run_pm_task_with_persona(
             // the persona opts in with `enforce_search_indexes = true`. A
             // persona declaring neither gets `(vec![], false)` — identical to
             // the pre-#3232 registration above.
+            //
+            // #4172 (epic #4167): for an L0 persona the declared tier-2 list
+            // is widened with the trusty-search index ids of its registered
+            // projects, so cross-project corpora are both DISCOVERABLE (they
+            // are enumerated in the schema) and, when this persona opts into
+            // `enforce_search_indexes`, queryable. For every other tier
+            // `effective_search_indexes` returns `resolved_search_indexes()`
+            // verbatim. `[[stores]]` — the ONE curated OKG store, DOC-54
+            // §5.1 — is neither read nor widened by that call.
+            let bound_index = persona_cfg
+                .stores
+                .default_search_index()
+                .map(str::to_string);
+            let attached = cross_project_scope
+                .effective_search_indexes(persona_cfg.tools.resolved_search_indexes());
             registry.register(Arc::new(
                 crate::tools::memory::VectorSearchTool::new()
-                    .with_default_index(
-                        persona_cfg
-                            .stores
-                            .default_search_index()
-                            .map(str::to_string),
-                    )
-                    .with_attached_indexes(persona_cfg.tools.resolved_search_indexes())
+                    .with_default_index(bound_index)
+                    .with_attached_indexes(attached)
                     .with_index_enforcement(persona_cfg.tools.search_indexes_enforced()),
             ));
 
