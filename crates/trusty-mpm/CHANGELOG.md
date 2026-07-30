@@ -106,6 +106,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- PM instructions (`assets/instructions/sections/core.md`, § Response Format):
+  new **Prose Style — Write Plainly** subsection. Lead with the point; short
+  sentences; no throat-clearing openers, no closing aphorisms, no
+  meta-commentary about the PM's own reasoning; plain words over inflated ones;
+  tables and bullets for status. Scoped to prose only — failures, corrections,
+  and bad news are still reported directly and in full, so the rule shortens
+  the wording and never the disclosure. Ships to every PM session via the
+  bundled instruction package; `core` is `customization_tier: project`, so a
+  project may still override it. Composed-prompt goldens regenerated.
 - `tm ls` STATE column: a row the daemon did not probe now renders
   `[assets ?]` rather than nothing, so the absence of `[stale-assets]` can
   never be misread as "assets fresh"
@@ -113,7 +122,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   new additive wire field, `SessionSummary::stale_assets_unchecked`, whose
   `false` default keeps an older daemon's (authoritative) verdicts rendering
   exactly as before.
-
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
   set is now documented as DELIBERATELY unfiltered by session state, and pinned
   by a new regression test `prune_spares_a_stopped_records_workspace`
