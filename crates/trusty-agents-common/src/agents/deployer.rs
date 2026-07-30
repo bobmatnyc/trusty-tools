@@ -20,10 +20,17 @@
 //! manifest. Corrupt manifests are detected and surfaced as errors rather
 //! than silently reset to empty. Returns a [`DeployResult`] summarising what
 //! happened.
+//! Ownership follows the two-variant install policy (#4408): a manifest entry
+//! whose origin is FRAMEWORK-owned (bundled, the `Overwrite` tier) is
+//! re-deployed whenever its on-disk checksum drifts — a mismatch there means
+//! corruption, not user ownership — while a user-owned entry (the `SeedOnce`
+//! tier) and any untracked file keep the preserve-on-mismatch behavior.
 //! Test: `cargo test -p trusty-agents-common agents::deployer` covers a new
-//! deploy, a skipped user-modified file, an unchanged file, a user-owned file,
-//! atomic writes, corrupt manifest detection, and (#3556) a stale-broken-copy
-//! refresh plus a strict-YAML-invalid composition being isolated and skipped.
+//! deploy, a preserved user-owned file, an unchanged file, atomic writes,
+//! corrupt manifest detection, (#3556) a stale-broken-copy refresh plus a
+//! strict-YAML-invalid composition being isolated and skipped, and (#4408) a
+//! corrupted bundled file being re-deployed while a modified user-owned entry
+//! survives byte-identical.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,8 +57,10 @@ use crate::agents::metadata::agent_metadata_from_str;
 pub struct DeployResult {
     /// Filenames successfully (re)written this run.
     pub deployed: Vec<String>,
-    /// Filenames skipped because the user modified them, or because they were
-    /// untracked and differ from the fresh composition.
+    /// Filenames skipped because they are user-owned — either untracked by the
+    /// manifest and differing from the fresh composition, or tracked with a
+    /// user-owned origin (the seed-once tier) and edited. A tracked
+    /// FRAMEWORK-owned file that differs is re-deployed, not skipped (#4408).
     pub skipped: Vec<String>,
     /// Filenames left untouched because their checksum already matched.
     pub unchanged: Vec<String>,
@@ -114,7 +123,11 @@ pub fn is_agent_file(name: &str) -> bool {
 /// Rules:
 ///   - Not in manifest → user-owned → skip silently
 ///   - In manifest, checksum matches → overwrite (safe)
-///   - In manifest, checksum differs → user-modified → warn + skip
+///   - In manifest, checksum differs, entry is framework-owned
+///     ([`Origin::is_framework_owned`], the Overwrite tier) → drift or
+///     corruption → warn + re-deploy the bundled composition (issue #4408)
+///   - In manifest, checksum differs, entry is user-owned (the seed-once
+///     tier) → user-modified → skip, preserving their content byte-for-byte
 ///   - New trusty-mpm agent → compose + write (atomic) + add to manifest
 ///   - Corrupt manifest → error (never silently reset, which would reclassify
 ///     managed files as user-owned and skip re-deploying them)
@@ -274,6 +287,13 @@ pub fn deploy_agents_filtered(
                 continue;
             }
             let current = std::fs::read_to_string(&target_path)?;
+            // #4408: snapshot the recorded checksum + ownership tier before the
+            // branches below take a mutable borrow of `manifest` to re-register
+            // the file.
+            let recorded_owner = manifest
+                .managed
+                .get(&filename)
+                .map(|e| (e.checksum.clone(), e.origin.is_framework_owned()));
             if manifest.checksum_matches(&filename, &current) {
                 if checksum(&composed) == checksum(&current) {
                     // Deployed copy is already the latest composition.
@@ -281,8 +301,26 @@ pub fn deploy_agents_filtered(
                     continue;
                 }
                 // Managed and unmodified by the user → safe to refresh.
+            } else if let Some((expected, true)) = recorded_owner {
+                // #4408: a framework-owned (bundled / Overwrite-tier) file that
+                // no longer matches its recorded checksum is DRIFT or
+                // CORRUPTION, not user ownership — freezing it left a corrupted
+                // agent (a 32-byte `v1` stub in the reported incident)
+                // unrecoverable forever, because corrupt content can never
+                // checksum-match again. Re-deploy it, loudly, so the corruption
+                // event is visible instead of silently skipped.
+                tracing::warn!(
+                    file = %filename,
+                    expected_checksum = %expected,
+                    found_checksum = %checksum(&current),
+                    found_bytes = current.len(),
+                    "bundled agent file drifted from its manifest checksum — \
+                     re-deploying the bundled composition over it (framework-owned \
+                     files are refreshed, not preserved; issue #4408)"
+                );
             } else {
-                // Managed but the user edited it → preserve their changes.
+                // Managed but user-owned (Origin::User / Registry — the
+                // seed-once tier) and edited → preserve their changes.
                 result.skipped.push(filename);
                 continue;
             }

@@ -69,26 +69,36 @@ fn deploy_skips_user_file() {
     assert_eq!(after, user_content, "user file untouched");
 }
 
-/// A managed file the user later hand-edited is preserved (and reported as
-/// skipped) on the next deploy.
+/// A managed BUNDLED file whose deployed copy drifted from the manifest
+/// checksum is re-deployed from the bundle on the next deploy (issue #4408).
+///
+/// Bundled files are framework-owned (the `Overwrite` install tier), so a
+/// checksum mismatch there means drift or corruption, never user ownership.
+/// The user-owned tier is covered by `deploy_skips_user_file` above, which
+/// still passes untouched.
 #[test]
-fn deploy_skips_user_modified() {
+fn deploy_repairs_drifted_bundled_file() {
     let src = TempDir::new().unwrap();
     let tgt = TempDir::new().unwrap();
     write_agent_sources(src.path());
 
     deploy_agents(src.path(), tgt.path()).expect("first deploy");
+    let bundled = std::fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
 
-    // User edits the deployed (managed) file.
-    let edited = "---\nname: engineer\n---\n\nHAND-EDITED BY USER\n";
-    std::fs::write(tgt.path().join("engineer.md"), edited).unwrap();
+    // The deployed copy corrupts into the degenerate `v1` stub from the
+    // incident, while the manifest still records the real content's checksum.
+    std::fs::write(
+        tgt.path().join("engineer.md"),
+        "---\nname: engineer\n---\n\nv1\n",
+    )
+    .unwrap();
 
     let result = deploy_agents(src.path(), tgt.path()).expect("second deploy");
-    assert!(result.skipped.contains(&"engineer.md".to_string()));
-    assert!(!result.deployed.contains(&"engineer.md".to_string()));
+    assert!(result.deployed.contains(&"engineer.md".to_string()));
+    assert!(!result.skipped.contains(&"engineer.md".to_string()));
 
     let after = std::fs::read_to_string(tgt.path().join("engineer.md")).unwrap();
-    assert!(after.contains("HAND-EDITED BY USER"), "user edit preserved");
+    assert_eq!(after, bundled, "bundled composition restored");
 }
 
 /// Composing an agent resolves the full inheritance chain in base-first order.

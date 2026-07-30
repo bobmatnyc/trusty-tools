@@ -100,7 +100,8 @@ pub struct SyncAssetsReport {
 /// framework install regardless.
 /// Test: `sync_assets_redeploys_new_agent`, `sync_assets_refreshes_stale_skill`,
 /// `sync_assets_refreshes_project_output_style`,
-/// `sync_assets_skips_user_modified_agent`.
+/// `sync_assets_never_touches_hand_placed_agent`,
+/// `sync_assets_repairs_drifted_bundled_agent`.
 pub fn sync_session_assets(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -227,9 +228,51 @@ mod tests {
     }
 
     #[test]
-    fn sync_assets_skips_user_modified_agent() {
-        // A user-modified managed agent must be left alone, matching the
-        // deployer's own ownership rule (never silently clobber a hand-edit).
+    fn sync_assets_never_touches_hand_placed_agent() {
+        // A hand-placed agent — a file the operator dropped into
+        // `.claude/agents/` that trusty-mpm never deployed, so it is absent
+        // from the deploy manifest — must survive session-asset sync
+        // byte-identical, even when it shares a bundled agent's filename.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fw = FrameworkPaths::under(tmp.path().join("home"));
+        fw.trusty_mpm_root = None;
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(
+            bundled.join("rust-engineer.md"),
+            "---\nname: rust-engineer\n---\nv1",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut ws_fw = fw.clone();
+        ws_fw.claude_agents = project_dir.join(".claude").join("agents");
+        ws_fw.claude_skills = project_dir.join(".claude").join("skills");
+
+        // The operator's own file lands first — never deployed by trusty-mpm.
+        std::fs::create_dir_all(ws_fw.claude_agents_dir()).unwrap();
+        let hand_placed = ws_fw.claude_agents_dir().join("rust-engineer.md");
+        let content = "---\nname: rust-engineer\n---\noperator's own agent";
+        std::fs::write(&hand_placed, content).unwrap();
+
+        let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
+        assert!(
+            report
+                .agents_skipped
+                .contains(&"rust-engineer.md".to_string())
+        );
+        assert_eq!(std::fs::read_to_string(&hand_placed).unwrap(), content);
+    }
+
+    #[test]
+    fn sync_assets_repairs_drifted_bundled_agent() {
+        // Issue #4408: a BUNDLED agent this deployer wrote is framework-owned
+        // (the `InstallPolicy::Overwrite` tier), so a deployed copy that
+        // drifted from its manifest checksum — here the degenerate stub from
+        // the incident — is refreshed from the bundle rather than frozen as a
+        // user edit. Freezing it made the agent unrecoverable in that
+        // workspace forever.
         let tmp = tempfile::tempdir().unwrap();
         let mut fw = FrameworkPaths::under(tmp.path().join("home"));
         fw.trusty_mpm_root = None;
@@ -249,7 +292,7 @@ mod tests {
 
         sync_session_assets(&ws_fw, &project_dir).unwrap();
         let deployed = ws_fw.claude_agents_dir().join("rust-engineer.md");
-        std::fs::write(&deployed, "operator hand-edited this").unwrap();
+        std::fs::write(&deployed, "---\nname: rust-engineer\n---\n\nv1\n").unwrap();
 
         std::fs::write(
             bundled.join("rust-engineer.md"),
@@ -259,12 +302,18 @@ mod tests {
         let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
         assert!(
             report
+                .agents_deployed
+                .contains(&"rust-engineer.md".to_string()),
+            "drifted bundled agent must be repaired, got: {report:?}"
+        );
+        assert!(
+            !report
                 .agents_skipped
                 .contains(&"rust-engineer.md".to_string())
         );
-        assert_eq!(
-            std::fs::read_to_string(&deployed).unwrap(),
-            "operator hand-edited this"
+        assert!(
+            std::fs::read_to_string(&deployed).unwrap().contains("v2"),
+            "the current bundled composition must be restored"
         );
     }
 }
