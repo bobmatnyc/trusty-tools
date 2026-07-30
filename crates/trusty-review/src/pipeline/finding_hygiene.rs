@@ -26,7 +26,7 @@
 //!    document ... no implementation ... is present", "if implementation
 //!    follows the interface literally") and reason past it anyway.
 //!
-//! What: [`sanitize_findings`] runs two independent, marker-based passes, both
+//! What: [`sanitize_findings`] runs three independent, marker-based passes, all
 //! reusing the SAME shape — the finding's own text is the signal, no LLM
 //! double-check required:
 //!
@@ -44,6 +44,17 @@
 //!     structurally prevents it from ever driving BLOCK
 //!     (`grade::drives_block_floor` requires `Effort::High`), while leaving it
 //!     as an advisory note.
+//!  3. [`claim_grounding::demote_ungrounded_registry_claims`] (#4081) — DEMOTES
+//!     (does not drop) any finding asserting a package-registry fact nothing in
+//!     this pipeline looked up, and pre-stamps it `Unverifiable` so the verifier
+//!     round can never mark it `Confirmed`. Same defect family as the two above —
+//!     the system asserting a state it never observed — but a distinct signal
+//!     (registry vocabulary, not self-admission), so it lives in its own module
+//!     with its own marker sets and test surface, exactly as `citation_check`
+//!     does. See `claim_grounding` for the full rationale.
+//!
+//! [`claim_grounding::demote_ungrounded_registry_claims`]:
+//!     crate::pipeline::claim_grounding::demote_ungrounded_registry_claims
 //!
 //! Both passes run BEFORE `citation_check::enforce_citation_integrity` (see
 //! `runner.rs` / `mapreduce/mod.rs`) so a self-negated finding never
@@ -117,19 +128,42 @@ const DIFF_ABSENT_SPECULATION_MARKERS: &[&str] = &[
     "is not yet implemented code",
 ];
 
+/// Counts returned by [`sanitize_findings`], one per pass.
+///
+/// Why: a bare tuple stopped reading clearly once a third pass (#4081) joined
+/// the two original ones — `(usize, usize, usize)` at a call site says nothing
+/// about which count is which.
+/// What: plain public counters; every field is "how many findings this pass
+/// acted on".
+/// Test: `sanitize_findings_runs_every_pass`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HygieneCounts {
+    /// Findings dropped as self-negated / chain-of-thought-leaking (#4044).
+    pub dropped_self_negated: usize,
+    /// Findings demoted as diff-absent speculation (#4043).
+    pub demoted_diff_absent: usize,
+    /// Findings demoted as unverified package-registry claims (#4081).
+    pub demoted_ungrounded_registry: usize,
+}
+
 /// Run every output-hygiene pass over `findings`, in place.
 ///
-/// Why: a single call site for both #4043 and #4044's fixes keeps `runner.rs`
+/// Why: a single call site for #4043, #4044 and #4081's fixes keeps `runner.rs`
 /// and `mapreduce/mod.rs` from having to know the internal pass ordering.
 /// What: drops self-negated/leaked findings FIRST (so they never participate
 /// in downstream checks — e.g. `citation_check`'s mutual-contradiction pass),
-/// then demotes any surviving diff-absent-speculation High finding. Returns
-/// `(dropped, demoted)`.
-/// Test: `sanitize_findings_runs_both_passes`.
-pub fn sanitize_findings(findings: &mut Vec<Finding>) -> (usize, usize) {
-    let dropped = drop_self_negated_or_leaked_findings(findings);
-    let demoted = demote_diff_absent_speculation(findings);
-    (dropped, demoted)
+/// then demotes any surviving diff-absent-speculation High finding, then demotes
+/// any surviving unverified package-registry claim (`claim_grounding`, #4081 —
+/// last, because the advisory note it appends contains registry vocabulary the
+/// earlier marker passes have no business re-reading).
+/// Test: `sanitize_findings_runs_every_pass`.
+pub fn sanitize_findings(findings: &mut Vec<Finding>) -> HygieneCounts {
+    HygieneCounts {
+        dropped_self_negated: drop_self_negated_or_leaked_findings(findings),
+        demoted_diff_absent: demote_diff_absent_speculation(findings),
+        demoted_ungrounded_registry:
+            crate::pipeline::claim_grounding::demote_ungrounded_registry_claims(findings),
+    }
 }
 
 /// Drop any finding whose `kind`/`description`/`consequence` contains a

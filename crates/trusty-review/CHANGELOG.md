@@ -24,6 +24,41 @@ a new public module.
 
 ### Fixed
 
+- **A hallucinated dependency-version finding wore `code_provable: true` +
+  `verified: "confirmed"` and drove a false `BLOCK`/`F`** (closes
+  [#4081](https://github.com/bobmatnyc/trusty-tools/issues/4081)).
+  - A review of a one-line CI change (`ruff>=0.6.0` → `ruff==0.16.0`) reported
+    that `0.16.0` "does not exist on PyPI", reasoning explicitly from the
+    reviewer model's training cutoff. It was the current latest release, and all
+    ten checks on that PR were green on that exact dependency. Nothing in the
+    pipeline performs a registry lookup, so nothing had checked the claim — yet
+    it carried both signals a consumer reads to decide a finding is trustworthy,
+    and hard-clamped the verdict to `BLOCK`/`F`. A hallucination wearing a
+    confirmation is worse than no finding at all, and this failure mode is
+    concentrated on dependency bumps — the one diff shape where a reviewer's
+    version knowledge is stale by construction.
+  - New `pipeline::claim_grounding` pass (wired into
+    `finding_hygiene::sanitize_findings`, so both the unified and map-reduce
+    paths get it) demotes any finding whose text makes a package-registry
+    assertion — version absent, withdrawn, deprecated, "latest release is…",
+    "as of my knowledge cutoff" — to the advisory tier: `code_provable` cleared,
+    `effort` capped at Medium, `confidence` capped at the advisory band, and
+    `verified` pre-stamped with a new `VerifyOutcome::Unverifiable { reason }`.
+    `verify::select_candidates` now skips any finding whose outcome is already
+    decided, so such a claim is never put to the verifier LLM — a second model
+    with the same stale training knowledge would only launder the recollection
+    into a `"confirmed"`.
+  - **Refuse-to-confirm, not look-up.** Querying PyPI/npm/crates.io was
+    considered and rejected: it buys nothing the reported harm needs, and adds a
+    live network dependency, rate limits, and a new way for the review path
+    itself to hang. The principle encoded is stronger than any lookup — a claim
+    may be marked `verified: "confirmed"` only when something actually verified
+    it.
+  - **The finding is never dropped.** It still surfaces, verbatim, with an
+    advisory note telling the author nothing checked it and to confirm the pin
+    themselves. Only its grading weight is removed. A genuine, diff-provable
+    finding alongside it keeps full weight and still drives `BLOCK`.
+
 - **A live trusty-search was reported as `"unreachable"`, and a degraded verdict
   was indistinguishable from a complete one** (closes
   [#4086](https://github.com/bobmatnyc/trusty-tools/issues/4086)).

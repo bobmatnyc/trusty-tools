@@ -367,8 +367,18 @@ fn verdict_min(a: Verdict, b: Verdict) -> Verdict {
 /// finding with `confidence >= VERIFY_CANDIDATE_MIN_CONFIDENCE` (0.50).  For
 /// APPROVE / APPROVE*: only findings with `confidence >= BLOCK_VERDICT_MIN_CONFIDENCE`
 /// (0.90).  UNKNOWN never reaches here (handled by the caller).
+///
+/// A finding that ALREADY carries a `verified` outcome is never a candidate
+/// (#4081).  Nothing set that field before the round until `claim_grounding`
+/// began pre-stamping `Unverifiable` on package-registry claims the pipeline
+/// cannot check; sending one to the verifier would let a second model with the
+/// same stale training knowledge launder the recollection into
+/// `verified: "confirmed"` — the exact trust-signal inversion #4081 reports.
+/// The rule is stated generally rather than as an `Unverifiable` special case:
+/// an outcome that is already decided is not a question worth re-asking.
 /// Test: `select_candidates_block_uses_wide_net`,
-/// `select_candidates_approve_uses_block_tier_only`.
+/// `select_candidates_approve_uses_block_tier_only`,
+/// `select_candidates_skips_findings_with_a_decided_outcome`.
 pub fn select_candidates(primary_verdict: Verdict, findings: &[Finding]) -> Vec<usize> {
     let floor = match primary_verdict {
         Verdict::RequestChanges | Verdict::Block => VERIFY_CANDIDATE_MIN_CONFIDENCE,
@@ -380,7 +390,7 @@ pub fn select_candidates(primary_verdict: Verdict, findings: &[Finding]) -> Vec<
     findings
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.confidence >= floor)
+        .filter(|(_, f)| f.verified.is_none() && f.confidence >= floor)
         .map(|(i, _)| i)
         .collect()
 }
