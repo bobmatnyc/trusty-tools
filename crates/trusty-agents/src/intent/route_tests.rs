@@ -13,6 +13,28 @@ fn hard_verb_alone_routes_tcode() {
 }
 
 #[test]
+fn run_and_build_generic_verbs_route_tcode_with_no_tm_signal() {
+    // Owner-approved #4319 follow-up (2026-07-29): "run"/"build" added to
+    // GENERIC_CODE_VERBS so these short imperative coding requests route to
+    // Tcode end to end, matching `intent::classify_intent`'s Implementation
+    // classification for the same sentences.
+    assert_eq!(route_task("run the tests"), BridgeRoute::Tcode);
+    assert_eq!(route_task("build the release"), BridgeRoute::Tcode);
+}
+
+#[test]
+fn run_generic_verb_still_loses_to_tm_signal() {
+    // Precedence rule 2 (Tm signal) still beats rule 3 (generic verb) —
+    // "run" joining GENERIC_CODE_VERBS must not out-rank real Tm vocabulary,
+    // same guarantee `ambiguous_write_up_the_project_roadmap_routes_tm_via_signal_precedence`
+    // already pins for "write".
+    assert_eq!(
+        route_task("run the project roadmap session"),
+        BridgeRoute::Tm
+    );
+}
+
+#[test]
 fn repo_file_extension_routes_tcode() {
     assert_eq!(
         route_task("something is wrong in main.rs"),

@@ -173,35 +173,59 @@ const SELF_QUESTIONS: &[&str] = &[
     "you there",
 ];
 
-/// #4319 (code-critic HIGH-1): bug-report / incident vocabulary not already
-/// covered by `route::has_tcode_lexical_signal` — words that describe
-/// something being WRONG (broken, failing, crash, error, issue, bug,
-/// regression, outage, timeout, exception) or name the technical subsystem
-/// it's wrong in (middleware, backend, frontend, database, server,
-/// endpoint, api, staging, production, auth, token, session, config,
-/// deployment, credentials, certificate, pipeline, queue, cache,
-/// container).
+/// #4319 (code-critic HIGH-1, widened in the owner-approved 2026-07-29
+/// follow-up): technical-context vocabulary not already covered by
+/// `route::has_tcode_lexical_signal` — words that describe something being
+/// WRONG (broken, failing, crash, error, issue, bug, regression, outage,
+/// timeout, exception), name the technical subsystem it's wrong in
+/// (middleware, backend, frontend, database, server, endpoint, api,
+/// staging, production, auth, token, session, config, deployment,
+/// credentials, certificate, pipeline, queue, cache, container), or name a
+/// code artifact (script, test, tests, release, codebase).
 ///
-/// Why: a verb-less bug report — "the login page has been broken on mobile
-/// safari for the past two days and none of my customers can complete
-/// checkout", "the situation with the auth middleware on staging seems
-/// related to the recent token refresh changes from last week" — carries
-/// NEITHER an `ACTION_VERBS` word NOR any of `route_task`'s existing Tcode
-/// lexical signals (no file path, no `error:` marker, no "stack trace" /
-/// "failing test" phrase), so `route::has_tcode_lexical_signal` alone still
-/// misses both. Both regressed to `Conversational` under the #4319 fix
-/// before this list was added (code-critic finding, verified empirically
-/// against pre/post binaries) — a WORSE failure than the original bug: a
-/// genuine coding request answered as idle chat, with nothing anywhere to
-/// signal it happened.
+/// Why: this list now serves TWO callers that both need "is this actually
+/// about code" as a signal (`has_technical_context_signal` below, shared
+/// rather than reimplemented per caller):
+/// 1. The bug-report `Research` fallback (original #4319 HIGH-1): a
+///    verb-less bug report — "the login page has been broken on mobile
+///    safari for the past two days and none of my customers can complete
+///    checkout", "the situation with the auth middleware on staging seems
+///    related to the recent token refresh changes from last week" —
+///    carries NEITHER an `ACTION_VERBS` word NOR any
+///    `route::has_tcode_lexical_signal` hit (no file path, no `error:`
+///    marker, no "stack trace"/"failing test" phrase). Both regressed to
+///    `Conversational` under the first #4319 fix pass (code-critic
+///    finding, verified empirically against pre/post binaries) — worse
+///    than the original bug: a genuine coding request answered as idle
+///    chat with nothing to signal it happened.
+/// 2. Gating `ACTION_VERBS` (owner-approved follow-up): an `ACTION_VERBS`
+///    hit ALONE is common in ordinary conversation with a non-coding
+///    meaning ("can you check if it's raining tomorrow", "I'll run by the
+///    store after work" both contain an `ACTION_VERBS` word) and must not
+///    alone trigger the subprocess pipeline. "write a script"/"run the
+///    tests"/"build the release" must still reach `Implementation`, so the
+///    artifact nouns (`script`/`test`/`tests`/`release`/`codebase`) that
+///    distinguish a real short coding command from casual phrasing using
+///    the same verb are added here rather than to a second list.
 /// What: matched via exact word-token equality against normalized input
-/// (see `has_bug_report_signal`), same as `ACTION_VERBS`/`RESEARCH_VERBS`.
-/// Deliberately biased toward false positives: this list only feeds the
-/// `Research` fallback (in-process, tool-armed, no subprocess) in
-/// `classify_intent`, never `Implementation` — misrouting ordinary
-/// technical-sounding chatter here costs a slightly more expensive but
-/// still-safe path, not a crash.
-const BUG_REPORT_DOMAIN_WORDS: &[&str] = &[
+/// (see `has_technical_context_signal`), same as
+/// `ACTION_VERBS`/`RESEARCH_VERBS`. Deliberately biased toward false
+/// positives in both roles: caller 1 only ever promotes to `Research`
+/// (in-process, tool-armed, no subprocess); caller 2 only promotes an
+/// ALREADY-present `ACTION_VERBS` hit to `Implementation` one step earlier
+/// than it would otherwise resolve — misrouting ordinary technical-sounding
+/// chatter here costs a slightly more expensive but still-safe path, not a
+/// crash. Known corner case (owner-briefed, not silently swallowed): "test"
+/// doubles as both an `ACTION_VERBS` entry (the verb "to test something")
+/// and a `TECHNICAL_CONTEXT_WORDS` entry (the noun "a test"/"the tests"),
+/// so a sentence combining an unrelated soft verb with the word "test" in
+/// its exam/quiz sense (e.g. "check my test scores") would also read as
+/// having technical context. Judged acceptable: false positives here land
+/// on the safe `Research`/`Implementation` distinction the PM can still
+/// correct, never on a crash, and this product's actual traffic is a
+/// coding-assistant chat where "test" overwhelmingly means "a software
+/// test."
+const TECHNICAL_CONTEXT_WORDS: &[&str] = &[
     "broken",
     "failing",
     "fails",
@@ -244,17 +268,31 @@ const BUG_REPORT_DOMAIN_WORDS: &[&str] = &[
     "queue",
     "cache",
     "container",
+    "script",
+    "test",
+    "tests",
+    "release",
+    "codebase",
 ];
 
-/// #4319 (code-critic HIGH-1): True when `input` describes a concrete
-/// technical situation — a bug report, an incident, a system status update
-/// — via lexical cues, without requiring an `ACTION_VERBS` hit. Combines
-/// `route::has_tcode_lexical_signal` (reused, not reimplemented — the
-/// common-entry-point principle) with `BUG_REPORT_DOMAIN_WORDS` above.
-/// Test: `classifier_tests_2::*bug_report*`.
-fn has_bug_report_signal(input: &str, words: &[&str]) -> bool {
+/// #4319: True when `input` describes a concrete technical situation — a
+/// bug report, an incident, a real coding request — via lexical cues,
+/// without requiring an `ACTION_VERBS` hit on its own to be sufficient
+/// evidence. Combines `route::has_tcode_lexical_signal` (reused, not
+/// reimplemented — the common-entry-point principle) with
+/// `TECHNICAL_CONTEXT_WORDS` above, plus a general snake_case-identifier
+/// check: a token containing `_` longer than 3 chars (e.g.
+/// `delegate_to_agent`, `auth_middleware.rs`) names a real code symbol —
+/// `normalize` already preserves underscores for exactly this reason (see
+/// its own doc comment), so recognizing that preserved shape as a
+/// technical-context signal reuses the SAME design decision rather than
+/// adding a third detector.
+/// Test: `classifier_tests_2::*` (bug-report and action-verb-plus-context
+/// cases), `unit_tests::search_verb_is_implementation`.
+fn has_technical_context_signal(input: &str, words: &[&str]) -> bool {
     route::has_tcode_lexical_signal(input)
-        || words.iter().any(|w| BUG_REPORT_DOMAIN_WORDS.contains(w))
+        || words.iter().any(|w| TECHNICAL_CONTEXT_WORDS.contains(w))
+        || words.iter().any(|w| w.len() > 3 && w.contains('_'))
 }
 
 /// Strip surrounding/embedded punctuation for matching.
@@ -292,11 +330,15 @@ pub(crate) fn normalize(input: &str) -> String {
 /// to its cheapest viable path — direct reply (Conversational), in-process
 /// tool-armed loop (Research), or full subprocess pipeline (Implementation).
 /// What: Applies heuristics in priority order — empty, slash command, greeting,
-/// closing, self-question, action-verb scan (wins outright, any length),
-/// research-verb/question-word scan, trailing question mark, "help me", then
+/// closing, self-question, hard-action-verb scan (wins outright, any length —
+/// `route::TCODE_HARD_VERBS`: fix/debug/implement/refactor), soft-action-verb
+/// scan (wins only WITH a technical-context signal — see
+/// `has_technical_context_signal`), research-verb/question-word scan, trailing
+/// question mark, "help me", technical-context-signal-alone (Research), then
 /// defaults to `Conversational` when no positive signal fired. Word count
-/// alone is NEVER evidence for `Implementation` (#4319) — only an
-/// `ACTION_VERBS` hit or a leading slash routes there.
+/// alone is NEVER evidence for `Implementation` (#4319); a soft `ACTION_VERBS`
+/// hit ALONE isn't either (owner-approved 2026-07-29 follow-up) — only a hard
+/// verb, a soft verb plus context, or a leading slash routes there.
 /// Test: `tests::*` below covers greetings, closings, self-questions, research
 /// verbs, question words, clear task verbs, slash commands, the #4319
 /// long-conversational-input regression, and edge cases.
@@ -368,10 +410,29 @@ pub fn classify_intent(input: &str) -> IntentClass {
         }
     }
 
-    // Action verbs ALWAYS win — even over question words and research verbs.
-    // "how do I fix this bug" -> Implementation (because "fix" is concrete work).
-    // "explain how to write a test" -> Implementation (because "write" wins).
-    if has_action_verb {
+    // Owner-approved #4319 follow-up (2026-07-29): an ACTION_VERBS hit is no
+    // longer unconditionally sufficient for Implementation. It splits in two:
+    //
+    // 1. The 4 "hard" verbs reused from `route::TCODE_HARD_VERBS`
+    //    (fix/debug/implement/refactor) ALWAYS win, even over question words
+    //    and research verbs — they're concrete enough on their own that
+    //    `route_task` already makes this exact judgment for the SAME verbs.
+    //    "how do I fix this bug" -> Implementation (because "fix" is concrete
+    //    work, no other evidence needed).
+    // 2. Every other ACTION_VERBS entry ("write", "create", "build", "run",
+    //    "check", "test", ...) is common in ordinary conversation with a
+    //    non-coding meaning — "can you check if it's raining tomorrow",
+    //    "I'll run by the store after work" both contain one — so it ALSO
+    //    needs `has_technical_context_signal` (the SAME detector the
+    //    bug-report Research fallback below uses) before winning.
+    //    "explain how to write a test" -> Implementation ("write" + the
+    //    artifact noun "test"). "write a script" -> Implementation ("write" +
+    //    "script"). "I'll run by the store after work" -> falls through
+    //    (verb present, no context) to the checks below instead.
+    if words.iter().any(|w| route::TCODE_HARD_VERBS.contains(w)) {
+        return IntentClass::Implementation;
+    }
+    if has_action_verb && has_technical_context_signal(trimmed, &words) {
         return IntentClass::Implementation;
     }
 
@@ -404,9 +465,11 @@ pub fn classify_intent(input: &str) -> IntentClass {
     // tool-armed, lets the PM decide with real tools available, and —
     // critically — never spawns a subprocess. This is deliberately
     // narrower than the old length-based fallback: it requires an actual
-    // lexical cue (see `has_bug_report_signal`/`BUG_REPORT_DOMAIN_WORDS`),
-    // not merely "the message is long".
-    if has_bug_report_signal(trimmed, &words) {
+    // lexical cue (see `has_technical_context_signal`/
+    // `TECHNICAL_CONTEXT_WORDS`), not merely "the message is long". (Any
+    // input reaching this line already lacks an `ACTION_VERBS` hit — that
+    // path was fully resolved, one way or the other, above.)
+    if has_technical_context_signal(trimmed, &words) {
         return IntentClass::Research;
     }
 

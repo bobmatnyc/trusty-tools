@@ -226,39 +226,55 @@ fn slash_command_with_whitespace_prefix() {
 // Section 6: Exhaustive ACTION_VERBS constant coverage
 // =====================================================================
 
+// Owner-approved #4319 follow-up (2026-07-29): a bare `ACTION_VERBS` hit is
+// no longer unconditionally sufficient for `Implementation` — see
+// `classify_intent`'s doc comment and `has_technical_context_signal`. This
+// splits the old single exhaustive-coverage test into two, reflecting the
+// ACTUAL new contract rather than deleting coverage to get green:
+// - 8 of the 23 entries still trigger Implementation from the bare verb
+//   alone (4 `route::TCODE_HARD_VERBS`, plus write/test/rename/compile,
+//   each of which independently self-satisfies its own technical-context
+//   requirement — see `every_action_verb_that_self_satisfies_context`).
+// - The remaining 15 are common in ordinary conversation with a
+//   non-coding meaning ("check if it's raining", "list your goals for
+//   today") and must NOT trigger Implementation without it — see
+//   `plain_action_verbs_require_technical_context`.
+
 #[test]
-fn every_action_verb_triggers_implementation() {
-    let action_verbs = [
-        "write",
-        "create",
-        "build",
-        "run",
+fn every_action_verb_that_self_satisfies_context() {
+    let always_implementation = [
         "fix",
-        "implement",
-        "add",
-        "update",
-        "delete",
-        "test",
-        "deploy",
-        "generate",
-        "show",
-        "list",
-        "find",
-        "search",
-        "refactor",
-        "remove",
-        "rename",
-        "install",
-        "compile",
         "debug",
-        "check",
+        "implement",
+        "refactor", // route::TCODE_HARD_VERBS
+        "write",
+        "rename",
+        "compile", // also in route::TCODE_WORDS
+        "test",    // also in TECHNICAL_CONTEXT_WORDS (documented corner case)
     ];
-    for verb in &action_verbs {
+    for verb in &always_implementation {
         let input = format!("{} something now", verb);
         assert_eq!(
             classify_intent(&input),
             IntentClass::Implementation,
-            "action verb '{}' should trigger Implementation",
+            "'{}' should trigger Implementation without extra context",
+            verb
+        );
+    }
+}
+
+#[test]
+fn plain_action_verbs_require_technical_context() {
+    let plain_verbs = [
+        "create", "build", "run", "add", "update", "delete", "deploy", "generate", "show", "list",
+        "find", "search", "remove", "install", "check",
+    ];
+    for verb in &plain_verbs {
+        let input = format!("{} something now", verb);
+        assert_ne!(
+            classify_intent(&input),
+            IntentClass::Implementation,
+            "'{}' alone (no technical context) should NOT trigger Implementation",
             verb
         );
     }

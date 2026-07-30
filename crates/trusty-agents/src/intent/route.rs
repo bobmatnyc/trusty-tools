@@ -43,7 +43,13 @@ pub enum BridgeRoute {
 /// deliberately verb-only (not `write`/`add`/`create`, which are softer —
 /// see `GENERIC_CODE_VERBS`) avoids over-triggering the highest-precedence
 /// rule.
-const TCODE_HARD_VERBS: &[&str] = &["fix", "debug", "implement", "refactor"];
+///
+/// `pub(crate)` (owner-approved #4319 follow-up, 2026-07-29) so
+/// `intent::classify_intent` can reuse the SAME "these 4 verbs are
+/// concrete enough to need no other evidence" judgment this module already
+/// makes for `route_task`, instead of maintaining a second, independently
+/// drifting "which verbs are unambiguously technical" list.
+pub(crate) const TCODE_HARD_VERBS: &[&str] = &["fix", "debug", "implement", "refactor"];
 
 /// Full Tcode single-token signal set (superset of `TCODE_HARD_VERBS`), used
 /// for the fallback per-side match count (precedence rule 4).
@@ -81,7 +87,15 @@ const RAW_TCODE_MARKERS: &[&str] = &["error:"];
 /// Generic code verbs that route to Tcode ONLY when no Tm signal is present
 /// (precedence rule 3) — deliberately softer than `TCODE_HARD_VERBS` because
 /// "write up the project roadmap" should NOT out-rank "project"/"roadmap".
-const GENERIC_CODE_VERBS: &[&str] = &["write", "add", "create"];
+///
+/// `run`/`build` added (owner-approved #4319 follow-up, 2026-07-29): once
+/// `intent::classify_intent` was tightened to require technical context
+/// before a plain verb like "run"/"build" reaches `Implementation`, "run the
+/// tests"/"build the release" correctly classify Implementation — but they
+/// were then falling to `route_task`'s Tm default (no matching Tcode
+/// signal), contradicting the owner's explicit requirement that these
+/// short imperative coding requests still route to Tcode end to end.
+const GENERIC_CODE_VERBS: &[&str] = &["write", "add", "create", "run", "build"];
 
 /// Tm single-token signal set.
 const TM_WORDS: &[&str] = &[

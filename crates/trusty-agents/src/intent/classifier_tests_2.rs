@@ -22,17 +22,28 @@ fn question_word_not_first_does_not_trigger_research() {
 
 #[test]
 fn action_verb_wins_over_question_word() {
+    // "fix" is a hard verb (route::TCODE_HARD_VERBS) -> always wins.
     assert_eq!(
         classify_intent("how do I fix this bug"),
         IntentClass::Implementation
     );
+    // "write" self-satisfies its own technical-context requirement — it's
+    // also a `route::TCODE_WORDS` entry — so it still wins over the
+    // question word even with no other context in the sentence.
     assert_eq!(
         classify_intent("what should I write here"),
         IntentClass::Implementation
     );
+    // Owner-approved #4319 follow-up (2026-07-29): "deploy" is a PLAIN verb
+    // with no technical context here ("this" names nothing concrete), so it
+    // no longer unconditionally wins over the leading question word --
+    // falls through to "where" -> Research. (Previously Implementation
+    // under the old "any action verb always wins" contract; see
+    // `plain_action_verbs_need_context_across_all_templates` in
+    // classifier_property_tests.rs for the full verb x template matrix.)
     assert_eq!(
         classify_intent("where should I deploy this"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 
@@ -197,6 +208,101 @@ fn genuine_coding_request_still_reaches_implementation_and_tcode() {
     assert_eq!(
         crate::intent::route::route_task(task),
         crate::intent::route::BridgeRoute::Tcode
+    );
+}
+
+// =====================================================================
+// Owner-approved #4319 follow-up (2026-07-29): the four decision buckets,
+// pinned together with the owner's verbatim sentences, since the first
+// #4319 fix pass only pinned bucket 3 and left buckets 1/2 as a real,
+// live gap ("can you check if it's raining tomorrow" and "I'll run by the
+// store after work" both still crashed the subprocess pipeline).
+// =====================================================================
+
+#[test]
+fn bucket_1_casual_phrasing_with_action_verb_is_not_implementation() {
+    // "check" and "run" are both PLAIN ACTION_VERBS entries (common in
+    // ordinary conversation with a non-coding meaning) with no technical
+    // context anywhere in either sentence.
+    assert_ne!(
+        classify_intent("can you check if it's raining tomorrow"),
+        IntentClass::Implementation
+    );
+    assert_ne!(
+        classify_intent("I'll run by the store after work"),
+        IntentClass::Implementation
+    );
+    // Specific landing spots: "can you check ..." starts with the question
+    // word "can" -> Research; "I'll run by ..." has no signal left once the
+    // verb-alone gate doesn't fire -> Conversational.
+    assert_eq!(
+        classify_intent("can you check if it's raining tomorrow"),
+        IntentClass::Research
+    );
+    assert_eq!(
+        classify_intent("I'll run by the store after work"),
+        IntentClass::Conversational
+    );
+}
+
+#[test]
+fn bucket_2_short_imperative_coding_request_is_implementation_and_routes_to_tcode() {
+    // "run the tests" / "build the release": both PLAIN verbs, but paired
+    // with a genuine technical-context word ("tests"/"release") in a short,
+    // unambiguous imperative. Must reach Implementation AND still route to
+    // Tcode via `route_task` -- these are exactly the coding requests the
+    // owner actively uses "run coding projects from inside chat" for.
+    for task in ["run the tests", "build the release"] {
+        assert_eq!(
+            classify_intent(task),
+            IntentClass::Implementation,
+            "'{task}' should be Implementation"
+        );
+    }
+    // route_task's original GENERIC_CODE_VERBS (write/add/create) didn't
+    // include "run"/"build", so before this fix these two fell through to
+    // its OWNER-LOCKED Tm default — contradicting the requirement that a
+    // real coding request routes to Tcode end to end. Added "run"/"build"
+    // to `route::GENERIC_CODE_VERBS` (precedence rule 3: wins only when no
+    // Tm signal is present, same softness as write/add/create) to close
+    // that gap.
+    assert_eq!(
+        crate::intent::route::route_task("run the tests"),
+        crate::intent::route::BridgeRoute::Tcode
+    );
+    assert_eq!(
+        crate::intent::route::route_task("build the release"),
+        crate::intent::route::BridgeRoute::Tcode
+    );
+}
+
+#[test]
+fn bucket_3_verbless_bug_report_with_domain_cues_is_research() {
+    // The two #4319 HIGH-1 proven regression sentences, verbatim.
+    let sentence_1 = "the login page has been broken on mobile safari for the past two days \
+                       and none of my customers can complete checkout";
+    let sentence_2 = "the situation with the auth middleware on staging \
+                       seems related to the recent token refresh changes from last week";
+    for s in [sentence_1, sentence_2] {
+        assert_eq!(
+            classify_intent(s),
+            IntentClass::Research,
+            "'{s}' should be Research"
+        );
+    }
+}
+
+#[test]
+fn bucket_4_signal_free_conversation_is_conversational() {
+    assert_eq!(
+        classify_intent("that new library seems pretty nice honestly"),
+        IntentClass::Conversational
+    );
+    assert_eq!(
+        classify_intent(
+            "please confirm that the research agent you mentioned earlier is actually available today"
+        ),
+        IntentClass::Conversational
     );
 }
 

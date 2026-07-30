@@ -69,8 +69,14 @@ fn action_verbs_signal_implementation() {
         classify_intent("Run the tests"),
         IntentClass::Implementation
     );
+    // Owner-approved #4319 follow-up (2026-07-29): "Build a markdown table
+    // formatter" had NO technical-context word under the new contract (a
+    // bare "build" is common in ordinary conversation — "build a case",
+    // "build a fire" — and must not alone reach Implementation), so this
+    // assertion changed from that sentence to one of the owner's verbatim
+    // required cases: "build" + the artifact noun "release".
     assert_eq!(
-        classify_intent("Build a markdown table formatter"),
+        classify_intent("Build the release"),
         IntentClass::Implementation
     );
     assert_eq!(

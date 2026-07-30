@@ -16,7 +16,9 @@
 //!
 //! - Invariants: totality (never panics), determinism, whitespace invariance
 //! - Slash prefix always Implementation
-//! - Action verb dominance across all verb x context combinations (23 * 6 = 138 cases)
+//! - Action verb / technical-context interaction across all verb x context
+//!   combinations (8 self-satisfying verbs always dominate; 15 plain verbs
+//!   need external context — owner-approved #4319 follow-up, 2026-07-29)
 //! - Word count boundary sweep (1-30 words, all Conversational absent
 //!   verb/question signals — #4319)
 //! - Constant-list completeness guards (count, lowercase, no duplicates, no overlap)
@@ -121,35 +123,41 @@ fn slash_prefix_always_implementation() {
 }
 
 // =====================================================================
-// Invariant 5: Any input containing an action verb must return Implementation
+// Invariant 5 (REVISED, owner-approved #4319 follow-up, 2026-07-29): an
+// action verb no longer unconditionally dominates. It now splits into two
+// groups, empirically pinned against all 6 context templates:
+//
+// - 8 of the 23 `ACTION_VERBS` entries self-satisfy their own
+//   technical-context requirement regardless of template (4
+//   `route::TCODE_HARD_VERBS`, plus write/test/rename/compile — each
+//   independently also present in `route::TCODE_WORDS` or
+//   `TECHNICAL_CONTEXT_WORDS`) -> Implementation in all 6 templates.
+// - The remaining 15 are plain, common-in-conversation verbs that need
+//   an EXTERNAL technical-context word to reach Implementation. Across
+//   the same 6 templates: the 2 context-free ones ("{v} something",
+//   "please {v} the thing") land Conversational; the 2 question-shaped
+//   ones ("can you {v} it", "what should I {v}") land Research (the
+//   verb doesn't win, so the leading question word does); the 2
+//   context-bearing ones ("explain how to {v} a test", "hello, {v} a
+//   script") land Implementation via the "test"/"script" context words.
+//
+// This was a corner the original #4319 fix left open: casual phrasing
+// containing one of these 23 words ("can you check if it's raining
+// tomorrow", "I'll run by the store after work") still hit
+// `Implementation` and the crash this whole fix exists to prevent.
 // =====================================================================
 
 #[test]
-fn action_verb_always_dominates() {
-    let action_verbs = [
-        "write",
-        "create",
-        "build",
-        "run",
+fn self_satisfying_action_verbs_always_dominate() {
+    let always_implementation = [
         "fix",
-        "implement",
-        "add",
-        "update",
-        "delete",
-        "test",
-        "deploy",
-        "generate",
-        "show",
-        "list",
-        "find",
-        "search",
-        "refactor",
-        "remove",
-        "rename",
-        "install",
-        "compile",
         "debug",
-        "check",
+        "implement",
+        "refactor",
+        "write",
+        "test",
+        "rename",
+        "compile",
     ];
     let contexts = [
         "{v} something",
@@ -159,13 +167,59 @@ fn action_verb_always_dominates() {
         "what should I {v}",
         "hello, {v} a script",
     ];
-    for verb in &action_verbs {
+    for verb in &always_implementation {
         for ctx in &contexts {
             let input = ctx.replace("{v}", verb);
             assert_eq!(
                 classify_intent(&input),
                 IntentClass::Implementation,
-                "action verb '{}' in '{}' should be Implementation",
+                "self-satisfying verb '{}' in '{}' should be Implementation",
+                verb,
+                input
+            );
+        }
+    }
+}
+
+#[test]
+fn plain_action_verbs_need_context_across_all_templates() {
+    let plain_verbs = [
+        "create", "build", "run", "add", "update", "delete", "deploy", "generate", "show", "list",
+        "find", "search", "remove", "install", "check",
+    ];
+    // (template, expected) — expected depends on what ELSE fires once the
+    // action-verb-alone gate no longer does.
+    let context_free = ["{v} something", "please {v} the thing"];
+    let question_shaped = ["can you {v} it", "what should I {v}"];
+    let context_bearing = ["explain how to {v} a test", "hello, {v} a script"];
+
+    for verb in &plain_verbs {
+        for ctx in &context_free {
+            let input = ctx.replace("{v}", verb);
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Conversational,
+                "plain verb '{}' in context-free '{}' should be Conversational, not Implementation",
+                verb,
+                input
+            );
+        }
+        for ctx in &question_shaped {
+            let input = ctx.replace("{v}", verb);
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Research,
+                "plain verb '{}' in question-shaped '{}' should be Research (leading question word wins), not Implementation",
+                verb,
+                input
+            );
+        }
+        for ctx in &context_bearing {
+            let input = ctx.replace("{v}", verb);
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Implementation,
+                "plain verb '{}' in context-bearing '{}' SHOULD be Implementation (technical-context word present)",
                 verb,
                 input
             );
