@@ -15,14 +15,20 @@ measurements. **The measurements are the deliverable.** No harness is being buil
 | # | Question | Answer | Confidence |
 |---|----------|--------|------------|
 | A | Base image inventory | **ANSWERED** — see A below | measured |
-| B | `tart exec` viability / exit-code propagation | NOT YET MEASURED | — |
+| B | `tart exec` viability / exit-code propagation | **ANSWERED — fully viable, see B** | measured |
 | C | Tahoe "Local Network" permission vs SSH | NOT YET MEASURED | — |
 | D | Non-interactive access mechanics | NOT YET MEASURED | — |
 | E | mise + Rust reality check | **ANSWERED — assumption was broken, see E** | measured |
 | F | TCC / permission dialogs, headless | PARTIAL — `--no-graphics` boots and provisions | partial |
-| G | Timings & disk | PARTIAL — golden→clone 0.30 s | partial |
+| G | Timings & disk | **MOSTLY ANSWERED — see G** | measured |
 | H | Compile-speed calibration | NOT YET MEASURED | — |
 | I | Suspend/resume | NOT YET MEASURED | — |
+
+> **Headline finding (see B/E):** the baked golden image
+> `trusty-toolchain-20260730` does **not** actually have a working non-interactive
+> PATH. `~/.zshenv` — the fix the bake script documents and the bake run verified —
+> is **absent from the produced image**. A clone of the golden today answers
+> `cargo --version` with exit **127** under both `/bin/sh` and `/bin/zsh`.
 
 ---
 
@@ -146,6 +152,98 @@ Alternatives not needed here but valid: `mise exec -- cargo …` or
 
 ---
 
+## B. `tart exec` viability — ANSWERED, fully viable
+
+All tests run against `probe-h`, a clone of the golden. Raw output:
+
+```
+### B1: exit code propagation, /bin/sh, exit 7
+host saw 7
+### B2: exit code 0
+host saw 0
+### B3: exit code 1 from a failing real command
+host saw 1
+### B4: stdout captured?
+captured=[HELLO_STDOUT]
+### B5: stderr separation (stdout only)
+stdout_only=[TO_OUT]
+### B6: -i stdin heredoc piping
+heredoc ran as admin in /Users/admin
+arg-free script works
+host saw 3 (expect 3 if exit codes propagate through -i)
+### B7: cargo visible via /bin/sh (the E trap) ?
+sh saw 127
+### B8: cargo visible via /bin/zsh ?
+zsh saw 127
+### B9: long output truncation - expect 200000 lines
+lines_received=  200000
+last_line=200000
+### B10: streaming vs buffering - timestamps of arrival
+123.23 tick1
+125.28 tick2
+127.3 tick3
+```
+
+Conclusions:
+
+* **Exit codes propagate exactly**, including through the `-i` stdin form (`exit 3` →
+  host saw 3). This is the single most important property for a test harness and it
+  holds.
+* **stdin piping works.** A heredoc fed to `tart exec -i <vm> /bin/zsh -s` runs as
+  `admin` in `/Users/admin`. This is a complete substitute for file transfer for
+  provisioning scripts.
+* **stdout and stderr are separate streams** on the host side (B5 discarded stderr and
+  kept stdout cleanly).
+* **Output streams, it does not buffer.** B10's three ticks arrived at 123.23 / 125.28 /
+  127.30 — 2 s apart, matching the guest's `sleep 2`. Long-running commands give live
+  output.
+* **No truncation.** 200 000 lines sent, 200 000 received, last line intact.
+
+`tart exec` is a viable harness transport. It needs no network, no SSH, no credentials.
+
+### B7/B8 — the golden image is broken
+
+`cargo` is invisible to **both** `/bin/sh` **and** `/bin/zsh` on a fresh clone:
+
+```
+### does ~/.zshenv exist?
+---
+rc=1
+### PATH seen by zsh -c
+PATH=/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin
+### PATH seen by zsh -s (stdin form)
+PATH=/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin
+cargo:
+```
+
+The toolchain itself is present and functional — only the PATH wiring is missing:
+
+```
+### explicit absolute path invocation
+cargo 1.91.1 (ea2d97820 2025-10-10)
+rc=0
+### rustup default toolchain
+1.91.1-aarch64-apple-darwin (default)
+rustc 1.91.1 (ed61e7d7e 2025-11-07)
+```
+
+Everything else provisioning wrote **did** persist — `~/.cargo` (22:15), `~/.rustup`
+(22:15), `~/.config/mise/config.toml` (22:16, `rust = "1.91"`), and the mise shims dir.
+`~/.zshenv` is the *only* provisioning artifact missing, and it was the *last* thing the
+provisioning script wrote. The bake run's own `verify.txt` proves it existed and worked
+at bake time (it printed the prepended PATH). Something between verify and the produced
+image dropped it. Root cause is not yet established; a persistence experiment is pending.
+
+**Design consequence:** a harness must not depend on guest shell rc files at all.
+Since `tart exec` has **no `--env` flag**, the reliable pattern is to prefix PATH
+explicitly inside the command itself, or invoke absolute paths:
+
+```sh
+tart exec "$VM" /bin/zsh -c 'export PATH="$HOME/.cargo/bin:$PATH"; cargo --version'
+```
+
+---
+
 ## F. TCC / headless — PARTIAL
 
 `tart run --no-graphics` boots the guest successfully and the guest agent becomes
@@ -155,32 +253,71 @@ NOT YET MEASURED.
 
 ---
 
-## G. Timings & disk — PARTIAL
+## G. Timings & disk — MOSTLY ANSWERED
 
 | Measurement | Value |
 |---|---|
-| `tart clone` of **golden** (APFS CoW) | **0.30 s** |
-| `tart clone` of base | NOT YET MEASURED |
-| boot-to-ready (agent responsive) | NOT YET MEASURED |
-| full mise + rust provisioning | NOT YET MEASURED |
+| `tart clone` of **golden** (80 GB image) | **0.310 s** |
+| `tart clone` of **base** (50 GB image) | **0.306 s** |
+| `tart delete` | **0.29–0.30 s** |
+| boot-to-ready (headless clone, agent responsive) | **34.4 s** |
+| golden `du -sh` | 31 G (misleading — see below) |
+| golden `disk.img` apparent size | 80,000,000,000 bytes |
+| **true CoW divergence cost of a clone** | **~104 KB** |
+| full mise + rust provisioning | NOT YET MEASURED (bake stdout was lost) |
 | `tart stop` | NOT YET MEASURED |
-| `tart delete` | NOT YET MEASURED |
-| golden on-disk size after bake | NOT YET MEASURED |
-| true CoW divergence cost of a clone | NOT YET MEASURED |
 
-### Suspected broken assumption: `--disk-size` auto-expansion
+Raw:
 
-`scripts/vmtest/bake-golden.sh` claims in its header that
-`tart set --disk-size N` auto-expands the guest APFS container on next boot with no
-in-guest `diskutil apfs resizeContainer`. The pristine inventory above was taken *after*
-`tart set --disk-size 80` and a boot, and the guest reports a **46 GiB** filesystem — the
-original ~50 GB image, not 80 GB. **This claim looks wrong and is flagged for
-verification.** `tart list` reports Disk=80 for the golden, so the host-side container
-grew but the guest filesystem apparently did not.
+```
+CLONE_BASE_MS=306
+CLONE_GOLDEN_MS=310
+DELETE_MS=299
+DELETE2_MS=293
+BOOT_TO_READY_MS=34414
+```
+
+### Clone cost is effectively zero and independent of image size
+
+Cloning the 50 GB base and the 80 GB golden take the same ~0.31 s. This is an APFS
+`clonefile`, not a copy. Real disk consumed by making **two** clones:
+
+```
+=== df Data avail KB before ===  561725380
+=== df Data avail KB after 2 clones ===  561725172
+```
+
+208 KB total for two clones, i.e. **~104 KB per clone**. Host capacity for clean VMs is
+therefore *not* bounded by clone count — it is bounded only by how much each clone
+*writes* after divergence. With 536 GiB free the host can hold effectively unlimited
+idle clones.
+
+**`du -sh` is not a usable measure here.** It reports 31 G for both the golden and its
+clone because it counts CoW-shared blocks against each. Use `df` deltas instead.
+
+### Corrected: `--disk-size` auto-expansion DOES work (just not on the resize boot)
+
+An earlier reading of this probe's own data suggested `tart set --disk-size 80` failed to
+expand the guest filesystem, because the bake run's pristine inventory reported a 46 GiB
+volume. That reading was **wrong**. On a later boot the guest reports:
+
+```
+Filesystem        Size    Used   Avail Capacity  Mounted on
+/dev/disk2s1s1    74Gi    12Gi    43Gi    22%    /
+...
+/dev/disk0 (internal, physical):
+   0:      GUID_partition_scheme       *80.0 GB    disk0
+   2:                 Apple_APFS Container disk2   79.5 GB   disk0s2
+```
+
+So the header claim in `bake-golden.sh` holds — no in-guest `diskutil apfs
+resizeContainer` is needed — but the expansion is **not visible during the boot in which
+the resize is first applied**. A bake script that asserts on free space immediately after
+resizing will read the pre-expansion number.
 
 ---
 
-## B, C, D, H, I — NOT YET MEASURED
+## C, D, H, I — NOT YET MEASURED
 
 ---
 
