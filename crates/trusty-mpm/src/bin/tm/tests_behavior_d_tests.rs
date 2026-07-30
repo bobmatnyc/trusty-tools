@@ -1996,6 +1996,100 @@ async fn auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_remov
         "both records must be left on the manual [d<N>] path once the stale \
          daemon is detected"
     );
+    assert_eq!(
+        outcome.pending, 2,
+        "both stale-daemon-held records must fold into `pending`, not vanish \
+         from the reported count"
+    );
+
+    handle.abort();
+}
+
+/// Owner request 2026-07-30 follow-up: the stale-daemon sentinel expires
+/// after its 1-hour TTL, so a daemon that gets restarted eventually stops
+/// being wedged out of auto-prune forever. A FRESH sentinel still blocks;
+/// an EXPIRED one lets the next call retry (and, since this stub daemon is
+/// still "stale," immediately re-trips a fresh sentinel — correct
+/// oscillation, one probe per hour, never a permanent lockout).
+#[tokio::test]
+async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
+    async fn stub_decommission(
+        axum::extract::Path(_id): axum::extract::Path<String>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "workspace_removed": true }))
+    }
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(stub_decommission),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("http://{addr}");
+
+    let client = reqwest::Client::new();
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+
+    let confirmed_session = || {
+        let mut s = ls_test_session("id-a", "errored", None, None, None, None);
+        s.id = "id-a".to_string();
+        s.unresumable = true;
+        s
+    };
+
+    // A FRESH sentinel (just now) must block — no decommission attempted.
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("id-a".to_string(), "2020-01-01T00:00:00Z".to_string());
+    seen.insert(
+        "__stale_daemon_detected__".to_string(),
+        chrono::Utc::now().to_rfc3339(),
+    );
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    let outcome =
+        auto_prune_dead_records_at(&client, &url, vec![confirmed_session()], &marker_path).await;
+    assert_eq!(outcome.pruned, 0, "a fresh sentinel must still block");
+    assert_eq!(outcome.kept.len(), 1);
+    assert_eq!(outcome.pending, 1, "held record must fold into pending");
+
+    // An EXPIRED sentinel (well past the 1-hour TTL) must let this call
+    // retry. This stub always reports `workspace_removed: true`, so the
+    // retry immediately re-trips a FRESH sentinel — proving both halves:
+    // expiry allows a retry, and a still-stale daemon re-blocks right away.
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("id-a".to_string(), "2020-01-01T00:00:00Z".to_string());
+    seen.insert(
+        "__stale_daemon_detected__".to_string(),
+        "2020-01-01T00:00:00Z".to_string(),
+    );
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    let outcome =
+        auto_prune_dead_records_at(&client, &url, vec![confirmed_session()], &marker_path).await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "the stub is still stale, so the retry must not count as pruned"
+    );
+    assert_eq!(outcome.kept.len(), 1);
+
+    // The re-trip must have rewritten a FRESH sentinel — verified directly
+    // against the persisted marker file, not merely inferred from behavior.
+    let raw = std::fs::read_to_string(&marker_path).expect("read marker file");
+    let persisted: std::collections::HashMap<String, String> =
+        serde_json::from_str(&raw).expect("parse marker file");
+    let sentinel_ts = persisted
+        .get("__stale_daemon_detected__")
+        .expect("sentinel must be re-written after retry");
+    let parsed = chrono::DateTime::parse_from_rfc3339(sentinel_ts).expect("valid RFC 3339");
+    assert!(
+        chrono::Utc::now().signed_duration_since(parsed) < chrono::Duration::minutes(1),
+        "the re-tripped sentinel must be freshly timestamped, not the expired one"
+    );
 
     handle.abort();
 }

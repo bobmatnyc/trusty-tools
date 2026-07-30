@@ -38,7 +38,11 @@
 //!      the response body and requires `workspace_removed == false` before
 //!      counting a call as safe; anything else trips
 //!      [`STALE_DAEMON_MARKER_KEY`], which disables further auto-prune
-//!      attempts for the rest of this invocation.
+//!      attempts until the sentinel expires ([`STALE_DAEMON_TTL_SECS`], 1
+//!      hour) — self-healing: one probe per hour against a genuinely stale
+//!      daemon, not a permanent lockout once it's restarted. Records held
+//!      back by this gate fold into [`AutoPruneOutcome::pending`], never
+//!      silently disappearing from the reported count.
 //!
 //! What: [`auto_prune_dead_records`] is the production entry point (resolves
 //! the marker file under `~/.trusty-mpm`); [`auto_prune_dead_records_at`] is
@@ -51,7 +55,8 @@
 //! `auto_prune_dead_records_keeps_workspace_present_records`,
 //! `auto_prune_dead_records_is_noop_when_nothing_is_dead`,
 //! `auto_prune_dead_records_honors_the_cap`,
-//! `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`
+//! `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`,
+//! `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`
 //! in `tests_behavior_d_tests.rs`; the record-only server-side guarantee is
 //! pinned by `decommission_record_only_never_removes_existing_workspace`
 //! (`session_manager::tests`).
@@ -96,9 +101,25 @@ const SEEN_MARKER_FILENAME: &str = "auto-prune-seen.json";
 /// never bleed into each other despite `cargo test` running many tests in
 /// one process.
 /// What: an unlikely-to-collide sentinel key (real session ids are UUIDs);
-/// its value is the RFC 3339 timestamp of first detection, for debugging.
-/// Test: `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`.
+/// its value is the RFC 3339 timestamp of first detection — checked against
+/// [`STALE_DAEMON_TTL_SECS`] by [`stale_daemon_sentinel_active`], not merely
+/// its presence.
+/// Test: `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`,
+/// `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`.
 const STALE_DAEMON_MARKER_KEY: &str = "__stale_daemon_detected__";
+
+/// TTL for the `STALE_DAEMON_MARKER_KEY` sentinel: 1 hour (owner request
+/// 2026-07-30 follow-up).
+///
+/// Why: a daemon that was stale an hour ago may have been restarted since —
+/// wedging auto-prune off permanently would defeat the point of a
+/// self-healing safeguard once the operator (or the daemon's own restart
+/// machinery) catches up. Expiring the sentinel lets the NEXT invocation
+/// retry; if the daemon is STILL stale, [`decommission_dead_record`]'s
+/// body-check trips again immediately and rewrites a fresh sentinel — one
+/// probe per hour against a genuinely stale daemon, never a permanent
+/// lockout.
+const STALE_DAEMON_TTL_SECS: i64 = 60 * 60;
 
 /// Result of one [`auto_prune_dead_records`] / [`auto_prune_dead_records_at`]
 /// call.
@@ -115,8 +136,11 @@ pub(crate) struct AutoPruneOutcome {
     /// Count of records actually decommissioned this call (never more than
     /// [`AUTO_PRUNE_CAP`]).
     pub(crate) pruned: usize,
-    /// Count of `unresumable` records NOT acted on this call — either a
-    /// first sighting (not yet confirmed) or confirmed-but-over-the-cap.
+    /// Count of `unresumable` records NOT acted on this call — a first
+    /// sighting (not yet confirmed), confirmed-but-over-the-cap, or held
+    /// back because the stale-daemon gate is active (owner request
+    /// 2026-07-30 follow-up — this must fold in here or the reported count
+    /// under-represents exactly the batch that gate is protecting).
     pub(crate) pending: usize,
 }
 
@@ -178,7 +202,8 @@ pub(crate) async fn auto_prune_dead_records(
 /// `auto_prune_dead_records_first_sighting_is_not_pruned`,
 /// `auto_prune_dead_records_keeps_workspace_present_records`,
 /// `auto_prune_dead_records_is_noop_when_nothing_is_dead`,
-/// `auto_prune_dead_records_honors_the_cap`.
+/// `auto_prune_dead_records_honors_the_cap`,
+/// `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`.
 pub(crate) async fn auto_prune_dead_records_at(
     client: &reqwest::Client,
     url: &str,
@@ -226,13 +251,23 @@ pub(crate) async fn auto_prune_dead_records_at(
     let to_prune: Vec<_> = confirmed.drain(..cap).collect();
 
     // Critic CRITICAL (2026-07-30): a daemon that already proved it ignores
-    // `record_only` (ANY earlier call this invocation) must never be asked
-    // to decommission again — see `STALE_DAEMON_MARKER_KEY`'s doc.
-    let already_stale_daemon = seen.contains_key(STALE_DAEMON_MARKER_KEY);
+    // `record_only` — within its 1-hour TTL — must never be asked to
+    // decommission again this call. An EXPIRED sentinel is cleared here so a
+    // now-current daemon isn't wedged off forever.
+    let already_stale_daemon = stale_daemon_sentinel_active(&seen);
+    if !already_stale_daemon && seen.remove(STALE_DAEMON_MARKER_KEY).is_some() {
+        changed = true;
+    }
     let mut newly_stale_daemon = false;
     let mut pruned = 0usize;
+    // Owner request 2026-07-30 follow-up: records held back by the
+    // stale-daemon gate (already-active OR newly-tripped-mid-loop) must fold
+    // into `pending` — otherwise "N more dead records pending confirmation"
+    // under-reports exactly the batch this gate is protecting.
+    let mut stale_daemon_held = 0usize;
 
     if already_stale_daemon {
+        stale_daemon_held = to_prune.len();
         kept.extend(to_prune);
     } else {
         let mut iter = to_prune.into_iter();
@@ -246,6 +281,7 @@ pub(crate) async fn auto_prune_dead_records_at(
                 DecommissionOutcome::Failed => kept.push(s),
                 DecommissionOutcome::StaleDaemon => {
                     newly_stale_daemon = true;
+                    stale_daemon_held += 1;
                     kept.push(s);
                     break;
                 }
@@ -253,7 +289,9 @@ pub(crate) async fn auto_prune_dead_records_at(
         }
         // `iter.by_ref()` leaves every un-visited item (after the `break`)
         // in `iter` — collect them back rather than silently dropping them.
-        kept.extend(iter);
+        let remainder: Vec<_> = iter.collect();
+        stale_daemon_held += remainder.len();
+        kept.extend(remainder);
     }
 
     if newly_stale_daemon {
@@ -267,7 +305,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         );
     }
 
-    let pending = confirmed.len() + first_sighting.len();
+    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held;
     kept.extend(confirmed);
     kept.extend(first_sighting);
 
@@ -280,6 +318,26 @@ pub(crate) async fn auto_prune_dead_records_at(
         pruned,
         pending,
     }
+}
+
+/// Whether the persisted `STALE_DAEMON_MARKER_KEY` sentinel is still within
+/// its [`STALE_DAEMON_TTL_SECS`] TTL (owner request 2026-07-30 follow-up).
+///
+/// Why: see [`STALE_DAEMON_TTL_SECS`]'s doc — a permanent lockout would
+/// outlive the daemon restart that fixes it.
+/// What: `true` only when the sentinel is present AND parses as an RFC 3339
+/// timestamp no more than [`STALE_DAEMON_TTL_SECS`] old. A missing, corrupt,
+/// or expired sentinel returns `false` (retry allowed) — the caller is
+/// responsible for clearing an expired entry from `seen` so it doesn't
+/// linger.
+/// Test: `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`.
+fn stale_daemon_sentinel_active(seen: &HashMap<String, String>) -> bool {
+    seen.get(STALE_DAEMON_MARKER_KEY)
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .is_some_and(|ts| {
+            chrono::Utc::now().signed_duration_since(ts)
+                < chrono::Duration::seconds(STALE_DAEMON_TTL_SECS)
+        })
 }
 
 /// Load the persisted first-sighting map, tolerating a missing or corrupt
