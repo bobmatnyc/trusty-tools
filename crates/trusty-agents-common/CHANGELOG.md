@@ -9,11 +9,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- `agents::deployer` now re-deploys a corrupted bundled agent instead of freezing it as user-modified (closes [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)). A manifest entry whose origin is framework-owned (`Origin::Bundled`, the `InstallPolicy::Overwrite` tier) is refreshed from the bundle whenever its on-disk checksum drifts — a mismatch there means corruption or drift, never user ownership. Previously ANY checksum mismatch was read as "the user edited this file", which is unrecoverable for a bundled asset: corrupt content can never checksum-match again, so a 32-byte `v1` stub that replaced the real 25KB `rust-engineer.md` was permanently misclassified as a user edit and skipped by every subsequent deploy and by `tm validate --repair`, dropping the agent from the session roster for the life of the workspace. The user-owned tier is unchanged — an untracked file, and a tracked entry with `Origin::User`/`Origin::Registry`, are still preserved byte-for-byte. Each overwrite-on-mismatch repair logs the file, the expected and found checksums, and the on-disk byte count.
+- `agents::deployer` now re-deploys a corrupted bundled agent instead of freezing it as user-modified (closes [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)). A manifest entry whose origin is framework-owned (`Origin::Bundled`, the `InstallPolicy::Overwrite` tier) is refreshed from the bundle whenever its on-disk checksum drifts — a mismatch there means corruption or drift, never user ownership. Previously ANY checksum mismatch was read as "the user edited this file", which is unrecoverable for a bundled asset: corrupt content can never checksum-match again, so a 32-byte `v1` stub that replaced the real 25KB `rust-engineer.md` was permanently misclassified as a user edit and skipped by every subsequent deploy and by `tm validate --repair`, dropping the agent from the session roster for the life of the workspace. The user-owned tier is unchanged — an untracked file, and a tracked entry with `Origin::User`/`Origin::Registry`, are still preserved byte-for-byte. Each overwrite-on-mismatch repair logs the file, the expected and found checksums, and the on-disk byte count. ([#4419](https://github.com/bobmatnyc/trusty-tools/pull/4419)) ([`e8f30ef`](https://github.com/bobmatnyc/trusty-tools/commit/e8f30ef00bb3c7636c53182e88ee8a569acd6442))
 
 ### Added
 
 - `agents::manifest::Origin::is_framework_owned` — names the two install-ownership tiers so the deployer branches on declared ownership rather than on checksum mismatch alone (#4408).
+
+### Changed
+
+<!--
+  Note: the two entries below predate 0.2.1 (they reference #1959/#1968/#1750,
+  the trusty-agents-common 0.1.3 publish) and were left stranded under a stale
+  duplicate "## [Unreleased]" heading below the 0.2.1 section for several
+  releases (issue #2793 pattern) instead of being folded into whatever version
+  actually shipped them. Merged up into this changelog's single Unreleased
+  section during the 0.4.0 bump rather than deleted, since they are real
+  historical entries, not generator noise.
+-->
+- hoist compress::tool_output from trusty-agents ([#1959](https://github.com/bobmatnyc/trusty-tools/pull/1959)) ([#1968](https://github.com/bobmatnyc/trusty-tools/pull/1968)) ([`7cf93b9`](https://github.com/bobmatnyc/trusty-tools/commit/7cf93b9ab3918aff316238bdfe540a4053aa971d))
+- publish trusty-agents-common 0.1.3 + trusty-mpm 0.11.0 to crates.io ([#1750](https://github.com/bobmatnyc/trusty-tools/pull/1750)) ([`70194ec`](https://github.com/bobmatnyc/trusty-tools/commit/70194ec1788fed2e71016912dae4e062baade139))
 
 ## [0.3.0] — 2026-07-21
 
@@ -50,10 +64,3 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - Add crates.io package metadata (keywords/categories/homepage/readme).
-
-## [Unreleased]
-
-### Changed
-
-- hoist compress::tool_output from trusty-agents ([#1959](https://github.com/bobmatnyc/trusty-tools/pull/1959)) ([#1968](https://github.com/bobmatnyc/trusty-tools/pull/1968)) ([`7cf93b9`](https://github.com/bobmatnyc/trusty-tools/commit/7cf93b9ab3918aff316238bdfe540a4053aa971d))
-- publish trusty-agents-common 0.1.3 + trusty-mpm 0.11.0 to crates.io ([#1750](https://github.com/bobmatnyc/trusty-tools/pull/1750)) ([`70194ec`](https://github.com/bobmatnyc/trusty-tools/commit/70194ec1788fed2e71016912dae4e062baade139))
