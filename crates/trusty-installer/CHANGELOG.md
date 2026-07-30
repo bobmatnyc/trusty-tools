@@ -18,8 +18,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ([`bd28002`](https://github.com/bobmatnyc/trusty-tools/commit/bd2800216c2999bbcfb72373a2f81e837b2ab93a), [`6078b21`](https://github.com/bobmatnyc/trusty-tools/commit/6078b21c091b7d4b1ea7d5d05eb96cd49801cfec))
 
-## [Unreleased]
-
 ### Changed
 
 - **`detect_does_not_hang_on_an_unresponsive_shadowing_binary` now runs on
