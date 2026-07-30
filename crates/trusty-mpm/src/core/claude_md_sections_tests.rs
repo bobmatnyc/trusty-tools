@@ -15,7 +15,7 @@
 use super::*;
 use crate::core::bundled_pm_package::bundled_fallback_package;
 use crate::core::instruction_overrides::{
-    FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, OVERRIDE_DIR_NAME, PromptSource,
+    FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_WORKFLOW, OVERRIDE_DIR_NAME, PromptSource,
     resolve_pm_prompt_with_roster,
 };
 use crate::core::instruction_package::{Generator, InstructionBlock, Join};
@@ -777,24 +777,171 @@ fn tm_never_writes_claude_md() {
 }
 
 #[test]
-fn named_sections_are_reported_unapplied_on_the_legacy_path() {
-    // A project still carrying a legacy `.trusty-mpm/` override file composes
-    // through the sectionless legacy assembly, so its named sections cannot
-    // land. That must be loud (`warn_unapplied`) and must not corrupt the
-    // prompt — never silent, which is the #381 failure.
+fn an_unrelated_legacy_file_does_not_shadow_a_named_section_override() {
+    // #4399 REGRESSION GATE (this test previously pinned the bug it now
+    // guards against). A project carrying a legacy `.trusty-mpm/` override
+    // file composes through the sectionless legacy assembly — but an
+    // unrelated legacy file (here `AGENT_DELEGATION.md`) must not shadow a
+    // CLAUDE.md named override for a DIFFERENT section (here `WORKFLOW`):
+    // that override has nothing to do with the file that forced this branch,
+    // so it must still land.
     let tmp = TempDir::new().unwrap();
     write_claude_md(tmp.path(), &block(SectionId::Workflow, "NAMED_WORKFLOW"));
     write_trusty_file(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
 
     let (prompt, source) = resolve(tmp.path());
     assert_eq!(source, PromptSource::Legacy);
-    assert!(!prompt.contains("NAMED_WORKFLOW"));
-    assert!(prompt.contains("# PM Workflow Configuration"));
+    assert!(
+        prompt.contains("NAMED_WORKFLOW"),
+        "an unrelated legacy file must not drop this override: {prompt}"
+    );
+    assert!(
+        !prompt.contains("# PM Workflow Configuration"),
+        "the bundled workflow must be replaced by the named override"
+    );
+    assert!(
+        prompt.contains("X"),
+        "the unrelated legacy file still applies to ITS OWN section"
+    );
     assert!(prompt.contains("# BASE_PM Framework Floor"));
     assert_eq!(
         scan_project(tmp.path()).overrides.len(),
         1,
-        "and it is reported"
+        "the named override was scanned"
+    );
+}
+
+#[test]
+fn a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported() {
+    // The flip side of #4399: a legacy file for the SAME section a CLAUDE.md
+    // marker names is a genuine, deliberate collision — the legacy file (the
+    // more specific, project-authored mechanism for that exact section) still
+    // wins, unchanged from before. The named override is correctly declined,
+    // and that decline is still reported — never silently.
+    let tmp = TempDir::new().unwrap();
+    write_claude_md(tmp.path(), &block(SectionId::Workflow, "NAMED_WORKFLOW"));
+    write_trusty_file(
+        tmp.path(),
+        FILE_WORKFLOW,
+        "# Legacy Workflow\n\nLEGACY_WORKFLOW\n",
+    );
+
+    let (prompt, source) = resolve(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(
+        prompt.contains("LEGACY_WORKFLOW"),
+        "the same-section legacy file wins"
+    );
+    assert!(
+        !prompt.contains("NAMED_WORKFLOW"),
+        "the named override cannot also apply once its own section has a legacy file"
+    );
+    // Not just "one override was scanned" — the SPECIFIC section that lost to
+    // the legacy file, so a miscounted or wrong-section regression cannot pass
+    // this test by accident. `warn_unapplied` is only ever handed the entries
+    // `resolve_pm_prompt_with_roster` still considers unapplied, and this is
+    // that entry: same section (`Workflow`), same host (`CLAUDE.md`).
+    let scanned = scan_project(tmp.path());
+    assert_eq!(scanned.overrides.len(), 1, "the named override was scanned");
+    assert_eq!(
+        scanned.overrides[0].section,
+        SectionId::Workflow,
+        "the reported override is the WORKFLOW one the legacy file shadowed"
+    );
+    assert_eq!(
+        scanned.overrides[0].host,
+        tmp.path().join("CLAUDE.md"),
+        "the reported override was authored in CLAUDE.md, not a legacy file"
+    );
+}
+
+#[test]
+fn an_unrelated_legacy_file_does_not_shadow_a_named_memory_override() {
+    // #4399: same guarantee for MEMORY as for WORKFLOW.
+    let tmp = TempDir::new().unwrap();
+    write_claude_md(
+        tmp.path(),
+        &block(SectionId::Memory, "Recall from the `team` palace first."),
+    );
+    write_trusty_file(
+        tmp.path(),
+        FILE_WORKFLOW,
+        "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
+    );
+
+    let (prompt, source) = resolve(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(
+        prompt.contains("Recall from the `team` palace first."),
+        "an unrelated WORKFLOW.md must not drop the named MEMORY override: {prompt}"
+    );
+    assert!(prompt.contains("## Memory Behavior (project override)"));
+}
+
+#[test]
+fn an_unrelated_legacy_file_does_not_shadow_a_named_delegation_override() {
+    // #4399: same guarantee for AGENT-DELEGATION, including the roster
+    // survival rule (#4196) — the named override replaces the bundled
+    // doctrine, but the LIVE roster (host-computed, not authored) still
+    // follows, exactly as it does on the packaged path.
+    let tmp = TempDir::new().unwrap();
+    write_claude_md(
+        tmp.path(),
+        &block(SectionId::AgentDelegation, "# Custom Routing\n\nROUTE_ALL"),
+    );
+    write_trusty_file(
+        tmp.path(),
+        FILE_WORKFLOW,
+        "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
+    );
+
+    let (prompt, source) = resolve(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(
+        prompt.contains("ROUTE_ALL"),
+        "the named override lands: {prompt}"
+    );
+    assert!(
+        !prompt.contains("## Make / Mise Command Routing"),
+        "the bundled doctrine is replaced"
+    );
+    assert!(
+        prompt.contains("## Delegation Authority") && prompt.contains("### ticketing"),
+        "the LIVE roster must still be emitted: {prompt}"
+    );
+    assert!(
+        prompt.contains("TWO_PHASE_ONLY"),
+        "the unrelated legacy file still applies to ITS OWN section"
+    );
+}
+
+#[test]
+fn identity_core_and_search_stay_reported_unapplied_on_the_legacy_path() {
+    // Unlike WORKFLOW/MEMORY/AGENT-DELEGATION, these sections have no
+    // independent slot in the string-assembled legacy assembly — they live
+    // inside the single opaque `pm_instructions()` blob. A legacy file
+    // forcing that assembly genuinely cannot honour them, and that must stay
+    // loud (`warn_unapplied`), never silently dropped without a trace.
+    let tmp = TempDir::new().unwrap();
+    write_claude_md(tmp.path(), &block(SectionId::Core, "NAMED_CORE"));
+    write_trusty_file(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
+
+    let (prompt, source) = resolve(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(!prompt.contains("NAMED_CORE"));
+    // Not just "one override was scanned" — the SPECIFIC section that has no
+    // slot on this path, so a miscounted or wrong-section regression cannot
+    // pass this test by accident.
+    let scanned = scan_project(tmp.path());
+    assert_eq!(
+        scanned.overrides.len(),
+        1,
+        "and it is still reported, never silently"
+    );
+    assert_eq!(
+        scanned.overrides[0].section,
+        SectionId::Core,
+        "the reported override is the CORE one this legacy path cannot honour"
     );
 }
 

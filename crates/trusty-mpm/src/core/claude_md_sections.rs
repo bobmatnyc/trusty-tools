@@ -501,8 +501,21 @@ pub fn strip_marker_blocks(text: &str) -> String {
 /// Quietly is the part that is unacceptable — that is #381 again. The removal of
 /// the legacy files is a later step of #4183; until then this says so, loudly,
 /// once per override.
+///
+/// #4399: the legacy string assembly is NOT entirely sectionless — `WORKFLOW`,
+/// `MEMORY` and `AGENT-DELEGATION` are independently addressable there too, so
+/// the caller ([`crate::core::instruction_overrides::resolve_pm_prompt_with_roster`])
+/// applies a named override for any of those three sections that has no
+/// same-section legacy file shadowing it, and passes THIS function only the
+/// overrides that genuinely could not land — a same-section legacy-file
+/// collision, or `IDENTITY`/`CORE`/`SEARCH`, which have no slot at all on this
+/// path. This function itself is unchanged: it still warns, unconditionally,
+/// about every override in the slice it is given.
+///
 /// What: one `warn!` per accepted override, naming the file and the section.
-/// Test: `named_sections_are_reported_unapplied_on_the_legacy_path`.
+/// Test: `an_unrelated_legacy_file_does_not_shadow_a_named_section_override`,
+/// `a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported`,
+/// `identity_core_and_search_stay_reported_unapplied_on_the_legacy_path`.
 pub fn warn_unapplied(scanned: &ProjectOverrides) {
     for applied in &scanned.overrides {
         tracing::warn!(
