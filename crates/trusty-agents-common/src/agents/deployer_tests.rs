@@ -8,8 +8,9 @@
 //! file, the #4408 corrupted-bundled-file repair and its user-owned guard,
 //! atomic writes, corrupt-manifest detection, the
 //! HR-1 enrichment deploy path, the HR-2 filtered-select predicate, the
-//! DOC-42 `declared_skills` population, and per-agent compose-failure
-//! isolation.
+//! DOC-42 `declared_skills` population, per-agent compose-failure isolation,
+//! and (#4409) `retract_framework_agents` removing only the framework-owned
+//! tier from a directory that is no longer a deploy destination.
 //! Test: this file IS the test module for `deployer`; run with
 //! `cargo test -p trusty-agents-common -- agents::deployer`.
 
@@ -594,4 +595,147 @@ fn deploy_content_file_is_atomic() {
             "stale .tmp file found after deploy: {name_str}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Retraction (#4409): the per-workspace tier stops being a deploy destination,
+// so the framework-owned copies already sitting there must be removed — and
+// nothing else may be.
+// ---------------------------------------------------------------------------
+
+/// Deploy `write_sources` into `tgt`, then downgrade one entry to a user-owned
+/// origin so retraction has both ownership tiers to discriminate between.
+fn deploy_then_mark_user_owned(src: &Path, tgt: &Path, filename: &str) {
+    deploy_agents(src, tgt).unwrap();
+    let mut manifest = AgentManifest::load(tgt);
+    manifest.managed.get_mut(filename).unwrap().origin = Origin::User;
+    manifest.save(tgt).unwrap();
+}
+
+#[test]
+fn retract_removes_framework_owned_only() {
+    // The bundled (Overwrite-tier) copy goes; the user-owned (seed-once)
+    // entry stays byte-identical, and the manifest keeps claiming it.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+    deploy_then_mark_user_owned(src.path(), tgt.path(), "base-agent.md");
+    let user_owned_before = fs::read_to_string(tgt.path().join("base-agent.md")).unwrap();
+
+    let result = retract_framework_agents(tgt.path()).unwrap();
+
+    assert_eq!(result.removed, vec!["engineer.md".to_string()]);
+    assert_eq!(result.preserved, vec!["base-agent.md".to_string()]);
+    assert!(
+        !tgt.path().join("engineer.md").exists(),
+        "the framework-owned copy must be gone"
+    );
+    assert_eq!(
+        fs::read_to_string(tgt.path().join("base-agent.md")).unwrap(),
+        user_owned_before,
+        "a user-owned entry must survive byte-identical"
+    );
+
+    let manifest = AgentManifest::load(tgt.path());
+    assert!(!manifest.is_managed("engineer.md"));
+    assert!(manifest.is_managed("base-agent.md"));
+}
+
+#[test]
+fn retract_preserves_untracked_hand_placed_file() {
+    // A file the operator dropped in by hand is absent from the manifest and
+    // must be invisible to retraction.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+    deploy_agents(src.path(), tgt.path()).unwrap();
+
+    let hand_placed = tgt.path().join("my-own-agent.md");
+    let content = "---\nname: my-own-agent\ndescription: mine\n---\n\nMine.\n";
+    fs::write(&hand_placed, content).unwrap();
+
+    let result = retract_framework_agents(tgt.path()).unwrap();
+
+    assert!(!result.removed.contains(&"my-own-agent.md".to_string()));
+    assert!(!result.preserved.contains(&"my-own-agent.md".to_string()));
+    assert_eq!(fs::read_to_string(&hand_placed).unwrap(), content);
+}
+
+#[test]
+fn retract_removes_drifted_framework_file() {
+    // Checksum drift on a framework-owned file is corruption, not ownership
+    // (#4408's ruling). Retraction must not freeze the #4408 stub in place —
+    // that is precisely the shadowing copy #4409 exists to clear.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+    deploy_agents(src.path(), tgt.path()).unwrap();
+    fs::write(tgt.path().join("engineer.md"), CORRUPT_STUB).unwrap();
+
+    let result = retract_framework_agents(tgt.path()).unwrap();
+
+    assert!(result.removed.contains(&"engineer.md".to_string()));
+    assert!(!tgt.path().join("engineer.md").exists());
+}
+
+#[test]
+fn retract_clears_manifest_and_dir_when_nothing_remains() {
+    // A workspace whose agents were ALL framework-owned returns to pristine:
+    // no ledger left behind, no empty directory.
+    let src = TempDir::new().unwrap();
+    let base = TempDir::new().unwrap();
+    let tgt = base.path().join("agents");
+    write_sources(src.path());
+    deploy_agents(src.path(), &tgt).unwrap();
+
+    let result = retract_framework_agents(&tgt).unwrap();
+
+    assert_eq!(result.removed.len(), 2);
+    assert!(!tgt.exists(), "an emptied agents dir must be removed");
+}
+
+#[test]
+fn retract_is_idempotent() {
+    // The flip runs retraction on every session prepare; the second run must
+    // be a clean no-op rather than an error.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+    deploy_agents(src.path(), tgt.path()).unwrap();
+
+    let first = retract_framework_agents(tgt.path()).unwrap();
+    assert_eq!(first.removed.len(), 2);
+
+    let second = retract_framework_agents(tgt.path()).unwrap();
+    assert!(second.removed.is_empty());
+    assert!(second.preserved.is_empty());
+}
+
+#[test]
+fn retract_missing_dir_is_a_noop() {
+    // A workspace that never received a deploy has nothing to retract.
+    let tmp = TempDir::new().unwrap();
+    let result = retract_framework_agents(&tmp.path().join("never-deployed")).unwrap();
+    assert_eq!(result, RetractResult::default());
+}
+
+#[test]
+fn retract_refuses_on_corrupt_manifest() {
+    // Deleting files on the strength of an unreadable ownership ledger is the
+    // exact failure mode the manifest exists to prevent.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+    deploy_agents(src.path(), tgt.path()).unwrap();
+    fs::write(tgt.path().join(MANIFEST_FILE), b"not valid json{{{").unwrap();
+
+    let err = retract_framework_agents(tgt.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("corrupt"),
+        "error must name the corruption, got: {err}"
+    );
+    assert!(
+        tgt.path().join("engineer.md").exists(),
+        "no file may be removed when the ledger is unreadable"
+    );
 }

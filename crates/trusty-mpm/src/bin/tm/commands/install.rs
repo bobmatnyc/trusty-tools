@@ -74,13 +74,17 @@ pub(crate) async fn install(
         Err(e) => eprintln!("warning: failed to assemble system prompt: {e:#}"),
     }
 
+    // #4409: bundled agents deploy ONLY into the tm-managed config-dir tier.
+    // `tm install` previously wrote them into the operator's generic
+    // `~/.claude/agents/`, contaminating a Claude Code install that has nothing
+    // to do with trusty-mpm — the highest-severity breach on that issue.
     println!(
         "Composing agents into {}",
-        paths.claude_agents_dir().display()
+        paths.agent_deploy_dir().display()
     );
     let deploy = trusty_mpm::core::agent_deployer::deploy_agents(
         &paths.agent_source_dir(),
-        &paths.claude_agents_dir(),
+        &paths.agent_deploy_dir(),
     )?;
     for line in deploy_report_lines(&deploy, &paths.agent_source_dir()) {
         println!("  {line}");
@@ -98,11 +102,11 @@ pub(crate) async fn install(
                 .as_ref()
                 .map(|n| n.join(", "))
                 .unwrap_or_else(|| "all".to_string()),
-            paths.claude_agents_dir().display()
+            paths.agent_deploy_dir().display()
         );
         let reset = trusty_mpm::core::agent_reset::reset_agents(
             &paths.agent_source_dir(),
-            &paths.claude_agents_dir(),
+            &paths.agent_deploy_dir(),
             filter.as_deref(),
         )?;
         for line in reset_report_lines(&reset) {

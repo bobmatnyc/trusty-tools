@@ -192,7 +192,11 @@ pub fn validate_workspace(fw: &FrameworkPaths) -> ValidationReport {
 /// Probe the deployed agent roster against the EXPECTED per-project set
 /// (issue #2171 — see [`expected_set::expected_agent_stems`]).
 fn validate_agents(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
-    let target = fw.claude_agents_dir();
+    // #4409: the deployed agent roster lives in the tm-managed config dir, not
+    // in the workspace's `.claude/agents/`. Probing the workspace tier here
+    // after the flip would report every expected agent missing and drive the
+    // spawn/resume gate into a permanent repair loop.
+    let target = fw.agent_deploy_dir();
     let manifest = match AgentManifest::load_checked(&target) {
         ManifestLoad::Corrupt(detail) => {
             gaps.push(DeploymentGap::AgentManifestCorrupt(detail));

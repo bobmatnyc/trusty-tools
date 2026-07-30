@@ -7,6 +7,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- bundled agents deploy to the tm-managed user tier, never per-workspace and never to `~/.claude` (closes [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409))
+  - `FrameworkPaths::agent_deploy_dir()` is the single destination for every
+    bundled-agent deploy, validate, staleness, reset, and doctor call site:
+    `$CLAUDE_CONFIG_DIR/agents` (`~/.trusty-tools/trusty-mpm/claude-config/agents`).
+    Unlike `claude_agents_dir()` it is never rewritten project-local by
+    `for_managed_project`/`for_managed_workspace`.
+  - `tm install` no longer writes composed agents into the operator's generic
+    `~/.claude/agents/` — the highest-severity breach on the issue, since that
+    directory belongs to a Claude Code install with nothing to do with
+    trusty-mpm.
+  - Session launch, `tm sessions sync-assets`, and `tm catalog apply` no longer
+    deploy bundled agents into a workspace's `.claude/agents/`. That directory
+    is now reserved for hand-placed (and future project-custom) agents, which
+    are still never touched.
+  - Session launch and sync-assets additionally RETRACT the bundled agents an
+    older binary deployed into a workspace. The project tier outranks the
+    config-dir tier in agent resolution, so a stale copy left behind would
+    shadow the canonical roster permanently and would no longer be refreshed by
+    any deploy — the #4408 shadowing incident made permanent. Retraction removes
+    only manifest-tracked, framework-owned files; hand-placed and user-owned
+    files survive byte-identical, and a corrupt manifest aborts the retraction
+    rather than guessing.
+  - `tm doctor`'s `agents` and `agent_skills` probes and the deployment-
+    completeness gate follow the roster to the new tier. Probing the workspace
+    tier after the flip would have reported every healthy install as broken and
+    driven the spawn/resume gate into a permanent repair loop.
+  - Known consequence: the agent deploy tier is machine-global, so a
+    per-project `[agents] exclude` no longer removes an agent from a session's
+    view — it only refrains from writing it, and a sibling project that selects
+    the agent still puts it there. Per-project agent SELECTION at a shared tier
+    is not solved by this change.
+
 ### Added
 
 - `tm` CLI accepts unambiguous abbreviated subcommands, e.g. `tm doc` for `tm doctor` ([#4398](https://github.com/bobmatnyc/trusty-tools/issues/4398))

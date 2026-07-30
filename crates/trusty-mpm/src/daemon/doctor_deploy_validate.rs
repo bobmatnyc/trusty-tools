@@ -68,7 +68,7 @@ mod tests {
         let mut paths = FrameworkPaths::under(tmp.path());
         paths.trusty_mpm_root = None;
 
-        let agents_dir = paths.claude_agents_dir();
+        let agents_dir = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents_dir).unwrap();
         crate::core::agent_manifest::AgentManifest::default()
             .save(&agents_dir)

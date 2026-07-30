@@ -1749,7 +1749,7 @@ fn prepare_session_default_deploys_all_seeded_agents() {
             .deployed
             .contains(&"rust-engineer.md".to_string())
     );
-    assert!(fw.claude_agents_dir().join("rust-engineer.md").exists());
+    assert!(fw.agent_deploy_dir().join("rust-engineer.md").exists());
 }
 
 #[test]
@@ -1792,7 +1792,7 @@ fn prepare_session_manifest_filters_agent_set() {
             .contains(&"base-engineer.md".to_string()),
         "excluded-by-omission agent must NOT deploy"
     );
-    assert!(!fw.claude_agents_dir().join("base-engineer.md").exists());
+    assert!(!fw.agent_deploy_dir().join("base-engineer.md").exists());
 }
 
 #[test]

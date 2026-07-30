@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use super::settings::deploy_output_style;
-use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
+use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
 use crate::core::agent_skill_codeploy::co_deploy_skill_set;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
@@ -88,7 +88,9 @@ pub struct SyncAssetsReport {
 /// What: resolves the harness manifest + [`crate::core::manifest::HarnessPlan`]
 /// for `project_dir` exactly as [`super::prepare_session_inner`] does, then:
 /// (1) redeploys agents via [`deploy_agents_filtered`] against
-/// `fw.claude_agents_dir()`; (2) folds the redeployed agents' declared `skills:`
+/// `fw.agent_deploy_dir()` — the tm-managed config-dir tier, issue #4409 — and
+/// retracts any bundled copy an older binary left in the workspace's own
+/// `.claude/agents/`; (2) folds the redeployed agents' declared `skills:`
 /// into the skill `select` predicate (DOC-42 co-deploy) and redeploys the
 /// 3-tier skill set via [`deploy_all_skill_tiers`]; (3) best-effort refreshes
 /// the PROJECT-tier output styles via [`deploy_output_style`] (issue #2125 item
@@ -101,7 +103,8 @@ pub struct SyncAssetsReport {
 /// Test: `sync_assets_redeploys_new_agent`, `sync_assets_refreshes_stale_skill`,
 /// `sync_assets_refreshes_project_output_style`,
 /// `sync_assets_never_touches_hand_placed_agent`,
-/// `sync_assets_repairs_drifted_bundled_agent`.
+/// `sync_assets_repairs_drifted_bundled_agent`,
+/// `sync_assets_retracts_workspace_bundled_agents`.
 pub fn sync_session_assets(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -112,11 +115,23 @@ pub fn sync_session_assets(
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
 
+    // #4409: agents refresh in the tm-managed config-dir tier, never
+    // per-workspace, and any bundled copy an older binary left in this
+    // workspace's `.claude/agents/` is retracted so it stops shadowing the
+    // canonical roster. Retraction is non-fatal: a workspace that cannot be
+    // cleaned must not block the asset refresh itself.
     let deploy: DeployResult =
-        deploy_agents_filtered(&plan.agent_source, &fw.claude_agents_dir(), |name| {
+        deploy_agents_filtered(&plan.agent_source, &fw.agent_deploy_dir(), |name| {
             plan.agent_selected(name)
         })
         .map_err(|e| SyncAssetsError::AgentDeploy(e.to_string()))?;
+
+    if let Err(err) = retract_framework_agents(&fw.claude_agents_dir()) {
+        tracing::warn!(
+            project_dir = %project_dir.display(),
+            "workspace bundled-agent retraction failed during sync-assets: {err}"
+        );
+    }
 
     let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
     let skill_deploy: DeployStats = deploy_all_skill_tiers(
@@ -167,13 +182,13 @@ mod tests {
 
         let first = sync_session_assets(&ws_fw, &project_dir).unwrap();
         assert_eq!(first.agents_deployed, vec!["rust-engineer.md".to_string()]);
-        assert!(!ws_fw.claude_agents_dir().join("qa.md").exists());
+        assert!(!ws_fw.agent_deploy_dir().join("qa.md").exists());
 
         // Catalog gains a new agent mid-session.
         std::fs::write(bundled.join("qa.md"), "---\nname: qa\n---\nv1").unwrap();
         let second = sync_session_assets(&ws_fw, &project_dir).unwrap();
         assert!(second.agents_deployed.contains(&"qa.md".to_string()));
-        assert!(ws_fw.claude_agents_dir().join("qa.md").exists());
+        assert!(ws_fw.agent_deploy_dir().join("qa.md").exists());
     }
 
     #[test]
@@ -251,8 +266,8 @@ mod tests {
         ws_fw.claude_skills = project_dir.join(".claude").join("skills");
 
         // The operator's own file lands first — never deployed by trusty-mpm.
-        std::fs::create_dir_all(ws_fw.claude_agents_dir()).unwrap();
-        let hand_placed = ws_fw.claude_agents_dir().join("rust-engineer.md");
+        std::fs::create_dir_all(ws_fw.agent_deploy_dir()).unwrap();
+        let hand_placed = ws_fw.agent_deploy_dir().join("rust-engineer.md");
         let content = "---\nname: rust-engineer\n---\noperator's own agent";
         std::fs::write(&hand_placed, content).unwrap();
 
@@ -291,7 +306,7 @@ mod tests {
         ws_fw.claude_skills = project_dir.join(".claude").join("skills");
 
         sync_session_assets(&ws_fw, &project_dir).unwrap();
-        let deployed = ws_fw.claude_agents_dir().join("rust-engineer.md");
+        let deployed = ws_fw.agent_deploy_dir().join("rust-engineer.md");
         std::fs::write(&deployed, "---\nname: rust-engineer\n---\n\nv1\n").unwrap();
 
         std::fs::write(
@@ -314,6 +329,57 @@ mod tests {
         assert!(
             std::fs::read_to_string(&deployed).unwrap().contains("v2"),
             "the current bundled composition must be restored"
+        );
+    }
+
+    #[test]
+    fn sync_assets_retracts_workspace_bundled_agents() {
+        // Issue #4409: a workspace provisioned by an OLDER binary carries a
+        // full bundled roster in its own `.claude/agents/`, which outranks the
+        // config-dir tier. Syncing must clear those framework-owned copies —
+        // and must leave a hand-placed agent in the same directory alone.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fw = FrameworkPaths::under(tmp.path().join("home"));
+        fw.trusty_mpm_root = None;
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(
+            bundled.join("rust-engineer.md"),
+            "---\nname: rust-engineer\n---\nv1",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut ws_fw = fw.clone();
+        ws_fw.claude_agents = project_dir.join(".claude").join("agents");
+        ws_fw.claude_skills = project_dir.join(".claude").join("skills");
+
+        // Simulate the legacy per-workspace deploy an older binary performed.
+        let legacy = ws_fw.claude_agents_dir();
+        deploy_agents_filtered(&bundled, &legacy, |_| true).unwrap();
+        assert!(legacy.join("rust-engineer.md").exists());
+
+        // …plus an agent the operator dropped in by hand, which trusty-mpm
+        // never deployed and must never remove.
+        let hand_placed = legacy.join("my-own-agent.md");
+        let mine = "---\nname: my-own-agent\ndescription: mine\n---\n\nMine.\n";
+        std::fs::write(&hand_placed, mine).unwrap();
+
+        sync_session_assets(&ws_fw, &project_dir).unwrap();
+
+        assert!(
+            !legacy.join("rust-engineer.md").exists(),
+            "the legacy per-workspace bundled copy must be retracted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&hand_placed).unwrap(),
+            mine,
+            "a hand-placed agent must survive retraction byte-identical"
+        );
+        assert!(
+            ws_fw.agent_deploy_dir().join("rust-engineer.md").exists(),
+            "the canonical config-dir tier must carry the roster instead"
         );
     }
 }

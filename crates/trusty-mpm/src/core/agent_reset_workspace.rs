@@ -1,6 +1,16 @@
 //! Sweep active session/project workspaces into `tm install --reset-agents`
 //! (issue #2508).
 //!
+//! STATUS AFTER #4409: bundled agents no longer deploy per-workspace, and
+//! `prepare_session`/`sync-assets` RETRACT the framework-owned copies an older
+//! binary left behind, so a swept workspace normally has an empty (or absent)
+//! agent manifest and this sweep is a no-op. It is retained deliberately: a
+//! workspace that has not yet been re-prepared under the new binary still
+//! carries the legacy roster, and this is the operator-driven path that
+//! reconciles it without waiting for a session launch. It is also still the
+//! only mechanism that would refresh a project-tier agent should project-custom
+//! deployment land later.
+//!
 //! Why: [`super::agent_reset::reset_agents`] only ever targeted the USER-LEVEL
 //! `~/.claude/agents/` directory `tm install` writes to. PROJECT-LEVEL
 //! `.claude/agents/` directories — deployed by [`super::session_launch`] into

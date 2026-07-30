@@ -25,12 +25,17 @@
 //! re-deployed whenever its on-disk checksum drifts — a mismatch there means
 //! corruption, not user ownership — while a user-owned entry (the `SeedOnce`
 //! tier) and any untracked file keep the preserve-on-mismatch behavior.
+//! [`retract_framework_agents`] is the inverse operation (#4409): it deletes
+//! exactly the framework-owned entries this deployer wrote into a directory
+//! that is no longer a deploy destination, using the same ownership predicate,
+//! and never touches an untracked or user-owned file.
 //! Test: `cargo test -p trusty-agents-common agents::deployer` covers a new
 //! deploy, a preserved user-owned file, an unchanged file, atomic writes,
 //! corrupt manifest detection, (#3556) a stale-broken-copy refresh plus a
-//! strict-YAML-invalid composition being isolated and skipped, and (#4408) a
+//! strict-YAML-invalid composition being isolated and skipped, (#4408) a
 //! corrupted bundled file being re-deployed while a modified user-owned entry
-//! survives byte-identical.
+//! survives byte-identical, and (#4409) retraction removing only the
+//! framework-owned tier.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,7 +43,8 @@ use std::path::Path;
 use crate::agents::builder::{AgentBuildError, compose_agent, source_chain};
 use crate::agents::frontmatter::validate_frontmatter;
 use crate::agents::manifest::{
-    AgentManifest, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write, checksum,
+    AgentManifest, MANIFEST_FILE, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write,
+    checksum,
 };
 use crate::agents::metadata::agent_metadata_from_str;
 
@@ -374,6 +380,130 @@ pub fn deploy_agents_filtered(
         other => AgentBuildError::FrontmatterParse(other.to_string()),
     })?;
 
+    Ok(result)
+}
+
+/// Summary of one [`retract_framework_agents`] run.
+///
+/// Why: the caller reports what a workspace retraction actually removed, and
+/// tests need to assert that user-owned entries and untracked files survived.
+/// What: filenames removed (framework-owned, manifest-tracked) and filenames
+/// deliberately preserved (manifest-tracked but user-owned — the seed-once
+/// tier). Untracked files never appear in either list: they are invisible to
+/// this function by construction, which is exactly the guarantee.
+/// Test: `retract_removes_framework_owned_only`,
+/// `retract_preserves_untracked_hand_placed_file`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetractResult {
+    /// Framework-owned filenames deleted from `target_dir` this run.
+    pub removed: Vec<String>,
+    /// Manifest-tracked but user-owned filenames left in place.
+    pub preserved: Vec<String>,
+}
+
+/// Remove the FRAMEWORK-owned agents this deployer previously wrote into
+/// `target_dir`, leaving everything else byte-identical (issue #4409).
+///
+/// Why: bundled agents moved from per-workspace `.claude/agents/` to the
+/// tm-managed user tier. Stopping the writes is not enough — a workspace
+/// provisioned by an older binary still holds a full copy of the bundled
+/// roster, and the project tier OUTRANKS the user tier in Claude Code's agent
+/// resolution. Left in place those copies would shadow the new canonical tier
+/// forever and would no longer be refreshed by any deploy, which is strictly
+/// worse than the pre-#4409 behavior (it is #4408's shadowing incident made
+/// permanent). Retraction is the other half of the flip, not cleanup polish.
+/// What: reads the ownership manifest in `target_dir` and deletes exactly the
+/// entries whose [`Origin::is_framework_owned`] is `true` — the same
+/// `Overwrite`-tier predicate the deployer uses to decide a file is tm's to
+/// rewrite (#4408) — then saves the pruned manifest. Checksum is deliberately
+/// NOT consulted: a framework-owned file that drifted is corruption, not user
+/// ownership, and corrupt content can never checksum-match again. A file
+/// absent from the manifest is NEVER touched (hand-placed agents), and a
+/// tracked entry with a user-owned origin (the seed-once tier) is kept and
+/// reported in [`RetractResult::preserved`]. A missing `target_dir` or missing
+/// manifest is an empty no-op. A CORRUPT manifest is an error and removes
+/// nothing — deleting files on the strength of an unreadable ledger is exactly
+/// the failure mode the manifest exists to prevent. When no managed entries
+/// remain, the manifest file itself is removed (and `target_dir` too, if it is
+/// then empty) so a retracted workspace returns to pristine rather than
+/// carrying an empty ledger forever.
+/// Test: `retract_removes_framework_owned_only`,
+/// `retract_preserves_untracked_hand_placed_file`,
+/// `retract_is_idempotent`, `retract_missing_dir_is_a_noop`,
+/// `retract_refuses_on_corrupt_manifest`,
+/// `retract_removes_drifted_framework_file`.
+pub fn retract_framework_agents(target_dir: &Path) -> Result<RetractResult, AgentBuildError> {
+    let mut result = RetractResult::default();
+    if !target_dir.is_dir() {
+        return Ok(result);
+    }
+
+    let mut manifest = match AgentManifest::load_checked(target_dir) {
+        ManifestLoad::Ok(m) => m,
+        ManifestLoad::Corrupt(detail) => {
+            return Err(AgentBuildError::FrontmatterParse(format!(
+                "agent manifest is corrupt; refusing to retract any file on the strength \
+                 of an unreadable ownership ledger. Run `tm repair deploy` to recover. \
+                 Detail: {detail}"
+            )));
+        }
+    };
+
+    // Deterministic order so logs and tests are stable.
+    let mut tracked: Vec<String> = manifest.managed.keys().cloned().collect();
+    tracked.sort_unstable();
+
+    for filename in tracked {
+        let framework_owned = manifest
+            .managed
+            .get(&filename)
+            .is_some_and(|entry| entry.origin.is_framework_owned());
+        if !framework_owned {
+            result.preserved.push(filename);
+            continue;
+        }
+        match std::fs::remove_file(target_dir.join(&filename)) {
+            Ok(()) => {}
+            // Already gone (operator deleted it, or a previous partial run):
+            // still drop the ledger entry so the manifest stops claiming it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AgentBuildError::Io(e)),
+        }
+        manifest.managed.remove(&filename);
+        result.removed.push(filename);
+    }
+
+    if result.removed.is_empty() {
+        return Ok(result);
+    }
+
+    tracing::info!(
+        removed = result.removed.len(),
+        preserved = result.preserved.len(),
+        dir = %target_dir.display(),
+        "retracted per-workspace bundled agents — the canonical tier is now the \
+         tm-managed CLAUDE_CONFIG_DIR (issue #4409)"
+    );
+
+    if manifest.managed.is_empty() {
+        // Nothing left to track: drop the ledger, and the directory too when
+        // the retraction emptied it, so the workspace looks untouched.
+        match std::fs::remove_file(target_dir.join(MANIFEST_FILE)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(AgentBuildError::Io(e)),
+        }
+        if std::fs::read_dir(target_dir)?.next().is_none() {
+            // Best-effort: a concurrent writer racing us here is harmless.
+            let _ = std::fs::remove_dir(target_dir);
+        }
+        return Ok(result);
+    }
+
+    manifest.save(target_dir).map_err(|e| match e {
+        ManifestError::Io(io) => AgentBuildError::Io(io),
+        other => AgentBuildError::FrontmatterParse(other.to_string()),
+    })?;
     Ok(result)
 }
 

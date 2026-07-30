@@ -118,7 +118,9 @@ pub fn apply_catalog<G: GitBackend>(
     };
 
     // 3. Redeploy the manifest-selected agents and skills, refreshing checksums.
-    let agent_target = fw.claude_agents_dir();
+    // #4409: the canonical bundled-agent tier is the tm-managed config dir, so
+    // a catalog apply refreshes THAT, never the workspace's project tier.
+    let agent_target = fw.agent_deploy_dir();
     let deploy = deploy_agents_filtered(&plan.agent_source, &agent_target, |name| {
         plan.agent_selected(name)
     })

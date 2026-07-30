@@ -608,7 +608,8 @@ pub(crate) fn compose_session_instructions(
     // and populate the metadata flags (agent_count, claude_md_created, …).
     let input = PipelineInput {
         framework_instructions_path: fw.framework_instructions_path(),
-        agents_dir: fw.claude_agents_dir(),
+        // #4409: scan the tier bundled agents actually deploy into.
+        agents_dir: fw.agent_deploy_dir(),
         claude_md_path: project_dir.join("CLAUDE.md"),
     };
     let output = build_instructions(&input)?;

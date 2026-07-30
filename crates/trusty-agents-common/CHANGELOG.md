@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `agents::deployer::retract_framework_agents` — the inverse of a deploy, for a directory that is no longer a deploy destination ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). Removes exactly the manifest-tracked, framework-owned (`Origin::Bundled`) files the deployer wrote, prunes their ledger entries, and returns a `RetractResult` naming what was removed and what was preserved. A file absent from the manifest (hand-placed) is never touched, a tracked entry with a user-owned origin is kept, a corrupt manifest is an error that removes nothing, and a retraction that empties the ledger deletes the manifest (and the directory, when empty) so the location returns to pristine. Checksum drift is deliberately not consulted: on a framework-owned file that means corruption, not ownership.
 - `agents::manifest::Origin::is_framework_owned` — names the two install-ownership tiers so the deployer branches on declared ownership rather than on checksum mismatch alone (#4408).
 
 ### Changed

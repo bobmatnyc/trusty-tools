@@ -82,7 +82,7 @@ mod tests_claude_json_concurrency_4072;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
+use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
 use crate::core::agent_skill_codeploy::{co_deploy_skill_set, log_declared_skills};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
@@ -545,16 +545,21 @@ fn prepare_session_inner(
     // best-effort `warn` at the call site.
     let mut roster_errors: Vec<String> = Vec::new();
 
-    // Deploy composed agents — Claude Code reads `~/.claude/agents/` at startup.
-    // The manifest's agent-set selection (include/exclude) restricts WHICH source
-    // agents deploy; the default manifest selects all of them. Announce the
-    // stage BEFORE the step so a slow deploy is visibly "in flight" rather than
-    // only surfacing after the fact (issue #1904); a no-op outside a daemon
-    // `spawn_managed` scope (see `provisioning_stage`).
+    // Deploy composed agents into the tm-managed `CLAUDE_CONFIG_DIR` tier
+    // (`fw.agent_deploy_dir()`), which a managed session's harness reads at
+    // startup and re-scans mid-session. Issue #4409: this used to target the
+    // workspace's own `.claude/agents/`, giving every project a mutable copy of
+    // the bundled roster that outranked — and silently shadowed — the canonical
+    // one; the workspace tier is retracted just below. The manifest's agent-set
+    // selection (include/exclude) still restricts WHICH source agents deploy;
+    // the default manifest selects all of them. Announce the stage BEFORE the
+    // step so a slow deploy is visibly "in flight" rather than only surfacing
+    // after the fact (issue #1904); a no-op outside a daemon `spawn_managed`
+    // scope (see `provisioning_stage`).
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
-    let deploy = match deploy_agents_filtered(&plan.agent_source, &fw.claude_agents_dir(), |name| {
+    let deploy = match deploy_agents_filtered(&plan.agent_source, &fw.agent_deploy_dir(), |name| {
         plan.agent_selected(name)
     }) {
         Ok(result) => result,
@@ -572,6 +577,33 @@ fn prepare_session_inner(
             DeployResult::default()
         }
     };
+
+    // Issue #4409, the other half of the flip: retract the bundled agents an
+    // OLDER binary deployed into this workspace's `.claude/agents/`. The
+    // project tier outranks the config-dir tier in the harness's agent
+    // resolution, so a stale copy left behind would shadow the canonical roster
+    // forever — and nothing refreshes it any more. Only manifest-tracked,
+    // framework-owned files are removed; hand-placed and user-owned files are
+    // untouched. Non-fatal, like every other roster step here.
+    match retract_framework_agents(&fw.claude_agents_dir()) {
+        Ok(retracted) if !retracted.removed.is_empty() => {
+            tracing::info!(
+                project_dir = %project_dir.display(),
+                count = retracted.removed.len(),
+                "retracted per-workspace bundled agents; the roster now lives in the \
+                 tm-managed config dir (issue #4409)"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                project_dir = %project_dir.display(),
+                "workspace bundled-agent retraction failed: {err}. The stale project-tier \
+                 copies may shadow the canonical roster until this is resolved."
+            );
+            roster_errors.push(format!("agent retraction failed: {err}"));
+        }
+    }
 
     // Self-heal the skill *source* directory before deploying from it
     // (#1917): `plan.skill_source` falls back to `fw.skill_source_dir()`,
@@ -665,7 +697,9 @@ fn prepare_session_inner(
     );
     let input = PipelineInput {
         framework_instructions_path: fw.framework_instructions_path(),
-        agents_dir: fw.claude_agents_dir(),
+        // #4409: the roster is scanned from the tier the agents actually
+        // deploy into, not the workspace's project tier.
+        agents_dir: fw.agent_deploy_dir(),
         claude_md_path: project_dir.join("CLAUDE.md"),
     };
     let instructions = build_instructions(&input)?;

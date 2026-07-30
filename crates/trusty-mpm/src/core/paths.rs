@@ -51,10 +51,36 @@ pub struct FrameworkPaths {
     pub instructions: PathBuf,
     /// `~/.trusty-mpm/registry`
     pub registry: PathBuf,
-    /// `~/.claude/agents` — where Claude Code reads composed agent files.
+    /// `~/.claude/agents` — the GENERIC Claude Code user agent directory.
+    ///
+    /// NOT a deploy destination for bundled agents (issue #4409): trusty-mpm
+    /// writes framework-owned agents to [`agent_deploy`](Self::agent_deploy)
+    /// only. This field survives because [`claude_home_dir`](Self::claude_home_dir)
+    /// derives the settings/output-style base from it, and because the
+    /// project-tier `.claude/agents/` it names for a workspace-scoped layout is
+    /// still the directory a workspace RETRACTION must clean and a hand-placed
+    /// agent still lives in.
     pub claude_agents: PathBuf,
     /// `~/.claude/skills` — where Claude Code reads skill files.
     pub claude_skills: PathBuf,
+    /// `~/.trusty-tools/trusty-mpm/claude-config/agents` — the ONE tier
+    /// bundled (framework-owned) agents deploy into (issue #4409).
+    ///
+    /// Why: the day-1 segregation design says tm-owned assets live in the
+    /// tm-managed `CLAUDE_CONFIG_DIR`, never in the operator's generic
+    /// `~/.claude` and never per-workspace. Deploying per-workspace made every
+    /// project's `.claude/agents/` a mutable copy of the bundled roster — the
+    /// shadowing vector behind #4408 — and deploying into `~/.claude/agents`
+    /// contaminated the user's own Claude Code install. Managed sessions run
+    /// with `CLAUDE_CONFIG_DIR` pointed here, and this tier is verified
+    /// discovered by the harness both at session start and mid-session
+    /// (maintainer probe matrix on #4409).
+    /// What: `<base>/.trusty-tools/trusty-mpm/claude-config/agents`, resolved
+    /// from the SAME base every other path in this struct is resolved against,
+    /// so [`under`](Self::under) keeps tests hermetic. Deliberately NOT
+    /// overridden by [`for_managed_project`](Self::for_managed_project) — the
+    /// deploy destination is global on purpose.
+    pub agent_deploy: PathBuf,
     /// The trusty-mpm source checkout root, if one could be located.
     ///
     /// Why: the `agents/` git submodule (`agents/agents/`, `agents/skills/`)
@@ -133,6 +159,11 @@ impl FrameworkPaths {
             registry: root.join("registry"),
             claude_agents: base.join(".claude").join("agents"),
             claude_skills: base.join(".claude").join("skills"),
+            // Issue #4409: bundled agents deploy ONLY into the tm-managed
+            // `CLAUDE_CONFIG_DIR`. Resolved from `base` (not `dirs::home_dir()`)
+            // so `under(tempdir)` stays hermetic.
+            agent_deploy: crate::core::trusty_tools_config::managed_claude_config_dir_at(base)
+                .join("agents"),
             trusty_mpm_root,
             framework,
             root,
@@ -197,10 +228,16 @@ impl FrameworkPaths {
     /// still resolves from the shared framework install — `managed_root`, i.e.
     /// `~/.trusty-mpm` by default or the operator's `--root`/`TRUSTY_MPM_ROOT`
     /// override — exactly as before. Only `claude_agents` and `claude_skills`
-    /// (the DEPLOY destinations, and therefore `claude_home_dir()` too) are
+    /// (the SKILL deploy destination, and therefore `claude_home_dir()` too) are
     /// overridden to `<project_dir>/.claude/{agents,skills}`.
+    /// Issue #4409: [`agent_deploy`](Self::agent_deploy) is deliberately NOT
+    /// overridden here. Bundled agents no longer deploy per-workspace at all —
+    /// they land in the tm-managed `CLAUDE_CONFIG_DIR`, which the harness reads
+    /// for a managed session — so `claude_agents` now names only the project
+    /// tier that holds hand-placed and (future) project-custom agents.
     /// Test: `for_managed_project_targets_project_local_claude_dirs`,
-    /// `for_managed_project_keeps_framework_source_at_managed_root`.
+    /// `for_managed_project_keeps_framework_source_at_managed_root`,
+    /// `agent_deploy_dir_is_not_project_local_for_managed_workspace`.
     pub fn for_managed_project(
         managed_root: impl AsRef<Path>,
         project_dir: impl AsRef<Path>,
@@ -365,6 +402,27 @@ impl FrameworkPaths {
         self.claude_agents.clone()
     }
 
+    /// The ONE directory bundled (framework-owned) agents deploy into
+    /// (issue #4409).
+    ///
+    /// Why: every bundled-agent deploy, validation, staleness, and reset call
+    /// site must agree on a single destination, or the roster silently splits
+    /// across tiers again. Routing them all through this accessor makes the
+    /// segregation invariant — tm never writes framework-owned agents into
+    /// `~/.claude/agents` or a project's `.claude/agents` — mechanically
+    /// checkable instead of a convention.
+    /// What: returns [`agent_deploy`](Self::agent_deploy), i.e.
+    /// `<base>/.trusty-tools/trusty-mpm/claude-config/agents`. Unlike
+    /// [`claude_agents_dir`](Self::claude_agents_dir) this is NEVER rewritten
+    /// to a project-local path by
+    /// [`for_managed_project`](Self::for_managed_project).
+    /// Test: `agent_deploy_dir_is_managed_config_agents`,
+    /// `agent_deploy_dir_is_not_project_local_for_managed_workspace`,
+    /// `agent_deploy_dir_is_never_the_generic_claude_home`.
+    pub fn agent_deploy_dir(&self) -> PathBuf {
+        self.agent_deploy.clone()
+    }
+
     /// Directory Claude Code reads skill files from (`~/.claude/skills`).
     ///
     /// Why: the skill deploy step writes `.md` skill files here so Claude Code
@@ -498,6 +556,52 @@ mod tests {
             PathBuf::from("/base/.trusty-mpm/framework/instructions")
         );
         assert_eq!(paths.registry, PathBuf::from("/base/.trusty-mpm/registry"));
+    }
+
+    // Issue #4409: bundled agents deploy into the tm-managed
+    // `CLAUDE_CONFIG_DIR` tier and nowhere else.
+    #[test]
+    fn agent_deploy_dir_is_managed_config_agents() {
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(
+            paths.agent_deploy_dir(),
+            PathBuf::from("/base/.trusty-tools/trusty-mpm/claude-config/agents"),
+            "bundled agents must deploy into the tm-managed CLAUDE_CONFIG_DIR"
+        );
+    }
+
+    #[test]
+    fn agent_deploy_dir_is_never_the_generic_claude_home() {
+        // The segregation invariant: tm must never write framework-owned
+        // agents into the operator's own Claude Code install.
+        let paths = FrameworkPaths::under("/base");
+        assert_ne!(
+            paths.agent_deploy_dir(),
+            paths.claude_agents_dir(),
+            "the deploy tier must not be `<base>/.claude/agents`"
+        );
+        assert!(
+            !paths.agent_deploy_dir().starts_with("/base/.claude"),
+            "agent_deploy_dir = {}",
+            paths.agent_deploy_dir().display()
+        );
+    }
+
+    #[test]
+    fn agent_deploy_dir_is_not_project_local_for_managed_workspace() {
+        // `for_managed_project` moves the SKILL destination project-local; the
+        // agent destination must stay global (issue #4409's whole point).
+        let paths = FrameworkPaths::for_managed_project("/managed-root", "/some/project/repo");
+        assert!(
+            !paths.agent_deploy_dir().starts_with("/some/project/repo"),
+            "bundled agents must never deploy into a workspace: {}",
+            paths.agent_deploy_dir().display()
+        );
+        assert_eq!(
+            paths.agent_deploy_dir(),
+            FrameworkPaths::from_root("/managed-root").agent_deploy_dir(),
+            "the workspace override must not touch the agent deploy tier"
+        );
     }
 
     #[test]
