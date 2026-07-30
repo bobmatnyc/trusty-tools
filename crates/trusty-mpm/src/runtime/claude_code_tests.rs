@@ -1480,7 +1480,7 @@ fn compose_inplace_args_uses_resume_for_existing_id() {
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("existing-id.jsonl"), "{}").unwrap();
 
-    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("existing-id"));
+    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("existing-id"), None);
     assert!(
         args.windows(2).any(|w| w == ["--resume", "existing-id"]),
         "must select --resume <id> for an id that exists on disk: {args:?}"
@@ -1501,7 +1501,7 @@ fn compose_inplace_args_falls_back_for_missing_id() {
     std::fs::create_dir_all(&cwd).unwrap();
     let config_dir = tmp.path().join("config");
 
-    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("stale-id"));
+    let args = compose_inplace_args(&cwd, Some(&config_dir), Some("stale-id"), None);
     assert!(
         !args.contains(&"--resume".to_owned()),
         "a stale id must not be passed to --resume: {args:?}"
@@ -1534,7 +1534,7 @@ fn compose_inplace_args_uses_continue_when_no_id_but_prior_conv() {
     std::fs::create_dir_all(&project_dir).unwrap();
     std::fs::write(project_dir.join("some-other-session.jsonl"), "{}").unwrap();
 
-    let args = compose_inplace_args(&cwd, None, Some("stale-id"));
+    let args = compose_inplace_args(&cwd, None, Some("stale-id"), None);
     assert!(
         !args.contains(&"--resume".to_owned()),
         "a stale id must not be passed to --resume: {args:?}"
@@ -1542,6 +1542,80 @@ fn compose_inplace_args_uses_continue_when_no_id_but_prior_conv() {
     assert!(
         args.contains(&"--continue".to_owned()),
         "prior conversation history exists: must fall back to --continue: {args:?}"
+    );
+}
+
+#[test]
+fn compose_inplace_args_carries_prompt_file_unquoted() {
+    // #4336: the in-place relaunch execs claude directly — no shell splits
+    // this argv — so the prompt path must be its OWN token and must NOT be
+    // shell-quoted the way `prompt_file_flag` quotes it for the pane-string
+    // paths. A path with a space is the case that would break if the quoting
+    // helper were reused here.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().join("workspace-prompt");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let prompt = tmp.path().join("system prompt.txt");
+    std::fs::write(&prompt, "PM").unwrap();
+
+    let args = compose_inplace_args(&cwd, None, None, Some(&prompt));
+
+    let idx = args
+        .iter()
+        .position(|a| a == "--append-system-prompt-file")
+        .expect("prompt flag must be present");
+    assert_eq!(
+        args[idx + 1],
+        prompt.display().to_string(),
+        "the path must be a single, UNQUOTED argv token: {args:?}"
+    );
+    assert!(
+        !args[idx + 1].contains('\''),
+        "shell quoting must not leak into an execv argv token: {args:?}"
+    );
+    assert!(
+        args.contains(&"--dangerously-skip-permissions".to_owned()),
+        "the isolation flags must still follow the prompt file: {args:?}"
+    );
+}
+
+#[test]
+fn compose_inplace_args_omits_prompt_flag_when_absent() {
+    // A prompt-file write failure is non-fatal: the flag is omitted rather
+    // than passed with an empty path (which claude would fail to open).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let args = compose_inplace_args(tmp.path(), None, None, None);
+    assert!(
+        !args.contains(&"--append-system-prompt-file".to_owned()),
+        "no prompt file → no flag: {args:?}"
+    );
+    assert!(
+        args.contains(&"--setting-sources".to_owned()),
+        "isolation flags are unconditional: {args:?}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn build_inplace_resume_command_carries_prompt_file() {
+    // #4336: the PM persona must reach the in-place relaunch through the same
+    // `build_prompt_file` carrier `spawn`/`spawn_resume` use. Requires a real
+    // claude install (resolve_claude gates the builder); skip otherwise.
+    let _home = HomeGuard::set();
+    if ClaudeCodeAdapter::resolve_claude().is_none() {
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let result = build_inplace_resume_command(tmp.path(), None).expect("build succeeds");
+    let idx = result
+        .args
+        .iter()
+        .position(|a| a == "--append-system-prompt-file")
+        .expect("in-place relaunch must carry the PM system prompt");
+    assert!(
+        std::path::Path::new(&result.args[idx + 1]).is_file(),
+        "the prompt token must name a written file: {:?}",
+        result.args
     );
 }
 

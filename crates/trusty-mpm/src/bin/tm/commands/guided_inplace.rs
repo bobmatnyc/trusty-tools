@@ -490,7 +490,9 @@ pub(crate) enum InPlaceOutcome {
 /// rather than proceeding; (5) execs `claude` in place.
 /// Test: `run_inplace_relaunch_never_reactivates_when_command_build_fails`,
 /// `run_inplace_relaunch_falls_through_on_gutted_worktree`,
-/// `run_inplace_relaunch_serves_live_linked_worktree`. The exec itself is not
+/// `run_inplace_relaunch_serves_live_linked_worktree`. The argv/environment the
+/// final step hands to `exec` is pinned by [`build_inplace_exec_command`]'s own
+/// tests (#4336). The exec CALL itself is still not
 /// unit-tested (it replaces the process image); the gate-2a tests pin the
 /// decision by asserting the daemon mock records ZERO hits, which is only true
 /// when the fall-through happened before any daemon mutation. The FSM invariant
@@ -578,22 +580,49 @@ pub(crate) async fn run_inplace_relaunch(
         return InPlaceOutcome::FallThrough;
     }
 
+    InPlaceOutcome::Result(exec_claude_in_place(build_inplace_exec_command(
+        &resume, &cwd,
+    )))
+}
+
+/// Assemble the [`std::process::Command`] the in-place relaunch execs — the
+/// pure, inspectable half of the exec seam (#4336).
+///
+/// Why: this construction used to be inlined immediately before
+/// [`exec_claude_in_place`], which is unavoidably untestable (it replaces the
+/// process image). That made the LAST step before `exec` — the one that decides
+/// what argv and environment `claude` actually receives — the only launch step
+/// in the codebase with no coverage at all, which is precisely why #4336 could
+/// be reported as "the in-place relaunch execs `claude` with zero args" and not
+/// be refutable from the test suite. Splitting the construction out leaves
+/// `exec` as a one-line untestable tail and puts everything that carries the
+/// isolation flags, the PM persona, and the auth environment under assertion.
+/// What: `Command` for `resume.claude_bin` with `resume.args` (the
+/// `compose_inplace_args` argv — `--append-system-prompt-file`, the isolation
+/// flags, and the resume/continue selection), rooted at `cwd`, with
+/// `ANTHROPIC_API_KEY` scrubbed and `CLAUDE_CONFIG_DIR` /
+/// `CLAUDE_CODE_OAUTH_TOKEN` set when resolved. Issue #2246: the token mirrors
+/// the tmux-pane spawn/resume paths so an in-place relaunch does not silently
+/// drop back into the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop the token
+/// exists to bypass. Pure — builds and returns, never spawns.
+/// Test: `inplace_exec_command_forwards_every_arg_in_order`,
+/// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
+/// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
+pub(crate) fn build_inplace_exec_command(
+    resume: &trusty_mpm::runtime::InPlaceResumeCommand,
+    cwd: &std::path::Path,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(&resume.claude_bin);
     cmd.args(&resume.args)
-        .current_dir(&cwd)
+        .current_dir(cwd)
         .env_remove("ANTHROPIC_API_KEY");
     if let Some(dir) = &resume.config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
-    // Issue #2246: mirror the tmux-pane spawn/resume paths — inject the
-    // resolved CLAUDE_CODE_OAUTH_TOKEN (when available) so an in-place
-    // relaunch does not silently drop back into the CLAUDE_CONFIG_DIR-keyed
-    // Keychain login loop the token exists to bypass.
     if let Some(token) = &resume.oauth_token {
         cmd.env(trusty_mpm::core::oauth_token::OAUTH_TOKEN_ENV_VAR, token);
     }
-
-    InPlaceOutcome::Result(exec_claude_in_place(cmd))
+    cmd
 }
 
 /// Top-level entry point: try the in-place relaunch before any other bare-`tm`

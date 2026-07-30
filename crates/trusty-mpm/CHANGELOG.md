@@ -368,6 +368,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The bare-`tm` in-place relaunch keeps the PM persona
+  ([#4336](https://github.com/bobmatnyc/trusty-tools/issues/4336)).
+  `compose_inplace_args` omitted `--append-system-prompt-file` by design, so the
+  one launch path that `exec`s `claude` directly — instead of sending a command
+  string to a tmux pane — restored the operator into vanilla Claude Code. It now
+  builds the prompt through the same `build_prompt_file` carrier `spawn` and
+  `spawn_resume` use (#2125, #2230), pushing the path as its own argv token
+  rather than through `prompt_file_flag`'s shell quoting, which would embed
+  literal quotes in a filename no shell is present to strip.
+- The argv and environment handed to that `exec` are now under test. The
+  `std::process::Command` construction moved out of `run_inplace_relaunch` into
+  a pure `build_inplace_exec_command`, leaving `exec` as a one-line untestable
+  tail. Previously the last step before process replacement — the step that
+  decides whether `--setting-sources project,local` and
+  `--dangerously-skip-permissions` reach `claude` at all — was the only launch
+  step in the codebase with no coverage, which is why #4336 could be reported
+  and not refuted from the suite. Guarded by
+  `inplace_exec_command_forwards_every_arg_in_order`,
+  `inplace_exec_command_scrubs_api_key_and_sets_auth_env`, and
+  `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
 - A subagent's `SessionStart` hook can no longer overwrite a managed session's
   `claude_session_id` with its OWN Claude session UUID, and a legitimately
   diverged id can no longer stay wrong forever

@@ -668,3 +668,141 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
         "reactivate must NEVER be called when command resolution fails first (#2027)"
     );
 }
+
+// ── #4336: the exec seam's argv/environment ───────────────────────────────
+
+/// Build a synthetic [`trusty_mpm::runtime::InPlaceResumeCommand`] so the
+/// exec-seam assertions below run on every machine.
+///
+/// Why: `build_inplace_resume_command` needs a real `claude` install, so a
+/// test built only on top of it is skipped on CI — exactly the coverage hole
+/// #4336 was reported into. Hand-constructing the struct pins
+/// [`build_inplace_exec_command`]'s own contract (does it forward EVERY arg,
+/// the cwd, and the env?) unconditionally.
+/// What: a fixed binary path plus `args`, with a config dir and oauth token.
+/// Test: used by the `inplace_exec_command_*` cases below.
+fn synthetic_resume(args: &[&str]) -> trusty_mpm::runtime::InPlaceResumeCommand {
+    trusty_mpm::runtime::InPlaceResumeCommand {
+        claude_bin: "/fake/bin/claude".to_owned(),
+        args: args.iter().map(|s| (*s).to_owned()).collect(),
+        config_dir: Some(std::path::PathBuf::from("/fake/config")),
+        oauth_token: Some("sk-ant-oat01-fake".to_owned()),
+    }
+}
+
+#[test]
+fn inplace_exec_command_forwards_every_arg_in_order() {
+    // #4336 core regression: the Command handed to `exec` must carry the
+    // composed argv VERBATIM. An empty (or truncated) `get_args()` here is
+    // precisely the reported "execs claude with zero args" defect.
+    let resume = synthetic_resume(&[
+        "--setting-sources",
+        "project,local",
+        "--dangerously-skip-permissions",
+        "--continue",
+    ]);
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        vec![
+            "--setting-sources",
+            "project,local",
+            "--dangerously-skip-permissions",
+            "--continue"
+        ],
+        "the exec seam must forward the composed argv verbatim and in order"
+    );
+    assert_eq!(
+        cmd.get_program().to_string_lossy(),
+        "/fake/bin/claude",
+        "the resolved claude binary must be the exec target"
+    );
+    assert_eq!(
+        cmd.get_current_dir(),
+        Some(std::path::Path::new("/fake/cwd")),
+        "the relaunch must be rooted at the record's workspace"
+    );
+}
+
+#[test]
+fn inplace_exec_command_scrubs_api_key_and_sets_auth_env() {
+    // The env invariants `env_bin_prefix` encodes for the shell-string paths
+    // must hold identically on the exec path (DOC-34 + #2246).
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+
+    let envs: Vec<(String, Option<String>)> = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+
+    assert!(
+        envs.contains(&("ANTHROPIC_API_KEY".to_owned(), None)),
+        "ANTHROPIC_API_KEY must be REMOVED (None) for the relaunched claude: {envs:?}"
+    );
+    assert!(
+        envs.contains(&(
+            "CLAUDE_CONFIG_DIR".to_owned(),
+            Some("/fake/config".to_owned())
+        )),
+        "the tm-owned CLAUDE_CONFIG_DIR must be injected: {envs:?}"
+    );
+    assert!(
+        envs.iter().any(
+            |(k, v)| k == trusty_mpm::core::oauth_token::OAUTH_TOKEN_ENV_VAR
+                && v.as_deref() == Some("sk-ant-oat01-fake")
+        ),
+        "#2246: the resolved oauth token must be injected: {envs:?}"
+    );
+}
+
+#[serial_test::serial]
+#[test]
+fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
+    // #4336 end-to-end: composed through the REAL builder (not a synthetic
+    // struct), the argv that reaches `exec` must carry both isolation flags
+    // AND the PM system prompt. Before this fix `--append-system-prompt-file`
+    // was omitted by design, so an in-place relaunch restored the operator
+    // into vanilla Claude Code. Requires a real `claude` install; skip
+    // otherwise, matching this file's established convention.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Ok(resume) = trusty_mpm::runtime::build_inplace_resume_command(tmp.path(), None) else {
+        return;
+    };
+    let cmd = build_inplace_exec_command(&resume, tmp.path());
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["--setting-sources", "project,local"]),
+        "--setting-sources project,local must survive to exec (#1269): {args:?}"
+    );
+    assert!(
+        args.iter().any(|a| a == "--dangerously-skip-permissions"),
+        "--dangerously-skip-permissions must survive to exec (#1269): {args:?}"
+    );
+    let prompt_idx = args
+        .iter()
+        .position(|a| a == "--append-system-prompt-file")
+        .expect("in-place relaunch must carry the PM system prompt (#4336)");
+    let prompt_path = args
+        .get(prompt_idx + 1)
+        .expect("--append-system-prompt-file must be followed by a path");
+    assert!(
+        std::path::Path::new(prompt_path).is_file(),
+        "the prompt-file argv token must name a readable file, unquoted: {prompt_path}"
+    );
+}
