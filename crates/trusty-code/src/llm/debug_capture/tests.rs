@@ -27,8 +27,8 @@ use crate::llm::{ChatMessage, FunctionCall, FunctionDefinition, ToolCall, ToolDe
 /// which clippy's `await_holding_lock` correctly flags for a std mutex.
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// A scripted `LlmClientTrait` mock: replays a fixed sequence of
-/// `Result<ChatResponse, LlmError>`, panicking (via `LlmError::MissingConfig`)
+/// A scripted `InferenceAdapter` mock: replays a fixed sequence of
+/// `Result<ChatResponse, InferenceError>`, panicking (via `InferenceError::MissingConfig`)
 /// if called past the end — mirrors `task::mock_llm::EchoLlmClient`'s shape.
 struct ScriptedLlm {
     script: Vec<Result<ChatResponse, ()>>,
@@ -45,16 +45,18 @@ impl ScriptedLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for ScriptedLlm {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for ScriptedLlm {
+    crate::llm::mock_adapter_identity!("mock-scripted");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.script.get(idx) {
             Some(Ok(resp)) => Ok(resp.clone()),
-            Some(Err(())) => Err(LlmError::ApiError {
+            Some(Err(())) => Err(InferenceError::Api {
                 status: 500,
                 body: "scripted failure".into(),
             }),
-            None => Err(LlmError::MissingConfig("script exhausted".into())),
+            None => Err(InferenceError::MissingConfig("script exhausted".into())),
         }
     }
 }
@@ -78,6 +80,7 @@ fn sample_request(user_text: &str) -> ChatRequest {
             cache_control: None,
         })]),
         tool_choice: None,
+        stop: None,
         usage: None,
     }
 }
@@ -125,7 +128,7 @@ fn read_records(path: &std::path::Path) -> Vec<Value> {
 /// (#2264 requirement 1).
 #[test]
 fn wrap_with_debug_capture_returns_inner_unchanged_when_sink_none() {
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![]));
+    let inner: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::new(vec![]));
     let inner_clone = Arc::clone(&inner);
     let wrapped = wrap_with_debug_capture(inner, "pm", None);
     assert!(
@@ -142,7 +145,8 @@ async fn wrap_with_debug_capture_wraps_and_records_when_sink_some() {
     let capture_path = dir.path().join("run.jsonl");
     let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
 
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
+    let inner: Arc<dyn InferenceAdapter> =
+        Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
     let inner_clone = Arc::clone(&inner);
     let wrapped = wrap_with_debug_capture(inner, "pm", Some(&sink));
     assert!(
@@ -167,7 +171,8 @@ async fn record_captures_full_request_messages_and_tool_schema() {
     let dir = tempdir().expect("tempdir");
     let capture_path = dir.path().join("run.jsonl");
     let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
+    let inner: Arc<dyn InferenceAdapter> =
+        Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
     let wrapped = wrap_with_debug_capture(inner, "python-engineer", Some(&sink));
 
     let req = sample_request("write a stub file");
@@ -193,7 +198,8 @@ async fn record_captures_tool_call_arguments_not_just_names() {
     let dir = tempdir().expect("tempdir");
     let capture_path = dir.path().join("run.jsonl");
     let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
+    let inner: Arc<dyn InferenceAdapter> =
+        Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
     let wrapped = wrap_with_debug_capture(inner, "python-engineer", Some(&sink));
 
     wrapped
@@ -218,7 +224,7 @@ async fn record_captures_tool_results_via_next_turns_message_history() {
     let dir = tempdir().expect("tempdir");
     let capture_path = dir.path().join("run.jsonl");
     let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![
+    let inner: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::new(vec![
         Ok(tool_call_response()),
         Ok(tool_call_response()),
     ]));
@@ -255,14 +261,14 @@ async fn record_captures_tool_results_via_next_turns_message_history() {
 }
 
 /// A failed inner `chat()` call is still recorded: `response` is null and
-/// `error` carries the `LlmError`'s display text — debugging a failure needs
+/// `error` carries the `InferenceError`'s display text — debugging a failure needs
 /// to see exactly what request triggered it.
 #[tokio::test]
 async fn record_captures_error_when_inner_call_fails() {
     let dir = tempdir().expect("tempdir");
     let capture_path = dir.path().join("run.jsonl");
     let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![Err(())]));
+    let inner: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::new(vec![Err(())]));
     let wrapped = wrap_with_debug_capture(inner, "pm", Some(&sink));
 
     let result = wrapped.chat(&sample_request("do something")).await;
@@ -286,9 +292,9 @@ async fn shared_sink_gives_monotonic_turn_index_across_roles() {
     let capture_path = dir.path().join("run.jsonl");
     let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
 
-    let pm_inner: Arc<dyn LlmClientTrait> =
+    let pm_inner: Arc<dyn InferenceAdapter> =
         Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
-    let engineer_inner: Arc<dyn LlmClientTrait> =
+    let engineer_inner: Arc<dyn InferenceAdapter> =
         Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
 
     let pm = wrap_with_debug_capture(pm_inner, "pm", Some(&sink));
@@ -373,7 +379,8 @@ async fn from_env_opens_literal_file_path_and_captures() {
         std::env::remove_var(ENV_VAR);
     }
 
-    let inner: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
+    let inner: Arc<dyn InferenceAdapter> =
+        Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
     let wrapped = wrap_with_debug_capture(inner, "pm", Some(&sink));
     wrapped
         .chat(&sample_request("hi"))

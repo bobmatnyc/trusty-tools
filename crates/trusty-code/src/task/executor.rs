@@ -43,7 +43,7 @@ use crate::agent_loop::{
 use crate::agents::AgentConfig;
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::RpcError;
-use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
+use crate::llm::{DebugCaptureSink, InferenceAdapter, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
@@ -139,7 +139,7 @@ pub struct TaskRunParams {
 /// the full run is exercised by `tests/task_e2e.rs`.
 pub fn spawn_task_run(
     registry: Arc<SessionRegistry>,
-    llm: Arc<dyn LlmClientTrait>,
+    llm: Arc<dyn InferenceAdapter>,
     params: TaskRunParams,
 ) -> Result<(), RpcError> {
     let cancel = registry.begin_execution(&params.session_id)?;
@@ -200,7 +200,7 @@ pub fn spawn_task_run(
 /// special-casing — they simply find nothing in the scratch root.
 async fn run_and_record(
     registry: Arc<SessionRegistry>,
-    llm: Arc<dyn LlmClientTrait>,
+    llm: Arc<dyn InferenceAdapter>,
     params: TaskRunParams,
     cancel: Arc<AtomicBool>,
 ) {
@@ -425,7 +425,7 @@ async fn run_and_record(
         )));
     }
 
-    let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
+    let pm_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
         wrap_with_debug_capture(Arc::clone(&llm), "pm", debug_sink.as_ref()),
         "pm",
         Arc::clone(&transcript),
@@ -611,7 +611,7 @@ async fn run_and_record(
 /// travelled together, keeping this function's arity under clippy's
 /// `too_many_arguments` gate now that `work_root` is threaded in.
 fn build_engineer_runner(
-    llm: Arc<dyn LlmClientTrait>,
+    llm: Arc<dyn InferenceAdapter>,
     params: &TaskRunParams,
     work_root: &Path,
     prompt: EngineerPromptContext,
@@ -624,7 +624,7 @@ fn build_engineer_runner(
         skills_catalog,
         skill_resolver,
     } = prompt;
-    let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
+    let engineer_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
         llm,
         ENGINEER_AGENT_NAME,
         transcript,

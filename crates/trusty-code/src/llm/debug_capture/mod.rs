@@ -15,13 +15,13 @@
 //! What: [`DebugCaptureSink`] resolves the env var once per run and owns the
 //! output file + a monotonic turn counter shared across every wrapped
 //! client for that run; [`DebugCaptureLlmClient`] is a transparent
-//! `LlmClientTrait` decorator that appends one JSONL [`DebugCaptureRecord`]
+//! `InferenceAdapter` decorator that appends one JSONL [`DebugCaptureRecord`]
 //! per `chat()` call (request verbatim, response verbatim including
 //! tool-call arguments, or the error, plus usage) before forwarding to the
 //! wrapped inner client; [`wrap_with_debug_capture`] is the single call-site
 //! helper — when no sink is configured it returns `inner` UNCHANGED (no
 //! allocation, no indirection), which is what makes the default (unset)
-//! path zero-overhead. Wrapping happens at the `LlmClientTrait::chat`
+//! path zero-overhead. Wrapping happens at the `InferenceAdapter::chat`
 //! boundary — the same object-safe seam `DispatchingLlmClient` (OpenRouter +
 //! Bedrock) and `RecordingLlmClient` already share across both the
 //! in-process CLI path (`run_task::execute_run_task`) and the daemon path
@@ -52,7 +52,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Serialize;
 
-use super::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use futures_util::StreamExt;
+
+use super::{
+    ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, InferenceAdapter, InferenceError,
+    StreamAssembly,
+};
 use crate::perf::TokenUsage;
 
 #[cfg(test)]
@@ -91,7 +96,7 @@ pub const ENV_VAR: &str = "TCODE_DEBUG_TRANSCRIPT";
 /// the verbatim `ChatRequest` serialised with its normal wire `Serialize`
 /// impl (so `ChatMessage`'s cache_control content-block shape round-trips
 /// exactly as sent); `response` is `Some` on success, `None` on failure (in
-/// which case `error` carries the `LlmError`'s `Display` text); `usage` is
+/// which case `error` carries the `InferenceError`'s `Display` text); `usage` is
 /// the zero value on failure.
 /// Test: `debug_capture::tests::record_serialises_full_request_and_response`.
 #[derive(Debug, Clone, Serialize)]
@@ -189,7 +194,7 @@ impl DebugCaptureSink {
     /// stderr and otherwise swallowed — a debug-capture write must never
     /// fail the underlying LLM call it is observing.
     /// What: builds a [`DebugCaptureRecord`] from `req` and `result`
-    /// (cloning the `ChatResponse` on success; recording `LlmError`'s
+    /// (cloning the `ChatResponse` on success; recording `InferenceError`'s
     /// `Display` text on failure), serialises it to one JSON line, and
     /// appends it (with a trailing newline) to the sink's file under its
     /// mutex.
@@ -198,10 +203,10 @@ impl DebugCaptureSink {
         turn_index: u64,
         role: &str,
         req: &ChatRequest,
-        result: &Result<ChatResponse, LlmError>,
+        result: &Result<ChatResponse, InferenceError>,
     ) {
         let (response, error, usage) = match result {
-            Ok(resp) => (Some(resp.clone()), None, resp.clone().token_usage()),
+            Ok(resp) => (Some(resp.clone()), None, crate::llm::token_usage(resp)),
             Err(e) => (None, Some(e.to_string()), TokenUsage::default()),
         };
         let record = DebugCaptureRecord {
@@ -254,12 +259,12 @@ fn resolve_capture_path(raw: &Path) -> PathBuf {
     }
 }
 
-/// A transparent `LlmClientTrait` decorator that appends a full wire-level
+/// A transparent `InferenceAdapter` decorator that appends a full wire-level
 /// record of each round-trip to a shared [`DebugCaptureSink`].
 ///
 /// Why: the same "wrap, observe, forward unchanged" shape
 /// `run_task::recorder::RecordingLlmClient` already uses — this decorator
-/// sits at the identical `LlmClientTrait::chat` seam, so it is transport-
+/// sits at the identical `InferenceAdapter::chat` seam, so it is transport-
 /// and run-path-agnostic by construction (whatever `inner` resolves to —
 /// `DispatchingLlmClient` routing to OpenRouter or Bedrock, or a test mock —
 /// is invisible to this wrapper).
@@ -270,18 +275,63 @@ fn resolve_capture_path(raw: &Path) -> PathBuf {
 /// have without capture enabled).
 /// Test: `debug_capture::tests::*`.
 struct DebugCaptureLlmClient {
-    inner: Arc<dyn LlmClientTrait>,
+    inner: Arc<dyn InferenceAdapter>,
     role: String,
     sink: Arc<DebugCaptureSink>,
 }
 
 #[async_trait]
-impl LlmClientTrait for DebugCaptureLlmClient {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for DebugCaptureLlmClient {
+    // #4425: a transparent decorator must report the WRAPPED backend's identity,
+    // never its own.
+    crate::llm::delegating_adapter_identity!(inner);
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let turn_index = self.sink.next_turn_index();
         let result = self.inner.chat(req).await;
         self.sink.record(turn_index, &self.role, req, &result);
         result
+    }
+
+    /// Forward the STREAMING call, capturing the assembled turn when it ends.
+    ///
+    /// Why (#4425): `wrap_with_debug_capture` sits between the agent loop and
+    /// the real transport on every production path, so inheriting the trait's
+    /// buffered default here would silently disable streaming for anyone who
+    /// turned `TCODE_DEBUG_TRANSCRIPT` on — i.e. exactly the person debugging a
+    /// streaming problem.
+    /// What: reserves the turn index UP FRONT (so a streamed turn keeps its
+    /// dispatch-order position even though it completes later), forwards every
+    /// event unchanged, and writes the capture record from the assembled
+    /// response at the terminal event. A stream that errors mid-flight records
+    /// that error, matching the blocking path.
+    /// Test: `debug_capture::tests::*` cover the blocking path; the streaming
+    /// pass-through is covered end to end by `crate::agent_loop::tests`.
+    async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        let turn_index = self.sink.next_turn_index();
+        let inner = self.inner.chat_stream(req).await?;
+        let sink = Arc::clone(&self.sink);
+        let role = self.role.clone();
+        let req = req.clone();
+        let mut assembly = StreamAssembly::new();
+        Ok(Box::pin(inner.map(move |event| {
+            match &event {
+                Ok(ev) => {
+                    assembly.push(ev.clone());
+                    if matches!(ev, ChatStreamEvent::Done(_)) {
+                        let resp = std::mem::take(&mut assembly)
+                            .into_response(String::new(), req.model.clone());
+                        sink.record(turn_index, &role, &req, &Ok(resp));
+                    }
+                }
+                Err(e) => {
+                    let failed: Result<ChatResponse, InferenceError> =
+                        Err(InferenceError::Transport(e.to_string()));
+                    sink.record(turn_index, &role, &req, &failed);
+                }
+            }
+            event
+        })))
     }
 }
 
@@ -298,10 +348,10 @@ impl LlmClientTrait for DebugCaptureLlmClient {
 /// `sink`'s `Arc`; `None` → returns `inner`.
 /// Test: `debug_capture::tests::wrap_with_debug_capture_*`.
 pub fn wrap_with_debug_capture(
-    inner: Arc<dyn LlmClientTrait>,
+    inner: Arc<dyn InferenceAdapter>,
     role: impl Into<String>,
     sink: Option<&Arc<DebugCaptureSink>>,
-) -> Arc<dyn LlmClientTrait> {
+) -> Arc<dyn InferenceAdapter> {
     match sink {
         Some(sink) => Arc::new(DebugCaptureLlmClient {
             inner,

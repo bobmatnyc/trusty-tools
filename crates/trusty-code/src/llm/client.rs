@@ -10,11 +10,15 @@
 //! credential via the shared 3-tier resolver (process env > `.env.local` >
 //! secure store), builds the matching `trusty_common::inference` adapter once
 //! (caching it so the underlying `reqwest` connection pool is reused across a
-//! run's many turns — a bake-off latency concern), and bridges tcode's
-//! request/response types across the seam (`super::convert`). Bedrock stays on
-//! its own Converse transport (`super::bedrock`, routed by `super::dispatch`) —
-//! its migration into commons is #2407.
-//! What: [`OpenAiCompatClient`] implements [`LlmClientTrait`]. `fireworks/*`
+//! run's many turns — a bake-off latency concern), and calls it. Since #4425
+//! unified trusty-code's wire types with the shared ones there is nothing left
+//! to bridge — the former `super::convert` module is gone, and the only
+//! per-request rewrite is the routing prefix (see [`OpenAiCompatClient::route`]).
+//! Bedrock stays on its own Converse transport (`super::bedrock`, routed by
+//! `super::dispatch`) — its migration into commons is #2407.
+//! What: [`OpenAiCompatClient`] implements [`InferenceAdapter`] — including
+//! [`InferenceAdapter::chat_stream`], which reaches the shared adapter's native
+//! SSE transport and is what makes trusty-code stream (#4425). `fireworks/*`
 //! slugs route to the Fireworks adapter (stripping the `fireworks/` routing
 //! prefix to the provider-native model id and requiring `FIREWORKS_API_KEY`);
 //! `together/*` slugs route to the Together adapter (#2494 — stripping the
@@ -40,18 +44,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use trusty_common::inference::{
-    InferenceAdapter,
+    ChatRequest, ChatResponse, ChatStream, InferenceAdapter, InferenceError, ProviderCapabilities,
+    capabilities,
     credentials::{KeyStore, default_store, resolve_key_with},
     provider_for,
     providers::{atlascloud, fireworks, openrouter, together},
     registry::ProviderId,
 };
-
-use super::client_trait::LlmClientTrait;
-use super::convert;
-use super::error::LlmError;
-use super::request::ChatRequest;
-use super::response::ChatResponse;
 
 /// Env var overriding the OpenRouter API base URL (for offline mock testing /
 /// self-hosted gateways). Defaults to [`openrouter::OPENROUTER_BASE_URL`].
@@ -241,7 +240,7 @@ impl OpenAiCompatClient {
     async fn adapter_for(
         &self,
         provider: ProviderId,
-    ) -> Result<Arc<dyn InferenceAdapter>, LlmError> {
+    ) -> Result<Arc<dyn InferenceAdapter>, InferenceError> {
         {
             let cache = self.adapters.lock().await;
             if let Some(adapter) = cache.get(&provider) {
@@ -262,7 +261,7 @@ impl OpenAiCompatClient {
     /// Anthropic-direct.
     /// What: for Fireworks, first resolves the `FIREWORKS_API_KEY` explicitly via
     /// the shared resolver so a missing key is ALWAYS a clear, Fireworks-specific
-    /// [`LlmError::MissingConfig`] — never the shared two-stage resolver's silent
+    /// [`InferenceError::MissingConfig`] — never the shared two-stage resolver's silent
     /// fall-back to OpenRouter (which would be a wrong-provider misroute), and
     /// never an OpenRouter-flavoured error when both keys happen to be absent;
     /// only once the key is confirmed does it resolve + build the Fireworks
@@ -277,11 +276,14 @@ impl OpenAiCompatClient {
     /// `client::tests::missing_fireworks_key_errors_not_falls_back`,
     /// `client::tests::missing_together_key_errors_not_falls_back`,
     /// `client::tests::missing_atlascloud_key_errors_not_falls_back`.
-    fn build_adapter(&self, provider: ProviderId) -> Result<Box<dyn InferenceAdapter>, LlmError> {
+    fn build_adapter(
+        &self,
+        provider: ProviderId,
+    ) -> Result<Box<dyn InferenceAdapter>, InferenceError> {
         match provider {
             ProviderId::Fireworks => {
                 if resolve_key_with("fireworks", self.store.as_ref()).is_none() {
-                    return Err(LlmError::MissingConfig(
+                    return Err(InferenceError::MissingConfig(
                         "FIREWORKS_API_KEY is required to reach a fireworks/* model. Export it \
                          (e.g. `export FIREWORKS_API_KEY=fw_...`), add it to .env.local, or set it \
                          via `tcode config keys set fireworks`."
@@ -289,13 +291,12 @@ impl OpenAiCompatClient {
                     ));
                 }
                 // The key is present, so stage-1 of the resolver returns Fireworks.
-                let resolved = provider_for("fireworks/route", self.store.as_ref())
-                    .map_err(convert::map_error)?;
-                fireworks::build(&resolved, &self.fireworks_base).map_err(convert::map_error)
+                let resolved = provider_for("fireworks/route", self.store.as_ref())?;
+                fireworks::build(&resolved, &self.fireworks_base)
             }
             ProviderId::Together => {
                 if resolve_key_with("together", self.store.as_ref()).is_none() {
-                    return Err(LlmError::MissingConfig(
+                    return Err(InferenceError::MissingConfig(
                         "TOGETHER_API_KEY is required to reach a together/* model. Export it \
                          (e.g. `export TOGETHER_API_KEY=tgp_...`), add it to .env.local, or set \
                          it via `tcode config keys set together`."
@@ -303,13 +304,12 @@ impl OpenAiCompatClient {
                     ));
                 }
                 // The key is present, so stage-1 of the resolver returns Together.
-                let resolved = provider_for("together/route", self.store.as_ref())
-                    .map_err(convert::map_error)?;
-                together::build(&resolved, &self.together_base).map_err(convert::map_error)
+                let resolved = provider_for("together/route", self.store.as_ref())?;
+                together::build(&resolved, &self.together_base)
             }
             ProviderId::AtlasCloud => {
                 if resolve_key_with("atlascloud", self.store.as_ref()).is_none() {
-                    return Err(LlmError::MissingConfig(
+                    return Err(InferenceError::MissingConfig(
                         "ATLASCLOUD_API_KEY is required to reach an atlascloud/* model. Export it \
                          (e.g. `export ATLASCLOUD_API_KEY=ac_...`), add it to .env.local, or set \
                          it via `tcode config keys set atlascloud`."
@@ -317,36 +317,38 @@ impl OpenAiCompatClient {
                     ));
                 }
                 // The key is present, so stage-1 of the resolver returns AtlasCloud.
-                let resolved = provider_for("atlascloud/route", self.store.as_ref())
-                    .map_err(convert::map_error)?;
-                atlascloud::build(&resolved, &self.atlascloud_base).map_err(convert::map_error)
+                let resolved = provider_for("atlascloud/route", self.store.as_ref())?;
+                atlascloud::build(&resolved, &self.atlascloud_base)
             }
             _ => {
-                let resolved = provider_for("openrouter/route", self.store.as_ref())
-                    .map_err(convert::map_error)?;
-                openrouter::build(&resolved, &self.openrouter_base).map_err(convert::map_error)
+                let resolved = provider_for("openrouter/route", self.store.as_ref())?;
+                openrouter::build(&resolved, &self.openrouter_base)
             }
         }
     }
 
-    /// Route + issue one chat call through the shared adapter.
+    /// Resolve the adapter and the provider-native request for one call.
     ///
-    /// Why: the single method [`LlmClientTrait`] exposes; all provider selection,
-    /// prefix stripping, credential resolution, and type bridging live behind it.
-    /// What: selects the provider from `req.model`, gets its cached adapter,
-    /// converts the request (with the provider-native wire model), calls the
-    /// shared adapter, maps any error, and converts the response back.
+    /// Why (#4425): [`InferenceAdapter::chat`] and [`InferenceAdapter::chat_stream`]
+    /// make the IDENTICAL routing, credential, and prefix-stripping decisions and
+    /// differ only in which adapter method they finally invoke. Sharing one
+    /// resolution step is what guarantees a model cannot be routed to one
+    /// provider when blocking and another when streaming.
+    /// What: selects the provider from `req.model`, gets (or builds) its cached
+    /// adapter, and returns it alongside a copy of `req` whose `model` is the
+    /// provider-native wire id (routing prefix stripped). The clone is one
+    /// shallow copy per call — the same cost the pre-#4425 `to_shared_request`
+    /// bridge paid.
     /// Test: `client::tests::*` and `tests/inference_shared_adapter_e2e.rs`.
-    pub async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn route(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<(Arc<dyn InferenceAdapter>, ChatRequest), InferenceError> {
         let provider = Self::provider_for_slug(&req.model);
         let adapter = self.adapter_for(provider).await?;
-        let wire_model = Self::wire_model(provider, &req.model);
-        let shared_req = convert::to_shared_request(req, wire_model);
-        let shared_resp = adapter
-            .chat(&shared_req)
-            .await
-            .map_err(convert::map_error)?;
-        Ok(convert::from_shared_response(shared_resp))
+        let mut routed = req.clone();
+        routed.model = Self::wire_model(provider, &req.model);
+        Ok((adapter, routed))
     }
 }
 
@@ -357,11 +359,58 @@ impl Default for OpenAiCompatClient {
     }
 }
 
+/// Delegating [`InferenceAdapter`] impl (#4425).
+///
+/// Why: this transport IS a shared-trait implementation, not a private
+/// abstraction — `DispatchingLlmClient` and every trusty-code call site reach
+/// it through `dyn InferenceAdapter`. It routes per REQUEST across four
+/// OpenAI-dialect providers, so the trait's per-adapter identity methods are
+/// answered for the routing default rather than for one fixed backend.
+/// What: `chat` and `chat_stream` both go through [`Self::route`], so they can
+/// never disagree about provider selection; `chat_stream` reaches the shared
+/// OpenAI-compat adapter's NATIVE SSE transport (#3696 Gap B), which is what
+/// makes trusty-code's OpenRouter path stream token-by-token.
+/// Test: `client::tests::*`, `tests/inference_shared_adapter_e2e.rs`.
 #[async_trait]
-impl LlmClientTrait for OpenAiCompatClient {
-    /// Forward to the inherent [`OpenAiCompatClient::chat`].
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        OpenAiCompatClient::chat(self, req).await
+impl InferenceAdapter for OpenAiCompatClient {
+    /// The routing default's name; see [`Self::capabilities`] for why this is
+    /// not a per-request answer.
+    fn name(&self) -> &str {
+        ProviderId::OpenRouter.as_str()
+    }
+
+    /// Capabilities for the routing DEFAULT (OpenRouter).
+    ///
+    /// Why: the shared trait's `capabilities()` takes no model argument, but
+    /// this transport serves four providers chosen per request. OpenRouter is
+    /// the default branch of [`Self::provider_for_slug`] and the backend nearly
+    /// every trusty-code slug takes; trusty-code's own per-model decisions go
+    /// through `crate::provider::provider_for(slug)`, not through this method.
+    /// What: `capabilities(ProviderId::OpenRouter)`.
+    /// Test: `client::tests::capabilities_report_openrouter_default`.
+    fn capabilities(&self) -> &ProviderCapabilities {
+        capabilities(ProviderId::OpenRouter)
+    }
+
+    /// Route + issue one blocking chat call through the shared adapter.
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        let (adapter, routed) = self.route(req).await?;
+        adapter.chat(&routed).await
+    }
+
+    /// Route + issue one STREAMING chat call through the shared adapter.
+    ///
+    /// Why (#4425): this override is the whole reason trusty-code can stream —
+    /// the shared `OpenAiCompatAdapter` implements native SSE, and inheriting
+    /// the trait's buffered default here would have silently thrown that away.
+    /// What: same routing as [`Self::chat`], then the adapter's `chat_stream`.
+    /// A `stream=true` handshake failure surfaces synchronously as `Err`, so a
+    /// caller may choose to retry non-streaming rather than see a half-open
+    /// stream.
+    /// Test: `tests/inference_shared_adapter_e2e.rs` streaming round-trip.
+    async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        let (adapter, routed) = self.route(req).await?;
+        adapter.chat_stream(&routed).await
     }
 }
 
@@ -527,13 +576,14 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let err = client
             .chat(&req)
             .await
             .expect_err("must fail without a key");
         assert!(
-            matches!(err, LlmError::MissingConfig(_)),
+            matches!(err, InferenceError::MissingConfig(_)),
             "expected MissingConfig, got: {err:?}"
         );
     }
@@ -562,13 +612,14 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let err = client
             .chat(&req)
             .await
             .expect_err("must fail without a key");
         match err {
-            LlmError::MissingConfig(msg) => {
+            InferenceError::MissingConfig(msg) => {
                 assert!(
                     msg.contains("FIREWORKS_API_KEY"),
                     "unhelpful message: {msg}"
@@ -603,13 +654,14 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let err = client
             .chat(&req)
             .await
             .expect_err("must fail without a key");
         match err {
-            LlmError::MissingConfig(msg) => {
+            InferenceError::MissingConfig(msg) => {
                 assert!(msg.contains("TOGETHER_API_KEY"), "unhelpful message: {msg}")
             }
             other => panic!("expected MissingConfig naming TOGETHER_API_KEY, got: {other:?}"),
@@ -642,13 +694,14 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let err = client
             .chat(&req)
             .await
             .expect_err("must fail without a key");
         match err {
-            LlmError::MissingConfig(msg) => {
+            InferenceError::MissingConfig(msg) => {
                 assert!(
                     msg.contains("ATLASCLOUD_API_KEY"),
                     "unhelpful message: {msg}"
@@ -688,12 +741,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let resp = client.chat(&req).await.expect("chat call succeeded");
         let text = resp.first_text().expect("assistant produced text");
         assert!(!text.is_empty(), "assistant text was empty");
         assert!(
-            resp.token_usage().prompt_tokens > 0,
+            crate::llm::token_usage(&resp).prompt_tokens > 0,
             "prompt_tokens should be > 0"
         );
         eprintln!("live openrouter ok — text: {text:?}");
@@ -729,12 +783,13 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let resp = client.chat(&req).await.expect("chat call succeeded");
         let text = resp.first_text().expect("assistant produced text");
         assert!(!text.is_empty(), "assistant text was empty");
         assert!(
-            resp.token_usage().prompt_tokens > 0,
+            crate::llm::token_usage(&resp).prompt_tokens > 0,
             "prompt_tokens should be > 0"
         );
         eprintln!("live fireworks ok — text: {text:?}");
@@ -770,14 +825,29 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         let resp = client.chat(&req).await.expect("chat call succeeded");
         let text = resp.first_text().expect("assistant produced text");
         assert!(!text.is_empty(), "assistant text was empty");
         assert!(
-            resp.token_usage().prompt_tokens > 0,
+            crate::llm::token_usage(&resp).prompt_tokens > 0,
             "prompt_tokens should be > 0"
         );
         eprintln!("live together ok — text: {text:?}");
+    }
+
+    /// Capabilities report the OpenRouter routing default (#4425).
+    ///
+    /// Why: pins the documented answer to the shared trait's model-free
+    /// `capabilities()` question for a transport that routes per request, so a
+    /// change to it is deliberate rather than silent drift.
+    /// What: assert the returned profile's id is OpenRouter.
+    /// Test: this test.
+    #[test]
+    fn capabilities_report_openrouter_default() {
+        let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
+        assert_eq!(client.capabilities().id, ProviderId::OpenRouter);
+        assert_eq!(client.name(), "openrouter");
     }
 }

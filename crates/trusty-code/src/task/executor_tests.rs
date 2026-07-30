@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::agent_loop::telemetry;
 use crate::agent_loop::with_cadence_env;
-use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::llm::{ChatRequest, ChatResponse, InferenceAdapter, InferenceError};
 use crate::session::{SessionRegistry, SessionStatus};
 use crate::task::mock_llm::EchoLlmClient;
 
@@ -66,7 +66,7 @@ async fn spawn_task_run_rejects_second_overlapping_run() {
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
-    let llm: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(EchoLlmClient::new());
 
     let p = params(&agents, &project, &session.id);
 
@@ -90,7 +90,7 @@ async fn spawn_task_run_unknown_session_errors() {
     let registry = Arc::new(SessionRegistry::new());
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
-    let llm: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(EchoLlmClient::new());
 
     let p = params(&agents, &project, "does-not-exist");
     let err = spawn_task_run(registry, llm, p).unwrap_err();
@@ -422,7 +422,7 @@ fn stop_response(text: &str) -> Value {
     })
 }
 
-/// An `LlmClientTrait` that sleeps before its Nth `chat` call, then replays a
+/// An `InferenceAdapter` that sleeps before its Nth `chat` call, then replays a
 /// scripted response (mirrors `run_task::tests::DeadlineTriggerLlm`).
 ///
 /// Why: deterministically drives the PM's own wall-clock deadline past its
@@ -453,15 +453,17 @@ impl DeadlineTriggerLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for DeadlineTriggerLlm {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for DeadlineTriggerLlm {
+    crate::llm::mock_adapter_identity!("mock-deadline-trigger");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         if idx == self.stall_at_call {
             tokio::time::sleep(self.stall_for).await;
         }
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
-            None => Err(LlmError::MissingConfig(format!(
+            None => Err(InferenceError::MissingConfig(format!(
                 "scripted LLM exhausted at call {idx}"
             ))),
         }
@@ -492,7 +494,7 @@ async fn spawn_task_run_deadline_exceeded_is_distinct_and_preserves_usage() {
     let agents = agents_dir();
     let project = tempfile::tempdir().expect("project tempdir");
 
-    let llm: Arc<dyn LlmClientTrait> = Arc::new(DeadlineTriggerLlm::new(
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(DeadlineTriggerLlm::new(
         &[
             malformed_finish_task_response(),
             stop_response("recovered (never reached in time)"),
@@ -570,7 +572,7 @@ fn set_goal_tool_call_response(call_id: &str) -> Value {
     })
 }
 
-/// An `LlmClientTrait` that replays a fixed script, erroring past the end —
+/// An `InferenceAdapter` that replays a fixed script, erroring past the end —
 /// mirrors `agent_loop::tests::ScriptedLlm` but scoped to this module so the
 /// daemon-path executor tests don't need to reach into `agent_loop`'s
 /// `#[cfg(test)]`-private fixtures.
@@ -593,12 +595,14 @@ impl ScriptedLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for ScriptedLlm {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for ScriptedLlm {
+    crate::llm::mock_adapter_identity!("mock-scripted");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
-            None => Err(LlmError::MissingConfig(format!(
+            None => Err(InferenceError::MissingConfig(format!(
                 "scripted LLM exhausted at call {idx}"
             ))),
         }
@@ -637,7 +641,7 @@ async fn spawn_task_run_turn_cap_exceeded_is_resumable() {
     let scripts: Vec<Value> = (0..8)
         .map(|i| set_goal_tool_call_response(&format!("call_{i}")))
         .collect();
-    let llm: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::from_json(&scripts));
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::from_json(&scripts));
 
     let p1 = params(&agents, &project, &session.id);
     spawn_task_run(Arc::clone(&registry), llm, p1).expect("run 1 must start");
@@ -651,7 +655,7 @@ async fn spawn_task_run_turn_cap_exceeded_is_resumable() {
 
     // The regression: a second `task.run` on this session must be ACCEPTED,
     // not rejected with "session ... is already terminal" (-32003).
-    let llm2: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let llm2: Arc<dyn InferenceAdapter> = Arc::new(EchoLlmClient::new());
     let p2 = params(&agents, &project, &session.id);
     spawn_task_run(Arc::clone(&registry), llm2, p2).expect(
         "a TurnCapExceeded session must accept a resuming task.run, \
@@ -723,7 +727,7 @@ async fn spawn_task_run_second_call_after_finish_appends_to_cumulative_transcrip
     let project = tempfile::tempdir().expect("project tempdir");
 
     // Run 1: completes the full delegate -> bash -> stop -> stop script.
-    let llm1: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let llm1: Arc<dyn InferenceAdapter> = Arc::new(EchoLlmClient::new());
     let p1 = params(&agents, &project, &session.id);
     spawn_task_run(Arc::clone(&registry), llm1, p1).expect("run 1 must start");
     wait_for_terminal(&registry, &session.id).await;
@@ -743,7 +747,7 @@ async fn spawn_task_run_second_call_after_finish_appends_to_cumulative_transcrip
     // Run 2 against the SAME session_id, issued only AFTER run 1 fully
     // finished — must be ACCEPTED, not rejected as an already-terminal
     // session.
-    let llm2: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let llm2: Arc<dyn InferenceAdapter> = Arc::new(EchoLlmClient::new());
     let mut p2 = params(&agents, &project, &session.id);
     p2.task = "do something else".to_string();
     spawn_task_run(Arc::clone(&registry), llm2, p2)
@@ -777,7 +781,7 @@ async fn spawn_task_run_second_call_after_finish_appends_to_cumulative_transcrip
     );
 }
 
-/// A scripted `LlmClientTrait` that records the tool-schema names of every
+/// A scripted `InferenceAdapter` that records the tool-schema names of every
 /// request it receives, then immediately stops (no tool calls) — the D3
 /// no-tool-call convention `finish_task`'s own docs describe, so a run
 /// completes in a single PM turn with no delegation needed.
@@ -800,8 +804,10 @@ impl SchemaCapturingLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for SchemaCapturingLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for SchemaCapturingLlm {
+    crate::llm::mock_adapter_identity!("mock-schema-capturing");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let names = req
             .tools
             .as_ref()
@@ -816,7 +822,7 @@ impl LlmClientTrait for SchemaCapturingLlm {
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         });
-        serde_json::from_value(fixture).map_err(|e| LlmError::MissingConfig(e.to_string()))
+        serde_json::from_value(fixture).map_err(|e| InferenceError::MissingConfig(e.to_string()))
     }
 }
 
@@ -831,7 +837,7 @@ async fn session_path_registers_recall_session_tool() {
     let project = tempfile::tempdir().expect("project tempdir");
 
     let mock = Arc::new(SchemaCapturingLlm::new());
-    let llm: Arc<dyn LlmClientTrait> = Arc::clone(&mock) as Arc<dyn LlmClientTrait>;
+    let llm: Arc<dyn InferenceAdapter> = Arc::clone(&mock) as Arc<dyn InferenceAdapter>;
     let p = params(&agents, &project, &session.id);
 
     spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
