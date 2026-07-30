@@ -25,10 +25,14 @@
 //! What: [`RegisteredWorktree`] (one porcelain record),
 //! [`parse_worktree_list`] (the pure parser), [`registry_root_for`] (replaces
 //! grandparent-as-repo-root inference), [`list_registered_worktrees`] (what
-//! git says about the repository owning a path), and
-//! [`enumerate_registered_worktrees`] (every registered worktree living INSIDE
-//! a managed project under the repos root — see that function's "positive
-//! assertion" section for the structural boundary that bounds the sweep).
+//! git says about the repository owning a path),
+//! [`scan_registered_worktrees`] (#4288 — EVERY registered worktree under the
+//! repos root, each carrying the [`Admission`] verdict that says whether it is
+//! a reclaim candidate and, when it is not, WHY), and
+//! [`enumerate_registered_worktrees`] (the admitted subset — every registered
+//! worktree living INSIDE a managed project under the repos root; see that
+//! function's "positive assertion" section for the structural boundary that
+//! bounds the sweep).
 //!
 //! # An unanswerable probe is never a verdict
 //!
@@ -226,7 +230,7 @@ pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredW
 /// without it, `git -C <non-repo>` walks UP the filesystem and would report an
 /// unrelated enclosing repository's worktrees. Records that are bare, main,
 /// already prunable, or git-`locked` are dropped, as is any worktree failing
-/// the [`collect_from_anchor`] containment rule. Results are canonicalized (so
+/// the [`scan_from_anchor`] containment rule. Results are canonicalized (so
 /// they compare cleanly against the canonicalized active-session set) and
 /// returned sorted and de-duplicated, since both anchors may report the same
 /// worktree.
@@ -304,8 +308,141 @@ pub(crate) fn list_registered_worktrees(anchor: &Path) -> Option<Vec<RegisteredW
 /// `enumerate_excludes_a_worktree_parked_beside_the_project`,
 /// `enumerate_excludes_a_locked_worktree`.
 pub(crate) fn enumerate_registered_worktrees(repos_root: &Path) -> Vec<PathBuf> {
+    let admitted: BTreeSet<PathBuf> = scan_registered_worktrees(repos_root)
+        .into_iter()
+        .filter(|s| s.admission == Admission::Admitted)
+        .map(|s| s.path)
+        .collect();
+    let mut out: Vec<PathBuf> = admitted.into_iter().collect();
+    sort_deepest_first(&mut out);
+    out
+}
+
+/// Order `paths` so a NESTED worktree always precedes the worktree that
+/// contains it (#4288, in-scope item 4).
+///
+/// Why: the pre-#4288 order came straight out of a `BTreeSet<PathBuf>`, which
+/// sorts lexicographically — so `…/parent` sorts BEFORE `…/parent/child`.
+/// Nine registered worktrees on the dogfood machine are nested inside another
+/// registered worktree, and removing a parent first takes its children's
+/// directories with it: the child's own removal then finds nothing to remove
+/// and git is left holding a dangling registry entry for a path that no longer
+/// exists. Reversing the order makes each nested worktree removed by
+/// `git worktree remove` (which de-registers it) before its parent is touched.
+///
+/// This changes ORDER only. It cannot admit a path the containment rules
+/// already rejected, and it cannot cause a removal that would not otherwise
+/// have happened — every element was already in the returned list.
+/// What: sorts by path DEPTH descending (component count), breaking ties
+/// lexicographically so the result stays deterministic. Depth-descending is
+/// sufficient for the containment property: a descendant always has strictly
+/// more components than its ancestor.
+/// Test: `enumerate_orders_nested_worktree_before_its_parent`.
+fn sort_deepest_first(paths: &mut [PathBuf]) {
+    paths.sort_by(|a, b| {
+        b.components()
+            .count()
+            .cmp(&a.components().count())
+            .then_with(|| a.cmp(b))
+    });
+}
+
+/// Why a registered worktree is, or is not, an orphan-reclaim CANDIDATE (#4288).
+///
+/// Why: `enumerate_registered_worktrees` returns only the admitted paths, so
+/// everything it drops is invisible — and on the dogfood machine that is 33 of
+/// 118 registered worktrees, 6 of which hold uncommitted work, including the
+/// two landmines #4288 documents (a `workspace_path` that is an ordinary
+/// subdirectory of a live checkout, and worktrees nested inside a live one).
+/// Reconciliation cannot report what enumeration silently discards, so the
+/// verdict is now a VALUE the scan carries rather than a `continue` statement.
+/// What: [`Admitted`](Self::Admitted) is the reclaim-candidate set — identical
+/// to what `enumerate_registered_worktrees` returned before #4288. Every other
+/// variant names one exclusion, in the order the scan applies them.
+/// Test: `scan_reports_the_excluded_set_with_reasons`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Admission {
+    /// Inside a managed project, not bare/main/prunable/locked — a candidate.
+    Admitted,
+    /// A bare repository record: no working tree to reclaim.
+    Bare,
+    /// The repository's main checkout: never a candidate.
+    MainCheckout,
+    /// Git already considers the directory gone.
+    Prunable,
+    /// The operator ran `git worktree lock` — an explicit removal veto.
+    Locked,
+    /// The path could not be canonicalized, so nothing about it is comparable.
+    Unresolvable,
+    /// Registered, but not a strict descendant of the managed project.
+    OutsideProject,
+    /// Registered, but outside the managed repos root.
+    OutsideReposRoot,
+}
+
+impl Admission {
+    /// A short, operator-facing phrase naming this verdict (#4288).
+    ///
+    /// Why: the reconcile report prints one reason per entry, and building
+    /// that string at each call site would let the wordings drift.
+    /// What: a `&'static str` per variant.
+    /// Test: `scan_reports_the_excluded_set_with_reasons`.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted: registered inside a managed project",
+            Self::Bare => "excluded: bare repository record (no working tree)",
+            Self::MainCheckout => "excluded: the repository's main checkout",
+            Self::Prunable => "excluded: git reports the directory is already gone",
+            Self::Locked => "excluded: git-locked by the operator",
+            Self::Unresolvable => "excluded: path could not be canonicalized",
+            Self::OutsideProject => "excluded: not inside the managed project that registered it",
+            Self::OutsideReposRoot => "excluded: outside the managed repos root",
+        }
+    }
+}
+
+/// One registered worktree plus everything the scan learned about it (#4288).
+///
+/// Why: reconciliation needs the registry that named a worktree (that is half
+/// the git-derived key), the project bounding it, and the admission verdict —
+/// none of which survive `enumerate_registered_worktrees`' `Vec<PathBuf>`.
+/// What: `path` is canonical when it resolved (raw otherwise, so an
+/// [`Admission::Unresolvable`] entry can still be REPORTED); `project` is the
+/// managed project directory; `registry_root` is the checkout whose
+/// `git worktree list` named it; `branch` and `admission` complete the record.
+/// Test: `scan_reports_the_excluded_set_with_reasons`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScannedWorktree {
+    /// Canonical worktree path (raw when canonicalization failed).
+    pub path: PathBuf,
+    /// The managed project directory `<repos_root>/<owner>/<repo>`.
+    pub project: PathBuf,
+    /// The checkout whose registry listed this worktree.
+    pub registry_root: PathBuf,
+    /// Short branch name, or `None` when detached.
+    pub branch: Option<String>,
+    /// Whether this is an orphan-reclaim candidate, and if not, why not.
+    pub admission: Admission,
+}
+
+/// Every worktree BOTH managed anchors register under `repos_root`, admitted
+/// or not (#4288).
+///
+/// Why: this is [`enumerate_registered_worktrees`] with the `continue`
+/// statements turned into values, so reconciliation reports the excluded set
+/// instead of inheriting enumeration's blind spot. Sharing one traversal is
+/// the point — a second, parallel enumerator is exactly the drift that let the
+/// pre-#4207 five-shape walk disagree with itself.
+/// What: for each `<repos_root>/<owner>/<repo>/`, interrogates `<repo>` and
+/// `<repo>/.base` (each only after [`registry_root_for`] confirms the anchor
+/// IS that repository's root), and returns one [`ScannedWorktree`] per
+/// porcelain record, deduplicated on (path, registry root) and sorted.
+/// Test: `scan_reports_the_excluded_set_with_reasons`,
+/// `scan_reports_both_registries_for_the_same_path_prefix`.
+pub(crate) fn scan_registered_worktrees(repos_root: &Path) -> Vec<ScannedWorktree> {
     let canonical_root = std::fs::canonicalize(repos_root).unwrap_or_else(|_| repos_root.into());
-    let mut found: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut found: BTreeSet<(PathBuf, PathBuf, ScannedKey)> = BTreeSet::new();
     let Ok(owner_entries) = std::fs::read_dir(repos_root) else {
         return Vec::new();
     };
@@ -328,36 +465,62 @@ pub(crate) fn enumerate_registered_worktrees(repos_root: &Path) -> Vec<PathBuf> 
                 continue;
             };
             for anchor in [repo_path.clone(), repo_path.join(BASE_CLONE_DIRNAME)] {
-                collect_from_anchor(&anchor, &canonical_root, &canonical_project, &mut found);
+                scan_from_anchor(&anchor, &canonical_root, &canonical_project, &mut found);
             }
         }
     }
-    found.into_iter().collect()
+    found
+        .into_iter()
+        .map(|(path, registry_root, key)| ScannedWorktree {
+            path,
+            project: key.project,
+            registry_root,
+            branch: key.branch,
+            admission: key.admission,
+        })
+        .collect()
 }
 
-/// Add every reclaimable-shaped worktree registered at `anchor` to `found`.
+/// The non-key remainder of a [`ScannedWorktree`], carried through the dedup
+/// `BTreeSet` (#4288).
 ///
-/// Why: extracted so [`enumerate_registered_worktrees`]' two anchors share one
-/// rule rather than duplicating the root-confirmation, filtering, and
-/// containment logic — the duplication that let the old walk's five shapes
-/// drift apart from each other.
+/// Why: deduplication is on (path, registry root) — the identity of the entry —
+/// but `BTreeSet` needs the WHOLE tuple to be `Ord`, and the payload has to
+/// ride along. Keeping it in a named struct rather than a bare tuple keeps
+/// `scan_registered_worktrees`' final `map` readable.
+/// What: the fields of [`ScannedWorktree`] that are not part of its identity.
+/// Test: covered by every `scan_*` test.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ScannedKey {
+    project: PathBuf,
+    branch: Option<String>,
+    admission: Admission,
+}
+
+/// Record every worktree registered at `anchor`, with its admission verdict.
+///
+/// Why: extracted so [`scan_registered_worktrees`]' two anchors share one rule
+/// rather than duplicating the root-confirmation, filtering, and containment
+/// logic — the duplication that let the old walk's five shapes drift apart
+/// from each other.
 /// What: no-ops unless `anchor` is a directory that is ITSELF the root of the
-/// repository owning its registry (see [`registry_root_for`]); then inserts
-/// every non-bare, non-main, non-prunable, non-`locked` worktree whose
-/// canonicalized path is a STRICT DESCENDANT of `canonical_project` (the
-/// managed project directory — see [`enumerate_registered_worktrees`]' "positive
-/// assertion" section) and also lies under `canonical_root`.
+/// repository owning its registry (see [`registry_root_for`]); then records
+/// every worktree, marking [`Admission::Admitted`] only for the non-bare,
+/// non-main, non-prunable, non-`locked` ones whose canonicalized path is a
+/// STRICT DESCENDANT of `canonical_project` (the managed project directory —
+/// see [`enumerate_registered_worktrees`]' "positive assertion" section) and
+/// also lies under `canonical_root`.
 ///
 /// Both containment checks are applied even though the first normally implies
 /// the second: `canonical_project` is derived by canonicalizing a `read_dir`
 /// entry, so a symlinked project directory could resolve OUTSIDE the managed
 /// root, and the pair keeps the sweep bounded in that case too.
-/// Test: covered by every `enumerate_*` test.
-fn collect_from_anchor(
+/// Test: covered by every `enumerate_*` and `scan_*` test.
+fn scan_from_anchor(
     anchor: &Path,
     canonical_root: &Path,
     canonical_project: &Path,
-    found: &mut BTreeSet<PathBuf>,
+    found: &mut BTreeSet<(PathBuf, PathBuf, ScannedKey)>,
 ) {
     if !anchor.is_dir() {
         return;
@@ -376,6 +539,36 @@ fn collect_from_anchor(
         return;
     };
     for wt in worktrees {
+        let admission = admission_for(&wt, canonical_root, canonical_project);
+        let path = std::fs::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone());
+        found.insert((
+            path,
+            canonical_repo_root.clone(),
+            ScannedKey {
+                project: canonical_project.to_path_buf(),
+                branch: wt.branch.clone(),
+                admission,
+            },
+        ));
+    }
+}
+
+/// The [`Admission`] verdict for one porcelain record (#4288).
+///
+/// Why: the exclusion rules were `continue` statements inside the scan loop, so
+/// nothing could name WHICH rule fired. Splitting them out makes each verdict
+/// reportable without changing any of them — the order and the conditions are
+/// exactly those `collect_from_anchor` applied before #4288.
+/// What: applies, in order, the git-reported vetoes, then canonicalization,
+/// then the two containment checks.
+/// Test: `scan_reports_the_excluded_set_with_reasons`,
+/// `enumerate_excludes_a_locked_worktree`.
+fn admission_for(
+    wt: &RegisteredWorktree,
+    canonical_root: &Path,
+    canonical_project: &Path,
+) -> Admission {
+    {
         // `locked` is git's own removal veto — the operator ran
         // `git worktree lock` to say "do not remove this".
         //
@@ -393,8 +586,17 @@ fn collect_from_anchor(
         // force flag, AND leaving git's now-dangling registry entry behind.
         // Never enumerating a locked worktree is therefore the only place the
         // operator's veto actually survives.
-        if wt.bare || wt.is_main || wt.prunable || wt.locked {
-            continue;
+        if wt.bare {
+            return Admission::Bare;
+        }
+        if wt.is_main {
+            return Admission::MainCheckout;
+        }
+        if wt.prunable {
+            return Admission::Prunable;
+        }
+        if wt.locked {
+            return Admission::Locked;
         }
         // #1845 item 8, preserved: a path that cannot be canonicalized is
         // SKIPPED, never proposed. A dangling symlink, a deletion race, an
@@ -404,19 +606,20 @@ fn collect_from_anchor(
         // deletion. The asymmetry is deliberate: a failed observation reduces
         // what this function proposes, and can never enlarge it.
         let Ok(canonical) = std::fs::canonicalize(&wt.path) else {
-            continue;
+            return Admission::Unresolvable;
         };
         // The structural boundary (#4224 HIGH). `starts_with` is component-wise,
         // so `<owner>/trusty-tools-worktrees/x` cannot match the project
         // `<owner>/trusty-tools`. The `!=` makes it STRICT: the project checkout
         // itself — the operator's working copy — is never a candidate, whether
         // or not some other registry lists it as a linked worktree.
-        if canonical != canonical_project
-            && canonical.starts_with(canonical_project)
-            && canonical.starts_with(canonical_root)
-        {
-            found.insert(canonical);
+        if canonical == canonical_project || !canonical.starts_with(canonical_project) {
+            return Admission::OutsideProject;
         }
+        if !canonical.starts_with(canonical_root) {
+            return Admission::OutsideReposRoot;
+        }
+        Admission::Admitted
     }
 }
 
