@@ -1927,6 +1927,79 @@ async fn auto_prune_dead_records_honors_the_cap() {
     assert_eq!(second.kept.len(), 1);
 }
 
+/// Critic CRITICAL (2026-07-30 re-review): a STALE daemon that silently
+/// ignores `?record_only=true` (no `Query<DecommissionQuery>` extractor —
+/// exactly what a pre-this-fix build looks like) and reports
+/// `workspace_removed: true` must NEVER be counted as a safe prune, and the
+/// sweep must stop attempting further decommissions for the rest of this
+/// call (and any later call sharing the same marker file).
+///
+/// Why: an HTTP 200 alone cannot distinguish "genuinely record-only" from
+/// "an old daemon ran the full destructive teardown anyway" — both return
+/// 200. Only the response body's `workspace_removed` field can, so this test
+/// drives a STUB server (not the real daemon/SessionManager) that mimics the
+/// old handler exactly: it accepts the POST, ignores every query param, and
+/// always reports `workspace_removed: true`.
+/// What: two CONFIRMED-dead session ids hit the stub in one call. The first
+/// one's stale response must trip the stop; the second must never even be
+/// attempted (it survives in `kept` untouched, `pruned` stays 0 for both).
+#[tokio::test]
+async fn auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed() {
+    // Stub daemon: mimics a PRE-#4384 build — no `Query<DecommissionQuery>`
+    // extractor on the route at all, so `record_only` is silently dropped by
+    // axum; always answers with the OLD full-teardown shape.
+    async fn stub_decommission(
+        axum::extract::Path(_id): axum::extract::Path<String>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "workspace_removed": true }))
+    }
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(stub_decommission),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("http://{addr}");
+
+    let client = reqwest::Client::new();
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+
+    // Pre-seed BOTH ids as already-confirmed (first-sighted on a prior,
+    // separate call) so this test isolates the stale-daemon STOP behavior
+    // from the two-sightings confirmation logic covered elsewhere.
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("id-a".to_string(), "2020-01-01T00:00:00Z".to_string());
+    seen.insert("id-b".to_string(), "2020-01-01T00:00:00Z".to_string());
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    let mut a = ls_test_session("id-a", "errored", None, None, None, None);
+    a.id = "id-a".to_string();
+    a.unresumable = true;
+    let mut b = ls_test_session("id-b", "errored", None, None, None, None);
+    b.id = "id-b".to_string();
+    b.unresumable = true;
+
+    let outcome = auto_prune_dead_records_at(&client, &url, vec![a, b], &marker_path).await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "a stale daemon's workspace_removed=true must never count as pruned"
+    );
+    assert_eq!(
+        outcome.kept.len(),
+        2,
+        "both records must be left on the manual [d<N>] path once the stale \
+         daemon is detected"
+    );
+
+    handle.abort();
+}
+
 /// `fetch_live_sessions(allow_auto_prune = false)` is a pure read — a
 /// non-interactive listing (scripted/cron/CI bare `tm` or `tm ls`) must never
 /// trigger the destructive auto-prune sweep (critic HIGH finding #3).

@@ -10,9 +10,10 @@
 //! [d<N>] to remove the record` — the operator had to notice the row and type
 //! the number themselves, every time.
 //!
-//! The critic's WARN identified this feature's first cut as converting an
-//! advisory flag into an unconditional, unconfirmed, uncapped destructive
-//! action. Three independent hardenings close that gap:
+//! The critic's WARN (then BLOCK on re-review) identified this feature's
+//! first cut as converting an advisory flag into an unconditional,
+//! unconfirmed, uncapped, unverified destructive action. Four independent
+//! hardenings close that gap:
 //!   1. **Record-only removal** — [`decommission_dead_record`] calls the
 //!      `/decommission` route with `record_only=true`
 //!      (`SessionManager::decommission_record_only`), which never touches
@@ -27,6 +28,17 @@
 //!      decommissioned per call; the rest are reported as "pending
 //!      confirmation" rather than acted on. A bad-mount day cannot
 //!      mass-tombstone an entire fleet in one `tm ls`.
+//!   4. **Response-body verification (a daemon/client version-skew guard)**
+//!      — `record_only=true` alone is not proof of safety: a daemon process
+//!      still running a build older than this fix has no
+//!      `Query<DecommissionQuery>` extractor on the route at all, silently
+//!      ignores the param (axum drops query params a handler doesn't
+//!      declare), and falls through to the OLD unconditional full-teardown
+//!      path — which ALSO returns 200. [`decommission_dead_record`] parses
+//!      the response body and requires `workspace_removed == false` before
+//!      counting a call as safe; anything else trips
+//!      [`STALE_DAEMON_MARKER_KEY`], which disables further auto-prune
+//!      attempts for the rest of this invocation.
 //!
 //! What: [`auto_prune_dead_records`] is the production entry point (resolves
 //! the marker file under `~/.trusty-mpm`); [`auto_prune_dead_records_at`] is
@@ -38,9 +50,10 @@
 //! `auto_prune_dead_records_first_sighting_is_not_pruned`,
 //! `auto_prune_dead_records_keeps_workspace_present_records`,
 //! `auto_prune_dead_records_is_noop_when_nothing_is_dead`,
-//! `auto_prune_dead_records_honors_the_cap` in `tests_behavior_d_tests.rs`;
-//! the record-only server-side guarantee is pinned by
-//! `decommission_record_only_never_removes_existing_workspace`
+//! `auto_prune_dead_records_honors_the_cap`,
+//! `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`
+//! in `tests_behavior_d_tests.rs`; the record-only server-side guarantee is
+//! pinned by `decommission_record_only_never_removes_existing_workspace`
 //! (`session_manager::tests`).
 
 use std::collections::HashMap;
@@ -60,6 +73,32 @@ const AUTO_PRUNE_CAP: usize = 5;
 /// Basename of the two-sightings confirmation marker file, under the
 /// framework root (`~/.trusty-mpm/` by default).
 const SEEN_MARKER_FILENAME: &str = "auto-prune-seen.json";
+
+/// Reserved key inside the marker file recording "a stale daemon already
+/// proved it ignores `record_only`" (critic CRITICAL finding, 2026-07-30
+/// re-review of PR #4384).
+///
+/// Why: `?record_only=true` is read by a `Query<DecommissionQuery>`
+/// extractor this feature ADDS to the `/decommission` handler. Axum silently
+/// drops a query param a handler doesn't declare — a daemon process still
+/// running a build older than this fix has no such extractor and falls
+/// through to the OLD unconditional full-teardown `decommission()` for EVERY
+/// auto-prune call, regardless of the query string sent. The HTTP status
+/// alone cannot distinguish that from a genuine record-only success (both
+/// return 200) — only the response body's `workspace_removed` field can
+/// (see [`decommission_dead_record`]). Once that's observed, auto-prune must
+/// stay off for the rest of THIS invocation — the daemon does not un-stale
+/// itself mid-process, and the picker's own re-fetch loop calls
+/// [`auto_prune_dead_records_at`] repeatedly within one process. Storing this
+/// in the SAME marker file (rather than process-global state) keeps the
+/// behavior scoped to `marker_path` — exactly like every other piece of
+/// state this module tracks — so tests using distinct tempdir paths can
+/// never bleed into each other despite `cargo test` running many tests in
+/// one process.
+/// What: an unlikely-to-collide sentinel key (real session ids are UUIDs);
+/// its value is the RFC 3339 timestamp of first detection, for debugging.
+/// Test: `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`.
+const STALE_DAEMON_MARKER_KEY: &str = "__stale_daemon_detected__";
 
 /// Result of one [`auto_prune_dead_records`] / [`auto_prune_dead_records_at`]
 /// call.
@@ -186,15 +225,46 @@ pub(crate) async fn auto_prune_dead_records_at(
     let cap = AUTO_PRUNE_CAP.min(confirmed.len());
     let to_prune: Vec<_> = confirmed.drain(..cap).collect();
 
+    // Critic CRITICAL (2026-07-30): a daemon that already proved it ignores
+    // `record_only` (ANY earlier call this invocation) must never be asked
+    // to decommission again — see `STALE_DAEMON_MARKER_KEY`'s doc.
+    let already_stale_daemon = seen.contains_key(STALE_DAEMON_MARKER_KEY);
+    let mut newly_stale_daemon = false;
     let mut pruned = 0usize;
-    for s in to_prune {
-        if decommission_dead_record(client, url, &s.id).await {
-            pruned += 1;
-            seen.remove(&s.id);
-            changed = true;
-        } else {
-            kept.push(s);
+
+    if already_stale_daemon {
+        kept.extend(to_prune);
+    } else {
+        let mut iter = to_prune.into_iter();
+        for s in iter.by_ref() {
+            match decommission_dead_record(client, url, &s.id).await {
+                DecommissionOutcome::Pruned => {
+                    pruned += 1;
+                    seen.remove(&s.id);
+                    changed = true;
+                }
+                DecommissionOutcome::Failed => kept.push(s),
+                DecommissionOutcome::StaleDaemon => {
+                    newly_stale_daemon = true;
+                    kept.push(s);
+                    break;
+                }
+            }
         }
+        // `iter.by_ref()` leaves every un-visited item (after the `break`)
+        // in `iter` — collect them back rather than silently dropping them.
+        kept.extend(iter);
+    }
+
+    if newly_stale_daemon {
+        seen.insert(STALE_DAEMON_MARKER_KEY.to_string(), now);
+        changed = true;
+    }
+    if already_stale_daemon || newly_stale_daemon {
+        eprintln!(
+            "tm: auto-prune: daemon may be running an older build; skipping \
+             automatic pruning until it's restarted"
+        );
     }
 
     let pending = confirmed.len() + first_sighting.len();
@@ -241,38 +311,82 @@ fn save_seen(path: &Path, seen: &HashMap<String, String>) {
     }
 }
 
+/// Outcome of one [`decommission_dead_record`] call.
+///
+/// Why: an HTTP 200 alone is NOT proof that `record_only` was honored — a
+/// stale daemon lacking the `Query<DecommissionQuery>` extractor also
+/// returns 200 (from the OLD unconditional full-teardown path). Only the
+/// response body's `workspace_removed` field can tell the two apart, so the
+/// caller needs a THIRD outcome distinct from plain success/failure.
+enum DecommissionOutcome {
+    /// The daemon confirmed `workspace_removed == false` — genuinely
+    /// record-only, safe to count as pruned.
+    Pruned,
+    /// The response proves (or fails to rule out) that the daemon actually
+    /// removed the workspace — `workspace_removed == true`, the field was
+    /// missing, or the body didn't even parse as JSON. Only reachable on a
+    /// 2xx status; treated as "a stale daemon may have just deleted this,"
+    /// never assumed safe.
+    StaleDaemon,
+    /// Non-2xx status or a transport error — the call simply failed.
+    Failed,
+}
+
 /// POST the existing `/decommission` route in RECORD-ONLY mode for one
-/// confirmed-dead record, best-effort (critic HIGH finding #1).
+/// confirmed-dead record, best-effort (critic HIGH finding #1; response-body
+/// verification added per critic CRITICAL finding, 2026-07-30).
 ///
 /// Why: kept as the single I/O primitive behind [`auto_prune_dead_records_at`]
 /// so a per-record transport/HTTP failure can never abort the rest of the
 /// listing — one stuck record must not hide every other session behind it.
-/// What: POSTs `?record_only=true`, which routes the daemon to
-/// `SessionManager::decommission_record_only` — the removal branches are
-/// skipped entirely, so this call can never delete filesystem content even
-/// if the workspace has reappeared since the listing-time probe. Returns
-/// `true` only on a 2xx response; any other status or a transport error is
-/// logged to stderr and returns `false`.
+/// POSTing `?record_only=true` alone is NOT sufficient proof of safety: a
+/// daemon process still running a build that predates this route's
+/// `Query<DecommissionQuery>` extractor silently ignores the param (axum
+/// drops query params a handler doesn't declare) and falls through to the
+/// OLD unconditional full-teardown `decommission()` — which also returns
+/// 200. This project's daemon is long-lived by design (a CLI upgrade never
+/// bounces it), so that version skew is the ROUTINE case, not an edge case.
+/// What: POSTs `?record_only=true`; on a 2xx response, parses the JSON body
+/// and requires `workspace_removed == false` before returning
+/// [`DecommissionOutcome::Pruned`] — the ONLY outcome that proves nothing was
+/// deleted. `workspace_removed == true`, a missing field, or an unparseable
+/// body all return [`DecommissionOutcome::StaleDaemon`]. A non-2xx status or
+/// a transport error is logged to stderr and returns
+/// [`DecommissionOutcome::Failed`].
 /// Test: `auto_prune_dead_records_removes_confirmed_unresumable_records`
-/// drives this through a real loopback daemon.
-async fn decommission_dead_record(client: &reqwest::Client, url: &str, id: &str) -> bool {
-    match client
+/// drives the happy path through a real loopback daemon;
+/// `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`
+/// drives the stale-daemon path through a stub server that ignores
+/// `record_only` and always reports `workspace_removed: true`.
+async fn decommission_dead_record(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+) -> DecommissionOutcome {
+    let resp = match client
         .post(format!("{url}/api/v1/sessions/managed/{id}/decommission"))
         .query(&[("record_only", "true")])
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => true,
-        Ok(resp) => {
-            eprintln!(
-                "tm: auto-prune: failed to remove dead record {id}: HTTP {}",
-                resp.status()
-            );
-            false
-        }
+        Ok(resp) => resp,
         Err(e) => {
             eprintln!("tm: auto-prune: failed to remove dead record {id}: {e}");
-            false
+            return DecommissionOutcome::Failed;
         }
+    };
+    if !resp.status().is_success() {
+        eprintln!(
+            "tm: auto-prune: failed to remove dead record {id}: HTTP {}",
+            resp.status()
+        );
+        return DecommissionOutcome::Failed;
+    }
+    match resp.json::<serde_json::Value>().await {
+        Ok(body) => match body.get("workspace_removed").and_then(|v| v.as_bool()) {
+            Some(false) => DecommissionOutcome::Pruned,
+            _ => DecommissionOutcome::StaleDaemon,
+        },
+        Err(_) => DecommissionOutcome::StaleDaemon,
     }
 }
