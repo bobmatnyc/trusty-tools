@@ -175,7 +175,7 @@
     <button
       type="button"
       onclick={toggleAdd}
-      class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+      class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2 py-0.5 font-mono text-[0.625rem] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
     >
       {addOpen ? 'cancel' : '+ add agent'}
     </button>
@@ -185,7 +185,7 @@
     {#if addOpen}
       <div class="mb-4 rounded border-1.5 border-trusty-border bg-trusty-raised p-3">
         <label
-          class="font-mono text-[10px] font-semibold uppercase tracking-wide text-trusty-text-muted"
+          class="font-mono text-[0.625rem] font-semibold uppercase tracking-wide text-trusty-text-muted"
           for="agent-add-name"
         >
           name (lowercase, digits, hyphens)
@@ -198,7 +198,7 @@
         />
 
         <label
-          class="mt-2 block font-mono text-[10px] font-semibold uppercase tracking-wide text-trusty-text-muted"
+          class="mt-2 block font-mono text-[0.625rem] font-semibold uppercase tracking-wide text-trusty-text-muted"
           for="agent-add-content"
         >
           content (Markdown + frontmatter)
@@ -216,7 +216,7 @@
             type="file"
             accept=".md,text/markdown,text/plain"
             onchange={onFilePicked}
-            class="font-mono text-[10px] text-trusty-text-muted"
+            class="font-mono text-[0.625rem] text-trusty-text-muted"
           />
         </div>
 
@@ -228,7 +228,7 @@
           type="button"
           disabled={addBusy || !addName.trim() || !addContent.trim()}
           onclick={submitAdd}
-          class="mt-2 rounded-sm border-1.5 border-trusty-primary bg-trusty-primary px-2.5 py-1 font-mono text-[11px] uppercase tracking-wide text-trusty-surface disabled:cursor-not-allowed disabled:opacity-50"
+          class="mt-2 rounded-sm border-1.5 border-trusty-primary bg-trusty-primary px-2.5 py-1 font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-surface disabled:cursor-not-allowed disabled:opacity-50"
         >
           {addBusy ? 'creating…' : 'create'}
         </button>
@@ -254,13 +254,13 @@
               <div class="flex items-center gap-2">
                 <span class="truncate font-mono text-xs text-trusty-text">{agent.name}</span>
                 <span
-                  class="shrink-0 rounded-sm border border-trusty-border-strong px-1 font-mono text-[9px] uppercase tracking-wide text-trusty-text-muted"
+                  class="shrink-0 rounded-sm border border-trusty-border-strong px-1 font-mono text-[0.5625rem] uppercase tracking-wide text-trusty-text-muted"
                 >
                   {tierLabel(agent.tier)}
                 </span>
               </div>
               {#if agent.description}
-                <p class="truncate text-[11px] text-trusty-text-secondary">{agent.description}</p>
+                <p class="truncate text-[0.6875rem] text-trusty-text-secondary">{agent.description}</p>
               {/if}
             </div>
 
@@ -269,7 +269,7 @@
                 <div class="flex shrink-0 items-center gap-1.5">
                   <button
                     type="button"
-                    class="font-mono text-[10px] uppercase tracking-wide text-status-error"
+                    class="font-mono text-[0.625rem] uppercase tracking-wide text-status-error"
                     disabled={removeBusy}
                     onclick={() => doRemove(agent.name)}
                   >
@@ -277,7 +277,7 @@
                   </button>
                   <button
                     type="button"
-                    class="font-mono text-[10px] uppercase tracking-wide text-trusty-text-muted"
+                    class="font-mono text-[0.625rem] uppercase tracking-wide text-trusty-text-muted"
                     disabled={removeBusy}
                     onclick={() => (removeConfirmName = null)}
                   >
@@ -287,7 +287,7 @@
               {:else}
                 <button
                   type="button"
-                  class="shrink-0 px-1 font-mono text-[11px] text-trusty-text-muted hover:text-status-error"
+                  class="shrink-0 px-1 font-mono text-[0.6875rem] text-trusty-text-muted hover:text-status-error"
                   aria-label={`remove ${agent.name}`}
                   onclick={() => (removeConfirmName = agent.name)}
                 >

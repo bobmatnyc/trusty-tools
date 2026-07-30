@@ -102,17 +102,24 @@
   --color-sidebar-active: 56 37 19; /* #382513 */
 }
 
-/* Issue #3447 item 3 — Bob: "10% larger base font." A rem-scale bump on the
+/* Issue #3447 — Bob: "base font still too small." A rem-scale bump on the
  * root element: every Tailwind utility class in this codebase (`text-xs`,
- * `text-[11px]`, `p-4`, etc.) that resolves to a `rem` value scales with it
- * automatically, so this one line reaches the whole app rather than
- * touching each component. Arbitrary `px`-bracket utilities (`text-[11px]`,
- * `w-[46px]`) do NOT scale (Tailwind emits those as literal `px`, not
- * `rem`) — verified by manual inspection (`pnpm build` + `pnpm test`, see
- * the PR's own gate output) that no rail/header/switcher/input-bar text
- * clips or overflows at the new size; nothing needed adjusting. */
+ * `p-4`, etc.) that resolves to a `rem` value scales with it automatically,
+ * so this one line reaches the whole app rather than touching each
+ * component. PR #3460 first tried a 110% bump but it barely moved the
+ * needle — most of the UI's small labels/badges/status text were written
+ * as Tailwind arbitrary `px`-bracket utilities (`text-[11px]`, `text-[10px]`,
+ * `text-[9px]`), which Tailwind emits as literal `px`, NOT `rem` — those
+ * never scaled with this root at all. Fixed by converting every such
+ * literal to its rem equivalent (`text-[11px]` -> `text-[0.6875rem]`, etc.,
+ * see components/*.svelte) so they inherit this multiplier like every
+ * other token; relative hierarchy between the 9/10/11px tiers is preserved
+ * exactly since each keeps its own distinct rem value. Root bumped again to
+ * 120% on top of that fix for a perceptibly larger base. Arbitrary
+ * `w-[Npx]`-style *non-text* utilities are unaffected by design — only
+ * font-size needed to track the root. */
 html {
-  font-size: 110%;
+  font-size: 120%;
 }
 
 html,

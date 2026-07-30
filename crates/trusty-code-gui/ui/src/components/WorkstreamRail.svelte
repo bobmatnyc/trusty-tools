@@ -161,7 +161,7 @@
       <button
         type="button"
         onclick={() => (railView = 'workstream')}
-        class={`flex-1 rounded-sm px-2 py-1 font-mono text-[10px] font-semibold uppercase tracking-wide ${
+        class={`flex-1 rounded-sm px-2 py-1 font-mono text-[0.625rem] font-semibold uppercase tracking-wide ${
           railView === 'workstream'
             ? 'bg-trusty-sidebar-active text-trusty-sidebar-text'
             : 'text-trusty-sidebar-muted hover:text-trusty-sidebar-text'
@@ -172,7 +172,7 @@
       <button
         type="button"
         onclick={() => (railView = 'project')}
-        class={`flex-1 rounded-sm px-2 py-1 font-mono text-[10px] font-semibold uppercase tracking-wide ${
+        class={`flex-1 rounded-sm px-2 py-1 font-mono text-[0.625rem] font-semibold uppercase tracking-wide ${
           railView === 'project'
             ? 'bg-trusty-sidebar-active text-trusty-sidebar-text'
             : 'text-trusty-sidebar-muted hover:text-trusty-sidebar-text'
@@ -189,40 +189,40 @@
             class="rounded-sm border-l-4 border-status-warn bg-trusty-sidebar-active px-2 py-1.5"
             title={activeSession.id}
           >
-            <p class="font-mono text-[11px] font-semibold uppercase tracking-wide">
+            <p class="font-mono text-[0.6875rem] font-semibold uppercase tracking-wide">
               {activeSession.status}
             </p>
-            <p class="truncate text-[11px] text-trusty-sidebar-muted">
+            <p class="truncate text-[0.6875rem] text-trusty-sidebar-muted">
               {activeSession.project ?? 'projectless'}
             </p>
           </div>
         {:else}
-          <p class="px-1 py-2 text-[11px] text-trusty-sidebar-muted">
+          <p class="px-1 py-2 text-[0.6875rem] text-trusty-sidebar-muted">
             no active workstream yet — start working from the Workstream tab
           </p>
         {/if}
       {:else if projectPhase === 'loading'}
-        <p class="px-1 py-2 text-[11px] text-trusty-sidebar-muted">loading…</p>
+        <p class="px-1 py-2 text-[0.6875rem] text-trusty-sidebar-muted">loading…</p>
       {:else if projectPhase === 'daemon-unreachable'}
-        <p class="px-1 py-2 text-[11px] text-status-error">
+        <p class="px-1 py-2 text-[0.6875rem] text-status-error">
           daemon unreachable{projectError ? ` — ${projectError}` : ''}
         </p>
       {:else}
         {#if projectSource === 'fs_only'}
-          <p class="rounded-sm bg-status-warn/10 px-2 py-1.5 text-[10px] text-status-warn">
+          <p class="rounded-sm bg-status-warn/10 px-2 py-1.5 text-[0.625rem] text-status-warn">
             shared registry unavailable — showing local checkouts only
           </p>
         {/if}
 
         {#if projectEntries.length === 0}
-          <p class="px-1 py-2 text-[11px] text-trusty-sidebar-muted">no known projects found</p>
+          <p class="px-1 py-2 text-[0.6875rem] text-trusty-sidebar-muted">no known projects found</p>
         {:else}
           {#each projectEntries as entry (entry.path)}
             <button
               type="button"
               title={entry.path}
               onclick={() => pickProject(entry)}
-              class={`flex w-full items-center justify-between gap-2 truncate rounded-sm px-2 py-1.5 text-left font-mono text-[11px] ${
+              class={`flex w-full items-center justify-between gap-2 truncate rounded-sm px-2 py-1.5 text-left font-mono text-[0.6875rem] ${
                 selectedProjectState.project?.path === entry.path
                   ? 'bg-trusty-sidebar-active text-trusty-sidebar-text'
                   : 'text-trusty-sidebar-muted hover:text-trusty-sidebar-text'
@@ -230,7 +230,7 @@
             >
               <span class="truncate">{projectCandidateLabel(entry)}</span>
               {#if !entry.registered}
-                <span class="shrink-0 text-[10px] uppercase tracking-wide">local only</span>
+                <span class="shrink-0 text-[0.625rem] uppercase tracking-wide">local only</span>
               {/if}
             </button>
           {/each}
@@ -239,7 +239,7 @@
         <button
           type="button"
           onclick={pickProjectless}
-          class={`w-full rounded-sm border-1.5 border-dashed px-2 py-1.5 text-center font-mono text-[11px] uppercase tracking-wide ${
+          class={`w-full rounded-sm border-1.5 border-dashed px-2 py-1.5 text-center font-mono text-[0.6875rem] uppercase tracking-wide ${
             selectedProjectState.project === null
               ? 'border-trusty-sidebar-active text-trusty-sidebar-text'
               : 'border-trusty-sidebar-border text-trusty-sidebar-muted hover:text-trusty-sidebar-text'

@@ -644,14 +644,14 @@
       <button
         type="button"
         onclick={openPicker}
-        class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+        class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-1.5 py-0.5 font-mono text-[0.625rem] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
       >
         choose project
       </button>
       {#if selectedProjectState.project}
         <button
           type="button"
-          class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
+          class="font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
           onclick={clearSelection}
         >
           clear

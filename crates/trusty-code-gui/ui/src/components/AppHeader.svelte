@@ -42,7 +42,7 @@
 
   <div class="flex items-center gap-3">
     <span
-      class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted"
+      class="font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-muted"
       title="Global tokens/cost readout — live cost tracking is issue #3254, not yet shipped"
     >
       tokens: — · cost: —
@@ -52,7 +52,7 @@
       disabled
       aria-label="settings"
       title="Settings — not yet implemented"
-      class="rounded-sm border-1.5 border-trusty-border bg-trusty-card px-1.5 py-1 font-mono text-[11px] text-trusty-text-muted disabled:cursor-not-allowed disabled:opacity-50"
+      class="rounded-sm border-1.5 border-trusty-border bg-trusty-card px-1.5 py-1 font-mono text-[0.6875rem] text-trusty-text-muted disabled:cursor-not-allowed disabled:opacity-50"
     >
       ⚙
     </button>

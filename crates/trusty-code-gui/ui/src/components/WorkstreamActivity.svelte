@@ -656,12 +656,12 @@
     <div
       class="flex shrink-0 items-center justify-between gap-2 border-b border-trusty-border bg-trusty-raised px-4 py-2"
     >
-      <span class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary">
+      <span class="font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-secondary">
         {workstreamLabel(activeWorkstream)}
       </span>
       <div class="flex items-center gap-3">
         {#if session}
-          <span class="flex items-center gap-2 font-mono text-[11px]">
+          <span class="flex items-center gap-2 font-mono text-[0.6875rem]">
             <span class={`h-1.5 w-1.5 rounded-full ${statusDotClass(session.status)}`}></span>
             <span class="font-semibold uppercase tracking-wide text-trusty-text">{session.status}</span>
             <span class="text-trusty-text-muted">·</span>
@@ -671,7 +671,7 @@
         {#if canDownload}
           <button
             type="button"
-            class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+            class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-2.5 py-1 font-mono text-[0.6875rem] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
             title="Download this workstream's full transcript as a Markdown file"
             onclick={downloadTranscript}
           >
@@ -735,31 +735,31 @@
           {#if cancelPhase === 'idle'}
             <button
               type="button"
-              class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+              class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-2.5 py-1 font-mono text-[0.6875rem] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
               onclick={() => (cancelPhase = 'confirming')}
             >
               cancel
             </button>
           {:else if cancelPhase === 'confirming'}
-            <span class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted"
+            <span class="font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-muted"
               >confirm cancel?</span
             >
             <button
               type="button"
-              class="rounded-sm border-1.5 border-trusty-primary bg-trusty-primary/10 px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-primary-hover hover:bg-trusty-primary hover:text-trusty-text-inverse"
+              class="rounded-sm border-1.5 border-trusty-primary bg-trusty-primary/10 px-2.5 py-1 font-mono text-[0.6875rem] font-semibold uppercase tracking-wide text-trusty-primary-hover hover:bg-trusty-primary hover:text-trusty-text-inverse"
               onclick={doCancel}
             >
               confirm cancel
             </button>
             <button
               type="button"
-              class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+              class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2.5 py-1 font-mono text-[0.6875rem] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
               onclick={() => (cancelPhase = 'idle')}
             >
               never mind
             </button>
           {:else}
-            <span class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted"
+            <span class="font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-muted"
               >cancelling…</span
             >
           {/if}
@@ -768,7 +768,7 @@
     {/if}
 
     <p
-      class="shrink-0 border-t border-trusty-border px-4 py-1 text-[11px] text-trusty-text-muted"
+      class="shrink-0 border-t border-trusty-border px-4 py-1 text-[0.6875rem] text-trusty-text-muted"
       title={`DOC-39 §4.6 AC-6.3's live search/memory-recall monitor (lane/query/hit_count/latency, docked-rail → inline settle) is not implemented here — GET /sessions/{id}/search-audit now exists (issue #3072) but this card has not been wired to it yet. Tracked at ${SEARCH_RECALL_GAP_ISSUE}`}
     >
       search/recall monitor (AC-6.3): not yet implemented — see issue #3108

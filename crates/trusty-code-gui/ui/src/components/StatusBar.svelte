@@ -204,7 +204,7 @@
 </script>
 
 <footer
-  class="statusbar flex items-center justify-between gap-4 border-t border-trusty-border bg-trusty-raised px-4 py-2 font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary"
+  class="statusbar flex items-center justify-between gap-4 border-t border-trusty-border bg-trusty-raised px-4 py-2 font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-secondary"
 >
   {#if phase === 'connecting'}
     <span class="text-trusty-text-muted">connecting…</span>

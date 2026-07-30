@@ -54,7 +54,7 @@
       disabled={visibility.locked}
       title={visibility.locked ? `${tab.label} — locked until a project is bound` : tab.label}
       onclick={() => onSelect(tab.id)}
-      class={`flex items-center gap-1.5 border-b-2 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wide disabled:cursor-not-allowed disabled:opacity-40 ${
+      class={`flex items-center gap-1.5 border-b-2 px-3 py-2 font-mono text-[0.6875rem] font-semibold uppercase tracking-wide disabled:cursor-not-allowed disabled:opacity-40 ${
         activeTab === tab.id
           ? 'border-trusty-primary text-trusty-primary'
           : 'border-transparent text-trusty-text-secondary hover:text-trusty-text'
