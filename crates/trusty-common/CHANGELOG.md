@@ -25,6 +25,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`claude_config::quarantine_path`** — computes a unique, timestamped
+  quarantine name (`<path>.corrupt-<UTC stamp>`) for a corrupt config file
+  ([#4206](https://github.com/bobmatnyc/trusty-tools/issues/4206)). Two
+  independent trusty-mpm writers previously renamed a malformed `.claude.json`
+  to the same fixed `.claude.json.corrupt`, so a second quarantine silently
+  destroyed the first one's bytes. Purely additive: no existing behaviour
+  changes.
+
 - `json_rmw`: cross-process locked read-modify-write for whole-file JSON
   documents — the single implementation of the load → mutate → save critical
   section that `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s

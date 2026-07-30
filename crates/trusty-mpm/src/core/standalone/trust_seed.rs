@@ -73,6 +73,107 @@ use std::path::Path;
 
 use crate::core::mcp_config::managed_mcp_server_names;
 
+/// The exact set of keys [`preseed_managed_trust`] itself writes into a
+/// `projects.<workspace>` entry.
+///
+/// Why (issue #4206): [`prune_stale_project_entries`] must distinguish a
+/// SEEDER DROPPING (an entry this function created for a directory that no
+/// longer exists — 2,520 of 2,541 entries in the reporting operator's config)
+/// from REAL USER STATE that Claude Code itself accumulated (`lastSessionId`,
+/// `lastCost`, `mcpServers`, `history`, …). The observed distribution is
+/// sharply bimodal — droppings carry exactly these four keys, real entries
+/// carried 15–33 — so "the entry's key set is a subset of what the seeder
+/// writes" is a precise, non-heuristic test for "nothing but this function has
+/// ever touched this entry".
+/// What: the four keys written below (`hasTrustDialogAccepted`,
+/// `hasCompletedProjectOnboarding`, `projectOnboardingSeenCount`,
+/// `enabledMcpjsonServers`). MUST be kept in sync with the writes at the end
+/// of [`preseed_managed_trust`] — adding a key there without adding it here
+/// only makes the prune MORE conservative (entries stop looking pure and are
+/// kept), never more destructive, so the failure mode of drift is safe.
+/// Test: `prune_keeps_entry_with_runtime_fields`.
+const SEEDER_WRITTEN_KEYS: &[&str] = &[
+    "hasTrustDialogAccepted",
+    "hasCompletedProjectOnboarding",
+    "projectOnboardingSeenCount",
+    "enabledMcpjsonServers",
+];
+
+/// Whether `dir` is DEFINITIVELY absent from the filesystem.
+///
+/// Why (issue #4206): this is the load-bearing safety predicate of the prune.
+/// Deleting an entry because its directory "looks missing" must never fire for
+/// a directory that is merely temporarily unreachable — an unmounted volume, a
+/// network mount that is down, a permission error, a filesystem returning
+/// `EIO`. This project has repeatedly shipped the opposite bug (a failure
+/// branch treating an ambiguous observation as a definite negative and
+/// advancing state anyway), so the rule here is deliberately asymmetric:
+/// `NotFound` is the ONLY error the OS reports that actually means "this path
+/// does not exist", and every other outcome — including success — keeps the
+/// entry.
+/// What: `symlink_metadata` (NOT `metadata`) so a dangling symlink counts as
+/// PRESENT: the link itself exists, and its target may simply be an unmounted
+/// volume. Returns `true` only on `ErrorKind::NotFound`; any other error kind
+/// (`PermissionDenied`, `NotADirectory`, or a platform-specific I/O fault)
+/// returns `false` — keep the entry.
+/// Test: `prune_keeps_entry_when_path_error_is_ambiguous`,
+///   `prune_drops_entry_when_directory_definitively_absent`.
+fn is_definitively_absent(dir: &Path) -> bool {
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => false,
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Drop `projects` entries that are pure seeder droppings for directories that
+/// are definitively gone, returning how many were removed.
+///
+/// Why (issue #4206): the seeder only ever ADDED entries, so a config that had
+/// accumulated 2,541 `projects` keys — 2,445 of them `tempfile::TempDir`
+/// paths — had no mechanism to ever shrink. Pruning during the read-modify-
+/// write that is already happening makes the file self-healing with no new
+/// command, no background job, and no extra I/O beyond one `symlink_metadata`
+/// per entry.
+/// What: removes an entry only when BOTH conditions hold —
+/// (1) [`is_definitively_absent`] for its path key, AND
+/// (2) its object carries no key outside [`SEEDER_WRITTEN_KEYS`].
+/// The conjunction is the point: either test alone would be unsafe.
+/// Condition (1) alone would delete a real, actively-used project sitting on a
+/// temporarily-unmounted volume; condition (2) alone would delete a
+/// freshly-seeded entry for a directory that still exists. `keep_key` (the
+/// workspace being seeded this run) is never pruned. Non-object entries are
+/// left untouched — this function only removes what it can positively
+/// identify.
+/// Test: `prune_drops_entry_when_directory_definitively_absent`,
+///   `prune_keeps_entry_when_path_error_is_ambiguous`,
+///   `prune_keeps_entry_with_runtime_fields`.
+fn prune_stale_project_entries(
+    projects: &mut serde_json::Map<String, serde_json::Value>,
+    keep_key: &str,
+) -> usize {
+    let before = projects.len();
+    projects.retain(|key, entry| {
+        if key == keep_key {
+            return true;
+        }
+        let Some(obj) = entry.as_object() else {
+            // Not an object — not something this seeder wrote. Leave it alone.
+            return true;
+        };
+        let is_pure_seeder_entry = obj
+            .keys()
+            .all(|k| SEEDER_WRITTEN_KEYS.contains(&k.as_str()));
+        if !is_pure_seeder_entry {
+            // Carries Claude Code's own runtime state (lastSessionId, lastCost,
+            // mcpServers, …) — real user state, never a seeder dropping. Keep
+            // it even when the path is gone.
+            return true;
+        }
+        !is_definitively_absent(Path::new(key))
+    });
+    before - projects.len()
+}
+
 /// Pre-seed project trust and MCP-server approval into `<claude_config_dir>/.claude.json`.
 ///
 /// Why (WI-3 sub-parts 2+3): Claude Code shows two blocking dialogs for unfamiliar
@@ -155,15 +256,28 @@ pub fn preseed_managed_trust(
                 // corrupt file so trust seeding can proceed from a fresh `{}`.
                 // A malformed .claude.json would otherwise permanently block
                 // trust seeding (managed sessions see the trust dialog forever).
-                let corrupt_path = claude_json.with_extension("json.corrupt");
+                //
+                // Issue #4206: the quarantine name is TIMESTAMPED
+                // (`trusty_common::claude_config::quarantine_path`) rather than
+                // the fixed `.claude.json.corrupt` this used to use. The fixed
+                // name meant a second quarantine — here or in the sibling
+                // writer `core::mcp_config::read_config` — silently overwrote
+                // the first, destroying the only record of the first failure.
+                let corrupt_path = trusty_common::claude_config::quarantine_path(&claude_json);
+                // ERROR, not warn: losing a `.claude.json` (OAuth state + every
+                // project's trust) is an operator-visible data-loss event. The
+                // workspace's error-capture layer filters on `!= Level::ERROR`
+                // and is only composed for the Daemon and Supervisor commands,
+                // so a `warn!` here reached NO diagnostic surface at all —
+                // verified: no `quarantin*` line has ever reached `daemon.log`.
                 match std::fs::rename(&claude_json, &corrupt_path) {
-                    Ok(()) => tracing::warn!(
+                    Ok(()) => tracing::error!(
                         "managed trust pre-seed: {} is not valid JSON ({err}); \
                          quarantined to {} — proceeding with fresh config",
                         claude_json.display(),
                         corrupt_path.display()
                     ),
-                    Err(rename_err) => tracing::warn!(
+                    Err(rename_err) => tracing::error!(
                         "managed trust pre-seed: {} is not valid JSON ({err}); \
                          quarantine rename failed ({rename_err}) — proceeding with fresh config",
                         claude_json.display()
@@ -220,6 +334,21 @@ pub fn preseed_managed_trust(
     }
     let projects = projects.as_object_mut().expect("projects is an object");
 
+    // Issue #4206: bound the growth of this file during the read-modify-write
+    // that is already in flight. Only entries that are BOTH definitively gone
+    // from disk AND carry nothing but this seeder's own keys are removed — see
+    // `prune_stale_project_entries` for why the conjunction, and why an
+    // ambiguous filesystem error keeps the entry.
+    let pruned = prune_stale_project_entries(projects, &workspace_key);
+    if pruned > 0 {
+        tracing::info!(
+            "managed trust pre-seed: pruned {pruned} stale project entr{} from {} \
+             (directory definitively absent and entry carried no Claude Code runtime state)",
+            if pruned == 1 { "y" } else { "ies" },
+            claude_json.display()
+        );
+    }
+
     let entry = projects
         .entry(workspace_key)
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
@@ -230,7 +359,14 @@ pub fn preseed_managed_trust(
 
     // Idempotent: skip the write when all fields are already fully set AND the
     // MCP list already matches the canonical server set.
-    let already_seeded = entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true))
+    //
+    // Issue #4206: `pruned == 0` is part of the condition. Without it, a run
+    // that pruned stale entries but found this workspace already seeded would
+    // return here and DISCARD the prune — the file could then never shrink on
+    // the (very common) repeat-launch path, which is exactly the path that let
+    // it reach 2,541 entries.
+    let already_seeded = pruned == 0
+        && entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true))
         && entry.get("hasCompletedProjectOnboarding") == Some(&Value::Bool(true))
         && entry
             .get("projectOnboardingSeenCount")

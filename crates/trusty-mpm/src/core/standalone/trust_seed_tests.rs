@@ -13,6 +13,59 @@
 use super::*;
 use tempfile::TempDir;
 
+/// Every timestamped quarantine sibling currently sitting in `cfg`.
+///
+/// Why (issue #4206): the quarantine name is no longer the fixed
+/// `.claude.json.corrupt`, so tests must match the
+/// `.claude.json.corrupt-<timestamp>` family by prefix. Centralising the match
+/// keeps the "how many quarantine events happened" question answerable in one
+/// place.
+/// What: file names under `cfg` starting with `.claude.json.corrupt`, sorted
+/// for deterministic assertion messages.
+fn quarantine_files(cfg: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(cfg)
+        .expect("config dir must be readable")
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|n| n.starts_with(".claude.json.corrupt"))
+        .collect();
+    found.sort();
+    found
+}
+
+/// Build a `.claude.json` whose `projects` map is exactly `entries`.
+///
+/// Why: the prune tests (issue #4206) all need a pre-populated config with
+/// hand-crafted project entries; inlining the JSON assembly in each obscured
+/// what each test was actually varying.
+/// What: writes `{"projects": {<entries>}}` to `<cfg>/.claude.json`.
+fn write_config_with_projects(cfg: &Path, entries: serde_json::Value) {
+    let config = serde_json::json!({ "projects": entries });
+    std::fs::write(
+        cfg.join(".claude.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Read back `projects` from `<cfg>/.claude.json`.
+fn read_projects(cfg: &Path) -> serde_json::Map<String, serde_json::Value> {
+    let text = std::fs::read_to_string(cfg.join(".claude.json")).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+    val["projects"].as_object().cloned().unwrap_or_default()
+}
+
+/// A `projects` entry carrying only the four keys the seeder itself writes —
+/// i.e. what a leaked test-fixture entry looks like on disk.
+fn seeder_only_entry() -> serde_json::Value {
+    serde_json::json!({
+        "hasTrustDialogAccepted": true,
+        "hasCompletedProjectOnboarding": true,
+        "projectOnboardingSeenCount": 1,
+        "enabledMcpjsonServers": ["trusty-mpm"],
+    })
+}
+
 // WI-3 TRUST-SEED: preseed_managed_trust must write trust keys for the workspace.
 #[test]
 fn test_preseed_managed_trust_marks_directory() {
@@ -407,9 +460,14 @@ fn test_preseed_managed_trust_quarantines_malformed_json() {
     preseed_managed_trust(&cfg, &workspace, true, true, true, true).unwrap();
 
     // The quarantine sibling must exist (corrupt file was renamed, not deleted).
-    assert!(
-        cfg.join(".claude.json.corrupt").exists(),
-        ".claude.json.corrupt quarantine file must exist after malformed-JSON quarantine"
+    // Issue #4206: the name is now TIMESTAMPED (`.claude.json.corrupt-<stamp>`)
+    // rather than the fixed `.claude.json.corrupt`, so match by prefix.
+    let quarantined = quarantine_files(&cfg);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "exactly one timestamped quarantine file must exist after malformed-JSON \
+         quarantine, found: {quarantined:?}"
     );
 
     // The new .claude.json must be valid JSON containing the seeded trust keys.
@@ -686,4 +744,211 @@ fn test_preseed_managed_trust_excludes_unconditional_builtin_when_pin_failed() {
     assert!(names.contains(&"trusty-review"));
     assert!(names.contains(&"trusty-memory"));
     assert!(names.contains(&"trusty-search"));
+}
+
+// ─── issue #4206: bounded growth (the prune) ──────────────────────────────
+
+// Issue #4206 TEST 2 — a `projects` entry whose directory is DEFINITIVELY
+// absent (a plain ENOENT: the path simply does not exist) and which carries
+// nothing but the four keys this seeder writes is a leaked test-fixture
+// dropping. It must be removed during the read-modify-write that is already
+// happening, so the file can shrink instead of only ever growing. Before this
+// fix `preseed_managed_trust` had no removal path at all and the reporting
+// operator's config had reached 2,541 entries, 2,445 of them tempdir paths.
+#[test]
+fn prune_drops_entry_when_directory_definitively_absent() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let workspace = tmp.path().join("live-repo");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    // A path that has never existed and whose parent DOES exist, so the OS
+    // reports a clean ENOENT rather than anything ambiguous.
+    let vanished = tmp.path().join("vanished-fixture-dir");
+    assert!(!vanished.exists(), "precondition: the path must not exist");
+
+    write_config_with_projects(
+        &cfg,
+        serde_json::json!({
+            vanished.to_string_lossy(): seeder_only_entry(),
+            workspace.to_string_lossy(): seeder_only_entry(),
+        }),
+    );
+
+    preseed_managed_trust(&cfg, &workspace, true, true, true, true).unwrap();
+
+    let projects = read_projects(&cfg);
+    assert!(
+        !projects.contains_key(vanished.to_string_lossy().as_ref()),
+        "a pure-seeder entry for a definitively-absent directory must be pruned: {:?}",
+        projects.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        projects.contains_key(workspace.to_string_lossy().as_ref()),
+        "the live workspace entry must survive the prune"
+    );
+}
+
+// Issue #4206 TEST 3 — THE ANTI-OVER-DELETION TEST, and the one that matters
+// most. An entry whose path cannot be resolved for an AMBIGUOUS reason must be
+// KEPT. "The directory did not stat" is NOT the same claim as "the directory
+// does not exist": an unmounted volume, a down network mount, a permission
+// error, or an I/O fault all fail to stat while the user's real project is
+// perfectly intact behind them. Deleting on that signal would silently destroy
+// live trust state. This project shipped two bugs in the opposite direction
+// (an ambiguous observation treated as a definite negative) on the same day
+// this fix was written, so the prune treats ONLY a clean `NotFound` as absent.
+//
+// The ambiguity here is produced by ENOTDIR — a regular FILE occupying what
+// the entry key uses as a parent directory, so `symlink_metadata` on the child
+// fails with a non-`NotFound` error. Chosen over a chmod-000 directory because
+// it reproduces identically whether or not the test runs as root, so the
+// assertion can never silently degrade into a vacuous pass in a container.
+#[test]
+fn prune_keeps_entry_when_path_error_is_ambiguous() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let workspace = tmp.path().join("live-repo");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    // A regular file standing where a directory would have to be.
+    let blocker = tmp.path().join("not-a-directory");
+    std::fs::write(&blocker, b"regular file").unwrap();
+    let unreachable = blocker.join("project");
+
+    // Assert the precondition this test depends on: the error really is
+    // ambiguous, NOT NotFound. Without this the test could pass for the wrong
+    // reason on a platform that reports ENOENT here.
+    let err =
+        std::fs::symlink_metadata(&unreachable).expect_err("stat through a regular file must fail");
+    assert_ne!(
+        err.kind(),
+        std::io::ErrorKind::NotFound,
+        "precondition: this path must fail AMBIGUOUSLY, not with NotFound — \
+         otherwise this test is not exercising the over-deletion guard (got {err:?})"
+    );
+
+    write_config_with_projects(
+        &cfg,
+        serde_json::json!({
+            unreachable.to_string_lossy(): seeder_only_entry(),
+            workspace.to_string_lossy(): seeder_only_entry(),
+        }),
+    );
+
+    preseed_managed_trust(&cfg, &workspace, true, true, true, true).unwrap();
+
+    let projects = read_projects(&cfg);
+    assert!(
+        projects.contains_key(unreachable.to_string_lossy().as_ref()),
+        "an entry whose path is unreachable for an AMBIGUOUS reason must be KEPT — \
+         only a definitive NotFound may prune: {:?}",
+        projects.keys().collect::<Vec<_>>()
+    );
+}
+
+// Issue #4206 TEST 4 — an entry carrying Claude Code's OWN runtime state
+// (`lastSessionId`, `lastCost`, `mcpServers`, `history`, …) represents real
+// user work, not a seeder dropping, and must survive even when its directory
+// is definitively gone. A user whose project moved or whose volume is detached
+// must not silently lose their session history. Only 21 of the reporting
+// operator's 2,541 entries carried such fields — they are precisely the ones
+// worth protecting.
+#[test]
+fn prune_keeps_entry_with_runtime_fields() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let workspace = tmp.path().join("live-repo");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let gone = tmp.path().join("moved-away-project");
+    assert!(!gone.exists(), "precondition: the path must not exist");
+
+    write_config_with_projects(
+        &cfg,
+        serde_json::json!({
+            gone.to_string_lossy(): {
+                "hasTrustDialogAccepted": true,
+                "hasCompletedProjectOnboarding": true,
+                "projectOnboardingSeenCount": 3,
+                "enabledMcpjsonServers": ["trusty-mpm"],
+                // The distinguishing signal: real Claude Code runtime state.
+                "lastSessionId": "abc-123",
+                "lastCost": 4.2,
+                "mcpServers": { "custom": { "command": "x" } },
+            },
+            workspace.to_string_lossy(): seeder_only_entry(),
+        }),
+    );
+
+    preseed_managed_trust(&cfg, &workspace, true, true, true, true).unwrap();
+
+    let projects = read_projects(&cfg);
+    let kept = projects
+        .get(gone.to_string_lossy().as_ref())
+        .expect("an entry with Claude Code runtime fields must be KEPT even when its path is gone");
+    assert_eq!(
+        kept.get("lastSessionId").and_then(|v| v.as_str()),
+        Some("abc-123"),
+        "the preserved entry must keep its runtime state intact, not just its key"
+    );
+    assert!(
+        kept.get("mcpServers").is_some(),
+        "mcpServers must survive the prune"
+    );
+}
+
+// ─── issue #4206: legible quarantine ──────────────────────────────────────
+
+// Issue #4206 TEST 5 — two quarantine events must produce TWO distinct files.
+// Both writers used the fixed name `.claude.json.corrupt`, so a second
+// corruption silently overwrote the first one's bytes — erasing the only
+// record of the first failure in a file that also holds OAuth state. A
+// post-mortem could tell that corruption had happened at least once, and
+// nothing more.
+#[test]
+fn two_quarantine_events_produce_two_distinct_files() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let workspace = tmp.path().join("repo");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    // First corruption + quarantine.
+    std::fs::write(cfg.join(".claude.json"), b"{ first corruption !!!").unwrap();
+    preseed_managed_trust(&cfg, &workspace, true, true, true, true).unwrap();
+    assert_eq!(
+        quarantine_files(&cfg).len(),
+        1,
+        "first quarantine must produce exactly one file"
+    );
+
+    // Second, independent corruption + quarantine.
+    std::fs::write(cfg.join(".claude.json"), b"{ second corruption ???").unwrap();
+    preseed_managed_trust(&cfg, &workspace, true, true, true, true).unwrap();
+
+    let files = quarantine_files(&cfg);
+    assert_eq!(
+        files.len(),
+        2,
+        "two quarantine events must leave TWO distinct records, not overwrite one: {files:?}"
+    );
+
+    // And both sets of original bytes must still be recoverable — the whole
+    // point of quarantining rather than deleting.
+    let bodies: Vec<String> = files
+        .iter()
+        .map(|f| std::fs::read_to_string(cfg.join(f)).unwrap())
+        .collect();
+    assert!(
+        bodies.iter().any(|b| b.contains("first corruption")),
+        "the FIRST failure's bytes must survive the second quarantine: {bodies:?}"
+    );
+    assert!(
+        bodies.iter().any(|b| b.contains("second corruption")),
+        "the second failure's bytes must be preserved too: {bodies:?}"
+    );
 }

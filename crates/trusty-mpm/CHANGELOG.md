@@ -91,6 +91,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **The test suite no longer writes trust-seed entries into the operator's real
+  managed `.claude.json`**
+  ([#4206](https://github.com/bobmatnyc/trusty-tools/issues/4206)): five tests
+  drove the real spawn path (`ClaudeCodeAdapter::spawn`/`spawn_resume` →
+  `prepare_managed_config` → `preseed_managed_trust`) without redirecting
+  `$HOME`, so each one wrote a `projects.<tempdir>` entry straight into
+  `~/.trusty-tools/trusty-mpm/claude-config/.claude.json` — a file that also
+  holds `oauthAccount`. 2,443 of 2,538 entries in the reporting operator's
+  config were `tempfile::TempDir` paths as a result. Those tests now redirect
+  `$HOME` (the isolation seam `dirs::home_dir()` already honours), and a new
+  regression test locks the invariant at the layer they all funnel through.
+  **No production behaviour changes** — the resolver was never the defect; see
+  the PR body for why the originally-reported root cause ("takes no injectable
+  base") did not hold up, and why honouring an ambient `CLAUDE_CONFIG_DIR`
+  would have made the leak strictly worse.
+- **The managed `.claude.json` `projects` map is now self-healing**
+  ([#4206](https://github.com/bobmatnyc/trusty-tools/issues/4206)): during the
+  read-modify-write `preseed_managed_trust` already performs, entries are dropped
+  when — and only when — the directory is DEFINITIVELY absent (a clean
+  `NotFound`) **and** the entry carries nothing beyond the four keys the seeder
+  itself writes. An ambiguous filesystem error (unmounted volume, down network
+  mount, permission denied, I/O fault) always KEEPS the entry, and any entry
+  carrying Claude Code's own runtime state (`lastSessionId`, `lastCost`,
+  `mcpServers`, …) is preserved even when its path is gone. No new command, no
+  background job.
+- **A second config quarantine no longer destroys the record of the first**
+  ([#4206](https://github.com/bobmatnyc/trusty-tools/issues/4206)): the two
+  writers that quarantine a malformed `.claude.json` (`standalone::trust_seed`
+  and `core::mcp_config`) both used the fixed name `.claude.json.corrupt`, so
+  whichever ran second silently overwrote the first one's evidence. Both now
+  share `trusty_common::claude_config::quarantine_path`, which timestamps the
+  filename, and both log at `error!` rather than `warn!` — the workspace's
+  error-capture layer filters on `!= Level::ERROR`, so the previous `warn!`
+  reached no diagnostic surface at all.
 - keep the PM persona on in-place relaunch and test the exec seam ([#4340](https://github.com/bobmatnyc/trusty-tools/pull/4340)) ([`714f33e`](https://github.com/bobmatnyc/trusty-tools/commit/714f33ed52f681b6d884a1c380c46935a8f2450a))
   - `compose_inplace_args` omitted `--append-system-prompt-file`; now builds
     the prompt through the same `build_prompt_file` carrier `spawn`/

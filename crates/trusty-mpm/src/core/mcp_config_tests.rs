@@ -177,9 +177,20 @@ fn add_quarantines_malformed_json() {
     std::fs::write(cfg.join(CLAUDE_JSON), b"{ not valid json !!!").unwrap();
     // add must succeed despite the corrupt file.
     add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap();
-    assert!(
-        cfg.join(".claude.json.corrupt").exists(),
-        "corrupt file quarantined, not deleted"
+    // Issue #4206: the quarantine name is TIMESTAMPED
+    // (`.claude.json.corrupt-<stamp>`), not the fixed `.claude.json.corrupt`
+    // this used to assert — a fixed name let a second quarantine silently
+    // overwrite the first one's record. Match the family by prefix.
+    let quarantined: Vec<String> = std::fs::read_dir(&cfg)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|n| n.starts_with(".claude.json.corrupt"))
+        .collect();
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "corrupt file quarantined under a timestamped name, not deleted: {quarantined:?}"
     );
     let v: Value =
         serde_json::from_str(&std::fs::read_to_string(cfg.join(CLAUDE_JSON)).unwrap()).unwrap();

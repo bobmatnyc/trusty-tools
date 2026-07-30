@@ -695,7 +695,14 @@ use super::super::launch_on_main::{has_concurrent_main_checkout_session, spawn_m
 /// (#3455).
 /// Test: itself.
 #[tokio::test]
+#[serial_test::serial]
 async fn spawn_managed_on_main_creates_record_without_worktree() {
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    // #4206: `#[serial]` + `$HOME` override — see `HomeGuard` above. Without
+    // this, `spawn_managed_on_main`'s real Claude Code spawn path resolves
+    // `managed_claude_config_dir()` via the REAL `$HOME` and leaks a
+    // `projects.<tempdir>` entry into the operator's own `.claude.json`.
+    let _home = set_home(tmp_home.path());
     let data_root = tempfile::TempDir::new().expect("tmp data root");
     let state = std::sync::Arc::new(
         crate::daemon::state::DaemonState::with_root_isolated_managed(

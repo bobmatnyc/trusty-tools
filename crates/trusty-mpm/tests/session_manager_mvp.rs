@@ -931,10 +931,13 @@ fn write_fake_tm_binary(dir: &std::path::Path) -> PathBuf {
 /// outcome.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn resume_managed_backfills_missing_status_line() {
     // Hermetic framework root with FakeNoopTmuxDriver — no real tmux sessions
     // are created, so nothing can escape into the production store (#1790).
     let root = TempDir::new().unwrap();
+    // #4206: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = HomeGuard::set(root.path());
     let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
     let mgr = state.session_manager().await;
 
@@ -1016,8 +1019,11 @@ async fn resume_managed_backfills_missing_status_line() {
 /// pattern of not asserting on the spawn outcome.)
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn resume_managed_launches_despite_incomplete_deployment() {
     let root = TempDir::new().unwrap();
+    // #4206: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = HomeGuard::set(root.path());
     let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
     let mgr = state.session_manager().await;
 
@@ -1122,6 +1128,8 @@ async fn resume_managed_heals_stale_bare_status_line_command() {
     let _path_guard = PathGuard::prepend(fake_bin_dir.path());
 
     let root = TempDir::new().unwrap();
+    // #4206: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = HomeGuard::set(root.path());
     let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
     let mgr = state.session_manager().await;
 
@@ -1193,6 +1201,7 @@ async fn resume_managed_heals_stale_bare_status_line_command() {
 /// if the runtime binary is absent).
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn front_gate_answer_unblocks_spawn() {
     use trusty_mpm::daemon::managed_routes::spawn_runtime_for;
     use trusty_mpm::session_manager::ManagedSessionState;
@@ -1200,6 +1209,8 @@ async fn front_gate_answer_unblocks_spawn() {
     // FakeNoopTmuxDriver: no real tmux sessions are created — nothing can escape
     // into the production store (#1790).
     let root = TempDir::new().unwrap();
+    // #4206: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = HomeGuard::set(root.path());
     let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
     let mgr = state.session_manager().await;
 

@@ -641,18 +641,31 @@ fn read_config(config_dir: &Path) -> Result<(PathBuf, Value)> {
         Ok(v) if v.is_object() => Ok((path, v)),
         other => {
             // Valid-but-not-object OR malformed → quarantine, proceed fresh.
-            let corrupt = path.with_extension("json.corrupt");
+            //
+            // Issue #4206: TIMESTAMPED via the shared
+            // `trusty_common::claude_config::quarantine_path`, not the fixed
+            // `.claude.json.corrupt` this used to use. This function and
+            // `standalone::trust_seed::preseed_managed_trust` both quarantine
+            // the SAME file, so with a fixed name whichever ran second silently
+            // destroyed the first one's evidence. Sharing the helper keeps the
+            // two writers from drifting apart again.
+            let corrupt = trusty_common::claude_config::quarantine_path(&path);
             let reason = match &other {
                 Ok(_) => "valid JSON but not an object".to_string(),
                 Err(err) => format!("not valid JSON ({err})"),
             };
+            // ERROR, not warn: this discards a `.claude.json` holding OAuth
+            // state and every project's trust. `warn!` reaches no diagnostic
+            // surface in this workspace — the error-capture layer filters on
+            // `!= Level::ERROR` and is composed only for the Daemon and
+            // Supervisor commands.
             match std::fs::rename(&path, &corrupt) {
-                Ok(()) => tracing::warn!(
+                Ok(()) => tracing::error!(
                     "{} is {reason}; quarantined to {} — proceeding with fresh config",
                     path.display(),
                     corrupt.display()
                 ),
-                Err(rename_err) => tracing::warn!(
+                Err(rename_err) => tracing::error!(
                     "{} is {reason}; quarantine rename failed ({rename_err}) — \
                      proceeding with fresh config",
                     path.display()
