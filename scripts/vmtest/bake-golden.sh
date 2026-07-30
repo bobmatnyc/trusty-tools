@@ -172,6 +172,11 @@ cat "$LOGDIR/verify.txt"
 say "PURITY ASSERTION"
 set +e
 guest > "$LOGDIR/purity.txt" 2>&1 <<'PURITY'
+# We drive the guest with zsh (see header), and zsh ABORTS on a glob that matches
+# nothing instead of leaving the pattern literal the way sh does. Without this the
+# purity gate errors out on a *clean* image, i.e. it fails exactly when it should pass.
+setopt NULL_GLOB
+
 violations=0
 note() { echo "VIOLATION: $*"; violations=$((violations+1)); }
 
