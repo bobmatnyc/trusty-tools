@@ -1,19 +1,25 @@
-//! Real `Runner` backed by the OS (process spawns + PATH probes).
+//! Real `Runner` backed by the OS (process spawns + the shared health probe).
 //!
 //! Why: `ensure_member` (member.rs) is transport-agnostic; this is the concrete
-//! implementation that actually probes each member's DOC-1 contract verbs over
-//! the OS — `which <binary>` for presence, `<binary> health --json` for
-//! liveness, `<binary> start` to bring it up, and `tctl install <member>` to
-//! auto-install an always-on member (RESOLVED Q1).
+//! implementation that actually brings members up over the OS — `<binary> start`
+//! to start one, and `tctl install <member>` to auto-install an always-on member
+//! (RESOLVED Q1).
 //!
-//! What: `SystemRunner` implements `Runner`. `probe` resolves the binary on
-//! PATH then parses the `health --json` envelope's `status` field into a
-//! `MemberHealth`; `start` and `install` spawn the corresponding command and
-//! map a non-zero exit into an `Err` with context.
+//! #4246: `probe` used to be its OWN health probe — a second copy of the
+//! `<binary> health --json` shell-out that `commands::probe` also had, divergent
+//! in two respects and wrong in the same way. It now delegates to the single
+//! shared probe, so `tctl up` and `tctl status` can never disagree about whether
+//! a daemon is up.
 //!
-//! Test: This file is side-effect-only (it spawns real subprocesses); its logic
-//! is covered indirectly by the `super::tests` matrix run against the mock
-//! `Runner`, and the JSON-status mapping is unit-tested via `classify_status`.
+//! What: `SystemRunner` implements `Runner`. `probe` delegates to
+//! `commands::probe::probe_member_health`; `start` and `install` spawn the
+//! corresponding command and map a non-zero exit into an `Err` with context.
+//! [`classify_status`] — the shared `status`-word vocabulary — lives here for
+//! historical reasons and is used by `probe_http` as well as by `up`.
+//!
+//! Test: the spawning halves are side-effect-only; their control flow is covered
+//! by the `super::tests` matrix run against the mock `Runner`, and
+//! `classify_status` is unit-tested directly.
 
 use std::process::Command;
 
@@ -41,51 +47,62 @@ impl SystemRunner {
     }
 }
 
-/// Map a DOC-1 `health --json` `status` string to a `MemberHealth` verdict.
+/// Map a daemon `/health` envelope's `status` string to a `MemberHealth` verdict.
 ///
-/// Why: The probe parses the contract envelope's `status` field; isolating the
-/// mapping makes the (otherwise side-effecting) probe partially unit-testable.
+/// Why: the probe classifies the envelope's `status` field; isolating the
+/// mapping makes the (otherwise side-effecting) probe unit-testable and keeps
+/// ONE vocabulary shared by `tctl up`, `status`, `stack` and the verify tail.
 ///
-/// What: `"healthy"`/`"ok"`/`"ready"` → `HealthyVersionOk`;
-/// `"stale"`/`"version_below_floor"`/`"degraded"` → `HealthyStale`; anything
-/// else (including `"down"`/`"error"`) → `Down`.
+/// #4246: `"running"`/`"serving"` were missing, so a daemon reporting the
+/// DOC-1 D4 vocabulary literally (`running | degraded | down`) fell through to
+/// `Down` — a false negative baked into the vocabulary itself, and one the test
+/// suite defended (`up::tests` asserted `"anything-else" → Down` where
+/// `"running"` IS "anything-else"). No shipped daemon emits `running` today
+/// (all six emit `ok`), so adding it changes nothing observable now and closes
+/// the trap for the next daemon that follows the spec.
 ///
-/// Test: `super::tests::classify_status_maps_known_values`.
+/// What: `"healthy"`/`"ok"`/`"ready"`/`"running"`/`"serving"` →
+/// `HealthyVersionOk`; `"stale"`/`"version_below_floor"`/`"degraded"` →
+/// `HealthyStale`; anything else (including `"down"`/`"error"`) → `Down`.
+///
+/// A genuinely unrecognised word still maps to `Down`, deliberately: that is a
+/// DISPLAY verdict only. Since #4246 the destructive repair is gated on
+/// [`super::super::probe_http::ProbeOutcome::is_confirmed_down`] — a
+/// transport-level observation — so an unknown status word can no longer
+/// kickstart anything.
+///
+/// Test: `super::tests::classify_status_maps_known_values`,
+/// `super::tests::classify_status_accepts_spec_vocabulary`.
 pub fn classify_status(status: &str) -> MemberHealth {
     match status.to_ascii_lowercase().as_str() {
-        "healthy" | "ok" | "ready" => MemberHealth::HealthyVersionOk,
+        "healthy" | "ok" | "ready" | "running" | "serving" => MemberHealth::HealthyVersionOk,
         "stale" | "version_below_floor" | "degraded" => MemberHealth::HealthyStale,
         _ => MemberHealth::Down,
     }
 }
 
 impl Runner for SystemRunner {
+    /// #4246: routes through the ONE shared probe
+    /// (`commands::probe::probe_member_health`) instead of carrying a second,
+    /// divergent copy of the same idea. The deleted version shelled out to
+    /// `<binary> health --json` — the contract no daemon implements — and differed
+    /// from the shared probe in two ways that were both bugs: it used bare
+    /// `which::which` for presence (so an installed-but-off-PATH binary read
+    /// `NotInstalled` and triggered a spurious full auto-reinstall, the #3876
+    /// failure class), and it mapped an unparseable 0-exit envelope to
+    /// `HealthyStale` rather than `Down`.
+    ///
+    /// Neither divergence could change what `tctl up` *does*: `ensure_member`
+    /// treats `HealthyStale` and `Down` identically (both fall through to
+    /// `start`). What DOES change, and is the point, is that a genuinely healthy
+    /// daemon now reads `HealthyVersionOk` and is reported a no-op instead of
+    /// being handed a redundant `start` — the same false-`down` class as the
+    /// verify tail's spurious kickstart, one layer up. trusty-mpm keeps its
+    /// pre-#4246 behaviour exactly: `OwnVerb` → `Unprobeable` → `Down` → `start`,
+    /// which is idempotent.
     fn probe(&self, member: &BootMember) -> MemberHealth {
-        // Presence first: a binary not on PATH is NotInstalled (drives auto-install).
-        if which::which(&member.binary).is_err() {
-            return MemberHealth::NotInstalled;
-        }
-        // CHECK / VERIFY: `<binary> health --json`. A non-2xx contract or an
-        // unparseable envelope means "not healthy" → Down (so the act step runs).
-        let out = Command::new(&member.binary)
-            .args(["health", "--json"])
-            .output();
-        let Ok(out) = out else {
-            return MemberHealth::Down;
-        };
-        if !out.status.success() {
-            return MemberHealth::Down;
-        }
-        let parsed: Result<serde_json::Value, _> = serde_json::from_slice(&out.stdout);
-        match parsed {
-            Ok(v) => {
-                let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("down");
-                classify_status(status)
-            }
-            // A 0-exit `health` with no/odd JSON: treat as alive-but-unknown =>
-            // stale rather than down so we do not bounce a possibly-healthy daemon.
-            Err(_) => MemberHealth::HealthyStale,
-        }
+        let manage = crate::commands::stable_set::manage_strategy_for(&member.binary, true);
+        crate::commands::probe::probe_member_health(&member.binary, manage).member_health()
     }
 
     fn start(&self, member: &BootMember) -> anyhow::Result<()> {
