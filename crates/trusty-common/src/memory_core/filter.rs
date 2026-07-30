@@ -673,6 +673,11 @@ fn looks_like_secret(token: &str) -> bool {
     if is_git_sha_like(token) {
         return false;
     }
+    // Allowlist issue/PR-number lists — issue #2800, same spirit as the SHA
+    // carve-out above.
+    if is_issue_number_list(token) {
+        return false;
+    }
     let lower = token.to_ascii_lowercase();
     if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) {
         return true;
@@ -711,6 +716,44 @@ fn looks_like_secret(token: &str) -> bool {
     // fires for tokens shaped like an actual bare credential (alphanumeric
     // plus the `-`/`_`/`.` separators used by JWTs and slug-style API keys).
     has_lower && has_upper && has_digit && is_plausible_credential_charset(token)
+}
+
+/// True when `token` is a slash-separated issue/PR-number list — built only
+/// from `#`, `/`, and ASCII digits, with at least one digit.
+///
+/// Why (issue #2800, observed live twice): PM session checkpoints routinely
+/// enumerate tickets as `#2763/#2774/#2780/#2782/#2790`. Such a token carries
+/// no letters at all, but the `/` separators set `has_b64_sym` and the digits
+/// set `has_digit`, so the base64-blob branch of [`looks_like_secret`] fired
+/// and the whole memory was rejected. The slash-path branch of
+/// [`is_structural_token`] does not rescue it because `#` is deliberately
+/// excluded from `is_word_segment` — and widening *that* set would loosen the
+/// structural bypass for every path and `key=value` token, which is a much
+/// larger blast radius than this false positive warrants. Agents worked around
+/// the rejection by rewording or dropping detail, silently degrading
+/// checkpoint fidelity.
+///
+/// Why this is safe as an allowlist: the `{#, /, 0-9}` charset has no
+/// character-class spread — no letters, so no base64, hex, or base32 alphabet
+/// can be expressed in it, and every known credential format contains letters
+/// (and none contains `#`). A single alphabetic character takes a token out of
+/// this exemption and back onto the normal heuristic path. The exemption is
+/// therefore a keyhole, not a hole: it is strictly narrower than the git-SHA
+/// carve-out above, which admits the full hex alphabet.
+///
+/// What: returns `true` iff `token` is non-empty, every char is `#`, `/`, or an
+/// ASCII digit, and at least one char is a digit. Note that
+/// [`find_secret_token`] trims a leading `#` before classification, so the
+/// trimmed form (`2763/#2774/…`) must satisfy this predicate too — it does,
+/// since the charset is closed under that trim.
+/// Test: `slash_separated_pr_number_list_not_flagged`,
+/// `real_secrets_still_blocked_after_2800_exemption`.
+fn is_issue_number_list(token: &str) -> bool {
+    !token.is_empty()
+        && token.bytes().any(|b| b.is_ascii_digit())
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'#' | b'/'))
 }
 
 /// True when every character in `token` could plausibly appear in a bare
