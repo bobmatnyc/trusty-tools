@@ -341,7 +341,36 @@ impl SessionManager {
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
         let managed_root = workspace_root(&config);
-        self.decommission_with_root(id, &managed_root, caller).await
+        self.decommission_with_root(id, &managed_root, caller, false)
+            .await
+    }
+
+    /// Tombstone a record WITHOUT ever touching the filesystem (owner request
+    /// 2026-07-29, critic HIGH finding #1).
+    ///
+    /// Why: `tm ls`/bare `tm`'s auto-prune sweep only knows a workspace was
+    /// ABSENT at listing time — a remount (network/removable volume) between
+    /// that probe and a real `decommission()` call could otherwise reach
+    /// `remove_dir_all` with live content back in place. This wrapper skips
+    /// BOTH removal branches entirely (never the worktree path, never the
+    /// owned-directory path) — there is no re-check to race, because there is
+    /// no removal attempt at all. If the workspace is genuinely gone there is
+    /// nothing to remove; if it reappeared, nothing is deleted. `caller: None`
+    /// — this is a daemon-internal sweep, never a session acting on its own
+    /// behalf.
+    /// What: [`decommission_with_root`](Self::decommission_with_root) with
+    /// `record_only = true`. The returned `bool` is always `false` (nothing is
+    /// ever removed by this path).
+    /// Test: `decommission_record_only_never_removes_existing_workspace`
+    /// (remount-race stand-in — a REAL, populated directory survives the call).
+    pub async fn decommission_record_only(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<(SessionRecord, bool), ManagedError> {
+        let config = TrustyToolsConfig::load();
+        let managed_root = workspace_root(&config);
+        self.decommission_with_root(id, &managed_root, None, true)
+            .await
     }
 
     /// Internal: decommission with an explicit managed root (test seam).
@@ -352,6 +381,9 @@ impl SessionManager {
     /// parallel tests; injecting the root avoids that entirely.
     /// What: identical teardown logic as the public `decommission` but resolves the
     /// managed root from the caller-supplied `managed_root` instead of the config.
+    /// `record_only` (owner request 2026-07-29): when `true`, BOTH removal
+    /// branches below are skipped unconditionally — see
+    /// [`decommission_record_only`](Self::decommission_record_only)'s doc.
     /// Returns `(SessionRecord, workspace_removed)` where `workspace_removed` is
     /// `true` ONLY when `remove_dir_all` actually ran — callers must not infer this
     /// from a post-call filesystem check (TOCTOU: owned workspace already absent
@@ -363,6 +395,7 @@ impl SessionManager {
         id: &ManagedSessionId,
         managed_root: &Path,
         caller: Option<ManagedSessionId>,
+        record_only: bool,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
@@ -403,8 +436,12 @@ impl SessionManager {
 
         // Guard: only remove the workspace directory if the SM provisioned it.
         // Track whether remove_dir_all ACTUALLY RAN (not inferred from filesystem).
+        // `record_only` (owner request 2026-07-29): skip BOTH removal branches
+        // below unconditionally — see `decommission_record_only`'s doc. The
+        // `workspace_still_on_disk` re-check further down still runs, so a
+        // genuinely-absent workspace is still cleared from the tombstone.
         let mut workspace_removed = false;
-        if let Some(ref ws) = record.workspace_path {
+        if !record_only && let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
                 // Unowned workspace (local-path spawn or adopt): never bulk-delete.
                 // #1840: EXCEPTION — in-project per-session worktrees live under
@@ -743,7 +780,7 @@ mod tests {
         let session_a = ManagedSessionId::new();
         let managed_root = crate::test_support::hermetic_temp_dir();
         let err = mgr
-            .decommission_with_root(&session_b, managed_root.path(), Some(session_a))
+            .decommission_with_root(&session_b, managed_root.path(), Some(session_a), false)
             .await
             .expect_err("session A must be refused decommissioning session B's live worktree");
         match err {
@@ -782,7 +819,7 @@ mod tests {
 
         let managed_root = crate::test_support::hermetic_temp_dir();
         let (record, _workspace_removed) = mgr
-            .decommission_with_root(&session_id, managed_root.path(), Some(session_id))
+            .decommission_with_root(&session_id, managed_root.path(), Some(session_id), false)
             .await
             .expect("self-decommission must be allowed");
         assert_eq!(record.state, ManagedSessionState::Decommissioned);
@@ -815,7 +852,7 @@ mod tests {
 
         let caller = ManagedSessionId::new();
         let managed_root = crate::test_support::hermetic_temp_dir();
-        mgr.decommission_with_root(&target, managed_root.path(), Some(caller))
+        mgr.decommission_with_root(&target, managed_root.path(), Some(caller), false)
             .await
             .expect(
                 "decommissioning an already-terminal, provably-ownerless target must be allowed",
@@ -844,7 +881,7 @@ mod tests {
 
         let managed_root = crate::test_support::hermetic_temp_dir();
         let (record, _workspace_removed) = mgr
-            .decommission_with_root(&session_id, managed_root.path(), None)
+            .decommission_with_root(&session_id, managed_root.path(), None, false)
             .await
             .expect("operator (caller=None) decommission must never be gated");
         assert_eq!(record.state, ManagedSessionState::Decommissioned);

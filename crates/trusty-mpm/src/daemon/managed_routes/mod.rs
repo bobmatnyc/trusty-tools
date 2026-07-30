@@ -825,20 +825,44 @@ pub async fn resume_managed_session(
     }
 }
 
+/// Query parameters for POST /api/v1/sessions/managed/{id}/decommission
+/// (owner request 2026-07-29, critic HIGH finding #1).
+///
+/// Why: the `tm ls`/bare `tm` auto-prune sweep must be structurally incapable
+/// of removing filesystem content — a remount between its listing-time probe
+/// and this call could otherwise reach a real `remove_dir_all`. Rather than
+/// trust every future caller to re-check, the route itself routes to a
+/// removal-free teardown when asked.
+/// What: `record_only` (default `false`, `#[serde(default)]` keeps every
+/// existing caller's plain POST unaffected) selects
+/// [`SessionManager::decommission_record_only`] instead of
+/// [`SessionManager::decommission`].
+/// Test: `decommission_record_only_never_removes_existing_workspace`
+/// (`session_manager::tests`).
+#[derive(Debug, serde::Deserialize)]
+pub struct DecommissionQuery {
+    #[serde(default)]
+    pub record_only: bool,
+}
+
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.
 ///
 /// Why: the ONLY operation that removes the workspace from disk. Unlike `stop`,
 /// decommission is terminal — no further `resume` is possible.
 /// What: delegates to SessionManager::decommission (kills runtime, removes
-/// workspace dir when owned, marks record Decommissioned). Returns a
-/// [`DecommissionResponse`] that includes `workspace_removed` so callers can
-/// display an honest message reflecting whether the filesystem was actually
-/// mutated (e.g. adopted/local-path workspaces are NEVER deleted).
+/// workspace dir when owned, marks record Decommissioned) — or, when
+/// `?record_only=true`, to [`SessionManager::decommission_record_only`]
+/// (never touches disk). Returns a [`DecommissionResponse`] that includes
+/// `workspace_removed` so callers can display an honest message reflecting
+/// whether the filesystem was actually mutated (e.g. adopted/local-path
+/// workspaces are NEVER deleted).
 /// Test: `manager_decommission_removes_workspace`;
-/// `decommission_workspace_removed_reflects_ownership`.
+/// `decommission_workspace_removed_reflects_ownership`;
+/// `decommission_record_only_never_removes_existing_workspace`.
 pub async fn decommission_managed_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
+    axum::extract::Query(q): axum::extract::Query<DecommissionQuery>,
 ) -> impl IntoResponse {
     let id = match parse_id(&id_str) {
         Ok(id) => id,
@@ -852,7 +876,12 @@ pub async fn decommission_managed_session(
     let pre = mgr.get(&id).await.ok();
     let pre_owned = pre.as_ref().map(|r| r.workspace_owned).unwrap_or(false);
     let pre_ws = pre.and_then(|r| r.workspace_path);
-    match mgr.decommission(&id, None).await {
+    let outcome = if q.record_only {
+        mgr.decommission_record_only(&id).await
+    } else {
+        mgr.decommission(&id, None).await
+    };
+    match outcome {
         Ok((record, workspace_removed)) => {
             // workspace_path_was: only meaningful for owned sessions (those where
             // `decommission_with_root` might have removed the directory).

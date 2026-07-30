@@ -1664,34 +1664,33 @@ fn local_session_needs_force_active_and_others_true() {
 }
 
 // ── auto-prune dead (unresumable) records at listing time (owner request
-// 2026-07-29) ─────────────────────────────────────────────────────────────
+// 2026-07-29; hardened per code-critic WARN, PR #4384 review) ──────────────
 //
-// `auto_prune_dead_records` partitions on the daemon-computed `unresumable`
-// flag and, for anything dead, drives the REAL `/decommission` HTTP route
-// against a hermetic loopback daemon (mirroring `LocalTestServer` above) —
-// proving the wiring, not just the pure partition logic.
+// `auto_prune_dead_records_at` partitions on the daemon-computed `unresumable`
+// flag and, for anything CONFIRMED dead (seen on two consecutive calls),
+// drives the REAL `/decommission?record_only=true` HTTP route against a
+// hermetic loopback daemon (mirroring `LocalTestServer` above) — proving the
+// wiring, not just the pure partition logic. Every test uses an explicit
+// tempdir-rooted marker path (`auto_prune_dead_records_at`), never the
+// production `auto_prune_dead_records` wrapper, which resolves the real
+// `~/.trusty-mpm` — tests must never touch the developer's real home dir.
 
-use crate::commands::session_picker_prune::auto_prune_dead_records;
+use crate::commands::session_picker_prune::auto_prune_dead_records_at;
 
-/// A dead (`unresumable`) session record disappears after
-/// `auto_prune_dead_records`, and the daemon's own store reflects the
-/// teardown (state flips to `decommissioned`, which the default live view
-/// hides) — never a client-side-only illusion of removal.
-#[tokio::test]
-async fn auto_prune_dead_records_removes_unresumable_records() {
-    let root = tempfile::TempDir::new().expect("tempdir");
-    let state = std::sync::Arc::new(
-        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
-    );
-    let mgr = state.session_manager().await;
-
-    // A workspace path that is NEVER created — every workdir candidate is
-    // therefore verifiably absent from disk, exactly `is_unresumable`'s gate.
-    let gone = root.path().join("gone-workspace");
+/// Seed one managed session whose workspace path is NEVER created on disk —
+/// every workdir candidate is therefore verifiably absent, exactly
+/// `is_unresumable`'s gate — and mark it `Errored` so it becomes
+/// `unresumable: true` on the next fetch. Returns the session id.
+async fn seed_dead_session(
+    mgr: &trusty_mpm::session_manager::SessionManager,
+    root: &std::path::Path,
+    label: &str,
+) -> trusty_mpm::session_manager::ManagedSessionId {
+    let gone = root.join(format!("gone-workspace-{label}"));
     let id = trusty_mpm::session_manager::ManagedSessionId::new();
     mgr.create_with_id(
         id,
-        "regression: auto-prune dead record".to_string(),
+        format!("regression: auto-prune dead record {label}"),
         Some(gone.clone()),
         None,
         Some(gone),
@@ -1706,40 +1705,103 @@ async fn auto_prune_dead_records_removes_unresumable_records() {
     mgr.mark_errored(&id, "regression: simulate prior spawn failure")
         .await
         .expect("mark errored");
+    id
+}
+
+/// Fetch the RAW (non-auto-pruning) live session list — bypasses
+/// `fetch_live_sessions`'s own internal auto-prune entirely, so a test can
+/// inspect pre-prune state or drive `auto_prune_dead_records_at` manually
+/// without a prior fetch silently consuming the record.
+async fn fetch_raw_live(
+    client: &reqwest::Client,
+    url: &str,
+) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
+    let raw = crate::commands::session_picker::fetch_managed_raw(client, url, None)
+        .await
+        .expect("fetch raw");
+    crate::commands::session_picker::parse_scoped_sessions(&raw, false).expect("parse")
+}
+
+/// A FIRST sighting of an `unresumable` record is never pruned — only
+/// recorded as a candidate (critic HIGH finding #1: no single-observation
+/// destructive action).
+#[tokio::test]
+async fn auto_prune_dead_records_first_sighting_is_not_pruned() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    let id = seed_dead_session(&mgr, root.path(), "first").await;
 
     let server = LocalTestServer::spawn(state).await;
     let client = reqwest::Client::new();
-    // Fetch via the RAW (non-auto-pruning) path first — `fetch_live_sessions`
-    // already runs `auto_prune_dead_records` internally, which would prune
-    // this record before the test gets to assert its pre-prune shape.
-    let raw = crate::commands::session_picker::fetch_managed_raw(&client, &server.url, None)
-        .await
-        .expect("fetch raw");
-    let sessions =
-        crate::commands::session_picker::parse_scoped_sessions(&raw, false).expect("parse");
+    let marker_path = root.path().join("seen.json");
+
+    let sessions = fetch_raw_live(&client, &server.url).await;
     let target = sessions
         .iter()
         .find(|s| s.id == id.to_string())
         .expect("dead session must still surface on the raw fetch");
+    assert!(target.unresumable, "seeded session must be unresumable");
+
+    let outcome = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    assert_eq!(outcome.pruned, 0, "a first sighting must never be pruned");
+    assert_eq!(outcome.pending, 1, "a first sighting is reported pending");
     assert!(
-        target.unresumable,
-        "seeded session must be flagged unresumable before pruning"
+        outcome.kept.iter().any(|s| s.id == id.to_string()),
+        "the record must remain visible while awaiting confirmation"
     );
 
-    let (kept, pruned) = auto_prune_dead_records(&client, &server.url, sessions).await;
-    assert_eq!(pruned, 1, "exactly the one dead record must be pruned");
+    // The daemon-side record itself must be untouched — still Errored, not
+    // Decommissioned.
+    let still_there = fetch_raw_live(&client, &server.url).await;
+    let record = still_there
+        .iter()
+        .find(|s| s.id == id.to_string())
+        .expect("record must still be live");
+    assert_eq!(record.state, "errored");
+}
+
+/// A record confirmed dead on a SECOND (later) call is decommissioned via the
+/// record-only route, and the daemon's own store reflects the teardown
+/// (state flips to `decommissioned`, which the default live view hides) —
+/// never a client-side-only illusion of removal.
+#[tokio::test]
+async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    let id = seed_dead_session(&mgr, root.path(), "confirmed").await;
+
+    let server = LocalTestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+    let marker_path = root.path().join("seen.json");
+
+    // First call: first sighting, not yet acted on.
+    let sessions = fetch_raw_live(&client, &server.url).await;
+    let first = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    assert_eq!(first.pruned, 0);
+
+    // Second call (a later, separate listing): now CONFIRMED — decommissioned.
+    let sessions = fetch_raw_live(&client, &server.url).await;
+    let second = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    assert_eq!(
+        second.pruned, 1,
+        "confirmed on a second listing must be pruned"
+    );
+    assert_eq!(second.pending, 0);
     assert!(
-        !kept.iter().any(|s| s.id == id.to_string()),
+        !second.kept.iter().any(|s| s.id == id.to_string()),
         "the pruned record must not remain in the returned list"
     );
 
     // The daemon's own record must have been torn down for real (not merely
     // dropped client-side) — decommission tombstones it, which the default
     // live-only fetch hides.
-    let refetched =
-        crate::commands::session_picker::fetch_live_sessions(&client, &server.url, None, false)
-            .await
-            .expect("re-fetch after prune");
+    let refetched = fetch_raw_live(&client, &server.url).await;
     assert!(
         !refetched.iter().any(|s| s.id == id.to_string()),
         "the decommissioned record must no longer appear in the live listing"
@@ -1784,10 +1846,8 @@ async fn auto_prune_dead_records_keeps_workspace_present_records() {
 
     let server = LocalTestServer::spawn(state).await;
     let client = reqwest::Client::new();
-    let sessions =
-        crate::commands::session_picker::fetch_live_sessions(&client, &server.url, None, false)
-            .await
-            .expect("fetch live sessions");
+    let marker_path = root.path().join("seen.json");
+    let sessions = fetch_raw_live(&client, &server.url).await;
     let target = sessions
         .iter()
         .find(|s| s.id == id.to_string())
@@ -1798,13 +1858,14 @@ async fn auto_prune_dead_records_keeps_workspace_present_records() {
          be flagged unresumable"
     );
 
-    let (kept, pruned) = auto_prune_dead_records(&client, &server.url, sessions).await;
+    let outcome = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
     assert_eq!(
-        pruned, 0,
+        outcome.pruned, 0,
         "a record with an existing workspace must never be pruned"
     );
+    assert_eq!(outcome.pending, 0);
     assert!(
-        kept.iter().any(|s| s.id == id.to_string()),
+        outcome.kept.iter().any(|s| s.id == id.to_string()),
         "the record must survive auto-prune untouched"
     );
 }
@@ -1815,10 +1876,95 @@ async fn auto_prune_dead_records_keeps_workspace_present_records() {
 #[tokio::test]
 async fn auto_prune_dead_records_is_noop_when_nothing_is_dead() {
     let client = reqwest::Client::new();
+    let marker_path = tempfile::TempDir::new()
+        .expect("tempdir")
+        .path()
+        .join("seen.json");
     let sessions = vec![ls_test_session("healthy", "active", None, None, None, None)];
 
-    let (kept, pruned) = auto_prune_dead_records(&client, "http://127.0.0.1:1", sessions).await;
-    assert_eq!(pruned, 0);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].name, "healthy");
+    let outcome =
+        auto_prune_dead_records_at(&client, "http://127.0.0.1:1", sessions, &marker_path).await;
+    assert_eq!(outcome.pruned, 0);
+    assert_eq!(outcome.pending, 0);
+    assert_eq!(outcome.kept.len(), 1);
+    assert_eq!(outcome.kept[0].name, "healthy");
+}
+
+/// The per-call cap (critic HIGH finding #1) limits a single call to at most
+/// 5 decommissions even when MORE records are confirmed-eligible — a
+/// bad-mount day must not mass-tombstone an entire fleet in one `tm ls`.
+#[tokio::test]
+async fn auto_prune_dead_records_honors_the_cap() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    for i in 0..6 {
+        seed_dead_session(&mgr, root.path(), &format!("cap-{i}")).await;
+    }
+
+    let server = LocalTestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+    let marker_path = root.path().join("seen.json");
+
+    // First call: all 6 are first sightings — nothing pruned yet.
+    let sessions = fetch_raw_live(&client, &server.url).await;
+    assert_eq!(sessions.len(), 6);
+    let first = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    assert_eq!(first.pruned, 0);
+    assert_eq!(first.pending, 6);
+
+    // Second call: all 6 are now CONFIRMED, but the cap limits this call to 5.
+    let sessions = fetch_raw_live(&client, &server.url).await;
+    assert_eq!(sessions.len(), 6);
+    let second = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    assert_eq!(second.pruned, 5, "the cap must limit a single call to 5");
+    assert_eq!(
+        second.pending, 1,
+        "the 6th confirmed record must be reported pending, not silently dropped"
+    );
+    assert_eq!(second.kept.len(), 1);
+}
+
+/// `fetch_live_sessions(allow_auto_prune = false)` is a pure read — a
+/// non-interactive listing (scripted/cron/CI bare `tm` or `tm ls`) must never
+/// trigger the destructive auto-prune sweep (critic HIGH finding #3).
+#[tokio::test]
+async fn fetch_live_sessions_skips_auto_prune_when_disallowed() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    let id = seed_dead_session(&mgr, root.path(), "non-tty").await;
+
+    let server = LocalTestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let sessions = crate::commands::session_picker::fetch_live_sessions(
+        &client,
+        &server.url,
+        None,
+        false,
+        false, // allow_auto_prune = false: the non-interactive case
+    )
+    .await
+    .expect("fetch live sessions");
+    assert!(
+        sessions.iter().any(|s| s.id == id.to_string()),
+        "a non-interactive fetch must return the dead record unchanged"
+    );
+
+    // The daemon-side record must be untouched — still Errored, never
+    // decommissioned, and no confirmation marker written.
+    let still_there = fetch_raw_live(&client, &server.url).await;
+    let record = still_there
+        .iter()
+        .find(|s| s.id == id.to_string())
+        .expect("record must still be live");
+    assert_eq!(
+        record.state, "errored",
+        "a non-interactive fetch must never decommission anything"
+    );
 }

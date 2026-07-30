@@ -426,14 +426,19 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 /// Why: the interactive picker (both call sites) needs the deserialized, filtered
 /// session list; combining the GET and the parse keeps re-fetch-after-detach a
 /// single call and guarantees identical scoping to the static list.
-/// What: [`fetch_managed_raw`] then [`parse_scoped_sessions`], then
+/// What: [`fetch_managed_raw`] then [`parse_scoped_sessions`], then — ONLY
+/// when `allow_auto_prune` is `true` —
 /// [`super::session_picker_prune::auto_prune_dead_records`] (owner request
-/// 2026-07-29) — every session the daemon flags `unresumable` (workspace
-/// verifiably gone) is torn down automatically instead of sitting in the list
-/// forever printing "use [d<N>] to remove the record". The picker always
-/// requests live-only (`all = false`) — a decommissioned tombstone is never a
-/// resume target, and is never `unresumable` either (see that function's
-/// doc), so auto-pruning runs unconditionally here regardless of `all`.
+/// 2026-07-29): every session the daemon flags `unresumable` (workspace
+/// verifiably gone) on TWO consecutive listings is torn down automatically
+/// (capped per call), instead of sitting in the list forever printing "use
+/// [d<N>] to remove the record". `allow_auto_prune` exists because auto-prune
+/// is destructive-adjacent — every call site MUST explicitly decide (critic
+/// HIGH finding #3): pass `true` only when the listing is genuinely
+/// interactive (a real TTY), never for a scripted/piped/non-interactive
+/// invocation. When `false`, this is a pure read: the raw parsed list is
+/// returned unchanged, no marker file is touched, no HTTP call beyond the
+/// initial GET is made.
 /// Test: HTTP path in `tests/session_manager_mvp.rs`; the parse/filter seam is
 /// unit-tested via `parse_scoped_sessions`; the auto-prune seam by
 /// `auto_prune_dead_records_*` in `tests_behavior_d_tests.rs`.
@@ -442,18 +447,29 @@ pub(crate) async fn fetch_live_sessions(
     url: &str,
     source_id: Option<&str>,
     all: bool,
+    allow_auto_prune: bool,
 ) -> anyhow::Result<Vec<ManagedSessionSummary>> {
     let raw = fetch_managed_raw(client, url, source_id).await?;
     let sessions = parse_scoped_sessions(&raw, all)?;
-    let (sessions, pruned) =
-        super::session_picker_prune::auto_prune_dead_records(client, url, sessions).await;
-    if pruned > 0 {
+    if !allow_auto_prune {
+        return Ok(sessions);
+    }
+    let outcome = super::session_picker_prune::auto_prune_dead_records(client, url, sessions).await;
+    if outcome.pruned > 0 {
         eprintln!(
-            "tm: pruned {pruned} dead record{} (workspace gone)",
-            if pruned == 1 { "" } else { "s" }
+            "tm: pruned {} dead record{} (workspace gone)",
+            outcome.pruned,
+            if outcome.pruned == 1 { "" } else { "s" }
         );
     }
-    Ok(sessions)
+    if outcome.pending > 0 {
+        eprintln!(
+            "tm: {} more dead record{} pending confirmation",
+            outcome.pending,
+            if outcome.pending == 1 { "" } else { "s" }
+        );
+    }
+    Ok(outcome.kept)
 }
 
 /// Find the 0-based position in `sessions` whose stable `slot` equals `n`
@@ -1003,7 +1019,11 @@ pub(crate) async fn run_tty_picker(
         // #1809: the shared fetch path applies the same live-only tombstone filter.
         // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
         // never drifts from the one the operator picked against.
-        sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
+        // `allow_auto_prune = true`: this loop only ever runs once the picker
+        // is ALREADY confirmed interactive (see `should_show_picker`/`tty_gate`
+        // at the call sites that reach here) — every re-fetch stays interactive.
+        sessions =
+            fetch_live_sessions(client, url, scope.source_id.as_deref(), false, true).await?;
         sessions = filter_sessions_by_term(sessions, scope.term.as_deref());
         sort_sessions(&mut sessions, scope.sort);
     }
@@ -1082,7 +1102,9 @@ pub(crate) async fn run_ls_connector(
     // Interactive stream: fetch the live sessions once. On any fetch error
     // (daemon unreachable, HTTP failure) fall back to the static renderer so the
     // operator sees the same actionable error rather than a bare picker crash.
-    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
+    // `allow_auto_prune = true`: `stdin_tty && stdout_tty` was just confirmed
+    // by the pre-gate above (critic HIGH finding #3).
+    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false, true).await {
         Ok(s) => s,
         Err(_) => {
             return super::managed::session_ls(
