@@ -590,6 +590,15 @@ impl SessionManager {
             record.workspace_path = None;
             record.workspace_owned = false;
         }
+        // #4400: a decommissioned session is terminal — no human will ever act
+        // on a `pending_decision` raised before teardown, so leaving it set
+        // means `supervisor_status`'s human-confirmation queue accumulates
+        // phantom gates forever (19-day-old dead entries indistinguishable
+        // from a real, live T4 gate). Clear both fields unconditionally on
+        // every decommission path (fresh teardown, record-only tombstone,
+        // dirty-worktree-refused teardown — all reach this line).
+        record.pending_decision = None;
+        record.proposed_default = None;
         record.state = ManagedSessionState::Decommissioned;
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
@@ -885,5 +894,52 @@ mod tests {
             .await
             .expect("operator (caller=None) decommission must never be gated");
         assert_eq!(record.state, ManagedSessionState::Decommissioned);
+    }
+
+    /// #4400: decommissioning a session with an outstanding `pending_decision`
+    /// (and `proposed_default`) must clear both — otherwise `supervisor_status`
+    /// keeps reporting a terminal, un-actionable record in its human-confirmation
+    /// queue forever.
+    #[tokio::test]
+    async fn decommission_clears_pending_decision() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(
+            dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let session_id = ManagedSessionId::new();
+        let mut record = owned_record(session_id, ManagedSessionState::Active);
+        record.pending_decision =
+            Some("T4: irreversible operation; human confirmation required".into());
+        record.proposed_default = Some("use cursor".into());
+        mgr.store
+            .write()
+            .await
+            .upsert(record)
+            .await
+            .expect("upsert");
+
+        let managed_root = crate::test_support::hermetic_temp_dir();
+        let (after, _workspace_removed) = mgr
+            .decommission_with_root(&session_id, managed_root.path(), None, false)
+            .await
+            .expect("decommission");
+        assert_eq!(after.state, ManagedSessionState::Decommissioned);
+        assert!(
+            after.pending_decision.is_none(),
+            "pending_decision must be cleared on decommission"
+        );
+        assert!(
+            after.proposed_default.is_none(),
+            "proposed_default must be cleared on decommission"
+        );
+
+        // Persisted copy must reflect the clear too, not just the returned value.
+        let stored = mgr.get(&session_id).await.expect("get");
+        assert!(stored.pending_decision.is_none());
+        assert!(stored.proposed_default.is_none());
     }
 }
