@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`tctl sign trusty-agents`** — extended the Developer-ID codesign single
+  source of truth (`macos_signing::SIGNABLE_BINARIES`, #2558) with a new
+  `AGENTS_SET` covering the `tagent` CLI binary (`com.trusty.tagent`), so
+  `cargo install --path crates/trusty-agents`'s ad-hoc-signed binary can get a
+  stable Developer ID identity the same way `trusty-search`/`trusty-mpm`
+  already do, fixing macOS re-prompting a TCC category on every rebuild
+  (#4277). `tctl sign`'s `<TARGET>` now accepts `trusty-agents` alongside
+  `trusty-search`/`trusty-mpm`.
+
 ## [0.4.10] — 2026-07-26
 
 ### Fixed

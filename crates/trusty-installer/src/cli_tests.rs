@@ -500,8 +500,9 @@ fn tctl_alias_self_update() {
     assert!(matches!(cli.command, Commands::SelfUpdate));
 }
 
-/// `trusty-installer sign trusty-search` / `sign trusty-mpm` both parse and
-/// round-trip to the right `SignTargetArg` (#2558).
+/// `trusty-installer sign trusty-search` / `sign trusty-mpm` / `sign
+/// trusty-agents` all parse and round-trip to the right `SignTargetArg`
+/// (#2558, #4277).
 #[test]
 fn parse_sign() {
     let search = Cli::try_parse_from(["trusty-installer", "sign", "trusty-search"])
@@ -521,6 +522,17 @@ fn parse_sign() {
         Commands::Sign { target, .. } => {
             assert_eq!(target, SignTargetArg::Mpm);
             assert_eq!(target.as_set_name(), "trusty-mpm");
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
+
+    // #4277: `trusty-agents` joins as a valid `tctl sign` target.
+    let agents = Cli::try_parse_from(["trusty-installer", "sign", "trusty-agents"])
+        .expect("sign trusty-agents parses");
+    match agents.command {
+        Commands::Sign { target, .. } => {
+            assert_eq!(target, SignTargetArg::Agents);
+            assert_eq!(target.as_set_name(), "trusty-agents");
         }
         other => panic!("expected Sign, got {other:?}"),
     }

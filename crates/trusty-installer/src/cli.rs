@@ -127,7 +127,9 @@ pub enum AnalyzeCoreArg {
 /// clap-independent.
 ///
 /// What: `Search` → the `trusty-search` + `trusty-embedderd` set; `Mpm` → the
-/// `trusty-mpm` set (owner-authorized scope extension, #2558).
+/// `trusty-mpm` set (owner-authorized scope extension, #2558); `Agents` → the
+/// `trusty-agents` set, i.e. `tagent` (owner-authorized scope extension,
+/// #4277).
 ///
 /// Test: `cli_tests::parse_sign` round-trips each value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -138,6 +140,9 @@ pub enum SignTargetArg {
     /// `trusty-mpm`.
     #[value(name = "trusty-mpm")]
     Mpm,
+    /// `trusty-agents` (`tagent`). (#4277)
+    #[value(name = "trusty-agents")]
+    Agents,
 }
 
 impl SignTargetArg {
@@ -146,12 +151,14 @@ impl SignTargetArg {
     /// Why: Bridges the clap enum to the plain-`&str` set vocabulary used by
     /// `macos_signing::binaries_for_set` / `sign_set_strict`, so that module
     /// has no clap dependency.
-    /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`.
+    /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`, `Agents` →
+    /// `"trusty-agents"`.
     /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip).
     pub fn as_set_name(self) -> &'static str {
         match self {
             SignTargetArg::Search => "trusty-search",
             SignTargetArg::Mpm => "trusty-mpm",
+            SignTargetArg::Agents => "trusty-agents",
         }
     }
 }
