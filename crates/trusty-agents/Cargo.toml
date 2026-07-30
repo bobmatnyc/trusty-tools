@@ -180,7 +180,7 @@ lru = "0.16"
 #      Cargo edge was cut deliberately, ahead of cto-assistant's planned
 #      migration directly into `trusty-agents`. This `install_plugins`
 #      mechanism remains available for any future private launcher.
-trusty-agents-common = { path = "../trusty-agents-common", version = "0.3.0" }
+trusty-agents-common = { path = "../trusty-agents-common", version = "0.4.0" }
 
 # [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
 # [patch] tables to live in the workspace root; see #460 for context).
