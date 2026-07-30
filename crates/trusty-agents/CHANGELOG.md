@@ -7,6 +7,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **`izzie`, `personal-assistant` and the base `assistant` no longer reach
+  `git_log`/`git_status`.** PR #4222 gave L0-tier agents cross-project git
+  scoping and ADR-0024 decision 3 (PR #4296) made an undeclared `tier =`
+  derive from agent kind, so assistant-kind personas resolve L0 — together
+  moving those two tools from a single-tenant git surface to a cross-project
+  one bounded only by the operator's `projects.json`. `izzie` ingests
+  untrusted content (Gmail, Drive, Calendar), which left untrusted input one
+  hop from a cross-project read primitive: a prompt-injection exfiltration
+  shape. Read-only and registry-bounded throughout, but the reach was new and
+  unintended. Removing the entries from izzie's own two files was NOT
+  sufficient — `izzie/agent.toml` declares `extends = "assistant"` and
+  `merge_extends` UNIONS `[tools].allow` base-first with no subtractive key,
+  so the base kept re-granting them; `assistant/agent.toml` had to drop them
+  too. `cto-assistant` re-declares all four git tools itself as a deliberate
+  carve-out (it is a coding assistant, not a mail-ingesting one) and keeps an
+  unchanged surface. Pinned by `bundled_personas_pin_git_reach`, which
+  resolves personas through the real loader rather than reading TOML — a
+  file-reading test would have gone green while the inherited grant stayed.
+
 ### Changed
 
 - **`discover_one_returns_none_on_timeout` now runs on Tokio's paused clock

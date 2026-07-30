@@ -44,7 +44,6 @@ use_anthropic_direct = false
 # (enumerate internal MCP service names) are DELIBERATELY EXCLUDED — this is
 # an assistant-tier persona and must not leak internal system names.
 allow = [
-    "git_log", "git_status",
     "granola_*",
 ]
 # OpenRPC over stdio scopes (#454). Personal assistant taps the gworkspace
