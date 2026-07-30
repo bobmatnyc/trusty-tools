@@ -76,6 +76,34 @@ fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionR
     }
 }
 
+/// Register `worktree` a SECOND time, in the `.base` clone's registry.
+///
+/// Why: git will not create this state through its own porcelain — a worktree
+/// belongs to one repository — but the state is real and #4288 names it as
+/// residual 3: a hand-copied administrative directory (`cp -r`) leaves two
+/// registries listing one path. Forging the admin directory by hand is the only
+/// way to reach it, and it is exactly what `cp -r` produces.
+/// What: writes `<repo>/.base/worktrees/<dup>/{gitdir,commondir,HEAD}` pointing
+/// at `worktree`, which is all `git worktree list` reads to enumerate an entry.
+fn forge_duplicate_registration(repo: &std::path::Path, worktree: &std::path::Path) {
+    let admin = repo.join(".base").join("worktrees").join("forged-dup");
+    std::fs::create_dir_all(&admin).expect("create the forged admin dir");
+    std::fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )
+    .expect("write gitdir");
+    std::fs::write(admin.join("commondir"), "../..\n").expect("write commondir");
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("resolve HEAD");
+    assert!(head.status.success(), "fixture: rev-parse HEAD failed");
+    std::fs::write(admin.join("HEAD"), head.stdout).expect("write HEAD");
+}
+
 /// The entry for `path` in `report`, or a panic naming what WAS reported.
 fn entry_for<'a>(report: &'a ReconcileReport, path: &std::path::Path) -> &'a ReconciledWorktree {
     let want = canonical(path);
@@ -275,6 +303,78 @@ fn key_is_none_for_a_plain_directory_inside_a_checkout() {
     assert!(worktree_key(&wt).is_some());
 }
 
+/// Two registries listing one path keep BOTH verdicts, and neither is
+/// reclaimable (#4382 review).
+///
+/// Why: the inventory grouped scanned rows into a map keyed on path alone, so a
+/// second registry's claim silently overwrote the first — last writer wins, no
+/// trace. A disagreement between two registries about one path is precisely the
+/// state this slice exists to surface, so losing one side is the one outcome
+/// that cannot be allowed. Both rows now survive, each naming the registry that
+/// produced it, and the ambiguity resolves the same way an unanswerable probe
+/// does: UNKNOWN, never ORPHANED.
+///
+/// Non-vacuity: `uncontested` is an otherwise identical worktree with an
+/// identical session record, and it IS proposed for adoption — so the contested
+/// path's absence from that list is attributable to the contest and nothing
+/// else.
+#[test]
+fn two_registries_claiming_one_path_keep_both_verdicts() {
+    let fx = GitWorktreeFixture::new();
+    fx.add_base_clone_worktree("seed");
+    let contested = fx.add_worktree("claimed-twice");
+    forge_duplicate_registration(&fx.repo, &contested);
+    let uncontested = fx.add_worktree("claimed-once");
+    let records = vec![
+        record_at(ManagedSessionState::Active, Some(contested.clone())),
+        record_at(ManagedSessionState::Active, Some(uncontested.clone())),
+    ];
+
+    let report = reconcile_worktrees(&fx.repos_root, &records, &[], Utc::now());
+    let want = canonical(&contested);
+    let rows: Vec<&ReconciledWorktree> = report.entries.iter().filter(|e| e.path == want).collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "both registries' claims must survive; got {rows:?}"
+    );
+
+    let mut got_roots: Vec<PathBuf> = rows
+        .iter()
+        .filter_map(|r| r.registry_root.clone())
+        .collect();
+    got_roots.sort();
+    let mut want_roots = vec![canonical(&fx.repo), canonical(&fx.repo.join(".base"))];
+    want_roots.sort();
+    assert_eq!(
+        got_roots, want_roots,
+        "each row must name the registry that produced it"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.admission == Some(Admission::Admitted)),
+        "both verdicts must be preserved, not collapsed; got {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.contested && r.state == ReconcileState::Unknown),
+        "an ambiguous path is never reclaimable; got {rows:?}"
+    );
+    assert!(rows.iter().all(|r| r.reason.contains("contested")));
+    assert_eq!(report.counts.orphaned, 0);
+
+    let proposed: Vec<PathBuf> = report
+        .proposed_adoptions
+        .iter()
+        .map(|p| p.path.clone())
+        .collect();
+    assert_eq!(
+        proposed,
+        vec![canonical(&uncontested)],
+        "the uncontested twin IS proposed, the contested path is not; got {proposed:?}"
+    );
+}
+
 // ── three-state classification ───────────────────────────────────────────
 
 /// A `Stopped` record's workspace is LIVE, never ORPHANED (#4288).
@@ -402,6 +502,72 @@ fn a_dirty_ownerless_worktree_is_unknown_not_orphaned() {
     );
     assert!(entry.dirty.is_some(), "the dirt reason must be reported");
     assert_eq!(report.counts.orphaned, 0);
+}
+
+/// A bare clone reports its `Bare` verdict, not an instruction to repair
+/// something that is not broken (#4382 review).
+///
+/// Why: a bare repository HAS no working tree, so `rev-parse --show-toplevel`
+/// exiting 128 is git answering correctly. The row was falling into the generic
+/// no-key branch and printing "repair the registry (`git worktree repair`)"
+/// while discarding the `Admission::Bare` verdict it already held. Every managed
+/// project has a `.base` clone, so that wrong line would appear on one of the
+/// most common rows in the report — and on the real machine, where ~95% of rows
+/// are UNKNOWN, the reason line is the only text distinguishing them.
+///
+/// The same applies to a worktree whose directory is gone: git already said why
+/// there is no key, and it is not a repair.
+#[test]
+fn a_bare_clone_reports_its_bare_verdict_not_a_repair_instruction() {
+    let fx = GitWorktreeFixture::new();
+    fx.add_base_clone_worktree("seed");
+    let base = fx.repo.join(".base");
+    let vanished = fx.add_worktree("directory-removed");
+    std::fs::remove_dir_all(&vanished).expect("remove the worktree directory");
+
+    let report = reconcile_worktrees(&fx.repos_root, &[], &[], Utc::now());
+
+    let bare = entry_for(&report, &base);
+    assert_eq!(
+        bare.admission,
+        Some(Admission::Bare),
+        "the Bare verdict must survive, not be discarded"
+    );
+    assert!(
+        bare.key.is_none(),
+        "a bare repo has no working tree, so it has no key — that is the point"
+    );
+    assert_eq!(bare.state, ReconcileState::Unknown);
+    assert!(
+        bare.reason.contains("bare repository record"),
+        "the reason must name the real verdict; got {}",
+        bare.reason
+    );
+    assert!(
+        !bare.reason.contains("worktree repair"),
+        "a bare clone is not a broken registry; got {}",
+        bare.reason
+    );
+
+    // The directory-is-gone row lands in the same branch for the same reason.
+    let gone = report
+        .entries
+        .iter()
+        .find(|e| e.path.ends_with("directory-removed"))
+        .unwrap_or_else(|| panic!("the removed worktree must still be reported"));
+    assert!(
+        matches!(
+            gone.admission,
+            Some(Admission::Prunable | Admission::Unresolvable)
+        ),
+        "got {:?}",
+        gone.admission
+    );
+    assert!(
+        !gone.reason.contains("worktree repair"),
+        "a directory git already reports as gone is not a repair job; got {}",
+        gone.reason
+    );
 }
 
 // ── the inventory shape ──────────────────────────────────────────────────

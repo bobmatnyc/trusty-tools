@@ -283,6 +283,12 @@ pub struct ReconciledWorktree {
     pub category: WorktreeCategory,
     /// Git's admission verdict, or `None` when git registers no such worktree.
     pub admission: Option<Admission>,
+    /// The checkout whose `git worktree list` produced THIS row. With
+    /// `contested`, it is what distinguishes two rows sharing one path.
+    pub registry_root: Option<PathBuf>,
+    /// More than one git registry lists this path — see [`classify`]. Every row
+    /// for a contested path carries this, and none of them is reclaimable.
+    pub contested: bool,
     /// Sessions whose `workspace_path` is this path, whatever their state.
     pub sessions: Vec<ManagedSessionId>,
     /// Owner named by the on-disk ownership sentinel, if it parsed.
@@ -391,10 +397,15 @@ pub fn reconcile_worktrees(
     live_cwds: &[PathBuf],
     now: DateTime<Utc>,
 ) -> ReconcileReport {
-    let scanned: BTreeMap<PathBuf, ScannedWorktree> = scan_registered_worktrees(repos_root)
-        .into_iter()
-        .map(|s| (s.path.clone(), s))
-        .collect();
+    // Grouped by path, but every (path, registry root) CLAIM is kept. Collapsing
+    // to one entry per path — which this did until the #4382 review — makes a
+    // last-writer-wins map silently discard one registry's verdict, and a
+    // disagreement between two registries about one path is precisely the state
+    // this whole slice exists to surface. See `classify`'s contested branch.
+    let mut scanned: BTreeMap<PathBuf, Vec<ScannedWorktree>> = BTreeMap::new();
+    for s in scan_registered_worktrees(repos_root) {
+        scanned.entry(s.path.clone()).or_default().push(s);
+    }
     let mut by_workspace: BTreeMap<PathBuf, Vec<&SessionRecord>> = BTreeMap::new();
     for r in records {
         if let Some(ws) = r.workspace_path.as_deref() {
@@ -404,19 +415,30 @@ pub fn reconcile_worktrees(
     }
     let universe: BTreeSet<PathBuf> = scanned.keys().chain(by_workspace.keys()).cloned().collect();
 
-    let mut entries: Vec<ReconciledWorktree> = universe
-        .iter()
-        .map(|path| {
-            classify(
+    let mut entries: Vec<ReconciledWorktree> = Vec::new();
+    for path in &universe {
+        let claims = scanned.get(path).map_or(&[][..], Vec::as_slice);
+        let owners = by_workspace.get(path).map_or(&[][..], Vec::as_slice);
+        if claims.is_empty() {
+            entries.push(classify(path, None, owners, records, live_cwds, now, false));
+            continue;
+        }
+        // One row per claiming registry. `contested` is computed once for the
+        // path and applied to EVERY row, so neither row can be read as the
+        // authoritative one.
+        let contested = claims.len() > 1;
+        for claim in claims {
+            entries.push(classify(
                 path,
-                scanned.get(path),
-                by_workspace.get(path).map_or(&[][..], Vec::as_slice),
+                Some(claim),
+                owners,
                 records,
                 live_cwds,
                 now,
-            )
-        })
-        .collect();
+                contested,
+            ));
+        }
+    }
 
     // Deepest first (#4288 item 4): a nested worktree must precede the worktree
     // that contains it, so a reader — and any later reclaimer — sees the child
@@ -483,7 +505,9 @@ fn count(entries: &[ReconciledWorktree]) -> ReconcileCounts {
 /// ownerless owner and whose tree is clean; else UNKNOWN with the reason.
 /// Test: `stopped_records_workspace_is_live_not_orphaned`,
 /// `reconcile_keys_on_the_git_registry_not_the_path`,
-/// `clean_ownerless_admitted_worktree_is_orphaned`.
+/// `clean_ownerless_admitted_worktree_is_orphaned`,
+/// `a_bare_clone_reports_its_bare_verdict_not_a_repair_instruction`,
+/// `two_registries_claiming_one_path_keep_both_verdicts`.
 fn classify(
     path: &Path,
     scanned: Option<&ScannedWorktree>,
@@ -491,6 +515,7 @@ fn classify(
     records: &[SessionRecord],
     live_cwds: &[PathBuf],
     now: DateTime<Utc>,
+    contested: bool,
 ) -> ReconciledWorktree {
     let key = worktree_key(path);
     let sentinel = read_sentinel_owner(path);
@@ -509,6 +534,8 @@ fn classify(
             !owners.is_empty() || sentinel_owner.is_some(),
         ),
         admission: scanned.map(|s| s.admission),
+        registry_root: scanned.map(|s| s.registry_root.clone()),
+        contested,
         sessions: owners.iter().map(|r| r.id).collect(),
         sentinel_owner,
         branch: scanned.and_then(|s| s.branch.clone()),
@@ -518,7 +545,20 @@ fn classify(
 
     // 1. UNKNOWN dominates: no git identity, no verdict.
     if key.is_none() {
-        entry.reason = match scanned {
+        entry.reason = match entry.admission {
+            Some(a @ (Admission::Bare | Admission::Prunable | Admission::Unresolvable)) => {
+                format!(
+                    "{} — no working tree to key on, which is git answering correctly rather \
+                     than a registry to repair",
+                    a.reason()
+                )
+            }
+            // These three verdicts ALREADY explain why there is no key, and the
+            // explanation is not a broken registry. A bare repository has no
+            // working tree at all, so `rev-parse --show-toplevel` failing is
+            // git answering correctly — every managed project has a `.base`
+            // clone, so telling an operator to run `git worktree repair` on it
+            // would be wrong on the most common row in the whole report.
             Some(_) => "no git-derived key: `rev-parse --show-toplevel` disagrees this path is \
                         its own worktree root, or git could not answer — repair the registry \
                         (`git worktree repair`) before trusting any verdict here"
@@ -528,6 +568,19 @@ fn classify(
                      as an orphan"
                 .to_string(),
         };
+        return entry;
+    }
+
+    // 1b. Two registries claim this path. Both rows are reported, and NEITHER
+    // may be reclaimable: the key names exactly one registry, so at most one
+    // claim can be right and nothing here can say which. Ambiguity resolves the
+    // same way an unanswerable probe does.
+    if contested {
+        entry.reason = "contested: more than one git registry lists this path; the git-derived \
+                        key names only ONE of them, so at most one claim is right and nothing \
+                        here can say which — resolve the duplicate registration (this is the \
+                        hand-copied-admin-directory shape) before acting on any row for this path"
+            .to_string();
         return entry;
     }
 
@@ -683,6 +736,10 @@ fn propose_adoptions(
             || e.key.is_none()
             || e.sentinel_owner.is_some()
             || e.contains_other_entry
+            // A path two registries claim would otherwise be proposed once per
+            // claim, naming the same owner twice for a registration nobody has
+            // resolved yet.
+            || e.contested
         {
             continue;
         }
