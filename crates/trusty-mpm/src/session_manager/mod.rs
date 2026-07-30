@@ -52,6 +52,9 @@ mod reactivate_tests;
 mod backfill_tests;
 
 #[cfg(test)]
+mod decommission_tests;
+
+#[cfg(test)]
 mod decommission_worktree_tests;
 
 #[cfg(test)]

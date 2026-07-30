@@ -85,6 +85,13 @@ impl SessionManager {
         let mut updated = record.clone();
         updated.state = ManagedSessionState::Deleted;
         updated.last_activity_at = Some(Utc::now());
+        // #4400: `Deleted` is terminal — same reasoning as `decommission`'s
+        // clear (`decommission.rs`): no human will ever act on a
+        // `pending_decision` raised before a soft-delete, so leaving it set
+        // would let `supervisor_status`'s human-confirmation queue accumulate
+        // another phantom-gate source alongside decommissioned records.
+        updated.pending_decision = None;
+        updated.proposed_default = None;
         self.store.write().await.upsert(updated).await?;
         Ok(record)
     }

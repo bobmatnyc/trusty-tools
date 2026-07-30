@@ -158,3 +158,42 @@ async fn delete_record_never_touches_workspace_dir() {
         "workspace directory must NOT be removed by delete_record (store-only op)"
     );
 }
+
+/// `delete_record` clears a stale `pending_decision`/`proposed_default` on the
+/// persisted record (#4400).
+///
+/// Why: `Deleted` is terminal — the same reasoning `decommission_with_root`
+/// applies (issue #4400): no human will ever act on a `pending_decision`
+/// raised before a soft-delete, so leaving it set would let
+/// `supervisor_status`'s human-confirmation queue accumulate another
+/// phantom-gate source alongside decommissioned records.
+/// What: seeds a `Stopped` record, sets a `pending_decision` +
+/// `proposed_default` via `set_pending_decision`, deletes it, and asserts the
+/// PERSISTED copy (`mgr.get`) has both fields cleared. The returned
+/// PRE-deletion snapshot is expected to still carry the original decision
+/// (documented behavior — callers render the state it was in before
+/// deletion), so only the persisted copy is asserted clear.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delete_record_clears_pending_decision() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+    mgr.set_pending_decision(&id, "merge or rebase?", Some("merge"))
+        .await
+        .expect("set_pending_decision");
+
+    mgr.delete_record(&id, false).await.expect("delete");
+
+    let after = mgr.get(&id).await.expect("record must still exist");
+    assert_eq!(after.state, ManagedSessionState::Deleted);
+    assert!(
+        after.pending_decision.is_none(),
+        "pending_decision must be cleared by delete_record"
+    );
+    assert!(
+        after.proposed_default.is_none(),
+        "proposed_default must be cleared by delete_record"
+    );
+}
