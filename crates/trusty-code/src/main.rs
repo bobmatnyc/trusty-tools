@@ -17,7 +17,11 @@
 //! `trusty_code::serve::{run_stdio, run_http}` for its two transports.
 //! `run-workflow` remains a stub. `workstream` (`ws` alias, #3296, DOC-48
 //! §5.4) is the same thin-client shape over `workstream.*` — see
-//! [`WorkstreamCommand`] and `crate::cli::workstream`.
+//! [`WorkstreamCommand`] and `crate::cli::workstream`. `tui` (#4424, DOC-50
+//! §4.1/AC-2.4) is the odd one out: instead of spawning its own ephemeral
+//! `--stdio` child, it attaches to an ALREADY-RUNNING `tcode serve --http`
+//! daemon and hands `trusty_code::tui_client::CodeEngine` to
+//! `trusty_tui::run::run` — see `crate::cli::tui`.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
 //! crate version. The thin-client subcommands are covered end-to-end by
@@ -105,6 +109,25 @@ enum Command {
         /// the port discarded.
         #[arg(long, value_name = "PORT", requires = "http", conflicts_with = "stdio")]
         port: Option<u16>,
+    },
+
+    /// Launch the interactive TUI REPL against a running `tcode serve --http`
+    /// daemon (#4424; DOC-50 §4.1, AC-2.4).
+    ///
+    /// The daemon is located by `TCODE_DAEMON_URL`, else the `http_addr`
+    /// discovery file, and is liveness-pinged before use. This MVP does NOT
+    /// auto-spawn one (deliberately deferred, DOC-50 §4.1): start
+    /// `tcode serve --http` first, or the command exits with an actionable
+    /// message. See `crate::cli::tui` for the wiring.
+    Tui {
+        /// Path to the project root the REPL's session binds to.
+        ///
+        /// OPTIONAL: omit it for a PROJECTLESS session — the same
+        /// first-class state `serve` without `--project` and `session.create`
+        /// without a `project` already support. Must name an existing
+        /// directory when given.
+        #[arg(long, short, value_name = "PATH")]
+        project: Option<PathBuf>,
     },
 
     /// Create (or target) a session, run a task through it via the daemon's
@@ -355,6 +378,11 @@ async fn main() -> Result<()> {
             http,
             port,
         } => run_serve(project, stdio, http, port).await,
+
+        // #4424: the launch point for the TUI REPL — reuses `run_thin_client`
+        // so a discovery failure prints `tcode tui: <actionable message>` and
+        // exits nonzero, exactly like every other subcommand's failure.
+        Command::Tui { project } => run_thin_client(cli::tui::run(project), "tui").await,
 
         Command::RunTask {
             agent,
