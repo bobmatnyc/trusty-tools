@@ -177,21 +177,20 @@ fn field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
 ///
 /// Why (#4163): [`classify_dispatch`]'s presence-check and [`on_launched`]'s
 /// consumption used to ask different questions —
-/// `r.get("agentId").is_some()` treats `null` and `""` as "we have an id",
+/// `r.get("agentId").is_some()` treated `null` and `""` as "we have an id",
 /// while the consumer's `.and_then(Value::as_str)` (for `null`) or
 /// [`on_subagent_stop`]'s `field` (for `""`) both reject them. A response
 /// carrying either shape took the `Launched` branch, pinning the delegation
 /// `Running` with an `agent_id` no `SubagentStop` can ever quote back —
-/// burning the full 6 h staleness window as a phantom in-flight entry. One
-/// extraction used by every site that asks "do we have an agent id" makes
-/// them structurally incapable of disagreeing again.
+/// burning the full 6 h staleness window as a phantom in-flight entry. This
+/// is a thin wrapper around [`field`] — the exact same extraction
+/// [`on_subagent_stop`] already uses for `agent_id` — rather than an
+/// independent body, so all three sites route through one implementation and
+/// are structurally incapable of disagreeing again.
 /// Test: `null_agent_id_does_not_launch_a_phantom_delegation`,
 /// `empty_string_agent_id_does_not_launch_a_phantom_delegation`.
 fn usable_agent_id(response: &Value) -> Option<&str> {
-    response
-        .get("agentId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+    field(response, "agentId")
 }
 
 /// `PreToolUse` on a dispatch tool: a subagent is starting now.
@@ -450,7 +449,7 @@ enum DispatchOutcome {
 /// - `Unknown` — absent, not an object, or carrying no [`TOOL_RESPONSE_KEYS`]
 ///   member.
 ///
-/// # KNOWN LIMITATION — an `agentId`-less response is read as a return
+/// # KNOWN LIMITATION — a response with no usable `agentId` is read as a return
 ///
 /// `Returned` is deliberately still *residual* rather than affirmative
 /// (`isAsync == false` or a non-launch `status`), so a recognized response that
@@ -460,7 +459,8 @@ enum DispatchOutcome {
 /// today, not better:
 ///
 /// [`on_subagent_stop`] resolves a delegation *only* by `agent_id`, and
-/// `agent_id` is taught *only* by this function. A response with no `agentId`
+/// `agent_id` is taught *only* by this function. A response with no *usable*
+/// `agentId` — absent, `null`, `""`, or any non-string ([`usable_agent_id`])
 /// therefore has **no** route to termination other than this branch — nothing
 /// can ever quote it back to us. Compounding that, `PostToolUse` is installed
 /// `async: true` while `SubagentStop` is synchronous
