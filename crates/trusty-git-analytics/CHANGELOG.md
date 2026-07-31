@@ -5,51 +5,7 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
 
-MINOR, not patch. `Config` gained a public field and its fields are all public
-with no `#[non_exhaustive]`, and the new default flips identity-resolution
-behaviour for every existing `aliases_file` deployment on upgrade.
-
-### Fixed
-
-- Identity resolution no longer runs the Tier-3/4 Jaro-Winkler fuzzy fallback
-  when a comprehensive `aliases_file` is configured (#4251). As the alias
-  roster grew from 130 to 177 entries, the fuzzy tiers began collapsing
-  distinct people onto similarly-spelled colleagues — `Cristian Dominguez` →
-  `Crislaine Tripoli`, `Ravi Chandrasekaran` → `Ravi Pandey`, `Gauri Saykar` →
-  `Gaurav Sharma`, `Josh Taylor` and `Joseph Ku` → `Joshua Lepage` — none of
-  which had a declared alias explaining the match. An author that matches no
-  declared alias is now reported under its own raw name instead of being
-  guessed. Tier-1/2 exact alias resolution and the #2253 email-domain gate are
-  unchanged.
-
-### Added
-
-- `fuzzy_identity_fallback` config key (#4251). Unset (default) disables the
-  Tier-3/4 fuzzy fallback only when a declared `aliases_file` successfully
-  loaded a non-empty alias table; `true` forces it on, `false` forces it off.
-  A declared `aliases_file` that fails to load, or resolves empty, leaves the
-  fallback ON and logs at `error!` rather than silently fragmenting every
-  identity. `IdentityResolver` gained the matching `with_fuzzy_fallback()`
-  builder and `fuzzy_fallback()` accessor for callers that construct a
-  resolver outside `from_config`.
-- The behaviour flip is announced once at `info!` when it takes effect.
-
-### Internal
-
-- Identity resolver tests now use `tempfile::TempDir` instead of a hand-rolled
-  `process::id() + SystemTime` directory name. The old scheme was not unique
-  within a test binary — `process::id()` is constant across parallel tests and
-  the `SystemTime` remainder is coarser than a nanosecond — so tests collided
-  and each one's cleanup deleted a directory another was still using. Because
-  `Config::resolved_aliases()` swallows alias-file load errors, the victim got
-  a resolver with zero members, which returns every input unchanged and so
-  satisfied the #4251 pass-through assertions *vacuously*. Measured at 10
-  failures per 100 runs. The affected tests now also carry an explicit
-  non-vacuity assertion that the roster loaded.
-
----
 ## [2.10.0] — 2026-07-27
 
 MINOR, not patch. The JIRA ingestion work (#3966, #4084) landed on `main`
@@ -137,8 +93,6 @@ No crates are published by this change.
 ### Changed
 
 - Add crates.io package metadata (keywords/categories/homepage/readme).
-
-## [Unreleased]
 
 ### Added
 
@@ -733,8 +687,6 @@ the same SQLite schema, with materially better performance and a single static b
 
 ### Changed
 - `AzureDevOpsAdapter::fetch_ticket` no longer stubs — returns populated `PmTicket` from batch work item fetch
-
-## [Unreleased]
 
 ## [2026-05-11]
 

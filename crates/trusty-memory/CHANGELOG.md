@@ -6,45 +6,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
-
-### Added
-
-- **`/health` now reports live worker-pool occupancy (issue #4001).** The
-  payload carries a `worker` block — `in_flight`, `oldest_age_secs`, and a
-  `wedged` verdict — and the top-level `status` becomes `"wedged"` when the
-  oldest in-flight palace operation has outlived
-  `TRUSTY_WEDGE_THRESHOLD_SECS` (default: twice `open_queue_timeout()`).
-  Backed by a new `worker_liveness` module: a fixed-size, lock-free slot table
-  of operation start timestamps, registered from `open_palace_handle` (the
-  choke point every `memory_recall` / `memory_remember` passes through, and
-  where the #3992 wedge actually occurred). One CAS in and one store out per
-  operation, no allocation and no syscall on the hot path, so the gauge cannot
-  become the load problem it exists to detect. Registration is RAII, so the
-  `?` and panic paths release it as reliably as the success path.
-
-### Fixed
-
-- **`trusty-memory doctor` no longer reports HEALTHY while the daemon is
-  wedged (issue #4001).** During the #3992 incident six threads sat parked in
-  `concurrent_open::backoff_sleep_ms` with a `memory_remember` hung ~1800 s,
-  and doctor reported healthy throughout — it checked HTTP liveness, fastembed
-  cache state, and lock-file staleness, none of which can observe a wedged
-  worker pool. The daemon-health check now reads the `/health` body and fails
-  on a reported wedge, naming the age and in-flight count.
-
-- **`trusty-memory doctor` distinguishes "could not determine" from "down"
-  (issue #4005).** New `CheckStatus::Unknown`, rendered `❔` and counted in its
-  own summary column rather than folded into `passed`. A probe that times out
-  now reports Unknown instead of a hard failure, and a 2xx whose body carries
-  no worker observation (an older daemon, or an unreadable body) is Unknown
-  rather than a pass doctor cannot support. The `/health` probe budget also
-  rose from 2 s to 10 s: the default handler samples RSS/CPU behind a mutex and
-  enumerates open file descriptors, work the MCP request path never does, so
-  under load it could miss a 2 s budget that real traffic never approached.
-
----
-
 ## [0.22.0] — 2026-07-27
 
 MINOR, not the patch 0.21.3 this was originally staged as (#4177). This crate

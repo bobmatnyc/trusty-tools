@@ -1,5 +1,7 @@
 # Changelog — trusty-bm25-daemon
 
+---
+
 ## [0.1.3] — 2026-07-09
 
 ### Changed
@@ -17,8 +19,6 @@
   without `--force` (#1262). This crate is still published to crates.io as a
   **library** (`publish = true` retained). Install the binary via
   `cargo install trusty-memory`.
-
-## [Unreleased]
 
 ### Changed
 - Extracted daemon logic into a `[lib]` target (`src/lib.rs`) with a

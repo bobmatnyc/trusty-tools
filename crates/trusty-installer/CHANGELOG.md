@@ -5,33 +5,6 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
-
-### Added
-
-- New public `probe_http` module: an HTTP `/health` probe local to trusty-installer, replacing the old CLI-verb probe ([#4246](https://github.com/bobmatnyc/trusty-tools/pull/4246), [#4381](https://github.com/bobmatnyc/trusty-tools/pull/4381)).
-
-### Fixed
-
-- **`tctl install` could SIGKILL-restart healthy daemons mid-flush** ([#4246](https://github.com/bobmatnyc/trusty-tools/issues/4246)). Root cause: the health probe shelled out to `<binary> health --json`, a contract no daemon implements, so healthy daemons falsely reported `down` and drove `needs_kickstart`. Fixed by replacing it with an HTTP `/health` probe local to trusty-installer ([#4381](https://github.com/bobmatnyc/trusty-tools/pull/4381)). Fixes the reported symptom; #4246 stays open pending root-cause confirmation.
-- **Follow-up hardening from code review of the above** ([#4388](https://github.com/bobmatnyc/trusty-tools/pull/4388)): the regression-guard tests used a TOCTOU-racy ephemeral port for their "connection refused" fixture, making them latently flaky — replaced with a fixed privileged loopback port that verifies the refusal before returning; a probe test's timeout bounds were inverted (connect budget longer than the total request budget), leaving the `silent`/read-path-timeout case ambiguous — reordered so connect and read-path timeouts are unambiguously distinct; and the `health_string()` / `is_confirmed_down()` asymmetry — a display-only "down" string must never authorise a kickstart — is now documented on both methods and pinned by a new test asserting the confirmed-down set is a strict, non-empty subset of the down-rendering set.
-
-([`bd28002`](https://github.com/bobmatnyc/trusty-tools/commit/bd2800216c2999bbcfb72373a2f81e837b2ab93a), [`6078b21`](https://github.com/bobmatnyc/trusty-tools/commit/6078b21c091b7d4b1ea7d5d05eb96cd49801cfec))
-
-### Changed
-
-- **`detect_does_not_hang_on_an_unresponsive_shadowing_binary` now runs on
-  Tokio's paused clock** — 10.01s to 0.00s. The hanging `sleep 30` shadowing
-  binary is still really spawned and still really never answers; only the
-  health gate's 10s probe timeout moves to the virtual clock. That the child
-  is genuinely spawned under a paused clock was verified by measurement (a
-  spawn marker written by the fake binary was present on 3 of 3 runs), and a
-  new elapsed-time assertion keeps it honest: if `shadowing_version: None`
-  ever came from an early probe failure instead of the timeout expiring, the
-  test fails rather than passing green on deleted coverage. Reverting the
-  probe to the un-timed-out `installed_version` call still fails the test.
-
----
 
 ## [0.4.10] — 2026-07-26
 
