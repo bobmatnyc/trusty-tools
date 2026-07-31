@@ -1075,7 +1075,13 @@ pub(crate) fn resolve_statusline_command() -> String {
 /// PATH lookup reproduced the exact bug this module fixes for that installed
 /// name. Both entries are tried, in order, before degrading to the bare
 /// literal.
-const STATUSLINE_BIN_NAMES: &[&str] = &["tm", "trusty-mpm"];
+///
+/// #4058: sourced from [`crate::core::own_binary_names::OWN_BINARY_NAMES`]
+/// rather than a second hand-copy of the two names, so this can't drift out
+/// of sync with the discovery/hooks/daemon-PID lists again. `OWN_BINARY_NAMES`
+/// happens to already order `tm` before `trusty-mpm`, matching this module's
+/// intended fallback order.
+const STATUSLINE_BIN_NAMES: &[&str] = crate::core::own_binary_names::OWN_BINARY_NAMES;
 
 /// Resolve the absolute path to the running `tm`/`trusty-mpm` binary.
 ///

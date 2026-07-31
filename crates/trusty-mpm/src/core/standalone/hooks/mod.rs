@@ -207,7 +207,11 @@ pub fn mpm_hook_additions() -> serde_json::Value {
 
 /// Canonical binary names this crate ships as `[[bin]]` targets (`Cargo.toml`):
 /// the full name and the short everyday alias used by `tm run`/`tm load`/`tm login`.
-const MPM_BIN_NAMES: &[&str] = &["trusty-mpm", "tm"];
+///
+/// #4058: sourced from [`crate::core::own_binary_names::OWN_BINARY_NAMES`] —
+/// the single shared list — rather than a second hand-copy, so this can't
+/// drift out of sync with the discovery/statusline/daemon-PID lists again.
+const MPM_BIN_NAMES: &[&str] = crate::core::own_binary_names::OWN_BINARY_NAMES;
 
 /// File-name STEMS that identify an mpm-owned binary once any Cargo
 /// build-artifact `-<hash>` suffix is stripped.
