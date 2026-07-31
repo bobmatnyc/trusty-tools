@@ -14,6 +14,7 @@
 pub mod bundled;
 pub mod claude_code_runner;
 pub mod claude_mpm_loader;
+pub(crate) mod claude_mpm_role;
 mod config;
 pub mod context_filter;
 // #4172 (epic #4167): L0-only cross-project git/search scoping.
