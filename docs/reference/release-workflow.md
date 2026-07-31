@@ -378,6 +378,20 @@ After the first signed install, grant Full Disk Access once:
 After this one-time grant, future `scripts/install-trusty-search-signed.sh`
 reinstalls keep the FDA grant — no re-granting needed.
 
+🔴 **Check for an orphan listener BEFORE `bootout`** (issue #4230). `bootout` is
+a silent no-op against a process launchd does not own, and the following
+`bootstrap` then crash-loops every ~10 s failing to bind the already-held port
+while the orphan keeps serving — so the restart reads as successful and ships
+nothing. Run this first:
+
+```bash
+launchctl print gui/$(id -u)/<label> | grep -E 'state|pid'   # does launchd own a live PID?
+lsof -nP -iTCP:<port> -sTCP:LISTEN                           # who actually holds the port?
+```
+
+If the listener's PID is not the one `launchctl print` reports, `kill -TERM` it
+before restarting, then use `launchctl kickstart -k gui/$(id -u)/<label>`.
+
 🔴 **A 200 `GET /health` right after `bootstrap` is NOT sufficient evidence the
 restart succeeded** (issue #2486) — a client racing the restart window (e.g. an
 MCP stdio bridge's auto-reconnect) can spawn an orphan daemon that answers
@@ -385,10 +399,16 @@ MCP stdio bridge's auto-reconnect) can spawn an orphan daemon that answers
 the wrong `cwd`. Verify launchd actually owns the new process with one of:
 
 ```bash
-launchctl print gui/$(id -u)/<label>                       # launchd's own view
-ps -o ppid= -p "$(pgrep -fx '<daemon process>' | head -1)"  # must print "1"
+launchctl print gui/$(id -u)/<label>                        # launchd's own view
 curl -s http://127.0.0.1:<port>/health | jq '.supervised'   # trusty-mpm only; must print true
+tm doctor                                                   # trusty-mpm only; `daemon_orphan` must be OK
 ```
+
+⚠️ **`PPID == 1` is NOT evidence of launchd supervision** (issue #4230). Any
+daemon whose spawning parent has exited reparents to PID 1, so the #4230 orphan
+reported `PPID 1` while launchd's `com.trusty.mpm` was `not running`. Compare the
+listening PID against `launchctl print`'s PID instead — that is the only check
+that distinguishes the two.
 
 ### Notarization Appendix (Optional — for distributing to OTHER machines)
 

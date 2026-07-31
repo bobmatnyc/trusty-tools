@@ -166,8 +166,16 @@ pub(crate) async fn daemon_healthy(client: &reqwest::Client, url: &str) -> bool 
 /// same listing as `tm status`. If not, opens `~/.trusty-mpm/daemon.log`, spawns
 /// `tm daemon` detached with stdout/stderr appended to that log, polls `/health`
 /// for up to 5 seconds, then prints "Starting daemon... done" and the status.
-/// Test: `cli_parses_start` covers parsing; the spawn/wait path is exercised by
-/// running `tm start` against a clean environment.
+///
+/// #4230: refuses to spawn at all when a trusty-mpm launchd unit is registered.
+/// This was the ONE client-side daemon-spawn path with no launchd awareness —
+/// the stdio bridge has had `no_spawn` since #2486 and `guided_autostart` has
+/// nudged launchd since #1900 — and it is the path that produced the #4230
+/// orphan.
+/// Test: `cli_parses_start` covers parsing; the refusal decision and message are
+/// covered by `launchd_probe`'s `compute_no_spawn_*` and
+/// `cli_spawn_refusal_names_kickstart_and_force`; the spawn/wait path is
+/// exercised by running `tm start` against a clean environment.
 pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Prefer the lock file URL — it's the address our daemon actually bound to,
     // not whatever default URL the CLI was given (which may point at a different
@@ -183,6 +191,17 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     if daemon_healthy(client, &check_url).await {
         println!("Daemon already running on {check_url}");
         return print_status(client, &check_url).await;
+    }
+
+    // #4230: nothing is serving, but launchd may still OWN the daemon. Spawning
+    // a detached `tm daemon` here is exactly how the #4230 orphan was created —
+    // it seized :7880 for two days while `com.trusty.mpm` reported `not running`,
+    // so a fresh signed install verified green against a stale 1.0.2 image. Bail
+    // out with the launchctl verb instead of racing launchd.
+    if crate::commands::launchd_probe::compute_no_spawn(
+        crate::commands::launchd_probe::mpm_launchd_plist_exists(),
+    ) {
+        anyhow::bail!(crate::commands::launchd_probe::cli_spawn_refusal_hint());
     }
 
     // Resolve the log file under `~/.trusty-mpm/`, creating the dir if absent.
@@ -253,9 +272,23 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
 /// `start` manually has a gap where the daemon is unreachable.
 /// What: if the daemon is healthy, sends SIGTERM (via pkill) and waits up to
 /// 3 s for the port to free, then calls `start`.
-/// Test: `cli_parses_start` covers parsing; the spawn/wait path is exercised by
-/// running `tm start` against a clean environment.
+///
+/// #4230: the launchd check happens BEFORE the `pkill`, not after. `start`
+/// refuses to spawn when launchd owns the daemon, so checking only there would
+/// tear the supervised daemon down and then decline to bring it back — worse
+/// than the pre-fix behaviour. `pkill` is also the pre-existing route into the
+/// #4230 state: SIGTERM makes the launchd job exit 0, and `KeepAlive
+/// {SuccessfulExit: false}` means launchd deliberately does NOT respawn it.
+/// Test: `cli_parses_start` covers parsing; the refusal decision and message are
+/// covered by `launchd_probe`'s `compute_no_spawn_*` and
+/// `cli_spawn_refusal_names_kickstart_and_force`; the spawn/wait path is
+/// exercised by running `tm restart` against a clean environment.
 pub(crate) async fn restart(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+    if crate::commands::launchd_probe::compute_no_spawn(
+        crate::commands::launchd_probe::mpm_launchd_plist_exists(),
+    ) {
+        anyhow::bail!(crate::commands::launchd_probe::cli_spawn_refusal_hint());
+    }
     if daemon_healthy(client, url).await {
         print!("Stopping daemon... ");
         use std::io::Write as _;

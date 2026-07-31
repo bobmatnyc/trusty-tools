@@ -73,19 +73,58 @@ pub(crate) fn compute_supervised(is_launchd_supervised: bool, plist_exists: bool
     !plist_exists || is_launchd_supervised
 }
 
-/// Pure decision: should the MCP stdio bridge refuse to auto-spawn a daemon?
+/// Pure decision: should a CLIENT-side auto-spawn of the daemon be refused?
 ///
-/// Why: when a launchd unit is registered, `launchctl bootstrap` is the
-/// correct (and eventually consistent) way to bring the daemon back after a
-/// restart; a bridge-side auto-spawn during the restart gap creates the #2486
+/// Why: when a launchd unit is registered, `launchctl bootstrap`/`kickstart` is
+/// the correct (and eventually consistent) way to bring the daemon back after a
+/// restart; a client-side auto-spawn during the restart gap creates the #2486
 /// orphan. When no launchd unit exists (a dev machine), auto-spawn remains the
-/// convenient default, matching the pre-existing `tm start` behaviour.
+/// convenient default.
+///
+/// #4230: this decision is deliberately keyed on `plist_exists` ALONE — no
+/// supervision heuristic. It is consumed by every client that would spawn a
+/// daemon subprocess: the MCP stdio bridge (`serve_stdio`, the original #2486
+/// call site) and `tm start`/`tm restart` (`commands::daemon::start`, the path
+/// that actually produced the #4230 orphan — it spawned a detached bare
+/// `tm daemon` with no launchd awareness whatsoever). Keeping it heuristic-free
+/// matters: the child-side #4397 guard folds in
+/// [`trusty_common::update::is_launchd_supervised`], whose `XPC_SERVICE_NAME`
+/// prong can report `true` for a non-launchd child spawned from a context where
+/// `TERM_PROGRAM` is unset, so the callee guard alone is not a reliable last
+/// line of defence.
 /// What: `no_spawn` is exactly `plist_exists` — spawn is refused if and only
 /// if a trusty-mpm launchd unit is present.
 /// Test: `compute_no_spawn_true_when_plist_exists`,
 /// `compute_no_spawn_false_when_no_plist`.
 pub(crate) fn compute_no_spawn(plist_exists: bool) -> bool {
     plist_exists
+}
+
+/// Operator guidance printed when `tm start`/`tm restart` refuses to spawn a
+/// daemon because launchd owns it (issue #4230).
+///
+/// Why: the pre-#4230 `commands::daemon::start` spawned a detached bare
+/// `tm daemon` unconditionally, with no launchd check at all — that is the path
+/// that produced the #4230 orphan (PID 98606, PPID 1, `cwd=$HOME`, serving a
+/// stale 1.0.2 image on :7880 for two days while launchd's `com.trusty.mpm`
+/// reported `not running`). Once the child-side #4397 guard landed, the same
+/// invocation instead spawns a child that dies in `~/.trusty-mpm/daemon.log`
+/// and `tm start` reports only "daemon did not become healthy within 5s" — the
+/// operator is told the daemon is broken, not that they used the wrong verb.
+/// This message names the right verb up front.
+/// What: a fixed string naming the `launchctl kickstart` restart recipe, the
+/// `tm daemon --force` opt-in, and the issue; single source of truth for the
+/// call site and its test.
+/// Test: `cli_spawn_refusal_names_kickstart_and_force`.
+pub(crate) fn cli_spawn_refusal_hint() -> String {
+    "refusing to spawn: a trusty-mpm launchd unit is registered, so launchd owns \
+     the daemon's lifecycle — spawning one here would create a duplicate, \
+     unsupervised daemon that can seize the port and serve a stale binary \
+     indefinitely (issue #2486/#4230). Restart it with \
+     `launchctl kickstart -k gui/$(id -u)/com.trusty.mpm` (or \
+     `com.trusty.mpm.supervisor`), then re-run `tm status`. To start an \
+     unsupervised daemon on purpose, run `tm daemon --force`."
+        .to_string()
 }
 
 /// Pure decision: should the bare `tm daemon` CLI path refuse to start?
@@ -148,6 +187,18 @@ mod tests {
     #[test]
     fn compute_no_spawn_false_when_no_plist() {
         assert!(!compute_no_spawn(false));
+    }
+
+    /// #4230: the `tm start` refusal must name the launchctl verb that
+    /// actually works and the `--force` opt-in, so an operator hitting it has
+    /// an immediate next step either way.
+    #[test]
+    fn cli_spawn_refusal_names_kickstart_and_force() {
+        let msg = cli_spawn_refusal_hint();
+        assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
+        assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
+        assert!(msg.contains("tm daemon --force"), "message was: {msg}");
+        assert!(msg.contains("#4230"), "message was: {msg}");
     }
 
     #[test]

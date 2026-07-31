@@ -9,6 +9,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- `tm start` / `tm restart` no longer spawn an unsupervised daemon that can seize the port from launchd (closes [#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230))
+  - `commands::daemon::start` was the one client-side daemon-spawn path with no
+    launchd awareness at all — the MCP stdio bridge has refused to auto-spawn
+    since [#2486](https://github.com/bobmatnyc/trusty-tools/issues/2486) and
+    `guided_autostart` has nudged launchd since
+    [#1900](https://github.com/bobmatnyc/trusty-tools/issues/1900), while
+    `start` spawned a detached bare `tm daemon` unconditionally. That is how the
+    #4230 orphan was created: PID 98606, `PPID 1`, `cwd=$HOME`, holding
+    `127.0.0.1:7880` for two days and answering `/health` 200 with a stale 1.0.2
+    image while launchd's `com.trusty.mpm` reported `state = not running`. A
+    fresh signed install and its behavioural verification both passed against
+    the binary the install had just replaced.
+  - Both `start` and `restart` now refuse when a trusty-mpm launchd unit is
+    registered, naming the `launchctl kickstart` recipe and the
+    `tm daemon --force` opt-in. The check runs BEFORE `restart`'s `pkill`, so a
+    refusal never tears the supervised daemon down and then declines to bring it
+    back. The decision is keyed on plist presence alone — no supervision
+    heuristic — because the callee-side
+    [#4397](https://github.com/bobmatnyc/trusty-tools/issues/4397) guard folds in
+    `is_launchd_supervised`, whose `XPC_SERVICE_NAME` prong can report `true` for
+    a non-launchd child spawned where `TERM_PROGRAM` is unset.
+  - The #2486 bridge guard did NOT regress. The orphan's own
+    `{"supervised":false}` proves a plist was registered when it started
+    (`supervised` is `false` only in that case), which means the bridge's
+    `no_spawn` was necessarily set and it could not have been the spawner.
+
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`
     instead of `project,local`. Claude Code discovers subagents per settings
@@ -26,6 +52,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     hard-coded per call site.
 
 ### Added
+
+- `tm doctor` detects an orphaned daemon serving while the supervised one is down (issue [#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230))
+  - New `daemon_orphan` check: `Fail` when a trusty-mpm launchd unit is
+    registered but the daemon answering `/health` reports `supervised: false`.
+    The flag has been on the wire since #2486; nothing client-side ever read it,
+    which is why a two-day binary substitution stayed invisible to every probe.
+    The failure message names the `lsof` PID lookup, the `kill -TERM`, and the
+    `launchctl kickstart` restart, in the order they must be run.
+  - Runs client-side, like the #2332 `stale_daemon` check and for a stronger
+    reason: in the orphan state the process answering `run_doctor` is precisely
+    the one whose self-report cannot be trusted to be the supervised one. Static
+    — one `/health` GET plus a `Path::exists`, no spawn and no `launchctl`
+    shell-out.
+  - `docs/reference/release-workflow.md` gains an orphan pre-check before
+    `bootout` (which is a silent no-op against a process launchd does not own)
+    and drops its `PPID == 1` verification step: any daemon whose parent exits
+    reparents to PID 1, so that check CONFIRMED the #4230 orphan as supervised.
 
 - `tm doctor` gains an `agent_reachability` check that fails when the bundled roster is unreachable ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - The existing `agents` and `deployment` checks are presence-only — they

@@ -808,12 +808,19 @@ fn health_snapshot_deserializes() {
         "catalog_unknown": false,
         "catalog_changes": ["agents/foo"],
         "version": "0.42.0",
+        "supervised": false,
     }))
     .expect("full health body parses");
     assert_eq!(full.status, "ok");
     assert!(full.catalog_stale);
     assert!(!full.catalog_unknown);
     assert_eq!(full.version, "0.42.0");
+    // #4230: the orphan-daemon signal must survive the client round-trip — it
+    // was already on the wire (#2486) and simply never parsed on this side.
+    assert!(
+        !full.supervised,
+        "supervised:false must deserialize as false"
+    );
 
     let minimal: HealthSnapshot =
         serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
@@ -821,4 +828,17 @@ fn health_snapshot_deserializes() {
     assert!(!minimal.catalog_stale);
     assert!(!minimal.catalog_unknown);
     assert_eq!(minimal.version, "", "older daemon omitting version → empty");
+}
+
+/// #4230: a daemon whose `/health` predates the `supervised` field must read as
+/// supervised, not as an orphan — a `false` default would fire the orphan check
+/// on every legitimately old daemon and train operators to ignore it.
+#[test]
+fn health_snapshot_supervised_defaults_true_when_absent() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert!(
+        minimal.supervised,
+        "absent supervised field must default to true"
+    );
 }

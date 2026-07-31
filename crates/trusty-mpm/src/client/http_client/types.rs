@@ -907,4 +907,32 @@ pub struct HealthSnapshot {
     /// Test: `health_snapshot_deserializes`.
     #[serde(default)]
     pub version: String,
+    /// Whether the daemon that answered reports itself launchd-supervised
+    /// (issue #2486; surfaced to `tm doctor` for #4230).
+    ///
+    /// Why: `status: "ok"` is not evidence that the SUPERVISED daemon is the one
+    /// serving. In #4230 an orphaned 1.0.2 daemon answered `/health` 200 on
+    /// :7880 for two days while launchd's `com.trusty.mpm` reported `not
+    /// running`, so a fresh install verified green against a binary it had just
+    /// replaced. The daemon already computes and publishes this flag; nothing
+    /// client-side consumed it, which is why the substitution stayed silent.
+    /// What: mirrors `daemon::api::types::HealthResponse::supervised`. Defaults
+    /// to `true` for a daemon whose `/health` predates the field, so an old
+    /// daemon reads as "unknown, assume fine" rather than raising a false orphan
+    /// alarm — exactly the daemon side's own `default_supervised`.
+    /// Test: `health_snapshot_deserializes`,
+    /// `health_snapshot_supervised_defaults_true_when_absent`.
+    #[serde(default = "default_supervised")]
+    pub supervised: bool,
+}
+
+/// Serde default for [`HealthSnapshot::supervised`] — `true` (issue #4230).
+///
+/// Why: absence of the field means the daemon predates #2486, not that it is
+/// unsupervised. Defaulting to `false` would make `tm doctor` cry orphan on
+/// every legitimately old daemon, which trains operators to ignore the check.
+/// What: returns `true`. Mirrors the daemon side's `default_supervised`.
+/// Test: `health_snapshot_supervised_defaults_true_when_absent`.
+fn default_supervised() -> bool {
+    true
 }
