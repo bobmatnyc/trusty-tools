@@ -62,23 +62,40 @@ wait for a git error to correct course.
 ## Changelog Requirement (Before Merge)
 
 Changelogs go stale when updating them is left to "sometime at release" — so
-it is part of every PR, not a separate chore:
+it is part of every PR, not a separate chore. Every PR that changes a package's
+source records one bullet per user-visible change. Docs-only / CI-only PRs may
+skip this.
 
-- Every PR that changes a package's source adds one bullet per user-visible
-  change to that package's `CHANGELOG.md`, under the topmost `## [Unreleased]`
-  heading (create the heading if the file has none yet). Match the file's
-  existing bullet style and wording. Docs-only / CI-only PRs may skip this.
+**Prefer a per-PR fragment file.** When the package has a `changelog.d/`
+directory, that is where the entry goes:
+
+```
+<package>/changelog.d/<issue-or-pr-number>-<short-slug>.md
+
+Fixed                      <- line 1: Breaking|Added|Fixed|Performance|Changed|Documentation
+
+- the bullet text, in the package CHANGELOG's existing style
+```
+
+One new file per PR, named after the issue/PR number, means two concurrent PRs
+never touch the same lines and git never raises a conflict. A shared
+`## [Unreleased]` section does the opposite — it guarantees one. Release time
+assembles the fragments into `CHANGELOG.md` and deletes them; never hand-edit
+`CHANGELOG.md` in a package that uses fragments.
+
+If the package has no `changelog.d/`, add the bullet to `CHANGELOG.md` under the
+topmost `## [Unreleased]` heading (create the heading if the file has none yet),
+matching the file's existing style.
+
 - A PR that changes source and lands without a matching changelog entry is a
   **review-gate failure** — the same tier as a failing build/test/lint gate.
   Treat it exactly like CB#8 (QA gate): block the merge, delegate back to the
   Engineer to add the entry, don't wave it through as "trivial."
-- If the project has automated changelog-generation tooling (e.g. a
-  conventional-commits generator run at release time), that tooling and these
-  hand-written per-PR entries can conflict — it may regenerate a section from
-  git log without knowing about, merging, or deduping against what's already
-  written by hand. Check the project's own instructions (root `CLAUDE.md` /
-  `.trusty-mpm/INSTRUCTIONS.md`) for the precedence rule before assuming the
-  two coexist safely; do not invent one on the fly.
+- If the project also runs automated changelog generation at release time (e.g.
+  a conventional-commits generator), check the project's own instructions (root
+  `CLAUDE.md` / `.trusty-mpm/INSTRUCTIONS.md`) for which mechanism owns
+  `CHANGELOG.md` before assuming they coexist safely. Two writers to one file is
+  a defect; do not invent a precedence rule on the fly.
 
 ## The trusty-review Gate
 

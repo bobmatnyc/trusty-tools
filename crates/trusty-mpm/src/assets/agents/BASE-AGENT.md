@@ -70,12 +70,16 @@ Keep two axes separate and never conflate them:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
   NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
   trailer — replace the harness default with the footer above.
-- Every PR that changes a package's source adds one bullet per user-visible
-  change to that package's `CHANGELOG.md`, under an `## [Unreleased]` heading
-  (create it if missing). Match the file's existing bullet style. Docs-only /
-  CI-only PRs may skip this. A missing entry is a review-gate failure, not
-  optional polish — see `tm-pr-workflow` for the merge-gate detail and how
-  this interacts with any project-specific changelog-generation tooling.
+- Every PR that changes a package's source records one bullet per user-visible
+  change in that package's changelog. Prefer a per-PR FRAGMENT file —
+  `<package>/changelog.d/<issue-or-pr-number>-<slug>.md`, first line the change
+  category (`Added`/`Fixed`/`Changed`/…), the rest the bullet text — whenever
+  the project has that directory: two concurrent PRs then add two differently
+  named files and never conflict. Otherwise add the bullet to `CHANGELOG.md`
+  under an `## [Unreleased]` heading. Either way, match the existing bullet
+  style. Docs-only / CI-only PRs may skip this. A missing entry is a review-gate
+  failure, not optional polish — see `tm-pr-workflow` for the merge-gate detail
+  and for where the project puts its entries.
 
 ## Memory & Context Routing
 

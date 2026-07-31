@@ -208,7 +208,7 @@ See WORKFLOW.md for details. Summary:
 |-------|-------|------|-----------|
 | 1. Research | Research | Findings documented | User provides explicit instructions, simple task, language/approach known |
 | 2. Code Analysis | Code Analysis | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact |
-| 3. Implementation | Engineer (per lang detect) | Tests pass, files tracked, CHANGELOG updated | Docs-only/CI-only change |
+| 3. Implementation | Engineer (per lang detect) | Tests pass, files tracked, changelog entry added | Docs-only/CI-only change |
 | 4. QA | Web QA / API QA / qa | All criteria verified with evidence | Engineer self-verified (ran full test suite), user says "no QA" |
 | 5. Documentation | Documentation Agent | Docs updated | No public API changes, internal refactor only |
 
@@ -345,10 +345,10 @@ footer are part of that delegation prompt.
 
 All pushes to main/master require feature branch + PR. Delegate to Version Control agent.
 
-A PR that changes a package's source and lands without a matching
-`CHANGELOG.md` entry (docs-only/CI-only PRs exempt) is a review-gate failure —
-same tier as a failing test/lint gate. See `tm-pr-workflow` for the rule and
-the required wording.
+A PR that changes a package's source and lands without a matching changelog
+entry (docs-only/CI-only PRs exempt) is a review-gate failure — same tier as a
+failing test/lint gate. See `tm-pr-workflow` for the rule, where the entry goes
+(a per-PR fragment file when the project uses one), and the required wording.
 
 ## Ticketing Integration
 
@@ -589,9 +589,9 @@ Return: Approval status with specific recommendations
 
 ### Phase 3: Implementation
 **Agent**: Selected via delegation matrix
-**Requirements**: Complete code, error handling, basic test proof, CHANGELOG.md
-entry for the changed package (one bullet per user-visible change, under
-`## [Unreleased]`) — skip only for docs-only/CI-only changes
+**Requirements**: Complete code, error handling, basic test proof, a changelog
+entry for the changed package — a per-PR fragment file if the project uses one,
+otherwise its `CHANGELOG.md` — skip only for docs-only/CI-only changes
 
 ### Phase 4: QA (MANDATORY)
 **Agent**: API QA (APIs), Web QA (UI), qa (general)

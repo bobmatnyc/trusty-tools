@@ -15,11 +15,12 @@
 # Cargo.lock's entry for that package matches the bumped manifest (issue
 # #3199 — every release PR previously failed CI's `--locked` build until a
 # human pushed a manual lock-sync follow-up commit), then calls
-# scripts/generate-changelog.sh <crate-dir> <tag-prefix> to prepend the
-# unreleased CHANGELOG section. For every current crate the tag prefix equals
-# the crate-dir name (tag_prefix_for() is the single, easy-to-extend place
-# that derives it). Finally it prints — but does NOT execute — the `git tag`
-# and `git push` commands.
+# scripts/assemble-changelog.sh <crate-dir> <next> to fold the crate's
+# per-PR `changelog.d/` fragments into a `## [<next>]` CHANGELOG section and
+# delete the consumed fragments (issue #4476). For every current crate the tag
+# prefix equals the crate-dir name (tag_prefix_for() is the single,
+# easy-to-extend place that derives it). Finally it prints — but does NOT
+# execute — the `git tag` and `git push` commands.
 #
 # Test: `bash -n scripts/bump-version.sh` for syntax and `shellcheck
 # scripts/bump-version.sh` for lint. Functionally, the pure version-bump logic
@@ -57,9 +58,9 @@ usage() {
   echo "  <major|minor|patch>    semver component to increment" >&2
   echo "" >&2
   echo "Reads the package version from crates/<crate-dir>/Cargo.toml, bumps it," >&2
-  echo "syncs Cargo.lock (cargo update -p <package> --precise <next>), stages the" >&2
-  echo "unreleased CHANGELOG section, and PRINTS the tag/push commands for you to" >&2
-  echo "run (it never tags or pushes itself)." >&2
+  echo "syncs Cargo.lock (cargo update -p <package> --precise <next>), assembles" >&2
+  echo "the crate's changelog.d/ fragments into a [<next>] CHANGELOG section, and" >&2
+  echo "PRINTS the tag/push commands for you to run (it never tags or pushes)." >&2
   exit 2
 }
 
@@ -181,10 +182,10 @@ main() {
     exit 1
   fi
 
-  # Pre-flight (BEFORE mutating any Cargo.toml): the changelog generator must
+  # Pre-flight (BEFORE mutating any Cargo.toml): the changelog assembler must
   # exist and be executable. Failing here keeps the repo unmodified rather than
   # leaving it half-bumped (version edited but CHANGELOG never staged).
-  local changelog_script="${WORKSPACE_ROOT}/scripts/generate-changelog.sh"
+  local changelog_script="${WORKSPACE_ROOT}/scripts/assemble-changelog.sh"
   if [[ ! -x "${changelog_script}" ]]; then
     echo "ERROR: ${changelog_script} is missing or not executable — refusing to" >&2
     echo "       bump ${manifest} to avoid leaving the repo half-bumped." >&2
@@ -200,6 +201,18 @@ main() {
   # nothing would change — abort rather than print a misleading "Bumped" line.
   if [[ "${next}" == "${current}" ]]; then
     echo "ERROR: computed version ${next} equals current version ${current}; nothing to bump" >&2
+    exit 1
+  fi
+
+  # Pre-flight the changelog assembly BEFORE mutating anything (issue #4476).
+  # The old flow discovered changelog problems only AFTER Cargo.toml had already
+  # been bumped, leaving the repo half-bumped and the operator holding a "do NOT
+  # re-run this script" warning. Validating first — fragments exist, categories
+  # are known, no leftover `## [Unreleased]` section, `[next]` not already cut —
+  # means a changelog problem costs nothing to recover from.
+  if ! "${changelog_script}" "${crate_dir}" "${next}" --check; then
+    echo "ERROR: changelog pre-flight failed for crates/${crate_dir}." >&2
+    echo "       Nothing has been modified — fix the fragments and re-run." >&2
     exit 1
   fi
 
@@ -252,29 +265,21 @@ main() {
     exit 1
   fi
 
-  # Stage the unreleased CHANGELOG section for this crate's tag series.
-  echo "Staging unreleased CHANGELOG section via generate-changelog.sh ..." >&2
-  "${changelog_script}" "${crate_dir}" "${prefix}"
+  # Assemble the crate's per-PR changelog fragments into a [next] section and
+  # delete the consumed fragments (issue #4476). The pre-flight above already
+  # validated this exact operation, so a failure here is unexpected rather than
+  # routine — but it is still fatal, and the fragments are left untouched on
+  # any failure path inside the assembler.
+  echo "Assembling CHANGELOG section from changelog.d/ fragments ..." >&2
+  "${changelog_script}" "${crate_dir}" "${next}"
 
-  # Stopgap guard (issue #2793 tracks the real fix): generate-changelog.sh's
-  # `git cliff --prepend` blindly inserts a fresh "## [Unreleased]" section
-  # without checking whether one is already there (e.g. a hand-written
-  # per-PR draft that was never cleared first). Fail loudly here rather than
-  # silently shipping a duplicated changelog.
-  local changelog="${crate_path}/CHANGELOG.md"
-  local unreleased_count
-  unreleased_count=$(grep -c '^## \[Unreleased\]' "${changelog}") || true
-  if [[ "${unreleased_count}" -gt 1 ]]; then
-    echo "ERROR: ${changelog} now has ${unreleased_count} '## [Unreleased]' headings." >&2
-    echo "       generate-changelog.sh prepended a fresh section without an existing" >&2
-    echo "       hand-written draft being cleared first (see issue #2793)." >&2
-    echo "       crates/${crate_dir}/Cargo.toml has ALREADY been bumped to ${next} by" >&2
-    echo "       this run — after manually merging/dedupe-ing the sections in" >&2
-    echo "       ${changelog}, do NOT re-run this script (it would double-bump); commit" >&2
-    echo "       directly, or \`git checkout crates/${crate_dir}/Cargo.toml\` first if" >&2
-    echo "       you want to start over." >&2
-    exit 1
-  fi
+  # No duplicate-`## [Unreleased]`-heading stopgap is needed any more. The old
+  # one (issue #2793) existed because generate-changelog.sh ran
+  # `git cliff --unreleased --prepend`, which blindly stacked a fresh
+  # `## [Unreleased]` on top of whatever hand-written draft was already there.
+  # assemble-changelog.sh never emits an `[Unreleased]` heading into the file at
+  # all — fragments ARE the unreleased set — and its pre-flight refuses to run
+  # while a leftover one survives. The failure mode is not reachable.
 
   # Print — but DO NOT RUN — the manual tag/push commands (human stays in loop).
   local tag="${prefix}-v${next}"

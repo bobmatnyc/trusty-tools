@@ -1,0 +1,45 @@
+# Per-PR changelog fragment gate (issue #4476).
+#
+# Enforces mechanically what was previously a review-gate-only rule: a PR that
+# changes `crates/<crate>/src/**` must record the change in a
+# `crates/<crate>/changelog.d/<number>-<slug>.md` fragment. Release time folds
+# the fragments into CHANGELOG.md (scripts/assemble-changelog.sh), so concurrent
+# PRs never write to the same lines of the same file.
+#
+# Pure path/diff logic — no Rust toolchain or build needed, so this runs as its
+# own lightweight job (matches line-cap.yml's checkout style/auth).
+#
+# Deliberately NO `paths:` filter (issue #4468): a required check that is skipped
+# by a path filter never reports on the PRs it skips and leaves them pending
+# forever. This job always runs and reports SUCCESS on an exempt (docs-only /
+# CI-only / test-only) PR — the exemption lives in the script, not the trigger.
+#
+# `pull_request` only: the gate compares a branch against its base, which is
+# meaningless on a push to main (the diff against the merge base is empty).
+name: Changelog fragment
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches ci.yml).
+concurrency:
+  group: changelog-fragment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog-fragment:
+    name: Per-PR changelog fragment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 — the gate needs `git merge-base` against the base
+      # branch, which a shallow checkout cannot resolve.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Enforce per-PR changelog fragment
+        env:
+          CHANGELOG_GATE_BASE: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/check_changelog_fragment.sh
