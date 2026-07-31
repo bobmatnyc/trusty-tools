@@ -17,8 +17,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - The crate had four independent hand-copies of "this crate's own binary
     names" (`discovery`'s list, hooks' `MPM_BIN_NAMES`, the statusline
     resolver's `STATUSLINE_BIN_NAMES`, and an inline check in the `tm stop`
-    daemon-PID scan) and they had already drifted once. All four now read
-    from one canonical `core::own_binary_names::OWN_BINARY_NAMES` constant.
+    daemon-PID scan) and they had already drifted once. Three now read from
+    one canonical `core::own_binary_names::OWN_BINARY_NAMES` constant; hooks'
+    list keeps its own array (its PATH-lookup order differs) pinned to the
+    same set by a test.
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`
     instead of `project,local`. Claude Code discovers subagents per settings

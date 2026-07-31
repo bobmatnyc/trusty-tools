@@ -1077,10 +1077,13 @@ pub(crate) fn resolve_statusline_command() -> String {
 /// literal.
 ///
 /// #4058: sourced from [`crate::core::own_binary_names::OWN_BINARY_NAMES`]
-/// rather than a second hand-copy of the two names, so this can't drift out
-/// of sync with the discovery/hooks/daemon-PID lists again. `OWN_BINARY_NAMES`
-/// happens to already order `tm` before `trusty-mpm`, matching this module's
-/// intended fallback order.
+/// rather than a second hand-copy of the two names, so the SET can't drift
+/// out of sync with `daemon::discovery` and the `find_daemon_pids` daemon-PID
+/// scan again. `OWN_BINARY_NAMES` is deliberately ordered `tm` before
+/// `trusty-mpm` for exactly this call site's fallback order — see that
+/// constant's module doc. (`core::standalone::hooks::MPM_BIN_NAMES` needs the
+/// opposite order for a different lookup, so it keeps its own array rather
+/// than aliasing this one; a test pins the two to the same set.)
 const STATUSLINE_BIN_NAMES: &[&str] = crate::core::own_binary_names::OWN_BINARY_NAMES;
 
 /// Resolve the absolute path to the running `tm`/`trusty-mpm` binary.

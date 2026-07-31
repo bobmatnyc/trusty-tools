@@ -42,27 +42,25 @@ const OTHER_CLAUDE_LAUNCHER_COMMANDS: &[&str] = &["claude", "claude-code", "clau
 /// Why: the discovery scan must decide, per pane, whether it hosts Claude Code;
 /// a pure predicate keeps that decision unit-testable.
 /// What: case-insensitively matches `command` against
-/// [`OTHER_CLAUDE_LAUNCHER_COMMANDS`] and [`OWN_BINARY_NAMES`] —
-/// `claude`/`claude-code`/`claude-mpm`/`trusty-mpm` match as substrings, while
-/// `tm` must be the whole command so it never matches unrelated binaries like
-/// `vim`.
-/// Test: `is_claude_command_matches_known`, `is_claude_command_rejects_others`,
-/// `is_claude_command_matches_trusty_mpm` (#4058).
+/// [`OTHER_CLAUDE_LAUNCHER_COMMANDS`] (substring — `claude`/`claude-code`/
+/// `claude-mpm` may appear with extra invocation args) and [`OWN_BINARY_NAMES`]
+/// (EXACT equality, #4058 review round 1 MEDIUM finding 1) — `pane_current_command`
+/// is always a bare process name here, never a full command line, so a
+/// substring check on this crate's own names would also match a real sibling
+/// `[[bin]]` target, `trusty-mpm-gui` (`crates/trusty-mpm-gui/Cargo.toml`),
+/// spuriously auto-adopting its pane. Exact match closes that window without
+/// reopening the original #4058 defect.
+/// Test: `is_claude_command_matches_known`, `is_claude_command_rejects_others`
+/// (covers `trusty-mpm-gui`), `is_claude_command_matches_trusty_mpm` (#4058).
 pub fn is_claude_command(command: &str) -> bool {
     let lower = command.trim().to_lowercase();
     if lower.is_empty() {
         return false;
     }
-    // `tm` is short enough to appear inside unrelated names — require an exact
-    // match for it, but allow substring matches for the longer, distinctive
-    // names (including `trusty-mpm`, #4058).
-    lower == "tm"
+    OWN_BINARY_NAMES.iter().any(|c| lower == *c)
         || OTHER_CLAUDE_LAUNCHER_COMMANDS
             .iter()
             .any(|c| lower.contains(c))
-        || OWN_BINARY_NAMES
-            .iter()
-            .any(|c| *c != "tm" && lower.contains(c))
 }
 
 /// Parse one `tmux list-panes -a` line into `(session_name, pane_command)`.
@@ -506,7 +504,19 @@ mod tests {
 
     #[test]
     fn is_claude_command_rejects_others() {
-        for cmd in ["bash", "zsh", "vim", "tmux", "node", "", "  "] {
+        // #4058 review round 1 MEDIUM finding 1: `trusty-mpm-gui` is a real
+        // sibling `[[bin]]` target (`crates/trusty-mpm-gui/Cargo.toml`) — a
+        // substring match on `OWN_BINARY_NAMES` would wrongly adopt it.
+        for cmd in [
+            "bash",
+            "zsh",
+            "vim",
+            "tmux",
+            "node",
+            "trusty-mpm-gui",
+            "",
+            "  ",
+        ] {
             assert!(!is_claude_command(cmd), "expected `{cmd}` not to match");
         }
     }
