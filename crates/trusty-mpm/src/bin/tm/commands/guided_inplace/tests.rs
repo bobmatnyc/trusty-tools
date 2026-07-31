@@ -785,10 +785,14 @@ fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
 
+    // #4451: `build_inplace_resume_command` always resolves a tm-owned
+    // CLAUDE_CONFIG_DIR, so the relocated tier list is the correct expectation
+    // here — `user` names tm's own config home, not the operator's ~/.claude,
+    // so the #1269 isolation this test guards is unchanged.
     assert!(
         args.windows(2)
-            .any(|w| w == ["--setting-sources", "project,local"]),
-        "--setting-sources project,local must survive to exec (#1269): {args:?}"
+            .any(|w| w == ["--setting-sources", "user,project,local"]),
+        "--setting-sources user,project,local must survive to exec (#1269/#4451): {args:?}"
     );
     assert!(
         args.iter().any(|a| a == "--dangerously-skip-permissions"),

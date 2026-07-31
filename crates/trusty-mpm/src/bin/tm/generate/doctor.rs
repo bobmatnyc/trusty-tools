@@ -40,6 +40,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Bundled agent roster deployed under the operator/workspace `.claude/agents/` tier.",
     ),
     (
+        "agent_reachability",
+        "Fails when bundled agents deploy into a settings tier a managed session's `--setting-sources` flag never loads — presence-only checks stay green while every delegation degrades to `general-purpose` (issue #4451).",
+    ),
+    (
         "skills",
         "Bundled skill catalog deployed under the operator/workspace `.claude/skills/` tier.",
     ),
