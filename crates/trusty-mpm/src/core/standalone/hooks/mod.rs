@@ -88,7 +88,8 @@ pub fn mpm_hook_command(exe_override: Option<&Path>) -> String {
 /// Returns `None` only when no stable absolute path can be found (caller then
 /// uses the bare command name).
 /// Test: covered by `test_hook_command_uses_absolute_path`,
-/// `test_hook_command_rejects_ephemeral_exe_override`.
+/// `test_hook_command_rejects_ephemeral_exe_override`,
+/// `test_hook_command_rejects_system_temp_exe_override`.
 fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
     let running = exe_override
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
@@ -98,6 +99,11 @@ fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
                 .and_then(|p| p.canonicalize().ok().or(Some(p)))
         });
 
+    // #4485: `is_ephemeral_build_path` now also rejects anything under a system
+    // temp root, so an agent harness's scratchpad binary
+    // (`/private/tmp/claude-<uid>/…/scratchpad/…`) can no longer be persisted
+    // here as if it were the installed binary. The check stays in the guard —
+    // this site must not grow a second, divergent copy of it.
     if let Some(p) = running
         && p.is_absolute()
         && !trusty_common::bin_resolve::is_ephemeral_build_path(&p)
