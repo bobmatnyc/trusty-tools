@@ -658,16 +658,14 @@ fn spawn_command_uses_resolved_binary() {
         None,
         None,
     );
-    // The binary follows the `env` prefix, which since #4467 also carries the
-    // inherited-marker `-u` flags — so match on the LAST flag before the binary
-    // rather than assuming the API-key scrub is adjacent to it.
+    // This test owns BINARY RESOLUTION, so it must not couple to the marker
+    // list's contents or order. Matching the bare path (space-delimited on both
+    // sides, so a bare `claude` cannot satisfy it) keeps a marker-list reorder
+    // from failing here with an unrelated message — the scrub itself is asserted
+    // by `spawn_command_scrubs_inherited_session_markers`.
     assert!(
-        cmd.contains("-u CLAUDE_CODE_EXECPATH /Users/me/.local/bin/claude "),
+        cmd.contains(" /Users/me/.local/bin/claude "),
         "spawn command must invoke the resolved absolute claude path: {cmd}"
-    );
-    assert!(
-        cmd.contains("env -u ANTHROPIC_API_KEY -u "),
-        "the API-key scrub must still lead the env prefix: {cmd}"
     );
 }
 

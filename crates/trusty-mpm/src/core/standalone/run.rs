@@ -44,10 +44,18 @@ use super::registry::ManagedRegistry;
 /// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, stdin/stdout/stderr set to
 /// `Stdio::inherit()`, `--dangerously-skip-permissions`, and (when `api_key` is
 /// `Some(s)` with a non-empty `s`) the `--bare` arg. Does NOT spawn.
+///
+/// Issue #4467: also scrubs Claude Code's inherited process-local session
+/// markers via [`crate::core::claude_env_scrub::scrub_command`]. This is the one
+/// `tm` launch path where the transcript-saving suppression fires deterministically
+/// — there is no tmux here, so upstream's `tmux show-environment -g` escape hatch
+/// returns false immediately and an inherited `CLAUDE_CODE_CHILD_SESSION` always
+/// wins.
 /// Test: `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`,
-/// `test_build_launch_command_includes_bypass_permissions`.
+/// `test_build_launch_command_includes_bypass_permissions`,
+/// `test_build_launch_command_scrubs_inherited_session_markers`.
 pub fn build_launch_command(
     repo_path: &Path,
     claude_config_dir: &Path,
@@ -55,6 +63,14 @@ pub fn build_launch_command(
 ) -> Command {
     let mut cmd = Command::new("claude");
     cmd.current_dir(repo_path);
+    // #4467: strip Claude Code's inherited process-local session markers. This
+    // path matters MORE than the tmux ones, not less: `tm run` spawns `claude`
+    // directly with no tmux, and upstream's escape hatch bails on its first line
+    // (`if(!Z.TMUX) return false`), so an inherited `CLAUDE_CODE_CHILD_SESSION`
+    // suppresses transcript saving DETERMINISTICALLY here rather than depending
+    // on the tmux server's global env. Runs before the `CLAUDE_CONFIG_DIR`
+    // assignment below so the deliberate value always wins (#4455).
+    crate::core::claude_env_scrub::scrub_command(&mut cmd);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -345,6 +361,53 @@ mod tests {
         assert!(
             args2.iter().any(|a| *a == std::ffi::OsStr::new("--bare")),
             "expected --bare to co-exist with bypass flag; got {args2:?}"
+        );
+    }
+
+    // #4467: `tm run` is the ONE tm launch path with no tmux, so upstream's
+    // `tmux show-environment -g` escape hatch returns false at its first line and
+    // an inherited CLAUDE_CODE_CHILD_SESSION suppresses transcript saving every
+    // time — deterministically, not probe-dependently. Marker names are
+    // hard-coded so this cannot go vacuous if the shared list is emptied.
+    #[test]
+    fn test_build_launch_command_scrubs_inherited_session_markers() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let cfg = tmp.path().join("claude-config");
+        let cmd = build_launch_command(&repo, &cfg, None);
+
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        for marker in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDECODE",
+            "CLAUDE_PID",
+            "CLAUDE_EFFORT",
+            "CLAUDE_CODE_EXECPATH",
+        ] {
+            assert!(
+                envs.contains(&(marker.to_owned(), None)),
+                "{marker} must be REMOVED (None) for the `tm run` session: {envs:?}"
+            );
+        }
+
+        // Over-scrub guard: the scrub runs BEFORE the deliberate assignment, so
+        // CLAUDE_CONFIG_DIR must survive it as a SET value (#4455 / #4451).
+        assert!(
+            envs.contains(&(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                Some(cfg.display().to_string())
+            )),
+            "CLAUDE_CONFIG_DIR must survive the scrub as a set value: {envs:?}"
         );
     }
 

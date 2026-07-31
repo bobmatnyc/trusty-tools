@@ -57,12 +57,20 @@
 /// managed session and an unrecoverable one.
 ///
 /// Note the upstream escape hatch `Tsg()`: a marker present in the tmux SERVER's
-/// global environment suppresses the heuristic. That is why the defect looked
-/// intermittent rather than universal — a tmux server started from inside a
-/// Claude Code session carries the marker globally and masks the leak. Relying
-/// on that mask is not an option: it depends on how the tmux server happened to
-/// be started, so scrubbing the variable is what makes the outcome
-/// deterministic.
+/// global environment suppresses the heuristic. For a tmux PANE the marker's
+/// presence and the escape hatch are coupled — tmux's `update-environment` does
+/// not carry `CLAUDE_*`, so a marker only reaches a pane when the server's global
+/// env has it, which is exactly the condition that trips the hatch.
+///
+/// Two things make the hatch unreliable anyway, and both argue for scrubbing:
+/// `Esg()` runs `spawnSync("tmux", …)` by BARE NAME with a 250 ms timeout and
+/// returns false on throw or non-zero status — so it FAILS OPEN INTO SUPPRESSION.
+/// A pane running on the daemon's minimal launchd `PATH` (the #1298 hazard) or a
+/// machine loaded enough to blow 250 ms both flip a masked session to
+/// not-saving. And `tm run` has no tmux at all, so `Esg()` returns false on its
+/// first line (`if(!Z.TMUX) return false`) and the suppression fires every time.
+/// Scrubbing the variable is what makes the outcome deterministic instead of
+/// dependent on a probe that can fail open.
 /// What: the literal variable name.
 /// Test: `suppressing_marker_is_scrubbed`.
 pub const TRANSCRIPT_SUPPRESSING_MARKER: &str = "CLAUDE_CODE_CHILD_SESSION";
@@ -116,7 +124,29 @@ pub const INHERITED_SESSION_MARKERS: &[&str] = &[
 /// `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is an operator-facing configuration knob
 /// (scrubbing it would silently override the operator's intent), and
 /// `CLAUDE_CODE_ENTRYPOINT` already carries the value a fresh CLI spawn would
-/// compute for itself (`cli`).
+/// compute for itself (`cli`). On `CLAUDE_CODE_ENTRYPOINT` specifically: unset is
+/// NOT universally equivalent to `"cli"` — the bundle gates one code path on
+/// `e === "cli" || e === "remote"`, so scrubbing it would silently disable that
+/// path, which is why keeping it is the safer choice at the observed value. The
+/// keep is value-dependent rather than proven-safe for every value: an inherited
+/// `sdk-ts`/`sdk-py`/`sdk-cli` drops one built-in agent from the roster and
+/// `claude-vscode` changes `clientType`. Neither is reachable from a `tm` spawn,
+/// whose parent is always a `cli` session.
+///
+/// `AI_AGENT` and `TRACEPARENT` are set by the same upstream injector but are
+/// also left alone. `AI_AGENT` self-heals: the bundle overwrites any inherited
+/// value beginning `claude-code_`/`claude-code/` with its own at startup, so a
+/// leaked value cannot reach the session stale. `TRACEPARENT` is only set when
+/// tracing is on and its sole effect is span parenting. Both are generically
+/// named, so a third party could legitimately set them.
+///
+/// `CLAUDE_CODE_INVOKED_SKILLS` appears on the same upstream non-propagation
+/// list that justifies including `CLAUDE_CODE_EXECPATH`, and is deliberately NOT
+/// scrubbed: it was not in the observed leak set, nothing in this workspace reads
+/// it, and it carries no session identity — it records which skills the parent
+/// turn invoked. Unlike the entries above, a stale value cannot mis-attribute a
+/// session or suppress a transcript, so scrubbing it would be unjustified churn
+/// on a list whose whole value is that every entry has a stated reason.
 /// What: the variable names a managed spawn assigns rather than unsets.
 /// Test: `marker_list_is_free_of_deliberate_spawn_env`,
 /// `config_dir_is_never_scrubbed`.
@@ -174,14 +204,28 @@ pub fn scrub_command(cmd: &mut std::process::Command) {
 /// stay green if someone dropped the flags from the spawn builder — the exact
 /// shape of blind spot issue #4467 is about.
 /// What: whitespace-splits `prefix` and collects the token following each
-/// standalone `-u`. A trailing `-u` with no operand yields nothing.
+/// standalone `-u`, STOPPING at the first `NAME=VALUE` token. A trailing `-u`
+/// with no operand yields nothing.
+///
+/// The early stop models POSIX `env` option termination rather than merely
+/// scanning for `-u`. Without it this function would report a variable as unset
+/// on a prefix that `env` would actually reject: `env CLAUDE_CODE_CHILD_SESSION=1
+/// -u FOO claude` makes `env` stop parsing options at the assignment and try to
+/// exec `-u` as a command (`env: -u: No such file or directory`, exit 127). A
+/// parser that reported `FOO` unset there would let the `tm doctor` probe pass on
+/// an ordering that kills every spawn.
 /// Test: `parse_env_unset_vars_reads_the_real_spawn_prefix`,
-/// `parse_env_unset_vars_ignores_assignments`,
+/// `parse_env_unset_vars_stops_at_the_first_assignment`,
 /// `parse_env_unset_vars_tolerates_trailing_flag`.
 pub fn parse_env_unset_vars(prefix: &str) -> Vec<&str> {
     let mut tokens = prefix.split_whitespace();
     let mut found = Vec::new();
     while let Some(token) = tokens.next() {
+        // POSIX: `env [OPTION]... [NAME=VALUE]... [COMMAND]...` — the first
+        // assignment ends option parsing, so no later `-u` is an option.
+        if token.contains('=') {
+            break;
+        }
         if token == "-u"
             && let Some(name) = tokens.next()
         {

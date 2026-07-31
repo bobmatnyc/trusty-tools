@@ -197,16 +197,30 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 /// the session-isolation flag ([`SETTING_SOURCES_FLAG`]) and the
 /// unattended-permission flag ([`PERMISSION_MODE_FLAG`]) are applied so every
 /// spawn path stays unattended and isolated (issue #1269).
-/// What: always starts with `"claude"`; appends `--model <model>` when `model`
-/// is `Some`; appends `--append-system-prompt-file <path>` when `prompt_file` is
-/// `Some`; then ALWAYS appends [`SETTING_SOURCES_FLAG`] and
+///
+/// Issue #4467: the line is prefixed with `env <-u marker…>` from
+/// [`crate::core::claude_env_scrub::env_unset_flags`]. This builder's own doc
+/// claimed to be the place "every spawn path stays unattended and isolated", but
+/// it emitted a BARE `claude` with no `env` prefix at all — so `tm launch`,
+/// `tm connect` and every agent delegation launched with the inherited
+/// `CLAUDE_CODE_CHILD_SESSION` marker intact and silently saved no transcript.
+/// There are no `NAME=VALUE` assignments on this prefix (unlike
+/// `runtime::claude_code::env_bin_prefix`, this path does not relocate
+/// `CLAUDE_CONFIG_DIR`), so the POSIX ordering constraint is satisfied trivially
+/// — but the flags still lead the line for consistency with that builder.
+/// What: always starts with `env <-u marker…> claude`; appends `--model <model>`
+/// when `model` is `Some`; appends `--append-system-prompt-file <path>` when
+/// `prompt_file` is `Some`; then ALWAYS appends [`SETTING_SOURCES_FLAG`] and
 /// [`PERMISSION_MODE_FLAG`]. Returns the composed string.
 /// Test: `claude_command_bare`, `claude_command_with_model`,
 /// `claude_command_with_prompt`, `claude_command_with_both`,
 /// `claude_command_includes_setting_sources`,
-/// `claude_command_includes_permission_mode`.
+/// `claude_command_includes_permission_mode`,
+/// `claude_command_scrubs_inherited_session_markers`.
 pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> String {
-    let mut cmd = "claude".to_string();
+    // #4467: scrub the inherited Claude Code session markers so `tm launch` /
+    // `tm connect` / delegations keep native --resume/--continue/rewind.
+    let mut cmd = format!("env{} claude", crate::core::claude_env_scrub::env_unset_flags());
     if let Some(m) = model {
         cmd.push_str(" --model ");
         cmd.push_str(m);
@@ -256,16 +270,67 @@ mod tests {
     /// The isolation + unattended suffix every command now carries (#1269).
     const FLAGS: &str = "--setting-sources project,local --dangerously-skip-permissions";
 
+    /// The `env <-u marker…> claude` head every command now carries (#4467).
+    ///
+    /// Interpolated from production so these pins assert the marker segment's
+    /// POSITION; its CONTENT is pinned by literal name in
+    /// `core::claude_env_scrub`'s `every_marker_is_pinned_by_literal_name`.
+    fn head() -> String {
+        format!("env{} claude", crate::core::claude_env_scrub::env_unset_flags())
+    }
+
     #[test]
     fn claude_command_bare() {
-        // No model, no prompt file → "claude" + the always-on isolation flags.
-        assert_eq!(build_claude_command(None, None), format!("claude {FLAGS}"));
+        // No model, no prompt file → the env-scrub head + the isolation flags.
+        assert_eq!(
+            build_claude_command(None, None),
+            format!("{} {FLAGS}", head())
+        );
     }
 
     #[test]
     fn claude_command_with_model() {
         let cmd = build_claude_command(Some("claude-opus-4-5"), None);
-        assert_eq!(cmd, format!("claude --model claude-opus-4-5 {FLAGS}"));
+        assert_eq!(
+            cmd,
+            format!("{} --model claude-opus-4-5 {FLAGS}", head())
+        );
+    }
+
+    /// #4467: this builder is the launch line for `tm launch`, `tm connect` and
+    /// every agent delegation, and it previously emitted a BARE `claude` — so all
+    /// three silently saved no transcript. Marker names are hard-coded so this
+    /// cannot go vacuous if the shared list is emptied.
+    #[test]
+    fn claude_command_scrubs_inherited_session_markers() {
+        let cmd = build_claude_command(None, None);
+        assert!(
+            cmd.starts_with("env -u "),
+            "the launch line must carry an env scrub prefix: {cmd}"
+        );
+        for marker in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDECODE",
+            "CLAUDE_PID",
+            "CLAUDE_EFFORT",
+            "CLAUDE_CODE_EXECPATH",
+        ] {
+            assert!(
+                cmd.contains(&format!("-u {marker}")),
+                "the launch line must unset {marker}: {cmd}"
+            );
+        }
+        // Over-scrub guard: this path does not relocate the config dir, so it
+        // must neither set nor unset it (#4455).
+        assert!(
+            !cmd.contains("CLAUDE_CONFIG_DIR"),
+            "this builder must not touch CLAUDE_CONFIG_DIR at all: {cmd}"
+        );
+        assert!(
+            !cmd.contains("-u CLAUDE_CODE_OAUTH_TOKEN"),
+            "must never unset the OAuth token (#2246): {cmd}"
+        );
     }
 
     #[test]
@@ -274,7 +339,10 @@ mod tests {
         let cmd = build_claude_command(None, Some(path));
         assert_eq!(
             cmd,
-            format!("claude --append-system-prompt-file /tmp/prompt.txt {FLAGS}")
+            format!(
+                "{} --append-system-prompt-file /tmp/prompt.txt {FLAGS}",
+                head()
+            )
         );
     }
 
@@ -285,7 +353,8 @@ mod tests {
         assert_eq!(
             cmd,
             format!(
-                "claude --model claude-haiku-4-5 --append-system-prompt-file /tmp/sys.txt {FLAGS}"
+                "{} --model claude-haiku-4-5 --append-system-prompt-file /tmp/sys.txt {FLAGS}",
+                head()
             )
         );
     }
@@ -359,8 +428,14 @@ mod tests {
         };
 
         // Config per-agent override (haiku) wins over frontmatter (sonnet).
+        // #4467: delegations go through `build_claude_command`, so they carry the
+        // same `env <-u marker…>` head — an agent session that saved no
+        // transcript was the same defect as a PM session that saved none.
         let cmd = build_agent_command(&cfg, &agent, None, None);
-        assert_eq!(cmd, format!("claude --model claude-haiku-4-5 {FLAGS}"));
+        assert_eq!(
+            cmd,
+            format!("{} --model claude-haiku-4-5 {FLAGS}", head())
+        );
     }
 
     #[test]

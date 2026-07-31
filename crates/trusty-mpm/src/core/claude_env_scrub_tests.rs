@@ -9,14 +9,50 @@
 
 use super::*;
 
+/// Every marker, by LITERAL name.
+///
+/// Why (review follow-up on #4467): every other test in this file iterates
+/// `INHERITED_SESSION_MARKERS`, so deleting an entry made them all pass
+/// vacuously — `CLAUDE_PID` and `CLAUDE_EFFORT` in particular were pinned by
+/// nothing, and removing either kept the whole suite green. Restating the names
+/// here is the point: this list and the production constant must be edited
+/// together, deliberately.
+const EXPECTED_MARKERS: &[&str] = &[
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_CODE_EXECPATH",
+];
+
 /// The single most important assertion in this file: the variable that
 /// disables transcript saving is actually on the scrub list (issue #4467).
 #[test]
 fn suppressing_marker_is_scrubbed() {
+    assert_eq!(
+        TRANSCRIPT_SUPPRESSING_MARKER, "CLAUDE_CODE_CHILD_SESSION",
+        "the suppressing marker's identity is load-bearing; it is the sole trigger \
+         in Claude Code's persistence gate"
+    );
     assert!(
         INHERITED_SESSION_MARKERS.contains(&TRANSCRIPT_SUPPRESSING_MARKER),
         "the marker that disables transcript saving must be scrubbed; \
          without it managed sessions get no --resume/--continue/rewind recovery"
+    );
+}
+
+/// Pins the full marker set by literal name, in order, so deleting ANY entry
+/// fails — including `CLAUDE_PID` and `CLAUDE_EFFORT`, which previously had no
+/// literal assertion anywhere in the suite.
+#[test]
+fn every_marker_is_pinned_by_literal_name() {
+    assert_eq!(
+        INHERITED_SESSION_MARKERS,
+        EXPECTED_MARKERS,
+        "the scrub list changed. If that is intentional, update EXPECTED_MARKERS in \
+         this file too — and re-check the kept/scrubbed rationale in the module doc, \
+         since every entry there has a stated reason"
     );
 }
 
@@ -170,15 +206,27 @@ fn parse_env_unset_vars_reads_the_real_spawn_prefix() {
     );
 }
 
-/// `NAME=VALUE` assignments are not unsets; conflating them would let the
-/// doctor probe pass on a prefix that SET the marker instead of clearing it.
+/// POSIX option termination: the first `NAME=VALUE` ends option parsing, so a
+/// later `-u` is NOT an unset — `env` would try to exec `-u` as a command.
+///
+/// Why this matters (review follow-up on #4467): the earlier parser reported
+/// `FOO` unset here, which meant the doctor probe would have passed on an
+/// ordering that kills every spawn with `env: -u: No such file or directory`
+/// (exit 127). Reporting nothing is the correct answer — the prefix is broken.
 #[test]
-fn parse_env_unset_vars_ignores_assignments() {
+fn parse_env_unset_vars_stops_at_the_first_assignment() {
     let unset = parse_env_unset_vars("env CLAUDE_CODE_CHILD_SESSION=1 -u FOO /abs/claude");
     assert_eq!(
         unset,
+        Vec::<&str>::new(),
+        "an assignment ends option parsing, so no later -u counts as an unset: {unset:?}"
+    );
+    // A well-formed prefix — flags BEFORE the assignment — still parses fully.
+    let good = parse_env_unset_vars("env -u FOO CLAUDE_CONFIG_DIR=/tmp/x /abs/claude");
+    assert_eq!(
+        good,
         vec!["FOO"],
-        "only `-u NAME` operands are unsets: {unset:?}"
+        "flags preceding the assignment must still be collected: {good:?}"
     );
 }
 
