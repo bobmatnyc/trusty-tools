@@ -22,12 +22,11 @@
 //! removal would otherwise be undocumented/silent).
 //!
 //! Streaming (#4425/#4426): [`Self::chat_stream`] forwards to the shared
-//! adapter's, which today is the trait's buffered fallback — a Bedrock turn
-//! therefore arrives as one delta plus the terminal event, exactly as it did
-//! before streaming existed. Giving it a real `ConverseStream` transport is
-//! #4426, and because this wrapper delegates rather than reimplements, that
-//! change lands entirely inside `trusty_common::inference::bedrock` with no
-//! edit here.
+//! adapter's, which since #4426 is a NATIVE `ConverseStream` transport — a
+//! Bedrock turn arrives token-by-token, not as one buffered delta. This
+//! wrapper needed no edit for that (only this doc line): because it delegates
+//! rather than reimplements, the whole change landed inside
+//! `trusty_common::inference::bedrock`.
 //! Test: `bedrock::tests::*` (offline construction) plus the shared adapter's own
 //! conversion + `#[ignore]`-gated live coverage in
 //! `trusty_common::inference::bedrock`.
