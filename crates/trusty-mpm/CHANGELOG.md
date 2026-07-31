@@ -21,15 +21,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     image while launchd's `com.trusty.mpm` reported `state = not running`. A
     fresh signed install and its behavioural verification both passed against
     the binary the install had just replaced.
-  - Both `start` and `restart` now refuse when a trusty-mpm launchd unit is
-    registered, naming the `launchctl kickstart` recipe and the
-    `tm daemon --force` opt-in. The check runs BEFORE `restart`'s `pkill`, so a
-    refusal never tears the supervised daemon down and then declines to bring it
-    back. The decision is keyed on plist presence alone — no supervision
-    heuristic — because the callee-side
+  - Both `start` and `restart` now refuse when a DAEMON launchd unit is
+    registered, naming the unit that actually exists on that host, its
+    `launchctl kickstart` recipe, and the `tm daemon --force` opt-in. The check
+    runs BEFORE `restart`'s `pkill`, so a refusal never tears the supervised
+    daemon down and then declines to bring it back. The decision is keyed on
+    plist presence alone — no supervision heuristic — because the callee-side
     [#4397](https://github.com/bobmatnyc/trusty-tools/issues/4397) guard folds in
-    `is_launchd_supervised`, whose `XPC_SERVICE_NAME` prong can report `true` for
-    a non-launchd child spawned where `TERM_PROGRAM` is unset.
+    `is_launchd_supervised`, whose `XPC_SERVICE_NAME` and `getppid() == 1` prongs
+    can BOTH report `true` for a non-launchd child.
+  - `com.trusty.mpm.supervisor.plist` no longer counts as "launchd owns the
+    daemon". That plist runs `tm supervisor`, a passive fleet observer that never
+    starts a daemon, so counting it made every consumer wrong on a `tctl install`
+    host whose only plist is the supervisor's: the refusal fired with a false
+    claim and prescribed a `com.trusty.mpm` unit that does not exist there. This
+    also removes a latent false refusal in the #4397 child guard and a latent
+    false `no_spawn` in the #2486 bridge guard on those hosts. A drifted daemon
+    label still resolves, matching `install-trusty-mpm-signed.sh`'s existing
+    `resolve_mpm_plist` rules.
+  - `tm stop` is not refused — stopping the daemon is a legitimate request — but
+    now warns that launchd will NOT respawn it
+    (`KeepAlive.SuccessfulExit=false`) and names the command that will. That
+    SIGTERM is how the incident's `com.trusty.mpm` came to report `not running`
+    for four days before anything else went wrong.
+  - Every remediation that prescribed `tm restart` now resolves the verb for the
+    calling host — `tm doctor`'s staleness line (which printed "run `tm restart`"
+    two lines above the new orphan check), the three `tm manager` upgrade hints,
+    the session-picker stale-numbering warning, and the bundled
+    `tm-cli-operations` skill that agents read.
   - The #2486 bridge guard did NOT regress. The orphan's own
     `{"supervised":false}` proves a plist was registered when it started
     (`supervised` is `false` only in that case), which means the bridge's
@@ -54,21 +73,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `tm doctor` detects an orphaned daemon serving while the supervised one is down (issue [#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230))
-  - New `daemon_orphan` check: `Fail` when a trusty-mpm launchd unit is
-    registered but the daemon answering `/health` reports `supervised: false`.
-    The flag has been on the wire since #2486; nothing client-side ever read it,
-    which is why a two-day binary substitution stayed invisible to every probe.
-    The failure message names the `lsof` PID lookup, the `kill -TERM`, and the
-    `launchctl kickstart` restart, in the order they must be run.
+  - New `daemon_orphan` check. It compares WHO ANSWERED `/health` against WHO
+    LAUNCHD RUNS, from two independent sources — a new `pid` field on `/health`
+    and `launchctl list <label>` — so neither the daemon nor launchd alone can
+    make it pass. `Fail` when launchd runs a different PID than the one serving,
+    or runs nothing at all while something serves (the #4230 state verbatim).
+  - The `supervised` self-report is a FALLBACK, not the signal. It comes from
+    `is_launchd_supervised`, whose second prong is `getppid() == 1`, so any orphan
+    whose spawning parent exited before the daemon's startup probe self-reports as
+    supervised. Resting the detector on that flag would have made it blind to the
+    population it targets, and would have contradicted this same change's removal
+    of `PPID == 1` from the operator runbook. When the responding daemon is too old
+    to report its `pid`, a `supervised: true` yields `Unknown`, never `Ok`.
+  - `supervised` is `Option<bool>` client-side: an absent field means "this daemon
+    cannot tell me", which is a third state, not a pass.
+  - A deliberate `tm daemon --force` run is `Warn`, not `Fail` — `/health` now
+    carries the opt-in. A hard failure on the escape hatch #4230's own refusals
+    recommend would train operators to ignore the check.
   - Runs client-side, like the #2332 `stale_daemon` check and for a stronger
     reason: in the orphan state the process answering `run_doctor` is precisely
-    the one whose self-report cannot be trusted to be the supervised one. Static
-    — one `/health` GET plus a `Path::exists`, no spawn and no `launchctl`
-    shell-out.
+    the one whose self-report cannot be trusted to be the supervised one. `tm
+    doctor` now fetches `/health` ONCE and shares it with both client-side checks,
+    so they always describe the same daemon.
   - `docs/reference/release-workflow.md` gains an orphan pre-check before
-    `bootout` (which is a silent no-op against a process launchd does not own)
-    and drops its `PPID == 1` verification step: any daemon whose parent exits
-    reparents to PID 1, so that check CONFIRMED the #4230 orphan as supervised.
+    `bootout` (which is a silent no-op against a process launchd does not own) and
+    drops its `PPID == 1` verification step, as does `.trusty-mpm/INSTRUCTIONS.md`:
+    any daemon whose parent exits reparents to PID 1, so that check CONFIRMED the
+    #4230 orphan as supervised.
 
 - `tm doctor` gains an `agent_reachability` check that fails when the bundled roster is unreachable ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - The existing `agents` and `deployment` checks are presence-only — they

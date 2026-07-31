@@ -410,6 +410,13 @@ reported `PPID 1` while launchd's `com.trusty.mpm` was `not running`. Compare th
 listening PID against `launchctl print`'s PID instead — that is the only check
 that distinguishes the two.
 
+The same caveat applies to `.supervised` when it reads **true**: that flag's
+fallback prong is the identical PPID test, so a reparented orphan can report
+`supervised: true`. It is conclusive only when it reads `false`. `tm doctor`'s
+`daemon_orphan` check therefore treats it as a fallback and prefers the PID
+comparison above, reporting `Unknown` rather than a pass when it cannot make that
+comparison.
+
 ### Notarization Appendix (Optional — for distributing to OTHER machines)
 
 Notarization is **not required** for local FDA persistence. It is only needed

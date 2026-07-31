@@ -154,8 +154,17 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
             // just-installed binary, so its compiled-in version is the
             // "installed" side of the comparison. The daemon can only ever
             // report on itself.
+            //
+            // #4230: `/health` is fetched exactly ONCE here and shared with both
+            // client-side checks, so they always describe the same daemon rather
+            // than two probes that could straddle a restart. The restart hint is
+            // resolved from this host's launchd state because `tm restart` is a
+            // hard error where launchd owns the daemon.
             let daemon = DaemonClient::new(url.to_string());
-            let stale_check = super::doctor_stale::stale_daemon_check(&daemon).await;
+            let snapshot = daemon.health_snapshot().await.ok();
+            let restart_hint = super::launchd_probe::daemon_restart_command();
+            let stale_check =
+                super::doctor_stale::stale_daemon_check(snapshot.as_ref(), &restart_hint);
             println!(
                 "  {} {:<13} {}",
                 status_icon(stale_check.status),
@@ -167,7 +176,7 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
             // precisely the process whose own report cannot be trusted. Only a
             // client can compare "who answered /health" against "who launchd was
             // told to run".
-            let orphan_check = super::doctor_orphan::orphan_daemon_check(&daemon).await;
+            let orphan_check = super::doctor_orphan::orphan_daemon_check(snapshot.as_ref());
             println!(
                 "  {} {:<13} {}",
                 status_icon(orphan_check.status),

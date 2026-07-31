@@ -916,23 +916,39 @@ pub struct HealthSnapshot {
     /// running`, so a fresh install verified green against a binary it had just
     /// replaced. The daemon already computes and publishes this flag; nothing
     /// client-side consumed it, which is why the substitution stayed silent.
-    /// What: mirrors `daemon::api::types::HealthResponse::supervised`. Defaults
-    /// to `true` for a daemon whose `/health` predates the field, so an old
-    /// daemon reads as "unknown, assume fine" rather than raising a false orphan
-    /// alarm — exactly the daemon side's own `default_supervised`.
+    ///
+    /// `Option<bool>`, not `bool` with a `true` default (#4230 review): a default
+    /// silently converts "this daemon cannot tell me" into "this daemon is fine",
+    /// which is a two-state answer to a three-state question. `None` must reach
+    /// the verdict so it can report `Unknown` instead of a pass.
+    /// What: mirrors `daemon::api::types::HealthResponse::supervised`; `None` when
+    /// the responding daemon's `/health` predates the field.
     /// Test: `health_snapshot_deserializes`,
-    /// `health_snapshot_supervised_defaults_true_when_absent`.
-    #[serde(default = "default_supervised")]
-    pub supervised: bool,
-}
-
-/// Serde default for [`HealthSnapshot::supervised`] — `true` (issue #4230).
-///
-/// Why: absence of the field means the daemon predates #2486, not that it is
-/// unsupervised. Defaulting to `false` would make `tm doctor` cry orphan on
-/// every legitimately old daemon, which trains operators to ignore the check.
-/// What: returns `true`. Mirrors the daemon side's `default_supervised`.
-/// Test: `health_snapshot_supervised_defaults_true_when_absent`.
-fn default_supervised() -> bool {
-    true
+    /// `health_snapshot_supervised_is_none_when_absent`.
+    #[serde(default)]
+    pub supervised: Option<bool>,
+    /// OS process id of the daemon that answered (issue #4230).
+    ///
+    /// Why: the authoritative half of the orphan check — compared against the PID
+    /// launchd reports for the registered daemon label. `supervised` alone is a
+    /// heuristic self-report whose `getppid() == 1` prong reads `true` for a real
+    /// orphan; a PID comparison against launchd cannot be fooled that way.
+    /// What: mirrors `daemon::api::types::HealthResponse::pid`; `None` when the
+    /// responding daemon predates the field, which yields `Unknown` rather than a
+    /// pass.
+    /// Test: `health_snapshot_deserializes`, `health_snapshot_pid_is_none_when_absent`.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// Whether the responding daemon was deliberately started with
+    /// `tm daemon --force` (issue #4230).
+    ///
+    /// Why: distinguishes a deliberate unsupervised run from an unwanted orphan,
+    /// so `tm doctor` does not fire a hard `Fail` on the escape hatch its own
+    /// remediation recommends.
+    /// What: mirrors `daemon::api::types::HealthResponse::unsupervised_forced`;
+    /// `false` when absent (conservative — an unexplained unsupervised daemon is
+    /// treated as an orphan).
+    /// Test: `health_snapshot_deserializes`.
+    #[serde(default)]
+    pub unsupervised_forced: bool,
 }

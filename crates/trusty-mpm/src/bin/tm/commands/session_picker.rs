@@ -848,10 +848,13 @@ pub(crate) async fn run_tty_picker(
             eprintln!("[q]     quit");
         } else {
             if stale_slots {
+                // #4230: `tm restart` is a hard error where launchd owns the
+                // daemon, so name the verb that works on THIS host.
                 eprintln!(
                     "tm: warning — the running daemon appears to predate stable session \
                      numbering (issue #3034); the numbers below are positional for this \
-                     listing only — run `tm restart` to restore permanent numbering."
+                     listing only — run `{}` to restore permanent numbering.",
+                    crate::commands::launchd_probe::daemon_restart_command()
                 );
             }
             // #3723: verbless, color-coded rows — the restart-vs-resume verb

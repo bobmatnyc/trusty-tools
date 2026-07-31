@@ -502,21 +502,29 @@ launchctl print gui/$(id -u)/com.trusty.mpm.supervisor   # or com.trusty.mpm
 curl -s http://127.0.0.1:<port>/health | jq '.supervised' # must print true
 ```
 
-A third, weaker variant — is launchd (PID 1) the parent of the running daemon
-process — is sometimes useful but has two sharp edges: the daemon binary on
-disk is named `trusty-mpm`, not `tm` (both binary names exist, but launchd's
-plist invokes `trusty-mpm daemon`), and `pgrep -fx` requires an exact full
-cmdline match, which never matches launchd's absolute-path invocation
-(`/Users/…/.cargo/bin/trusty-mpm daemon`). Use an anchored, non-exact match
-against BOTH binary names instead:
+🔴 **`PPID == 1` is NOT evidence of supervision** (issue #4230) — do not use the
+`ps -o ppid=` variant that used to be documented here. macOS reparents ANY
+orphaned process to PID 1, so the #4230 orphan reported `PPID 1` while launchd's
+`com.trusty.mpm` was `not running`: the check CONFIRMED the orphan as supervised.
+Note this also makes `.supervised` itself non-conclusive when it reads `true`, as
+its fallback prong is exactly that PPID test.
+
+The one form that distinguishes the two is comparing the PID launchd owns against
+the PID that actually holds the port:
 
 ```bash
-# (c) is launchd (PID 1) the parent of the running daemon? (weaker — PID 1 is
-# also where macOS reparents ANY orphaned process, so this alone does not
-# distinguish "launchd-supervised service" from "orphan that got reparented
-# to init"; prefer (a) or (b) above and use this only as a quick sanity check)
-ps -o ppid= -p "$(pgrep -f 'trusty-mpm daemon|tm daemon' | head -1)"  # must print "1"
+# (c) does launchd own the process that is actually serving?
+launchctl print "gui/$(id -u)/com.trusty.mpm" | grep -E 'state|pid'
+lsof -nP -iTCP:7880 -sTCP:LISTEN
+# The listening PID must equal launchd's pid. If it does not, `kill -TERM` the
+# listener, then: launchctl kickstart -k gui/$(id -u)/com.trusty.mpm
 ```
+
+`tm doctor`'s `daemon_orphan` check performs exactly this comparison
+automatically — prefer it to running the two commands by hand.
+
+Note that `tm start` / `tm restart` REFUSE to run on a host where launchd owns
+the daemon (#4230); use the `kickstart` above.
 
 Prefer restarting between Claude Code sessions. See the cargo-publish skill
 (`.claude/skills/cargo-publish/SKILL.md`) for the full restart convention.

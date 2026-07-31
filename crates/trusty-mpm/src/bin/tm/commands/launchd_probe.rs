@@ -12,48 +12,137 @@
 //! auto-spawn is safe) need the same "does a trusty-mpm launchd unit exist"
 //! signal, so it is centralised here instead of duplicated.
 //!
-//! What: [`mpm_launchd_plist_exists`] probes the two plist paths a trusty-mpm
-//! launchd unit could be registered under. [`compute_supervised`] and
-//! [`compute_no_spawn`] are pure functions over that boolean (plus, for
-//! supervision, [`trusty_common::update::is_launchd_supervised`]) so the
-//! decision logic is unit-testable without touching the filesystem or launchd.
+//! What: [`daemon_launchd_label_in`] resolves WHICH launchd label owns the
+//! daemon on a given host (the #4230 review narrowed this from "any
+//! `com.trusty.mpm*` plist" — the supervisor plist does not own a daemon), and
+//! [`mpm_launchd_plist_exists`] reduces it to the boolean the older guards
+//! consume. [`compute_supervised`], [`compute_no_spawn`] and
+//! [`compute_daemon_refuse`] are pure functions over that boolean (plus, for
+//! supervision, [`trusty_common::update::is_launchd_supervised`]).
+//! [`launchd_owned_pid`] asks launchd which PID it actually runs, so the
+//! `daemon_orphan` doctor check has an AUTHORITATIVE signal rather than only the
+//! daemon's own heuristic self-report.
 //!
-//! Test: `compute_supervised_*` and `compute_no_spawn_*` below exercise every
-//! combination of the pure decision tables. `mpm_launchd_plist_exists` itself
-//! is a thin `Path::exists` probe and is not unit-tested (no hermetic way to
-//! fake `$HOME/Library/LaunchAgents` without real filesystem I/O).
+//! Test: `compute_supervised_*`, `compute_no_spawn_*` and
+//! `compute_daemon_refuse_*` below exercise every combination of the pure
+//! decision tables; `daemon_label_*` cover label resolution against temp homes;
+//! `parse_launchctl_pid_*` cover every real `launchctl` output shape. The two
+//! live wrappers ([`daemon_launchd_label`], [`launchd_owned_pid`]) are thin
+//! `$HOME` / subprocess lookups over those tested cores.
 
-/// Candidate launchd plist paths for a trusty-mpm daemon unit.
+/// The canonical launchd label for the trusty-mpm DAEMON.
 ///
-/// Why: the supervisor installer (`trusty-installer`) uses the label
-/// `com.trusty.mpm.supervisor`, but operators may also run a plain
-/// `com.trusty.mpm` unit; there is no single canonical in-repo daemon plist,
-/// so both are treated as "a trusty-mpm launchd unit exists".
-/// What: returns the two absolute paths under `~/Library/LaunchAgents/`,
-/// falling back to an empty list when `$HOME` cannot be resolved (e.g. a
-/// stripped-down CI sandbox) — treated the same as "no plist" by callers.
-/// Test: covered indirectly via `mpm_launchd_plist_exists`.
-fn launchd_plist_paths() -> Vec<std::path::PathBuf> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
+/// Why: `#4230` review — this is the one label whose plist `ProgramArguments`
+/// actually run `trusty-mpm daemon`. Kept as a shared constant so the probe,
+/// the refusal hint, and the restart recipe cannot drift apart.
+pub(crate) const DAEMON_LAUNCHD_LABEL: &str = "com.trusty.mpm";
+
+/// Resolve the launchd label of a registered trusty-mpm DAEMON unit, given a
+/// home directory.
+///
+/// Why (#4230 review): the previous probe also counted
+/// `com.trusty.mpm.supervisor.plist`. That plist runs `[<tm>, "supervisor"]`
+/// (`trusty-installer`'s `plist_bootstrap::PLIST_TEMPLATE`), and `tm supervisor`
+/// is a PASSIVE fleet observer — it never starts, restarts, or owns a daemon
+/// (the only two daemon spawn sites in this crate are `daemon::start` and
+/// `guided_autostart::ensure_daemon_started`). Treating it as "launchd owns the
+/// daemon" made every consumer wrong on a `tctl install` host that has only the
+/// supervisor plist: the refusal fired with a false claim, and the remediation
+/// named `com.trusty.mpm`, a label that does not exist there.
+///
+/// Returning the LABEL rather than a bool is what lets the remediation name a
+/// unit that genuinely exists on this host.
+/// What: mirrors `scripts/install-trusty-mpm-signed.sh`'s `resolve_mpm_plist`,
+/// which is already the repo's convention for this question — prefer the
+/// canonical `com.trusty.mpm.plist`; otherwise accept a drifted
+/// `com.trusty.*mpm*.plist`, excluding `supervisor`/`gui` names, which that
+/// script documents as "distinct services". `None` when neither is present.
+/// Test: `daemon_label_prefers_the_canonical_plist`,
+/// `daemon_label_ignores_a_supervisor_only_home`,
+/// `daemon_label_none_for_an_empty_home`,
+/// `daemon_label_accepts_a_drifted_label`,
+/// `daemon_label_ignores_a_gui_plist`.
+pub(crate) fn daemon_launchd_label_in(home: &std::path::Path) -> Option<String> {
     let agents = home.join("Library/LaunchAgents");
-    vec![
-        agents.join("com.trusty.mpm.plist"),
-        agents.join("com.trusty.mpm.supervisor.plist"),
-    ]
+    if agents
+        .join(format!("{DAEMON_LAUNCHD_LABEL}.plist"))
+        .exists()
+    {
+        return Some(DAEMON_LAUNCHD_LABEL.to_string());
+    }
+    let entries = std::fs::read_dir(&agents).ok()?;
+    let mut drifted: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| name.strip_suffix(".plist").map(str::to_owned))
+        .filter(|label| {
+            label.starts_with("com.trusty.")
+                && label.contains("mpm")
+                && !label.contains("supervisor")
+                && !label.contains("gui")
+        })
+        .collect();
+    // Sort so a home with several drifted labels resolves deterministically
+    // rather than depending on directory-iteration order.
+    drifted.sort();
+    drifted.into_iter().next()
 }
 
-/// Returns `true` when a trusty-mpm launchd unit is registered on this host.
+/// Resolve the registered trusty-mpm daemon launchd label on this host.
 ///
-/// Why: the presence of a plist is the operator's declared intent that
-/// launchd should own the daemon's lifecycle; both the health-supervision
-/// signal and the bridge's no-spawn decision key off this fact.
-/// What: `true` when either candidate path in [`launchd_plist_paths`] exists.
-/// Test: exercised manually — see module doc; the pure decisions that consume
-/// this boolean are unit-tested below.
+/// Why: the live wrapper over [`daemon_launchd_label_in`]; separated so the
+/// resolution rules are unit-testable against a temp home.
+/// What: applies [`daemon_launchd_label_in`] to `$HOME`, or `None` when `$HOME`
+/// cannot be resolved (e.g. a stripped-down CI sandbox) — treated the same as
+/// "no unit registered" by callers.
+/// Test: the pure resolver is tested below; this wrapper is a thin `$HOME` lookup.
+pub(crate) fn daemon_launchd_label() -> Option<String> {
+    daemon_launchd_label_in(&dirs::home_dir()?)
+}
+
+/// Returns `true` when a trusty-mpm DAEMON launchd unit is registered.
+///
+/// Why: the presence of a daemon plist is the operator's declared intent that
+/// launchd should own the daemon's lifecycle; the health-supervision signal, the
+/// bridge's no-spawn decision, and the `tm start`/`tm restart` refusal all key
+/// off this one fact.
+/// What: `true` when [`daemon_launchd_label`] resolves a label. Narrowed by the
+/// #4230 review from "any `com.trusty.mpm*` plist" — see
+/// [`daemon_launchd_label_in`] for why the supervisor plist does not count. This
+/// also removes a latent false refusal in the #4397 child guard and a latent
+/// false `no_spawn` in the #2486 bridge guard on supervisor-only hosts.
+/// Test: exercised via [`daemon_launchd_label_in`]'s tests; the pure decisions
+/// that consume this boolean are unit-tested below.
 pub(crate) fn mpm_launchd_plist_exists() -> bool {
-    launchd_plist_paths().iter().any(|p| p.exists())
+    daemon_launchd_label().is_some()
+}
+
+/// The command that correctly restarts the daemon on this host, given the
+/// resolved launchd label.
+///
+/// Why (#4230 review): `tm restart` now refuses when launchd owns the daemon, so
+/// every message that prescribed it unconditionally became self-contradictory —
+/// most visibly `tm doctor`, which printed "run `tm restart`" two lines above the
+/// new orphan check. One resolver keeps the remediation correct per host instead
+/// of hardcoding a verb that is wrong half the time.
+/// What: the `launchctl kickstart -k` recipe for `label` when a daemon unit is
+/// registered; plain `tm restart` otherwise.
+/// Test: `restart_command_names_kickstart_when_launchd_owns_the_daemon`,
+/// `restart_command_names_tm_restart_without_a_unit`.
+pub(crate) fn daemon_restart_command_for(label: Option<&str>) -> String {
+    match label {
+        Some(l) => format!("launchctl kickstart -k gui/$(id -u)/{l}"),
+        None => "tm restart".to_string(),
+    }
+}
+
+/// Resolve [`daemon_restart_command_for`] against this host.
+///
+/// Why: call sites want the correct verb without each re-deriving the label.
+/// What: applies [`daemon_restart_command_for`] to [`daemon_launchd_label`].
+/// Test: the pure resolver is tested below.
+pub(crate) fn daemon_restart_command() -> String {
+    daemon_restart_command_for(daemon_launchd_label().as_deref())
 }
 
 /// Pure decision: is this daemon process in a hazardous unsupervised state?
@@ -112,19 +201,93 @@ pub(crate) fn compute_no_spawn(plist_exists: bool) -> bool {
 /// and `tm start` reports only "daemon did not become healthy within 5s" — the
 /// operator is told the daemon is broken, not that they used the wrong verb.
 /// This message names the right verb up front.
-/// What: a fixed string naming the `launchctl kickstart` restart recipe, the
-/// `tm daemon --force` opt-in, and the issue; single source of truth for the
-/// call site and its test.
-/// Test: `cli_spawn_refusal_names_kickstart_and_force`.
-pub(crate) fn cli_spawn_refusal_hint() -> String {
-    "refusing to spawn: a trusty-mpm launchd unit is registered, so launchd owns \
-     the daemon's lifecycle — spawning one here would create a duplicate, \
-     unsupervised daemon that can seize the port and serve a stale binary \
-     indefinitely (issue #2486/#4230). Restart it with \
-     `launchctl kickstart -k gui/$(id -u)/com.trusty.mpm` (or \
-     `com.trusty.mpm.supervisor`), then re-run `tm status`. To start an \
-     unsupervised daemon on purpose, run `tm daemon --force`."
-        .to_string()
+/// What: a string naming the launchd unit that is ACTUALLY registered
+/// (`label`, resolved by [`daemon_launchd_label`]), its
+/// [`daemon_restart_command_for`] recipe, and the `tm daemon --force` opt-in.
+/// Taking the label as a parameter is the #4230-review fix for a hint that
+/// previously hardcoded `com.trusty.mpm` and so prescribed a nonexistent unit on
+/// a host whose label had drifted.
+/// Test: `cli_spawn_refusal_names_kickstart_and_force`,
+/// `cli_spawn_refusal_names_the_resolved_label`.
+pub(crate) fn cli_spawn_refusal_hint(label: &str) -> String {
+    format!(
+        "refusing to spawn: the launchd unit `{label}` is registered, so launchd owns \
+         the daemon's lifecycle — spawning one here would create a duplicate, \
+         unsupervised daemon that can seize the port and serve a stale binary \
+         indefinitely (issue #2486/#4230). Restart it with `{}`, then re-run \
+         `tm status`. To start an unsupervised daemon on purpose, run \
+         `tm daemon --force`.",
+        daemon_restart_command_for(Some(label))
+    )
+}
+
+/// Ask launchd for the PID it currently owns for `label`.
+///
+/// Why (#4230 review): the `daemon_orphan` doctor check must not rest on the
+/// daemon's own `supervised` self-report.
+/// [`trusty_common::update::is_launchd_supervised`] has TWO prongs — an
+/// `XPC_SERVICE_NAME` env probe AND a `getppid() == 1` fallback — and the second
+/// makes any orphan whose spawning parent exited before the daemon's startup
+/// probe self-report as supervised. That is the same reasoning this change uses
+/// to delete `PPID == 1` from the operator checklist, so the check cannot lean on
+/// it either. launchd's own answer is authoritative; a PID comparison against it
+/// is exactly what the revised runbook tells a human to do.
+/// What: shells out to `launchctl list <label>` and parses the PID from its
+/// output. `None` when the unit is not loaded, launchd reports no running PID, or
+/// `launchctl` is unavailable — all of which mean "launchd is not currently
+/// running this unit", which the verdict treats as hazardous only when something
+/// else IS serving.
+/// Test: the parser is unit-tested by `parse_launchctl_pid_*`; the shell-out
+/// itself needs a live launchd and is exercised by running `tm doctor`.
+pub(crate) fn launchd_owned_pid(label: &str) -> Option<u32> {
+    let out = std::process::Command::new("launchctl")
+        .args(["list", label])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_launchctl_pid(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure parser for the PID in `launchctl list <label>` / `launchctl print`
+/// output.
+///
+/// Why: separated from the shell-out so every real output shape is testable
+/// without launchd. Both forms are handled because the two commands differ and
+/// macOS has changed `list`'s format across releases — a parser that silently
+/// returns `None` on an unrecognised shape would fail OPEN, turning the check
+/// back into the self-report-only version it replaces.
+/// What: recognises `"PID" = 12345;` (`launchctl list <label>`), `pid = 12345`
+/// (`launchctl print`), and a leading `12345\t` (the tab-separated table form).
+/// `None` when no PID is present — including launchd's `"PID"` absence for a
+/// loaded-but-not-running unit and the `-` placeholder in the table form.
+/// Test: `parse_launchctl_pid_reads_the_list_dict_form`,
+/// `parse_launchctl_pid_reads_the_print_form`,
+/// `parse_launchctl_pid_reads_the_table_form`,
+/// `parse_launchctl_pid_none_when_not_running`,
+/// `parse_launchctl_pid_none_for_the_table_dash`,
+/// `parse_launchctl_pid_ignores_other_numeric_keys`.
+pub(crate) fn parse_launchctl_pid(output: &str) -> Option<u32> {
+    for raw in output.lines() {
+        let line = raw.trim();
+        // `launchctl list <label>` dict form: `"PID" = 12345;`
+        if let Some(rest) = line.strip_prefix("\"PID\" = ") {
+            return rest.trim_end_matches(';').trim().parse().ok();
+        }
+        // `launchctl print gui/<uid>/<label>` form: `pid = 12345`
+        if let Some(rest) = line.strip_prefix("pid = ") {
+            return rest.trim_end_matches(';').trim().parse().ok();
+        }
+        // Tab-separated table form: `12345\t0\tcom.trusty.mpm`
+        if let Some((first, rest)) = raw.split_once('\t')
+            && rest.contains('\t')
+            && let Ok(pid) = first.trim().parse::<u32>()
+        {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 /// Pure decision: should the bare `tm daemon` CLI path refuse to start?
@@ -194,11 +357,145 @@ mod tests {
     /// an immediate next step either way.
     #[test]
     fn cli_spawn_refusal_names_kickstart_and_force() {
-        let msg = cli_spawn_refusal_hint();
+        let msg = cli_spawn_refusal_hint(DAEMON_LAUNCHD_LABEL);
         assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
         assert!(msg.contains("com.trusty.mpm"), "message was: {msg}");
         assert!(msg.contains("tm daemon --force"), "message was: {msg}");
         assert!(msg.contains("#4230"), "message was: {msg}");
+    }
+
+    /// #4230 review: the hint must name the label actually registered on this
+    /// host. Hardcoding `com.trusty.mpm` prescribed a nonexistent unit —
+    /// `launchctl kickstart` on it fails with "Could not find service".
+    #[test]
+    fn cli_spawn_refusal_names_the_resolved_label() {
+        let msg = cli_spawn_refusal_hint("com.trusty.mpm.dogfood");
+        assert!(msg.contains("com.trusty.mpm.dogfood"), "message was: {msg}");
+        assert!(
+            msg.contains("gui/$(id -u)/com.trusty.mpm.dogfood"),
+            "message was: {msg}"
+        );
+    }
+
+    /// Build a temp home containing `LaunchAgents/<name>` for each entry.
+    fn home_with(plists: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agents = dir.path().join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).expect("create LaunchAgents");
+        for name in plists {
+            std::fs::write(agents.join(name), "<plist/>").expect("write plist");
+        }
+        dir
+    }
+
+    #[test]
+    fn daemon_label_prefers_the_canonical_plist() {
+        let home = home_with(&["com.trusty.mpm.plist", "com.trusty.mpm.dogfood.plist"]);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()).as_deref(),
+            Some("com.trusty.mpm")
+        );
+    }
+
+    /// #4230 review, HIGH-2: `com.trusty.mpm.supervisor.plist` runs
+    /// `tm supervisor`, a passive fleet observer that never starts a daemon. On a
+    /// `tctl install` host that plist is the ONLY one present, and counting it
+    /// made `tm start`/`tm restart` refuse with a false claim and prescribe a
+    /// `com.trusty.mpm` unit that does not exist there.
+    #[test]
+    fn daemon_label_ignores_a_supervisor_only_home() {
+        let home = home_with(&["com.trusty.mpm.supervisor.plist"]);
+        assert_eq!(daemon_launchd_label_in(home.path()), None);
+        // And therefore the whole guard chain stands down on such a host.
+        assert!(!compute_no_spawn(
+            daemon_launchd_label_in(home.path()).is_some()
+        ));
+    }
+
+    #[test]
+    fn daemon_label_none_for_an_empty_home() {
+        let home = home_with(&[]);
+        assert_eq!(daemon_launchd_label_in(home.path()), None);
+        // A home with no LaunchAgents directory at all must not panic either.
+        let bare = tempfile::tempdir().expect("tempdir");
+        assert_eq!(daemon_launchd_label_in(bare.path()), None);
+    }
+
+    /// Mirrors `install-trusty-mpm-signed.sh`'s drift glob: a non-canonical
+    /// daemon label still resolves, so the remediation names a real unit.
+    #[test]
+    fn daemon_label_accepts_a_drifted_label() {
+        let home = home_with(&["com.trusty.dogfood-mpm.plist"]);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()).as_deref(),
+            Some("com.trusty.dogfood-mpm")
+        );
+    }
+
+    #[test]
+    fn daemon_label_ignores_a_gui_plist() {
+        let home = home_with(&["com.trusty.mpm.gui.plist"]);
+        assert_eq!(daemon_launchd_label_in(home.path()), None);
+    }
+
+    #[test]
+    fn restart_command_names_kickstart_when_launchd_owns_the_daemon() {
+        assert_eq!(
+            daemon_restart_command_for(Some("com.trusty.mpm")),
+            "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm"
+        );
+    }
+
+    #[test]
+    fn restart_command_names_tm_restart_without_a_unit() {
+        assert_eq!(daemon_restart_command_for(None), "tm restart");
+    }
+
+    /// Real output captured from `launchctl list com.trusty.mpm` on macOS 15.
+    #[test]
+    fn parse_launchctl_pid_reads_the_list_dict_form() {
+        let out = "{\n\t\"LimitLoadToSessionType\" = \"Aqua\";\n\t\"Label\" = \
+                   \"com.trusty.mpm\";\n\t\"OnDemand\" = true;\n\t\"LastExitStatus\" = 0;\n\t\
+                   \"PID\" = 73599;\n\t\"Program\" = \"/Users/masa/.cargo/bin/trusty-mpm\";\n};";
+        assert_eq!(parse_launchctl_pid(out), Some(73599));
+    }
+
+    /// Real output captured from `launchctl print gui/<uid>/com.trusty.mpm`.
+    #[test]
+    fn parse_launchctl_pid_reads_the_print_form() {
+        let out = "\tstate = running\n\tpid = 73599\n\t\tstate = active\n";
+        assert_eq!(parse_launchctl_pid(out), Some(73599));
+    }
+
+    #[test]
+    fn parse_launchctl_pid_reads_the_table_form() {
+        assert_eq!(
+            parse_launchctl_pid("12345\t0\tcom.trusty.mpm\n"),
+            Some(12345)
+        );
+    }
+
+    /// The #4230 state itself: the unit is loaded but launchd is not running it,
+    /// so it reports no PID. Must be `None`, which the verdict reads as "launchd
+    /// owns nothing" — hazardous when something else is serving.
+    #[test]
+    fn parse_launchctl_pid_none_when_not_running() {
+        let out = "{\n\t\"Label\" = \"com.trusty.mpm\";\n\t\"LastExitStatus\" = 0;\n};";
+        assert_eq!(parse_launchctl_pid(out), None);
+    }
+
+    #[test]
+    fn parse_launchctl_pid_none_for_the_table_dash() {
+        assert_eq!(parse_launchctl_pid("-\t0\tcom.trusty.mpm\n"), None);
+    }
+
+    /// `LastExitStatus`/`OnDemand` must never be mistaken for a PID — a parser
+    /// that grabbed the first integer would report a bogus PID and, worse, make
+    /// the comparison pass by accident.
+    #[test]
+    fn parse_launchctl_pid_ignores_other_numeric_keys() {
+        let out = "{\n\t\"LastExitStatus\" = 0;\n\t\"TimeOut\" = 30;\n};";
+        assert_eq!(parse_launchctl_pid(out), None);
     }
 
     #[test]

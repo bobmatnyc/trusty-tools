@@ -448,6 +448,10 @@ pub async fn health(State(state): State<Arc<DaemonState>>) -> Json<HealthRespons
         catalog_changes: report.summary_lines(),
         supervised: state.supervised(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
+        // #4230: identify WHICH process answered, so `tm doctor` can compare it
+        // against the PID launchd owns instead of trusting `supervised` alone.
+        pid: std::process::id(),
+        unsupervised_forced: state.unsupervised_forced(),
     })
 }
 

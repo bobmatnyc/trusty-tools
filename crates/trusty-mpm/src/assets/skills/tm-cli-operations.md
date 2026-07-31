@@ -370,9 +370,23 @@ tm run <alias> [--task …]          # launch an interactive claude session for 
 tm path <alias>                    # print the stable repo path (IDE-attach / cd)
 tm update [<alias>]                # git pull --ff-only + re-deploy config (all loaded aliases if omitted)
 tm rm <alias>                      # deregister + delete the alias's project dir (shared config untouched)
-tm start | stop | restart | status # daemon lifecycle
+tm start | stop | restart | status # daemon lifecycle (see note below)
 tm serve --stdio                   # the MCP stdio bridge wired into .mcp.json
 ```
+
+🔴 **`tm start` and `tm restart` REFUSE when launchd owns the daemon** (issue
+#4230). On a host with a registered daemon launchd unit they exit with an error
+naming the right command instead of spawning a second, unsupervised daemon that
+would seize the port and keep serving a stale binary. Use launchd there:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.trusty.mpm   # restart the supervised daemon
+tm doctor                                            # `daemon_orphan` must be OK
+```
+
+`tm stop` still works, but launchd will NOT bring the daemon back on its own
+(`KeepAlive.SuccessfulExit=false`) — use the `kickstart` above. To run an
+unsupervised daemon deliberately, `tm daemon --force`.
 
 `--root <path>` on the alias commands (and `tm mcp`) switches to a standalone
 managed root via the precedence chain in §1.

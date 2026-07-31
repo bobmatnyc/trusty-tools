@@ -300,6 +300,23 @@ pub struct DaemonState {
     /// `commands::launchd_probe::tests` cover the pure decision logic that
     /// `daemon_run` uses to compute the value passed to `set_supervised`.
     pub(super) supervised: std::sync::atomic::AtomicBool,
+    /// Whether this daemon was started with the `tm daemon --force` opt-in
+    /// (issue #4230, review MEDIUM-1).
+    ///
+    /// Why: `supervised == false` alone cannot distinguish the two populations
+    /// that reach it — an unwanted ORPHAN (the #4230 incident) and a run the
+    /// operator deliberately asked for with the `--force` flag that #4397 added
+    /// and that both #4230 refusal messages recommend. Without this flag the
+    /// `daemon_orphan` doctor check would call a deliberate `--force` daemon an
+    /// orphan and tell the operator to kill it, which trains them to ignore the
+    /// check — the exact alert-fatigue failure the check exists to avoid.
+    /// What: an `AtomicBool` defaulting to `false`, set once post-construction by
+    /// `daemon_run` alongside [`Self::set_supervised`]. Read via
+    /// [`Self::unsupervised_forced`].
+    /// Test: `health_response_serializes_forced_field` asserts the default;
+    /// `daemon_orphan`'s `warns_not_fails_when_the_operator_forced_it` covers the
+    /// verdict that consumes it.
+    pub(super) unsupervised_forced: std::sync::atomic::AtomicBool,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
     ///
     /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
@@ -442,6 +459,7 @@ impl DaemonState {
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
+            unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -513,6 +531,7 @@ impl DaemonState {
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
+            unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -563,6 +582,27 @@ impl DaemonState {
     /// default; the daemon e2e suite exercises the post-`run_daemon` value.
     pub fn set_supervised(&self, value: bool) {
         self.supervised
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this daemon was started with the `tm daemon --force` opt-in
+    /// (issue #4230). See [`Self::unsupervised_forced`] field doc for why an
+    /// unsupervised run must be distinguishable from an unwanted orphan.
+    /// What: relaxed-ordering read — a startup-once flag, not a synchronization
+    /// primitive.
+    /// Test: `health_response_serializes_forced_field`.
+    pub fn unsupervised_forced(&self) -> bool {
+        self.unsupervised_forced
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record the `--force` opt-in (issue #4230). Called exactly once by
+    /// `daemon_run::run_daemon` alongside [`Self::set_supervised`].
+    /// What: relaxed-ordering store — see [`Self::unsupervised_forced`].
+    /// Test: `health_response_serializes_forced_field` exercises the default; the
+    /// daemon e2e suite exercises the post-`run_daemon` value.
+    pub fn set_unsupervised_forced(&self, value: bool) {
+        self.unsupervised_forced
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
