@@ -10,7 +10,8 @@
 
 - **2026-07-30** — §7.3 revised, owner-approved: the scenario driver **and**
   assertions move from an `#[ignore]`-tagged Rust integration test in-workspace to
-  **bash under `scripts/vmtest/`**, outside the Cargo workspace, run ad-hoc/manually
+  **bash under `vmtest-harness/`** (relocated to the project root per the
+  2026-07-31 third amendment), outside the Cargo workspace, run ad-hoc/manually
   rather than via `cargo test`. Rationale and the two preserved constraints
   (JSON-only oracle, `cargo install`-only) are in §7.3.
 - **2026-07-30** — `trusty-controller` renamed `trusty-installer` throughout this
@@ -51,6 +52,20 @@
   - The two constraints preserved by the first amendment — the **JSON-only
     assertion oracle** and **`cargo install`-only, never `cp` binaries into
     PATH** (§7.3) — are unchanged by this amendment.
+- **2026-07-31 (third amendment)** — Owner decision: the harness location moves
+  out of its former subdirectory nested under the top-level `scripts/`
+  directory to a **project-root `vmtest-harness/`** directory (§7.3 and §6b).
+  The core separation rationale is unchanged — root `Cargo.toml` uses
+  `members = ["crates/*"]`, so anything under `crates/` is auto-included in the
+  workspace and swept into `cargo test --workspace`, `clippy --all-targets -- -D
+  warnings`, the 500-SLOC `.rs` line-cap lint, the test-pointer lint, SLD lint,
+  and publish-guard; `#[ignore]`-tagged Rust tests still compile and lint, so
+  that tag would not have bought separation either. A project-root
+  `vmtest-harness/` sits even further from the `crates/*` glob than the prior
+  `scripts/`-nested location did, strengthening the separation argument. The
+  two constraints preserved by earlier amendments — the **JSON-only assertion
+  oracle** and **`cargo install`-only, never `cp` binaries into PATH** (cdhash
+  safety) — remain unchanged.
 
 ## Purpose
 
@@ -325,7 +340,7 @@ Clone-and-provision is strictly simpler and buys three properties the golden ima
 could not:
 
 - **Reproducible from a digest-pinned base.** The run is described by the base
-  digest plus the provisioning script in `scripts/vmtest/`, both in version
+  digest plus the provisioning script in `vmtest-harness/`, both in version
   control — not by an opaque image whose bake history lives nowhere.
 - **No bake step to get wrong.** Removing the bake removes failure modes (1) and
   (2) outright, and makes (3)'s purity gate unnecessary rather than merely fixed.
@@ -536,7 +551,7 @@ recommendation, fitting alongside the existing workflows (`ci.yml`, `release.yml
 
 | Leg | Where | When | Rationale |
 |---|---|---|---|
-| **Linux container** (foreground supervision, §4) | GitHub Actions, `container:` or a `services`-less Ubuntu job (mirrors `al2023-build.yml`/`ci.yml`) | **every PR** (path-filtered to `crates/trusty-installer/**` + `scripts/vmtest/**` (§7.3) + the BOM) | cheap Linux minutes; catches install/upgrade regressions on the **foreground/fallback** branch on every change |
+| **Linux container** (foreground supervision, §4) | GitHub Actions, `container:` or a `services`-less Ubuntu job (mirrors `al2023-build.yml`/`ci.yml`) | **every PR** (path-filtered to `crates/trusty-installer/**` + `vmtest-harness/**` (§7.3) + the BOM) | cheap Linux minutes; catches install/upgrade regressions on the **foreground/fallback** branch on every change |
 | **systemd-user (per-PR)** (the real Linux v1 product path, §4.1) | a **standard GitHub-hosted ubuntu runner** (a real login session — it has `systemctl --user`, no privileged systemd-in-container or VM needed) | **every PR** (path-filtered, same filter as the container leg) | the real Linux v1 product supervision path (DOC-8 Resolved-Decision-6 is systemd-user) must be gated per-PR, not only on the nightly VM; the foreground-container leg above covers only the fallback branch |
 | **macOS smoke (per-PR)** (minimal primary-target gate, §3) | GitHub-hosted `macos-14` runner | **every PR** (path-filtered, same filter as the Linux legs) | macOS is the primary target (spec §172–173) and the cdhash `cp`-into-PATH SIGKILL trap is the nastiest, hardest-to-diagnose failure — both need per-PR signal. A SMALL smoke: `cargo install trusty-installer --locked` → daemon comes up under launchd → `health --json` == `running` → **cdhash assertion** (the on-PATH binary execs without SIGKILL via `cargo install`'s atomic-rename path; the forbidden `cp`-over path is NOT used) → one `restart` (`bootout`→`bootstrap`) → `health` again. NOT the full §2 acceptance scenario (which stays nightly, next row). Costs a few bounded macOS minutes per PR — the trade-off is catching a silent cdhash/supervision regression pre-merge instead of discovering it nightly post-merge. |
 | **macOS** (the full §2 MUC2 acceptance run, §3) | GitHub-hosted `macos-14` runner (the runner *is* the isolation host, §3.2) **or** self-hosted tart | **nightly + manual `workflow_dispatch`** (NOT every PR) | macOS minutes are costly; the nightly run is the **full §2 acceptance scenario + teardown** — distinct from the minimal per-PR smoke above — catching the deeper macOS-specific regressions without taxing every PR |
