@@ -1,0 +1,126 @@
+=== K2 START 2026-07-31T12:22:53Z ===
+HOST_CORES=18 HOST_MEM_GB=64
+HOST_FREE_KB_BEFORE=555977804
+### clone
+CLONE_MS=318
+### tart set --cpu 8 --memory 16384 --disk-size 100
+SET_RC=0
+### boot 1 (applies the disk expansion; per section G it is not visible on this boot)
+BOOT1_TO_READY_MS=17112
+--- guest sizing + disk as seen on boot 1
+8
+8
+mem_gb=16
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk2s1s1    46Gi    12Gi    16Gi    42%    459k  170M    0%   /
+### sync + settle + stop (K1 discipline), then reboot so the expansion is visible
+FLUSHED
+BOOT2_TO_READY_MS=18292
+--- guest disk as seen on boot 2 (post-expansion)
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk2s1s1    93Gi    12Gi    63Gi    16%    459k  658M    0%   /
+
+8
+mem_gb=16
+
+############ PROVISIONING (timed) ############
+--- pre-provision tool inventory
+mise       /opt/homebrew/bin/mise
+brew       /opt/homebrew/bin/brew
+git        /usr/bin/git
+gh         /opt/homebrew/bin/gh
+curl       /usr/bin/curl
+rustc      ABSENT
+cargo      ABSENT
+rustup     ABSENT
+uv         ABSENT
+node       /opt/homebrew/bin/node
+python3    /opt/homebrew/bin/python3
+cmake      /opt/homebrew/bin/cmake
+mise WARN  mise version 2026.7.18 available
+mise=2026.6.0 macos-arm64 (2026-06-03)
+gh=gh version 2.93.0 (2026-05-27)
+--- step 1: mise use -g rust@1.91  (delegates to rustup; downloads toolchain)
+mise rust@1.91.1     [1/3] install
+mise rust@1.91.1     [1/3] Downloading rustup-init
+info: downloading installer
+warn: It looks like you have an existing rustup settings file at:
+warn: /Users/admin/.rustup/settings.toml
+warn: Rustup will install the default toolchain as specified in the settings file,
+warn: instead of the one inferred from the default host triple.
+info: profile set to default
+info: default host triple is aarch64-apple-darwin
+info: skipping toolchain installation
+mise rust@1.91.1     [1/3] Rust is installed now. Great!
+mise rust@1.91.1     [1/3] To get started you need Cargo's bin directory ($HOME/.cargo/bin) in your PATH
+mise rust@1.91.1     [1/3] environment variable. This has not been done automatically.
+mise rust@1.91.1     [1/3] To configure your current shell, you need to source
+mise rust@1.91.1     [1/3] the corresponding env file under $HOME/.cargo.
+mise rust@1.91.1     [1/3] This is usually done by running one of the following (note the leading DOT):
+mise rust@1.91.1     [1/3] . "$HOME/.cargo/env"            # For sh/bash/zsh/ash/dash/pdksh
+mise rust@1.91.1     [1/3] source "$HOME/.cargo/env.fish"  # For fish
+mise rust@1.91.1     [1/3] source "~/.cargo/env.nu"  # For nushell
+mise rust@1.91.1     [1/3] source "$HOME/.cargo/env.tcsh"  # For tcsh
+mise rust@1.91.1     [1/3] . "$HOME/.cargo/env.ps1"        # For pwsh
+mise rust@1.91.1     [1/3] source "$HOME/.cargo/env.xsh"   # For xonsh
+info: syncing channel updates for 1.91.1-aarch64-apple-darwin
+info: latest update on 2025-11-10 for version 1.91.1 (ed61e7d7e 2025-11-07)
+info: downloading 6 components
+mise rust@1.91.1     [1/3]   1.91.1-aarch64-apple-darwin installed - rustc 1.91.1 (ed61e7d7e 2025-11-07)
+info: default toolchain set to 1.91.1-aarch64-apple-darwin
+info: checking for self-update (current version: 1.29.0)
+mise rust@1.91.1     [1/3] rustc -V
+mise rust@1.91.1     [1/3] rustc 1.91.1 (ed61e7d7e 2025-11-07)
+mise rust@1.91.1   ✓ installed
+mise ~/.config/mise/config.toml tools: rust@1.91.1
+STEP_RUST_RC=0
+STEP_RUST_MS=20778
+--- step 2: mise use -g uv@latest
+mise uv@0.12.0       [1/3] install
+mise uv@0.12.0       [1/3] download uv-aarch64-apple-darwin.tar.gz
+mise uv@0.12.0       [2/3] verify GitHub artifact attestations
+mise uv@0.12.0       [2/3] ✓ GitHub artifact attestations verified
+mise uv@0.12.0       [2/3] checksum uv-aarch64-apple-darwin.tar.gz
+mise uv@0.12.0       [3/3] extract uv-aarch64-apple-darwin.tar.gz
+mise uv@0.12.0     ✓ installed
+mise ~/.config/mise/config.toml tools: uv@0.12.0
+STEP_UV_RC=0
+STEP_UV_MS=7947
+--- step 3: gh (preinstalled via Homebrew on the base image -- nothing to install)
+gh version 2.93.0 (2026-05-27)
+STEP_GH_RC=0
+STEP_GH_MS=616
+--- step 4: write ~/.zshenv (the load-bearing non-interactive PATH fix)
+export PATH="$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$PATH"
+STEP_ZSHENV_RC=0
+STEP_ZSHENV_MS=617
+
+PROVISION_MS=30079
+PROVISION_SEC=30
+
+### VERIFY in a fresh NON-INTERACTIVE shell (both /bin/sh with explicit PATH and /bin/zsh via .zshenv)
+--- /bin/sh, explicit PATH:
+PATH=/Users/admin/.cargo/bin:/Users/admin/.local/share/mise/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+rustc 1.91.1 (ed61e7d7e 2025-11-07)
+cargo 1.91.1 (ea2d97820 2025-10-10)
+uv 0.12.0 (b88d7c5c4 2026-07-28 aarch64-apple-darwin)
+gh version 2.93.0 (2026-05-27)
+rustup 1.29.0 (28d1352db 2026-03-05)
+VERIFY_SH_RC=0
+--- /bin/zsh, relying ONLY on ~/.zshenv:
+PATH=/Users/admin/.cargo/bin:/Users/admin/.local/share/mise/shims:/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin
+rustc 1.91.1 (ed61e7d7e 2025-11-07)
+cargo 1.91.1 (ea2d97820 2025-10-10)
+uv 0.12.0 (b88d7c5c4 2026-07-28 aarch64-apple-darwin)
+VERIFY_ZSH_RC=0
+--- mise ls:
+rust  1.91.1 (symlink)  ~/.config/mise/config.toml  1.91
+uv    0.12.0            ~/.config/mise/config.toml  latest
+--- MSRV gate:
+MSRV_OK
+
+### disk after provisioning
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk2s1s1    93Gi    12Gi    61Gi    17%    459k  644M    0%   /
+HOST_FREE_KB_AFTER=554162688
+=== K2 DONE 2026-07-31T12:24:10Z === VM probe-k2 LEFT RUNNING for K3

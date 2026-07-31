@@ -1,0 +1,12 @@
+=== K1c START 2026-07-31T12:16:54Z — 4 repeats of the exact variant-A recipe ===
+TRIAL_1 RESULT=LOST STOP_CMD_RETURN_MS=364 STOP_TO_STOPPED_MS=669
+TRIAL_2 RESULT=LOST STOP_CMD_RETURN_MS=408 STOP_TO_STOPPED_MS=682
+TRIAL_3 RESULT=SURVIVED STOP_CMD_RETURN_MS=502 STOP_TO_STOPPED_MS=813
+TRIAL_4 RESULT=LOST STOP_CMD_RETURN_MS=401 STOP_TO_STOPPED_MS=709
+K1C_TALLY survived=1 lost=3 (plus the original variant-A loss = 1 more LOST)
+--- remaining VMs:
+Source Name                                                                                                        Disk Size Accessed       State  
+local  tahoe-base                                                                                                  50   33   41 seconds ago stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   1 week ago     stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   1 week ago     stopped
+=== K1c DONE 2026-07-31T12:20:19Z ===
