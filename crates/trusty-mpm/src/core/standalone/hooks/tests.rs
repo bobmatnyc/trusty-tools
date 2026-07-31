@@ -78,23 +78,26 @@ fn test_hook_command_rejects_ephemeral_exe_override() {
 /// PATH-resolved install, or the bare fallback).
 #[test]
 fn test_hook_command_rejects_system_temp_exe_override() {
+    let mut baked: Vec<String> = Vec::new();
     for ephemeral in [
         PathBuf::from("/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/trusty-mpm"),
         PathBuf::from("/tmp/trusty-mpm"),
         std::env::temp_dir().join("claude-4485/base-bins/trusty-mpm"),
     ] {
         let cmd = mpm_hook_command(Some(&ephemeral));
-        assert!(
-            !cmd.contains(&ephemeral.display().to_string()),
-            "a system temp path must never be baked into the hook command (#4485), \
-             override {} produced: {cmd:?}",
-            ephemeral.display()
-        );
+        if cmd.contains(&ephemeral.display().to_string()) {
+            baked.push(cmd.clone());
+        }
         assert!(
             cmd.ends_with(" hook"),
             "hook command must still end with ' hook', got: {cmd:?}"
         );
     }
+    assert!(
+        baked.is_empty(),
+        "a system temp path must never be baked into the hook command (#4485), but these \
+         commands carry one: {baked:#?}"
+    );
 }
 
 #[test]

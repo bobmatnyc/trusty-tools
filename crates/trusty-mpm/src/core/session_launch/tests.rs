@@ -2252,24 +2252,25 @@ fn resolve_statusline_binary_with_rejects_ephemeral_current_exe() {
 /// PATH-resolved install wins instead.
 #[test]
 fn resolve_statusline_binary_with_rejects_system_temp_current_exe() {
-    for exe in [
+    let leaked: Vec<String> = [
         PathBuf::from("/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/tm"),
         PathBuf::from("/tmp/tm"),
         std::env::temp_dir().join("claude-4485/base-bins/tm"),
-    ] {
-        let expected = exe.clone();
-        let resolved = resolve_statusline_binary_with(
-            move || Ok(expected.clone()),
+    ]
+    .into_iter()
+    .map(|exe| {
+        resolve_statusline_binary_with(
+            move || Ok(exe.clone()),
             |_name| Some(PathBuf::from("/opt/homebrew/bin/tm")),
-        );
-        assert_eq!(
-            resolved,
-            "/opt/homebrew/bin/tm",
-            "a system temp current_exe ({}) must be rejected in favour of the PATH-resolved \
-             install (#4492)",
-            exe.display()
-        );
-    }
+        )
+    })
+    .filter(|resolved| resolved != "/opt/homebrew/bin/tm")
+    .collect();
+    assert!(
+        leaked.is_empty(),
+        "a system temp current_exe must be rejected in favour of the PATH-resolved install \
+         (#4492), but these were persisted verbatim: {leaked:#?}"
+    );
 }
 
 #[test]

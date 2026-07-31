@@ -330,10 +330,13 @@ mod tests {
     /// scratchpad path, a plain `/tmp` path, the macOS `/var/folders` per-user
     /// temp root, and a path derived from the live [`std::env::temp_dir`] (so
     /// the check holds on a machine whose `TMPDIR` is none of the literals).
+    /// Every shape is checked before the assertion fires, so reverting the
+    /// guard reports ALL the paths it stops rejecting rather than aborting on
+    /// the first — the difference between "the fix is gone" and "one case is".
     #[test]
     fn is_ephemeral_build_path_flags_system_temp_paths() {
         let temp_derived = std::env::temp_dir().join("claude-4485/scratchpad/base-bins/tm");
-        for p in [
+        let missed: Vec<String> = [
             PathBuf::from(
                 "/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/trusty-mpm",
             ),
@@ -342,13 +345,16 @@ mod tests {
             PathBuf::from("/var/tmp/tm"),
             PathBuf::from("/var/folders/qz/9x_2/T/cargo-install-abc/tm"),
             temp_derived,
-        ] {
-            assert!(
-                is_ephemeral_build_path(&p),
-                "{} must be flagged: a system temp root is never an installed location (#4485)",
-                p.display()
-            );
-        }
+        ]
+        .into_iter()
+        .filter(|p| !is_ephemeral_build_path(p))
+        .map(|p| p.display().to_string())
+        .collect();
+        assert!(
+            missed.is_empty(),
+            "a system temp root is never an installed location (#4485), but these were \
+             accepted as stable: {missed:#?}"
+        );
     }
 
     /// Why (#4485): the temp check must be a component-wise PREFIX match, not a
