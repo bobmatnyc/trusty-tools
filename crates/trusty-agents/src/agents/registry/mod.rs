@@ -31,6 +31,8 @@ mod tests;
 pub(crate) use md_agent::parse_md_agent;
 pub use roster::{build_roster_section, inject_roster_into_prompt};
 
+use crate::agents::mpm_bridge;
+
 /// Discovers and holds the project's agent configs.
 pub struct AgentRegistry {
     /// Ordered map: agent_name → (AgentConfig, source_path).
@@ -78,11 +80,17 @@ impl AgentRegistry {
     /// `.trusty-agents/agents/engineer.toml` in the project overrides a bundled
     /// `config/agents/engineer.toml`. Missing dirs are silently skipped so
     /// operators don't need to pre-create every path.
-    /// What: Walks each directory for `*.toml` files, parses each via
-    /// `AgentConfig::load`, and inserts the first occurrence of each agent
-    /// name. Malformed files log a warn and are skipped.
+    /// What: Walks each directory for `*.toml` and `*.md` files, parses each,
+    /// and inserts the first occurrence of each agent name. Malformed files log
+    /// a warn and are skipped.
+    ///
+    /// `.md` files are parsed by ONE OF TWO readers, selected by which tier the
+    /// containing directory belongs to (#4496) — see the match on
+    /// `mpm_bridge::is_claude_agents_dir` below for the full rationale.
     /// Test: `registry_loads_from_multiple_dirs_with_priority`,
-    /// `registry_skips_missing_dirs_silently`.
+    /// `registry_skips_missing_dirs_silently`,
+    /// `registry_reads_claude_agents_tier_with_the_mpm_parser`,
+    /// `hand_authored_trusty_agents_md_wins_over_a_claude_agents_agent`.
     pub fn load(search_paths: &[PathBuf]) -> Self {
         let mut agents: IndexMap<String, (AgentConfig, PathBuf)> = IndexMap::new();
 
@@ -103,6 +111,23 @@ impl AgentRegistry {
                 let ext = path.extension().and_then(|s| s.to_str());
                 let parsed = match ext {
                     Some("toml") => AgentConfig::load(&path),
+                    // #4496: `.md` means two different schemas depending on the
+                    // tier. `.claude/agents` holds trusty-mpm's DEPLOYED,
+                    // already-flattened artifacts, whose frontmatter follows
+                    // trusty-mpm's grammar — most visibly `tools:` as a FLAT
+                    // NAME LIST, where `parse_md_agent` expects a nested
+                    // `ToolsConfig` map and hard-errors, dropping the whole
+                    // agent with only a warn to show for it. Route that tier
+                    // through the SHARED reader that trusty-mpm itself emits
+                    // with (`mpm_bridge`, leaf-only). Every other tier —
+                    // `.trusty-agents/agents`, `<config_dir>/agents` — is
+                    // trusty-agents' OWN `.md` overlay schema (`capabilities:`,
+                    // `runner:`, `display_name:`, live `extends:`) and keeps
+                    // `parse_md_agent`. Neither reader is a superset of the
+                    // other, which is why this is a selection and not a merge.
+                    Some("md") if mpm_bridge::is_claude_agents_dir(dir) => {
+                        mpm_bridge::load_mpm_agent(&path)
+                    }
                     Some("md") => parse_md_agent(&path),
                     _ => continue,
                 };
