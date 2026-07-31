@@ -21,6 +21,7 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::inference::registry::ProviderId;
 use crate::inference::types::{ChatRequest, ToolChoice, ToolDefinition};
 
 /// Convert a neutral [`ChatRequest`] into an Anthropic `/v1/messages` body.
@@ -219,11 +220,18 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 ///
 /// Why: the resolver preserves the explicit `anthropic/claude-…` slug so the
 /// two-stage resolver can route it, but the Anthropic API expects the bare model
-/// id (`claude-…`); sending the prefixed form is an unknown-model 404.
-/// What: removes a leading `anthropic/` if present, else returns the slug as-is.
-/// Test: `strips_anthropic_prefix`.
+/// id (`claude-…`); sending the prefixed form is an unknown-model 404. #4493:
+/// this was one of two hand-rolled per-provider copies of that rule (Bedrock had
+/// the other) while the OpenAI-dialect providers had none — the reason
+/// `openai/gpt-4o-mini` reached `api.openai.com` prefixed. It now delegates to
+/// the ONE shared implementation so the three cannot drift.
+/// What: forwards to [`ProviderId::wire_model_id`] for
+/// [`ProviderId::Anthropic`], which removes a leading `anthropic/` marker (only
+/// that marker, only once) and otherwise returns the slug unchanged.
+/// Test: `strips_anthropic_prefix`, and
+/// `super::super::super::registry::tests::wire_model_id_strips_own_routing_prefix`.
 fn strip_prefix(model: &str) -> &str {
-    model.strip_prefix("anthropic/").unwrap_or(model)
+    ProviderId::Anthropic.wire_model_id(model)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

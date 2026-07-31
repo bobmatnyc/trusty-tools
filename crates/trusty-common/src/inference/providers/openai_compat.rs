@@ -14,7 +14,11 @@
 //! [`InferenceAdapter`]. The API key is held as a [`SecretString`] and only ever
 //! placed in the `Authorization` header — never logged, never in an error.
 //! Test: inline `tests` — `endpoint_appends_path`, `usage_directive_injected`,
-//! `usage_directive_absent_without_detailed`, `usage_directive_not_overwritten`;
+//! `usage_directive_absent_without_detailed`, `usage_directive_not_overwritten`,
+//! and the #4493 model-normalisation trio
+//! (`prepare_body_strips_routing_prefix_for_direct_provider`,
+//! `prepare_body_keeps_full_slug_for_openrouter`,
+//! `prepare_body_preserves_model_ids_containing_slashes`);
 //! full HTTP round-trip in `crates/trusty-common/tests/inference_adapters.rs`.
 
 use async_trait::async_trait;
@@ -106,21 +110,41 @@ impl OpenAiCompatAdapter {
         &self.endpoint
     }
 
-    /// Produce the outbound request body, injecting the detailed-usage directive
+    /// Produce the outbound request body: the caller's request with the model id
+    /// normalised for this provider and the detailed-usage directive injected
     /// when this provider wants it.
     ///
-    /// Why: OpenRouter only returns its authoritative, cache-discounted
-    /// `usage.cost` and nested cache counters when asked via `usage:{include:true}`;
-    /// every other provider must never see the directive. Centralising the
-    /// decision here (driven by [`InferenceAdapter::wants_detailed_usage`]) keeps
-    /// the caller provider-agnostic.
-    /// What: clones `request`; if [`Self::wants_detailed_usage`] is `true` and the
-    /// caller did not already set `usage`, sets it to
-    /// [`RequestUsageConfig::detailed`]. Otherwise returns the request unchanged.
-    /// Test: `usage_directive_injected`, `usage_directive_absent_without_detailed`,
+    /// Why: two provider-specific decisions must happen on EVERY outbound body,
+    /// and this is the one place both the buffered and streaming paths share.
+    /// (1) #4493 — a caller's slug carries the `<prefix>/` marker the two-stage
+    /// resolver routed on (`openai/gpt-4o-mini`), and a DIRECT provider does not
+    /// know that id: `api.openai.com` answered 400 for it. The marker is a
+    /// routing concern that must not reach the wire, so it is removed here, at
+    /// the last moment, by the provider that owns the payload — which is also
+    /// why no caller has to know whose credential resolved. (2) OpenRouter only
+    /// returns its authoritative, cache-discounted `usage.cost` and nested cache
+    /// counters when asked via `usage:{include:true}`; every other provider must
+    /// never see the directive. Centralising both here keeps the caller
+    /// provider-agnostic.
+    /// What: clones `request`; rewrites `model` to
+    /// [`crate::inference::ProviderId::wire_model_id`] for this adapter's
+    /// provider (a no-op for OpenRouter, which routes by the full slug, and for
+    /// any slug carrying no marker of ours); then, if
+    /// [`Self::wants_detailed_usage`] is `true` and the caller did not already
+    /// set `usage`, sets it to [`RequestUsageConfig::detailed`].
+    /// Test: `prepare_body_strips_routing_prefix_for_direct_provider`,
+    /// `prepare_body_keeps_full_slug_for_openrouter`,
+    /// `prepare_body_preserves_model_ids_containing_slashes`,
+    /// `usage_directive_injected`, `usage_directive_absent_without_detailed`,
     /// `usage_directive_not_overwritten`.
     fn prepare_body(&self, request: &ChatRequest) -> ChatRequest {
         let mut req = request.clone();
+        // #4493: the prefix the resolver consumed for routing is not part of a
+        // direct provider's model id — drop it before it reaches the wire.
+        let wire_model = self.capabilities.id.wire_model_id(&req.model).to_string();
+        if wire_model != req.model {
+            req.model = wire_model;
+        }
         if self.wants_detailed_usage() && req.usage.is_none() {
             req.usage = Some(RequestUsageConfig::detailed());
         }
@@ -345,6 +369,106 @@ mod tests {
             OpenAiCompatAdapter::new(config_for(ProviderId::OpenAI, "https://api.openai.com/v1/"))
                 .expect("build");
         assert_eq!(b.endpoint(), "https://api.openai.com/v1/chat/completions");
+    }
+
+    /// Why: #4493 — the whole defect. A slug whose `<prefix>/` marker the
+    /// resolver already consumed for routing must reach a DIRECT provider
+    /// unprefixed: `api.openai.com` 400s on `openai/gpt-4o-mini`. Proven across
+    /// several direct providers (not just OpenAI) so the fix is general, and on
+    /// the streaming body too, since `chat_stream` is a separate wire path.
+    /// Test: itself.
+    #[test]
+    fn prepare_body_strips_routing_prefix_for_direct_provider() {
+        for (id, slug, wire) in [
+            (ProviderId::OpenAI, "openai/gpt-4o-mini", "gpt-4o-mini"),
+            (
+                ProviderId::Together,
+                "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            ),
+            (
+                ProviderId::AtlasCloud,
+                "atlascloud/openai/gpt-5.6-sol",
+                "openai/gpt-5.6-sol",
+            ),
+            (ProviderId::Local, "ollama/qwen3:30b", "qwen3:30b"),
+        ] {
+            let a =
+                OpenAiCompatAdapter::new(config_for(id, "https://example.test/v1")).expect("build");
+            let req = ChatRequest::new(slug, vec![ChatMessage::user("hi")]);
+            assert_eq!(
+                a.prepare_body(&req).model,
+                wire,
+                "{} must send the unprefixed id",
+                id.as_str()
+            );
+            assert_eq!(
+                a.stream_body(&req).expect("body")["model"],
+                serde_json::json!(wire),
+                "{} streaming body must send the unprefixed id",
+                id.as_str()
+            );
+        }
+    }
+
+    /// Why: #4493 regression guard for the workspace's PRIMARY provider —
+    /// OpenRouter routes BY the full `vendor/model` slug, and additionally serves
+    /// first-party models under a real `openrouter/` vendor. A global strip would
+    /// break both, so the full slug must survive verbatim on both wire paths.
+    /// Test: itself.
+    #[test]
+    fn prepare_body_keeps_full_slug_for_openrouter() {
+        let a = OpenAiCompatAdapter::new(config_for(
+            ProviderId::OpenRouter,
+            "https://openrouter.ai/api/v1",
+        ))
+        .expect("build");
+        for slug in [
+            "openai/gpt-4o-mini",
+            "anthropic/claude-sonnet-4-5",
+            "openrouter/auto",
+        ] {
+            let req = ChatRequest::new(slug, vec![ChatMessage::user("hi")]);
+            assert_eq!(
+                a.prepare_body(&req).model,
+                slug,
+                "OpenRouter must transmit {slug} verbatim"
+            );
+            assert_eq!(
+                a.stream_body(&req).expect("body")["model"],
+                serde_json::json!(slug),
+                "OpenRouter streaming body must transmit {slug} verbatim"
+            );
+        }
+    }
+
+    /// Why: the normalisation must be surgical — a slash that belongs to the
+    /// MODEL ID (Fireworks' `accounts/…`, Together's `meta-llama/…`) or a bare id
+    /// must not be truncated into an invalid model.
+    /// Test: itself.
+    #[test]
+    fn prepare_body_preserves_model_ids_containing_slashes() {
+        for (id, slug) in [
+            (
+                ProviderId::Fireworks,
+                "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            ),
+            (
+                ProviderId::Together,
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            ),
+            (ProviderId::OpenAI, "gpt-4o-mini"),
+        ] {
+            let a =
+                OpenAiCompatAdapter::new(config_for(id, "https://example.test/v1")).expect("build");
+            let req = ChatRequest::new(slug, vec![ChatMessage::user("hi")]);
+            assert_eq!(
+                a.prepare_body(&req).model,
+                slug,
+                "{} must not mangle {slug}",
+                id.as_str()
+            );
+        }
     }
 
     /// Why: OpenRouter (detailed_usage_accounting = true) must inject
