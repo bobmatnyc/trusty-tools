@@ -368,11 +368,123 @@ fn registry_md_file_without_frontmatter_is_skipped() {
     let dir = TempDir::new().unwrap();
     // Valid TOML agent stays loadable.
     write_agent(dir.path(), "ok", "engineer", &[], &[], &[]);
-    // MD without frontmatter: skipped with warn.
+    // MD without frontmatter: skipped with warn. This dir is NOT shaped
+    // `.claude/agents`, so it stays on `parse_md_agent`, whose missing-fence
+    // hard error is what drops the file (#4496 changed only the other tier).
     fs::write(dir.path().join("broken.md"), "# not an agent\n").unwrap();
     let reg = AgentRegistry::load(&[dir.path().to_path_buf()]);
     assert_eq!(reg.len(), 1);
     assert!(reg.get("ok").is_some());
+}
+
+/// Create a `<root>/<parent>/agents` directory and return its path.
+fn agents_tier(root: &Path, parent: &str) -> PathBuf {
+    let dir = root.join(parent).join("agents");
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// #4496: the `.claude/agents` tier holds trusty-mpm's DEPLOYED artifacts and
+/// must be read with trusty-mpm's own grammar, not with `parse_md_agent`.
+///
+/// `tools:` is the discriminator that proves which reader ran: trusty-mpm
+/// emits a FLAT NAME LIST, which `parse_md_agent`'s `serde_yaml` deserialize
+/// into a nested `ToolsConfig` map rejects outright — under the old routing
+/// this agent did not merely lose its tools, it vanished from the roster
+/// entirely.
+#[test]
+fn registry_reads_claude_agents_tier_with_the_mpm_parser() {
+    let tmp = TempDir::new().unwrap();
+    let claude = agents_tier(tmp.path(), ".claude");
+    fs::write(
+        claude.join("research.md"),
+        "---\nname: research\nrole: researcher\ndescription: mpm research agent\n\
+         tools: [Read, Grep]\nskills:\n- systematic-debugging\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    let reg = AgentRegistry::load(&[claude]);
+
+    let cfg = reg.get("research").expect("mpm artifact is discovered");
+    assert_eq!(cfg.agent.role, "researcher");
+    assert_eq!(cfg.agent.description, "mpm research agent");
+    assert_eq!(
+        cfg.tools.allowed.as_deref(),
+        Some(["Read".to_string(), "Grep".to_string()].as_slice()),
+        "trusty-mpm's flat `tools:` list must survive as the exact-name allowlist"
+    );
+    assert!(
+        cfg.skills.allow.is_none(),
+        "trusty-mpm's `skills:` dependency list must never become a permission grant"
+    );
+    assert!(cfg.agent.tier.is_none());
+}
+
+/// Hand-authored `.trusty-agents/agents/*` MUST WIN over a trusty-mpm-sourced
+/// agent of the same name.
+///
+/// Why pin it: `agent_search_paths` already orders `.trusty-agents/agents`
+/// ahead of `.claude/agents` and `AgentRegistry::load` is first-occurrence-wins,
+/// so #4496 preserves this rather than introducing it — but nothing previously
+/// asserted it, and now that the two tiers use DIFFERENT parsers a silent
+/// inversion would also silently change which schema an operator's file is read
+/// with. The assertion is on the resulting config, not on the ordering, so it
+/// still holds if the shadowing mechanism is ever reimplemented.
+#[test]
+fn hand_authored_trusty_agents_md_wins_over_a_claude_agents_agent() {
+    let tmp = TempDir::new().unwrap();
+    let trusty = agents_tier(tmp.path(), ".trusty-agents");
+    let claude = agents_tier(tmp.path(), ".claude");
+
+    // Hand-authored overlay, trusty-agents' own schema.
+    fs::write(
+        trusty.join("engineer.md"),
+        "---\nname: engineer\nrole: engineer\ndescription: hand-authored\n\
+         runner: in-process\n---\n\nHand-authored body.\n",
+    )
+    .unwrap();
+    // Same name, trusty-mpm deploy artifact.
+    fs::write(
+        claude.join("engineer.md"),
+        "---\nname: engineer\nrole: qa\ndescription: mpm-deployed\n---\n\nDeployed body.\n",
+    )
+    .unwrap();
+
+    let reg = AgentRegistry::load(&[trusty, claude]);
+
+    assert_eq!(reg.len(), 1, "the shadowed copy must not be added");
+    let cfg = reg.get("engineer").expect("engineer is registered");
+    assert_eq!(cfg.agent.description, "hand-authored");
+    assert_eq!(cfg.agent.role, "engineer");
+    assert_eq!(
+        cfg.agent.runner,
+        RunnerKind::InProcess,
+        "the winning copy must be the one parsed by `parse_md_agent` — `runner:` \
+         is a key only trusty-agents' own overlay schema has"
+    );
+}
+
+/// The bundled `.trusty-agents/agents` roster must keep shadowing a
+/// same-named trusty-mpm artifact even when the mpm tier is listed too —
+/// the real-world shape of the collision, using the actual shipped agents.
+#[test]
+fn bundled_agents_are_not_shadowed_by_a_claude_agents_copy() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let claude = agents_tier(tmp.path(), ".claude");
+    fs::write(
+        claude.join("research-agent.md"),
+        "---\nname: research-agent\nrole: qa\ndescription: impostor\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    let reg = AgentRegistry::load(&[bundled_agents_dir(), claude]);
+
+    let cfg = reg.get("research-agent").expect("bundled agent present");
+    assert_ne!(
+        cfg.agent.description, "impostor",
+        "a trusty-mpm artifact must never shadow a bundled/hand-authored agent"
+    );
 }
 
 // ── Integration-style tests against bundled config/agents/ ─────────────
