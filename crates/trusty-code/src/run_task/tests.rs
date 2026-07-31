@@ -4,7 +4,7 @@
 //! acceptance criterion — the PM delegates to the engineer, the engineer's
 //! file change shows up in the diff, the transcript carries both roles, usage +
 //! cost aggregate, exit codes reflect outcome, and the per-run `--engineer-model`
-//! swap routes the engineer — is driven through a scripted `LlmClientTrait` mock
+//! swap routes the engineer — is driven through a scripted `InferenceAdapter` mock
 //! so no network call is ever made.
 //! What: A `ScriptedLlm` replays a queue of `ChatResponse`s; because the PM and
 //! engineer share one inner client, the script is consumed in call order
@@ -26,7 +26,7 @@ use super::{
 };
 use crate::agent_loop::AgentLoopError;
 use crate::agents::AgentConfig;
-use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::llm::{ChatRequest, ChatResponse, InferenceAdapter, InferenceError};
 use crate::runner::RegistryFactory;
 use crate::tools::{AgentOutput, EngineerCompletionSignal, RunContext};
 
@@ -139,7 +139,10 @@ fn isolate_ambient_daemons() {
 /// What: calls [`isolate_ambient_daemons`] then forwards to
 /// [`real_execute_run_task`] unchanged.
 /// Test: see [`isolate_ambient_daemons`].
-async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> super::RunReport {
+async fn execute_run_task(
+    params: RunTaskParams,
+    llm: Arc<dyn InferenceAdapter>,
+) -> super::RunReport {
     isolate_ambient_daemons();
     real_execute_run_task(params, llm).await
 }
@@ -228,8 +231,10 @@ impl ScriptedLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for ScriptedLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for ScriptedLlm {
+    crate::llm::mock_adapter_identity!("mock-scripted");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         self.models
             .lock()
             .expect("models lock")
@@ -247,7 +252,7 @@ impl LlmClientTrait for ScriptedLlm {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
-            None => Err(LlmError::MissingConfig(format!(
+            None => Err(InferenceError::MissingConfig(format!(
                 "scripted LLM exhausted at call {idx}"
             ))),
         }
@@ -794,7 +799,7 @@ fn malformed_finish_task_response() -> Value {
     })
 }
 
-/// An `LlmClientTrait` that sleeps before its Nth `chat` call, then delegates.
+/// An `InferenceAdapter` that sleeps before its Nth `chat` call, then delegates.
 ///
 /// Why: Deterministically drives the PM's own wall-clock deadline past its
 /// configured budget — the FIRST call (index 0) completes instantly and is
@@ -813,8 +818,10 @@ struct DeadlineTriggerLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for DeadlineTriggerLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for DeadlineTriggerLlm {
+    crate::llm::mock_adapter_identity!("mock-deadline-trigger");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.counter.fetch_add(1, Ordering::SeqCst);
         if idx == self.stall_at_call {
             tokio::time::sleep(self.stall_for).await;
@@ -1060,7 +1067,7 @@ async fn two_runs_route_engineer_to_distinct_slugs() {
 /// What: Script ONLY the PM's initial `delegate_to_agent` call — every
 /// subsequent `chat` call (every engineer retry attempt, and the PM's own
 /// follow-up turn) exhausts the scripted queue and returns
-/// `LlmError::MissingConfig`, i.e. a retryable `AgentLoopError::Llm` per
+/// `InferenceError::MissingConfig`, i.e. a retryable `AgentLoopError::Llm` per
 /// fix #2. No file is ever written, so the report is a genuine `RunFailure`
 /// (no deliverable) — but assert its `task` text names "re-delegation limit
 /// reached" (the fix #1 label), not a bare/opaque failure, and that at most 2
@@ -1201,7 +1208,7 @@ fn assemble_report_maps_retry_exhausted_with_deliverable_to_partial() {
     // Deliberately NOT a turn cap: the point is that the retry-exhausted flag
     // alone carries the label, independent of which loop error surfaced.
     let pm_result: Result<AgentOutput, AgentLoopError> =
-        Err(AgentLoopError::Llm(LlmError::ApiError {
+        Err(AgentLoopError::Llm(InferenceError::Api {
             status: 500,
             body: "upstream exploded".to_string(),
         }));
@@ -1507,7 +1514,7 @@ async fn gratuitous_redelegation_after_finish_is_refused_and_run_succeeds() {
 /// What: Inspects `req.tools` to classify the caller. PM requests get a canned
 /// delegate call. The engineer's first request replays `first` (a `write_file`
 /// that puts a real deliverable on disk); every later engineer request returns
-/// `LlmError::ApiError`, which `redelegation_hint` classifies as retryable.
+/// `InferenceError::Api`, which `redelegation_hint` classifies as retryable.
 /// Test: `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
 struct FirstEngineerCallWritesThenAllFail {
     first: Arc<ScriptedLlm>,
@@ -1517,8 +1524,10 @@ struct FirstEngineerCallWritesThenAllFail {
 }
 
 #[async_trait]
-impl LlmClientTrait for FirstEngineerCallWritesThenAllFail {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for FirstEngineerCallWritesThenAllFail {
+    crate::llm::mock_adapter_identity!("mock-first-write-then-fail");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let is_pm = req
             .tools
             .as_ref()
@@ -1530,7 +1539,7 @@ impl LlmClientTrait for FirstEngineerCallWritesThenAllFail {
         if self.engineer_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             return self.first.chat(req).await;
         }
-        Err(LlmError::ApiError {
+        Err(InferenceError::Api {
             status: 500,
             body: "synthetic retryable transport failure".to_string(),
         })

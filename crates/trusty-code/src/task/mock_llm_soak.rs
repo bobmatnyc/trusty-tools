@@ -1,17 +1,17 @@
-//! [`SoakEchoLlmClient`] — the scripted `LlmClientTrait` behind
+//! [`SoakEchoLlmClient`] — the scripted `InferenceAdapter` behind
 //! `TCODE_MOCK_LLM=echo-soak` (issue #3869, epic #3866 Slice C). Split out
 //! of `task::mock_llm` (`#[path = "mock_llm_soak.rs"] mod mock_llm_soak;`)
 //! purely to keep that file under the crate's 500-SLOC cap — see
 //! `session::registry`'s `events`/`memory_sink_ext` split for the identical
 //! precedent. `use super::*` below pulls in every type this file needs from
-//! the parent (`ChatRequest`, `ChatResponse`, `LlmClientTrait`, `LlmError`,
+//! the parent (`ChatRequest`, `ChatResponse`, `InferenceAdapter`, `InferenceError`,
 //! `AtomicUsize`, `Ordering`, `async_trait`, `Value`, `json`).
 //!
 //! Why: the compression-effectiveness soak harness
 //! (`crates/trusty-code/scripts/compression_soak.py`) drives 200+ PM turns
 //! by calling `task.run(session_id=..., ...)` repeatedly against ONE
 //! persistent session — `task::protocol::task_run` rebuilds the
-//! `Arc<dyn LlmClientTrait>` fresh on EVERY call (`build_llm_client()`), so
+//! `Arc<dyn InferenceAdapter>` fresh on EVERY call (`build_llm_client()`), so
 //! this client's script only ever needs to cover ONE call's worth of PM
 //! turns, not the whole soak. Every other scripted client in
 //! `task::mock_llm` ends its final turn with an explicit `finish_task`/
@@ -42,7 +42,7 @@ use super::*;
 /// blowing the whole context window in one turn.
 const SOAK_OVERSIZED_TEXT_LEN: usize = 8_000;
 
-/// A deterministic, offline `LlmClientTrait` for issue #3869's
+/// A deterministic, offline `InferenceAdapter` for issue #3869's
 /// compression-effectiveness soak harness (epic #3866 Slice C).
 ///
 /// Why: see the module docs above.
@@ -51,7 +51,7 @@ const SOAK_OVERSIZED_TEXT_LEN: usize = 8_000;
 /// are `set_goal` on slot `1 + (idx / 2)`, calls 1/3 are `clear_goal` on the
 /// matching slot, call 4's `set_goal` carries the oversized text, and call 6
 /// is a bare `stop`. Calls 5 clears the slot the oversized text just used.
-/// Running past call 6 returns an `LlmError` (script exhausted) rather than
+/// Running past call 6 returns an `InferenceError` (script exhausted) rather than
 /// panicking, mirroring every other client in the parent module — the
 /// harness must never call `chat` an 8th time in one `task.run`.
 /// Test: `tests::soak_script_ends_in_a_resumable_stop_and_has_one_oversized_turn`.
@@ -75,8 +75,10 @@ impl Default for SoakEchoLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for SoakEchoLlmClient {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for SoakEchoLlmClient {
+    crate::llm::mock_adapter_identity!("mock-soak-echo");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
             0 => soak_goal_tool_call("set_goal", idx, 1, "soak progress marker 0"),
@@ -87,13 +89,15 @@ impl LlmClientTrait for SoakEchoLlmClient {
             5 => soak_clear_goal_tool_call(idx, 3),
             6 => stop_fixture(),
             _ => {
-                return Err(LlmError::MissingConfig(format!(
+                return Err(InferenceError::MissingConfig(format!(
                     "SoakEchoLlmClient script exhausted at call {idx}"
                 )));
             }
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!("SoakEchoLlmClient: invalid scripted fixture: {e}"))
+            InferenceError::MissingConfig(format!(
+                "SoakEchoLlmClient: invalid scripted fixture: {e}"
+            ))
         })
     }
 }
@@ -177,6 +181,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
 
         let mut oversized_count = 0;

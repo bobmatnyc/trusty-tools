@@ -4,7 +4,7 @@
 //! every acceptance criterion — engineer runs its own loop on its own slug,
 //! returns an `AgentOutput` to the PM, `tools.allowed` is enforced, and usage
 //! rolls up — must be provable offline, without a live LLM. The scripted
-//! `LlmClientTrait` mock from the agent-loop tests is the seam that makes this
+//! `InferenceAdapter` mock from the agent-loop tests is the seam that makes this
 //! deterministic.
 //! What: Defines a `ScriptedLlm` that replays a queue of `ChatResponse`s and
 //! records the system prompt + model of every request, a `RecordingTool` whose
@@ -23,14 +23,14 @@ use tempfile::TempDir;
 use super::{InProcessAgentRunner, InProcessRunnerConfig};
 use crate::agent_loop::ToolEventSink;
 use crate::agents::AgentConfig;
-use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::llm::{ChatRequest, ChatResponse, InferenceAdapter, InferenceError};
 use crate::tools::{
     AgentRunner, DelegateToAgentTool, RunContext, ToolExecutor, ToolRegistry, ToolResult,
 };
 
 // ── Test doubles ───────────────────────────────────────────────────────────────
 
-/// A `LlmClientTrait` that replays a fixed script and records every request.
+/// A `InferenceAdapter` that replays a fixed script and records every request.
 ///
 /// Why: Deterministic, offline substitute for the network client; recording the
 /// requests lets tests assert what model and system prompt the runner resolved.
@@ -95,8 +95,10 @@ impl ScriptedLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for ScriptedLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for ScriptedLlm {
+    crate::llm::mock_adapter_identity!("mock-scripted");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let system = req
             .messages
             .iter()
@@ -115,14 +117,14 @@ impl LlmClientTrait for ScriptedLlm {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
-            None => Err(LlmError::MissingConfig(format!(
+            None => Err(InferenceError::MissingConfig(format!(
                 "scripted LLM exhausted at call {idx}"
             ))),
         }
     }
 }
 
-/// An `LlmClientTrait` that sleeps before every `chat` call, then delegates.
+/// An `InferenceAdapter` that sleeps before every `chat` call, then delegates.
 ///
 /// Why: #2207's `with_timeout_secs` override must actually shorten the loop's
 /// wall-clock budget; the only deterministic, offline way to prove that is a
@@ -136,8 +138,10 @@ struct SleepyLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for SleepyLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for SleepyLlm {
+    crate::llm::mock_adapter_identity!("mock-sleepy");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         tokio::time::sleep(self.delay).await;
         self.inner.chat(req).await
     }
@@ -1199,7 +1203,7 @@ async fn sequential_delegations_to_same_named_agent_get_distinct_ids() {
     assert!(!id_b.is_empty() && id_b != crate::events::UNATTRIBUTED_AGENT_ID);
 }
 
-/// An `LlmClientTrait` whose response depends ONLY on the given request's
+/// An `InferenceAdapter` whose response depends ONLY on the given request's
 /// OWN transcript (whether its last message is a tool result) — NEVER a
 /// shared cross-call cursor/counter.
 ///
@@ -1228,8 +1232,10 @@ async fn sequential_delegations_to_same_named_agent_get_distinct_ids() {
 struct ConversationAwareLlm;
 
 #[async_trait]
-impl LlmClientTrait for ConversationAwareLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for ConversationAwareLlm {
+    crate::llm::mock_adapter_identity!("mock-conversation-aware");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         // Force a genuine yield point: without this, `tokio::join!` could
         // run one conversation's entire `AgentLoop::run` to completion (chat
         // -> dispatch -> chat -> stop, none of which are ever `Pending`
@@ -1249,7 +1255,7 @@ impl LlmClientTrait for ConversationAwareLlm {
             tool_call_response("call-1", "mytool")
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!("ConversationAwareLlm: invalid fixture: {e}"))
+            InferenceError::MissingConfig(format!("ConversationAwareLlm: invalid fixture: {e}"))
         })
     }
 }

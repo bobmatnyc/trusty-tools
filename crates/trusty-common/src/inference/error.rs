@@ -80,6 +80,24 @@ pub enum InferenceError {
     /// A requested capability is not supported by the target provider/model.
     #[error("unsupported inference capability: {0}")]
     Unsupported(String),
+
+    /// A required configuration value is missing, described in free text.
+    ///
+    /// Why (#4425): [`Self::MissingCredential`] can only name a [`ProviderId`]
+    /// — it cannot carry an operator-actionable message, and it cannot describe
+    /// a missing NON-credential setting (an unset AWS region, an unconfigured
+    /// model slug, a test double with no scripted response left). trusty-code's
+    /// former `LlmError::MissingConfig` covered exactly that ground, and its
+    /// migration onto this shared enum would otherwise have had to flatten
+    /// those messages into [`Self::Unsupported`] — whose display text
+    /// ("unsupported inference capability: OPENROUTER_API_KEY not set") would
+    /// actively mislead the operator reading the log line.
+    /// What: a free-text description of what is missing. Classifies as an alarm
+    /// (a human must set something) and never as retryable, matching
+    /// [`Self::MissingCredential`].
+    /// Test: `missing_config_alarms_and_does_not_retry`.
+    #[error("missing configuration: {0}")]
+    MissingConfig(String),
 }
 
 impl InferenceError {
@@ -111,7 +129,8 @@ impl InferenceError {
         match self {
             Self::MissingCredential { .. }
             | Self::NoAdapterRegistered { .. }
-            | Self::Unsupported(_) => true,
+            | Self::Unsupported(_)
+            | Self::MissingConfig(_) => true,
             Self::Api { status, .. } => matches!(status, 401 | 403 | 404),
             _ => false,
         }
@@ -183,6 +202,23 @@ mod tests {
             .is_alarm()
         );
         assert!(!InferenceError::Transport("blip".into()).is_alarm());
+    }
+
+    /// A missing configuration value alarms and is never retried.
+    ///
+    /// Why (#4425): retrying a call whose configuration is absent burns budget
+    /// and can never succeed — the classification must match
+    /// [`InferenceError::MissingCredential`]'s, or trusty-code's migrated
+    /// missing-key paths would start spinning under the loop's retry policy.
+    /// What: assert `is_alarm()` and `!is_retryable()`, and that the display
+    /// carries the operator-facing text verbatim.
+    /// Test: this test.
+    #[test]
+    fn missing_config_alarms_and_does_not_retry() {
+        let e = InferenceError::MissingConfig("OPENROUTER_API_KEY not set".into());
+        assert!(e.is_alarm());
+        assert!(!e.is_retryable());
+        assert!(e.to_string().contains("OPENROUTER_API_KEY not set"), "{e}");
     }
 
     /// Why: display strings feed logs and must carry the actionable context.

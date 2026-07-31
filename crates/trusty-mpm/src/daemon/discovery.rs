@@ -18,39 +18,49 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::core::own_binary_names::OWN_BINARY_NAMES;
 use crate::core::session::{ControlModel, Session, SessionHost, SessionId, SessionStatus};
 
 use super::state::DaemonState;
 use super::tmux::TmuxDriver;
 
-/// Process names that mark a tmux pane as running Claude Code.
+/// Process names, other than this crate's own [`OWN_BINARY_NAMES`], that mark
+/// a tmux pane as running Claude Code.
 ///
-/// Why: auto-discovery must recognise the handful of binaries an operator runs
-/// a Claude Code session under; keeping the list in one place makes the
-/// predicate auditable.
+/// Why: auto-discovery must recognise the handful of *other* binaries an
+/// operator runs a Claude Code session under; keeping the list in one place
+/// makes the predicate auditable. This crate's own binary names come from
+/// [`OWN_BINARY_NAMES`] instead of being hand-copied here — a second
+/// hand-copy of that list is exactly what caused #4058 (a `trusty-mpm`-
+/// launched session was invisible to discovery because this list only had
+/// `"tm"`).
 /// What: substrings matched case-insensitively against `pane_current_command`.
-const CLAUDE_COMMANDS: &[&str] = &["claude", "claude-code", "claude-mpm", "tm"];
+const OTHER_CLAUDE_LAUNCHER_COMMANDS: &[&str] = &["claude", "claude-code", "claude-mpm"];
 
 /// True when `command` names a Claude Code process worth adopting.
 ///
 /// Why: the discovery scan must decide, per pane, whether it hosts Claude Code;
 /// a pure predicate keeps that decision unit-testable.
-/// What: case-insensitively matches `command` against [`CLAUDE_COMMANDS`] —
-/// `claude`/`claude-code`/`claude-mpm` match as substrings, while `tm` must be
-/// the whole command so it never matches unrelated binaries like `vim`.
-/// Test: `is_claude_command_matches_known`, `is_claude_command_rejects_others`.
+/// What: case-insensitively matches `command` against
+/// [`OTHER_CLAUDE_LAUNCHER_COMMANDS`] (substring — `claude`/`claude-code`/
+/// `claude-mpm` may appear with extra invocation args) and [`OWN_BINARY_NAMES`]
+/// (EXACT equality, #4058 review round 1 MEDIUM finding 1) — `pane_current_command`
+/// is always a bare process name here, never a full command line, so a
+/// substring check on this crate's own names would also match a real sibling
+/// `[[bin]]` target, `trusty-mpm-gui` (`crates/trusty-mpm-gui/Cargo.toml`),
+/// spuriously auto-adopting its pane. Exact match closes that window without
+/// reopening the original #4058 defect.
+/// Test: `is_claude_command_matches_known`, `is_claude_command_rejects_others`
+/// (covers `trusty-mpm-gui`), `is_claude_command_matches_trusty_mpm` (#4058).
 pub fn is_claude_command(command: &str) -> bool {
     let lower = command.trim().to_lowercase();
     if lower.is_empty() {
         return false;
     }
-    // `tm` is short enough to appear inside unrelated names — require an exact
-    // match for it, but allow substring matches for the longer, distinctive
-    // `claude*` names.
-    lower == "tm"
-        || CLAUDE_COMMANDS
+    OWN_BINARY_NAMES.iter().any(|c| lower == *c)
+        || OTHER_CLAUDE_LAUNCHER_COMMANDS
             .iter()
-            .any(|c| *c != "tm" && lower.contains(c))
+            .any(|c| lower.contains(c))
 }
 
 /// Parse one `tmux list-panes -a` line into `(session_name, pane_command)`.
@@ -494,8 +504,33 @@ mod tests {
 
     #[test]
     fn is_claude_command_rejects_others() {
-        for cmd in ["bash", "zsh", "vim", "tmux", "node", "", "  "] {
+        // #4058 review round 1 MEDIUM finding 1: `trusty-mpm-gui` is a real
+        // sibling `[[bin]]` target (`crates/trusty-mpm-gui/Cargo.toml`) — a
+        // substring match on `OWN_BINARY_NAMES` would wrongly adopt it.
+        for cmd in [
+            "bash",
+            "zsh",
+            "vim",
+            "tmux",
+            "node",
+            "trusty-mpm-gui",
+            "",
+            "  ",
+        ] {
             assert!(!is_claude_command(cmd), "expected `{cmd}` not to match");
+        }
+    }
+
+    /// #4058: a session launched via the `trusty-mpm` `[[bin]]` target (the
+    /// second binary `cargo install trusty-mpm` ships alongside `tm`, built
+    /// from the identical source) must be recognised by auto-discovery just
+    /// like a `tm`-launched session — before this fix, `CLAUDE_COMMANDS` only
+    /// listed `"tm"` and `trusty-mpm`-launched sessions were silently
+    /// invisible to `GET /sessions`.
+    #[test]
+    fn is_claude_command_matches_trusty_mpm() {
+        for cmd in ["trusty-mpm", "TRUSTY-MPM", "  trusty-mpm  "] {
+            assert!(is_claude_command(cmd), "expected `{cmd}` to match");
         }
     }
 

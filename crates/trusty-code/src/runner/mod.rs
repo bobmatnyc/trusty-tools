@@ -11,7 +11,7 @@
 //! `InProcessRunnerConfig` (default loop budget), `RunnerError` (structured
 //! library error), and the `agent_config_exists` helper.
 //! Test: `runner::tests::*` cover the full delegation path offline via a
-//! scripted `LlmClientTrait` mock.
+//! scripted `InferenceAdapter` mock.
 
 mod error;
 mod in_process;

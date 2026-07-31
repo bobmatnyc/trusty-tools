@@ -85,6 +85,9 @@ pub mod output_style;
 pub mod output_style_deployer;
 pub mod overseer;
 pub mod overseer_config;
+// #4058: single canonical source for the crate's own `[[bin]]` names, so
+// discovery/hooks/statusline/daemon-PID lists can't drift out of sync again.
+pub mod own_binary_names;
 pub mod paths;
 pub mod pid_registry;
 pub mod process;

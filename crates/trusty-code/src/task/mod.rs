@@ -13,7 +13,7 @@
 //! [`executor::spawn_task_run`] is the orchestration entry point it calls;
 //! [`sink::SessionToolEventSink`] is the concrete `agent_loop::ToolEventSink`
 //! forwarding to `session::SessionRegistry::record_tool_*`; [`mock_llm`]
-//! provides the offline-testable "echo" `LlmClientTrait` selected via
+//! provides the offline-testable "echo" `InferenceAdapter` selected via
 //! `TCODE_MOCK_LLM=echo` so the whole flow is black-box testable without a
 //! live model.
 //! Test: `task::executor::tests::*`, `task::protocol::tests::*`,

@@ -36,7 +36,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use trusty_code::llm::{DispatchingLlmClient, LlmClientTrait};
+use trusty_code::llm::{DispatchingLlmClient, InferenceAdapter};
 use trusty_code::plugins::is_valid_namespaced_name;
 use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
 
@@ -747,7 +747,7 @@ async fn run_task(
     );
 
     // Build the real OpenRouter client from env. A missing key is a config error.
-    let llm: Arc<dyn LlmClientTrait> = match build_llm_client() {
+    let llm: Arc<dyn InferenceAdapter> = match build_llm_client() {
         Ok(client) => client,
         Err(e) => {
             eprintln!("tcode run-task: {e}");
@@ -784,7 +784,7 @@ async fn run_task(
 /// Why: `DispatchingLlmClient` is what lets `--engineer-model bedrock/us.anthropic.*`
 /// (or `TCODE_ENGINEER_MODEL`) reach AWS Bedrock, `fireworks/*` reach Fireworks,
 /// and every other slug reach OpenRouter — the caller keeps depending only on
-/// `LlmClientTrait`. The Bedrock transport is constructed lazily on first use
+/// `InferenceAdapter`. The Bedrock transport is constructed lazily on first use
 /// (standard AWS credential chain, e.g. `AWS_PROFILE=cto`), so a pure-OpenRouter
 /// run never needs AWS credentials. Credentials for the OpenAI-dialect providers
 /// are resolved by the shared 3-tier chain (process env > `.env.local` > secure
@@ -793,10 +793,10 @@ async fn run_task(
 /// the moment a model that needs it is actually dispatched
 /// (`DispatchingLlmClient::chat`), never at startup.
 /// What: constructs a `DispatchingLlmClient` (infallible — no credential access
-/// at construction) and boxes it as the shared `Arc<dyn LlmClientTrait>`.
+/// at construction) and boxes it as the shared `Arc<dyn InferenceAdapter>`.
 /// Test: `tests::build_llm_client_succeeds_without_openrouter_key`; a live
 /// run against each backend is exercised manually.
-fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
+fn build_llm_client() -> Result<Arc<dyn InferenceAdapter>> {
     Ok(Arc::new(DispatchingLlmClient::new()))
 }
 

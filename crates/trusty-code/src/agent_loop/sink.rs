@@ -145,8 +145,9 @@ pub trait ToolEventSink: Send + Sync {
     ) {
     }
 
-    /// One assistant turn's text became available (tcode streaming epic
-    /// #3696, Gap A — per-agent streaming, Slice 1).
+    /// An incremental piece of one assistant turn's text became available
+    /// (tcode streaming epic #3696 — Gap A Slice 1, completed by Gap B in
+    /// #4425).
     ///
     /// Why: before this hook, a text-bearing assistant turn was recorded to
     /// the transcript (`transcript.push_response`) but never surfaced to a
@@ -159,11 +160,28 @@ pub trait ToolEventSink: Send + Sync {
     /// serve the UI need to override it. `turn_id` MUST be unique within the
     /// session across ALL agents (see [`crate::events::Event::AgentMessageDelta`]'s
     /// doc for why a per-agent-local counter is unsafe); callers mint a UUID
-    /// v4 per turn. `done: true` for Gap A (Slice 1) always — the whole
-    /// turn's text arrives in one call; a future token-level streaming slice
-    /// (Gap B) would call this repeatedly per turn with `done: false` until
-    /// the last delta.
-    /// Test: `crate::task::sink::tests::agent_message_reaches_stream_as_delta`.
+    /// v4 per turn and reuse it for EVERY delta of that turn.
+    ///
+    /// # Delta protocol (#4425)
+    ///
+    /// `AgentLoop` calls this repeatedly per text-bearing turn: once per
+    /// content chunk with `done: false`, then exactly once with `done: true`
+    /// and an EMPTY `delta`. A subscriber therefore appends every delta it
+    /// receives and treats the `done: true` call purely as "this bubble is
+    /// complete" — it carries no text of its own, so appending it
+    /// unconditionally is correct. Chunk boundaries are the provider's, not
+    /// semantic: against a transport without native streaming (the Bedrock
+    /// path until #4426, and every scripted test double) the whole turn
+    /// arrives as ONE content delta followed by the terminal one, which is
+    /// indistinguishable to a correct consumer.
+    ///
+    /// A tool-only turn (the model emitted no text) calls this ZERO times —
+    /// there is no bubble to render — so a consumer must not assume every turn
+    /// produces a terminal delta.
+    /// Test: `crate::task::sink::tests::agent_message_reaches_stream_as_delta`;
+    /// the per-turn call sequence is pinned by
+    /// `crate::agent_loop::tests::sink_events::sink_receives_agent_message_delta_for_text_turn_only`
+    /// and `…::native_streaming_transport_emits_incremental_deltas`.
     async fn agent_message(
         &self,
         _agent: &str,

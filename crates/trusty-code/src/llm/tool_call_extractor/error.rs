@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use super::ExtractionStrategy;
 use super::schema::SchemaViolation;
-use crate::llm::LlmError;
+use crate::llm::InferenceError;
 
 /// Failure modes of tool-call extraction and validation.
 ///
@@ -84,12 +84,12 @@ pub enum ToolCallExtractError {
     /// The retry callback's chat call failed (transport/API error).
     ///
     /// Why: `repair::extract_with_repair`'s retry closure typically wraps a
-    /// real `LlmClientTrait::chat` call; that call can fail independently of
+    /// real `InferenceAdapter::chat` call; that call can fail independently of
     /// extraction. Wrapping it here lets the repair loop propagate it with
     /// `?` instead of requiring every caller to define its own error type.
-    /// What: Wraps the underlying `LlmError`.
+    /// What: Wraps the underlying `InferenceError`.
     #[error("retry chat call failed: {0}")]
-    Retry(#[from] LlmError),
+    Retry(#[from] InferenceError),
 
     /// The bounded repair loop exhausted its attempts without success.
     ///

@@ -1,63 +1,77 @@
-//! LLM transports for trusty-code: the shared OpenAI-compatible adapter
-//! (OpenRouter / Fireworks) and AWS Bedrock (Converse API).
+//! trusty-code's inference layer — a CONSUMER of the shared multi-provider
+//! adapter, not a provider abstraction of its own (#4425, epic #4429).
 //!
-//! Why: trusty-code agents need to invoke LLMs via OpenAI-compatible endpoints
-//! (OpenRouter, and — since #2406 — Fireworks) OR, for organisations running on
-//! AWS (#1021), via Bedrock's Converse API. Both transports speak the same
-//! provider-neutral `ChatRequest`/`ChatResponse` shape so `AgentLoop` and every
-//! other caller never branches on the backend. The OpenAI-compatible HTTP
-//! mechanics now live in the shared `trusty_common::inference` adapter layer
-//! (epic #2400) rather than a bespoke tcode client — `OpenAiCompatClient`
-//! (`client`) is the thin consumer of that core, bridged to tcode's wire types
-//! by `convert`.
-//! What: This module exports `OpenAiCompatClient` (shared OpenRouter/Fireworks
-//! transport), `BedrockChatClient` (Bedrock Converse), `DispatchingLlmClient`
-//! (routes each request to the right transport by model slug via
-//! `crate::provider::provider_for`), all request/response types (`ChatRequest`,
-//! `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), `LlmError`, and (#2264)
-//! the opt-in `debug_capture` module — `DebugCaptureSink` +
-//! `wrap_with_debug_capture` — that dumps the FULL wire-level request/response
-//! of every round-trip to JSONL when `TCODE_DEBUG_TRANSCRIPT` is set.
-//! OpenRouter/Fireworks credentials are resolved via the shared 3-tier chain
+//! Why: the owner directive (2026-07-30) is that all inference/chat in this
+//! workspace goes through ONE adapter pattern that supports multiple providers
+//! and streams when needed. Until #4425 trusty-code owned a parallel one:
+//! `InferenceAdapter` (its own object-safe `chat` seam) plus duplicate
+//! `ChatRequest`/`ChatResponse`/`ChatMessage`/`UsageBlock`/`InferenceError` types and
+//! a `convert` module bridging them to the shared ones. That duplication had a
+//! concrete cost, not just an aesthetic one: the shared adapter gained real SSE
+//! streaming (`InferenceAdapter::chat_stream`, epic #3696 Gap B) and trusty-code
+//! could not use it, because its own trait had no streaming method — so a `tcode
+//! tui` turn could only ever arrive as one paste. #4425 deletes the parallel
+//! abstraction outright: the seam every trusty-code call site depends on IS
+//! `trusty_common::inference::InferenceAdapter`, and the wire types ARE the
+//! shared ones (they were copied from trusty-code's in #2406, so this is a
+//! de-duplication, not a re-modelling).
+//! What: this module now contributes only trusty-code-SPECIFIC transports and
+//! decorators — [`OpenAiCompatClient`] (OpenRouter / Fireworks / Together /
+//! AtlasCloud, delegating to the shared adapters), [`BedrockChatClient`]
+//! (Bedrock Converse; its re-pointing at the shared Bedrock adapter is #4426),
+//! [`DispatchingLlmClient`] (per-request routing by model slug), the opt-in
+//! `debug_capture` wire-dump decorator (#2264), and the `tool_call_extractor`
+//! argument-repair machinery — plus flat re-exports of the shared trait, error,
+//! and wire types so existing `crate::llm::…` import paths keep resolving.
+//! Every one of those is an IMPLEMENTATION of the shared trait; none of them is
+//! an abstraction over providers.
+//! OpenRouter/Fireworks credentials resolve via the shared 3-tier chain
 //! (process env > `.env.local` > secure store); Bedrock uses the standard AWS
 //! credential chain (no key). Library helpers never read `std::env` for secrets
-//! directly — resolution is centralised in the shared resolver.
-//! Test: `cargo test -p trusty-code` covers all unit tests (serialisation,
-//! deserialisation, type conversion + error mapping, Bedrock message/tool-choice/
-//! response conversion, debug-capture) plus the offline black-box HTTP round-trip
-//! in `tests/inference_shared_adapter_e2e.rs`. `cargo test -p trusty-code --
-//! --include-ignored` additionally runs the live
+//! directly.
+//! Test: `cargo test -p trusty-code` covers transport routing, the streaming
+//! decorator pass-through (`dispatch::tests`, `debug_capture`), the
+//! trusty-code-local response views (`response_ext`), and the offline black-box
+//! HTTP round-trip in `tests/inference_shared_adapter_e2e.rs`. `cargo test -p
+//! trusty-code -- --include-ignored` additionally runs the live
 //! `live_openrouter_call`/`live_fireworks_call`/`live_bedrock_call` tests.
 
 mod bedrock;
 mod client;
-mod client_trait;
-mod convert;
 mod debug_capture;
 mod dispatch;
-mod error;
-mod message;
-mod request;
-mod response;
+mod identity;
+mod response_ext;
 mod tool_call_extractor;
-mod usage;
 
-// ── Public API re-exports ─────────────────────────────────────────────────────
+// #4425: the two `InferenceAdapter` identity-method shapes trusty-code's
+// non-provider implementors (mocks, decorators) need. Crate-internal — nothing
+// outside trusty-code implements the shared trait on trusty-code's behalf.
+pub(crate) use identity::{delegating_adapter_identity, mock_adapter_identity};
+
+// ── trusty-code-specific transports, decorators, and views ────────────────────
 
 pub use bedrock::BedrockChatClient;
 pub use client::OpenAiCompatClient;
-pub use client_trait::LlmClientTrait;
 pub use debug_capture::{DebugCaptureSink, wrap_with_debug_capture};
 pub use dispatch::DispatchingLlmClient;
-pub use error::LlmError;
-pub use message::ChatMessage;
-pub use request::{
-    CacheControl, ChatRequest, FunctionCall, FunctionDefinition, RequestUsageConfig, ToolCall,
-    ToolDefinition,
-};
-pub use response::{AssistantMessage, ChatChoice, ChatResponse};
+pub use response_ext::{finish_reason, resolved_model, token_usage};
 pub use tool_call_extractor::{
     DEFAULT_MAX_REPAIR_ATTEMPTS, ExtractedToolCall, ExtractionStrategy, SchemaViolation,
     ToolCallExtractError, ToolCallExtractor, extract_with_repair, strategy_order_for,
 };
-pub use usage::UsageBlock;
+
+// ── The SHARED adapter surface, re-exported ───────────────────────────────────
+//
+// #4425: these are re-exports, NOT definitions. Keeping the `crate::llm::…`
+// paths alive is what let the migration touch call sites mechanically instead
+// of rewriting 26 files' import blocks; the types themselves are owned by
+// `trusty_common::inference` and shared with every other consumer in the
+// workspace.
+
+pub use trusty_common::inference::{
+    AssistantMessage, CacheControl, ChatChoice, ChatMessage, ChatRequest, ChatResponse, ChatStream,
+    ChatStreamEvent, FunctionCall, FunctionDefinition, InferenceAdapter, InferenceError,
+    PromptTokensDetails, RequestUsageConfig, StopReason, StreamAssembly, StreamCompletion,
+    ToolCall, ToolCallDelta, ToolDefinition, UsageBlock, buffered_stream,
+};
