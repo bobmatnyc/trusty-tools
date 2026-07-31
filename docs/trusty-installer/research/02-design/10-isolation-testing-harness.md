@@ -276,6 +276,42 @@ heavyweight prerequisite the base image should pre-bake, since `cargo install`
 needs a C linker; baking CLT into the base image is acceptable (it is not part of
 the "zero-knowledge user setup" surface — a Mac that can run cargo at all has it).
 
+#### 3.3a Base image policy — clone-and-provision per run, no prebaked golden image (added 2026-07-31 — see Amendments)
+
+**Decision: the harness clones a digest-pinned `tahoe-base` and provisions the
+toolchain on every run. There is no prebaked "golden" image, and any prebaked-golden
+specification elsewhere in this document is superseded by this subsection.**
+
+The golden-image approach existed to save the toolchain-provisioning cost. That
+cost is now measured at **30 s per run** (§7.4). Weighed against that ~30 s
+benefit are three **observed** failure modes, all of them reproduced rather than
+hypothesised:
+
+1. **`tart stop` silently loses the guest's last write** (4/5 reproductions). A
+   tart exit code is not a completion signal (§7.2.1).
+2. **A golden image shipped broken because of (1)** — `~/.zshenv`, the last write
+   before the bake was stopped, was simply absent from the image. Confirmed root
+   cause.
+3. **A false-positive purity-gate bug** — the gate that was supposed to prove the
+   golden image was still "vanilla" passed on an image that was not.
+
+Clone-and-provision is strictly simpler and buys three properties the golden image
+could not:
+
+- **Reproducible from a digest-pinned base.** The run is described by the base
+  digest plus the provisioning script in `scripts/vmtest/`, both in version
+  control — not by an opaque image whose bake history lives nowhere.
+- **No bake step to get wrong.** Removing the bake removes failure modes (1) and
+  (2) outright, and makes (3)'s purity gate unnecessary rather than merely fixed.
+- **The negative test runs every time.** Because the guest genuinely starts
+  without cargo, §3.3's "cargo absent → guide-and-abort" assertion (§5 assertion
+  A0) is exercised on **every** run instead of being baked away. A golden image
+  that pre-installs the toolchain destroys this test.
+
+The CoW clone itself is **0.31 s** and first boot **~34 s** (§7.4), so the whole
+clone → boot → provision preamble is well under two minutes against a full-stack
+body of 4–8 minutes.
+
 #### 3.4 cdhash caveat inside the VM (load-bearing)
 
 DOC-8 §1.3 / DOC-9 §3.3 / root CLAUDE.md: on macOS, **never `cp` a binary into
