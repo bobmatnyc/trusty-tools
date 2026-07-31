@@ -115,7 +115,17 @@ impl OrchestratorBackend for StateBackend {
     /// silently drops every `agent_delegate`-keyed record: the exact
     /// false-all-clear #4141 exists to eliminate, just relocated to the other
     /// key. The managed branch below reads BOTH spaces and de-duplicates by
-    /// delegation id.
+    /// delegation id — but that only removes an exact record appearing
+    /// twice, e.g. the same `Delegation` reachable under both the managed id
+    /// and the Claude UUID. It does NOT merge a PM's `agent_delegate` call
+    /// (managed-id record) with the hook-observed dispatch of the SAME
+    /// logical subagent (Claude-UUID record): those are two distinct
+    /// `Delegation`s with different ids and `delegation_tracker::dedup` only
+    /// matches within one session/agent pairing, so it cannot span the
+    /// bridge. `delegation_count` can therefore overcount one in-flight
+    /// subagent as two — this is the existing, deliberate tracker trade-off
+    /// (favouring overcount over a false merge, per `dedup`'s own doc
+    /// comment), not new behaviour this fix introduces or is meant to close.
     ///
     /// The legacy branch's `id` equals the Claude session UUID only on the
     /// `SessionStart`-hook-auto-registered path; a tmux-pane-discovered,
@@ -153,7 +163,11 @@ impl OrchestratorBackend for StateBackend {
             // #4141: read the managed-id key space unconditionally — this is
             // what `agent_delegate` (#1976) writes under for a managed
             // session — then union in the Claude-UUID key space when the
-            // bridge resolves, de-duplicating by delegation id.
+            // bridge resolves, de-duplicating by delegation id (removes an
+            // exact record reachable under both keys; does NOT merge a
+            // managed-id `agent_delegate` record with a separate
+            // Claude-UUID hook-observed record for the same logical
+            // subagent — see the doc comment above).
             let mut delegations = self.state.delegations_for(id);
             let claude_uuid = record
                 .claude_session_id
