@@ -98,8 +98,26 @@ impl OrchestratorBackend for StateBackend {
     /// reported "no such session" for the `tmpm-` sessions trusty-mpm itself
     /// spawns, even though `session_list` surfaces them. Managed records are
     /// serialized via the shared `record_to_json` (matching `session_list`) and
-    /// carry no memory snapshot; delegations are keyed by UUID so they resolve
-    /// for either family.
+    /// carry no memory snapshot.
+    ///
+    /// #4141: the legacy registry's `SessionId` IS the Claude session UUID
+    /// (hook auto-registration uses it directly), so `delegations_for(id)`
+    /// resolves correctly for that branch with no bridging. The MANAGED
+    /// branch is different: `id` here is a `ManagedSessionId`, but
+    /// hook-observed delegations are keyed by the Claude session UUID that
+    /// `session_start_correlation::correlate_session_start` stores on the
+    /// record as `claude_session_id` — a distinct identifier space (that's
+    /// the whole reason `SessionRecord` carries both fields separately).
+    /// Passing the managed id straight into `delegations_for` silently
+    /// matched nothing and reported `delegation_count: 0` even while
+    /// subagents were actively running — a false all-clear indistinguishable
+    /// from "genuinely none in flight". The fix bridges through
+    /// `record.claude_session_id` before querying, exactly as
+    /// `correlate_session_start` intends; when the bridge itself is missing
+    /// (no correlated Claude session id yet, e.g. the session hasn't started
+    /// or no `SessionStart` hook has landed), `delegation_count` is reported
+    /// as an explicit `null` with `delegation_lookup: "unbridged"` — never a
+    /// confident-looking zero.
     async fn session_status(&self, session_id: &str) -> Result<Value, String> {
         let id = parse_session_id(session_id)?;
         // Legacy in-process registry first.
@@ -112,19 +130,33 @@ impl OrchestratorBackend for StateBackend {
                 "memory": memory,
                 "delegation_count": delegations.len(),
                 "delegations": delegations,
+                "delegation_lookup": "ok",
             }));
         }
         // Managed store fallback (#1976): the `tmpm-` sessions `session_list`
         // surfaces and `session_stop`/`session_resume` already target by id.
         let manager = self.state.session_manager().await;
         if let Ok(record) = manager.get(&ManagedSessionId(id.0)).await {
-            let delegations = self.state.delegations_for(id);
+            // #4141: bridge the managed id to the Claude session UUID before
+            // querying delegations — they live in a different key space.
+            let claude_uuid = record
+                .claude_session_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let (delegation_count, delegations, lookup) = match claude_uuid {
+                Some(uuid) => {
+                    let delegations = self.state.delegations_for(SessionId(uuid));
+                    (json!(delegations.len()), json!(delegations), "ok")
+                }
+                None => (Value::Null, Value::Array(Vec::new()), "unbridged"),
+            };
             return Ok(json!({
                 "session": crate::daemon::managed_routes::record_to_json(&record),
                 "kind": SessionRecordKind::Managed.as_str(),
                 "memory": Value::Null,
-                "delegation_count": delegations.len(),
+                "delegation_count": delegation_count,
                 "delegations": delegations,
+                "delegation_lookup": lookup,
             }));
         }
         Err(format!("no such session: {session_id}"))

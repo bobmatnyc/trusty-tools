@@ -117,6 +117,74 @@ async fn session_status_resolves_managed_session() {
         .expect("managed session must resolve via the #1976 fallback");
     assert_eq!(status["kind"], "managed");
     assert_eq!(status["session"]["id"], record.id.to_string());
+    // #4141 negative case: this record has never been correlated to a Claude
+    // session UUID (no `SessionStart` hook has landed), so the delegation
+    // lookup cannot be bridged. It must report an explicit unknown — `null`,
+    // never `0` — so an unbridgeable lookup is distinguishable from
+    // "genuinely none in flight".
+    assert_eq!(
+        status["delegation_count"],
+        Value::Null,
+        "unbridged managed session must report delegation_count: null, not 0 (#4141)"
+    );
+    assert_eq!(status["delegation_lookup"], "unbridged");
+}
+
+#[tokio::test]
+async fn session_status_bridges_managed_id_to_hook_observed_delegation() {
+    // Regression for #4141: `session_status` resolved a `ManagedSessionId`
+    // and passed it straight into `delegations_for`, but hook-observed
+    // delegations are keyed by the Claude session UUID — a different
+    // identifier space bridged only via `correlate_session_start` /
+    // `SessionRecord::claude_session_id`. Without that bridge, this test's
+    // delegation (registered under the Claude UUID, exactly as the real hook
+    // pipeline in `daemon::api::observe` does) was invisible and
+    // `delegation_count` silently reported 0 while a subagent was genuinely
+    // in flight.
+    let root = tempfile::TempDir::new().expect("root tempdir");
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create(
+            "fix the bug".to_string(),
+            Some(root.path().to_path_buf()),
+            None,
+            Some(root.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await
+        .expect("managed create");
+
+    // Correlate the managed record to a Claude session UUID, exactly as
+    // `correlate_session_start` does when the `SessionStart` hook fires.
+    let claude_session_id = SessionId::new();
+    mgr.set_claude_session_id(&record.id, &claude_session_id.0.to_string())
+        .await
+        .expect("set_claude_session_id");
+
+    // Observe a delegation under the CLAUDE session UUID — the same key the
+    // hook-observed tracker uses (see `daemon::api::observe`).
+    state.upsert_delegation(Delegation::new(
+        claude_session_id,
+        None,
+        "rust-engineer",
+        ModelTier::Sonnet,
+        "wire up the fix",
+    ));
+
+    let backend = StateBackend::new(state);
+    let status = backend
+        .session_status(&record.id.to_string())
+        .await
+        .expect("managed session must resolve");
+    assert_eq!(status["kind"], "managed");
+    assert_eq!(
+        status["delegation_count"], 1,
+        "delegation observed under the bridged Claude session UUID must be \
+         visible via the managed id (#4141), got: {status}"
+    );
+    assert_eq!(status["delegation_lookup"], "ok");
 }
 
 #[tokio::test]
