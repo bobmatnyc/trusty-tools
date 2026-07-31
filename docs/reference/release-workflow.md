@@ -28,8 +28,11 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 > from the crates/ directory name — see the `tga` note below; this closes
 > issue #3199, where every release PR previously failed CI's `--locked` build
 > until a human pushed a manual lock-sync follow-up commit), calls
-> `scripts/generate-changelog.sh <crate-dir> <tag-prefix>` to prepend the
-> unreleased `CHANGELOG.md` section, then **prints — but does not run —** the
+> `scripts/assemble-changelog.sh <crate-dir> <next-version>` to fold the crate's
+> per-PR `changelog.d/` fragments into a `## [<next-version>]` `CHANGELOG.md`
+> section and delete the consumed fragments (issue #4476 — it pre-flights that
+> assembly with `--check` BEFORE touching `Cargo.toml`, so a changelog problem
+> never leaves the repo half-bumped), then **prints — but does not run —** the
 > `git tag <prefix>-v<version>` and `git push origin <prefix>-v<version>`
 > commands. This preserves the manual-tag convention (the human reviews and
 > tags). The tag prefix defaults to the crate-dir name, with the one documented

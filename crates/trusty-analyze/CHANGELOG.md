@@ -7,10 +7,6 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [Unreleased]
-
----
-
 ## [0.8.0] — 2026-07-27
 
 MINOR, not the patch 0.7.5 this was originally staged as (#4177). This crate

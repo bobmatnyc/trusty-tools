@@ -609,8 +609,8 @@ Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
    idempotent.
 2. Register it in `MigrationRegistry::new()` in `src/core/migration/mod.rs`.
 3. Increment `CURRENT_SCHEMA_VERSION` in the same file.
-4. Add unit tests in `m00N::tests` (especially idempotency) and update
-   `CHANGELOG.md`.
+4. Add unit tests in `m00N::tests` (especially idempotency) and add a
+   `changelog.d/` fragment.
 
 ### Key types
 
