@@ -521,8 +521,12 @@ fn retract_locked(
         ManifestLoad::Corrupt(detail) => {
             return Err(AgentBuildError::FrontmatterParse(format!(
                 "agent manifest is corrupt; refusing to retract any file on the strength \
-                 of an unreadable ownership ledger. Run `tm repair deploy` to recover. \
-                 Detail: {detail}"
+                 of an unreadable ownership ledger. `tm repair deploy` cannot fix this — \
+                 it only repairs the user-tier deploy, not this workspace's ledger. \
+                 Delete `.claude/agents/.trusty-mpm-manifest.json` in this workspace by \
+                 hand (and any stale framework-owned agent files alongside it) to clear \
+                 it; the next session launch will not redeploy here since bundled agents \
+                 now come from the user tier. Detail: {detail}"
             )));
         }
     };
