@@ -2,6 +2,37 @@
 #
 # bake-golden.sh — EXPLORATORY PROBE ARTIFACT (not production tooling)
 #
+# ============================================================================
+# SUPERSEDED — retained for provenance only, NOT to be used as the basis for
+# the real isolation-testing harness.
+#
+# This script is the instrument that produced measurements A-K in
+# ../vm-install-probe-findings.md (the empirical probe pass over Tart VM
+# behavior). It is kept here, renamed to `.superseded`, purely as the
+# record of what generated those measurements.
+#
+# The golden-image strategy it implements was KILLED BY MEASUREMENT, not by
+# opinion: K2 measured PROVISION_SEC=30s to provision a bare `tahoe-base`
+# clone from scratch (mise + rust@1.91 + uv + gh) vs. 0.31s to clone a
+# pre-baked golden image — a ~30s delta that does not justify the strategy's
+# cost once weighed against three failure modes this probe pass directly
+# observed:
+#   1. `tart stop` silently discards the guest's last unsynced write in 4 of
+#      5 trials (K1) — exactly the operation a bake-then-stop pipeline
+#      depends on to freeze the image.
+#   2. This already happened: the one golden image this workspace produced
+#      (trusty-toolchain-20260730) shipped with ~/.zshenv missing, `cargo` ->
+#      exit 127 in every downstream clone (sections B/E; K1 is the confirmed
+#      root cause).
+#   3. This script's own purity gate (below) had a false-positive-on-clean
+#      bug (needed `setopt NULL_GLOB`), meaning it cannot be trusted as a
+#      safety net for the K1 write-loss failure mode either.
+#
+# See section K4 ("Golden image: keep or kill?") in
+# ../vm-install-probe-findings.md for the full writeup and recommendation:
+# KILL the golden image, provision from `tahoe-base` on every run.
+# ============================================================================
+#
 # Bakes a "golden" Tart VM image containing the trusty-tools *toolchain* but
 # deliberately containing NO trusty artifacts, no tmux and no claude, so that a
 # future install-testing harness can exercise installer auto-install-on-missing
