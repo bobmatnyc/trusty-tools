@@ -67,6 +67,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     one canonical `core::own_binary_names::OWN_BINARY_NAMES` constant; hooks'
     list keeps its own array (its PATH-lookup order differs) pinned to the
     same set by a test.
+
 - delegation-tracker `agentId` presence-check no longer accepts `null`/`""` (closes [#4163](https://github.com/bobmatnyc/trusty-tools/issues/4163))
   - `classify_dispatch` decided "we have an agent id" with key-presence alone
     (`r.get("agentId").is_some()`), while `on_launched`'s consumer rejected a
@@ -77,6 +78,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     a phantom in-flight entry. Both call sites now share one extraction,
     `usable_agent_id` (non-null, non-empty string), so the presence-check and
     the consumers are structurally incapable of disagreeing again.
+
 - `session_status` MCP tool no longer reports `delegation_count: 0` for a managed session with subagents genuinely in flight (closes [#4141](https://github.com/bobmatnyc/trusty-tools/issues/4141))
   - The handler resolved a `ManagedSessionId` and passed it straight into
     `delegations_for`, but hook-observed delegations are keyed by the Claude

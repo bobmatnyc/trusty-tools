@@ -5,15 +5,23 @@
 //! conversion logic keeps full coverage.
 //! What: region resolution, message/tool-choice/response conversion, the
 //! cachePoint translation, and the adapter surface (`name`, `map_tool_choice`,
-//! lazy construction) — all offline, no real AWS — plus one `#[ignore]`-gated
-//! live Converse call.
+//! lazy construction) — all offline, no real AWS — plus, since #4426, the
+//! `stream_*` suite that drives the REAL `ConverseStream` decode/stream path
+//! against a scripted event sequence, and two `#[ignore]`-gated live calls
+//! (`Converse` and `ConverseStream`).
+
+use std::collections::VecDeque;
 
 use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseOutputResponse;
 use aws_sdk_bedrockruntime::types::{
-    CachePointType, ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage,
-    StopReason, SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool,
-    ToolChoice as SdkToolChoice, ToolResultStatus,
+    CachePointType, ContentBlock, ContentBlockDelta as SdkContentBlockDelta,
+    ContentBlockDeltaEvent, ContentBlockStart as SdkContentBlockStart, ContentBlockStartEvent,
+    ContentBlockStopEvent, ConverseOutput as ConverseOutputKind, ConverseStreamMetadataEvent,
+    ConverseStreamOutput as ConverseEvent, Message as SdkMessage, MessageStartEvent,
+    MessageStopEvent, StopReason, SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool,
+    ToolChoice as SdkToolChoice, ToolResultStatus, ToolUseBlockDelta, ToolUseBlockStart,
 };
+use futures_util::StreamExt;
 use serde_json::json;
 
 use super::cache::{MIN_CACHEABLE_TOKENS, cache_point_block, system_cacheable, tools_cacheable};
@@ -21,8 +29,11 @@ use super::convert::{
     build_converse_messages, build_tool_config, converse_output_to_chat_response,
     document_to_json_string, json_to_document,
 };
-use super::{BedrockAdapter, bedrock_model_id, resolve_bedrock_region};
+use super::stream::{ConverseEventSource, drive};
+use super::{BedrockAdapter, bedrock_model_id, build_converse_parts, resolve_bedrock_region};
 use crate::inference::adapter::InferenceAdapter;
+use crate::inference::error::InferenceError;
+use crate::inference::streaming::{ChatStreamEvent, StreamAssembly, ToolCallDelta};
 use crate::inference::types::{
     CacheControl, ChatMessage, ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolChoice,
     ToolDefinition,
@@ -852,6 +863,514 @@ fn json_to_document_rejects_non_object_top_level() {
     assert!(json_to_document(&json!("just a string")).is_none());
 }
 
+// ─── ConverseStream (#4426) ─────────────────────────────────────────────────
+
+/// A scripted [`ConverseEventSource`] standing in for a live `ConverseStream`
+/// response.
+///
+/// Why: the SDK's `EventReceiver` cannot be constructed outside a real HTTP
+/// response, so without this double the streaming path could only ever be
+/// verified live (i.e. never in CI). Every event TYPE it yields DOES have a
+/// public builder, so a scripted sequence of already-decoded events drives the
+/// exact production `drive`/`ConverseStreamDecoder` code — only the socket is
+/// replaced.
+/// What: pops the next scripted `recv` result; an exhausted script reports a
+/// clean end of stream (`Ok(None)`), which is what a healthy Bedrock response
+/// does after its `Metadata` event.
+struct ScriptedEvents {
+    script: VecDeque<Result<Option<ConverseEvent>, InferenceError>>,
+}
+
+impl ScriptedEvents {
+    /// Build a source that yields each event in order, then ends cleanly.
+    fn events(events: Vec<ConverseEvent>) -> Self {
+        Self {
+            script: events.into_iter().map(|e| Ok(Some(e))).collect(),
+        }
+    }
+
+    /// Build a source that yields each event in order, then FAILS mid-stream.
+    fn events_then_error(events: Vec<ConverseEvent>, error: &str) -> Self {
+        let mut script: VecDeque<_> = events.into_iter().map(|e| Ok(Some(e))).collect();
+        script.push_back(Err(InferenceError::Provider(error.to_string())));
+        Self { script }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConverseEventSource for ScriptedEvents {
+    async fn recv(&mut self) -> Result<Option<ConverseEvent>, InferenceError> {
+        self.script.pop_front().unwrap_or(Ok(None))
+    }
+}
+
+/// Helper: a `ContentBlockDelta::Text` event on content block 0.
+fn text_delta(text: &str) -> ConverseEvent {
+    text_delta_at(0, text)
+}
+
+/// Helper: a `ContentBlockDelta::Text` event on an explicit content block.
+fn text_delta_at(block: i32, text: &str) -> ConverseEvent {
+    ConverseEvent::ContentBlockDelta(
+        ContentBlockDeltaEvent::builder()
+            .delta(SdkContentBlockDelta::Text(text.to_string()))
+            .content_block_index(block)
+            .build()
+            .expect("build ContentBlockDeltaEvent"),
+    )
+}
+
+/// Helper: the `ContentBlockStart` that introduces a tool call.
+fn tool_use_start(block: i32, id: &str, name: &str) -> ConverseEvent {
+    ConverseEvent::ContentBlockStart(
+        ContentBlockStartEvent::builder()
+            .start(SdkContentBlockStart::ToolUse(
+                ToolUseBlockStart::builder()
+                    .tool_use_id(id)
+                    .name(name)
+                    .build()
+                    .expect("build ToolUseBlockStart"),
+            ))
+            .content_block_index(block)
+            .build()
+            .expect("build ContentBlockStartEvent"),
+    )
+}
+
+/// Helper: a partial-JSON tool-argument fragment for a tool block.
+fn tool_use_delta(block: i32, fragment: &str) -> ConverseEvent {
+    ConverseEvent::ContentBlockDelta(
+        ContentBlockDeltaEvent::builder()
+            .delta(SdkContentBlockDelta::ToolUse(
+                ToolUseBlockDelta::builder()
+                    .input(fragment)
+                    .build()
+                    .expect("build ToolUseBlockDelta"),
+            ))
+            .content_block_index(block)
+            .build()
+            .expect("build ContentBlockDeltaEvent"),
+    )
+}
+
+/// Helper: the `MessageStop` event carrying a Bedrock stop reason.
+fn message_stop(reason: StopReason) -> ConverseEvent {
+    ConverseEvent::MessageStop(
+        MessageStopEvent::builder()
+            .stop_reason(reason)
+            .build()
+            .expect("build MessageStopEvent"),
+    )
+}
+
+/// Helper: the terminal `Metadata` event carrying a full token tally.
+fn metadata_with_usage(
+    input: i32,
+    output: i32,
+    cache_read: i32,
+    cache_write: i32,
+) -> ConverseEvent {
+    let usage = SdkTokenUsage::builder()
+        .input_tokens(input)
+        .output_tokens(output)
+        .total_tokens(input + output)
+        .cache_read_input_tokens(cache_read)
+        .cache_write_input_tokens(cache_write)
+        .build()
+        .expect("build TokenUsage");
+    ConverseEvent::Metadata(ConverseStreamMetadataEvent::builder().usage(usage).build())
+}
+
+/// Helper: collect a whole [`ChatStream`] into a vector.
+async fn collect_stream(
+    mut stream: crate::inference::streaming::ChatStream,
+) -> Vec<Result<ChatStreamEvent, InferenceError>> {
+    let mut out = Vec::new();
+    while let Some(item) = stream.next().await {
+        out.push(item);
+    }
+    out
+}
+
+/// Text deltas reach the consumer in arrival order, followed by exactly one
+/// terminal `Done`.
+///
+/// Why (#4426): out-of-order or dropped concatenation is the most visible
+/// streaming defect — the user reads scrambled prose — and a missing terminal
+/// event strands any consumer waiting for usage.
+/// What: script two text deltas plus a clean end; assert `Delta`, `Delta`,
+/// `Done` and nothing else.
+/// Test: this test.
+#[tokio::test]
+async fn stream_forwards_text_deltas_in_order() {
+    let events = collect_stream(drive(ScriptedEvents::events(vec![
+        text_delta("He"),
+        text_delta("llo"),
+    ])))
+    .await;
+
+    assert_eq!(events.len(), 3, "expected two deltas + Done: {events:?}");
+    assert_eq!(
+        events[0].as_ref().expect("delta"),
+        &ChatStreamEvent::Delta("He".to_string())
+    );
+    assert_eq!(
+        events[1].as_ref().expect("delta"),
+        &ChatStreamEvent::Delta("llo".to_string())
+    );
+    assert!(matches!(
+        events[2].as_ref().expect("done"),
+        ChatStreamEvent::Done(_)
+    ));
+}
+
+/// Structural framing events forward nothing.
+///
+/// Why: `MessageStart`/`ContentBlockStop` (and any future SDK `Unknown`
+/// variant) carry no assistant content; emitting anything for them would inject
+/// phantom deltas into the rendered turn.
+/// What: script a `MessageStart` and a `ContentBlockStop` around one real
+/// delta; assert only that delta plus `Done` come out. An EMPTY text delta is
+/// included too — Bedrock can frame one, and it must not surface as a token.
+/// Test: this test.
+#[tokio::test]
+async fn stream_ignores_structural_events() {
+    let events = collect_stream(drive(ScriptedEvents::events(vec![
+        ConverseEvent::MessageStart(
+            MessageStartEvent::builder()
+                .role(aws_sdk_bedrockruntime::types::ConversationRole::Assistant)
+                .build()
+                .expect("build MessageStartEvent"),
+        ),
+        text_delta(""),
+        text_delta("hi"),
+        ConverseEvent::ContentBlockStop(
+            ContentBlockStopEvent::builder()
+                .content_block_index(0)
+                .build()
+                .expect("build ContentBlockStopEvent"),
+        ),
+    ])))
+    .await;
+
+    assert_eq!(
+        events.len(),
+        2,
+        "only the non-empty delta + Done: {events:?}"
+    );
+    assert_eq!(
+        events[0].as_ref().expect("delta"),
+        &ChatStreamEvent::Delta("hi".to_string())
+    );
+    assert!(matches!(
+        events[1].as_ref().expect("done"),
+        ChatStreamEvent::Done(_)
+    ));
+}
+
+/// `MessageStop`'s stop reason and `Metadata`'s token tally both land in the
+/// single terminal `Done`.
+///
+/// Why (#4426): Bedrock splits the terminal summary across two events, neither
+/// of which is last, while the neutral contract promises ONE `Done` carrying
+/// both. Dropping the `Metadata` tally would silently zero every streamed
+/// Bedrock turn for cost/telemetry consumers — the same defect #3767 fixed on
+/// the `chat::bedrock_impl` path.
+/// What: script a delta, a `MessageStop(EndTurn)`, and a `Metadata` with all
+/// four token buckets; assert the terminal event carries the lowercased stop
+/// reason and every bucket.
+/// Test: this test.
+#[tokio::test]
+async fn stream_carries_usage_and_stop_reason_in_terminal() {
+    let events = collect_stream(drive(ScriptedEvents::events(vec![
+        text_delta("ok"),
+        message_stop(StopReason::EndTurn),
+        metadata_with_usage(100, 20, 30, 10),
+    ])))
+    .await;
+
+    let ChatStreamEvent::Done(completion) = events.last().expect("terminal").as_ref().expect("ok")
+    else {
+        panic!("last event must be Done: {events:?}");
+    };
+    assert_eq!(
+        completion.finish_reason,
+        Some(crate::inference::types::StopReason::Other(
+            "end_turn".into()
+        )),
+        "Bedrock's stopReason must be lowercased, exactly as the buffered path does"
+    );
+    assert_eq!(completion.usage.prompt_tokens, 100);
+    assert_eq!(completion.usage.completion_tokens, 20);
+    assert_eq!(completion.usage.cache_read_tokens, 30);
+    assert_eq!(completion.usage.cache_creation_tokens, 10);
+}
+
+/// A `Metadata` event with no `usage` must not fabricate a zeroed tally over a
+/// real one.
+///
+/// Why: Bedrock omits `usage` on some guardrail/error paths; treating an absent
+/// tally as "all zeros" is fine only because the decoder starts zeroed — the
+/// bug to guard against is a later empty `Metadata` ERASING a tally already
+/// reported.
+/// What: script a usage-bearing `Metadata` followed by an empty one; assert the
+/// terminal event still carries the real numbers.
+/// Test: this test.
+#[tokio::test]
+async fn stream_metadata_without_usage_does_not_clobber() {
+    let events = collect_stream(drive(ScriptedEvents::events(vec![
+        metadata_with_usage(7, 3, 0, 0),
+        ConverseEvent::Metadata(ConverseStreamMetadataEvent::builder().build()),
+    ])))
+    .await;
+
+    let ChatStreamEvent::Done(completion) = events.last().expect("terminal").as_ref().expect("ok")
+    else {
+        panic!("last event must be Done: {events:?}");
+    };
+    assert_eq!(completion.usage.prompt_tokens, 7);
+    assert_eq!(completion.usage.completion_tokens, 3);
+}
+
+/// A streamed tool call maps to an introducing `ToolCall` (id + name) followed
+/// by argument-fragment `ToolCall`s.
+///
+/// Why (#4426): the reference `chat::bedrock_impl` path IGNORES tool use
+/// entirely — porting that gap would have left the shared adapter unable to
+/// stream an agent turn, which is trusty-code's whole use case. Converse
+/// introduces the call in `ContentBlockStart` and streams its arguments as
+/// partial JSON in later deltas, so both must be forwarded.
+/// What: script a tool-use start plus two argument fragments; assert the
+/// introducing event carries id/name with empty arguments and the continuations
+/// carry only the fragments, all on the same slot index.
+/// Test: this test.
+#[tokio::test]
+async fn stream_maps_tool_use_fragments() {
+    let events = collect_stream(drive(ScriptedEvents::events(vec![
+        tool_use_start(0, "call_1", "get_weather"),
+        tool_use_delta(0, "{\"location\":"),
+        tool_use_delta(0, "\"Seattle\"}"),
+        message_stop(StopReason::ToolUse),
+    ])))
+    .await;
+
+    assert_eq!(events.len(), 4, "3 tool events + Done: {events:?}");
+    assert_eq!(
+        events[0].as_ref().expect("start"),
+        &ChatStreamEvent::ToolCall(ToolCallDelta {
+            index: 0,
+            id: Some("call_1".into()),
+            name: Some("get_weather".into()),
+            arguments: String::new(),
+        })
+    );
+    assert_eq!(
+        events[1].as_ref().expect("fragment"),
+        &ChatStreamEvent::ToolCall(ToolCallDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments: "{\"location\":".into(),
+        })
+    );
+    assert_eq!(
+        events[2].as_ref().expect("fragment"),
+        &ChatStreamEvent::ToolCall(ToolCallDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments: "\"Seattle\"}".into(),
+        })
+    );
+}
+
+/// Tool-call slots are dense from zero even when text precedes the tool block.
+///
+/// Why: Converse's `contentBlockIndex` counts EVERY content block, so a turn
+/// that says something before calling a tool puts the tool on block 1. Passing
+/// that raw index through as the tool-call ordinal would number the turn's only
+/// call `1` — an OpenAI-dialect consumer indexing calls densely from 0 would
+/// then see a phantom empty call at slot 0.
+/// What: script a text block (index 0) then two tool blocks (indices 1 and 2);
+/// assert the tool slots are 0 and 1.
+/// Test: this test.
+#[tokio::test]
+async fn stream_tool_slots_are_dense_from_zero() {
+    let events = collect_stream(drive(ScriptedEvents::events(vec![
+        text_delta_at(0, "let me check"),
+        tool_use_start(1, "call_a", "alpha"),
+        tool_use_start(2, "call_b", "beta"),
+        tool_use_delta(1, "{}"),
+    ])))
+    .await;
+
+    let slots: Vec<(usize, Option<String>)> = events
+        .iter()
+        .filter_map(|e| match e.as_ref().expect("ok") {
+            ChatStreamEvent::ToolCall(d) => Some((d.index, d.id.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        slots,
+        vec![
+            (0, Some("call_a".to_string())),
+            (1, Some("call_b".to_string())),
+            (0, None),
+        ],
+        "tool slots must be dense from 0 and stable per content block"
+    );
+}
+
+/// A mid-stream failure ends the stream with `Err` and NEVER a `Done`.
+///
+/// Why: a truncated stream that terminates with a clean `Done` is
+/// indistinguishable from a complete short answer — the caller would record a
+/// partial turn as successful. This is the same dual-channel failure contract
+/// the SSE lane (`decode_event_stream`) and `chat::bedrock_impl` both hold.
+/// What: script one delta then a provider error; assert the delta arrives, the
+/// next item is `Err`, and the stream ends there.
+/// Test: this test.
+#[tokio::test]
+async fn stream_surfaces_mid_stream_error() {
+    let events = collect_stream(drive(ScriptedEvents::events_then_error(
+        vec![text_delta("partial ")],
+        "ConverseStream failed mid-stream: throttled",
+    )))
+    .await;
+
+    assert_eq!(events.len(), 2, "delta + terminal Err: {events:?}");
+    assert_eq!(
+        events[0].as_ref().expect("delta"),
+        &ChatStreamEvent::Delta("partial ".to_string())
+    );
+    let err = events[1].as_ref().expect_err("must be an error");
+    assert!(
+        err.to_string().contains("throttled"),
+        "error must carry the provider reason: {err}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Ok(ChatStreamEvent::Done(_)))),
+        "a failed stream must not also emit Done: {events:?}"
+    );
+}
+
+/// A streamed turn rebuilds into the SAME `ChatResponse` the buffered
+/// `Converse` path returns for the equivalent output.
+///
+/// Why (#4426): this is the property that makes streaming a transport detail.
+/// If the streamed finish reason, text, or usage differed from the buffered
+/// one, every downstream consumer (transcript recording, cost accrual, the tool
+/// loop) would need to branch on which transport ran. Asserting against the
+/// REAL `converse_output_to_chat_response` output — not a hand-written expected
+/// value — means a future change to either side that breaks the equivalence
+/// fails here.
+/// What: stream `"hello world"` with `EndTurn` and a token tally, assemble via
+/// [`StreamAssembly`], and compare against the buffered conversion of a
+/// `ConverseOutput` carrying the same content.
+/// Test: this test.
+#[tokio::test]
+async fn stream_assembles_into_buffered_shaped_response() {
+    let usage = SdkTokenUsage::builder()
+        .input_tokens(100)
+        .output_tokens(20)
+        .total_tokens(120)
+        .cache_read_input_tokens(30)
+        .cache_write_input_tokens(10)
+        .build()
+        .expect("build usage");
+    let buffered = converse_output_to_chat_response(
+        &output_with_text("hello world", StopReason::EndTurn, Some(usage)),
+        "bedrock/us.anthropic.claude-sonnet-4-6",
+    );
+
+    let mut assembly = StreamAssembly::new();
+    let mut stream = drive(ScriptedEvents::events(vec![
+        text_delta("hello"),
+        text_delta(" world"),
+        message_stop(StopReason::EndTurn),
+        metadata_with_usage(100, 20, 30, 10),
+    ]));
+    while let Some(item) = stream.next().await {
+        assembly.push(item.expect("no stream error"));
+    }
+    let streamed = assembly.into_response(
+        buffered.id.clone(),
+        "bedrock/us.anthropic.claude-sonnet-4-6",
+    );
+
+    // `ChatResponse` has no `PartialEq` (it is a wire type, not a value type),
+    // so compare the serialised forms — which is a STRICTER check than a
+    // field-by-field assertion: a new field added to either path shows up here.
+    assert_eq!(
+        serde_json::to_value(&streamed).expect("serialise streamed"),
+        serde_json::to_value(&buffered).expect("serialise buffered"),
+        "a streamed turn must rebuild into exactly the buffered response"
+    );
+}
+
+/// Both Converse transports build their request from ONE conversion.
+///
+/// Why (#4426): `Converse` and `ConverseStream` have different fluent builders,
+/// so the shared conversion is the only thing preventing the two paths from
+/// drifting (a sampling knob, a cachePoint, or a tool config honoured on one
+/// and not the other). This pins the shared builder directly, so a regression
+/// in it fails a test rather than only showing up as a live behaviour
+/// difference.
+/// What: build parts from a request carrying a system prompt, sampling knobs,
+/// and a tool; assert every piece is populated.
+/// Test: this test.
+#[test]
+fn build_converse_parts_carries_system_sampling_and_tools() {
+    let req = ChatRequest {
+        model: "bedrock/us.anthropic.claude-sonnet-4-6".into(),
+        messages: vec![
+            ChatMessage::system("be brief"),
+            ChatMessage::user("what is the weather?"),
+        ],
+        temperature: Some(0.25),
+        max_tokens: Some(512),
+        tools: Some(vec![sample_tool()]),
+        tool_choice: Some(json!({"auto": {}})),
+        stop: None,
+        usage: None,
+    };
+
+    let parts = build_converse_parts(&req).expect("parts must build");
+    assert_eq!(parts.system.len(), 1, "system prompt must be diverted");
+    assert_eq!(parts.messages.len(), 1, "one user message");
+    assert_eq!(parts.inference.max_tokens(), Some(512));
+    assert_eq!(parts.inference.temperature(), Some(0.25));
+    let tool_config = parts.tool_config.expect("tool config must be built");
+    assert_eq!(tool_config.tools().len(), 1);
+}
+
+/// A request with no tools omits `toolConfig` entirely.
+///
+/// Why: Converse rejects an empty `toolConfig`, so "no tools" must mean the
+/// field is absent, not present-and-empty.
+/// What: build parts from a tool-free request; assert `tool_config` is `None`.
+/// Test: this test.
+#[test]
+fn build_converse_parts_omits_tool_config_without_tools() {
+    let req = ChatRequest {
+        model: "bedrock/us.anthropic.claude-sonnet-4-6".into(),
+        messages: vec![ChatMessage::user("hi")],
+        temperature: None,
+        max_tokens: None,
+        tools: None,
+        tool_choice: None,
+        stop: None,
+        usage: None,
+    };
+    let parts = build_converse_parts(&req).expect("parts must build");
+    assert!(parts.tool_config.is_none());
+    assert!(parts.system.is_empty());
+    assert_eq!(parts.inference.max_tokens(), None);
+}
+
 // ─── Live integration test ──────────────────────────────────────────────────
 
 /// Live integration test: send a trivial prompt to Bedrock via Converse.
@@ -893,4 +1412,74 @@ async fn live_bedrock_call() {
             eprintln!("skipping live_bedrock_call: call failed: {e}");
         }
     }
+}
+
+/// Live integration test: stream a trivial prompt from Bedrock via
+/// `ConverseStream` (#4426).
+///
+/// Why: the offline `stream_*` tests inject already-decoded events, so they
+/// cannot exercise credential resolution, the `ConverseStream` handshake, or
+/// the SDK's binary event-stream wire decoding — the three things that can only
+/// fail against the real service. This is the end-to-end proof that
+/// [`BedrockAdapter::chat_stream`] streams; unlike the offline suite it FAILS
+/// (rather than skips) on a mid-stream error, since a caller who opts into this
+/// test has credentials and wants a real verdict.
+/// What: requires AWS credentials resolvable by the default chain (e.g.
+/// `AWS_PROFILE=cto`) and a reachable `us.anthropic.claude-*` inference profile.
+/// Asserts MORE THAN ONE event carrying text arrived (one delta would mean the
+/// buffered fallback was still in play), that the concatenated text is
+/// non-empty, and that the terminal `Done` reports non-zero usage.
+/// Test: run with `cargo test -p trusty-common --features bedrock-client -- \
+///        --include-ignored live_bedrock_converse_stream --nocapture`.
+#[tokio::test]
+#[ignore = "requires AWS credentials; skipped in CI"]
+async fn live_bedrock_converse_stream() {
+    let adapter = BedrockAdapter::new(None);
+    let req = ChatRequest {
+        model: "bedrock/us.anthropic.claude-sonnet-4-6".into(),
+        messages: vec![
+            ChatMessage::system("You are a concise assistant."),
+            ChatMessage::user("Count from one to ten in words, separated by commas."),
+        ],
+        temperature: Some(0.0),
+        max_tokens: Some(128),
+        tools: None,
+        tool_choice: None,
+        stop: None,
+        usage: None,
+    };
+
+    let mut stream = adapter
+        .chat_stream(&req)
+        .await
+        .expect("ConverseStream handshake must succeed");
+
+    let mut deltas = 0usize;
+    let mut text = String::new();
+    let mut completion = None;
+    while let Some(item) = stream.next().await {
+        match item.expect("no mid-stream error") {
+            ChatStreamEvent::Delta(chunk) => {
+                deltas += 1;
+                eprintln!("delta {deltas}: {chunk:?}");
+                text.push_str(&chunk);
+            }
+            ChatStreamEvent::ToolCall(call) => eprintln!("tool call: {call:?}"),
+            ChatStreamEvent::Done(done) => completion = Some(done),
+        }
+    }
+
+    let done = completion.expect("stream must end with a terminal Done");
+    eprintln!("live_bedrock_converse_stream — {deltas} deltas, done: {done:?}");
+    assert!(!text.trim().is_empty(), "streamed text must be non-empty");
+    assert!(
+        deltas > 1,
+        "a real ConverseStream turn arrives in MANY deltas; {deltas} would mean \
+         the buffered fallback is still in play"
+    );
+    assert!(
+        done.usage.prompt_tokens > 0 && done.usage.completion_tokens > 0,
+        "the terminal Metadata tally must survive: {:?}",
+        done.usage
+    );
 }

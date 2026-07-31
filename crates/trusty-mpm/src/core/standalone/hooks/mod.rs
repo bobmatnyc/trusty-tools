@@ -219,9 +219,18 @@ pub fn mpm_hook_additions() -> serde_json::Value {
 /// before the #4058 consolidation. `OWN_BINARY_NAMES` is ordered `tm` first
 /// instead, because ITS order-sensitive consumer
 /// (`session_launch::settings::STATUSLINE_BIN_NAMES`) needs the opposite
-/// preference. `test_mpm_bin_names_matches_own_binary_names_set` pins the two
-/// arrays to the same SET so a future third `[[bin]]` target can't drift
-/// between them unnoticed.
+/// preference. `"trusty-mpm"` is first on purpose: it is the unambiguous full
+/// binary name, while `"tm"` is a short alias a user may have shadowed on
+/// `PATH`, and the resolved exe is persisted into `settings.json` where a
+/// wrong resolution survives across sessions.
+///
+/// Test: `test_mpm_bin_names_prefers_full_name_over_short_alias` pins this
+/// array's exact ORDER (the only mechanical guard — `resolve_stable_hook_exe`
+/// calls the real `resolve_binary` and is not injectable, so no behavioural
+/// test can observe the preference), and
+/// `test_mpm_bin_names_matches_own_binary_names_set` pins the two arrays to
+/// the same SET so a future third `[[bin]]` target can't drift between them
+/// unnoticed.
 const MPM_BIN_NAMES: &[&str] = &["trusty-mpm", "tm"];
 
 /// File-name STEMS that identify an mpm-owned binary once any Cargo
