@@ -170,7 +170,8 @@ trust boundary (code-critic review on PR #3547):
   but was never a real, scanned skill.
 - **Dispatch-path validators updated to ACCEPT the namespaced shape.**
   Before this fix, `tools::delegate::DelegateToAgentTool::execute`, the
-  CLI's `validate_agent_name` (`main.rs`), and `runner::agent_config_exists`
+  CLI's `validate_agent_name` (`cli::legacy_run_task`, `main.rs` until
+  #4434), and `runner::agent_config_exists`
   each rejected ANY name containing `:` outright — so even though
   `agents::resolve_agent` could resolve a namespaced name, nothing upstream
   ever let one reach it: a plugin agent was listed but never actually
@@ -226,7 +227,7 @@ trust boundary (code-critic review on PR #3547):
 | Discover plugins from `.claude/plugins/<plugin>/`, honoring `plugin.json` overrides | `plugins::discover_plugin_roots` | Implemented |
 | Namespace + list plugin agents in `agents.list` (`plugin` tier, additive) | `plugins::agents::discover_plugin_agents`, `agents::protocol::agents_list` | Implemented |
 | Resolve `<plugin>:<name>` for dispatch | `plugins::agents::find_plugin_agent_config`, `agents::resolve_agent` | Implemented |
-| `<plugin>:<name>` is genuinely delegatable end-to-end (PM tool, CLI, pre-flight gate) | `tools::delegate::DelegateToAgentTool`, `main.rs::validate_agent_name`, `runner::agent_config_exists` | Implemented |
+| `<plugin>:<name>` is genuinely delegatable end-to-end (PM tool, CLI, pre-flight gate) | `tools::delegate::DelegateToAgentTool`, `cli::legacy_run_task::validate_agent_name`, `runner::agent_config_exists` | Implemented |
 | Drop unsupported agent frontmatter fields with a warning | `plugins::agents::load_plugin_agent` | Implemented |
 | Treat `extends:` as leaf-only with a warning | `plugins::agents::load_plugin_agent` | Implemented |
 | Namespace + list plugin skills in `skills.list` (`plugin` tier, independent of PR #3465 threshold) | `plugins::skills::discover_plugin_skills`, `skills::protocol::skills_list` | Implemented |
