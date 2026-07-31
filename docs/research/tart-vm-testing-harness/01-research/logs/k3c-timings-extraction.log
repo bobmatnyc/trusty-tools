@@ -1,0 +1,28 @@
+=== guest-side checksum + size ===
+6e66e95554bfb5a522103f915415bddf756b2ea902365f1b01849be68c8190f3  cargo-timing.html
+  482823 cargo-timing.html
+=== transferring via base64 ===
+TRANSFER_RC=0 B64_BYTES=  643765
+DECODE_RC=0
+=== host-side checksum + size ===
+6e66e95554bfb5a522103f915415bddf756b2ea902365f1b01849be68c8190f3  /Users/mac/workspace/trusty-tools-worktrees/agent-aebbc1ba7ec22ddc9/docs/research/vm-probe-logs/k3-cargo-timing-trusty-search.html
+  482823 /Users/mac/workspace/trusty-tools-worktrees/agent-aebbc1ba7ec22ddc9/docs/research/vm-probe-logs/k3-cargo-timing-trusty-search.html
+=== sanity: is it really the cargo timing HTML? ===
+
+<html>
+<head>
+  <title>Cargo Build Timings — trusty-search 0.40.0</title>
+  <meta charset="utf-8">
+<style type="text/css">
+:root {
+  --error-text: #e80000;
+  --text: #000;
+  --background: #fff;
+  --h1-border-bottom: #c0c0c0;
+  --table-box-shadow: rgba(0, 0, 0, 0.1);
+  --table-th: #d5dde5;
+  --table-th-background: #1b1e24;
+  --table-th-border-bottom: #9ea7af;
+  --table-th-border-right: #343a45;
+
+8

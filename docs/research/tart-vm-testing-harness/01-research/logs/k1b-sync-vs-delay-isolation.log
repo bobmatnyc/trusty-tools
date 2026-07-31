@@ -1,0 +1,27 @@
+=== K1b START 2026-07-31T12:12:46Z ===
+########## VARIANT C: write + sync + IMMEDIATE tart stop
+wrote-and-postwrote
+WRITE_RC=0
+STOP_RC=0
+C_STOP_CMD_RETURN_MS=505
+C_STOP_TO_STOPPED_MS=800
+RESULT=SURVIVED(SENTINEL_C)
+########## VARIANT D: write + 10s delay + tart stop, NO sync
+wrote-and-postwrote
+WRITE_RC=0
+STOP_RC=0
+D_STOP_CMD_RETURN_MS=508
+D_STOP_TO_STOPPED_MS=811
+RESULT=SURVIVED(SENTINEL_D)
+########## VARIANT E: write, no sync, no delay, tart stop --timeout 120
+wrote
+STOP_RC=0
+E_STOP_CMD_RETURN_MS=396
+E_STOP_TO_STOPPED_MS=695
+RESULT=SURVIVED(SENTINEL_E)
+--- remaining VMs:
+Source Name                                                                                                        Disk Size Accessed       State  
+local  tahoe-base                                                                                                  50   33   53 seconds ago stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   1 week ago     stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   1 week ago     stopped
+=== K1b DONE 2026-07-31T12:15:48Z ===
