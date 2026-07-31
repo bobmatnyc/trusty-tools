@@ -264,6 +264,10 @@ a defect, not a convenience — behavior fixes, security patches, and safety gua
 must land once, not N times, and silent drift between copies is a hidden risk. See the
 domain consolidation audit table below for 2026-07-11 baseline status. First enforcement
 instances: inference-adapter epic #2400, tmux common entry point #2398/PR #2399.
+Scope: this rule governs capabilities shared ACROSS crates. Duplication of a
+capability WITHIN a single crate is not covered by it — consolidate that on
+its own merits when the drift has caused (or clearly will cause) a real
+defect, not by citing this rule (#4058 binary-name-table consolidation).
 
 🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`, and `trusty-code`
 (they use let-chains); `edition = "2021"` for all other crates. Check the crate

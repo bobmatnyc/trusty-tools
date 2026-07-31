@@ -54,6 +54,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     (`supervised` is `false` only in that case), which means the bridge's
     `no_spawn` was necessarily set and it could not have been the spawner.
 
+
+- sessions launched via the `trusty-mpm` binary are now auto-discovered, matching `tm`-launched sessions (closes [#4058](https://github.com/bobmatnyc/trusty-tools/issues/4058))
+  - `daemon::discovery`'s tmux-pane predicate only recognised `tm`, so an
+    identical session launched under the crate's other `[[bin]]` target
+    (`trusty-mpm`) never appeared in `GET /sessions` or other discovery
+    lists — no error, just silent invisibility.
+  - The crate had four independent hand-copies of "this crate's own binary
+    names" (`discovery`'s list, hooks' `MPM_BIN_NAMES`, the statusline
+    resolver's `STATUSLINE_BIN_NAMES`, and an inline check in the `tm stop`
+    daemon-PID scan) and they had already drifted once. Three now read from
+    one canonical `core::own_binary_names::OWN_BINARY_NAMES` constant; hooks'
+    list keeps its own array (its PATH-lookup order differs) pinned to the
+    same set by a test.
 - delegation-tracker `agentId` presence-check no longer accepts `null`/`""` (closes [#4163](https://github.com/bobmatnyc/trusty-tools/issues/4163))
   - `classify_dispatch` decided "we have an agent id" with key-presence alone
     (`r.get("agentId").is_some()`), while `on_launched`'s consumer rejected a
@@ -64,7 +77,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     a phantom in-flight entry. Both call sites now share one extraction,
     `usable_agent_id` (non-null, non-empty string), so the presence-check and
     the consumers are structurally incapable of disagreeing again.
-
+- `session_status` MCP tool no longer reports `delegation_count: 0` for a managed session with subagents genuinely in flight (closes [#4141](https://github.com/bobmatnyc/trusty-tools/issues/4141))
+  - The handler resolved a `ManagedSessionId` and passed it straight into
+    `delegations_for`, but hook-observed delegations are keyed by the Claude
+    session UUID — a different identifier space bridged only via
+    `SessionRecord::claude_session_id` /
+    `session_start_correlation::correlate_session_start`. The mismatch made
+    the surface that answers "what is in flight right now" structurally
+    blind to its own feature.
+  - The managed branch now reads BOTH key spaces — the managed id
+    `agent_delegate` (#1976) writes under, and the bridged Claude UUID
+    hook-observed delegations use — and unions them, deduplicated. When the
+    bridge itself is missing (no correlated Claude session id yet),
+    `delegation_count` and `delegations` both report an explicit `null` with
+    `delegation_lookup: "unbridged"` rather than a confident-looking
+    `0`/`[]` — an unbridgeable lookup must never be indistinguishable from
+    "genuinely none in flight".
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`
     instead of `project,local`. Claude Code discovers subagents per settings

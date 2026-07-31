@@ -449,7 +449,11 @@ pub(crate) fn find_daemon_pids() -> Vec<u32> {
             continue;
         }
         let name = proc_.name().to_string_lossy();
-        let is_tm_binary = name == "trusty-mpm" || name == "tm";
+        // #4058: sourced from the crate's single canonical binary-name list
+        // rather than a third hand-copy of {trusty-mpm, tm}.
+        let is_tm_binary = trusty_mpm::core::own_binary_names::OWN_BINARY_NAMES
+            .iter()
+            .any(|n| name == *n);
         if !is_tm_binary {
             continue;
         }
