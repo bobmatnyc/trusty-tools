@@ -138,7 +138,15 @@ parse_fragment() {
   fi
 
   body="$(fragment_body "${path}")"
-  if ! printf '%s\n' "${body}" | grep -qE '^-[[:space:]]'; then
+  # Herestring, NOT `printf ... | grep -q`. Under `set -o pipefail` that pipeline
+  # is a SIGPIPE race: `grep -q` exits the instant it matches, and when the body
+  # is larger than the pipe buffer the still-writing `printf` takes EPIPE. With
+  # pipefail the pipeline then reports that failure, so a fragment whose FIRST
+  # body line is a bullet — the common shape — is rejected as having none. It
+  # bit `trusty-agents/changelog.d/4476-migrated-added.md` (60 KB, bullet on
+  # line 1) on Linux CI while passing on macOS, which is exactly the
+  # platform-dependent flake this gate exists to prevent.
+  if ! grep -qE '^-[[:space:]]' <<<"${body}"; then
     echo "ERROR: ${base} has a category but no bullet — expected at least one" >&2
     echo "       line starting with '- ' after the category line." >&2
     return 1
