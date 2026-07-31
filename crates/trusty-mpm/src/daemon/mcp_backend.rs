@@ -100,24 +100,38 @@ impl OrchestratorBackend for StateBackend {
     /// serialized via the shared `record_to_json` (matching `session_list`) and
     /// carry no memory snapshot.
     ///
-    /// #4141: the legacy registry's `SessionId` IS the Claude session UUID
-    /// (hook auto-registration uses it directly), so `delegations_for(id)`
-    /// resolves correctly for that branch with no bridging. The MANAGED
-    /// branch is different: `id` here is a `ManagedSessionId`, but
-    /// hook-observed delegations are keyed by the Claude session UUID that
-    /// `session_start_correlation::correlate_session_start` stores on the
-    /// record as `claude_session_id` — a distinct identifier space (that's
-    /// the whole reason `SessionRecord` carries both fields separately).
-    /// Passing the managed id straight into `delegations_for` silently
-    /// matched nothing and reported `delegation_count: 0` even while
-    /// subagents were actively running — a false all-clear indistinguishable
-    /// from "genuinely none in flight". The fix bridges through
-    /// `record.claude_session_id` before querying, exactly as
-    /// `correlate_session_start` intends; when the bridge itself is missing
-    /// (no correlated Claude session id yet, e.g. the session hasn't started
-    /// or no `SessionStart` hook has landed), `delegation_count` is reported
-    /// as an explicit `null` with `delegation_lookup: "unbridged"` — never a
-    /// confident-looking zero.
+    /// # Delegation lookup (#4141)
+    ///
+    /// Delegations live in up to TWO key spaces. `agent_delegate` (#1976) keys
+    /// a delegation by whatever session id the CALLER passed — for a managed
+    /// session that is the MANAGED id itself (exercised over `/rpc` by
+    /// `connectors::tm::WorkstreamConnector::delegate`, certified by
+    /// `agent_delegate_accepts_managed_session` in `mcp_backend_tests.rs`).
+    /// Hook-observed delegations (`delegation_tracker::observe`) are instead
+    /// keyed by the Claude session UUID, reachable from a managed record only
+    /// by bridging through `record.claude_session_id` (populated by
+    /// `session_start_correlation::correlate_session_start`). Replacing the
+    /// managed-id read with the bridged one — instead of unioning both —
+    /// silently drops every `agent_delegate`-keyed record: the exact
+    /// false-all-clear #4141 exists to eliminate, just relocated to the other
+    /// key. The managed branch below reads BOTH spaces and de-duplicates by
+    /// delegation id.
+    ///
+    /// The legacy branch's `id` equals the Claude session UUID only on the
+    /// `SessionStart`-hook-auto-registered path; a tmux-pane-discovered,
+    /// native-process-discovered, or `POST /sessions`-registered legacy
+    /// session instead gets a freshly minted `SessionId` never correlated to
+    /// anything, so `delegations_for(id)` can under-report there too. No
+    /// marker distinguishes those three registration paths at this call site,
+    /// so the legacy branch omits `delegation_lookup` rather than assert an
+    /// `"ok"` it cannot establish for every path (that pre-existing gap is
+    /// tracked separately from this fix).
+    ///
+    /// When the managed bridge itself is missing (no correlated Claude
+    /// session id yet), `delegation_count` AND `delegations` are both an
+    /// explicit `null` with `delegation_lookup: "unbridged"` — the managed-id
+    /// half alone would be a floor masquerading as a total, so neither field
+    /// may be read as a confident (even if empty) answer.
     async fn session_status(&self, session_id: &str) -> Result<Value, String> {
         let id = parse_session_id(session_id)?;
         // Legacy in-process registry first.
@@ -130,32 +144,43 @@ impl OrchestratorBackend for StateBackend {
                 "memory": memory,
                 "delegation_count": delegations.len(),
                 "delegations": delegations,
-                "delegation_lookup": "ok",
             }));
         }
         // Managed store fallback (#1976): the `tmpm-` sessions `session_list`
         // surfaces and `session_stop`/`session_resume` already target by id.
         let manager = self.state.session_manager().await;
         if let Ok(record) = manager.get(&ManagedSessionId(id.0)).await {
-            // #4141: bridge the managed id to the Claude session UUID before
-            // querying delegations — they live in a different key space.
+            // #4141: read the managed-id key space unconditionally — this is
+            // what `agent_delegate` (#1976) writes under for a managed
+            // session — then union in the Claude-UUID key space when the
+            // bridge resolves, de-duplicating by delegation id.
+            let mut delegations = self.state.delegations_for(id);
             let claude_uuid = record
                 .claude_session_id
                 .as_deref()
                 .and_then(|s| Uuid::parse_str(s).ok());
-            let (delegation_count, delegations, lookup) = match claude_uuid {
+            let (delegation_count, delegations_value, lookup) = match claude_uuid {
                 Some(uuid) => {
-                    let delegations = self.state.delegations_for(SessionId(uuid));
+                    for d in self.state.delegations_for(SessionId(uuid)) {
+                        if !delegations.iter().any(|existing| existing.id == d.id) {
+                            delegations.push(d);
+                        }
+                    }
                     (json!(delegations.len()), json!(delegations), "ok")
                 }
-                None => (Value::Null, Value::Array(Vec::new()), "unbridged"),
+                // The hook-observed half is unreachable without the bridge,
+                // so the managed-id half alone cannot stand in for the
+                // total — report the explicit unknown for BOTH fields
+                // rather than let a caller reading only `delegations` see a
+                // confident empty list.
+                None => (Value::Null, Value::Null, "unbridged"),
             };
             return Ok(json!({
                 "session": crate::daemon::managed_routes::record_to_json(&record),
                 "kind": SessionRecordKind::Managed.as_str(),
                 "memory": Value::Null,
                 "delegation_count": delegation_count,
-                "delegations": delegations,
+                "delegations": delegations_value,
                 "delegation_lookup": lookup,
             }));
         }

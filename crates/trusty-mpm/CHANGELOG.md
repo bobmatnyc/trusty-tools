@@ -28,12 +28,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     `session_start_correlation::correlate_session_start`. The mismatch made
     the surface that answers "what is in flight right now" structurally
     blind to its own feature.
-  - The managed branch now bridges through `record.claude_session_id` before
-    querying. When the bridge itself is missing (no correlated Claude session
-    id yet), `delegation_count` reports an explicit `null` with
-    `delegation_lookup: "unbridged"` rather than a confident-looking `0` —
-    an unbridgeable lookup must never be indistinguishable from "genuinely
-    none in flight".
+  - The managed branch now reads BOTH key spaces — the managed id
+    `agent_delegate` (#1976) writes under, and the bridged Claude UUID
+    hook-observed delegations use — and unions them, deduplicated. When the
+    bridge itself is missing (no correlated Claude session id yet),
+    `delegation_count` and `delegations` both report an explicit `null` with
+    `delegation_lookup: "unbridged"` rather than a confident-looking
+    `0`/`[]` — an unbridgeable lookup must never be indistinguishable from
+    "genuinely none in flight".
 
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`

@@ -119,13 +119,19 @@ async fn session_status_resolves_managed_session() {
     assert_eq!(status["session"]["id"], record.id.to_string());
     // #4141 negative case: this record has never been correlated to a Claude
     // session UUID (no `SessionStart` hook has landed), so the delegation
-    // lookup cannot be bridged. It must report an explicit unknown — `null`,
-    // never `0` — so an unbridgeable lookup is distinguishable from
-    // "genuinely none in flight".
+    // lookup cannot be bridged. Both `delegation_count` AND `delegations`
+    // must report an explicit unknown — `null`, never `0`/`[]` — so an
+    // unbridgeable lookup is distinguishable from "genuinely none in
+    // flight" no matter which field a caller reads.
     assert_eq!(
         status["delegation_count"],
         Value::Null,
         "unbridged managed session must report delegation_count: null, not 0 (#4141)"
+    );
+    assert_eq!(
+        status["delegations"],
+        Value::Null,
+        "unbridged managed session must report delegations: null, not [] (#4141)"
     );
     assert_eq!(status["delegation_lookup"], "unbridged");
 }
@@ -183,6 +189,63 @@ async fn session_status_bridges_managed_id_to_hook_observed_delegation() {
         status["delegation_count"], 1,
         "delegation observed under the bridged Claude session UUID must be \
          visible via the managed id (#4141), got: {status}"
+    );
+    assert_eq!(status["delegation_lookup"], "ok");
+}
+
+#[tokio::test]
+async fn session_status_union_keeps_managed_id_keyed_delegation_visible() {
+    // Regression for the #4141 fix-round finding: the first version of this
+    // fix REPLACED the managed-id lookup with the bridged Claude-UUID one
+    // instead of unioning them, so an `agent_delegate`-keyed delegation (the
+    // key `agent_delegate` uses for a managed session, certified by
+    // `agent_delegate_accepts_managed_session` above and exercised for real
+    // by `connectors::tm::WorkstreamConnector::delegate`) went invisible —
+    // reported as `delegation_count: 0` under an affirmative
+    // `delegation_lookup: "ok"`, even though the bridge itself was intact.
+    // This test fails against that (reverted) shape and must pass here.
+    let root = tempfile::TempDir::new().expect("root tempdir");
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create(
+            "fix the bug".to_string(),
+            Some(root.path().to_path_buf()),
+            None,
+            Some(root.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await
+        .expect("managed create");
+
+    // Bridge succeeds (mirrors the critic's probe: correlate BEFORE the
+    // managed-id delegation is registered).
+    let claude_session_id = SessionId::new();
+    mgr.set_claude_session_id(&record.id, &claude_session_id.0.to_string())
+        .await
+        .expect("set_claude_session_id");
+
+    // Register a delegation keyed by the MANAGED id — exactly what
+    // `agent_delegate` does for a managed session (see
+    // `agent_delegate_accepts_managed_session`), NOT the Claude UUID.
+    state.upsert_delegation(Delegation::new(
+        SessionId(record.id.0),
+        None,
+        "rust-engineer",
+        ModelTier::Sonnet,
+        "wire up the fix",
+    ));
+
+    let backend = StateBackend::new(state);
+    let status = backend
+        .session_status(&record.id.to_string())
+        .await
+        .expect("managed session must resolve");
+    assert_eq!(
+        status["delegation_count"], 1,
+        "an agent_delegate-keyed (managed-id) delegation must remain visible \
+         after the bridge fix, not be dropped by it (#4141), got: {status}"
     );
     assert_eq!(status["delegation_lookup"], "ok");
 }
