@@ -160,7 +160,7 @@ test — which is precisely the contamination the harness exists to avoid.
 ### 3. Component architecture
 
 ```
-scripts/vmtest/                      # bash, OUTSIDE the Cargo workspace
+vmtest-harness/                      # project root, bash, OUTSIDE the Cargo workspace
 ├── vmtest                           # driver CLI
 ├── lib/
 │   ├── vm.sh                        # tart lifecycle — the OS boundary for future Linux support
