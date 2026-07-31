@@ -165,11 +165,12 @@ Three properties the oracle must respect:
   key is present and non-empty, and must **not** compare it against a release
   label, until the real `stack_version` lands.
 
-**Fields `verify.sh` reads:** `tool_version` (asserted equal to the crate version
-in `expected-binaries.tsv` for `trusty-installer` under patterns (b)/(c); asserted
+**Fields `verify.sh` reads:** `tool_version` (asserted equal to the version declared
+by the source tree the scenario installed from, under patterns (b)/(c); asserted
 merely present under pattern (a), where the published version legitimately differs
-from the working tree), `contract_floor`, `contract_target` (asserted integers, and
-`floor <= target`), `stack_version` (asserted present and non-empty only).
+from the working tree — see the amendment below), `contract_floor`,
+`contract_target` (asserted integers, and `floor <= target`), `stack_version`
+(asserted present and non-empty only).
 
 **Pass predicate:**
 
@@ -177,8 +178,42 @@ from the working tree), `contract_floor`, `contract_target` (asserted integers, 
 PASS  iff  tool_version is a non-empty string
      and   stack_version is a non-empty string
      and   contract_floor and contract_target are integers with floor <= target
-     and   (pattern ∈ {b,c}) → tool_version == tsv_version(trusty-installer)
+     and   (pattern ∈ {b,c}) → tool_version == source_tree_version(trusty-installer)
 ```
+
+> **Amended 2026-07-31 — `tsv_version(...)` removed.** The last clause previously
+> read `tool_version == tsv_version(trusty-installer)`, and the prose above sourced
+> the expected version from `expected-binaries.tsv`. **That file has no version
+> column** — §9.1 defines exactly nine and §9.3's seed rows carry no version value —
+> so the clause addressed data that does not exist, and two contract sections of
+> this document contradicted each other. The cross-check itself is worth keeping:
+> under (b)/(c) it is what distinguishes the `tctl` the scenario just built from one
+> that was somehow already there. It is therefore **restated against a source that
+> genuinely carries a version**, not dropped:
+>
+> ```
+> source_tree_version(p) := the `version` cargo reports for package p in the source
+>                           tree the scenario installed from — read with
+>                           `cargo metadata --no-deps --format-version 1` in the
+>                           guest at $VMTEST_GUEST_SRC via vm_exec, parsed
+>                           host-side with jq (§JSON parsing dependency).
+> ```
+>
+> **A tenth column was deliberately not added.** §9.6 states the rule this follows:
+> the TSV's non-derivable columns are *"human judgments about the harness's scope,
+> not facts about the workspace"*. A crate version is the opposite — a fact that
+> changes on every release — and hand-maintaining it in the expectation table would
+> guarantee exactly the staleness DOC-1 §7.2 created that table to prevent. It is
+> also the same source `--check-table` already reads (§9.6), so no new dependency
+> and no second parser.
+>
+> **Why the guest's tree and not the host's.** The host's `cargo metadata` is
+> equivalent under pattern (c) by construction, and simply wrong under pattern (b),
+> whose guest-side clone is of `default_branch` (§8.2) and need not match the host
+> working tree at all. Reading the tree that was actually built is correct for both,
+> and under (c) it is a free integrity check on the tar transport DOC-1 §14 records
+> as unmeasured. Pattern (a) is unchanged: no comparison, because there is no source
+> tree to compare against.
 
 #### 1.3 Daemon health JSON — **REQUIRED-CONTRACT, not yet implemented**
 
@@ -236,6 +271,29 @@ INTERIM: for each in-scope daemon d expected present under pattern P:
            .status is a non-empty string
            .status is not one of {"down", "error", "unhealthy"}
 ```
+
+> **`trusty-review` is now one of the daemons this covers.** *(Amended 2026-07-31,
+> D3 widened to eight crates.)* It was previously in this section's four-shape table
+> but out of D3's scope, so the drift hazard above was documented and not asserted
+> against. Now that it is in scope, the INTERIM predicate runs against it like any
+> other in-scope daemon — and **liveness-only remains sufficient**, for two reasons
+> worth stating rather than assuming:
+>
+> 1. **The MCP/HTTP drift is not on the assertion path.** The predicate reads
+>    `GET /health` — the axum handler at
+>    `crates/trusty-review/src/service/handlers.rs:171-186`. The oracle never calls
+>    the MCP `review_health` tool, so the hand-written `json!` literal at
+>    `crates/trusty-review/src/mcp/tools.rs:331-351` and its unconditional `detail`
+>    field cannot affect a result either way. The drift stays a real hazard for MCP
+>    consumers; it is simply not this oracle's hazard.
+> 2. **The predicate touches only fields all four shapes agree on.** It asserts
+>    HTTP 200, parseable JSON, and a non-empty `.status` outside
+>    `{down, error, unhealthy}`. `status` is one of the two fields §1.3 opens by
+>    naming as common to all four daemons; `trusty-review`'s struct carries it.
+>    Nothing in its `dry_run` / `reviewer_model` / `inference` / `deps{…}` tail is
+>    read, so bringing it in scope adds a daemon to the loop and **no new field
+>    dependency**. RC-1 is what would let the oracle assert more, and RC-1's status
+>    is unchanged by this scope decision — it neither becomes more urgent nor less.
 
 This is a **liveness** assertion, not a health-contract assertion. It is
 deliberately weak because a strong assertion here would have to be invented, and
@@ -956,7 +1014,8 @@ that will be slow.
 ### 9. `expected-binaries.tsv` schema
 
 DOC-1 §7.2 establishes the table as the single authoritative expectation source and
-gives a seed table of seven rows. DOC-1 §7.2's own note flags the `--check-table`
+gives a seed table of eight rows (seven until D3 was widened on 2026-07-31).
+DOC-1 §7.2's own note flags the `--check-table`
 diff source of truth as unnamed and recommends the `[[bin]]` targets. This section
 gives the real schema, the real seed content enumerated from the workspace, and
 confirms the diff source.
@@ -978,6 +1037,15 @@ Tab-separated, one header row, `#` comments permitted, `LF` line endings.
 | 9 | `expect_c` | `present` \| `absent` \| `-` (pattern (c), local source) |
 
 `-` in `expect_*` is only valid where `in_scope` is `no`.
+
+> **Nine columns, and no version column — deliberately.** *(Amended 2026-07-31.)*
+> §1.2's version cross-check previously named a `tsv_version(...)` accessor over
+> this file. This schema has never had a version column and is not gaining one; the
+> cross-check now reads `cargo metadata` from the source tree the scenario installed
+> from, per §1.2's amendment. A version belongs to the class §9.6 excludes from this
+> file in the other direction: it is a *fact about the workspace*, derivable and
+> release-volatile, and a hand-maintained copy of it would be stale one release
+> later.
 
 **Why an `in_scope` column rather than two files.** `--check-table` must diff
 against **every** `[[bin]]` in the workspace or it cannot detect a newly added
@@ -1011,9 +1079,22 @@ which is a further argument for keying on package name.
 
 #### 9.3 Seed content
 
-Enumerated from the workspace manifests. 26 explicit `[[bin]]` targets across 20
-manifests, plus one implicit target (§9.4). Twelve rows are in scope; DOC-1 D3's
-seven crates produce twelve binaries, not seven.
+Enumerated from the workspace manifests. **27** explicit `[[bin]]` targets across 20
+manifests, plus one implicit target (§9.4) — **28** rows in total. **Thirteen** rows
+are in scope; DOC-1 D3's **eight** crates produce **thirteen** binaries, not eight.
+The eight in-scope `crate_dir` values are the eight D3 directories — see §12.5 and
+the plan's §F-3 on why the loop over them must deduplicate.
+
+> **Correction, 2026-07-31 — the explicit count read 26.** The prose said "26
+> explicit … plus one implicit", i.e. 27, while the block below it has always had
+> **28** rows. Re-enumerated: `grep -c '^\[\[bin\]\]'` over every `Cargo.toml` under
+> `crates/` yields **27** across 20 manifests — 26 of them in the 19 top-level
+> `crates/*/Cargo.toml` manifests, plus one in the non-glob path member
+> `crates/trusty-agents/ui/src-tauri/Cargo.toml`. That twentieth manifest is the
+> same one §9.2 and §9.6 both single out as the reason to key on package name and
+> to read `cargo metadata` rather than a `crates/*/Cargo.toml` glob; the prose
+> counted the manifest but not its target. "20 manifests" was right; only the target
+> total was wrong, and the table was right all along.
 
 ```
 package	crate_dir	binary	bin_path	req_features	in_scope	expect_a	expect_b	expect_c
@@ -1029,6 +1110,7 @@ trusty-installer	trusty-installer	tctl	src/main.rs	-	yes	present	present	present
 tga	trusty-git-analytics	tga	src/main.rs	-	yes	present	present	present
 trusty-mpm	trusty-mpm	tm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-mpm	trusty-mpm	trusty-mpm	src/bin/tm/main.rs	cli	yes	present	present	present
+trusty-review	trusty-review	trusty-review	src/main.rs	-	yes	present	present	present
 # --- out of scope per DOC-1 D3; carried so --check-table can detect additions ---
 trusty-agents	trusty-agents	tagent	src/main.rs	-	no	-	-	-
 trusty-agents-ui	trusty-agents/ui/src-tauri	trusty-agents-ui	src/main.rs	-	no	-	-	-
@@ -1044,7 +1126,6 @@ trusty-gworkspace	trusty-gworkspace	trusty-gworkspace-mcp	src/bin/trusty-gworksp
 trusty-kb	trusty-kb	trusty-kb	src/main.rs	-	no	-	-	-
 trusty-mpm-gui	trusty-mpm-gui	trusty-mpm-gui	src/main.rs	-	no	-	-	-
 trusty-publish-guard	trusty-publish-guard	publish-guard	src/main.rs	-	no	-	-	-
-trusty-review	trusty-review	trusty-review	src/main.rs	-	no	-	-	-
 trusty-sld-lint	trusty-sld-lint	sld-lint	src/main.rs	-	no	-	-	-
 ```
 
@@ -1063,11 +1144,21 @@ manifests:
    §7.4 on 2026-07-31**, along with the project's Single-Install sidecar inventory
    checklist (`.claude-mpm/INSTRUCTIONS.md`), which carried the same omission and is
    the likely origin of it.
-2. **`trusty-review` is a publishable crate with a daemon and a `/health` endpoint
-   (§1.3), and it is *not* in DOC-1 D3's seven.** Carried as `in_scope=no` here,
-   faithfully to D3. Whether D3's scope should include it is a design question this
-   document does not decide, but it should be decided knowingly rather than by
-   omission.
+2. ~~**`trusty-review` is a publishable crate with a daemon and a `/health`
+   endpoint (§1.3), and it is *not* in DOC-1 D3's seven.**~~ **Decided and closed
+   2026-07-31 — `trusty-review` is IN scope.** This note asked that the question be
+   "decided knowingly rather than by omission"; the owner decided it, and **DOC-1 D3
+   is amended to eight crates** with a dated amendment recording the reasoning. Its
+   row above now carries `in_scope=yes` with `present` in all three `expect_*`
+   columns, on this evidence: `crates/trusty-review/Cargo.toml` declares
+   `publish = true` **explicitly**, and `cargo search trusty-review --limit 5`
+   returns `trusty-review = "0.10.1"`, so pattern (a) can install it. It has exactly
+   **one** `[[bin]]` (`name = "trusty-review"`, `path = "src/main.rs"`,
+   `required-features = []`, `Cargo.toml:16-19`), so it adds one in-scope row and
+   **no** `verify_single_install` call — see §12.5. Its `/health` route
+   (`crates/trusty-review/src/service/mod.rs:130`) is gated behind `http-server`,
+   which is in the crate's `default` set, so a plain `cargo install` produces a
+   binary whose serve path exists; the RC-1 consequence is recorded in §1.3.
 3. The `trusty-mpm` rows are discussed in §9.5.
 
 #### 9.4 `req_features` and the implicit target
@@ -1086,6 +1177,16 @@ a green install with a missing daemon, which is precisely the DOC-1 §7.4 failur
 mode ("still installs successfully, still passes a naive smoke test, leaves the
 user with a stack that cannot start its daemons"). Carrying the column lets
 `--check-table` flag the day a gating feature leaves `default`.
+
+**Still four after the D3 amendment, and `trusty-review` shows why the column means
+exactly what it says.** *(Added 2026-07-31.)* `trusty-review` joined the in-scope set
+with `required-features = []`, so it is not a fifth gated binary and its row reads
+`-`. Its `/health` route *is* compiled only under `http-server` — but that gates the
+*code inside* the binary, not the *target*, so cargo builds and installs
+`trusty-review` regardless and `req_features` is correctly `-`. The column records
+`[[bin]] required-features` and nothing else; reading it as "features this binary's
+behaviour depends on" would be a different column with a different source of truth,
+and `--check-table` could not derive it.
 
 **The implicit target.** `crates/trusty-agents-local` has a `src/main.rs` and **no
 `[[bin]]` section**, so cargo auto-infers a binary named `trusty-agents-local`. It
@@ -1123,7 +1224,9 @@ right call for a document that could only flag the premise. It is the wrong call
 that the premise has been checked and D2 amended: an assertion known in advance to
 be false is not a safety net, it is a scheduled failure. Both `trusty-mpm` rows
 above now carry **`expect_a = present`**, matching DOC-1 D2 and §7.5 as amended, and
-all twelve in-scope binaries are expected present under all three patterns.
+all **thirteen** in-scope binaries are expected present under all three patterns
+(twelve when this paragraph was written; the thirteenth is `trusty-review`, added
+by the D3 amendment of the same date — §9.3 note 2).
 
 The `expect_*` columns and the pattern-aware oracle **stay** regardless. With the
 gap dissolved no in-scope row currently diverges across patterns, but the columns
@@ -1196,7 +1299,7 @@ them as polling would invite someone to add pointless polling around a synchrono
 | Site | Observable condition | Interval | Maximum | Grounding |
 |---|---|---|---|---|
 | **boot-ready** | `tart exec <vm> /bin/sh -c 'exit 0'` returns 0 | 2 s | **150 s** | 34.4 s first boot (`vm-install-probe-findings.md:378`, `BOOT_TO_READY_MS=34414`); 18.0 s subsequent (`:483`, `COLD_BOOT_TO_READY_MS=17993`). ~4.4× the measured first boot. |
-| **`wait_for_stopped()`** | `tart list` reports state `stopped` | 1 s | **120 s** | `tart stop` asynchrony measured in K1/K1b/K1c; poll overhead measured negligible (`../01-research/logs/k1d-state-poll-overhead.log`). Maximum is a **judgment call** — worst-case flush duration was never measured. |
+| **`wait_for_stopped()`** | `tart list` reports state `stopped` | 1 s | **120 s** | `tart stop` asynchrony measured in K1/K1b/K1c; poll overhead measured negligible (`../01-research/logs/k1d-state-poll-overhead.log`). Maximum is a **judgment call** — worst-case flush duration was never measured. The stop this waits on is issued by `vm_request_stop` (§12.2), whose exit code is discarded. |
 | **daemon health** | `GET /health` returns 200 with parseable JSON (§1.3) | 1 s | **60 s** | **Wholly unmeasured.** `launchctl bootstrap` under `tart exec` is confirmed to work (DOC-1 §8.7) but daemon time-to-ready was never timed. |
 
 `vm_wait_ready` polls at a **fixed** 2 s interval, not with exponential backoff.
@@ -1212,12 +1315,14 @@ into a long interval it happens to land, in exchange for saving a handful of
 | `tart clone` | `vm_clone` | **60 s** | 0.31 s measured, APFS CoW (`vm-install-probe-findings.md:875`). ~190× — deliberately loose because §3.3's by-construction variant may pull an image on the first run, which is unmeasured. |
 | `provision.sh` | one `tart exec` | **300 s** | 30.079 s measured (`vm-install-probe-findings.md:857-858`, `PROVISION_MS=30079`). 10×, because the step is network-bound (rust toolchain download alone is 20.8 s, `:854`) and a slow link is not a defect. |
 | single-crate install | one `tart exec` per crate | **900 s** | 112 s for `trusty-search`, 409 dependency crates compiled, 8 vCPU (`vm-install-probe-findings.md:934-935`); 131 s for `cargo install tga --locked` at 4 vCPU (DOC-1 §9). ~8× the largest measured single-crate build. |
-| full-stack scenario | scenario wall clock | **2700 s** (45 min) | DOC-1 §9 extrapolates 4–8 min **and labels it low-confidence, for six crates when D3 scopes seven**. ~5.6× the upper bound. |
+| full-stack scenario | scenario wall clock | **2700 s** (45 min) | DOC-1 §9 extrapolates 4–8 min **and labels it low-confidence, for six crates when D3 now scopes eight**. ~5.6× the upper bound. |
 | guest `git clone` (pattern b) | one `tart exec` | **300 s** | 50.131 s measured (`vm-install-probe-findings.md:942`, `GIT_CLONE_MS=50131`). ~6×. |
 
 **Why the full-stack multiple is so loose, stated as reasoning rather than
 precision.** DOC-1 §9 is explicit that 4–8 minutes is an extrapolation, that it was
-computed for six crates against a seven-crate scope, and that it should be treated
+computed for six crates against what is now an **eight**-crate scope (six when the
+range was computed, seven after the D2 reversal, eight after the 2026-07-31 D3
+amendment), and that it should be treated
 as a low-confidence planning estimate until a full-stack run is actually timed. A
 tight timeout over a low-confidence estimate does not enforce a budget; it
 manufactures flaky failures that get "fixed" by raising the timeout. 45 minutes is
@@ -1398,6 +1503,7 @@ may contain the string `tart`.
 | `vm_exec <vm_name> <cmd_string>` | runs with `$VMTEST_GUEST_ENV` prefixed; **emits** guest stdout; **returns the guest's exit status verbatim** |
 | `vm_exec_raw <vm_name> <cmd_string>` | as `vm_exec` but **no** env prefix — for N1 (§6.2) and for reading `toolchain.tsv` before the prefix exists |
 | `vm_exec_stdin <vm_name> <cmd_string>` | as `vm_exec`, piping host stdin through `tart exec -i` |
+| `vm_request_stop <vm_name>` | flushes the guest, then issues `tart stop` and **discards its exit code**; always returns 0 |
 | `vm_wait_for_stopped <vm_name> <timeout_s>` | polls §10.1; 0, or dies 70 on timeout |
 | `vm_assert_stopped <vm_name>` | 0 if state is `stopped`, else dies 10 |
 | `vm_delete <vm_name>` | 0, or dies 70 |
@@ -1406,6 +1512,97 @@ may contain the string `tart`.
 so a caller can distinguish "the command failed" from "the harness failed" — which
 is exactly what N1 (§6.2) needs, since N1's *expected* result is a non-zero exit.
 Callers that require success wrap with `vm_exec ... || die 50 "..."`.
+
+**`vm_request_stop` is the shutdown initiator, and it was missing.**
+*(Amended 2026-07-31.)* Before this amendment **nothing in the specified path ever
+asked the guest to stop.** `vm_wait_for_stopped` *polls* `tart list` for state
+`stopped` (§10.1), and the cleanup rule (§Shell discipline, property 5) ordered it
+before `vm_delete` — so as literally written, cleanup polled a still-running VM for
+its full 120 s budget and exited **70** on every run, including successful ones.
+§10.1's own grounding cell cites "`tart stop` asynchrony measured in K1/K1b/K1c",
+which presupposes a `tart stop` that no function in §12.2 issued. It lives in
+`lib/vm.sh` because that is the only file permitted to contain the string `tart`
+(DOC-1 §3.2).
+
+What it does, in order:
+
+```sh
+# 1. flush the guest, from inside the guest — the only measured protection
+vm_exec_raw "$vm" '/bin/sync; /bin/sync'     # failure is logged to stderr, not fatal
+# 2. ask tart to stop it, and DISCARD the status
+tart stop "$vm" >/dev/null 2>&1 || :
+```
+
+**Provenance: this implements two of the research procedure's four steps.**
+*(Amended 2026-07-31 — the earlier wording claimed the procedure entire.)* The
+procedure at `../01-research/vm-install-probe-findings.md:820-831` has four steps:
+(1) flush from inside the guest **and confirm it returned** —
+`tart exec "$VM" /bin/sh -c 'sync; sync; echo FLUSHED'`; (2) `sleep 10` to settle;
+(3) `tart stop "$VM"`; (4) verify the artefact by clone→boot→assert, **not** by
+trusting the stop's exit code. `vm_request_stop` implements **steps 1 and 3 only**,
+and step 1 not verbatim: it drops the `echo FLUSHED` confirmation, because
+`vm_exec_raw`'s failure here is logged to stderr rather than treated as fatal. Steps
+2 and 4 are omitted deliberately; the durability paragraph below is why that is
+safe. Step 1 is
+non-fatal because cleanup runs on every exit path (§Shell discipline), including
+ones where the guest is already unreachable; refusing to stop a VM because its
+flush failed would leave a VM behind for a reason weaker than the stop itself.
+
+**This does not violate DOC-1 §8.1.** That rule reads "never issue a bare `tart
+stop` **and treat its return as completion**", generalised as "a tart exit code is
+not a completion signal". The prohibition is on *trusting the return*, not on
+issuing the command — the same research that produced the rule ends with a
+procedure whose third step is `tart stop`. `vm_request_stop` discards the status
+precisely so that nothing downstream can trust it, and `vm_wait_for_stopped` is
+what decides the VM stopped.
+
+**Durability is not what this teardown needs, and saying so prevents a false
+inheritance.** The research is explicit that polling for `stopped` does **not**
+protect a write — "the state flag is not a durability flag"
+(`vm-install-probe-findings.md:814-817`). That finding was about *baking*, where
+the disk image is the artefact being kept. This harness deletes the VM immediately
+afterwards (§Shell discipline, property 5) and keeps it only under `--keep`, which
+skips teardown entirely. No path both stops a VM and then relies on its disk, so
+guest-write durability is not at stake — which is also why **step 4** has no
+analogue here: there is no retained artefact to clone→boot→assert against. The
+observable requirement here is only that the VM reach `stopped` before
+`tart delete`. The `sync` is retained anyway: it costs one `tart exec` and it is
+what the research calls "the only measured protection" (`:818`). **Step 2**, the
+10 s settle, is dropped on the same measurement's authority — K1-iii's variant
+isolation found that "both a guest-side `sync` and a settle delay were individually
+sufficient in the trials run" (`:804`), so the retained half is a sufficient one,
+and the settle would cost
+10 s on every teardown to buy durability this path does not need.
+
+**If the graceful path fails there is no escalation.** §10.3's "no retry, ever"
+applies unchanged: `vm_request_stop` is issued once. If the VM has not reached
+`stopped` within `stopped_timeout` (120 s, §8.2), `vm_wait_for_stopped` dies **70**
+— "the run's result may have been fine; **the host is not clean**" (§2) — and the
+VM is left in place for a human. The harness does **not** kill the `tart run`
+process recorded in `$VMTEST_RUNDIR/tart-run.pid`, does not `tart delete` a running
+VM, and does not `tart suspend` (DOC-1 §8.2). `vmtest clean` will refuse it in turn
+(§5.4: `running`, no live registry entry → exit 10) and print the manual commands.
+Force-killing a way to a clean `tart list` would be repairing, which DOC-1 §4.1
+forbids in the one place this design is most emphatic about it.
+
+**A guest-side shutdown is forbidden as the initiator.** *(Amended 2026-07-31.)*
+This was previously recorded here as a judgment call to be validated on the first
+real run. It is now settled, and it is a prohibition — stated in the register DOC-1
+§8.1 and §8.2 use, because it is the same kind of rule.
+
+**Rule:** `vm_request_stop`'s flush-then-`tart stop` sequence is the **only**
+permitted shutdown initiator. No part of the harness may ask the guest to shut
+itself down — no `shutdown -h now`, no `halt`, no `poweroff` — over `tart exec` or
+any other channel.
+
+**Evidence:** the guest-side alternative appears exactly once in the research
+corpus, in the **superseded** Track A script
+(`../01-research/vm-install-testing-trackA-fable.md:299`), where it is issued over
+**SSH** — a transport DOC-1 §5.1 excludes outright. It also requires passwordless
+`sudo` in the guest, which the research never measured and never recorded as
+present on `tahoe-base`. There is therefore no measurement behind it at all, on
+either the mechanism or its precondition. Adopting it would be inventing a
+mechanism, and this document does not specify mechanisms it cannot ground.
 
 **`lib/provision.sh`**
 
@@ -1424,6 +1621,35 @@ Callers that require success wrap with `vm_exec ... || die 50 "..."`.
 | `source_deliver_released <vm_name>` | no-op returning 0 — pattern (a) has no delivery step; exists so scenarios stay symmetric |
 | `install_from_path <vm_name> <guest_dir> <crate_dir>` | asserts `rustc --version` first per DOC-1 §8.4, then `cargo install --path`; 0 or dies 50 |
 | `install_from_registry <vm_name> <package> [version]` | `cargo install <package> --locked` (DOC-1 §6.3); 0 or dies 50 |
+
+**Rule: both install functions install at *package* granularity — never `--bin`.**
+*(Amended 2026-07-31.)* `install_from_path` and `install_from_registry` install a
+**package**. Neither may pass `--bin`, and neither may pass `--bins` with a
+filter. Until this amendment the only thing standing in the way was the
+three-argument arity of `install_from_path` above — an accident of a signature,
+not a stated rule, and not something a reader could be expected to read as a
+prohibition.
+
+**Why the rule is needed, and why it is the sharper hazard.** `cargo install
+--path <dir>` has no per-binary granularity *unless* `--bin` is passed, so the
+specified form is already correct. But §9.3's table carries a `binary` column on
+**every** row, which makes a "row-faithful" install loop — `cargo install --path
+<dir> --bin <binary>` — look like tidying-up rather than a change in meaning. It
+is a change in meaning. The `binary` column is the **oracle's** input; it is
+never the **installer's**.
+
+DOC-1 §7.4's Single-Install Convention gate asserts exactly one thing: that **one
+package-granular install yields every sidecar**. A per-binary install loop targets
+each sidecar directly, so `verify_binaries` reports N/N present and every
+`verify_single_install` call passes — while proving nothing at all about the
+convention. A crate that silently stopped shipping a sidecar would still show
+green, because the harness would have installed that sidecar by name. This is
+precisely the failure DOC-1 §7.4 names — an omission is "not a weaker assertion,
+it is *no* assertion, and it fails silently and permanently"
+([`01-vm-install-harness.md:635-637`](./01-vm-install-harness.md)) — reached here
+by a different route: not a missing row, but an install that answers the row
+instead of being tested by it. `--check-table` cannot catch this one, because the
+table is not what is wrong.
 
 > **Naming tension, recorded.** DOC-1 §3.4 describes `source.sh` as owning "source
 > delivery", but DOC-1 §12.1 requires reusable **install-step** functions so an
@@ -1531,11 +1757,23 @@ scenario_install_local() {
     verify_single_install  "$VMTEST_VM" trusty-search      # DOC-1 §7.4
     verify_single_install  "$VMTEST_VM" trusty-memory      # 3 binaries — §9.3
     verify_single_install  "$VMTEST_VM" trusty-installer
+    verify_single_install  "$VMTEST_VM" trusty-mpm         # 2 binaries — added 2026-07-31
     verify_stack_doctor    "$VMTEST_VM" c                  # §1.1
     verify_versions        "$VMTEST_VM" c                  # §1.2
     verify_daemon_liveness "$VMTEST_VM" c                  # §1.3 interim, pending RC-1
 }
 ```
+
+> **Amendment, 2026-07-31 — the fourth `verify_single_install` call was missing.**
+> The skeleton gated `trusty-search`, `trusty-memory`, and `trusty-installer` but
+> not `trusty-mpm`, which ships **two** binaries (`tm` and `trusty-mpm`, §9.3).
+> Four in-scope packages are multi-binary and only three were gated, so the one
+> whose rows the D2 reversal had just changed was the one left ungated. The
+> omission is the §7.4 failure mode reached by yet another route: `verify_binaries`
+> would still find both `trusty-mpm` binaries, so nothing would go red, but nothing
+> would have asserted that **one** `cargo install trusty-mpm` is what produced
+> them. Every multi-binary in-scope package now gets a call; single-binary packages
+> do not need one, because for them `verify_binaries` already is the whole claim.
 
 Note what the skeleton does **not** contain: no `tart`, no `PATH`, no timeout, no
 exit code, no `if` around a lib call. Every one of those lives in a `lib/` module or
@@ -1624,12 +1862,18 @@ trap 'vmtest_cleanup; exit 143' TERM
    never created, cleanup does nothing and returns 0. Preflight failures (exit 10)
    must not produce a teardown error on top of the real message.
 4. **Do the right thing under `--keep`.** Write the `keep` marker into the run
-   directory (§4.3, §5.3), print the VM name and an inspection hint, **skip both
-   `wait_for_stopped()` and `tart delete`**, and leave the run directory in place.
-5. **Otherwise: `vm_wait_for_stopped` then `vm_delete`, in that order, always.**
-   Never a bare `tart stop` (DOC-1 §8.1 — write loss reproduced 4 of 5 attempts and
-   the confirmed root cause of a golden image shipping broken). Then remove the run
-   directory. Then re-exit with the preserved code.
+   directory (§4.3, §5.3), print the VM name and an inspection hint, **skip all
+   three of `vm_request_stop`, `vm_wait_for_stopped`, and `vm_delete`**, and leave
+   the run directory in place.
+5. **Otherwise: `vm_request_stop`, then `vm_wait_for_stopped`, then `vm_delete`, in
+   that order, always.** *(Amended 2026-07-31: `vm_request_stop` added. Nothing
+   previously issued the shutdown, so the poll had nothing to observe and cleanup
+   ran out its budget and exited 70 on every path — see §12.2.)* Never a bare
+   `tart stop`, meaning never issue one and treat its return as completion (DOC-1
+   §8.1 — write loss reproduced 4 of 5 attempts and the confirmed root cause of a
+   golden image shipping broken); `vm_request_stop` discards the status and the poll
+   is the completion signal. Then remove the run directory. Then re-exit with the
+   preserved code.
 
 The explicit `exit 130` / `exit 143` in the signal traps are not decoration. After a
 trap handler returns, bash may resume the interrupted command rather than
@@ -1715,8 +1959,20 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
   fallback.
 - ~~**`trusty-mpm` `publish` premise** (§9.5).~~ **Closed 2026-07-31.** The premise
   was false — no `publish` key, and `cargo search trusty-mpm` returns `1.0.2`. DOC-1
-  D2 is reversed, D3 scopes all seven crates into pattern (a), DOC-1 §7.5 inverts to
-  asserted-present, and the seed table's `expect_a` is now `present`.
+  D2 is reversed, D3 scopes `trusty-mpm` into pattern (a) along with the rest of the
+  stack, DOC-1 §7.5 inverts to asserted-present, and the seed table's `expect_a` is
+  now `present`. *(That closure put the stack at seven crates; a separate D3
+  amendment the same day took it to eight — see the next item.)*
+- ~~**`trusty-review` in or out of D3's scope** (§9.3 note 2).~~ **Closed
+  2026-07-31 by owner decision — IN scope.** §9.3 note 2 asked that this be "decided
+  knowingly rather than by omission", and it was: **DOC-1 D3 is amended to eight
+  crates**, with a dated amendment recording the reasoning. `publish = true` is
+  explicit in the manifest and `cargo search trusty-review` returns `0.10.1`, so
+  pattern (a) reaches it; it has one `[[bin]]`, so it adds one in-scope row
+  (thirteen total) and no `verify_single_install` call. Its `/health` now falls under
+  the oracle's INTERIM liveness predicate, which §1.3 records as sufficient — the
+  MCP/HTTP drift noted there is off the assertion path. **RC-1 is unaffected**: no
+  new field dependency was introduced.
 - ~~**`trusty-memory-mcp-bridge` missing from DOC-1 §7.2** (§9.3).~~ **Closed
   2026-07-31.** DOC-1 §7.2's table now lists all three `trusty-memory` binaries, and
   the project's Single-Install sidecar inventory checklist
@@ -1725,6 +1981,12 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
 - **Full-stack watchdog is 5.6× a low-confidence estimate** (§10.2). Tighten once
   the first pattern-(c) full-stack run is timed, as DOC-1 §9 already requests.
 - **Daemon time-to-ready** (§10.1). Wholly unmeasured; the 60 s maximum is a guess.
+- ~~**Guest-side graceful shutdown** (§12.2, added 2026-07-31).~~ **Closed
+  2026-07-31.** Not an open question and not a judgment call: a guest-side
+  `shutdown -h now` is **forbidden** as the shutdown initiator (§12.2). Its only
+  appearance in the corpus is the superseded Track A script issued over **SSH**,
+  which DOC-1 §5.1 excludes, and it requires passwordless `sudo` in the guest, which
+  was never measured. `vm_request_stop` is the only permitted initiator.
 
 ---
 

@@ -42,8 +42,12 @@ numbers live in [`../01-research/vm-install-probe-findings.md`](../01-research/v
 - **Three patterns:** (c) local source streamed to the guest, (b) branch cloned in
   the guest, (a) released from crates.io. Implementation order is **(c) → (b) →
   (a)**.
-- **Seven crates** in scope; `trusty-mpm` is a documented gap in pattern (a) only
-  (`publish = false`).
+- **Eight crates** in scope, and **all three patterns cover all eight** — including
+  `trusty-mpm`, published at **v1.0.2** and asserted present (D2 reversed
+  2026-07-31; the old "documented gap in pattern (a)" is dissolved), and
+  `trusty-review`, published at **v0.10.1** and brought into scope by an owner
+  decision the same day (D3 amended). They produce **thirteen** binaries between
+  them.
 - **No golden image.** Clone-and-provision every run — the clone costs 0.31s and
   provisioning 30s, and baking failed three distinct ways in research.
 - **The host repo is never mounted**, in either direction. That rule is what closes

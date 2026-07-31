@@ -75,7 +75,7 @@ so `cargo search` against the registry index is the evidence of record.)
 **The consequence.** `trusty-mpm` **is** installable by `cargo install trusty-mpm
 --locked` and is therefore **coverable by pattern (a)**. The "documented gap" this
 decision used to record **does not exist and is dissolved.** Pattern (a) covers the
-full seven-crate stack (D3), and the harness makes the same claim for all three
+full eight-crate stack (D3), and the harness makes the same claim for all three
 patterns.
 
 What survives the reversal is the *rule*, not the exception it was invented for:
@@ -94,7 +94,7 @@ count match. That rule now costs nothing, because nothing needs excluding.
 > keeping: a claim about publish status is checkable in one command, and this one
 > was never run until now.
 
-#### D3 — The stack is seven crates
+#### D3 — The stack is eight crates
 
 | # | Crate (workspace directory) | crates.io package | In pattern (a)? |
 |---|---|---|---|
@@ -105,10 +105,43 @@ count match. That rule now costs nothing, because nothing needs excluding.
 | 5 | `trusty-mpm` | `trusty-mpm` (v1.0.2, verified 2026-07-31) | yes — **amended**, D2 |
 | 6 | `trusty-git-analytics` | **`tga`** | yes |
 | 7 | `trusty-installer` | `trusty-installer` | yes |
+| 8 | `trusty-review` | `trusty-review` (v0.10.1, verified 2026-07-31) | yes — **amended**, see below |
 
-So **all three patterns cover all seven crates.** Row 5 previously read
+So **all three patterns cover all eight crates.** Row 5 previously read
 "— (`publish = false`)" / "**no** — D2"; that is corrected per the D2 reversal
-above.
+above. Row 8 is an addition, recorded immediately below.
+
+> **Amendment, 2026-07-31 — D3 widened to eight crates; `trusty-review` added.**
+> This is a **product-owner decision**, not a correction of a false premise — D3 as
+> originally written was accurate about the crates it named, it simply did not name
+> this one.
+>
+> **What was open.** [DOC-2 §9.3](./02-harness-contracts.md) note 2 recorded
+> `trusty-review` as a publishable crate with a daemon and a `/health` endpoint that
+> was **not** among D3's seven, carried `in_scope=no` faithfully to D3, and said the
+> question of whether D3 should include it *"should be decided knowingly rather than
+> by omission."* **It is now decided: `trusty-review` is IN scope.**
+>
+> **Verified before deciding, 2026-07-31.** `crates/trusty-review/Cargo.toml`
+> declares `publish = true` **explicitly** (not by cargo default, unlike
+> `trusty-mpm`), and `cargo search trusty-review --limit 5` returns
+> `trusty-review = "0.10.1"`. It has exactly **one** `[[bin]]` target —
+> `name = "trusty-review"`, `path = "src/main.rs"`, `required-features = []`
+> (`Cargo.toml:16-19`) — so it adds one binary, not a sidecar set, and no
+> Single-Install gate of its own (§7.4). Its `/health` route exists at
+> `crates/trusty-review/src/service/mod.rs:130`, under the `http-server` feature,
+> which is in the crate's `default` set.
+>
+> **Note the published/working-tree version gap.** The registry has **0.10.1**; the
+> working tree is **0.11.0**. Pattern (a) therefore installs a different version
+> from patterns (b) and (c). That is normal and already accounted for — DOC-2 §1.2's
+> version cross-check applies only to patterns (b) and (c) — but it is stated here
+> so that a pattern-(a) run reporting `0.10.1` is read as expected, not as drift.
+>
+> It is recorded as a dated amendment rather than a silent edit for the same reason
+> the D2 reversal was: a design whose settled decisions quietly change is a design
+> nobody can audit. What is being reversed here is narrower than D2 — an omission
+> deliberately flagged as an omission, closed on purpose.
 
 Note the package-name discontinuity on row 6: the workspace directory is
 `crates/trusty-git-analytics`, the published package name and the binary are both
@@ -379,7 +412,8 @@ tart run --no-graphics vmtest-<runid> &
 provision.sh                               # measured ~30s
 <scenario>                                 # install-local | install-branch | install-released
 verify.sh                                  # §7
-wait_for_stopped()                         # NOT a bare `tart stop` — §8.1
+vm_request_stop()                          # guest `sync; sync`, then `tart stop`, status DISCARDED
+vm_wait_for_stopped()                      # poll — NOT a bare `tart stop` — §8.1
 tart delete vmtest-<runid>
 ```
 
@@ -461,9 +495,9 @@ never rely on `mise activate`.
 
 | Pattern | Source delivery | Coverage |
 |---|---|---|
-| **(c) local** | `tar` of `git ls-files -co --exclude-standard`, piped via `tart exec -i` to guest-local disk | 7 crates; includes uncommitted work |
-| **(b) branch** | `git clone` inside the guest (repo is public), checkout branch, `cargo install --path` | 7 crates; committed+pushed state |
-| **(a) released** | `cargo install <crate> --locked` from crates.io | 7 crates; latest published state (D2 as amended) |
+| **(c) local** | `tar` of `git ls-files -co --exclude-standard`, piped via `tart exec -i` to guest-local disk | 8 crates; includes uncommitted work |
+| **(b) branch** | `git clone` inside the guest (repo is public), checkout branch, `cargo install --path` | 8 crates; committed+pushed state |
+| **(a) released** | `cargo install <crate> --locked` from crates.io | 8 crates; latest published state (D2 as amended) |
 
 #### 6.1 Pattern (c) — local source
 
@@ -503,7 +537,7 @@ per crate. No host→guest source transfer occurs; the host repository is not re
 
 #### 6.3 Pattern (a) — released
 
-`cargo install <crate> --locked` from crates.io, for all seven publishable crates in
+`cargo install <crate> --locked` from crates.io, for all eight publishable crates in
 D3. `--locked` is mandatory — it is what makes the run reproducible against the
 published lockfile rather than against whatever the resolver feels like today.
 
@@ -574,6 +608,7 @@ binaries that install must produce:
 | `trusty-analyze` | `trusty-analyze` |
 | `tga` | `tga` |
 | `trusty-mpm` | `tm`, `trusty-mpm` |
+| `trusty-review` | `trusty-review` |
 
 > **Amendment, 2026-07-31 — third `trusty-memory` sidecar added.** The row above
 > originally listed two binaries and **omitted `trusty-memory-mcp-bridge`**.
@@ -588,6 +623,13 @@ binaries that install must produce:
 > exists upstream in the project's Single-Install sidecar inventory checklist
 > (`.claude-mpm/INSTRUCTIONS.md`), which is the likely origin of the error and is
 > corrected in the same PR.
+
+> **Amendment, 2026-07-31 — `trusty-review` row added.** D3 was widened to eight
+> crates by the owner decision recorded there, so the table gains a row. It is a
+> **single-binary** crate — one `[[bin]]`, `name = "trusty-review"`,
+> `required-features = []` — so it adds one expectation and no sidecar set. Note
+> what that means for §7.4: a single-binary crate has no Single-Install Convention
+> to gate, and none is asserted for it.
 
 **Why a table and not the documentation:** `docs/reference/release-workflow.md`
 (~lines 450–460) is **stale** with respect to `trusty-console`. Asserting against
@@ -657,6 +699,14 @@ differs across patterns. That is a *fact about today's table*, not a licence to
 collapse the mechanism: the moment any crate legitimately diverges per pattern, the
 column is where that is recorded, and "known-absent" remains an explicit asserted
 expectation rather than a skipped assertion.
+
+**Unchanged by the 2026-07-31 D3 amendment.** Adding `trusty-review` (D3 row 8)
+does not reintroduce a divergence: it is published at **0.10.1**, so its binary is
+expected **present** under (a), (b) and (c) alike, exactly like the other seven.
+Its published version differs from the working tree's 0.11.0, but `expect_*` records
+presence, not version — a version gap is not a per-pattern expectation, and DOC-2
+§1.2 already scopes the version cross-check to patterns (b) and (c). The count of
+in-scope binaries whose expectation differs across patterns remains **zero**.
 
 ---
 
@@ -754,7 +804,7 @@ dominates every other tuning knob examined.
 
 **Rule:** full-stack runs set a single shared `CARGO_TARGET_DIR` across all crates.
 
-**Rationale:** the seven crates share a large fraction of their dependency graphs.
+**Rationale:** the eight crates share a large fraction of their dependency graphs.
 Per-crate target directories would rebuild those shared dependencies once per
 crate. This is the assumption underlying the full-stack extrapolation in §9, and
 it is the reason that extrapolation is far below 7 × single-crate time.
@@ -784,21 +834,26 @@ meaningful claim rather than a file-existence check.
 | **Full stack** | **~4–8 min** | **EXTRAPOLATION, not a measurement** — see note |
 
 **Full-stack figure — read this before quoting it.** The 4–8 minute range is an
-**extrapolation**, and it was extrapolated for **six** crates. D3 puts **seven**
-crates in scope for **every** pattern — including (a), which the superseded D2
-wrongly scoped at six — so the real figure is somewhat higher than the range says,
-in all three patterns rather than just two. No revised number is offered here:
-inventing one would be extrapolating from an extrapolation. Two further caveats:
+**extrapolation**, and it was extrapolated for **six** crates. D3 now puts
+**eight** crates in scope for **every** pattern — six when the range was computed,
+then seven when the D2 reversal dissolved the `trusty-mpm` exclusion, then eight
+when `trusty-review` was brought in on 2026-07-31 — so the real figure is higher
+than the range says, in all three patterns rather than just two. **No revised
+number is offered here, and none should be invented:** the count has been corrected
+twice, the range has been re-scoped neither time, and extrapolating from an
+extrapolation across a 33% wider scope would manufacture precision that does not
+exist. Two further caveats:
 
 - The extrapolation assumes the shared `CARGO_TARGET_DIR` amortisation of §8.6.
   Without it the number is not close.
 - The two per-crate measurements above (112s + 131s for two crates) are not
-  obviously consistent with 4–8 minutes for six or seven, *except* under strong
-  shared-dependency amortisation. Treat 4–8 min as a **low-confidence planning
-  estimate** — and, since the 2026-07-31 D2 amendment widened its scope without
-  re-deriving it, **lower-confidence now than when it was written**. It stands only
-  until a full-stack run is actually timed. The first pattern-(c) full-stack run
-  should be recorded as the replacement measurement.
+  obviously consistent with 4–8 minutes for six, let alone eight, *except* under
+  strong shared-dependency amortisation. Treat 4–8 min as a **low-confidence
+  planning estimate** whose confidence has now degraded **twice**: first when the
+  2026-07-31 D2 amendment widened its scope from six to seven without re-deriving
+  it, and again when the same day's D3 amendment widened it to eight. It stands
+  only until a full-stack run is actually timed. The first pattern-(c) full-stack
+  run should be recorded as the replacement measurement.
 
 The ONNX detail matters and is worth keeping explicit: `ort-sys` downloads its
 runtime **successfully inside the guest**. Network-dependent build scripts are not
@@ -820,8 +875,8 @@ Per D4:
 3. **Pattern (a) — released.** Adds `scenarios/install-released.sh` only. No new
    infrastructure. *(Amended 2026-07-31: this step previously also called for
    pattern-aware `trusty-mpm` known-absent handling in the oracle. The D2 reversal
-   removes that work item — pattern (a) now expects the same seven crates present
-   as (b) and (c), per §7.5.)*
+   removes that work item — pattern (a) now expects the same **eight** crates
+   present as (b) and (c), per §7.5 and D3 as amended.)*
 
 > **Settled:** the architecture sketch annotates `scenarios/install-local.sh` with
 > "build first". This means *implement this scenario first*, consistent with D4
