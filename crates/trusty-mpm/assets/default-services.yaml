@@ -39,6 +39,13 @@ services:
     process_match: "trusty-mpm"
     start_cmd: "tm daemon"
     stop_cmd: "tm stop"
+    # #4230: kept as `tm restart` deliberately. On a host with NO daemon launchd
+    # unit this is the correct verb and succeeds. On a launchd host `tm restart`
+    # refuses BEFORE tearing anything down and names the exact
+    # `launchctl kickstart` recipe for that host's label, which `tm services
+    # restart` surfaces verbatim before exiting 1 — strictly more actionable than
+    # the `no restart_cmd defined in manifest` that `null` would print, and that
+    # `null` would also break the non-launchd host where restarting works.
     restart_cmd: "tm restart"
 
   trusty-memory:

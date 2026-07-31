@@ -117,9 +117,10 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// operator can confirm — or fix — a broken install at a glance.
 /// What: runs [`TrustyCommand::Doctor`] through the shared [`CommandExecutor`]
 /// (which calls `GET /api/v1/doctor`), then prints one status-tagged line per
-/// check plus the client-side #2332 stale-daemon check (see
-/// [`super::doctor_stale::stale_daemon_check`]) and an overall verdict that
-/// folds both. When `prune_stale_skills` is set (hidden
+/// check plus the two client-side checks — the #2332 stale-daemon check (see
+/// [`super::doctor_stale::stale_daemon_check`]) and the #4230 orphan-daemon
+/// check (see [`super::doctor_orphan::orphan_daemon_check`]) — and an overall
+/// verdict that folds all three. When `prune_stale_skills` is set (hidden
 /// `--prune-stale-skills` flag), also runs [`prune_stale_skills_locally`] as a
 /// manual troubleshooting escape hatch — normal operation cleans up
 /// pre-rename `mpm-*` skill directories automatically and silently via the
@@ -153,15 +154,39 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
             // just-installed binary, so its compiled-in version is the
             // "installed" side of the comparison. The daemon can only ever
             // report on itself.
+            //
+            // #4230: `/health` is fetched exactly ONCE here and shared with both
+            // client-side checks, so they always describe the same daemon rather
+            // than two probes that could straddle a restart. The restart hint is
+            // resolved from this host's launchd state because `tm restart` is a
+            // hard error where launchd owns the daemon.
             let daemon = DaemonClient::new(url.to_string());
-            let stale_check = super::doctor_stale::stale_daemon_check(&daemon).await;
+            let snapshot = daemon.health_snapshot().await.ok();
+            let restart_hint = super::launchd_probe::daemon_restart_command();
+            let stale_check =
+                super::doctor_stale::stale_daemon_check(snapshot.as_ref(), &restart_hint);
             println!(
                 "  {} {:<13} {}",
                 status_icon(stale_check.status),
                 stale_check.name,
                 stale_check.message,
             );
-            let overall = report.overall.worst(stale_check.status);
+            // #4230: also client-side, and for a stronger reason than #2332's —
+            // the daemon that answers `run_doctor` is, in the orphan state,
+            // precisely the process whose own report cannot be trusted. Only a
+            // client can compare "who answered /health" against "who launchd was
+            // told to run".
+            let orphan_check = super::doctor_orphan::orphan_daemon_check(snapshot.as_ref());
+            println!(
+                "  {} {:<13} {}",
+                status_icon(orphan_check.status),
+                orphan_check.name,
+                orphan_check.message,
+            );
+            let overall = report
+                .overall
+                .worst(stale_check.status)
+                .worst(orphan_check.status);
 
             println!(
                 "\noverall: {} {}",

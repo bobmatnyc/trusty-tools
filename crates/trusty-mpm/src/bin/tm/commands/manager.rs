@@ -140,7 +140,10 @@ pub(crate) async fn digest(
     let Some(outcome) = outcome else {
         anyhow::bail!(
             "this daemon does not support `manager digest` yet — upgrade the daemon \
-             (`tm restart` after `cargo install trusty-mpm --locked`) and try again"
+             (`{}` after `cargo install trusty-mpm --locked`) and try again",
+            // #4230: `tm restart` is a hard error where launchd owns the daemon,
+            // so the upgrade recipe must name the verb that works on THIS host.
+            crate::commands::launchd_probe::daemon_restart_command()
         );
     };
     if json {
@@ -184,7 +187,10 @@ pub(crate) async fn chat(
     let Some(outcome) = outcome else {
         anyhow::bail!(
             "this daemon does not support `manager chat` yet — upgrade the daemon \
-             (`tm restart` after `cargo install trusty-mpm --locked`) and try again"
+             (`{}` after `cargo install trusty-mpm --locked`) and try again",
+            // #4230: `tm restart` is a hard error where launchd owns the daemon,
+            // so the upgrade recipe must name the verb that works on THIS host.
+            crate::commands::launchd_probe::daemon_restart_command()
         );
     };
     if json {
@@ -220,7 +226,10 @@ pub(crate) async fn route(
     let Some(outcome) = outcome else {
         anyhow::bail!(
             "this daemon does not support `manager route` yet — upgrade the daemon \
-             (`tm restart` after `cargo install trusty-mpm --locked`) and try again"
+             (`{}` after `cargo install trusty-mpm --locked`) and try again",
+            // #4230: `tm restart` is a hard error where launchd owns the daemon,
+            // so the upgrade recipe must name the verb that works on THIS host.
+            crate::commands::launchd_probe::daemon_restart_command()
         );
     };
     if json {

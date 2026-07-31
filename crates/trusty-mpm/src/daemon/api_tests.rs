@@ -91,6 +91,48 @@ async fn health_response_serializes_supervised_field() {
 }
 
 #[tokio::test]
+async fn health_response_serializes_pid_field() {
+    // #4230: `supervised` is a heuristic whose fallback prong is `getppid() == 1`,
+    // so an orphan can self-report `true`. `pid` is what makes `tm doctor`'s check
+    // authoritative — it identifies WHICH process answered, for comparison against
+    // the PID launchd reports for the registered daemon label.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert_eq!(
+        body.pid,
+        std::process::id(),
+        "pid must identify the responding process"
+    );
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("pid").and_then(serde_json::Value::as_u64),
+        Some(u64::from(std::process::id())),
+        "wire shape must carry `pid`: {value}"
+    );
+}
+
+#[tokio::test]
+async fn health_response_serializes_forced_field() {
+    // #4230: distinguishes a deliberate `tm daemon --force` run from an unwanted
+    // orphan, so `tm doctor` does not hard-Fail on the escape hatch its own
+    // remediation recommends. Defaults `false` until `daemon_run` sets it.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert!(
+        !body.unsupervised_forced,
+        "force flag defaults false before daemon_run sets it"
+    );
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("unsupervised_forced"),
+        Some(&serde_json::Value::Bool(false)),
+        "wire shape must carry `unsupervised_forced`: {value}"
+    );
+}
+
+#[tokio::test]
 async fn health_response_serializes_version_field() {
     // Issue #2332: `/health` must carry this process's build version so a
     // client can detect a stale daemon that predates the installed binary.
