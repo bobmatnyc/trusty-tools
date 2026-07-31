@@ -98,8 +98,50 @@ impl OrchestratorBackend for StateBackend {
     /// reported "no such session" for the `tmpm-` sessions trusty-mpm itself
     /// spawns, even though `session_list` surfaces them. Managed records are
     /// serialized via the shared `record_to_json` (matching `session_list`) and
-    /// carry no memory snapshot; delegations are keyed by UUID so they resolve
-    /// for either family.
+    /// carry no memory snapshot.
+    ///
+    /// # Delegation lookup (#4141)
+    ///
+    /// Delegations live in up to TWO key spaces. `agent_delegate` (#1976) keys
+    /// a delegation by whatever session id the CALLER passed — for a managed
+    /// session that is the MANAGED id itself (exercised over `/rpc` by
+    /// `connectors::tm::WorkstreamConnector::delegate`, certified by
+    /// `agent_delegate_accepts_managed_session` in `mcp_backend_tests.rs`).
+    /// Hook-observed delegations (`delegation_tracker::observe`) are instead
+    /// keyed by the Claude session UUID, reachable from a managed record only
+    /// by bridging through `record.claude_session_id` (populated by
+    /// `session_start_correlation::correlate_session_start`). Replacing the
+    /// managed-id read with the bridged one — instead of unioning both —
+    /// silently drops every `agent_delegate`-keyed record: the exact
+    /// false-all-clear #4141 exists to eliminate, just relocated to the other
+    /// key. The managed branch below reads BOTH spaces and de-duplicates by
+    /// delegation id — but that only removes an exact record appearing
+    /// twice, e.g. the same `Delegation` reachable under both the managed id
+    /// and the Claude UUID. It does NOT merge a PM's `agent_delegate` call
+    /// (managed-id record) with the hook-observed dispatch of the SAME
+    /// logical subagent (Claude-UUID record): those are two distinct
+    /// `Delegation`s with different ids and `delegation_tracker::dedup` only
+    /// matches within one session/agent pairing, so it cannot span the
+    /// bridge. `delegation_count` can therefore overcount one in-flight
+    /// subagent as two — this is the existing, deliberate tracker trade-off
+    /// (favouring overcount over a false merge, per `dedup`'s own doc
+    /// comment), not new behaviour this fix introduces or is meant to close.
+    ///
+    /// The legacy branch's `id` equals the Claude session UUID only on the
+    /// `SessionStart`-hook-auto-registered path; a tmux-pane-discovered,
+    /// native-process-discovered, or `POST /sessions`-registered legacy
+    /// session instead gets a freshly minted `SessionId` never correlated to
+    /// anything, so `delegations_for(id)` can under-report there too. No
+    /// marker distinguishes those three registration paths at this call site,
+    /// so the legacy branch omits `delegation_lookup` rather than assert an
+    /// `"ok"` it cannot establish for every path (that pre-existing gap is
+    /// tracked separately from this fix).
+    ///
+    /// When the managed bridge itself is missing (no correlated Claude
+    /// session id yet), `delegation_count` AND `delegations` are both an
+    /// explicit `null` with `delegation_lookup: "unbridged"` — the managed-id
+    /// half alone would be a floor masquerading as a total, so neither field
+    /// may be read as a confident (even if empty) answer.
     async fn session_status(&self, session_id: &str) -> Result<Value, String> {
         let id = parse_session_id(session_id)?;
         // Legacy in-process registry first.
@@ -118,13 +160,42 @@ impl OrchestratorBackend for StateBackend {
         // surfaces and `session_stop`/`session_resume` already target by id.
         let manager = self.state.session_manager().await;
         if let Ok(record) = manager.get(&ManagedSessionId(id.0)).await {
-            let delegations = self.state.delegations_for(id);
+            // #4141: read the managed-id key space unconditionally — this is
+            // what `agent_delegate` (#1976) writes under for a managed
+            // session — then union in the Claude-UUID key space when the
+            // bridge resolves, de-duplicating by delegation id (removes an
+            // exact record reachable under both keys; does NOT merge a
+            // managed-id `agent_delegate` record with a separate
+            // Claude-UUID hook-observed record for the same logical
+            // subagent — see the doc comment above).
+            let mut delegations = self.state.delegations_for(id);
+            let claude_uuid = record
+                .claude_session_id
+                .as_deref()
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let (delegation_count, delegations_value, lookup) = match claude_uuid {
+                Some(uuid) => {
+                    for d in self.state.delegations_for(SessionId(uuid)) {
+                        if !delegations.iter().any(|existing| existing.id == d.id) {
+                            delegations.push(d);
+                        }
+                    }
+                    (json!(delegations.len()), json!(delegations), "ok")
+                }
+                // The hook-observed half is unreachable without the bridge,
+                // so the managed-id half alone cannot stand in for the
+                // total — report the explicit unknown for BOTH fields
+                // rather than let a caller reading only `delegations` see a
+                // confident empty list.
+                None => (Value::Null, Value::Null, "unbridged"),
+            };
             return Ok(json!({
                 "session": crate::daemon::managed_routes::record_to_json(&record),
                 "kind": SessionRecordKind::Managed.as_str(),
                 "memory": Value::Null,
-                "delegation_count": delegations.len(),
-                "delegations": delegations,
+                "delegation_count": delegation_count,
+                "delegations": delegations_value,
+                "delegation_lookup": lookup,
             }));
         }
         Err(format!("no such session: {session_id}"))
