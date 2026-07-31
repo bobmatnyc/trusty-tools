@@ -3,7 +3,7 @@
 **Status:** Draft — design specification only, **no implementation**
 **Source research:** [conclusions-post-measurement.md](../01-research/conclusions-post-measurement.md) (authoritative research outcome), [vm-install-probe-findings.md](../01-research/vm-install-probe-findings.md) (raw measurements A–K)
 **Parent design:** [`docs/trusty-installer/research/02-design/10-isolation-testing-harness.md`](../../../trusty-installer/research/02-design/10-isolation-testing-harness.md) — **Accepted**, amended by PR #4438 to match these measurements. This document is the concrete, measured, macOS/Tart realisation of that parent design's harness concept.
-**Implements:** nothing. This document specifies `scripts/vmtest/`; the directory does not exist yet and is not created by this PR.
+**Implements:** nothing. This document specifies `vmtest-harness/`; the directory does not exist yet and is not created by this PR.
 
 ## Purpose
 
@@ -102,10 +102,11 @@ a host mount (rejected, §6.4).
 
 ---
 
-### 2. Placement: `scripts/vmtest/`, outside the Cargo workspace
+### 2. Placement: `vmtest-harness/`, at the project root, outside the Cargo workspace
 
-The harness lives at repository path **`scripts/vmtest/`** and is written in
-**bash**.
+The harness lives at repository path **`vmtest-harness/`** — a dedicated
+top-level directory, sibling to `crates/`, not nested under it or under any
+`scripts/` directory — and is written in **bash**.
 
 #### 2.1 Why not `crates/`
 
@@ -125,11 +126,27 @@ invocation. That directly violates the harness's defining requirement: it is
 **ad-hoc and manually run**, and it is **separate from the existing test
 infrastructure**. A VM-spawning, multi-minute, host-state-dependent harness that
 executes as a side effect of `cargo test --workspace` is a footgun, not a test.
+A project-root directory sits even further from the `crates/*` glob than a
+nested `scripts/` location would have — the separation argument only gets
+stronger the further the harness sits from anything the glob could ever match.
 
-#### 2.2 Why bash is the right encumbrance level
+#### 2.2 Why a dedicated top-level directory, not a loose script
 
-Shell under `scripts/` is unencumbered by the above gates: the line-cap lint is
-`.rs`-only, and the repo has no shellcheck hook. The harness can therefore be
+The harness is a driver plus a `lib/` of shared modules plus a `scenarios/`
+directory plus a data file (§3) — a small program, not a one-off script. Placing
+a multi-file harness inside a general-purpose `scripts/` directory buries that
+structure among unrelated, single-purpose utility scripts and invites the
+`lib/`/`scenarios/` layout to be flattened or picked apart over time. A
+dedicated top-level `vmtest-harness/` directory instead signals, on sight, that
+this is a self-contained harness with its own internal structure — not a loose
+script that happens to be long.
+
+#### 2.3 Why bash is the right encumbrance level
+
+Shell in `vmtest-harness/` is unencumbered by the workspace gates in §2.1: the
+line-cap lint is `.rs`-only, and the repo has no shellcheck hook. This holds
+regardless of where under the project root the harness sits, root or
+`scripts/`, since neither is a workspace member. The harness can therefore be
 structured for readability rather than to satisfy Rust lints it has no business
 satisfying.
 

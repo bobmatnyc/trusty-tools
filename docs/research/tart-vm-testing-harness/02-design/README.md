@@ -5,11 +5,11 @@
 **Parent design:** [`docs/trusty-installer/research/02-design/10-isolation-testing-harness.md`](../../../trusty-installer/research/02-design/10-isolation-testing-harness.md) (Accepted; amended by PR #4438)
 
 This directory refines the completed Tart VM research into an implementable
-specification for `scripts/vmtest/` — an ad-hoc, manually-run harness that
+specification for `vmtest-harness/` — an ad-hoc, manually-run harness that
 installs the trusty-tools stack inside a clean local Tart macOS VM and verifies
 that the install succeeds without affecting the host.
 
-**Nothing here is implemented.** `scripts/vmtest/` does not exist. These documents
+**Nothing here is implemented.** `vmtest-harness/` does not exist. These documents
 specify it.
 
 ## Contents
