@@ -9,7 +9,7 @@
 //! system prompt, and drives an `AgentLoop` to completion, returning the
 //! sub-agent's `AgentOutput` (including its accrued token usage) back to the PM.
 //! What: `InProcessAgentRunner` implements `AgentRunner`. It holds an
-//! `Arc<dyn LlmClientTrait>` (shared with the PM so usage rolls up onto one
+//! `Arc<dyn InferenceAdapter>` (shared with the PM so usage rolls up onto one
 //! transcript), an `Arc<dyn RegistryFactory>` (the DI seam for how a sub-agent's
 //! tools are assembled — fs/bash scoped to the working dir, plus a nested
 //! delegate), the agents config directory, optional project `CLAUDE.md` context,
@@ -17,7 +17,7 @@
 //! default is `InProcess` (config.rs), making this the real default backend.
 //! Test: `runner::tests` — stubbed-PM delegation, return-to-PM `AgentOutput`,
 //! `tools.allowed` enforcement, and usage roll-up — all offline via a scripted
-//! `LlmClientTrait` mock.
+//! `InferenceAdapter` mock.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
 use crate::agents::AgentConfig;
-use crate::llm::LlmClientTrait;
+use crate::llm::InferenceAdapter;
 use crate::mode::HarnessMode;
 use crate::prompt::assemble_system_prompt_for_mode;
 use crate::provider::{resolve_context_window, resolve_max_tokens, resolve_model};
@@ -138,7 +138,7 @@ impl Default for InProcessRunnerConfig {
 /// assembled system prompt, then runs an `AgentLoop` and returns its output.
 /// Test: `runner::tests::*` cover the full delegation path offline.
 pub struct InProcessAgentRunner {
-    llm: Arc<dyn LlmClientTrait>,
+    llm: Arc<dyn InferenceAdapter>,
     registry_factory: Arc<dyn RegistryFactory>,
     config_dir: PathBuf,
     project_context: Option<String>,
@@ -178,7 +178,7 @@ impl InProcessAgentRunner {
     /// `None` until `with_project_context` is called.
     /// Test: `runner::tests::delegate_runs_engineer_loop`.
     pub fn new(
-        llm: Arc<dyn LlmClientTrait>,
+        llm: Arc<dyn InferenceAdapter>,
         registry_factory: Arc<dyn RegistryFactory>,
         config_dir: impl Into<PathBuf>,
     ) -> Self {

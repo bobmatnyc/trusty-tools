@@ -120,6 +120,27 @@ allow = [
     # (search_gmail_messages/get_gmail_message_content/modify_gmail_messages
     # are already granted by the base's Gmail surface).
     "create_draft",
+    # OKG docstore reach — a SHIPPED grant (owner decision, 2026-07-31), not a
+    # hand edit. It was one in the DEPLOYED copy from 2026-07-29 (there is
+    # still no API to grant a tool, #3890) until a bundled-agent reprovision
+    # overwrote that file and destroyed it with no `.stale.bak` (#4461).
+    # Declaring it here is what survives the next reprovision.
+    #
+    # NARROW ON PURPOSE: the two read/ingest DOCSTORE tools only. This overlay
+    # deliberately does NOT name `okg_ingest_gmail`/`okg_ingest_drive` —
+    # widening it is a decision about what this persona may ingest, never a
+    # cleanup to "match the base".
+    #
+    # Not a FILTER, though, and the difference matters: the base `assistant`
+    # has granted all four OKG tools since #3883, and `extends` unions
+    # base-first, so the RESOLVED persona reaches the Gmail/Drive ingest tools
+    # today regardless of this list. These two lines are an independence
+    # guarantee — they pin the docstore reach this persona actually depends on
+    # so a future narrowing of the base cannot silently take it away. Same
+    # reasoning as the `scopes` line below and the git carve-out above. Pinned
+    # by `bundled_cto_assistant_pins_okg_docstore_reach` (agents/tests/loading.rs).
+    "okg_ingest_docstore",
+    "okg_sources",
 ]
 # #3938: OpenRPC scopes (#3208) for the Gmail/Tasks surface above. These are
 # NOT a delta the base can supply and they are NOT redundant with `allow`:

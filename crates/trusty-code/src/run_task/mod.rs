@@ -30,7 +30,7 @@ use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig};
 use crate::agents::AgentConfig;
-use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
+use crate::llm::{DebugCaptureSink, InferenceAdapter, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
@@ -215,7 +215,7 @@ pub struct RunTaskParams {
 ///
 /// Why: The single orchestration entry point the binary calls (with a real
 /// `LlmClient`) and tests call (with a scripted mock). Keeping the LLM client as
-/// an injected `Arc<dyn LlmClientTrait>` is what makes the whole path testable
+/// an injected `Arc<dyn InferenceAdapter>` is what makes the whole path testable
 /// offline without a network call or an API key.
 /// What: Loads the PM config, assembles its prompt (BASE + PM prompt + project
 /// `CLAUDE.md`), builds the engineer runner (fs/bash scoped to the project, with
@@ -232,7 +232,7 @@ pub struct RunTaskParams {
 /// `diff_reflects_engineer_file_change`, `usage_and_cost_aggregate_end_to_end`,
 /// `exit_code_reflects_run_failure`,
 /// `run_wide_ceiling_stops_the_pm_loop_and_ends_partial_promptly`.
-pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
+pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapter>) -> RunReport {
     // Trusty-search-first discovery (PR B): at task START, best-effort/detached,
     // ensure the working project is indexed so `search`/`grep` are useful while
     // the loop below proceeds. Fail-open, git-optional — see the helper's docs.
@@ -336,7 +336,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     }
 
     // The PM's loop uses a transcript-recording client tagged "pm".
-    let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
+    let pm_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
         wrap_with_debug_capture(Arc::clone(&llm), "pm", debug_sink.as_ref()),
         "pm",
         Arc::clone(&transcript),
@@ -490,7 +490,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 /// `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`,
 /// `run_task::tests::use_skill_on_legacy_path_reaches_engineer_and_transcript`.
 fn build_engineer_runner(
-    llm: Arc<dyn LlmClientTrait>,
+    llm: Arc<dyn InferenceAdapter>,
     params: &RunTaskParams,
     project_context: Option<String>,
     skills_catalog: Option<(String, Arc<dyn SkillResolver>)>,
@@ -498,7 +498,7 @@ fn build_engineer_runner(
     deadline_secs: u64,
     redelegation_signal: RedelegationCapSignal,
 ) -> Arc<dyn AgentRunner> {
-    let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
+    let engineer_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
         llm,
         ENGINEER_AGENT_NAME,
         transcript,

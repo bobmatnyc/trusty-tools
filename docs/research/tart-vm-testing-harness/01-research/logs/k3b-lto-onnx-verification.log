@@ -1,0 +1,115 @@
+=== K3b START 2026-07-31T12:29:19Z ===
+VM_STATE=running
+
+########## Q1: where did cargo install actually build? does target/ hold the artifacts?
+--- target/ tree top:
+total 16
+drwxr-xr-x@  7 admin  staff   224 Jul 31 12:27 .
+drwxr-xr-x  35 admin  staff  1120 Jul 31 12:26 ..
+-rw-r--r--   1 admin  staff   353 Jul 31 12:27 .rustc_info.json
+-rw-r--r--   1 admin  staff   177 Jul 31 12:26 CACHEDIR.TAG
+drwxr-xr-x   4 admin  staff   128 Jul 31 12:27 cargo-timings
+drwxr-xr-x   4 admin  staff   128 Jul 31 12:26 cxxbridge
+drwxr-xr-x  14 admin  staff   448 Jul 31 12:27 release
+--- target/release binaries:
+-rwxr-xr-x  1 admin  staff  35840256 Jul 31 12:27 target/release/trusty-embedderd
+-rwxr-xr-x  1 admin  staff  89396768 Jul 31 12:27 target/release/trusty-search
+
+########## Q2: the cargo --timings artifact
+./target/cargo-timings
+./target/cargo-timings/cargo-timing-20260731T122609.667816Z.html
+./target/cargo-timings/cargo-timing.html
+---
+total 1888
+drwxr-xr-x  4 admin  staff     128 Jul 31 12:27 .
+drwxr-xr-x@ 7 admin  staff     224 Jul 31 12:27 ..
+-rw-r--r--  1 admin  staff  482823 Jul 31 12:27 cargo-timing-20260731T122609.667816Z.html
+-rw-r--r--  1 admin  staff  482823 Jul 31 12:27 cargo-timing.html
+
+########## Q3: ort-sys -- did it DOWNLOAD ONNX Runtime, or defer to runtime?
+--- ort feature declaration in the workspace:
+Cargo.toml:139:# backend (dtolnay's c2rust port of libyaml, unsafe pointer code) — it is NOT the
+Cargo.toml:175:# IANA named-timezone support (e.g. "America/New_York") for chrono. Already
+Cargo.toml:215:# backend transparently; async D-Bus support is not needed here.
+Cargo.toml:262:# version. `default-features = false` drops the `shortcodes`/`syntect` extras
+Cargo.toml:293:criterion = { version = "0.5", features = ["html_reports"] }
+Cargo.toml:295:# parallel test threads. Used by bug-report token tests.
+Cargo.toml:326:ort = "2.0.0-rc.10"
+--- ort-sys build dirs:
+target/release/build/ort-sys-5baa57b135b1f8d6/
+target/release/build/ort-sys-9749c54230a8fcd1/
+--- ort-sys out/ contents (the download landing zone):
+== target/release/build/ort-sys-9749c54230a8fcd1/out
+total 0
+drwxr-xr-x  2 admin  staff   64 Jul 31 12:26 .
+drwxr-xr-x  7 admin  staff  224 Jul 31 12:26 ..
+--- libonnxruntime anywhere on disk?
+/Users/admin/Library/Caches/ort.pyke.io/dfbin/aarch64-apple-darwin/612739f75438dc0a075461e1fb454226b4a1eb175e60a7271ba966bbbb972cd4/libonnxruntime.a
+--- ort-sys build stderr/output:
+== target/release/build/ort-sys-9749c54230a8fcd1/output
+cargo:rustc-check-cfg=cfg(link_error)
+cargo:warning=[ort-sys] [WARN] can't do xcframework linking for target 'aarch64-apple-darwin'
+cargo:rerun-if-env-changed=ORT_LIB_PATH
+cargo:rerun-if-env-changed=ORT_LIB_LOCATION
+cargo:rerun-if-env-changed=CARGO_NET_OFFLINE
+cargo:rerun-if-env-changed=ORT_SKIP_DOWNLOAD
+cargo:rerun-if-env-changed=ORT_OFFLINE
+[ort-sys] [DEBUG] Using prebuilt binaries
+[ort-sys] [DEBUG] looking for prebuilt binaries matching feature set: none
+[ort-sys] [DEBUG] downloading from 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/aarch64-apple-darwin.tar.lzma2'; tls_provider=NativeTls, root_certs=PlatformVerifier
+cargo:rerun-if-env-changed=ORT_CXX_STDLIB
+cargo:rerun-if-env-changed=CXXSTDLIB
+cargo:rustc-link-lib=c++
+cargo:rustc-link-lib=framework=Foundation
+cargo:rerun-if-env-changed=CC
+cargo:rustc-link-search=/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin
+cargo:rustc-link-lib=clang_rt.osx
+cargo:rustc-link-search=native=/Users/admin/Library/Caches/ort.pyke.io/dfbin/aarch64-apple-darwin/612739f75438dc0a075461e1fb454226b4a1eb175e60a7271ba966bbbb972cd4
+cargo:rustc-link-lib=static=onnxruntime
+
+########## Q4: THIN LTO -- verify, do not assume. touch + rebuild with -v, grep the rustc cmdline.
+touched
+  73 -C embed-bitcode=no
+ 268 -C linker-plugin-lto
+   1 -C lto=thin
+LTO_PROBE_RC=0
+LTO_PROBE_MS=143430
+
+########## Q4b: cross-check -- what does the release profile resolve to for a workspace member?
+       Fresh trusty-search v0.40.0 (/Users/admin/trusty-tools/crates/trusty-search)
+
+########## Q5: do the installed binaries actually RUN? (real test of ONNX linkage)
+trusty-search 0.40.0
+TS_VERSION_RC=0
+trusty-embedderd 0.3.10
+TE_VERSION_RC=0
+CLI arguments for `trusty-embedderd`.
+
+Why: clap derive is the workspace standard for all trusty-* binaries. What: `--stdio` for the sidecar transport (piped stdin/stdout), `--http` for the TCP listener, `--socket` for the UDS listener. `--stdio` is mutually exclusive with `--http` and `--socket`. `--batch-size` and `--batch-window-ms` configure the `BatchQueue` coalescing window. Test: `clap::Parser::try_parse_from` in unit tests.
+
+Usage: trusty-embedderd [OPTIONS]
+
+Options:
+      --stdio
+          Run in stdio sidecar mode: read JSON-RPC requests from stdin, write responses to stdout. Mutually exclusive with --http and --socket. This is the transport used when trusty-search auto-spawns trusty-embedderd as a child process (issue #110 Phase 2 default).
+          
+          Why: avoids socket-file management — the parent owns the pipe handles and the child exits automatically when the parent closes its end.
+
+      --http <HTTP_ADDR>
+          TCP address to listen on for HTTP (host:port).
+          
+TE_HELP_RC=0
+
+########## Q6: dynamic linkage of the embedder binary
+/Users/admin/.cargo/bin/trusty-embedderd:
+	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)
+	/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 5026.5.4)
+	/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.120.67)
+	/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration (compatibility version 1.0.0, current version 1405.120.5)
+	/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)
+	/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)
+	/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+	/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML (compatibility version 1.0.0, current version 1.0.0)
+	/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)
+=== K3b DONE 2026-07-31T12:31:51Z ===

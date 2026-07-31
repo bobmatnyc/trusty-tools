@@ -15,7 +15,85 @@
 //! `registry_with_echo`, and `make_loop` helpers via `use super::*`.
 //! Test: this module is itself the test surface.
 
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+use futures_util::stream;
+use trusty_common::inference::{ChatStream, ChatStreamEvent, StopReason, StreamCompletion, Usage};
+
 use super::*;
+
+/// An `InferenceAdapter` whose `chat_stream` yields text in SEVERAL fragments.
+///
+/// Why (#4425): every other double in this crate inherits the trait's buffered
+/// `chat_stream` default, which replays a finished response as ONE delta — so
+/// none of them can tell "streaming works" apart from "the fallback ran". This
+/// double emits real multi-fragment output, which is what an OpenAI-dialect SSE
+/// turn looks like, and counts BOTH entry points so a test can also prove the
+/// sink-less path never opens a stream.
+/// What: `chunks` are emitted in order as [`ChatStreamEvent::Delta`]s followed
+/// by a terminal `Done` with `finish_reason: stop` (no tool calls, so the loop
+/// ends after one turn). `chat` returns the same turn buffered, so the blocking
+/// path yields identical content.
+/// Test: `native_streaming_transport_emits_incremental_deltas`,
+/// `no_sink_uses_the_blocking_chat_path`.
+struct ChunkedStreamingLlm {
+    chunks: Vec<String>,
+    chat_calls: AtomicUsize,
+    stream_calls: AtomicUsize,
+}
+
+impl ChunkedStreamingLlm {
+    fn new(chunks: Vec<&str>) -> Self {
+        Self {
+            chunks: chunks.into_iter().map(str::to_string).collect(),
+            chat_calls: AtomicUsize::new(0),
+            stream_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// The concatenation of every chunk — the turn's full text.
+    fn full_text(&self) -> String {
+        self.chunks.concat()
+    }
+
+    fn chat_calls(&self) -> usize {
+        self.chat_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    fn stream_calls(&self) -> usize {
+        self.stream_calls.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl InferenceAdapter for ChunkedStreamingLlm {
+    crate::llm::mock_adapter_identity!("mock-chunked-streaming");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        self.chat_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        let mut assembly = crate::llm::StreamAssembly::new();
+        assembly.push(ChatStreamEvent::Delta(self.full_text()));
+        assembly.push(ChatStreamEvent::Done(StreamCompletion {
+            finish_reason: Some(StopReason::Stop),
+            usage: Usage::default(),
+        }));
+        Ok(assembly.into_response("gen-chunked", "mock/model"))
+    }
+
+    async fn chat_stream(&self, _req: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        self.stream_calls.fetch_add(1, AtomicOrdering::SeqCst);
+        let mut events: Vec<Result<ChatStreamEvent, InferenceError>> = self
+            .chunks
+            .iter()
+            .map(|c| Ok(ChatStreamEvent::Delta(c.clone())))
+            .collect();
+        events.push(Ok(ChatStreamEvent::Done(StreamCompletion {
+            finish_reason: Some(StopReason::Stop),
+            usage: Usage::default(),
+        })));
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
 
 /// A `ToolEventSink` that records every call as a tagged string, in order.
 ///
@@ -310,19 +388,20 @@ async fn sink_events_are_attributed_to_the_agent() {
     );
 }
 
-/// A normal (text) assistant turn must publish exactly one `done: true`
-/// delta; a tool-only turn (the model's `content` is `null`) must publish
-/// none (tcode streaming epic #3696, Gap A, Slice 1).
+/// A text assistant turn publishes its content deltas with `done: false` and
+/// exactly one terminal `done: true`; a tool-only turn publishes none
+/// (tcode streaming epic #3696, Gap B — #4425).
 ///
-/// Why: this is Gap A's whole contract — the assistant's own words become
-/// observable to a `session.attach`ed client without a UI having to
-/// reconstruct them from tool events, but ONLY for turns that actually carry
-/// text; a tool-only turn has nothing for a streaming UI to render as a
-/// bubble.
-/// What: script [tool_call_response, stop_response("final answer")]; assert
-/// the sink recorded exactly one message, attributed to the running agent,
-/// carrying the final turn's text with `done: true` and a non-empty
-/// `turn_id`.
+/// Why: this is the contract #4425 replaced Gap A (Slice 1)'s single
+/// `done: true` call with. A subscriber must be able to append every
+/// `done: false` delta as it arrives and treat the `done: true` call purely as
+/// "the bubble is complete" — so the terminal call must carry NO text, or a
+/// UI that appends every delta would duplicate the whole turn. A tool-only
+/// turn still emits nothing: there is no bubble to render.
+/// What: script [tool_call_response, stop_response("final answer")]. The
+/// scripted mock has no native streaming, so the shared adapter's buffered
+/// fallback replays the turn as one delta — giving exactly one `done: false`
+/// call carrying the text plus one empty `done: true`.
 /// Test: this test.
 #[tokio::test]
 async fn sink_receives_agent_message_delta_for_text_turn_only() {
@@ -344,19 +423,117 @@ async fn sink_receives_agent_message_delta_for_text_turn_only() {
     let messages = sink.messages();
     assert_eq!(
         messages.len(),
-        1,
-        "a tool-only turn must not emit a delta; expected exactly one delta \
-         for the final text turn, got {messages:?}"
+        2,
+        "a tool-only turn must not emit a delta; expected one content delta \
+         plus one terminal delta for the final text turn, got {messages:?}"
     );
-    let recorded = &messages[0];
-    assert_eq!(recorded.agent, "pm");
-    assert_eq!(recorded.agent_id, "pm-1");
+    let content = &messages[0];
+    assert_eq!(content.agent, "pm");
+    assert_eq!(content.agent_id, "pm-1");
     assert!(
-        !recorded.turn_id.is_empty(),
+        !content.turn_id.is_empty(),
         "turn_id must be minted, not empty"
     );
-    assert_eq!(recorded.delta, "final answer");
-    assert!(recorded.done, "Gap A (Slice 1) always emits done: true");
+    assert_eq!(content.delta, "final answer");
+    assert!(!content.done, "content deltas must carry done: false");
+
+    let terminal = &messages[1];
+    assert_eq!(
+        terminal.turn_id, content.turn_id,
+        "every delta of one turn shares its turn_id"
+    );
+    assert_eq!(
+        terminal.delta, "",
+        "the terminal delta must carry no text — a UI appends every delta"
+    );
+    assert!(terminal.done, "the last delta of a turn is done: true");
+}
+
+/// A natively-streaming transport reaches the sink as SEPARATE `done: false`
+/// deltas, in order (#4425).
+///
+/// Why: the previous test cannot distinguish "streaming works" from "the
+/// buffered fallback emits one delta" — both produce a single content call.
+/// This one drives a transport whose `chat_stream` yields several fragments,
+/// which is what an OpenAI-dialect SSE turn actually looks like, and is the
+/// evidence that token-level output reaches a subscriber incrementally rather
+/// than as one paste.
+/// What: a mock overriding `chat_stream` with four text fragments and a
+/// terminal `Done`; assert the sink saw each fragment separately with
+/// `done: false`, that concatenating them reproduces the turn, and that the
+/// loop still received the assembled text as its final answer.
+/// Test: this test.
+#[tokio::test]
+async fn native_streaming_transport_emits_incremental_deltas() {
+    let llm = Arc::new(ChunkedStreamingLlm::new(vec![
+        "The ", "quick ", "brown ", "fox",
+    ]));
+    let registry = registry_with_echo(false);
+    let sink = Arc::new(RecordingSink::new());
+
+    let output = AgentLoop::new(AgentLoopConfig::default(), llm, registry)
+        .with_tool_event_sink(sink.clone())
+        .with_agent("pm")
+        .with_agent_id("pm-1")
+        .run("sys", "task")
+        .await
+        .expect("loop should complete");
+
+    let messages = sink.messages();
+    let content: Vec<&RecordedMessage> = messages.iter().filter(|m| !m.done).collect();
+    assert_eq!(
+        content.len(),
+        4,
+        "each streamed fragment must reach the sink separately, got {messages:?}"
+    );
+    assert_eq!(
+        content
+            .iter()
+            .map(|m| m.delta.as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        "The quick brown fox"
+    );
+    assert!(
+        content.iter().all(|m| m.turn_id == content[0].turn_id),
+        "all deltas of one turn share a turn_id"
+    );
+
+    let terminal: Vec<&RecordedMessage> = messages.iter().filter(|m| m.done).collect();
+    assert_eq!(terminal.len(), 1, "exactly one terminal delta per turn");
+
+    // The loop itself must still see the whole turn — streaming is a transport
+    // detail, not a change to what the agent produced.
+    assert_eq!(output.content, "The quick brown fox");
+}
+
+/// With NO sink attached, the loop takes the blocking `chat` path and never
+/// calls `chat_stream` (#4425).
+///
+/// Why: `run_task`'s CLI path and every scripted test attach no sink; opening
+/// a stream for them would change the wire request (`stream: true`) and the
+/// failure modes of a path that has no consumer for deltas. This pins that
+/// the non-streaming callers did not regress.
+/// What: a mock that counts both entry points; run without a sink and assert
+/// `chat` was used and `chat_stream` never was.
+/// Test: this test.
+#[tokio::test]
+async fn no_sink_uses_the_blocking_chat_path() {
+    let llm = Arc::new(ChunkedStreamingLlm::new(vec!["done"]));
+    let registry = registry_with_echo(false);
+
+    AgentLoop::new(AgentLoopConfig::default(), llm.clone(), registry)
+        .with_agent("pm")
+        .run("sys", "task")
+        .await
+        .expect("loop should complete");
+
+    assert_eq!(llm.chat_calls(), 1, "the blocking path must be used");
+    assert_eq!(
+        llm.stream_calls(),
+        0,
+        "a sink-less loop must never open a stream"
+    );
 }
 
 /// Two loops sharing ONE sink must attribute their calls to their OWN agents

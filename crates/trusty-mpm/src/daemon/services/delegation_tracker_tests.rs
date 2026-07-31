@@ -603,6 +603,72 @@ fn changed_async_status_value_with_an_agent_id_stays_running() {
 }
 
 #[test]
+fn null_agent_id_does_not_launch_a_phantom_delegation() {
+    // #4163: `classify_dispatch`'s old presence-check (`.is_some()`) read a
+    // `null` agentId as evidence of a launch, storing `agent_id = None` while
+    // staying `Running` — a delegation `SubagentStop` can never resolve
+    // (it matches only a stored `agent_id`), so it would burn the full 6h
+    // staleness window as a phantom in-flight entry. With no other launch
+    // marker present, this must terminalize as an ordinary synchronous
+    // return instead.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "agentId": null }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+
+    let d = only(&state, sid);
+    assert_eq!(
+        d.status,
+        DelegationStatus::Completed,
+        "a null agentId is not a usable handle and carries no other launch \
+         marker, so it must not pin the delegation Running with nothing left \
+         to resolve it"
+    );
+    assert_eq!(d.agent_id, None);
+}
+
+#[test]
+fn empty_string_agent_id_does_not_launch_a_phantom_delegation() {
+    // #4163: an empty-string agentId passed the old presence-check too
+    // (`.is_some()` is true for `Some("")`), storing `agent_id = Some("")` —
+    // a value `on_subagent_stop`'s `field()` (which rejects empty strings)
+    // can never match. Same phantom-Running failure as the null case, via a
+    // different payload shape.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "agentId": "" }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+
+    let d = only(&state, sid);
+    assert_eq!(
+        d.status,
+        DelegationStatus::Completed,
+        "an empty-string agentId is not a usable handle and carries no other \
+         launch marker, so it must not pin the delegation Running with \
+         nothing left to resolve it"
+    );
+    assert_eq!(d.agent_id, None);
+}
+
+#[test]
 fn renamed_async_marker_does_not_terminalize() {
     // The specific drift scenario: `isAsync`/`status` renamed but `agentId`
     // kept. We still recognise the response, so we would infer a synchronous

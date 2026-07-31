@@ -6,33 +6,37 @@
 //! and the `cachePoint` prompt-cache translation) moved into the shared
 //! `trusty_common::inference::bedrock` adapter in #2407, so every consumer shares
 //! ONE implementation instead of tcode owning a private ~1000-SLOC copy. This
-//! module is what remains in tcode: a thin `LlmClientTrait`-shaped wrapper that
-//! bridges tcode's wire types to the shared adapter at exactly one seam (reusing
-//! `super::convert`, the same field-by-field bridge #2406 established for the
-//! OpenAI-compatible transport) — zero local Bedrock/Converse logic.
+//! module is what remains in tcode: a thin wrapper that delegates every method
+//! to the shared adapter — zero local Bedrock/Converse logic.
 //! What: [`BedrockChatClient`] wraps a
-//! [`trusty_common::inference::BedrockAdapter`]. `chat` converts the request via
-//! [`super::convert::to_shared_request`] (passing the FULL `bedrock/`-prefixed
-//! slug as the wire model — the shared adapter strips the prefix before the AWS
-//! call and keeps it for telemetry), delegates to the shared adapter, maps its
-//! [`trusty_common::inference::InferenceError`] back to [`LlmError`] via
-//! [`super::convert::map_error`], and converts the response via
-//! [`super::convert::from_shared_response`]. The shared adapter constructs its
-//! AWS client lazily on first `chat`, so [`Self::from_env`]/[`Self::new`] touch
-//! no AWS credentials. [`Self::new`]/[`Self::region`] are thin passthroughs kept
-//! for public-API compatibility with the pre-#2407 local transport (no in-tree
-//! caller uses them post-migration, but this is a published rlib crate and the
-//! surface removal would otherwise be undocumented/silent).
+//! [`trusty_common::inference::BedrockAdapter`] and implements
+//! [`InferenceAdapter`] by delegation. Since #4425 unified trusty-code's wire
+//! types with `trusty_common::inference`'s, the wrapper no longer converts
+//! anything: the request, the response, and the error type are already the
+//! shared ones, so the former `super::convert` bridge is gone. The shared
+//! adapter constructs its AWS client lazily on first `chat`, so
+//! [`Self::from_env`]/[`Self::new`] touch no AWS credentials.
+//! [`Self::new`]/[`Self::region`] are thin passthroughs kept for public-API
+//! compatibility with the pre-#2407 local transport (no in-tree caller uses
+//! them post-migration, but this is a published rlib crate and the surface
+//! removal would otherwise be undocumented/silent).
+//!
+//! Streaming (#4425/#4426): [`Self::chat_stream`] forwards to the shared
+//! adapter's, which today is the trait's buffered fallback — a Bedrock turn
+//! therefore arrives as one delta plus the terminal event, exactly as it did
+//! before streaming existed. Giving it a real `ConverseStream` transport is
+//! #4426, and because this wrapper delegates rather than reimplements, that
+//! change lands entirely inside `trusty_common::inference::bedrock` with no
+//! edit here.
 //! Test: `bedrock::tests::*` (offline construction) plus the shared adapter's own
 //! conversion + `#[ignore]`-gated live coverage in
 //! `trusty_common::inference::bedrock`.
 
-use trusty_common::inference::{BedrockAdapter, InferenceAdapter};
-
-use super::convert::{from_shared_response, map_error, to_shared_request};
-use super::error::LlmError;
-use super::request::ChatRequest;
-use super::response::ChatResponse;
+use async_trait::async_trait;
+use trusty_common::inference::{
+    BedrockAdapter, ChatRequest, ChatResponse, ChatStream, InferenceAdapter, InferenceError,
+    ProviderCapabilities, ToolChoice,
+};
 
 /// AWS Bedrock Converse transport, backed by the shared inference adapter.
 ///
@@ -61,7 +65,7 @@ impl BedrockChatClient {
     /// What: wraps [`BedrockAdapter::new`] with `region`. Async + `Result` to
     /// match the pre-migration signature; never actually fails.
     /// Test: `bedrock::tests::new_constructs_offline`.
-    pub async fn new(region: Option<&str>) -> Result<Self, LlmError> {
+    pub async fn new(region: Option<&str>) -> Result<Self, InferenceError> {
         Ok(Self {
             inner: BedrockAdapter::new(region),
         })
@@ -75,7 +79,7 @@ impl BedrockChatClient {
     /// chain, resolved lazily on the first `chat`, so this never touches AWS.
     /// What: delegates to [`Self::new`] with `region: None`.
     /// Test: `bedrock::tests::from_env_constructs_offline`.
-    pub async fn from_env() -> Result<Self, LlmError> {
+    pub async fn from_env() -> Result<Self, InferenceError> {
         Self::new(None).await
     }
 
@@ -88,22 +92,49 @@ impl BedrockChatClient {
     pub fn region(&self) -> &str {
         self.inner.region()
     }
+}
 
-    /// Execute one Converse call and return the response.
-    ///
-    /// Why: the single method `DispatchingLlmClient` needs to satisfy
-    /// `LlmClientTrait::chat` for `bedrock/*` slugs.
-    /// What: converts `req` to the shared request (the FULL slug is passed as the
-    /// wire model — the shared adapter strips the `bedrock/` prefix before the AWS
-    /// call), delegates to the shared [`BedrockAdapter`], maps a shared
-    /// [`trusty_common::inference::InferenceError`] to [`LlmError`], and converts
-    /// the shared response back to tcode's [`ChatResponse`].
-    /// Test: the shared adapter's conversion tests + the `#[ignore]`-gated live
-    /// call cover the wire behaviour end-to-end.
-    pub async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let shared = to_shared_request(req, req.model.clone());
-        let resp = self.inner.chat(&shared).await.map_err(map_error)?;
-        Ok(from_shared_response(resp))
+/// Delegating [`InferenceAdapter`] impl (#4425).
+///
+/// Why: `DispatchingLlmClient` routes `bedrock/*` slugs here through the SHARED
+/// trait, so this wrapper must satisfy that trait rather than expose a
+/// look-alike inherent `chat`. Every method delegates — including the
+/// capability and tool-choice hooks, which Bedrock overrides with the
+/// Anthropic dialect: forwarding them (instead of inheriting the trait's
+/// OpenAI-dialect defaults) is what keeps a `bedrock/*` turn wire-identical to
+/// calling the shared adapter directly.
+/// What: name/capabilities/chat/chat_stream/map_tool_choice all forward to
+/// [`BedrockAdapter`]. The capability-derived `supports_*` defaults need no
+/// override because they read `capabilities()`, which is forwarded.
+/// Test: `bedrock::tests::*`; wire behaviour is covered by the shared adapter's
+/// own tests.
+#[async_trait]
+impl InferenceAdapter for BedrockChatClient {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    // #4425: forward the model-aware form too — a decorator that answered it
+    // from the trait default would silently drop back to `capabilities()` and
+    // stop reflecting the wrapped adapter.
+    fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+        self.inner.capabilities_for(model)
+    }
+
+    async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        self.inner.chat(request).await
+    }
+
+    async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        self.inner.chat_stream(request).await
+    }
+
+    fn map_tool_choice(&self, choice: ToolChoice) -> serde_json::Value {
+        self.inner.map_tool_choice(choice)
     }
 }
 

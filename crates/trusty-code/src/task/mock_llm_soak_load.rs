@@ -1,4 +1,4 @@
-//! [`SoakLoadEchoLlmClient`] — the scripted `LlmClientTrait` behind
+//! [`SoakLoadEchoLlmClient`] — the scripted `InferenceAdapter` behind
 //! `TCODE_MOCK_LLM=echo-soak-load` (epic #3866, follow-up to #3869/PR #3887).
 //! Sibling of [`super::mock_llm_soak::SoakEchoLlmClient`], same 7-turn/call,
 //! resumable-`stop`-ending shape (see that module's docs for why 7, not 8,
@@ -98,7 +98,7 @@ fn resolve_payload_bytes() -> [usize; 3] {
     }
 }
 
-/// A deterministic, offline `LlmClientTrait` driving load-realistic
+/// A deterministic, offline `InferenceAdapter` driving load-realistic
 /// per-turn payload sizes for the compression-effectiveness follow-up soak
 /// (epic #3866).
 ///
@@ -132,8 +132,10 @@ impl Default for SoakLoadEchoLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for SoakLoadEchoLlmClient {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for SoakLoadEchoLlmClient {
+    crate::llm::mock_adapter_identity!("mock-soak-load-echo");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
             0 => load_goal_tool_call(idx, 1, self.payload_bytes[0]),
@@ -144,13 +146,13 @@ impl LlmClientTrait for SoakLoadEchoLlmClient {
             5 => load_clear_goal_tool_call(idx, 3),
             6 => load_stop_fixture(),
             _ => {
-                return Err(LlmError::MissingConfig(format!(
+                return Err(InferenceError::MissingConfig(format!(
                     "SoakLoadEchoLlmClient script exhausted at call {idx}"
                 )));
             }
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!(
+            InferenceError::MissingConfig(format!(
                 "SoakLoadEchoLlmClient: invalid scripted fixture: {e}"
             ))
         })
@@ -353,6 +355,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
 
         for i in 0..6 {

@@ -13,7 +13,7 @@ use anyhow::anyhow;
 
 use super::*;
 use crate::agent_loop::AgentLoopError;
-use crate::llm::LlmError;
+use crate::llm::InferenceError;
 use crate::runner::RunnerError;
 
 /// Scripted inner runner: replays a fixed queue of `Result`s in order,
@@ -96,7 +96,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
 fn llm_error() -> anyhow::Error {
     anyhow::Error::from(RunnerError::Loop {
         name: "python-engineer".to_string(),
-        source: AgentLoopError::Llm(LlmError::ApiError {
+        source: AgentLoopError::Llm(InferenceError::Api {
             status: 500,
             body: "bedrock hiccup".to_string(),
         }),

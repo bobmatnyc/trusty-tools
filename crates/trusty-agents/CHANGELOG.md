@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **`cto-assistant` now declares its OKG docstore grant in the bundled
+  persona.** `okg_ingest_docstore` and `okg_sources` are named in the bundled
+  package's `[tools].allow` (owner decision, 2026-07-31) instead of living as
+  a hand edit in the deployed copy, where a bundled-agent reprovision
+  overwrote the file and destroyed the grant with no `.stale.bak` (#4461).
+  There is still no API to grant a tool (#3890), so bundling is what makes it
+  durable — the next reprovision converges on it rather than eating it.
+  Resolved behaviour is unchanged: the base `assistant` has granted the OKG
+  tools since #3883 and `extends` unions `[tools].allow` base-first, so this
+  is an independence guarantee against a future narrowing of the base, not a
+  new capability. Narrow on purpose — the overlay does not name
+  `okg_ingest_gmail`/`okg_ingest_drive`; widening it is a deliberate decision
+  about what the persona may ingest. Pinned by
+  `bundled_cto_assistant_pins_okg_docstore_reach`, which asserts both the
+  resolved reach and the overlay's own declaration, since a resolution-only
+  check would stay green through a full revert.
+
 ### Security
 
 - **`izzie`, `personal-assistant` and the base `assistant` no longer reach

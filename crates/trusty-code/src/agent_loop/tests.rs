@@ -4,7 +4,7 @@
 //! abort-on-cap, accrue-usage) is exactly the kind of branching that regresses
 //! silently; a scripted mock LLM plus a trivial echo tool lets us assert every
 //! branch deterministically and offline.
-//! What: Defines `ScriptedLlm` (a `LlmClientTrait` that replays a queue of
+//! What: Defines `ScriptedLlm` (a `InferenceAdapter` that replays a queue of
 //! pre-built `ChatResponse`s and counts calls) and `EchoTool` (a `ToolExecutor`
 //! that echoes its `text` argument). Covers a two-turn flow, turn-cap abort,
 //! recoverable tool-error continuation, usage accrual, and arg parsing, plus an
@@ -22,12 +22,12 @@ use super::{
     AgentLoop, AgentLoopConfig, AgentLoopError, CadenceConfig, CompactionConfig,
     ContextBudgetSnapshot, ToolEventSink, Transcript,
 };
-use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::llm::{ChatRequest, ChatResponse, InferenceAdapter, InferenceError};
 use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
 
 // ── Test doubles ───────────────────────────────────────────────────────────────
 
-/// A `LlmClientTrait` that replays a fixed script of responses.
+/// A `InferenceAdapter` that replays a fixed script of responses.
 ///
 /// Why: Deterministic, offline substitute for the network client so loop
 /// behaviour is testable without an API key.
@@ -139,8 +139,10 @@ impl ScriptedLlm {
 }
 
 #[async_trait]
-impl LlmClientTrait for ScriptedLlm {
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for ScriptedLlm {
+    crate::llm::mock_adapter_identity!("mock-scripted");
+
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         if let Ok(mut guard) = self.requests.lock() {
             guard.push(req.messages.clone());
         }
@@ -156,7 +158,7 @@ impl LlmClientTrait for ScriptedLlm {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
-            None => Err(LlmError::MissingConfig(format!(
+            None => Err(InferenceError::MissingConfig(format!(
                 "scripted LLM exhausted at call {idx}"
             ))),
         }
@@ -893,14 +895,16 @@ async fn timeout_returns_partial() {
     }
 
     #[async_trait]
-    impl LlmClientTrait for SleepyLlm {
-        async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+    impl InferenceAdapter for SleepyLlm {
+        crate::llm::mock_adapter_identity!("mock-sleepy");
+
+        async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
             tokio::time::sleep(self.delay).await;
             self.inner.chat(req).await
         }
     }
 
-    let llm: Arc<dyn LlmClientTrait> = Arc::new(SleepyLlm {
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(SleepyLlm {
         inner: ScriptedLlm::from_json(&[stop_response("too slow")]),
         delay: std::time::Duration::from_secs(3),
     });

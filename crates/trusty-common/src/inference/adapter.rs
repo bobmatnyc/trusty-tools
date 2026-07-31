@@ -8,12 +8,15 @@
 //! branching on the backend. Concrete HTTP adapters (OpenRouter/Fireworks/
 //! Bedrock) land in #2403/#2407 — this ticket defines only the surface and a
 //! test-only implementation.
-//! What: [`InferenceAdapter`] — `async fn chat`, `name`, `capabilities`, a
-//! `map_tool_choice` hook, and capability-introspection defaults derived from
+//! What: [`InferenceAdapter`] — `async fn chat`, `name`, `capabilities`, the
+//! model-aware `capabilities_for` (#4425, for adapters that route per request),
+//! a `map_tool_choice` hook, and capability-introspection defaults derived from
 //! the adapter's [`ProviderCapabilities`]. Object-safe (async via
 //! `async_trait`), so it is boxable/`Arc`-able for the configurator.
 //! Test: exercised by `test_support::ScriptedAdapter` and the configurator
-//! round-trip in `crates/trusty-common/tests/inference_foundation.rs`.
+//! round-trip in `crates/trusty-common/tests/inference_foundation.rs`; the
+//! `adapter::tests` module pins the `capabilities_for` default and the
+//! `context_window` derivation from it.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -54,6 +57,32 @@ pub trait InferenceAdapter: Send + Sync {
     /// a customised copy).
     /// Test: `supports_*` defaults are derived from it.
     fn capabilities(&self) -> &ProviderCapabilities;
+
+    /// The capability descriptor for the provider that would actually serve
+    /// `model`.
+    ///
+    /// Why (#4425): [`Self::capabilities`] assumes one adapter serves one
+    /// provider, but a ROUTING adapter picks its backend per request from the
+    /// model slug (trusty-code's `OpenAiCompatClient` spans OpenRouter /
+    /// Fireworks / Together / AtlasCloud; its `DispatchingLlmClient` adds
+    /// Bedrock). Answering such an adapter's capability question with one fixed
+    /// provider's profile is silently wrong for every other backend it serves —
+    /// e.g. reporting OpenRouter's `detailed_usage_accounting: true` for a
+    /// Fireworks turn, which no other provider accepts on the wire. This is the
+    /// model-aware form callers should prefer whenever a slug is in hand;
+    /// [`Self::context_window`] already established that shape.
+    /// What: defaults to [`Self::capabilities`] — correct for every
+    /// single-provider adapter, which is most of them. A routing adapter
+    /// overrides it to resolve `model` through the same routing gate its
+    /// `chat`/`chat_stream` use, so capabilities can never disagree with where
+    /// the request is actually sent.
+    /// Test: `adapter_capabilities_for_defaults_to_capabilities`;
+    /// trusty-code's `client::tests::capabilities_for_follows_slug_routing` and
+    /// `dispatch::tests::capabilities_for_follows_slug_routing`.
+    fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+        let _ = model;
+        self.capabilities()
+    }
 
     /// Issue one chat/completions call.
     ///
@@ -147,10 +176,120 @@ pub trait InferenceAdapter: Send + Sync {
     /// Why: compaction/budget code asks the adapter for the real window rather
     /// than hard-coding one; the answer is model-specific (incl. the #2330 haiku
     /// fix) with the provider default as a fallback.
-    /// What: defaults to [`context_window`] with this adapter's capabilities as
-    /// the provider-default tier.
-    /// Test: `context` submodule tests (`haiku_resolves_to_200k`).
+    /// What: defaults to [`context_window`] with the capabilities of the
+    /// provider that would actually serve `model` ([`Self::capabilities_for`])
+    /// as the provider-default tier — #4425: on a routing adapter this is the
+    /// only way the fallback tier can match the backend the slug reaches.
+    /// Test: `context` submodule tests (`haiku_resolves_to_200k`);
+    /// `context_window_default_follows_capabilities_for`.
     fn context_window(&self, model: &str) -> usize {
-        context_window(model, Some(self.capabilities()))
+        context_window(model, Some(self.capabilities_for(model)))
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::registry::{ProviderId, capabilities};
+
+    /// A single-provider adapter: never overrides [`InferenceAdapter::capabilities_for`].
+    struct SingleProvider;
+
+    #[async_trait]
+    impl InferenceAdapter for SingleProvider {
+        fn name(&self) -> &str {
+            "single"
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            capabilities(ProviderId::OpenRouter)
+        }
+
+        async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+            Err(InferenceError::Unsupported("test double".into()))
+        }
+    }
+
+    /// A ROUTING adapter, in miniature: the shape trusty-code's
+    /// `OpenAiCompatClient`/`DispatchingLlmClient` have — one adapter, a backend
+    /// chosen per request from the model slug.
+    struct RoutingAdapter;
+
+    #[async_trait]
+    impl InferenceAdapter for RoutingAdapter {
+        fn name(&self) -> &str {
+            "routing"
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            capabilities(ProviderId::OpenRouter)
+        }
+
+        fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+            if model.starts_with("fireworks/") {
+                capabilities(ProviderId::Fireworks)
+            } else {
+                capabilities(ProviderId::OpenRouter)
+            }
+        }
+
+        async fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+            Err(InferenceError::Unsupported("test double".into()))
+        }
+    }
+
+    /// The `capabilities_for` default is `capabilities()` for any slug (#4425).
+    ///
+    /// Why: adding a model-aware capability accessor must not change what a
+    /// single-provider adapter — most implementors, and every one that existed
+    /// before #4425 — answers. The default has to be a pure widening.
+    /// What: assert both an arbitrary and an unrelated-provider slug return the
+    /// adapter's own profile.
+    /// Test: this test.
+    #[test]
+    fn adapter_capabilities_for_defaults_to_capabilities() {
+        let adapter = SingleProvider;
+        for slug in ["openai/gpt-4o-mini", "fireworks/accounts/x/models/y"] {
+            assert_eq!(
+                adapter.capabilities_for(slug).id,
+                adapter.capabilities().id,
+                "slug {slug} must fall back to the adapter's own capabilities"
+            );
+        }
+    }
+
+    /// A routing adapter's `capabilities_for` follows the slug, and
+    /// `context_window`'s default tier follows it too (#4425).
+    ///
+    /// Why: this is the regression guard for the defect that made a multi-
+    /// provider adapter answer capability questions for ONE hard-wired
+    /// provider. `context_window` is the observable consequence: with the
+    /// default deriving from `capabilities()` a `fireworks/*` slug the substring
+    /// table does not recognise would report OpenRouter's 200K tier instead of
+    /// Fireworks' 128K one.
+    /// What: assert the Fireworks slug resolves to the Fireworks profile and to
+    /// its 128K default tier, while an OpenRouter slug keeps 200K.
+    /// Test: this test.
+    #[test]
+    fn context_window_default_follows_capabilities_for() {
+        let adapter = RoutingAdapter;
+        let fireworks_slug = "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct";
+        assert_eq!(
+            adapter.capabilities_for(fireworks_slug).id,
+            ProviderId::Fireworks
+        );
+        assert_eq!(adapter.context_window(fireworks_slug), 128_000);
+        assert_eq!(
+            adapter
+                .capabilities_for("qwen/qwen-2.5-coder-32b-instruct")
+                .id,
+            ProviderId::OpenRouter
+        );
+        assert_eq!(
+            adapter.context_window("qwen/qwen-2.5-coder-32b-instruct"),
+            200_000
+        );
     }
 }

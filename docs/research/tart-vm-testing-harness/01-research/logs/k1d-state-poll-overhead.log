@@ -1,0 +1,7 @@
+=== measurement overhead of the state poll itself ===
+vm_state_helper_ms=308
+vm_state_helper_ms=303
+vm_state_helper_ms=303
+tart_list_json_ms=294
+tart_list_json_ms=211
+tart_list_json_ms=35
