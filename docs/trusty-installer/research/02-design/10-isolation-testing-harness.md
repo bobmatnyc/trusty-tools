@@ -488,7 +488,20 @@ update, DOC-6 §5). This is the install-time half of the M3 mitigation; the runt
 half is the shim's loud-degrade rule (unrecognized output → `degraded` with a clear
 message, never a confident-but-wrong verdict — DOC-6 §4.1).
 
-### 6b. CI integration vs maintainer-run
+### 6b. CI integration vs maintainer-run — **OUT OF SCOPE (2026-07-31)**
+
+> **OUT OF SCOPE as of 2026-07-31 (owner ruling).** The owner has ruled GitHub
+> Actions and CI runners out of scope for this harness. **This harness is local
+> Tart VM only, run ad-hoc/manually by a maintainer.** There is no `isolation.yml`,
+> no per-PR leg, no nightly leg, and no `macos-14`/`linux-container` runner split
+> to build.
+>
+> **This section is retained, not deleted**, so the historical decision and its
+> reasoning stay legible: the CI cadence below was genuinely approved (Resolved
+> Decision 5) under the old cost model, and a future reader needs to see *why* it
+> was designed that way before seeing that it was dropped. Read everything from
+> here to the end of §6b as **superseded historical record**, not as a
+> specification to implement. The same applies to Resolved Decision 5.
 
 The harness must serve **both** the maintainer (MUC1, run-on-demand in a VM) and
 CI (regression gate). The constraint is **macOS VM cost in CI** (§3.2). The
