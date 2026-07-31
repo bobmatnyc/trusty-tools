@@ -21,22 +21,46 @@ use uuid::Uuid;
 /// when the test scope ends.
 /// Test: Every test in this module that constructs state.
 ///
-/// Why (issue #88): sets `TRUSTY_SKIP_PALACE_ENFORCEMENT=1` so that
-/// existing tests that call `palace_create` with arbitrary names continue
-/// to work. The enforcement gate in `handle_palace_create` bypasses the
-/// project-slug check when this env var is set, which is the correct
-/// behaviour for test helpers that point at isolated tempdirs. Production
-/// processes never set this variable.
-fn test_state() -> (AppState, tempfile::TempDir) {
-    // SAFETY: tests in this module run in-process; setting the bypass var
-    // here races with any test that reads env before or after, but since
-    // the value is "set to the same constant forever" once any test runs,
-    // the race is benign — all tests should see "1" within the first
-    // iteration. Tests that need stricter serialisation already use
-    // `env_test_lock()`.
-    unsafe {
+/// Why (issue #88): calls [`skip_palace_enforcement`] so that existing tests
+/// that call `palace_create` with arbitrary names continue to work.
+/// Set `TRUSTY_SKIP_PALACE_ENFORCEMENT=1` for this test process (#88, #4413).
+///
+/// Why: `handle_palace_create` rejects a palace name that does not match the
+/// project slug derived from cwd unless this var is set, so every test that
+/// creates a palace with an arbitrary name (`"ctx"`, `"disc"`, …) needs it.
+/// Production processes never set it.
+///
+/// Why it exists as a named helper rather than a line inside [`test_state`]
+/// (#4413): two tests here build their `AppState` INLINE — they need
+/// `with_default_palace`, which [`test_state`] does not offer — and so never
+/// ran [`test_state`]'s `set_var`. They passed anyway under `cargo test`, purely
+/// because some *other* test in the same process had already set the var: a
+/// hidden ordering dependency, and one that made them pass for the wrong reason
+/// (in isolation they verify nothing, because they never get past
+/// `palace_create`). Per-test process isolation removes the donor and exposes
+/// it — `cargo nextest run -p trusty-memory` failed both, which is how #4413
+/// was found. Making the requirement callable, and calling it from each test
+/// that needs it, is what makes each test self-sufficient.
+///
+/// What: writes the var at most once per process via a `OnceLock`, so N callers
+/// perform ONE write rather than N racing ones (the pre-existing `test_state`
+/// body re-wrote it on every call). Idempotent and safe to call from any test.
+/// Test: [`add_alias_round_trip_through_prompt_cache`] and
+/// [`dispatch_discover_aliases_inserts_new_and_dedupes`] are the two callers
+/// that #4413 was filed for; every `test_state`/`test_state_warming` user gets
+/// it transitively.
+fn skip_palace_enforcement() {
+    static SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    // SAFETY: a single write of a constant value, performed at most once per
+    // process by the OnceLock. Matches this crate's established test-env
+    // convention; tests needing stricter serialisation use `env_test_lock()`.
+    SET.get_or_init(|| unsafe {
         std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
-    }
+    });
+}
+
+fn test_state() -> (AppState, tempfile::TempDir) {
+    skip_palace_enforcement();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -53,13 +77,7 @@ fn test_state() -> (AppState, tempfile::TempDir) {
 ///       `recall_returns_warming_error_while_state_is_warming`,
 ///       `note_returns_warming_error_while_state_is_warming`.
 fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
-    // Use OnceLock so the env var is written exactly once across all
-    // parallel test threads — avoids the unsynchronised set_var race while
-    // remaining consistent with the idempotent-write approach in test_state().
-    static SKIP_ENFORCEMENT_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    SKIP_ENFORCEMENT_SET.get_or_init(|| unsafe {
-        std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
-    });
+    skip_palace_enforcement();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = crate::AppState::new(root);
@@ -445,6 +463,12 @@ async fn dispatch_kg_gaps_returns_cached() {
 async fn add_alias_round_trip_through_prompt_cache() {
     // Issue #234: bind `_tmp` so the directory is cleaned up on drop at
     // end of scope (previously we leaked via `std::mem::forget`).
+    // #4413: this test builds `AppState` inline (it needs `with_default_palace`,
+    // which `test_state()` does not offer), so it must set the palace-enforcement
+    // bypass ITSELF rather than inherit one another test happened to leak — see
+    // `skip_palace_enforcement`. Without this the `palace_create` below fails
+    // whenever no sibling test ran first (e.g. under `cargo nextest run`).
+    skip_palace_enforcement();
     let _tmp = tempfile::tempdir().expect("tempdir");
     let root = _tmp.path().to_path_buf();
     let state = AppState::new(root).with_default_palace(Some("ctx".to_string()));
@@ -673,6 +697,12 @@ async fn get_prompt_context_serves_cache_and_filters() {
 async fn dispatch_discover_aliases_inserts_new_and_dedupes() {
     // Issue #234: bind `_tmp` so the directory is cleaned up on drop at
     // end of scope (previously we leaked via `std::mem::forget`).
+    // #4413: this test builds `AppState` inline (it needs `with_default_palace`,
+    // which `test_state()` does not offer), so it must set the palace-enforcement
+    // bypass ITSELF rather than inherit one another test happened to leak — see
+    // `skip_palace_enforcement`. Without this the `palace_create` below fails
+    // whenever no sibling test ran first (e.g. under `cargo nextest run`).
+    skip_palace_enforcement();
     let _tmp = tempfile::tempdir().expect("tempdir");
     let root = _tmp.path().to_path_buf();
     let state = AppState::new(root).with_default_palace(Some("disc".to_string()));

@@ -774,11 +774,54 @@ fn evaluate_worktree_add_command_follows_git_dash_c_override() {
     );
 }
 
+/// Restore `$TMPDIR` and `$HOME` to their pre-test values on scope exit.
+///
+/// Why: this test must pin both variables to assert the expansion rules, but it
+/// shares a process with every other test in the `tm` bin target — including
+/// `formatters::banner::source`'s, which write real files under `$HOME`.
+/// Leaking `HOME=/Users/x` past this test, or letting it land inside a
+/// concurrent reader's window, is the #4407 failure shape: a test reddens
+/// because of an environment it never set.
+/// What: captures both variables on construction and reinstates them — or
+/// removes them, if originally absent — on `Drop`, so an assertion panic cannot
+/// skip the cleanup the way the old trailing `remove_var` could. That
+/// `remove_var` was also unconditional, clearing a `TMPDIR` the process
+/// normally inherits rather than restoring it.
+/// Test: exercised by `evaluate_worktree_add_command_expands_tmpdir_and_home`.
+struct EnvGuard {
+    tmpdir: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` on the only construction
+        // site — no other thread reads or writes the environment here.
+        unsafe {
+            match self.tmpdir.take() {
+                Some(v) => std::env::set_var("TMPDIR", v),
+                None => std::env::remove_var("TMPDIR"),
+            }
+            match self.home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+// `#[serial]` is load-bearing, not decoration: it joins the same default serial
+// group as the `formatters::banner::source` tests in this same test binary,
+// which is what keeps this test's `$HOME` write out of their window (#4407).
 #[test]
+#[serial_test::serial]
 fn evaluate_worktree_add_command_expands_tmpdir_and_home() {
     let cwd = Path::new("/Users/x/proj");
-    // SAFETY: test-only env mutation, no concurrent access to these vars in
-    // this process's test execution of this specific test.
+    let _env = EnvGuard {
+        tmpdir: std::env::var_os("TMPDIR"),
+        home: std::env::var_os("HOME"),
+    };
+    // SAFETY: serialised by `#[serial_test::serial]`; restored by `EnvGuard`.
     unsafe {
         std::env::set_var("TMPDIR", "/private/tmp/claude-502/scratch");
         std::env::set_var("HOME", "/Users/x");
@@ -793,9 +836,6 @@ fn evaluate_worktree_add_command_expands_tmpdir_and_home() {
         None,
         "~ expansion to an in-project target must be allowed"
     );
-    unsafe {
-        std::env::remove_var("TMPDIR");
-    }
 }
 
 #[test]
