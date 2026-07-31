@@ -47,6 +47,23 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// Name of this check as it appears in `tm doctor` output.
 const CHECK_NAME: &str = "transcript_saving";
 
+/// Launch-line builders that live in the `tm` BINARY crate.
+///
+/// Why (review round 2 MEDIUM): the Ok message used to describe exactly one
+/// binary-crate gap in prose ("the bare-`tm` in-place relaunch … is covered by
+/// its own test"), which reads as THE gap rather than A gap — and a sixth
+/// uncovered launch line (`tm session start`, in place) sat outside the check
+/// while that sentence implied completeness. Naming them from a list makes the
+/// disclosure countable and forces an edit here when the set changes.
+/// What: one human-readable entry per binary-crate builder, each naming the test
+/// that covers it. A library check cannot reference the binary crate, so these
+/// can never be read by [`launch_lines`] — the honest disclosure is the fix.
+/// Test: `ok_message_names_every_binary_crate_gap`.
+const BINARY_CRATE_BUILDERS: &[&str] = &[
+    "`bin/tm/commands/guided_inplace.rs::build_inplace_exec_command` (the bare-`tm` in-place \
+     relaunch; covered by `inplace_exec_command_scrubs_inherited_session_markers`)",
+];
+
 /// A representative config dir for the probe.
 ///
 /// Why: `env_bin_prefix` emits `CLAUDE_CONFIG_DIR` as an ASSIGNMENT, so passing
@@ -94,6 +111,11 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     let prefix = crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN));
     let launch_line = crate::core::model_inject::build_claude_command(None, None);
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
+    // #4467 round 2: the two launch lines the anti-drift scan found uncovered.
+    let inplace_line = crate::core::model_inject::build_inplace_session_command();
+    let client_line = crate::core::model_inject::build_client_session_command(Some(
+        std::path::Path::new("/probe/prompt.txt"),
+    ));
 
     // `Command` builders: an `env_remove` shows up as a `None` value.
     let run_cmd = crate::core::standalone::run::build_launch_command(
@@ -112,8 +134,16 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
             owned(parse_env_unset_vars(&prefix)),
         ),
         (
-            "core::model_inject::build_claude_command (tm launch / connect / delegate)",
+            "core::model_inject::build_claude_command (tm launch / tm connect)",
             owned(parse_env_unset_vars(&launch_line)),
+        ),
+        (
+            "core::model_inject::build_inplace_session_command (tm session start, in place)",
+            owned(parse_env_unset_vars(&inplace_line)),
+        ),
+        (
+            "core::model_inject::build_client_session_command (DaemonClient launch/connect)",
+            owned(parse_env_unset_vars(&client_line)),
         ),
         (
             "daemon::spawn_command::relaunch_command (pane relaunch)",
@@ -192,10 +222,14 @@ pub(super) fn check_transcript_saving() -> DoctorCheck {
         CheckStatus::Ok,
         format!(
             "all {covered} library launch line(s) unset `{TRANSCRIPT_SUPPRESSING_MARKER}` while \
-             keeping [{}], so transcript saving and native --resume stay available; {context} \
-             (the bare-`tm` in-place relaunch lives in the `tm` binary and is covered by its \
-             own test, not by this check)",
-            DELIBERATE_SPAWN_ENV.join(", ")
+             keeping [{}], so transcript saving and native --resume stay available; {context}. \
+             NOT covered by this check: {} launch line(s) in the `tm` BINARY crate, which a \
+             library check cannot reference — {}. Each is covered by its own test; \
+             `every_claude_launch_site_in_the_crate_is_allowlisted` is what fails when a new \
+             `claude` launch site appears anywhere in the crate.",
+            DELIBERATE_SPAWN_ENV.join(", "),
+            BINARY_CRATE_BUILDERS.len(),
+            BINARY_CRATE_BUILDERS.join("; ")
         ),
     )
 }

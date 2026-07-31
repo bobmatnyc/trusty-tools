@@ -229,6 +229,34 @@ fn parse_env_unset_vars_stops_at_the_first_assignment() {
     );
 }
 
+/// The COMMAND word ends `env`'s argument list, so flags belonging to the
+/// command are never mistaken for `env -u` operands.
+///
+/// Why this matters (review round 2 LOW): `model_inject::build_claude_command`
+/// emits NO `NAME=VALUE` assignments, so the assignment stop never fires on its
+/// output. Without a COMMAND stop the scan runs to the end of the line, and a
+/// future `claude` flag pair spelled `-u <value>` would be counted as an unset
+/// variable — inflating what the `tm doctor` probe believes is scrubbed.
+#[test]
+fn parse_env_unset_vars_stops_at_the_command_word() {
+    let unset = parse_env_unset_vars("env -u REAL claude --some-flag -u NOT_AN_UNSET");
+    assert_eq!(
+        unset,
+        vec!["REAL"],
+        "only operands before the command word are unsets: {unset:?}"
+    );
+
+    // The daemon shape: the command word can be an absolute path, and the
+    // disclaim wrapper puts a quoted tm path there. Neither may be scanned past.
+    let wrapped =
+        parse_env_unset_vars("env -u REAL '/w/tm' internal-spawn-disclaimed /abs/claude -u NOPE");
+    assert_eq!(
+        wrapped,
+        vec!["REAL"],
+        "the wrapper path is a command word, not an operand: {wrapped:?}"
+    );
+}
+
 /// A malformed trailing `-u` must not panic.
 #[test]
 fn parse_env_unset_vars_tolerates_trailing_flag() {

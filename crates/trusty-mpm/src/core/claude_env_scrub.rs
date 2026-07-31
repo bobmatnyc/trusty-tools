@@ -203,34 +203,54 @@ pub fn scrub_command(cmd: &mut std::process::Command) {
 /// [`INHERITED_SESSION_MARKERS`] against itself would be a tautology and would
 /// stay green if someone dropped the flags from the spawn builder — the exact
 /// shape of blind spot issue #4467 is about.
-/// What: whitespace-splits `prefix` and collects the token following each
-/// standalone `-u`, STOPPING at the first `NAME=VALUE` token. A trailing `-u`
-/// with no operand yields nothing.
+/// What: whitespace-splits `prefix`, skips the leading `env` word, and collects
+/// the token following each standalone `-u`. Parsing STOPS at the first token
+/// that ends `env`'s own argument list — a `NAME=VALUE` assignment or the
+/// COMMAND word. A trailing `-u` with no operand yields nothing.
 ///
-/// The early stop models POSIX `env` option termination rather than merely
-/// scanning for `-u`. Without it this function would report a variable as unset
-/// on a prefix that `env` would actually reject: `env CLAUDE_CODE_CHILD_SESSION=1
-/// -u FOO claude` makes `env` stop parsing options at the assignment and try to
-/// exec `-u` as a command (`env: -u: No such file or directory`, exit 127). A
-/// parser that reported `FOO` unset there would let the `tm doctor` probe pass on
-/// an ordering that kills every spawn.
+/// Both stops model POSIX `env [OPTION]... [NAME=VALUE]... [COMMAND] [ARG]...`
+/// rather than merely scanning the whole string for `-u`.
+///
+/// The assignment stop keeps this from reporting a variable as unset on a prefix
+/// that `env` would actually reject: `env CLAUDE_CODE_CHILD_SESSION=1 -u FOO
+/// claude` makes `env` stop parsing options at the assignment and try to exec
+/// `-u` as a command (`env: -u: No such file or directory`, exit 127). A parser
+/// that reported `FOO` unset there would let the `tm doctor` probe pass on an
+/// ordering that kills every spawn.
+///
+/// The COMMAND stop (review round 2) matters because
+/// [`crate::core::model_inject::build_claude_command`] emits NO assignments at
+/// all, so the assignment stop never fires on its output and the scan would
+/// otherwise run to the end of the line. A future `claude` flag pair spelled
+/// `-u <value>` would then be miscounted as an unset variable. Not reachable
+/// today — this closes the hole before a flag makes it reachable.
 /// Test: `parse_env_unset_vars_reads_the_real_spawn_prefix`,
 /// `parse_env_unset_vars_stops_at_the_first_assignment`,
+/// `parse_env_unset_vars_stops_at_the_command_word`,
 /// `parse_env_unset_vars_tolerates_trailing_flag`.
 pub fn parse_env_unset_vars(prefix: &str) -> Vec<&str> {
-    let mut tokens = prefix.split_whitespace();
+    let mut tokens = prefix.split_whitespace().peekable();
+    // The leading `env` word is the program, not an operand — step over it so
+    // the COMMAND stop below does not fire on the very first token.
+    if tokens.peek() == Some(&"env") {
+        tokens.next();
+    }
     let mut found = Vec::new();
     while let Some(token) = tokens.next() {
-        // POSIX: `env [OPTION]... [NAME=VALUE]... [COMMAND]...` — the first
-        // assignment ends option parsing, so no later `-u` is an option.
+        // POSIX: the first assignment ends option parsing, so no later `-u` is
+        // an option.
         if token.contains('=') {
             break;
         }
-        if token == "-u"
-            && let Some(name) = tokens.next()
-        {
-            found.push(name);
+        if token == "-u" {
+            if let Some(name) = tokens.next() {
+                found.push(name);
+            }
+            continue;
         }
+        // Anything else is the COMMAND word: `env`'s own arguments are over, and
+        // every token after it belongs to the command, not to `env`.
+        break;
     }
     found
 }

@@ -10,9 +10,22 @@
 //! `tmux send-keys`; it optionally appends `--model <id>` and
 //! `--append-system-prompt-file <path>` flags. [`write_prompt_file`] handles
 //! the temp-file side of that second flag.
+//!
+//! Issue #4467: this module owns THREE launch-line builders, and every one of
+//! them must be built here rather than hand-written at a call site. That is not
+//! style — `daemon::doctor_transcript_saving`'s `launch_lines()` can only read
+//! builders the library owns, so a hand-built line is structurally invisible to
+//! the check that exists to catch an unscrubbed spawn. Three separate call sites
+//! had hand-built their own and all three silently saved no transcript.
+//! [`build_inplace_session_command`] and [`build_client_session_command`]
+//! deliberately do NOT carry [`SETTING_SOURCES_FLAG`]: their paths do not
+//! relocate `CLAUDE_CONFIG_DIR`, so dropping the `user` tier would change which
+//! of the operator's own settings and agents load.
 //! Test: `claude_command_bare`, `claude_command_with_model`,
 //! `claude_command_with_prompt`, `claude_command_with_both`,
-//! `write_prompt_file_returns_path`.
+//! `write_prompt_file_returns_path`,
+//! `inplace_session_command_scrubs_inherited_session_markers`,
+//! `client_session_command_scrubs_inherited_session_markers`.
 
 use std::path::{Path, PathBuf};
 
@@ -201,9 +214,18 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 /// Issue #4467: the line is prefixed with `env <-u marker…>` from
 /// [`crate::core::claude_env_scrub::env_unset_flags`]. This builder's own doc
 /// claimed to be the place "every spawn path stays unattended and isolated", but
-/// it emitted a BARE `claude` with no `env` prefix at all — so `tm launch`,
-/// `tm connect` and every agent delegation launched with the inherited
-/// `CLAUDE_CODE_CHILD_SESSION` marker intact and silently saved no transcript.
+/// it emitted a BARE `claude` with no `env` prefix at all — so `tm launch` and
+/// `tm connect` launched with the inherited `CLAUDE_CODE_CHILD_SESSION` marker
+/// intact and silently saved no transcript.
+///
+/// Round-2 review correction: earlier wording here (and the doctor's label) also
+/// advertised this as the AGENT-DELEGATION launch line via [`build_agent_command`].
+/// That was wrong and would have sent an operator chasing a `transcript_saving`
+/// failure to a path that does not exist: `build_agent_command` has no production
+/// caller anywhere in the workspace — only its own definition and test. It is
+/// left in place rather than deleted because `trusty-mpm` is a published crate
+/// with no `publish = false`, so removing a `pub fn` is a semver-breaking change
+/// that does not belong in a bug-fix PR; removing it is filed as follow-up.
 /// There are no `NAME=VALUE` assignments on this prefix (unlike
 /// `runtime::claude_code::env_bin_prefix`, this path does not relocate
 /// `CLAUDE_CONFIG_DIR`), so the POSIX ordering constraint is satisfied trivially
@@ -251,6 +273,74 @@ pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> 
     cmd.push_str(SETTING_SOURCES_FLAG);
     cmd.push(' ');
     cmd.push_str(PERMISSION_MODE_FLAG);
+    cmd
+}
+
+/// The `claude` launch line for an in-place `tm session start` pane.
+///
+/// Why (issue #4467, review round 2 HIGH): `bin/tm`'s `start_session_in_place`
+/// hand-built `format!("claude {PERMISSION_MODE_FLAG}")` and sent it straight to
+/// a fresh tmux pane — a SIXTH interactive launch line with no marker scrub, no
+/// test, and no doctor coverage. It is reachable on the documented "just run
+/// claude here" case (`tm session start` outside a GitHub-backed git repo), so
+/// those sessions silently saved no transcript. Living in the library rather
+/// than the binary is the point: `daemon::doctor_transcript_saving`'s
+/// `launch_lines()` can only read builders the library owns, so a binary-crate
+/// builder is structurally invisible to the check that exists to catch exactly
+/// this.
+///
+/// Deliberately NOT routed through [`build_claude_command`]: that would also add
+/// [`SETTING_SOURCES_FLAG`], and `--setting-sources project,local` DROPS the
+/// `user` tier. On this path `CLAUDE_CONFIG_DIR` is not relocated, so the user
+/// tier is the operator's own `~/.claude` — dropping it would change which
+/// settings and agents an in-place session loads. This fix scrubs the markers
+/// and changes nothing else.
+/// What: `env <-u marker…> claude --dangerously-skip-permissions`. The scrub
+/// flags lead the line and there are no `NAME=VALUE` assignments, so POSIX
+/// option termination is satisfied trivially.
+/// Test: `inplace_session_command_scrubs_inherited_session_markers`,
+/// `inplace_session_command_keeps_the_permission_flag_and_nothing_else`.
+pub fn build_inplace_session_command() -> String {
+    // #4467: same shared scrub every other launch line uses — never a second
+    // mechanism.
+    format!(
+        "env{} claude {}",
+        crate::core::claude_env_scrub::env_unset_flags(),
+        PERMISSION_MODE_FLAG
+    )
+}
+
+/// The `claude` launch line the daemon CLIENT sends to a fresh tmux pane.
+///
+/// Why (issue #4467, found by the round-2 anti-drift scan): `DaemonClient`'s
+/// `launch_session` and `connect_session` — the TUI/bot surface behind
+/// `/connect <dir>` — each hand-built `format!("claude --append-system-prompt-file
+/// {}", …)` with no marker scrub. Two more interactive launch lines that saved no
+/// transcript, neither of them named in the review that found the sixth. Sharing
+/// one builder is what stops the seventh: a hand-built line in a caller is
+/// invisible to `daemon::doctor_transcript_saving`'s `launch_lines()`, which can
+/// only read builders.
+///
+/// Deliberately NOT routed through [`build_claude_command`], for the same reason
+/// as [`build_inplace_session_command`]: that would add [`SETTING_SOURCES_FLAG`]
+/// and drop the `user` settings tier on a path that does not relocate
+/// `CLAUDE_CONFIG_DIR`. This scrubs the markers and changes nothing else.
+/// What: `env <-u marker…> claude` plus `--append-system-prompt-file <path>` when
+/// `prompt_file` is `Some`. The caller falls back to `None` when writing the
+/// prompt file failed, which is why the argument is optional.
+/// Test: `client_session_command_scrubs_inherited_session_markers`,
+/// `client_session_command_appends_the_prompt_file`.
+pub fn build_client_session_command(prompt_file: Option<&Path>) -> String {
+    // #4467: same shared scrub every other launch line uses — never a second
+    // mechanism.
+    let mut cmd = format!(
+        "env{} claude",
+        crate::core::claude_env_scrub::env_unset_flags()
+    );
+    if let Some(p) = prompt_file {
+        cmd.push_str(" --append-system-prompt-file ");
+        cmd.push_str(&p.display().to_string());
+    }
     cmd
 }
 
@@ -347,6 +437,86 @@ mod tests {
         assert!(
             !cmd.contains("-u CLAUDE_CODE_OAUTH_TOKEN"),
             "must never unset the OAuth token (#2246): {cmd}"
+        );
+    }
+
+    /// Assert one launch line carries the full scrub and over-scrubs nothing.
+    /// Marker names are hard-coded so an emptied shared list cannot make any
+    /// caller of this helper pass vacuously.
+    fn assert_scrubbed_launch_line(cmd: &str) {
+        assert!(
+            cmd.starts_with("env -u "),
+            "the launch line must carry an env scrub prefix: {cmd}"
+        );
+        for marker in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDECODE",
+            "CLAUDE_PID",
+            "CLAUDE_EFFORT",
+            "CLAUDE_CODE_EXECPATH",
+        ] {
+            assert!(
+                cmd.contains(&format!("-u {marker}")),
+                "the launch line must unset {marker}: {cmd}"
+            );
+        }
+        assert!(
+            !cmd.contains("CLAUDE_CONFIG_DIR"),
+            "this builder must not touch CLAUDE_CONFIG_DIR at all: {cmd}"
+        );
+        assert!(
+            !cmd.contains("-u CLAUDE_CODE_OAUTH_TOKEN"),
+            "must never unset the OAuth token (#2246): {cmd}"
+        );
+    }
+
+    /// #4467 round 2 HIGH: `tm session start`'s in-place pane line was
+    /// hand-built in the `tm` binary with no scrub — a sixth interactive launch
+    /// line that silently saved no transcript.
+    #[test]
+    fn inplace_session_command_scrubs_inherited_session_markers() {
+        assert_scrubbed_launch_line(&build_inplace_session_command());
+    }
+
+    /// The scrub must be the ONLY change: adding `--setting-sources
+    /// project,local` here would drop the `user` tier, and this path does not
+    /// relocate `CLAUDE_CONFIG_DIR`, so that tier is the operator's own
+    /// `~/.claude`. Pinned as a full string so a flag cannot creep in.
+    #[test]
+    fn inplace_session_command_keeps_the_permission_flag_and_nothing_else() {
+        assert_eq!(
+            build_inplace_session_command(),
+            format!(
+                "env{} claude {PERMISSION_MODE_FLAG}",
+                crate::core::claude_env_scrub::env_unset_flags()
+            )
+        );
+        assert!(
+            !build_inplace_session_command().contains(SETTING_SOURCES_FLAG),
+            "must not add --setting-sources: that would drop the user settings tier"
+        );
+    }
+
+    /// #4467 round 2: `DaemonClient::launch_session` / `connect_session` (the
+    /// TUI/bot surface) hand-built their line too. Found by the anti-drift scan,
+    /// not by review.
+    #[test]
+    fn client_session_command_scrubs_inherited_session_markers() {
+        assert_scrubbed_launch_line(&build_client_session_command(None));
+        assert_scrubbed_launch_line(&build_client_session_command(Some(Path::new("/tmp/p.txt"))));
+    }
+
+    #[test]
+    fn client_session_command_appends_the_prompt_file() {
+        let head = format!(
+            "env{} claude",
+            crate::core::claude_env_scrub::env_unset_flags()
+        );
+        assert_eq!(build_client_session_command(None), head);
+        assert_eq!(
+            build_client_session_command(Some(Path::new("/tmp/p.txt"))),
+            format!("{head} --append-system-prompt-file /tmp/p.txt")
         );
     }
 

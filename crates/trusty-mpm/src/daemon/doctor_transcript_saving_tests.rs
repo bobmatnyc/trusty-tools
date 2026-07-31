@@ -37,6 +37,8 @@ fn launch_lines_covers_every_builder() {
     for expected in [
         "runtime::claude_code::env_bin_prefix",
         "core::model_inject::build_claude_command",
+        "core::model_inject::build_inplace_session_command",
+        "core::model_inject::build_client_session_command",
         "daemon::spawn_command::relaunch_command",
         "core::standalone::run::build_launch_command",
         "control::backend::stream_json::build_claude_command",
@@ -63,6 +65,163 @@ fn launch_lines_covers_every_builder() {
             "{label} must NOT unset CLAUDE_CODE_OAUTH_TOKEN (#2246); unsets: {unset:?}"
         );
     }
+}
+
+/// Every source site that names `claude` as a command word, with the number of
+/// non-comment occurrences expected in that file and why they are acceptable.
+///
+/// Why (review round 2 MEDIUM): `launch_lines()` is hand-maintained and
+/// `launch_lines_covers_every_builder` only asserts the listed labels are
+/// PRESENT — nothing failed when a launch line existed that was not on the list.
+/// That is how `tm session start`'s in-place line stayed uncovered through two
+/// review rounds, and it is an anti-drift helper that reintroduces drift one
+/// level down. This allowlist inverts the direction: the test enumerates what is
+/// actually IN THE SOURCE and fails on anything unaccounted for, so a new spawn
+/// site is a build failure rather than a silent gap.
+const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
+    (
+        "core/model_inject.rs",
+        4,
+        "the three shared launch-line builders (build_claude_command, \
+         build_inplace_session_command, build_client_session_command — all three in \
+         launch_lines()) plus the `head()` test helper that reconstructs their prefix",
+    ),
+    (
+        "core/standalone/run.rs",
+        2,
+        "build_launch_command (tm run, in launch_lines()) and build_login_command \
+         (`claude auth login` — an auth subcommand, not an interactive session, so it \
+         creates no transcript to suppress)",
+    ),
+    (
+        "daemon/spawn_command.rs",
+        1,
+        "relaunch_command; in launch_lines()",
+    ),
+    (
+        "control/backend/stream_json.rs",
+        1,
+        "build_claude_command (headless); in launch_lines()",
+    ),
+    (
+        "core/claude_env_scrub_tests.rs",
+        2,
+        "test fixtures for scrub_command — not launch lines",
+    ),
+    (
+        "core/spawn_disclaim/pane.rs",
+        3,
+        "test fixtures for the disclaim wrapper — not launch lines",
+    ),
+    (
+        "daemon/discovery.rs",
+        1,
+        "a test fixture pane-line string parsed by discovery — not a launch line",
+    ),
+];
+
+/// Fails when a `claude` launch site appears anywhere in the crate that is not
+/// accounted for above.
+///
+/// Honest about its reach, because a coverage test that overstates itself is the
+/// defect it is guarding against: it matches only sites that name `claude`
+/// LITERALLY. Builders that spawn a RESOLVED binary path held in a variable
+/// (`runtime::claude_code`, `bin/tm/commands/guided_inplace.rs`) carry no literal
+/// and are invisible here — they are covered by `launch_lines()` and by their own
+/// tests respectively. What this catches is the shape that actually went wrong
+/// twice: someone hand-writing `format!("claude …")` or `Command::new("claude")`
+/// at a new call site.
+#[test]
+fn every_claude_launch_site_in_the_crate_is_allowlisted() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut stack = vec![src.clone()];
+
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src must be readable") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // This file necessarily contains every pattern it searches for — in
+            // the allowlist's own reason strings and in the failure message. It
+            // is the one self-exclusion, and it is a test file, so it can hold
+            // no production launch line.
+            if path.file_name().and_then(|n| n.to_str())
+                == Some("doctor_transcript_saving_tests.rs")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source must be readable");
+            let hits = text
+                .lines()
+                // Prose in a doc comment is not a spawn site. Filtering comments
+                // is what keeps this test from failing on its own explanations.
+                .filter(|line| {
+                    let t = line.trim_start();
+                    !(t.starts_with("//") || t.starts_with("*"))
+                })
+                .filter(|line| {
+                    line.contains(r#"Command::new("claude")"#)
+                        || line.contains(r#""claude ""#)
+                        || line.contains(r#""claude {"#)
+                        || line.contains(r#""claude --"#)
+                        || line.contains(r#"} claude""#)
+                })
+                .count();
+            if hits > 0 {
+                let rel = path
+                    .strip_prefix(&src)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                found.insert(rel, hits);
+            }
+        }
+    }
+
+    let expected: std::collections::BTreeMap<String, usize> = ALLOWLISTED_CLAUDE_SITES
+        .iter()
+        .map(|(f, n, _)| ((*f).to_owned(), *n))
+        .collect();
+
+    assert_eq!(
+        found, expected,
+        "\nA `claude` launch site changed.\n\
+         If you ADDED a launch line: route it through `core::claude_env_scrub` (never a second \
+         mechanism), register it in `daemon::doctor_transcript_saving::launch_lines()` so the \
+         `transcript_saving` check covers it, and then update ALLOWLISTED_CLAUDE_SITES.\n\
+         If it is not a launch line, add it with a reason saying why.\n\
+         found:    {found:#?}\n\
+         expected: {expected:#?}"
+    );
+}
+
+/// The Ok message must enumerate the binary-crate gaps, not describe one of
+/// them — the prose that made a sixth uncovered launch line read as covered.
+#[test]
+fn ok_message_names_every_binary_crate_gap() {
+    let check = check_transcript_saving();
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    for gap in BINARY_CRATE_BUILDERS {
+        assert!(
+            check.message.contains(gap),
+            "the Ok message must name the binary-crate gap {gap}: {}",
+            check.message
+        );
+    }
+    assert!(
+        check.message.contains(&format!(
+            "{} launch line(s) in the `tm` BINARY",
+            BINARY_CRATE_BUILDERS.len()
+        )),
+        "the message must COUNT the gaps rather than implying one: {}",
+        check.message
+    );
 }
 
 /// The probe must supply an OAuth token, or an over-scrub of it stays invisible.

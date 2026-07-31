@@ -18,9 +18,16 @@ Fixed
   - Applied to every launch line, not just the default one: `spawn_command` and
     `resume_command` (a spawn-only fix would leave every resumed session broken),
     the in-place bare-`tm` relaunch, the headless stream-JSON backend, the
-    `tm launch` / `tm connect` / agent-delegation launch line, the pane-relaunch
-    line, and `tm run`.
-  - `tm run` mattered most and was fixed last: it spawns `claude` with no tmux, so
-    Claude Code's `tmux show-environment -g` escape hatch returns false
-    immediately and the suppression fired there every time rather than depending
-    on the tmux server's environment.
+    `tm launch` / `tm connect` launch line, the pane-relaunch line, `tm run`,
+    `tm session start`'s in-place pane, and the `DaemonClient` launch/connect
+    line behind the TUI and bot surfaces.
+  - `tm run` mattered most: it spawns `claude` with no tmux, so Claude Code's
+    `tmux show-environment -g` escape hatch returns false immediately and the
+    suppression fired there every time rather than depending on the tmux
+    server's environment.
+  - Every launch line is now built in one place. Three call sites had each
+    hand-written their own `claude …` string, and all three silently saved no
+    transcript — a hand-built line is invisible to the `transcript_saving`
+    check, which can only read builders. A new test walks the crate's source
+    and fails when a `claude` launch site appears that is not accounted for,
+    so the next one is a build failure rather than a silent gap.
