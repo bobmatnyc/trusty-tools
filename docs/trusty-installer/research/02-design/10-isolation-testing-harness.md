@@ -615,6 +615,44 @@ matching exactly what DOC-8/DOC-9 do in production.
   toolchain (rustup channel/version, `uv`, system deps) itself, as STEP 0 (§3.3/§4.2)
   already does.
 
+#### 7.2a Operational constraints (added 2026-07-31 — see Amendments)
+
+These constraints come from a measurement pass in a local Tart VM and are
+binding on the implementation, not merely advisory:
+
+- **Never bare-`tart stop`.** It silently loses the guest's last write —
+  reproduced 4 of 5 attempts, and is the confirmed root cause of a golden
+  image that shipped broken (`~/.zshenv`, the last file written, was absent).
+  **A tart exit code is not a completion signal** — poll for observable
+  stopped state before trusting guest contents.
+- **Never `tart suspend`.** Resume is broken and reproducible:
+  `VZErrorDomain Code=12`. Unwedge procedure for a VM stuck `suspended`:
+  `mv ~/.tart/vms/<name>/state.vzvmsave{,.bak}` then
+  `tart run --no-graphics <name>`. Root cause: `tart list` derives
+  `suspended` purely from that file's presence, and `tart run`
+  unconditionally attempts to restore from it — the failing step — so
+  retries never help.
+- **`tart exec` is the sole transport.** It propagates exit codes exactly
+  (including through `-i`), streams stdin heredocs, separates stdout/stderr,
+  and handled 200,000 lines with no truncation. It has **no `--env` flag**,
+  so every command must self-prefix PATH. SSH is demoted to an opt-in
+  interactive post-mortem convenience.
+- **Do not depend on guest shell rc files.** SSH's non-interactive PATH is
+  `/usr/bin:/bin:/usr/sbin:/sbin`, so `mise`, `brew` and `gh` are invisible
+  over SSH; and a golden image once shipped with `~/.zshenv` missing, making
+  `cargo` return 127 under both `/bin/sh` and `/bin/zsh`. Resolve toolchain
+  paths explicitly.
+- **Assert `rustc --version` immediately before each build step.** Toolchain
+  drift is confirmed real, not theoretical:
+  `crates/trusty-git-analytics/rust-toolchain.toml` (`channel = "stable"`)
+  resolves to rustc **1.97.1** inside that directory versus the
+  workspace-pinned **1.91.1** at root, verified in-guest. rustup resolves by
+  current directory.
+- **launchd works under `tart exec`** — a LaunchAgent bootstrapped via
+  `launchctl bootstrap gui/$(id -u)` ran and produced its proof file with no
+  SSH or GUI login. Daemon/health verification gates are viable over
+  `tart exec`.
+
 #### 7.3 Where the harness lives (revised 2026-07-30 — see Amendments)
 
 **The scenario driver AND the assertions both live as bash under
