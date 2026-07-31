@@ -696,8 +696,8 @@ binding on the implementation, not merely advisory:
 
 #### 7.3 Where the harness lives (revised 2026-07-30 — see Amendments)
 
-**The scenario driver AND the assertions both live as bash under
-`scripts/vmtest/`, outside the Cargo workspace**, run ad-hoc/manually rather than
+**The scenario driver AND the assertions both live as bash under a
+project-root `vmtest-harness/`, outside the Cargo workspace**, run ad-hoc/manually rather than
 via `cargo test`. This reverses the earlier Rust-integration-test recommendation
 (see the superseded text preserved in Resolved Decision 4, and the amendment note
 at the top of this document); the reasoning is owner-approved and explicit:
@@ -718,10 +718,14 @@ at the top of this document); the reasoning is owner-approved and explicit:
   linted). A Rust test crate under `crates/` therefore **cannot** satisfy the
   owner's separation requirement — membership in the workspace is structural, not
   opt-in.
-- **Shell is unencumbered by the same tooling.** The line-cap lint covers `.rs`
-  files only, and there is no shellcheck hook in this repo's CI. A `scripts/vmtest/`
-  tree of bash scripts sits entirely outside `cargo test`, `cargo clippy`, and every
-  Rust-specific lint gate, which is exactly the isolation the owner asked for.
+- **Shell is unencumbered by the same tooling, and the project-root placement
+  strengthens the separation further.** The line-cap lint covers `.rs` files
+  only, and there is no shellcheck hook in this repo's CI. A project-root
+  `vmtest-harness/` tree of bash scripts sits entirely outside `cargo test`,
+  `cargo clippy`, and every Rust-specific lint gate, which is exactly the
+  isolation the owner asked for — and, being at the project root, it sits even
+  further from the `crates/*` glob than a `scripts/`-nested location did,
+  reinforcing rather than weakening the separation argument.
 
 **The following two constraints from the original (Rust) design survive the
 Rust→bash move unchanged and remain binding on the bash implementation:**
@@ -739,20 +743,21 @@ Rust→bash move unchanged and remain binding on the bash implementation:**
 
 **Layout:**
 
-- **`scripts/vmtest/`** — the scenario driver (drives §2's STEP 0–6 via `tctl`/
-  `trusty-installer` non-interactively), the assertion helpers (§2.1/§5, `--json` +
-  `jq`), and the VM/container provisioning + teardown scripts (`provision-macos.sh`
-  (tart), `provision-linux.sh` (docker)) all live together here, outside
-  `crates/` and outside the Cargo workspace. A maintainer invokes it directly
-  (e.g. `scripts/vmtest/run.sh --target macos|linux --source
-  released|worktree`) or via the `make isolation-macos` / `make isolation-linux`
-  targets §6b names, which simply shell out to these scripts.
+- **`vmtest-harness/`** (project root) — the scenario driver (drives §2's STEP
+  0–6 via `tctl`/`trusty-installer` non-interactively), the assertion helpers
+  (§2.1/§5, `--json` + `jq`), and the VM/container provisioning + teardown
+  scripts (`provision-macos.sh` (tart), `provision-linux.sh` (docker)) all live
+  together here, outside `crates/` and outside the Cargo workspace. A
+  maintainer invokes it directly (e.g. `vmtest-harness/run.sh --target
+  macos|linux --source released|worktree`) or via the `make isolation-macos` /
+  `make isolation-linux` targets §6b names, which simply shell out to these
+  scripts.
 - **The CI wiring, if/when added, lives in `.github/workflows/isolation.yml`**
-  (§6b) and invokes `scripts/vmtest/run.sh` directly — it does **not** invoke
+  (§6b) and invokes `vmtest-harness/run.sh` directly — it does **not** invoke
   `cargo test`.
 - **A `.cirrus.yml` wrapper remains possible later**, since the guest-side payload
   is plain bash and Cirrus CI's model (clone → run script → assert) maps directly
-  onto `scripts/vmtest/`'s provision/run/teardown shape (tart's own vendor, Cirrus
+  onto `vmtest-harness/`'s provision/run/teardown shape (tart's own vendor, Cirrus
   Labs, is Cirrus-CI-native). **Cirrus CLI is not used now** — this is noted as a
   future option, not a current dependency.
 
@@ -864,7 +869,7 @@ existing integration-test patterns confirmed).
 | **launchd is per-user** | Root CLAUDE.md + DOC-8 §6: launch agents load into `gui/$(id -u)` (uid-keyed, not `$HOME`-keyed); `trusty_common::launchd` `bootstrap`/`bootout`. | §3: a clean `$HOME` is **not** isolation on macOS — needs a separate uid (VM / fresh runner). |
 | **macOS cdhash caveat** | Root CLAUDE.md: never `cp` over an on-PATH binary; `cargo install` atomic-rename is cdhash-safe; a `cp` SIGKILLs the next exec. | §3.4: the harness installs via `cargo install`/`tctl` only, never copies host→VM; it doubles as a regression gate for the property. |
 | **Existing CI** | `.github/workflows/{ci.yml,release.yml,al2023-build.yml,line-cap.yml}`. `ci.yml` = fmt/clippy/test/msrv on `ubuntu-latest`, MSRV `dtolnay/rust-toolchain@1.91`, `SKIP_UI_BUILD=1` global. `release.yml` builds on **`macos-14`** (Apple-Silicon) — the project already pays for hosted macOS minutes. `al2023-build.yml` runs in an `amazonlinux:2023` **container**, rustup inside, path-filtered + `workflow_dispatch`. | §6b: a new `isolation.yml` fits the established shape — cheap Linux container job per-PR, expensive macOS job nightly/manual, exactly mirroring `al2023-build.yml`'s "expensive, path-filtered, dispatchable" precedent. `macos-14` runner = the macOS isolation host. |
-| **Existing integration-test patterns** | `#[ignore]`-tagged tests shelling out: `bundled_install.rs` runs `cargo install --root <tempdir>` and asserts binaries exist; `baseline_trusty_tools.rs` hits a live daemon started `--foreground &`, discovered via `daemon_url()`. Run with `-- --include-ignored`. | §7.3: the harness driver takes the same *pattern* (cargo-install-then-assert, foreground daemon + live `--json` probe) but not the same *mechanism* — per the 2026-07-30 revision it lives as bash under `scripts/vmtest/`, outside the Cargo workspace, not as a Rust `#[ignore]` test (the owner's separation-from-`cargo test` requirement rules out anything under `crates/*`). |
+| **Existing integration-test patterns** | `#[ignore]`-tagged tests shelling out: `bundled_install.rs` runs `cargo install --root <tempdir>` and asserts binaries exist; `baseline_trusty_tools.rs` hits a live daemon started `--foreground &`, discovered via `daemon_url()`. Run with `-- --include-ignored`. | §7.3: the harness driver takes the same *pattern* (cargo-install-then-assert, foreground daemon + live `--json` probe) but not the same *mechanism* — per the 2026-07-30 revision (relocated 2026-07-31, see Amendments) it lives as bash under a project-root `vmtest-harness/`, outside the Cargo workspace, not as a Rust `#[ignore]` test (the owner's separation-from-`cargo test` requirement rules out anything under `crates/*`). |
 | **Linux supervision** | DOC-8 §6 / Resolved Decision 6: systemd-user where present, else foreground/daemonless (`<binary> serve`). Daemons support foreground (`trusty-search start --foreground &`, used by the baseline suite). | §4: container harness uses **foreground/daemonless** (no systemd in a stock container); systemd-user validated on a full Linux VM, manual/nightly. Resolves DOC-8 Q6 for the harness. |
 | **macOS VM tooling** | **None in-tree** (no Dockerfile, no tart/lima config). `tart`/`lima`/`UTM`/`Anka` are external ecosystem tools. | §3.2: tart recommended (Apple-Silicon native, CI-standard, disposable lifecycle); lima/UTM/Anka as fallbacks; all net-new. |
 | **`uv` orchestrator install** | DOC-6 §5: `uv tool install claude-mpm`; version "pinned at implementation". | §6: the harness *is* the implementation that pins it — installs unpinned, captures the resolved version, freezes it as the asserted BOM pin. |
@@ -911,9 +916,10 @@ existing integration-test patterns confirmed).
       where it lives) (§7)
 - [x] **Owner: resolve the decisions** (all 6 approved, 2026-06-09)
 - [ ] Team review → ready to implement
-- [ ] *(implementation-time)* build `scripts/vmtest/run.sh` (scenario driver +
-      assertions, bash + `jq`) + `scripts/vmtest/provision-{macos,linux}.sh` +
-      `make` targets, outside the Cargo workspace (§7.3, revised 2026-07-30)
+- [ ] *(implementation-time)* build `vmtest-harness/run.sh` (scenario driver +
+      assertions, bash + `jq`) + `vmtest-harness/provision-{macos,linux}.sh` +
+      `make` targets, outside the Cargo workspace (§7.3, revised 2026-07-30,
+      relocated 2026-07-31)
 - [ ] *(implementation-time)* add `.github/workflows/isolation.yml` (linux-container
       per-PR, path-filtered; macos nightly + `workflow_dispatch`), mirroring
       `al2023-build.yml`
@@ -961,8 +967,8 @@ All six decisions were approved by the owner (owner-approved, 2026-06-09).
    scheduling in a new `.github/workflows/isolation.yml`. This location was later
    reversed because `crates/*` is auto-swept into the Cargo workspace (root
    `Cargo.toml` `members = ["crates/*"]`), which the owner's separation
-   requirement rules out — see §7.3 for the current (bash, `scripts/vmtest/`)
-   decision.
+   requirement rules out — see §7.3 for the current (bash, project-root
+   `vmtest-harness/`) decision.
 
 5. **CI cadence — macOS nightly + `workflow_dispatch`; Linux every PR (§6b).**
    *Approved as drafted.* The Linux container leg runs **every PR** (cheap, path-filtered
