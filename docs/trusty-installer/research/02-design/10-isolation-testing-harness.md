@@ -634,6 +634,36 @@ So: **assertions and scenario driver in bash** (still parsing the
 workflow that shells out to the bash scripts** — all net-new and all outside the
 Cargo workspace, satisfying the owner's separation requirement.
 
+#### 7.4 Run cost — measured (added 2026-07-31 — see Amendments)
+
+**Correction.** Earlier drafts of this design carried a cost model of roughly
+**20–55 min per crate** and **45–90 min for a full-stack run**. Those figures were
+never measured: they were extrapolated from a **2-vCPU GitHub Actions runner** and
+are **wrong by roughly 20×** for the actual target host (an Apple-Silicon Tart
+guest). They are withdrawn and replaced by the measured numbers below. Any
+scheduling, scoping, or caching decision in this document that was justified by
+the old figures is void — see §7.5 (scope) and §3.3a (base image).
+
+Measured in a local Tart VM on Apple Silicon, 2026-07-31:
+
+| Step | Measured | Conditions |
+| --- | --- | --- |
+| `SKIP_UI_BUILD=1 cargo install --path crates/trusty-search --locked` | **112 s** | 409 crates, 8 vCPU / 16 GB, **cold** cargo registry. Workspace `lto = "thin"` confirmed applied under `--path`. `ort-sys` downloads ONNX Runtime successfully in-guest. 162 s including a one-time 50.1 s `git clone`. |
+| Provision mise + rust@1.91 + uv + gh from a bare `tahoe-base` clone | **30 s** (`PROVISION_SEC`) | full STEP 0 toolchain provisioning |
+| CoW clone (`tart clone`) | **0.31 s** | |
+| First boot / subsequent boot | **~34 s** / **~18 s** | |
+| `cargo install tga --locked` (reference point) | **131 s** | 211 deps, cargo-default `lto = false`, 4 vCPU |
+| Full stack, six primary crates, shared `CARGO_TARGET_DIR` | **≈ 4–8 min** | **extrapolated, not measured** |
+
+Two conclusions follow:
+
+- **Guest CPU allocation is the dominant lever.** 112 s (409 crates, 8 vCPU) beat
+  131 s (211 deps, 4 vCPU) at roughly 2× the crate count. Give the guest as many
+  vCPUs as the host can spare before optimising anything else.
+- **A full-stack run is a minutes-scale operation, not an hours-scale one.** This
+  is what makes full-stack the sane default scope (§7.5) and makes provisioning
+  from a bare base clone on every run affordable (§3.3a).
+
 ---
 
 ## Dependencies
