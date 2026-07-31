@@ -374,13 +374,18 @@ pub(crate) fn build_converse_parts(request: &ChatRequest) -> Result<ConversePart
 /// identifier is invalid`, confirmed live), while the bare id succeeds.
 /// [`BedrockAdapter::chat`] calls this right before `.model_id(...)` so the value
 /// sent to AWS is correct regardless of what any caller passes.
-/// What: returns `slug` with a leading `"bedrock/"` removed, or `slug` unchanged
+/// #4493: this was one of two hand-rolled per-provider copies of that rule
+/// (Anthropic-direct had the other) while the OpenAI-dialect providers had none
+/// — the reason `openai/gpt-4o-mini` reached `api.openai.com` prefixed. It now
+/// delegates to the ONE shared implementation so the three cannot drift.
+/// What: forwards to [`ProviderId::wire_model_id`] for [`ProviderId::Bedrock`],
+/// which returns `slug` with a leading `"bedrock/"` removed, or `slug` unchanged
 /// when there is no such prefix (defensive passthrough — a caller that already
 /// hands over a bare id must not be mangled).
 /// Test: `super::tests::bedrock_model_id_strips_prefix`,
 /// `super::tests::bedrock_model_id_passthrough_without_prefix`.
 pub(crate) fn bedrock_model_id(slug: &str) -> &str {
-    slug.strip_prefix("bedrock/").unwrap_or(slug)
+    ProviderId::Bedrock.wire_model_id(slug)
 }
 
 /// Build a Bedrock adapter for a resolved provider.
