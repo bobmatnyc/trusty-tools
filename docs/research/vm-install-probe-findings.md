@@ -719,7 +719,7 @@ no throwaway/calibration clones left on the host.
 
 | # | Question | Answer | Confidence |
 |---|----------|--------|------------|
-| K1 | Is `tart stop` synchronous? Does it lose the last write? | _pending_ | _pending_ |
+| K1 | Is `tart stop` synchronous? Does it lose the last write? | **ANSWERED — state is synchronous, DATA IS NOT. 4 of 5 unsynced last writes were LOST. See K1** | measured |
 | K2 | `PROVISION_SEC` — full mise + rust + uv + gh from a bare clone | _pending_ | _pending_ |
 | K3 | `cargo install --path crates/trusty-search --locked` wall-clock | _pending_ | _pending_ |
 | K3a | Does workspace `lto = "thin"` apply to a `--path` install? | _pending_ | _pending_ |
@@ -728,9 +728,116 @@ no throwaway/calibration clones left on the host.
 | K4b | Does the golden image earn its complexity? | _pending_ | _pending_ |
 | K5 | `rust-toolchain.toml` override in `trusty-git-analytics` | _pending_ | _pending_ |
 
-### K1. `tart stop` asynchrony — _pending_
+### K1. `tart stop` asynchrony — **CONFIRMED: `tart stop` silently discards the guest's last writes**
 
-_pending_
+This was the leading hypothesis for why the `trusty-toolchain-20260730` golden image
+shipped with `~/.zshenv` missing (section B/E). **The hypothesis is confirmed**, and the
+mechanism is worse than "asynchronous stop".
+
+Logs: `docs/research/vm-probe-logs/k1-tart-stop-asynchrony.log`,
+`k1b-sync-vs-delay-isolation.log`, `k1c-write-loss-repeat-trial.log`,
+`k1d-state-poll-overhead.log`.
+
+#### K1-i. Is the *state transition* asynchronous? **No — that part is fine.**
+
+```
+STOP_A_CMD_RETURN_MS=405
+STATE_IMMEDIATELY_AFTER_STOP_RETURNS=stopped
+STOP_A_TO_ACTUALLY_STOPPED_MS=747
+STOP_A_EXTRA_LAG_AFTER_CMD_RETURN_MS=342
+```
+
+The 342 ms of apparent "extra lag" is **entirely the cost of the poll itself**, not real lag:
+
+```
+vm_state_helper_ms=308 / 303 / 303
+```
+
+By the time `tart stop` returns, `tart list` already reports `stopped`, across all 8 stop
+cycles measured. `tart stop` returns in **~360–510 ms** and its exit code was `0` every time.
+
+**So the naive check passes.** That is precisely the trap.
+
+#### K1-ii. Is the *data* durable when it returns? **No. 4 out of 5 trials lost the last write.**
+
+The exact recipe — boot a fresh `tahoe-base` clone, `printf` a sentinel into `$HOME`,
+`ls`/`cat` it back successfully, then immediately `tart stop` — run 5 times:
+
+| Trial | `tart stop` rc | returned in | state on return | sentinel after clone+boot |
+|---|---|---|---|---|
+| A (original) | 0 | 405 ms | `stopped` | **LOST** |
+| K1c-1 | 0 | 364 ms | `stopped` | **LOST** |
+| K1c-2 | 0 | 408 ms | `stopped` | **LOST** |
+| K1c-3 | 0 | 502 ms | `stopped` | SURVIVED |
+| K1c-4 | 0 | 401 ms | `stopped` | **LOST** |
+
+**Loss rate: 4/5.** It is a race, not a deterministic failure — which is why a bake script
+can appear to work, be committed, and then ship a broken image on a later run.
+
+Critically, in variant A the loss was confirmed **on the original VM too**, not just in a
+clone:
+
+```
+--- does sentinel_immediate exist on the ORIGINAL VM after its own reboot?
+A_ON_ORIGINAL=NO
+```
+
+So this is genuine data loss at the disk image level, not a `tart clone` snapshot artefact.
+The write was verified present in the running guest (`cat` returned `SENTINEL_IMMEDIATE`,
+`ls -l` showed 18 bytes) immediately before the stop.
+
+`tart stop` returns in ~400 ms. A graceful macOS shutdown does not complete in 400 ms.
+The `--timeout 30` graceful window is documented as "seconds to wait for graceful
+termination before forcefully terminating" — in practice the VM is torn down long before
+the guest has flushed its APFS write cache.
+
+#### K1-iii. What actually protects the write?
+
+| Variant | Recipe | Result |
+|---|---|---|
+| A / K1c | write, **immediate** `tart stop` (default `--timeout 30`) | **LOST 4/5** |
+| B | write, `sync`, 10 s settle, `tart stop` | SURVIVED |
+| C | write, **`sync`**, immediate `tart stop` | SURVIVED |
+| D | write, **10 s settle**, no `sync`, `tart stop` | SURVIVED |
+| E | write, no `sync`, no settle, **`tart stop --timeout 120`** | SURVIVED |
+
+Both a guest-side `sync` and a settle delay were individually sufficient in the trials run.
+**Variant E is the dangerous result and should not be read as "`--timeout 120` fixes it"** —
+E is a single trial of a recipe that fails only 80 % of the time, and its stop still returned
+in 396 ms, meaning the longer timeout was never actually exercised. Treat E as a coin flip
+that came up heads, not as a fix.
+
+#### K1-iv. Verdict and the correct shutdown procedure
+
+* **`tart stop`'s exit code is NOT a reliable completion signal for durability.** It was `0`
+  in every one of the 4 runs that lost data.
+* **Polling for `stopped` does NOT help either.** The state was already `stopped` when the
+  command returned, in every trial including the losing ones. There is no "wait for stopped"
+  poll that fixes this, because the state flag is not a durability flag. This corrects the
+  natural assumption that a wait-for-stopped loop is the missing safety.
+* The only measured protection is **on the guest side, before the stop**.
+
+The procedure a bake or snapshot script must use:
+
+```sh
+# 1. flush the guest, from inside the guest, and confirm it returned
+tart exec "$VM" /bin/sh -c 'sync; sync; echo FLUSHED'
+# 2. settle (belt and braces -- both sync and delay were independently sufficient)
+sleep 10
+# 3. now stop
+tart stop "$VM"
+# 4. verify the artefact by cloning + booting and asserting on the file,
+#    NOT by trusting the stop's exit code
+```
+
+**And, decisively: a golden image must be verified by clone→boot→assert after the stop.**
+The `bake-golden.sh` run that produced `trusty-toolchain-20260730` verified `~/.zshenv`
+*while the VM was still running* and then trusted `tart stop`'s exit code — which is exactly
+the failure mode measured here. That explains section B/E's headline finding completely.
+
+Throwaway VMs (`probe-k1`, `probe-k1-c1`, `probe-k1-c2`, `probe-k1b-{C,D,E}`,
+`probe-k1c{1..4}` and their clones) were all deleted; `tart list` confirms only `tahoe-base`
+and the two OCI base images remain.
 
 ### K2. `PROVISION_SEC` — _pending_
 
