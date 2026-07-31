@@ -34,9 +34,9 @@
 //! silently drop that session's auth/roster isolation and unattended-permission
 //! mode. Adding registry-aware validation is out of scope for this
 //! consolidation (#2010) and is tracked separately in #2020.
-//! What: [`relaunch_command`] returns the literal shell command sent to the
-//! pane.
-//! Test: `relaunch_command_returns_bare_claude`.
+//! What: [`relaunch_command`] returns the shell command sent to the pane —
+//! `claude` behind the #4467 inherited-session-marker `env` scrub.
+//! Test: `relaunch_command_scrubs_inherited_session_markers`.
 
 /// The shell command used to (re)launch `claude` inside an already-running,
 /// already-configured tmux pane.

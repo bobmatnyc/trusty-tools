@@ -22,7 +22,9 @@
 //! [`super::DISABLE_ENV`] is set, the invocation is returned unchanged.
 //! Test: `wraps_invocation_when_wrapper_present`,
 //! `passes_through_when_no_wrapper`, `single_quotes_wrapper_with_space`,
-//! `preserves_flags_after_program` (all cross-platform, pure).
+//! `preserves_flags_after_program`,
+//! `wraps_the_scrubbed_launch_line_with_env_as_the_program` (all
+//! cross-platform, pure).
 
 /// The hidden `tm`/`trusty-mpm` subcommand a managed pane invokes to launch
 /// its `claude` disclaimed (issue #2997).
@@ -63,7 +65,8 @@ fn shell_single_quote(s: &str) -> String {
 /// existing flags follow the program token as separate shell words). `None`
 /// → `claude_invocation` unchanged.
 /// Test: `wraps_invocation_when_wrapper_present`,
-/// `passes_through_when_no_wrapper`, `preserves_flags_after_program`.
+/// `passes_through_when_no_wrapper`, `preserves_flags_after_program`,
+/// `wraps_the_scrubbed_launch_line_with_env_as_the_program`.
 fn disclaim_pane_command_with(wrapper_bin: Option<&str>, claude_invocation: &str) -> String {
     match wrapper_bin {
         Some(bin) => format!(
@@ -112,8 +115,10 @@ fn current_wrapper_bin() -> Option<String> {
 /// `claude_invocation` with `<current_exe> <PANE_DISCLAIM_SUBCOMMAND>`; on any
 /// other platform, or with the escape hatch set, returns it unchanged.
 /// `claude_invocation` may be a bare program token (the daemon's resolved
-/// `claude_bin`, with its flags appended downstream) or a full `claude …`
-/// command string (the CLI paths) — prefixing works identically for both.
+/// `claude_bin`, with its flags appended downstream) or a full command string
+/// (the CLI paths, which since #4467 lead with `env -u <marker…> claude …`) —
+/// prefixing works identically for both, and in the `env` case the shim spawns
+/// `env` disclaimed and `env` execs `claude` in that same process.
 /// Test: the pure shape is covered by [`disclaim_pane_command_with`]'s tests;
 /// the resolution is exercised by the live managed-session launch path.
 pub fn disclaim_pane_command(claude_invocation: &str) -> String {
@@ -164,6 +169,34 @@ mod tests {
             out,
             "'/w/tm' internal-spawn-disclaimed /abs/claude \
              --setting-sources project,local --dangerously-skip-permissions"
+        );
+    }
+
+    /// #4467: `model_inject::build_claude_command` (the `tm launch` / `tm
+    /// connect` line, the only two callers of [`disclaim_pane_command`] on the
+    /// CLI side) now leads with `env -u <marker…>`, so the token the shim
+    /// `posix_spawn`s is `env` rather than `claude`. Pin that composition: the
+    /// shim must receive `env` as its program with the markers and `claude`
+    /// following as plain trailing argv, which is what makes `env` exec `claude`
+    /// in the disclaimed process instead of the shim spawning `claude` directly.
+    #[test]
+    fn wraps_the_scrubbed_launch_line_with_env_as_the_program() {
+        let line = crate::core::model_inject::build_claude_command(None, None);
+        let out = disclaim_pane_command_with(Some("/w/tm"), &line);
+
+        assert!(
+            out.starts_with("'/w/tm' internal-spawn-disclaimed env -u "),
+            "the shim's program token must be `env`, with the scrub flags as \
+             trailing argv: {out}"
+        );
+        assert!(
+            out.contains("-u CLAUDE_CODE_CHILD_SESSION"),
+            "the suppressing marker must survive the wrapping: {out}"
+        );
+        assert!(
+            out.contains(" claude --"),
+            "`claude` must follow the scrub flags, still carrying its own \
+             flags: {out}"
         );
     }
 

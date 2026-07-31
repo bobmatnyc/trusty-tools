@@ -208,6 +208,20 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 /// `runtime::claude_code::env_bin_prefix`, this path does not relocate
 /// `CLAUDE_CONFIG_DIR`), so the POSIX ordering constraint is satisfied trivially
 /// — but the flags still lead the line for consistency with that builder.
+///
+/// The `env` token becoming the line's PROGRAM is deliberate and safe on the two
+/// CLI callers, both of which wrap this output in
+/// [`crate::core::spawn_disclaim::disclaim_pane_command`] (#2997). That yields
+/// `<tm> internal-spawn-disclaimed env -u … claude …`, so the shim
+/// `posix_spawn`s `env` disclaimed and `env` then EXECs `claude` in that same
+/// process — the disclaim is a process attribute and survives the exec, and
+/// because `env` exec's rather than forks, the process tree
+/// `crate::core::process` walks (`pane sh → tm shim → claude`) is unchanged.
+/// The daemon path composes the two the other way round (`env … <tm>
+/// internal-spawn-disclaimed <abs claude>`); both shapes end with `claude`
+/// running as its own responsible process. Note also that the shim resolves its
+/// program through `PATH`, and `env` is no less resolvable than the bare
+/// `claude` this line used to emit — so this is not a new `PATH` dependency.
 /// What: always starts with `env <-u marker…> claude`; appends `--model <model>`
 /// when `model` is `Some`; appends `--append-system-prompt-file <path>` when
 /// `prompt_file` is `Some`; then ALWAYS appends [`SETTING_SOURCES_FLAG`] and
