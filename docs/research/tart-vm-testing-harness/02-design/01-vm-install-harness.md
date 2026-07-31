@@ -593,14 +593,18 @@ A single provisioning-time version check therefore proves nothing about the
 compiler that will actually build a given crate. The assertion must be adjacent to
 the build, in the same working directory.
 
-> **Underspecified in the source research:** provisioning installs `rust@1.91` via
-> **mise** (§3.3), whereas the drift mechanism described above is a **rustup**
-> directory-resolution behaviour. Whether a mise-managed Rust exhibits the same
-> `rust-toolchain.toml` resolution — and therefore whether the guest will reproduce
-> the 1.91.1/1.97.1 split at all — was not measured. The per-build-step assertion
-> is correct either way (it *observes* rather than assumes), but the implementation
-> should record which resolver is actually in play in the guest, and the first
-> pattern-(c) run should be treated as the measurement that settles it.
+> **Confirmed under a mise-provisioned guest:** provisioning installs `rust@1.91`
+> via **mise** (§3.3), and the drift above was measured in-guest on exactly that
+> setup. Measurement K5 ran on VM `probe-k2` — the VM provisioned in measurement
+> K2 via `mise use -g rust@1.91` — where `rustc --version` and `rustup show` in
+> both `crates/trusty-git-analytics/` and the workspace root reproduced the same
+> split: rustc **1.97.1** in the crate directory versus **1.91.1** at the root.
+> This is expected: mise's rust backend **delegates to rustup** under the hood
+> (mise downloads `rustup-init`, and the mise rust entry is a symlink to it — see
+> research §E), so rustup's directory-based `rust-toolchain.toml` resolution
+> applies normally under a mise-managed toolchain. The per-build-step assertion
+> in this rule is justified by this confirmed behaviour, not by uncertainty about
+> it.
 
 #### 8.5 Guest sizing is the dominant performance lever
 
