@@ -342,7 +342,13 @@ pub(crate) fn launchd_ownership(label: &str) -> LaunchdOwnership {
     }
     // Probe 2: name the GUI domain explicitly. A `list` that exited non-zero may
     // simply have been asked from a domain that cannot see an `Aqua`-only agent.
-    let uid = trusty_common::launchd::current_uid();
+    //
+    // NOT `trusty_common::launchd::current_uid()`, which would be the natural
+    // shared helper: that whole module is `#[cfg(target_os = "macos")]`, while this
+    // one is not, so borrowing it breaks the Linux build. `libc::getuid()` is what
+    // that helper wraps anyway.
+    // SAFETY: getuid() is a POSIX call with no arguments and no failure mode.
+    let uid = unsafe { libc::getuid() };
     if let Some(state) = ask_launchctl(&["print".to_string(), format!("gui/{uid}/{label}")]) {
         return state;
     }
