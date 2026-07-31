@@ -211,19 +211,58 @@ fn ctrl_delegate_posture_orchestrator_role_is_unrestricted() {
 /// passed in — `pm`/`ctrl`-as-orchestrator sits outside the L0/L1 persona
 /// model entirely and must never be newly blocked from reaching a future
 /// L0 persona.
+///
+/// #4497: that tier is no longer a hardcoded `AgentTier::L0Orchestration`
+/// literal in this function — it is `AgentTier::for_kind(role)`, the SAME
+/// role-derived rule that makes an assistant L0. This test now pins the
+/// unification: it asserts the same L0 answer, AND that it agrees with the
+/// rule, so a future edit that re-hardcodes the literal (or drops the
+/// orchestrator kind from the rule) fails here. `declared_tier` is still
+/// deliberately ignored on this branch.
 #[test]
 fn ctrl_delegate_posture_orchestrator_role_reports_l0_tier() {
-    let (_taint, _roles, tier) = ctrl_delegate_posture(
-        "orchestrator",
-        None,
-        None,
-        crate::agents::AgentTier::L1Standard,
-    );
-    assert_eq!(
-        tier,
-        crate::agents::AgentTier::L0Orchestration,
-        "pm/orchestrator must be treated as unrestricted by the tier gate too"
-    );
+    for role in crate::agents::delegation::ORCHESTRATOR_TIER_ROLES {
+        let (_taint, _roles, tier) =
+            ctrl_delegate_posture(role, None, None, crate::agents::AgentTier::L1Standard);
+        assert_eq!(
+            tier,
+            crate::agents::AgentTier::L0Orchestration,
+            "{role} must be treated as unrestricted by the tier gate too"
+        );
+        assert_eq!(
+            tier,
+            crate::agents::AgentTier::for_kind(role),
+            "{role}'s dispatch posture must come from the ONE role-derived \
+             rule, not from a second hardcoded literal here"
+        );
+    }
+}
+
+/// The narrowing half of #4497's unification, pinned so it cannot be widened
+/// back by accident.
+///
+/// Why: this branch used to return `L0Orchestration` for EVERY role that was
+/// not `"assistant"` — a fallthrough, not a decision. `resolve_agent_config`
+/// (the only producer of this function's input) can return just `pm.toml`
+/// (`orchestrator`), `ctrl.toml` (`assistant`) or `ctrl_default()`
+/// (`controller`), so for every config that actually reaches here the
+/// role-derived rule returns the identical answer and this is a pure
+/// refactor. A hand-edited `pm.toml` carrying a specialist role is the one
+/// input where the two differ, and there the derived rule fails CLOSED (L1)
+/// where the fallthrough handed out L0 — the safe direction, and the whole
+/// reason the rule is a named set rather than a complement.
+#[test]
+fn ctrl_delegate_posture_specialist_role_is_not_silently_l0() {
+    for role in ["engineer", "qa", "researcher", "observer", ""] {
+        let (_taint, _roles, tier) =
+            ctrl_delegate_posture(role, None, None, crate::agents::AgentTier::L1Standard);
+        assert_eq!(
+            tier,
+            crate::agents::AgentTier::L1Standard,
+            "role {role:?} is neither assistant- nor orchestrator-kind and must \
+             not inherit L0 from a not-an-assistant fallthrough"
+        );
+    }
 }
 
 #[test]
