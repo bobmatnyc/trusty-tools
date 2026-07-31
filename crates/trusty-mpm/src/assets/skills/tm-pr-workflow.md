@@ -72,7 +72,7 @@ directory, that is where the entry goes:
 ```
 <package>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 
-Fixed                      <- line 1: Breaking|Added|Fixed|Performance|Changed|Documentation
+Fixed   <- line 1: Breaking|Added|Fixed|Performance|Changed|Removed|Security|Documentation
 
 - the bullet text, in the package CHANGELOG's existing style
 ```

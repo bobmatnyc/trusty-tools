@@ -74,8 +74,10 @@ Keep two axes separate and never conflate them:
   change in that package's changelog. Prefer a per-PR FRAGMENT file —
   `<package>/changelog.d/<issue-or-pr-number>-<slug>.md`, first line the change
   category (`Added`/`Fixed`/`Changed`/…), the rest the bullet text — whenever
-  the project has that directory: two concurrent PRs then add two differently
-  named files and never conflict. Otherwise add the bullet to `CHANGELOG.md`
+  the project uses fragments: two concurrent PRs then add two differently
+  named files and never conflict. The file goes DIRECTLY in `changelog.d/`; a
+  `README.md` there is the directory's placeholder, not a fragment. Only when
+  the project has no `changelog.d/` at all, add the bullet to `CHANGELOG.md`
   under an `## [Unreleased]` heading. Either way, match the existing bullet
   style. Docs-only / CI-only PRs may skip this. A missing entry is a review-gate
   failure, not optional polish — see `tm-pr-workflow` for the merge-gate detail

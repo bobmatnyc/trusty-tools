@@ -355,16 +355,22 @@ Fixed
 ```
 
 - **Line 1 is the category:** `Breaking` | `Added` | `Fixed` | `Performance` |
-  `Changed` | `Documentation` (the same groups the changelogs already use).
+  `Changed` | `Removed` | `Security` | `Documentation` (the same groups the
+  changelogs already use).
 - **Everything after it is the bullet text**, copied through verbatim. Match the
   crate CHANGELOG's existing style.
+- **The file must sit directly in `changelog.d/`.** A nested one (`changelog.d/sub/…`)
+  is rejected at release time; `changelog.d/README.md` is the tracked directory
+  placeholder and is never treated as a fragment.
+- **Preview what the next release will say:**
+  `bash scripts/assemble-changelog.sh <crate-dir> --stdout`.
 - **The filename's leading number is what makes this collision-free.** Two
   concurrent PRs add two differently-named files, so git never sees a conflict.
   That is the entire point: on 2026-07-31 five concurrent trusty-mpm PRs
   (#4463–#4475) each wrote a bullet into the shared `## [Unreleased]` section and
   every merge forced the next PR to rebase and hand-resolve it (#4399 burned
   three such rounds).
-- Docs-only, CI-only and test-only PRs may skip this step. A PR that changes
+- Docs-only, CI-only, test-only and `testdata/` PRs may skip this step. A PR that changes
   crate source and lands with no fragment is a **review-gate failure**, the same
   tier as a failing `cargo test`/`cargo clippy` gate — and it is now also a CI
   failure (`.github/workflows/changelog-fragment.yml` →

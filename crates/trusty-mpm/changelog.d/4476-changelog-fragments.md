@@ -20,3 +20,17 @@ Changed
     [#2793](https://github.com/bobmatnyc/trusty-tools/issues/2793) tracks — so
     the `bump-version.sh` stopgap guard for that is gone too. `cliff.toml`
     remains, scoped to the GitHub Release body only.
+  - The whole workspace is migrated in the same change: 22 crates' pending
+    `## [Unreleased]` sections became fragments, 4 stale buried `[Unreleased]`
+    headings left by #2793 were removed without moving their text, and
+    `trusty-kb`/`trusty-bm25-daemon` gained the `---` separator the assembler
+    needs. Every crate's `--check` pre-flight passes; word-level conservation
+    confirms nothing was dropped.
+  - An empty `changelog.d/` is explicitly NOT an error — it is the steady state
+    after a release. A tracked `changelog.d/README.md` keeps the directory
+    present so the next PR still sees a fragments project.
+  - The gate asks the real assembler whether it would accept a crate's
+    fragments rather than checking that a file exists, so a 0-byte, bodyless,
+    mis-categorised or nested fragment fails in the PR that wrote it instead of
+    silently vanishing from the release. `Removed` and `Security` join the
+    category set, which the hand-written sections already used.
