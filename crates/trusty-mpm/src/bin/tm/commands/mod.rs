@@ -6,6 +6,10 @@
 //! What: re-exports handler modules — `auth`, `compress`, `daemon`,
 //! `hook_rewrite`, `install`, `launch`, `managed`, `managed_route`, `meta`,
 //! `misc`, `project`, `services`, `session`, `slack`, `supervisor`, `telegram`.
+//! Two client-side `tm doctor` probes also live here rather than in the daemon's
+//! `run_doctor`, because each needs state the responding daemon cannot report on
+//! itself: `doctor_stale` (this binary's own `CARGO_PKG_VERSION`, #2332) and
+//! `doctor_orphan` (whether launchd owns the process that answered, #4230).
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
