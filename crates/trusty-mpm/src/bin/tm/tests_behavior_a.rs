@@ -300,17 +300,19 @@ fn install_then_deploy_deploys_skills() {
     )
     .unwrap()
     .stats;
-    // The full /tm- skill portfolio deploys on first install: 21 skills total
-    // — 19 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
+    // The full /tm- skill portfolio deploys on first install: 22 skills total
+    // — 20 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
     // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
     // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
     // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
     // tm-delegation-patterns, tm-session-management, tm-session-pause,
-    // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations) +
-    // tm-doctor + the tm overview skill (tm-skills-portfolio epic: the
-    // `example-skill.md` placeholder and the 11 mpm-* guidance skills no longer
-    // ship; the previously-orphaned tm-doctor.md is now wired in; issue #2185
-    // added tm-issues-prune; issue #2321 added tm-cli-operations) + 2 (issue
+    // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations,
+    // tm-slack-canvas-delivery) + tm-doctor + the tm overview skill
+    // (tm-skills-portfolio epic: the `example-skill.md` placeholder and the
+    // 11 mpm-* guidance skills no longer ship; the previously-orphaned
+    // tm-doctor.md is now wired in; issue #2185 added tm-issues-prune; issue
+    // #2321 added tm-cli-operations; issue #4447 added
+    // tm-slack-canvas-delivery) + 2 (issue
     // #2890: code-review-standards, contract-driven-testing — code-critic's
     // declared `skills:` dependencies; see
     // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions
@@ -333,7 +335,7 @@ fn install_then_deploy_deploys_skills() {
     // flat-file bundled skill declared by rust-engineer and tauri-engineer;
     // see `tests_behavior_rust_build_performance_tests.rs` for the dedicated
     // deploy-reachability assertion).
-    // 21 + 2 + 93 + 7 + 7 + 1 = 131. See `bundle_tm_skills.rs`/
+    // 22 + 2 + 93 + 7 + 7 + 1 = 132. See `bundle_tm_skills.rs`/
     // `bundle_tm_capabilities.rs`/`bundle.rs`
     // (CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING)/`bundle_all.rs::ALL`
     // for the authoritative list.
@@ -355,8 +357,8 @@ fn install_then_deploy_deploys_skills() {
     }
     assert_eq!(
         result.deployed.len(),
-        131,
-        "expected 131 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview \
+        132,
+        "expected 132 skill files deployed (20 /tm- portfolio + tm-doctor + tm overview \
          + code-review-standards + contract-driven-testing + 93 skill-port batch-1 entries \
          + 7 documentation-style entries + 7 tm-capabilities entries \
          + 1 rust-build-performance entry); got {:?}",
