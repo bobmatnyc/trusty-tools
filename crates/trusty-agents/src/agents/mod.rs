@@ -26,6 +26,9 @@ pub mod harness_protocol;
 pub mod in_process_runner;
 mod loader;
 mod model;
+// The shared-frontmatter bridge for trusty-mpm's deployed `.claude/agents`
+// artifacts. `pub(crate)` — an internal parser selection, not public surface.
+pub(crate) mod mpm_bridge;
 mod params;
 pub mod permissions;
 pub mod persona;
