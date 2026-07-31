@@ -2241,6 +2241,38 @@ fn resolve_statusline_binary_with_rejects_ephemeral_current_exe() {
     );
 }
 
+/// Why (#4492, same root cause as #4485): `statusLine.command` is resolved by
+/// this function, and the #2229 ephemeral guard it consults knew only about
+/// build/worktree layouts. A `current_exe()` under the agent harness's temp
+/// scratchpad therefore passed as "stable" and was persisted, leaving
+/// `statusLine.command` pointing at a dead libtest harness. Only the hooks call
+/// site had coverage for this, which is why the statusline path regressed
+/// independently.
+/// What: injects each system-temp `current_exe()` shape and asserts the
+/// PATH-resolved install wins instead.
+#[test]
+fn resolve_statusline_binary_with_rejects_system_temp_current_exe() {
+    let leaked: Vec<String> = [
+        PathBuf::from("/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/tm"),
+        PathBuf::from("/tmp/tm"),
+        std::env::temp_dir().join("claude-4485/base-bins/tm"),
+    ]
+    .into_iter()
+    .map(|exe| {
+        resolve_statusline_binary_with(
+            move || Ok(exe.clone()),
+            |_name| Some(PathBuf::from("/opt/homebrew/bin/tm")),
+        )
+    })
+    .filter(|resolved| resolved != "/opt/homebrew/bin/tm")
+    .collect();
+    assert!(
+        leaked.is_empty(),
+        "a system temp current_exe must be rejected in favour of the PATH-resolved install \
+         (#4492), but these were persisted verbatim: {leaked:#?}"
+    );
+}
+
 #[test]
 fn resolve_statusline_binary_with_falls_back_to_path_lookup() {
     let resolved = resolve_statusline_binary_with(

@@ -184,7 +184,10 @@ fn candidate(dir: &Path, name: &str) -> Option<PathBuf> {
 /// What: the worktree layout markers this workspace uses
 /// (`.claude/worktrees/`, `.base/.worktrees/`) plus the two Cargo build
 /// profiles. Matched as substrings so `deps/`-nested and profile-suffixed
-/// variants are all covered.
+/// variants are all covered. This list is only ONE of the two rejection rules
+/// [`is_ephemeral_build_path`] applies — see [`SYSTEM_TEMP_ROOTS`] for the
+/// other, and that constant's doc for why a substring list alone was not
+/// enough.
 const EPHEMERAL_PATH_SEGMENTS: &[&str] = &[
     "target/debug",
     "target/release",
@@ -192,21 +195,106 @@ const EPHEMERAL_PATH_SEGMENTS: &[&str] = &[
     ".base/.worktrees/",
 ];
 
-/// Whether `path` points inside an ephemeral build/worktree location that will
-/// not survive a rebuild or worktree cleanup.
+/// Well-known absolute system temp roots, matched as component-wise path
+/// PREFIXES (never substrings).
+///
+/// Why (#4485): [`EPHEMERAL_PATH_SEGMENTS`] enumerated build and worktree
+/// layouts only, so a scratch binary living under a system temp root read as an
+/// ordinary installed path and passed the guard. The Claude Code agent harness
+/// puts per-session scratch space at
+/// `/private/tmp/claude-<uid>/<session>/<uuid>/scratchpad/…`; a
+/// `cargo test --no-run` artifact copied there was accepted as "stable" and
+/// persisted into project `settings.json`, which then EXECUTED a dead libtest
+/// harness on every hook event across ten unrelated projects (#4485, and via
+/// `statusLine.command`, #4492). A temp root is by definition not a place an
+/// installed binary lives, so nothing under one may ever be baked into a
+/// persisted config.
+///
+/// What: the Unix temp roots in both of their macOS spellings. `/tmp` is a
+/// symlink to `/private/tmp` and `/var` one to `/private/var`, so the SAME
+/// directory reaches this guard under either name; both spellings are listed
+/// rather than canonicalized because an ephemeral path routinely no longer
+/// exists on disk and [`Path::canonicalize`] fails on exactly the paths this
+/// guard most needs to reject. `/var/folders` is macOS's per-user temp root
+/// (`confstr(_CS_DARWIN_USER_TEMP_DIR)`), where [`std::env::temp_dir`] lands by
+/// default. The list is deliberately a set of ROOTS, not segments: matching is
+/// done with [`Path::starts_with`], which compares whole path components, so
+/// `/tmpfoo/bin/tm` and `/Users/x/tmp/bin/tm` are correctly NOT flagged —
+/// the false-positive class a `contains("/tmp")` test would have introduced.
+///
+/// This is checked IN ADDITION to the live [`std::env::temp_dir`], not instead
+/// of it: `temp_dir()` reflects the `TMPDIR` of the process asking the
+/// question, which need not be the `TMPDIR` that produced the path being
+/// judged — #4485 is precisely that case.
+const SYSTEM_TEMP_ROOTS: &[&str] = &[
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+];
+
+/// Whether `path` lives under a system temp root.
+///
+/// Why (#4485): see [`SYSTEM_TEMP_ROOTS`]. Split out of
+/// [`is_ephemeral_build_path`] so the "is this a temp location" question has
+/// one implementation and one place to document the prefix-vs-substring and
+/// symlink-alias decisions.
+/// What: returns `true` when `path` has any [`SYSTEM_TEMP_ROOTS`] entry as a
+/// component-wise prefix, or is under [`std::env::temp_dir`] (also tried in its
+/// canonicalized form, which resolves the macOS `/tmp` -> `/private/tmp`
+/// symlink when `TMPDIR` points through it). A degenerate temp dir with no
+/// parent (`/`) is ignored rather than allowed to reject every absolute path.
+/// Deliberately free of `#[cfg(target_os)]`: the extra Unix roots simply never
+/// match on Windows, where `temp_dir()` supplies the real answer.
+/// Test: `is_ephemeral_build_path_flags_system_temp_paths`,
+/// `is_ephemeral_build_path_ignores_temp_lookalike_paths`.
+fn is_under_system_temp(path: &Path) -> bool {
+    if SYSTEM_TEMP_ROOTS.iter().any(|root| path.starts_with(root)) {
+        return true;
+    }
+    let tmp = std::env::temp_dir();
+    // `TMPDIR=/` would otherwise make every absolute path "ephemeral".
+    if tmp.parent().is_none() {
+        return false;
+    }
+    if path.starts_with(&tmp) {
+        return true;
+    }
+    tmp.canonicalize()
+        .is_ok_and(|real| real.parent().is_some() && path.starts_with(real))
+}
+
+/// Whether `path` points inside an ephemeral build/worktree/temp location that
+/// will not survive a rebuild, a worktree cleanup, or a temp sweep.
 ///
 /// Why: `std::env::current_exe()` returns a `target/debug/deps/...` path when
-/// `tm`/`trusty-mpm` runs from a worktree or a debug build. Persisting that
-/// path into the SHARED global `settings.json` (hook commands, statusline)
-/// breaks every managed session once the artifact is rebuilt away (#2229).
-/// Callers use this to reject `current_exe()` and fall back to a stable,
-/// PATH-resolved installed binary instead.
-/// What: returns `true` when the path's string form contains any of
-/// [`EPHEMERAL_PATH_SEGMENTS`]. Uses a lossy string comparison so non-UTF-8
-/// path components degrade to "not ephemeral" rather than panicking.
+/// `tm`/`trusty-mpm` runs from a worktree or a debug build, and a
+/// `/private/tmp/claude-<uid>/…/scratchpad/…` path when it runs from an agent
+/// harness's scratch space (#4485). Persisting either into a SHARED
+/// `settings.json` (hook commands, statusline) breaks every managed session
+/// once the artifact is gone (#2229) — and worse, leaves config that keeps
+/// EXECUTING whatever now sits at that path (#4485, #4492). Callers use this to
+/// reject `current_exe()` and fall back to a stable, PATH-resolved installed
+/// binary instead.
+/// What: returns `true` when `path` is under a system temp root
+/// ([`is_under_system_temp`]) OR its string form contains any of
+/// [`EPHEMERAL_PATH_SEGMENTS`]. The segment check uses a lossy string
+/// comparison so non-UTF-8 path components degrade to "not ephemeral" rather
+/// than panicking; the temp check operates on components and is unaffected by
+/// encoding.
 /// Test: `is_ephemeral_build_path_flags_build_and_worktree_paths`,
+/// `is_ephemeral_build_path_flags_system_temp_paths`,
+/// `is_ephemeral_build_path_ignores_temp_lookalike_paths`,
 /// `is_ephemeral_build_path_accepts_installed_paths`.
 pub fn is_ephemeral_build_path(path: &Path) -> bool {
+    // #4485: a system temp root is every bit as ephemeral as `target/debug` —
+    // and, unlike a build dir, an attacker-or-accident-writable location whose
+    // contents a persisted hook command would go on executing.
+    if is_under_system_temp(path) {
+        return true;
+    }
     let s = path.to_string_lossy();
     EPHEMERAL_PATH_SEGMENTS.iter().any(|seg| s.contains(seg))
 }
@@ -226,6 +314,66 @@ mod tests {
             assert!(
                 is_ephemeral_build_path(Path::new(p)),
                 "{p} must be flagged as an ephemeral build path"
+            );
+        }
+    }
+
+    /// Why (#4485): the pre-fix guard enumerated build and worktree layouts
+    /// only, so a scratch binary under a system temp root — the shape the
+    /// Claude Code harness produces at
+    /// `/private/tmp/claude-<uid>/<session>/<uuid>/scratchpad/base-bins/<bin>` —
+    /// passed as an ordinary installed path and got persisted into
+    /// `settings.json` as a hook / statusLine command that then ran a dead
+    /// libtest harness on every hook event (#4492 is the same root cause via
+    /// the statusLine path).
+    /// What: asserts every system-temp shape is rejected: the exact harness
+    /// scratchpad path, a plain `/tmp` path, the macOS `/var/folders` per-user
+    /// temp root, and a path derived from the live [`std::env::temp_dir`] (so
+    /// the check holds on a machine whose `TMPDIR` is none of the literals).
+    /// Every shape is checked before the assertion fires, so reverting the
+    /// guard reports ALL the paths it stops rejecting rather than aborting on
+    /// the first — the difference between "the fix is gone" and "one case is".
+    #[test]
+    fn is_ephemeral_build_path_flags_system_temp_paths() {
+        let temp_derived = std::env::temp_dir().join("claude-4485/scratchpad/base-bins/tm");
+        let missed: Vec<String> = [
+            PathBuf::from(
+                "/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/trusty-mpm",
+            ),
+            PathBuf::from("/tmp/claude-502/scratchpad/base-bins/tm"),
+            PathBuf::from("/tmp/tm"),
+            PathBuf::from("/var/tmp/tm"),
+            PathBuf::from("/var/folders/qz/9x_2/T/cargo-install-abc/tm"),
+            temp_derived,
+        ]
+        .into_iter()
+        .filter(|p| !is_ephemeral_build_path(p))
+        .map(|p| p.display().to_string())
+        .collect();
+        assert!(
+            missed.is_empty(),
+            "a system temp root is never an installed location (#4485), but these were \
+             accepted as stable: {missed:#?}"
+        );
+    }
+
+    /// Why (#4485): the temp check must be a component-wise PREFIX match, not a
+    /// `contains("/tmp")` substring match — substring matching is exactly what
+    /// left the original guard incomplete, and it would newly misfire on any
+    /// ordinary directory whose name merely starts with or contains `tmp`.
+    /// What: asserts three lookalikes stay accepted. This test does NOT flip
+    /// when the #4485 change is reverted (the old guard accepted them too); it
+    /// exists to pin the matching STRATEGY against a future substring rewrite.
+    #[test]
+    fn is_ephemeral_build_path_ignores_temp_lookalike_paths() {
+        for p in [
+            "/Users/x/tmp/bin/tm",
+            "/tmpfoo/bin/tm",
+            "/opt/tmp-tools/bin/trusty-mpm",
+        ] {
+            assert!(
+                !is_ephemeral_build_path(Path::new(p)),
+                "{p} is not under a temp ROOT and must NOT be flagged"
             );
         }
     }

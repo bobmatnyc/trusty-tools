@@ -67,6 +67,39 @@ fn test_hook_command_rejects_ephemeral_exe_override() {
     );
 }
 
+/// Why (#4485): the #2229 guard listed build/worktree layouts only, so a
+/// binary under a system temp root — the shape the Claude Code agent harness
+/// produces at `/private/tmp/claude-<uid>/<session>/<uuid>/scratchpad/…` —
+/// looked like an ordinary installed path and WAS baked into the hook command.
+/// Sixteen settings files across ten projects ended up running a dead
+/// `cargo test --no-run` libtest harness on every hook event.
+/// What: passes each system-temp shape as `exe_override` and asserts the
+/// resulting command never contains it, while still ending in " hook" (a stable
+/// PATH-resolved install, or the bare fallback).
+#[test]
+fn test_hook_command_rejects_system_temp_exe_override() {
+    let mut baked: Vec<String> = Vec::new();
+    for ephemeral in [
+        PathBuf::from("/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/trusty-mpm"),
+        PathBuf::from("/tmp/trusty-mpm"),
+        std::env::temp_dir().join("claude-4485/base-bins/trusty-mpm"),
+    ] {
+        let cmd = mpm_hook_command(Some(&ephemeral));
+        if cmd.contains(&ephemeral.display().to_string()) {
+            baked.push(cmd.clone());
+        }
+        assert!(
+            cmd.ends_with(" hook"),
+            "hook command must still end with ' hook', got: {cmd:?}"
+        );
+    }
+    assert!(
+        baked.is_empty(),
+        "a system temp path must never be baked into the hook command (#4485), but these \
+         commands carry one: {baked:#?}"
+    );
+}
+
 #[test]
 fn test_mpm_hook_additions_has_six_events() {
     // #1744: SessionStart/SessionEnd must be present so the daemon receives
