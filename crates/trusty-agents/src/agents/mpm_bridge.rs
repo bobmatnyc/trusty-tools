@@ -248,9 +248,19 @@ fn extract_body(raw: &str) -> String {
 /// What, field by field:
 /// - `name` -> `agent.name`, falling back to `default_name` (the file stem),
 ///   exactly as `parse_md_agent` identifies an unnamed file.
-/// - `role` -> `agent.role`, defaulting to `"agent"` — byte-identical to
-///   `parse_md_agent`'s default, so switching this tier's parser changes no
-///   agent's role and therefore no agent's derived tier (see below).
+/// - `role` -> `agent.role`, NORMALIZED through
+///   [`super::claude_mpm_role::normalize_role`] (#4502) rather than copied
+///   verbatim. `role` is a load-bearing security discriminator — it selects
+///   the tool-registry branch in `build_registry_for_agent` and is checked
+///   against `ASSISTANT_ALLOWED_DELEGATE_ROLES` at every delegation — so a
+///   value arriving from a `.md` artifact must clear a reviewed table before
+///   it reaches those gates. An absent or unrecognized value yields
+///   `claude_mpm_role::UNMAPPED_ROLE` (`"agent"`), byte-identical to
+///   `parse_md_agent`'s default, so switching this tier's parser still
+///   changes no agent's role and therefore no agent's derived tier (see
+///   below). Only `role` is consulted here: `AgentMetadata` carries no
+///   `agent_type`, which is the key trusty-mpm's composer actually emits — so
+///   in practice every deployed artifact resolves to the sentinel today.
 /// - `description` -> `agent.description`; `model` -> `agent.model` after
 ///   `resolve_model` (the same `TAGENT_MODEL_*` / default env resolution
 ///   `parse_md_agent` applies on its non-`extends` path — this tier is always
@@ -302,7 +312,13 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
     AgentConfig {
         agent: AgentInfo {
             name,
-            role: meta.role.unwrap_or_else(|| "agent".to_string()),
+            // #4502: NORMALIZED, never a verbatim copy — see this function's
+            // doc comment and `super::claude_mpm_role::normalize_role`. Only
+            // `role` is available here (`AgentMetadata` carries no
+            // `agent_type`), so the deployed artifacts — which declare
+            // `agent_type` and no `role` — resolve to the fail-closed
+            // sentinel, byte-identical to the literal this replaced.
+            role: super::claude_mpm_role::normalize_role(meta.role.as_deref(), None),
             model,
             description: meta.description.unwrap_or_default(),
             persistent_session: false,

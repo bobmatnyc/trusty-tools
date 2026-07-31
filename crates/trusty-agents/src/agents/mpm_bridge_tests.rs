@@ -61,6 +61,35 @@ fn projects_clean_scalars() {
     assert!(cfg.system_prompt.content.ends_with("Body prose."));
 }
 
+/// `role` reaches `AgentInfo.role` NORMALIZED, never verbatim (#4502).
+///
+/// Why: `role` selects the tool-registry branch in `build_registry_for_agent`
+/// and is checked against `ASSISTANT_ALLOWED_DELEGATE_ROLES` at every
+/// delegation. A verbatim copy would let any string in a `.md` artifact reach
+/// those gates directly, so this tier must fail CLOSED on anything the
+/// reviewed table does not admit — `security` is a real trusty-mpm role with
+/// no counterpart in the coarse vocabulary, and it must not become one.
+#[test]
+fn role_is_normalized_and_fails_closed() {
+    let tmp = TempDir::new().unwrap();
+    let artifact =
+        "---\nname: security\nrole: security\ndescription: Auditor\n---\n\n# Security\n\nBody.\n";
+    let path = write_agent(tmp.path(), "security", artifact);
+
+    let cfg = load_mpm_agent(&path).expect("mpm artifact loads");
+
+    assert_eq!(
+        cfg.agent.role,
+        crate::agents::claude_mpm_role::UNMAPPED_ROLE,
+        "an unmappable declared role must not survive verbatim"
+    );
+    assert!(
+        !crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+            .contains(&cfg.agent.role.as_str()),
+        "the fail-closed sentinel must never be role-eligible"
+    );
+}
+
 /// `skills:` is a trusty-mpm CO-DEPLOYMENT DEPENDENCY list. trusty-agents'
 /// `[skills].allow` is a PERMISSION GATE where `None` means "does not use
 /// skill grants". Mapping one onto the other would silently turn a dependency
