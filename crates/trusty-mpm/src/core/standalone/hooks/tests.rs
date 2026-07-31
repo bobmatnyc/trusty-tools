@@ -446,6 +446,27 @@ fn test_mpm_bin_names_matches_own_binary_names_set() {
     );
 }
 
+/// Why (#4058 review round 1 MEDIUM finding 2): the SET test above cannot see
+/// an order flip, and an order flip at this site is exactly what shipped
+/// unnoticed in round 1 — [`resolve_stable_hook_exe`] consumes `MPM_BIN_NAMES`
+/// via `.find_map(resolve_binary)`, so the FIRST entry that resolves on `PATH`
+/// becomes the hook exe. `resolve_stable_hook_exe` calls the real
+/// `resolve_binary` and is not injectable, so no behavioural test can observe
+/// that preference; pinning the array's order is the only mechanical guard.
+/// The order is `"trusty-mpm"` first deliberately: it is the unambiguous full
+/// crate/binary name, whereas `"tm"` is a short alias a user may well have
+/// shadowed on `PATH` with an unrelated tool, and a hook command is persisted
+/// into `settings.json` where a wrong resolution survives across sessions.
+/// What: asserts `MPM_BIN_NAMES` is exactly `["trusty-mpm", "tm"]`, in order.
+#[test]
+fn test_mpm_bin_names_prefers_full_name_over_short_alias() {
+    assert_eq!(
+        MPM_BIN_NAMES,
+        &["trusty-mpm", "tm"],
+        "resolve_stable_hook_exe takes the first PATH hit — 'trusty-mpm' must stay first"
+    );
+}
+
 /// Why (#2235): dedup that keyed identity on the exact file name ∈
 /// {`trusty-mpm`,`tm`} could never strip a stale entry whose command carried a
 /// Cargo build-artifact path (`.../deps/trusty_mpm-<hash> hook`,

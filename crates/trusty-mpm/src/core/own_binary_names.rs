@@ -24,9 +24,11 @@
 //! first-PATH-hit-wins lookup. `core::standalone::hooks::MPM_BIN_NAMES` needs
 //! the OPPOSITE preference for its own first-hit-wins lookup, so it keeps a
 //! separate literal array with the same two-name SET rather than aliasing
-//! this constant — see that module's doc comment, and
-//! `hooks::tests::test_mpm_bin_names_matches_own_binary_names_set`, which pins
-//! the two to the same set. `daemon::discovery::is_claude_command` and
+//! this constant — see that module's doc comment,
+//! `hooks::tests::test_mpm_bin_names_matches_own_binary_names_set` (pins the
+//! two to the same set) and
+//! `hooks::tests::test_mpm_bin_names_prefers_full_name_over_short_alias`
+//! (pins that array's opposite order). `daemon::discovery::is_claude_command` and
 //! `bin::tm::commands::daemon::find_daemon_pids` compare by exact equality, so
 //! order is immaterial to them.
 //! Test: `own_binary_names_is_tm_then_trusty_mpm` (below) pins the exact
