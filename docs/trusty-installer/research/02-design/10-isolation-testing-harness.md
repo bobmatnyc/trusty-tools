@@ -25,6 +25,32 @@
   cannot be built from a read-only source tree — five `build.rs` files write into
   `$CARGO_MANIFEST_DIR` (§7.2 constraint), and no `mise.toml`/`.mise.toml` exists in
   the repo — the harness must define the guest toolchain itself (§7.2).
+- **2026-07-31 (second amendment)** — A measurement pass in a local Tart VM on
+  Apple Silicon invalidated the prior cost model and the golden-image strategy,
+  and changed the default scope:
+  - The extrapolated **20–55 min/crate, 45–90 min full-stack** cost model
+    (§7.4) was withdrawn — a real `cargo install --path crates/trusty-search`
+    measured **112 s cold-registry**, roughly **20× faster** than estimated.
+  - The prebaked golden-image base-image strategy was replaced with
+    clone-and-provision per run (§3.3a) — provisioning measured **30 s**
+    (`PROVISION_SEC`) against three observed golden-image failure modes,
+    including a broken image that shipped with `~/.zshenv` missing.
+  - Full stack became the harness's default scope (§7.5): a minutes-scale
+    full-stack run is affordable to run by default, so the single-crate
+    default was removed.
+  - §6b (CI integration) was marked **OUT OF SCOPE**, owner ruling.
+  - New operational constraints from the same measurement pass were recorded
+    (§7.2a): `tart stop`/`tart suspend` data-loss and hang failure modes,
+    `tart exec` as the sole transport, guest PATH/rc-file assumptions, and
+    toolchain-drift verification.
+  - Pre-warming the cargo registry was confirmed **not required** (§7.4) —
+    the owner accepts a cold registry on every run.
+  - See the fuller research record at
+    `docs/research/tart-vm-testing-harness/01-research/` (added by a sibling
+    PR, #4456; not present on this branch).
+  - The two constraints preserved by the first amendment — the **JSON-only
+    assertion oracle** and **`cargo install`-only, never `cp` binaries into
+    PATH** (§7.3) — are unchanged by this amendment.
 
 ## Purpose
 
