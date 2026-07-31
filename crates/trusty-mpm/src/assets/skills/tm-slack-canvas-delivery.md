@@ -32,17 +32,20 @@ not the canvas creation response.
    named project channel (`slack_search_channels`). Ask once if genuinely
    ambiguous — never invent a channel silently.
 
-2. **Create the canvas.** Two tool surfaces exist:
-   - The claude.ai connector —
-     `mcp__claude_ai_Slack__slack_create_canvas` — takes `title` and
-     `content` only. It has no channel-binding parameter.
-   - The native trusty slack-mcp — `slack_canvas_create` — **always** pass
-     `channel_id`. This tabs the canvas into the channel, and free-tier
-     Slack workspaces hard-fail canvas creation without it
-     (`free_teams_cannot_create_non_tabbed_canvases`).
-
-   Prefer the native tool when it's registered (check the tool listing for
-   availability). The claude.ai connector is the fallback surface.
+2. **Create the canvas.** Three tool names can appear, and picking by name
+   pattern alone is how this fails: the claude.ai connector
+   (`mcp__claude_ai_Slack__slack_create_canvas`, `title`+`content` only, no
+   channel binding at all); the native trusty slack-mcp's own
+   `slack_create_canvas` (a connector-parity clone with an *optional*
+   `channel_id`); and the native slack-mcp's `slack_canvas_create`. On the
+   native server, always prefer `slack_canvas_create` over its
+   `slack_create_canvas` clone, and **always pass `channel_id` regardless of
+   which create-tool variant you end up calling** — the parameter being
+   optional in a schema does not make it optional on a free-tier workspace,
+   which hard-fails canvas creation without it
+   (`free_teams_cannot_create_non_tabbed_canvases`). Prefer the native server
+   over the claude.ai connector whenever it's registered (check the tool
+   listing); the connector is the fallback surface only.
 
 3. **Capture the link/id from the creation response.** The native tool
    returns only a `canvas_id`, with no permalink. In that case, rely on the
