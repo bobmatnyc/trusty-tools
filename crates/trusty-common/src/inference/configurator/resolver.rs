@@ -63,11 +63,20 @@ impl ResolvedProvider {
         self.provider
     }
 
-    /// The model slug to send to the provider.
+    /// The ROUTING slug this resolution was made from.
     ///
-    /// Why: an adapter needs the concrete slug for its request body.
-    /// What: returns the stored slug.
-    /// Test: `bare_slug_uses_openrouter`.
+    /// Why: diagnostics and consumers that echo "which model answered" want the
+    /// slug the operator configured, prefix and all. #4493: this is deliberately
+    /// NOT the wire id — the `<prefix>/` marker stage 1 consumed for routing is
+    /// still on it, and sending that verbatim to a direct provider is the bug
+    /// #4493 fixed. Normalisation belongs to whoever builds the payload, so it
+    /// happens in the adapter via
+    /// [`crate::inference::ProviderId::wire_model_id`]; that is also the only
+    /// place that knows OpenRouter must keep the full slug.
+    /// What: returns the stored slug unchanged.
+    /// Test: `bare_slug_uses_openrouter`;
+    /// `crates/trusty-common/tests/inference_adapters.rs` pins the wire id the
+    /// adapters derive from it.
     pub fn model(&self) -> &str {
         &self.model
     }

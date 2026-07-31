@@ -105,9 +105,33 @@ mod tests {
     /// mutators) because it held no lock at all. Join the same
     /// `dotenv_credential_env` group as every other test that reads or
     /// writes this var.
+    ///
+    /// #4407: the `#[serial]` group excludes concurrent *test* writers but not
+    /// the AMBIENT environment. The var being absent was still an unstated
+    /// precondition on the machine, so this test failed for anyone whose shell
+    /// exports a real `OPENROUTER_API_KEY` — which is every developer who has
+    /// configured one, and was the observed cause on a CI runner whose shell had
+    /// it set. Reproduced deterministically: `OPENROUTER_API_KEY=sk-… cargo test
+    /// -p trusty-common --features memory-core --lib semantic_consolidation`
+    /// failed on `main` at `assertion failed: !inference_available("", false)`.
+    ///
+    /// Fixed by CLEARING the var for the body rather than assuming it is clear.
+    /// This does not weaken the test — it makes it verify what it always claimed
+    /// to: "no key configured anywhere ⇒ the gate is closed". Previously, on a
+    /// machine WITH the var set it could not verify that at all; it just failed.
+    /// `EnvVarGuard` restores the prior value on drop, so a developer's real key
+    /// survives the test run.
     #[test]
     #[serial_test::serial(dotenv_credential_env)]
     fn inference_available_false_without_key() {
+        // #4407: `force_env_local_loaded` FIRST — the `.env.local` loader is a
+        // process-global `OnceLock` that folds file contents into the process
+        // environment on whichever call happens to be first. If that first call
+        // were the one inside `inference_available` below, it could re-populate
+        // the very var this test just cleared, mid-assertion (the #3464
+        // mechanism). Forcing it now makes the clear below the last word.
+        crate::inference::credentials::load_env_local_once();
+        let _guard = EnvVarGuard::clear("OPENROUTER_API_KEY");
         assert!(!inference_available("", false));
         assert!(!inference_available("   ", false));
     }
@@ -169,6 +193,19 @@ mod tests {
             let previous = std::env::var(key).ok();
             // Safety: test-only; caller is `#[serial]`.
             unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        /// Remove `key` for the guard's lifetime, restoring it on drop (#4407).
+        ///
+        /// Why: a test asserting "behaviour X holds when this var is UNSET" must
+        /// make it unset, not assume the ambient shell left it that way — see
+        /// `inference_available_false_without_key`, which failed on any machine
+        /// with a real `OPENROUTER_API_KEY` exported.
+        fn clear(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            // Safety: test-only; caller is `#[serial]`.
+            unsafe { std::env::remove_var(key) };
             Self { key, previous }
         }
     }

@@ -174,16 +174,12 @@ fn action_bar_reflects_daemon_reachability_by_default() {
     assert!(actions_bar::bar_text(&state).contains(actions_bar::DAEMON_UNREACHABLE));
 }
 
-/// A `127.0.0.1` URL bound to an ephemeral port, then immediately dropped so
-/// a later connect is refused — mirrors
-/// `tui::coordinator::tests::dead_loopback_url` / `poll::tests::dead_loopback_url`.
-fn dead_loopback_url() -> String {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
-    let port = listener.local_addr().expect("read bound local addr").port();
-    drop(listener);
-    format!("http://127.0.0.1:{port}")
-}
+// #4306/#4415: the dead-address fixture used to be a local bind-an-ephemeral-
+// port-then-drop-it helper, whose "nothing can be listening here" premise
+// expired the moment the OS re-handed that port to another binder. All three
+// former copies now share ONE fixture whose guarantee does not depend on
+// winning a port race — see `crate::test_support::dead_loopback_url`.
+use crate::test_support::dead_loopback_url;
 
 /// A daemon poll racing with an open confirmation gate must never reassign or
 /// clear it (DOC-35 §5.2) — the gate pins its target session id at the moment

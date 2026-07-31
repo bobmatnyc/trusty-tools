@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "1.3.0"
+version = "1.3.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -332,5 +332,6 @@ http-body-util.workspace = true
 # parallel Rust test threads (used by bug-report token resolution tests).
 serial_test.workspace = true
 # test-util enables tokio's paused-clock (`tokio::time::pause` / `start_paused = true`)
-# used by the deterministic auth-timeout tests in actor_tests.rs (#1649).
+# used by the deterministic auth-timeout tests in actor_tests.rs (#1649) and by
+# `telegram::supervisor_tests::healthy_run_resets_transient_backoff` (#4306).
 tokio = { workspace = true, features = ["test-util"] }

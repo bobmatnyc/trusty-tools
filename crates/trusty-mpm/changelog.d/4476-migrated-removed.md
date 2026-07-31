@@ -1,3 +1,0 @@
-Removed
-
-- `core::agent_reset::reset_project_agents` — force-recomposed the bundled roster into an arbitrary directory, narrowed by a project's harness roster ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). The workspace sweep was its only caller and now retracts instead, leaving it with zero production callers. A public function that writes the bundled roster into a workspace is exactly the shadow-creating footgun this change removes, so it is deleted rather than left callable. `ResetResult::deselected` is retained for the report's shape but is no longer populated by anything.

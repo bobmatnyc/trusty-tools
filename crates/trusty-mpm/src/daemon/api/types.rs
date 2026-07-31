@@ -85,6 +85,40 @@ pub struct HealthResponse {
     /// Test: `health_response_serializes_version_field`.
     #[serde(default)]
     pub version: String,
+    /// OS process id of the daemon that answered this request (issue #4230).
+    ///
+    /// Why: `supervised` is computed from
+    /// [`trusty_common::update::is_launchd_supervised`], a heuristic with a
+    /// `getppid() == 1` fallback prong — so an orphan whose spawning parent
+    /// exited before the startup probe self-reports `supervised: true`. A
+    /// self-report cannot be the only input to an orphan detector. This field is
+    /// the identity half of an AUTHORITATIVE check: `tm doctor` compares it
+    /// against the PID launchd says it runs for the daemon's registered label,
+    /// which is exactly what the runbook tells a human to do.
+    /// What: `std::process::id()` at handler time. Absent from an older daemon's
+    /// response, which the client models as `Option<u32>` → `None` → `Unknown`
+    /// rather than a pass.
+    /// Test: `health_response_serializes_pid_field`.
+    ///
+    /// `#[serde(default)]` (#4230 review round 2, LOW) matches every other field
+    /// added here: `HealthResponse` derives `Deserialize` as well as `Serialize`,
+    /// so anything deserializing an OLDER daemon's `/health` — which omits `pid`
+    /// entirely — would otherwise get a hard parse error instead of a zero.
+    #[serde(default)]
+    pub pid: u32,
+    /// Whether this daemon was deliberately started unsupervised via
+    /// `tm daemon --force` (issue #4230).
+    ///
+    /// Why: without this, `tm doctor` calls a deliberate `--force` run an ORPHAN
+    /// and tells the operator to kill it — while both of #4230's own refusal
+    /// messages recommend `--force` as the opt-in. A check that fires on the
+    /// escape hatch it recommends trains operators to ignore it.
+    /// What: `true` only when the operator passed `--force`. `#[serde(default)]`
+    /// → `false` for an older daemon, which is the conservative reading (treat an
+    /// unexplained unsupervised daemon as an orphan).
+    /// Test: `health_response_serializes_forced_field`.
+    #[serde(default)]
+    pub unsupervised_forced: bool,
 }
 
 /// Default for [`HealthResponse::supervised`] on deserialize — matches the

@@ -339,6 +339,47 @@ mod tests {
             .unwrap_or(false)
     }
 
+    /// Hold `$HOME` still for the duration of a test that shells out to `uv`
+    /// (#4414).
+    ///
+    /// Why: `uv` resolves its cache from `$HOME` (`$HOME/.cache/uv`) at spawn
+    /// time, and 161 statements across this crate's tests reassign `HOME`
+    /// process-wide to a `TempDir`. Under parallel load the sequence that
+    /// actually bit was: a sibling test set `HOME=<tempdir>`, `uv` derived its
+    /// cache path from that tempdir, and the sibling's `TempDir` was then
+    /// dropped — deleting the tree out from under the running interpreter.
+    /// Captured failures name the vanished path directly:
+    /// `Caused by: No such file or directory (os error 2) at path
+    /// ".../T/.tmpHR50aj/.cache/uv/.tmptfs807"`, and
+    /// `ModuleNotFoundError: No module named 'python'` for the same reason.
+    /// Measured on `main`: 3 failures in 5 full-suite runs.
+    ///
+    /// What: acquires `test_env::HOME_LOCK`, the mutex this crate's HOME
+    /// convention is built on. Verified exhaustive for this crate before relying
+    /// on it: all 161 HOME-mutating statements — 116 `set_var("HOME", ..)` plus
+    /// 45 `remove_var("HOME")`, across 72 test fns — sit inside a function that
+    /// holds `HOME_LOCK`, so holding it here excludes every writer. Nothing is
+    /// mutating `HOME`, and no sibling's `TempDir` is being reaped, while the
+    /// `uv` subprocess runs. That makes the test hermetic with respect to the
+    /// variable rather than merely likely to win the race; widening a timeout
+    /// or retrying would have left the same race with a longer fuse.
+    ///
+    /// `unwrap_or_else(into_inner)` so one panicking test cannot poison the
+    /// lock for its siblings — the same acquisition idiom the other 43 callers
+    /// use. Plain `HOME_LOCK` rather than `test_env::lock_home()` because these
+    /// tests exercise no production path guarded by
+    /// `home_lock_held_by_this_thread` (only `listeners::store::events_dir` is).
+    /// Test: [`execute_dispatches_to_python_and_parses_json`] and
+    /// [`execute_maps_python_error_key_to_recoverable_result`] — the two tests
+    /// that spawn `uv`. [`execute_reports_spawn_failure_as_recoverable`]
+    /// deliberately does not: it spawns a nonexistent binary and never reads
+    /// `HOME`.
+    fn hold_home_for_uv() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn manifest_parses_cto_db_shape() {
         let manifest = load_manifest(&cto_db_skill_dir()).expect("manifest should parse");
@@ -386,12 +427,22 @@ mod tests {
         assert!(build_plugin(tmp.path()).is_err());
     }
 
+    // #4414: holds the guard across `.await` deliberately — the whole point is
+    // that `$HOME` must not move while the `uv` subprocess is alive. The default
+    // `#[tokio::test]` runtime is current-thread, which pins this test (every
+    // `.await` included) to one OS thread, so the guard is sound here.
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "#4414: holding HOME_LOCK across the uv subprocess IS the fix"
+    )]
     #[tokio::test]
     async fn execute_dispatches_to_python_and_parses_json() {
         if !uv_available() {
             eprintln!("SKIP: `uv` not on PATH — cannot exercise the real cto-db skill subprocess");
             return;
         }
+        // #4414: pin $HOME for the whole body — see `hold_home_for_uv`.
+        let _home = hold_home_for_uv();
         let plugin = build_plugin(&cto_db_skill_dir()).expect("plugin should build");
         let tool = plugin
             .tools
@@ -410,12 +461,22 @@ mod tests {
         assert!(parsed["groups"].as_array().is_some_and(|g| !g.is_empty()));
     }
 
+    // #4414: holds the guard across `.await` deliberately — the whole point is
+    // that `$HOME` must not move while the `uv` subprocess is alive. The default
+    // `#[tokio::test]` runtime is current-thread, which pins this test (every
+    // `.await` included) to one OS thread, so the guard is sound here.
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "#4414: holding HOME_LOCK across the uv subprocess IS the fix"
+    )]
     #[tokio::test]
     async fn execute_maps_python_error_key_to_recoverable_result() {
         if !uv_available() {
             eprintln!("SKIP: `uv` not on PATH — cannot exercise the real cto-db skill subprocess");
             return;
         }
+        // #4414: pin $HOME for the whole body — see `hold_home_for_uv`.
+        let _home = hold_home_for_uv();
         let plugin = build_plugin(&cto_db_skill_dir()).expect("plugin should build");
         let tool = plugin
             .tools

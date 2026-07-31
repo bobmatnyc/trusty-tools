@@ -7,41 +7,50 @@
 //! `CARGO_PKG_VERSION`: `tm doctor` always executes as the just-installed
 //! binary, so its compiled-in version is the "installed" side of the
 //! comparison; the daemon can only ever report on itself.
-//! What: [`stale_daemon_check`] fetches the running daemon's `/health`
-//! version via [`trusty_mpm::client::DaemonClient::health_snapshot`] and
-//! folds it into a [`trusty_mpm::core::doctor::DoctorCheck`] via
+//! What: [`stale_daemon_check`] folds the caller's `/health` snapshot into a
+//! [`trusty_mpm::core::doctor::DoctorCheck`] via
 //! [`trusty_mpm::core::version_staleness::check_daemon_version_staleness`].
 //! Test: the pure comparison logic is covered by
 //! `core::version_staleness`'s own unit tests; the network fetch itself is
 //! exercised indirectly by the executor's live-daemon doctor test.
 
-use trusty_mpm::client::DaemonClient;
+use trusty_mpm::client::HealthSnapshot;
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 use trusty_mpm::core::version_staleness::{CHECK_NAME, check_daemon_version_staleness};
 
-/// Fetch the daemon's `/health` version and fold it into the #2332
-/// stale-daemon [`DoctorCheck`].
+/// Fold the daemon's `/health` version into the #2332 stale-daemon
+/// [`DoctorCheck`].
 ///
 /// Why: separates the network fetch (untestable without a live daemon) from
 /// the pure comparison in [`trusty_mpm::core::version_staleness`], and keeps
-/// `commands::misc::doctor` itself free of the "daemon unreachable" branch.
-/// What: calls `daemon.health_snapshot()`; on success, compares its `version`
-/// against this process's own `env!("CARGO_PKG_VERSION")`. On a transport
-/// failure, returns `Warn` — the daemon is presumably unreachable, which the
-/// caller's own `report.checks` output already explains in detail; this just
-/// keeps the stale-daemon line from silently vanishing.
+/// `commands::misc::doctor` itself free of the "daemon unreachable" branch. The
+/// snapshot is passed IN rather than fetched here (#4230 review) so `tm doctor`
+/// samples `/health` exactly once and both client-side checks reason about the
+/// same daemon rather than two probes that could straddle a restart.
+/// What: on `Some`, compares the snapshot's `version` against this process's own
+/// `env!("CARGO_PKG_VERSION")` and resolves the remediation verb via
+/// `restart_hint` — which is `launchctl kickstart …` on a host where launchd owns
+/// the daemon, because #4230 makes `tm restart` refuse there. On `None` (the fetch
+/// failed) returns `Warn`: the daemon is presumably unreachable, which the
+/// caller's own `report.checks` output already explains in detail; this just keeps
+/// the stale-daemon line from silently vanishing.
 /// Test: the comparison logic is covered by `core::version_staleness`'s unit
 /// tests; the network fetch itself is exercised indirectly by the executor's
 /// live-daemon doctor test.
-pub(crate) async fn stale_daemon_check(daemon: &DaemonClient) -> DoctorCheck {
-    match daemon.health_snapshot().await {
-        Ok(snapshot) => {
-            check_daemon_version_staleness(env!("CARGO_PKG_VERSION"), &snapshot.version)
-        }
-        Err(e) => DoctorCheck::new(
+pub(crate) fn stale_daemon_check(
+    snapshot: Option<&HealthSnapshot>,
+    restart_hint: &str,
+) -> DoctorCheck {
+    match snapshot {
+        Some(snapshot) => check_daemon_version_staleness(
+            env!("CARGO_PKG_VERSION"),
+            &snapshot.version,
+            restart_hint,
+        ),
+        None => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Warn,
-            format!("could not fetch daemon version from /health: {e}"),
+            "could not fetch daemon version from /health".to_string(),
         ),
     }
 }

@@ -44,6 +44,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Fails when bundled agents deploy into a settings tier a managed session's `--setting-sources` flag never loads — presence-only checks stay green while every delegation degrades to `general-purpose` (issue #4451).",
     ),
     (
+        "transcript_saving",
+        "Fails when a managed spawn would leave Claude Code transcript saving disabled — an inherited `CLAUDE_CODE_CHILD_SESSION` marker costs the session all native `--resume`/`--continue`/`/rewind` recovery, and also fails if the scrub would wrongly take `CLAUDE_CONFIG_DIR` (issue #4467).",
+    ),
+    (
         "skills",
         "Bundled skill catalog deployed under the operator/workspace `.claude/skills/` tier.",
     ),

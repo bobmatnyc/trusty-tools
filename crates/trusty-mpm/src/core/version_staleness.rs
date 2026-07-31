@@ -11,15 +11,16 @@
 //! self-reports on `GET /health` (see [`crate::daemon::api::types::HealthResponse::version`])
 //! is a purely client-side COMPARISON — the two values it folds together need
 //! no shared process or IPC to compare. It is NOT free of network cost,
-//! though: the caller, `stale_daemon_check` in the `tm` CLI binary's
-//! `commands::doctor_stale` module (a separate crate target from this
-//! library, so it cannot be an intra-doc link here), issues a SECOND
-//! `GET /health` round-trip after the primary `GET /api/v1/doctor` call
-//! already made by `tm doctor`, and the two requests are not atomic — the
+//! though: `tm doctor` issues one `GET /health` round-trip in addition to the
+//! primary `GET /api/v1/doctor` call, and the two requests are not atomic — the
 //! daemon can restart between them. That is handled by treating a transport
-//! failure on the second call as `Warn` rather than propagating an error (see
-//! `stale_daemon_check`'s own doc comment), not by this module, which only
-//! ever sees the two already-fetched strings.
+//! failure on the `/health` call as `Warn` rather than propagating an error (see
+//! `stale_daemon_check` in the `tm` CLI binary's `commands::doctor_stale`
+//! module — a separate crate target from this library, so it cannot be an
+//! intra-doc link here), not by this module, which only ever sees the
+//! already-fetched strings. As of #4230 that single snapshot is fetched ONCE by
+//! `commands::misc::doctor` and shared with the `daemon_orphan` check, so the two
+//! client-side checks always describe the same daemon.
 //! What: [`parse_version_triple`] extracts a `(major, minor, patch)` triple
 //! from a `CARGO_PKG_VERSION`-shaped string (mirrors the lightweight parser in
 //! [`crate::core::output_style::parse_claude_version`] rather than pulling in
@@ -79,17 +80,29 @@ pub fn parse_version_triple(raw: &str) -> Option<(u64, u64, u64)> {
 /// fails to parse → `Warn` with a "could not compare" message rather than
 /// guessing. Never `Fail` — a stale daemon still serves traffic; this is
 /// advisory, matching every other doctor probe's severity convention.
+///
+/// `restart_hint` is the command that ACTUALLY restarts the daemon on the calling
+/// host (issue #4230 review, HIGH-3). This used to be a hardcoded `tm restart`,
+/// which #4230 makes refuse on any host where launchd owns the daemon — so
+/// `tm doctor` printed "run `tm restart`" two lines above its own new orphan
+/// check, and the prescribed command errored out. The caller resolves the verb via
+/// `commands::launchd_probe::daemon_restart_command`; taking it as a parameter
+/// keeps this module pure (no filesystem or launchd probing in `core`).
 /// Test: `staleness_ok_when_versions_match`, `staleness_warns_when_daemon_older`,
 /// `staleness_warns_when_daemon_newer`, `staleness_warns_when_daemon_version_empty`,
-/// `staleness_warns_when_unparseable`.
-pub fn check_daemon_version_staleness(installed: &str, daemon_reported: &str) -> DoctorCheck {
+/// `staleness_warns_when_unparseable`, `staleness_uses_the_caller_restart_hint`.
+pub fn check_daemon_version_staleness(
+    installed: &str,
+    daemon_reported: &str,
+    restart_hint: &str,
+) -> DoctorCheck {
     if daemon_reported.is_empty() {
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Warn,
             format!(
                 "daemon did not report a version on /health — it likely predates this build \
-                 (installed binary is v{installed}); restart the daemon (`tm restart`)"
+                 (installed binary is v{installed}); restart the daemon (`{restart_hint}`)"
             ),
         );
     }
@@ -112,7 +125,8 @@ pub fn check_daemon_version_staleness(installed: &str, daemon_reported: &str) ->
                 CheckStatus::Warn,
                 format!(
                     "running daemon is older than installed binary — restart the daemon \
-                     (daemon: v{daemon_reported}, installed: v{installed}); run `tm restart`"
+                     (daemon: v{daemon_reported}, installed: v{installed}); run \
+                     `{restart_hint}`"
                 ),
             )
         }
@@ -138,7 +152,8 @@ pub fn check_daemon_version_staleness(installed: &str, daemon_reported: &str) ->
             CheckStatus::Warn,
             format!(
                 "could not compare daemon version `{daemon_reported}` against installed \
-                 binary version `{installed}` — restart the daemon if unsure (`tm restart`)"
+                 binary version `{installed}` — restart the daemon if unsure \
+                 (`{restart_hint}`)"
             ),
         ),
     }
@@ -147,6 +162,12 @@ pub fn check_daemon_version_staleness(installed: &str, daemon_reported: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in restart hint. Deliberately NOT `tm restart`: #4230 made that
+    /// verb refuse on launchd hosts, and a test that passed the old hardcoded
+    /// string could not tell whether the message used the caller's value or a
+    /// leftover literal.
+    const HINT: &str = "launchctl kickstart -k gui/$(id -u)/com.trusty.mpm";
 
     #[test]
     fn parse_version_triple_plain() {
@@ -168,36 +189,52 @@ mod tests {
 
     #[test]
     fn staleness_ok_when_versions_match() {
-        let check = check_daemon_version_staleness("0.42.0", "0.42.0");
+        let check = check_daemon_version_staleness("0.42.0", "0.42.0", HINT);
         assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
         assert_eq!(check.name, CHECK_NAME);
     }
 
     #[test]
     fn staleness_warns_when_daemon_older() {
-        let check = check_daemon_version_staleness("0.42.0", "0.41.9");
+        let check = check_daemon_version_staleness("0.42.0", "0.41.9", HINT);
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("older than installed binary"));
-        assert!(check.message.contains("tm restart"));
+        assert!(check.message.contains(HINT), "message: {}", check.message);
+    }
+
+    /// #4230 review, HIGH-3: every remediation must use the CALLER's verb. The
+    /// hardcoded `tm restart` this replaced is a hard error on a launchd host, so
+    /// `tm doctor` prescribed a command its own next line had just broken. All
+    /// three hint-carrying branches are checked, and none may leak the literal.
+    #[test]
+    fn staleness_uses_the_caller_restart_hint() {
+        for (installed, reported) in [("0.42.0", "0.41.9"), ("0.42.0", ""), ("0.42.0", "garbage")] {
+            let msg = check_daemon_version_staleness(installed, reported, HINT).message;
+            assert!(msg.contains(HINT), "message: {msg}");
+            assert!(
+                !msg.contains("tm restart"),
+                "must not leak the old hardcoded verb: {msg}"
+            );
+        }
     }
 
     #[test]
     fn staleness_warns_when_daemon_newer() {
-        let check = check_daemon_version_staleness("0.41.9", "0.42.0");
+        let check = check_daemon_version_staleness("0.41.9", "0.42.0", HINT);
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("NEWER"));
     }
 
     #[test]
     fn staleness_warns_when_daemon_version_empty() {
-        let check = check_daemon_version_staleness("0.42.0", "");
+        let check = check_daemon_version_staleness("0.42.0", "", HINT);
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("did not report a version"));
     }
 
     #[test]
     fn staleness_warns_when_unparseable() {
-        let check = check_daemon_version_staleness("0.42.0", "garbage");
+        let check = check_daemon_version_staleness("0.42.0", "garbage", HINT);
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("could not compare"));
     }
@@ -209,7 +246,7 @@ mod tests {
         // NOT hit the `daemon_reported == installed` exact-string
         // short-circuit above it, since the raw strings differ; it must also
         // NOT hit either `<`/`>` ordering arm, since the triples are equal.
-        let check = check_daemon_version_staleness("0.42.0", "0.42.0-beta");
+        let check = check_daemon_version_staleness("0.42.0", "0.42.0-beta", HINT);
         assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
         assert_eq!(check.name, CHECK_NAME);
     }
