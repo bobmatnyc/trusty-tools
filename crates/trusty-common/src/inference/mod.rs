@@ -67,12 +67,15 @@ pub use registry::{
 };
 #[cfg(feature = "inference-client")]
 pub use streaming::{
-    ChatStream, ChatStreamEvent, SseDecoder, StreamCompletion, ToolCallDelta, buffered_stream,
-    decode_event_stream,
+    ChatStream, ChatStreamEvent, SseDecoder, StreamAssembly, StreamCompletion, ToolCallDelta,
+    buffered_stream, decode_event_stream,
 };
+// #4425: `PromptTokensDetails`/`UsageBlock` join the flat re-export because a
+// consumer that owns a `ChatResponse` owns its wire usage block — trusty-code
+// reads it directly for cost accounting and had to reach into `types::usage`.
 #[cfg(feature = "inference-client")]
 pub use types::{
     AssistantMessage, CacheControl, ChatChoice, ChatMessage, ChatRequest, ChatResponse,
-    FunctionCall, FunctionDefinition, RequestUsageConfig, SecretString, StopReason, ToolCall,
-    ToolChoice, ToolDefinition, Usage, openai_tool_choice,
+    FunctionCall, FunctionDefinition, PromptTokensDetails, RequestUsageConfig, SecretString,
+    StopReason, ToolCall, ToolChoice, ToolDefinition, Usage, UsageBlock, openai_tool_choice,
 };

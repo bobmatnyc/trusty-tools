@@ -20,14 +20,14 @@
 
 use thiserror::Error;
 
-use crate::llm::LlmError;
+use crate::llm::InferenceError;
 use crate::tools::AgentOutput;
 
 /// Failure modes of `AgentLoop::run`.
 ///
 /// Why: Distinguishes a hard LLM failure from the two budget-exhaustion paths
 /// so callers can decide whether to retry, surface partial output, or abort.
-/// What: `Llm` wraps the underlying `LlmError`; `TurnCapExceeded` and `Timeout`
+/// What: `Llm` wraps the underlying `InferenceError`; `TurnCapExceeded` and `Timeout`
 /// each carry the partial `AgentOutput` accumulated up to the point the limit
 /// fired.
 /// Test: Constructed and matched in `agent_loop::tests`.
@@ -37,9 +37,9 @@ pub enum AgentLoopError {
     ///
     /// Why: Network/API failures are typically not recoverable within the loop;
     /// the caller decides whether to retry the whole run.
-    /// What: Wraps the source `LlmError`.
+    /// What: Wraps the source `InferenceError`.
     #[error("LLM call failed: {0}")]
-    Llm(#[from] LlmError),
+    Llm(#[from] InferenceError),
 
     /// The configured `max_turns` budget was exhausted before the model stopped.
     ///

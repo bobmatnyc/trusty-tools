@@ -24,7 +24,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::jsonrpc::RpcError;
-use crate::llm::{ChatRequest, ChatResponse, DispatchingLlmClient, LlmClientTrait, LlmError};
+use crate::llm::{
+    ChatRequest, ChatResponse, DispatchingLlmClient, InferenceAdapter, InferenceError,
+};
 
 /// Environment variable selecting the mock LLM. Set to [`MOCK_LLM_ECHO`] to
 /// enable [`EchoLlmClient`] instead of a real OpenRouter client.
@@ -66,7 +68,7 @@ pub const MOCK_LLM_ECHO_SEARCH: &str = "echo-search";
 /// The `TCODE_MOCK_LLM` value that selects [`SoakEchoLlmClient`] (issue
 /// #3869, epic #3866 Slice C).
 ///
-/// Why: `task::protocol::task_run` rebuilds this `Arc<dyn LlmClientTrait>`
+/// Why: `task::protocol::task_run` rebuilds this `Arc<dyn InferenceAdapter>`
 /// fresh on EVERY `task.run` call, so the compression-effectiveness soak
 /// harness — which drives 200+ PM turns across many repeated `task.run`
 /// calls against one `session_id` — needs a script that ends cleanly
@@ -89,7 +91,7 @@ pub const MOCK_LLM_ECHO_SOAK: &str = "echo-soak";
 /// [`MOCK_LLM_ECHO_SOAK`] — see [`SoakLoadEchoLlmClient`]'s module docs.
 pub const MOCK_LLM_ECHO_SOAK_LOAD: &str = "echo-soak-load";
 
-/// Build the `Arc<dyn LlmClientTrait>` `task.run` executions share.
+/// Build the `Arc<dyn InferenceAdapter>` `task.run` executions share.
 ///
 /// Why: the single seam that decides "real model or offline mock" — kept
 /// here (not inlined at each call site) so the decision is made exactly
@@ -111,7 +113,7 @@ pub const MOCK_LLM_ECHO_SOAK_LOAD: &str = "echo-soak-load";
 /// it is actually dispatched.
 /// Test: `task::mock_llm::tests::mock_env_selects_echo_client`,
 /// `task::mock_llm::tests::real_client_builds_without_openrouter_key`.
-pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
+pub fn build_llm_client() -> Result<Arc<dyn InferenceAdapter>, RpcError> {
     match std::env::var(MOCK_LLM_ENV).ok().as_deref() {
         Some(MOCK_LLM_ECHO) => return Ok(Arc::new(EchoLlmClient::new())),
         Some(MOCK_LLM_ECHO_FANOUT) => return Ok(Arc::new(FanoutEchoLlmClient::new())),
@@ -124,7 +126,7 @@ pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
     Ok(Arc::new(DispatchingLlmClient::new()))
 }
 
-/// A deterministic, scripted `LlmClientTrait` for offline task-execution
+/// A deterministic, scripted `InferenceAdapter` for offline task-execution
 /// testing (#2056).
 ///
 /// Why: exercises the SAME PM -> engineer -> tool -> engineer-stop ->
@@ -137,7 +139,7 @@ pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
 /// 3. Engineer stops with final text.
 /// 4. PM stops with final text.
 ///
-/// Running past the script's end returns an `LlmError` rather than
+/// Running past the script's end returns an `InferenceError` rather than
 /// panicking, so a bug that adds an unexpected turn fails loudly instead of
 /// hanging.
 /// Test: `task::mock_llm::tests::script_drives_full_delegation_flow`.
@@ -161,8 +163,10 @@ impl Default for EchoLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for EchoLlmClient {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for EchoLlmClient {
+    crate::llm::mock_adapter_identity!("mock-echo");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
             0 => delegate_response(),
@@ -170,13 +174,13 @@ impl LlmClientTrait for EchoLlmClient {
             2 => stop_response("engineer: echoed hello-from-mock-engineer"),
             3 => stop_response("pm: task complete"),
             _ => {
-                return Err(LlmError::MissingConfig(format!(
+                return Err(InferenceError::MissingConfig(format!(
                     "EchoLlmClient script exhausted at call {idx}"
                 )));
             }
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!("EchoLlmClient: invalid scripted fixture: {e}"))
+            InferenceError::MissingConfig(format!("EchoLlmClient: invalid scripted fixture: {e}"))
         })
     }
 }
@@ -240,7 +244,7 @@ fn stop_response(text: &str) -> Value {
     })
 }
 
-/// A deterministic, scripted `LlmClientTrait` exercising a FAN-OUT to two
+/// A deterministic, scripted `InferenceAdapter` exercising a FAN-OUT to two
 /// concurrently-delegated `python-engineer` sub-agents (DOC-39 AC-13's
 /// acceptance proof).
 ///
@@ -266,7 +270,7 @@ fn stop_response(text: &str) -> Value {
 /// 5. Engineer B stops with final text.
 /// 6. PM stops with final text.
 ///
-/// Running past the script's end returns an `LlmError` rather than panicking.
+/// Running past the script's end returns an `InferenceError` rather than panicking.
 /// Test: `task::mock_llm::tests::fanout_script_drives_two_delegations_to_the_same_agent`;
 /// exercised end-to-end (as a real subprocess) by `tests/agent_id_e2e.rs`.
 pub struct FanoutEchoLlmClient {
@@ -289,8 +293,10 @@ impl Default for FanoutEchoLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for FanoutEchoLlmClient {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for FanoutEchoLlmClient {
+    crate::llm::mock_adapter_identity!("mock-fanout-echo");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
             0 => fanout_delegate_response(),
@@ -300,13 +306,13 @@ impl LlmClientTrait for FanoutEchoLlmClient {
             4 => stop_response("engineer B: done"),
             5 => stop_response("pm: fan-out complete"),
             _ => {
-                return Err(LlmError::MissingConfig(format!(
+                return Err(InferenceError::MissingConfig(format!(
                     "FanoutEchoLlmClient script exhausted at call {idx}"
                 )));
             }
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!(
+            InferenceError::MissingConfig(format!(
                 "FanoutEchoLlmClient: invalid scripted fixture: {e}"
             ))
         })
@@ -371,7 +377,7 @@ fn bash_response_named(call_id: &str, command: &str) -> Value {
     })
 }
 
-/// A deterministic, scripted `LlmClientTrait` exercising the PM calling
+/// A deterministic, scripted `InferenceAdapter` exercising the PM calling
 /// `recall_session` (DOC-39 Slice C's e2e proof).
 ///
 /// Why: [`EchoLlmClient`] and [`FanoutEchoLlmClient`]'s scripts never call
@@ -389,7 +395,7 @@ fn bash_response_named(call_id: &str, command: &str) -> Value {
 /// 1. PM calls `recall_session(query="pkce oauth flow")`.
 /// 2. PM stops with final text.
 ///
-/// Running past the script's end returns an `LlmError` rather than panicking.
+/// Running past the script's end returns an `InferenceError` rather than panicking.
 /// Test: `task::mock_llm::tests::recall_script_drives_a_single_recall_call`;
 /// exercised end-to-end (as a real subprocess) by
 /// `tests/recall_content_e2e.rs`.
@@ -413,20 +419,22 @@ impl Default for RecallEchoLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for RecallEchoLlmClient {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for RecallEchoLlmClient {
+    crate::llm::mock_adapter_identity!("mock-recall-echo");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
             0 => recall_response(),
             1 => stop_response("pm: recalled what I needed"),
             _ => {
-                return Err(LlmError::MissingConfig(format!(
+                return Err(InferenceError::MissingConfig(format!(
                     "RecallEchoLlmClient script exhausted at call {idx}"
                 )));
             }
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!(
+            InferenceError::MissingConfig(format!(
                 "RecallEchoLlmClient: invalid scripted fixture: {e}"
             ))
         })
@@ -456,7 +464,7 @@ fn recall_response() -> Value {
     })
 }
 
-/// A deterministic, scripted `LlmClientTrait` exercising the engineer's
+/// A deterministic, scripted `InferenceAdapter` exercising the engineer's
 /// `search_code` tool (DOC-39 Slice B's mandatory real-wire e2e proof that
 /// `Event::SearchPerformed.hits` carries real per-hit path/score data, not
 /// just a count).
@@ -472,7 +480,7 @@ fn recall_response() -> Value {
 /// 3. Engineer stops with final text.
 /// 4. PM stops with final text.
 ///
-/// Running past the script's end returns an `LlmError` rather than
+/// Running past the script's end returns an `InferenceError` rather than
 /// panicking, mirroring [`EchoLlmClient`].
 /// Test: `task::mock_llm::tests::search_script_drives_full_delegation_flow`;
 /// exercised end-to-end (as a real subprocess, against a fake trusty-search
@@ -497,8 +505,10 @@ impl Default for SearchEchoLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for SearchEchoLlmClient {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+impl InferenceAdapter for SearchEchoLlmClient {
+    crate::llm::mock_adapter_identity!("mock-search-echo");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
             0 => delegate_response(),
@@ -506,13 +516,13 @@ impl LlmClientTrait for SearchEchoLlmClient {
             2 => stop_response("engineer: found it"),
             3 => stop_response("pm: task complete"),
             _ => {
-                return Err(LlmError::MissingConfig(format!(
+                return Err(InferenceError::MissingConfig(format!(
                     "SearchEchoLlmClient script exhausted at call {idx}"
                 )));
             }
         };
         serde_json::from_value(fixture).map_err(|e| {
-            LlmError::MissingConfig(format!(
+            InferenceError::MissingConfig(format!(
                 "SearchEchoLlmClient: invalid scripted fixture: {e}"
             ))
         })
@@ -586,6 +596,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
 
         let turn1 = client.chat(&req).await.expect("turn 1");
@@ -621,6 +632,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
 
         let turn1 = client.chat(&req).await.expect("turn 1");
@@ -666,6 +678,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
 
         let turn1 = client.chat(&req).await.expect("turn 1");
@@ -695,6 +708,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
 
         let turn1 = client.chat(&req).await.expect("turn 1");

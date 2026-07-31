@@ -75,7 +75,7 @@ impl Provider for FireworksProvider {
     /// OpenAI-dialect providers).
     /// Test: `fireworks::tests::extract_usage_maps_fields`.
     fn extract_usage(&self, response: &ChatResponse) -> TokenUsage {
-        response.clone().token_usage()
+        crate::llm::token_usage(response)
     }
 
     fn supports_native_tools(&self) -> bool {

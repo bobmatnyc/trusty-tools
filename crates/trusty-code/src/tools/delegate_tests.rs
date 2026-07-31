@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::{DelegateToAgentTool, EngineerCompletionSignal, redelegation_hint};
 use crate::agent_loop::AgentLoopError;
-use crate::llm::LlmError;
+use crate::llm::InferenceError;
 use crate::runner::RunnerError;
 use crate::tools::finish_task::FinishStatus;
 use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor};
@@ -513,7 +513,7 @@ async fn redelegation_hint_present_on_llm_error() {
         make_err: || {
             anyhow::Error::from(RunnerError::Loop {
                 name: "engineer".to_string(),
-                source: AgentLoopError::Llm(LlmError::ApiError {
+                source: AgentLoopError::Llm(InferenceError::Api {
                     status: 500,
                     body: "internal error".to_string(),
                 }),
@@ -548,7 +548,7 @@ async fn redelegation_hint_present_on_llm_error() {
 fn redelegation_hint_fn_returns_some_for_llm_error() {
     let err = anyhow::Error::from(RunnerError::Loop {
         name: "engineer".to_string(),
-        source: AgentLoopError::Llm(LlmError::ApiError {
+        source: AgentLoopError::Llm(InferenceError::Api {
             status: 503,
             body: "bedrock throttled".to_string(),
         }),

@@ -139,16 +139,22 @@ pub mod rbac;
 /// Why: trusty-code agents invoke LLMs via OpenAI-compatible endpoints
 /// (OpenRouter / Fireworks) and AWS Bedrock. Since #2406 (epic #2400) the
 /// OpenAI-compatible HTTP mechanics live in the shared `trusty_common::inference`
-/// adapter layer rather than a bespoke tcode client, so credential resolution,
-/// error classification, and the wire schema are shared across the ecosystem.
-/// What: Exports `OpenAiCompatClient` (shared OpenRouter/Fireworks transport),
-/// `DispatchingLlmClient` (slug-routed transport), `BedrockChatClient`, all
-/// request/response types (`ChatRequest`, `ChatResponse`, `ChatMessage`,
-/// `ToolDefinition`, …), and `LlmError`. Credentials resolve via the shared
-/// 3-tier chain (env > `.env.local` > secure store) at first use.
-/// Test: `cargo test -p trusty-code` covers serialisation, deserialisation,
-/// type-conversion, and error-mapping unit tests plus the offline black-box
-/// e2e (`tests/inference_shared_adapter_e2e.rs`). `--include-ignored` adds the
+/// adapter layer rather than a bespoke tcode client; since #4425 (epic #4429)
+/// so does the ABSTRACTION — trusty-code defines no chat/provider trait of its
+/// own, it implements and consumes `trusty_common::inference::InferenceAdapter`.
+/// That is what gave trusty-code streaming: the shared trait's `chat_stream`
+/// already carried native SSE, which the deleted local trait had no method for.
+/// What: Exports `OpenAiCompatClient` (shared OpenRouter/Fireworks/Together/
+/// AtlasCloud transport), `DispatchingLlmClient` (slug-routed transport),
+/// `BedrockChatClient`, the trusty-code-local response views (`token_usage`,
+/// `finish_reason`, `resolved_model`), and RE-EXPORTS of the shared trait,
+/// error, and wire types (`InferenceAdapter`, `InferenceError`, `ChatRequest`,
+/// `ChatResponse`, `ChatMessage`, `ToolDefinition`, …) so `crate::llm::…` paths
+/// keep resolving. Credentials resolve via the shared 3-tier chain (env >
+/// `.env.local` > secure store) at first use.
+/// Test: `cargo test -p trusty-code` covers transport routing, the streaming
+/// decorators, and the local response views, plus the offline black-box e2e
+/// (`tests/inference_shared_adapter_e2e.rs`). `--include-ignored` adds the
 /// live provider tests.
 pub mod llm;
 

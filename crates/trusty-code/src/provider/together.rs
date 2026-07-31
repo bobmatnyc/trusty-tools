@@ -79,7 +79,7 @@ impl Provider for TogetherProvider {
     /// OpenAI-dialect providers).
     /// Test: `together::tests::extract_usage_maps_fields`.
     fn extract_usage(&self, response: &ChatResponse) -> TokenUsage {
-        response.clone().token_usage()
+        crate::llm::token_usage(response)
     }
 
     fn supports_native_tools(&self) -> bool {

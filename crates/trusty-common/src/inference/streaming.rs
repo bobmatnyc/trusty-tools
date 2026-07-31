@@ -543,5 +543,12 @@ pub fn buffered_stream(response: ChatResponse) -> ChatStream {
     Box::pin(stream::iter(events))
 }
 
+// #4425: the inverse of `buffered_stream` — rebuild a `ChatResponse` from the
+// events this module produces, so a consumer can stream for display without
+// forking its non-streaming downstream pipeline.
+mod assembly;
+
+pub use assembly::StreamAssembly;
+
 #[cfg(test)]
 mod tests;

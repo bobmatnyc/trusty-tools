@@ -8,8 +8,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Assistant turns stream token-by-token to attached clients (issue #4425,
+  epic #3696 Gap B).** `ToolEventSink::agent_message` is now called repeatedly
+  per text turn — once per content chunk with `done: false`, then once with
+  `done: true` and an empty delta marking the bubble complete — instead of once
+  with the whole turn. A `session.attach`ed client (and therefore `tcode tui`)
+  renders the assistant's words as they are produced rather than as one paste
+  when the turn ends. A tool-only turn still emits nothing. Streaming engages
+  only when a sink is attached: the `run-task` CLI path and every scripted test
+  keep taking the blocking call unchanged, so their wire request is
+  byte-identical to before.
+
 ### Changed
 
+- **trusty-code no longer defines its own LLM/provider abstraction; it consumes
+  the shared one (issue #4425, epic #4429).** `llm::LlmClientTrait` is deleted
+  and every call site now depends on
+  `trusty_common::inference::InferenceAdapter` — the same trait trusty-review
+  and the shared OpenRouter/Fireworks/Together/AtlasCloud/Bedrock adapters
+  already implement. With it go trusty-code's duplicate wire types
+  (`ChatRequest`, `ChatResponse`, `ChatMessage`, `ToolDefinition`, `UsageBlock`,
+  `LlmError`) and the `llm::convert` bridge that existed solely to translate
+  between the two copies; `crate::llm` now re-exports the shared types, so
+  existing `crate::llm::…` import paths are unchanged. This is what unlocked
+  streaming: the shared trait already carried `chat_stream` with native SSE,
+  and the deleted local trait had no streaming method at all. Net −478 lines
+  across the two crates (−2,409 removed, +1,931 added, most of the additions
+  being the shared `StreamAssembly` and its tests).
+  `LlmError` is renamed to `InferenceError` and its `ApiError` variant to `Api`
+  (rlib-consumer-visible; no in-tree consumer outside trusty-code).
+- **`OpenAiCompatClient`, `DispatchingLlmClient`, `BedrockChatClient`, the
+  transcript recorder, and the debug-capture decorator all implement
+  `chat_stream` explicitly.** The trait's default would have buffered through
+  `chat`, which would have silently disabled streaming on exactly the
+  production paths (`run_task`, `task::executor`, and anything run with
+  `TCODE_DEBUG_TRANSCRIPT` set) that wrap the transport in a decorator.
+- **A `chat_stream` handshake failure is propagated, never silently retried as
+  a blocking call.** A degraded-but-working tcode would make "is streaming
+  working?" unanswerable from the outside.
+- **Bedrock streaming is the buffered fallback for now.** A `bedrock/*` turn
+  arrives as one content delta plus the terminal one — the pre-existing
+  behaviour, with no regression. Its real `ConverseStream` transport is #4426,
+  and lands entirely inside `trusty_common::inference::bedrock`.
 - **`events_connect_hang_is_bounded_by_connect_timeout_not_infinite` waits out
   `CONNECT_TIMEOUT` on Tokio's virtual clock** — 10.01s to 0.01s. The pause is
   taken only AFTER the listener confirms it accepted the pump's connection, so
@@ -22,6 +64,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   ordering above the emitted reason string is byte-identical to the real-clock
   run, and removing `.timeout(CONNECT_TIMEOUT)` from `pump_session_events`
   still fails the test.
+
+### Fixed
+
+- **A failed `chat_stream` handshake no longer punches a hole in the
+  debug-capture turn sequence (issue #4425, review finding 1).**
+  `DebugCaptureLlmClient::chat_stream` reserves its `turn_index` before opening
+  the stream, and an open failure used to propagate with `?` — so the index was
+  consumed but never written, leaving a permanent GAP in
+  `TCODE_DEBUG_TRANSCRIPT`'s sequence and losing the only record of the request
+  that failed. The blocking `chat` path records in all cases; the streaming path
+  now matches it exactly. Pinned by
+  `stream_open_failure_records_its_reserved_turn_index`, which asserts the
+  recorded indices are contiguous from zero across a failed stream-open and a
+  following successful turn.
+- **A streaming failure is captured with its ORIGINAL error variant, not a
+  re-wrapped `Transport` (issue #4425, review finding 2).** The stream's error
+  branch synthesised `InferenceError::Transport(e.to_string())` for the record —
+  the one variant that is always retryable and never an alarm — so a
+  missing-config or auth failure appeared in the transcript as a transient
+  network blip and `is_retryable`/`is_alarm` became underivable from the
+  capture. The record now carries the real error, and each failure record gains
+  explicit `error_retryable` / `error_alarm` booleans so classification is
+  readable without re-parsing Display text (the record cannot hold an
+  `InferenceError` directly — the shared enum is not `Serialize`).
+- **A multi-provider adapter answers capability questions for the provider the
+  request actually routes to (issue #4425, review finding 3).**
+  `OpenAiCompatClient` and `DispatchingLlmClient` both hard-wired
+  `capabilities()` to OpenRouter's profile even though they route per request
+  across Fireworks, Together, AtlasCloud, and Bedrock — reporting
+  `detailed_usage_accounting: true` and OpenAI-dialect tooling for backends that
+  honour neither, and handing compaction OpenRouter's 200K context tier for a
+  128K backend. Both now override the new model-aware
+  `InferenceAdapter::capabilities_for(model)`, resolving through the SAME gate
+  their `chat`/`chat_stream` route on, so capabilities can never disagree with
+  where the request is sent. `BedrockChatClient` and the
+  `delegating_adapter_identity!` decorators forward it, so a recorder or
+  debug-capture wrapper cannot collapse the routing back to one provider. The
+  model-free `capabilities()` still answers for the routing default — the
+  backend an unprefixed slug genuinely reaches — and is documented as such.
+  #4426 builds Bedrock streaming on this surface.
 
 ### Added
 

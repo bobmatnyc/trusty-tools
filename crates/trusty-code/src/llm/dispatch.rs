@@ -2,13 +2,13 @@
 //! OpenAI-compatible transport (OpenRouter / Fireworks) by model slug
 //! (#1021 phase 1; #2406 migration).
 //!
-//! Why: Every caller of `LlmClientTrait::chat` (`AgentLoop`, `run_task`,
-//! `task::executor`) is constructed with exactly ONE `Arc<dyn LlmClientTrait>`
+//! Why: Every caller of `InferenceAdapter::chat` (`AgentLoop`, `run_task`,
+//! `task::executor`) is constructed with exactly ONE `Arc<dyn InferenceAdapter>`
 //! shared across every agent in a run, but different agents can be routed to
 //! different model slugs (`crate::provider::resolve_model`) — some `bedrock/*`,
 //! some `fireworks/*`, most plain OpenRouter. Rather than threading multiple
 //! clients through every call site, `DispatchingLlmClient` is itself an
-//! `LlmClientTrait` impl that picks the real transport per-request from
+//! `InferenceAdapter` impl that picks the real transport per-request from
 //! `req.model`, using the exact same `crate::provider::provider_for` routing
 //! `AgentLoop::build_request` already consults for tool-choice/caching/usage
 //! decisions — so there is exactly one source of truth for "which backend".
@@ -26,12 +26,13 @@
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
+use trusty_common::inference::{
+    ChatRequest, ChatResponse, ChatStream, InferenceAdapter, InferenceError, ProviderCapabilities,
+    ProviderId, capabilities,
+};
+
 use super::bedrock::BedrockChatClient;
 use super::client::OpenAiCompatClient;
-use super::client_trait::LlmClientTrait;
-use super::error::LlmError;
-use super::request::ChatRequest;
-use super::response::ChatResponse;
 
 /// Provider name `crate::provider::provider_for` reports for `bedrock/*`
 /// slugs — the single dispatch condition this client checks.
@@ -42,7 +43,7 @@ const BEDROCK_PROVIDER_NAME: &str = "bedrock";
 ///
 /// Why: this is the seam that makes `bedrock/*` model slugs reach AWS Bedrock
 /// while `fireworks/*` and plain OpenRouter slugs reach the shared adapter —
-/// keeping every call site depending only on the object-safe `LlmClientTrait`
+/// keeping every call site depending only on the object-safe `InferenceAdapter`
 /// so no signature changes when routing evolves. Production call sites
 /// (`main.rs`, `task::mock_llm`) construct this instead of a bare transport.
 /// What: `openai_compat` is the shared-adapter-backed transport (built eagerly —
@@ -87,7 +88,7 @@ impl DispatchingLlmClient {
     /// What: returns the cached client, or builds one via
     /// `BedrockChatClient::from_env` on first use.
     /// Test: `dispatch::tests::bedrock_construction_is_lazy`.
-    async fn bedrock(&self) -> Result<&BedrockChatClient, LlmError> {
+    async fn bedrock(&self) -> Result<&BedrockChatClient, InferenceError> {
         self.bedrock
             .get_or_try_init(BedrockChatClient::from_env)
             .await
@@ -115,23 +116,96 @@ impl Default for DispatchingLlmClient {
 }
 
 #[async_trait]
-impl LlmClientTrait for DispatchingLlmClient {
+impl InferenceAdapter for DispatchingLlmClient {
+    /// The dispatcher's own label.
+    ///
+    /// Why (#4425): [`InferenceAdapter::name`] assumes one adapter serves one
+    /// provider, but this type exists precisely because trusty-code shares ONE
+    /// client across agents routed to different backends — there is no single
+    /// truthful provider name. Reporting `"dispatching"` says exactly that,
+    /// rather than naming whichever backend happened to be built first and
+    /// misattributing every log line for the other one.
+    /// What: the constant `"dispatching"`.
+    /// Test: `dispatch::tests::name_is_dispatching`.
+    fn name(&self) -> &str {
+        "dispatching"
+    }
+
+    /// Capabilities for the DEFAULT backend, not for a specific request.
+    ///
+    /// Why (#4425): [`InferenceAdapter::capabilities`] takes no model argument,
+    /// so a per-request-routed client has no single right answer to it. The
+    /// OpenRouter profile is the routing default — the backend a slug with no
+    /// `bedrock/` or other routing prefix actually reaches — so it is the
+    /// honest answer to the model-free question. Every caller that HAS a slug
+    /// must ask [`Self::capabilities_for`], which routes.
+    /// What: `capabilities(ProviderId::OpenRouter)`.
+    /// Test: `dispatch::tests::capabilities_report_openrouter_default`.
+    fn capabilities(&self) -> &ProviderCapabilities {
+        capabilities(ProviderId::OpenRouter)
+    }
+
+    /// Capabilities for the backend `model` ACTUALLY dispatches to (#4425).
+    ///
+    /// Why: this dispatcher's entire purpose is that ONE shared client serves
+    /// several backends, so a capability answer hard-wired to OpenRouter is
+    /// wrong for exactly the requests the type exists to handle. Bedrock's
+    /// profile differs where it matters — `tool_dialect` is
+    /// `AnthropicMessages`, not `OpenAiFunctions`, and it never wants the
+    /// OpenRouter usage directive — and #4426 builds its `ConverseStream`
+    /// transport on this very surface.
+    /// What: routes through the SAME [`Self::routes_to_bedrock`] gate `chat`
+    /// and `chat_stream` use, then delegates to the chosen transport's own
+    /// `capabilities_for` (so the OpenAI-compat lane keeps resolving
+    /// Fireworks/Together/AtlasCloud by prefix). The Bedrock arm reads the
+    /// shared registry directly rather than via [`Self::bedrock`], because that
+    /// builder is async and touches AWS credentials — a capability lookup must
+    /// stay synchronous and side-effect-free (#2245 lazy construction).
+    /// Test: `dispatch::tests::capabilities_for_follows_slug_routing`.
+    fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+        if Self::routes_to_bedrock(model) {
+            capabilities(ProviderId::Bedrock)
+        } else {
+            self.openai_compat.capabilities_for(model)
+        }
+    }
+
     /// Dispatch `req` to Bedrock or the shared OpenAI-compat transport based on
     /// `req.model`.
     ///
-    /// Why: the single method every caller (`AgentLoop`, `run_task`,
-    /// `task::executor`) invokes through `Arc<dyn LlmClientTrait>`.
+    /// Why: the single blocking method every caller (`AgentLoop`, `run_task`,
+    /// `task::executor`) invokes through `Arc<dyn InferenceAdapter>`.
     /// What: `bedrock/*` slugs go through [`Self::bedrock`]; every other slug
     /// (OpenRouter default, `fireworks/*`, and `together/*`) goes through the
     /// `OpenAiCompatClient`, which handles the OpenRouter/Fireworks/Together split
-    /// and surfaces a missing credential as `LlmError::MissingConfig` at this
+    /// and surfaces a missing credential as `InferenceError::MissingConfig` at this
     /// point.
     /// Test: `dispatch::tests::*`.
-    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         if Self::routes_to_bedrock(&req.model) {
             self.bedrock().await?.chat(req).await
         } else {
             self.openai_compat.chat(req).await
+        }
+    }
+
+    /// Stream `req` through the same routing decision [`Self::chat`] makes.
+    ///
+    /// Why (#4425): without this override the trait's default would buffer via
+    /// [`Self::chat`] — every trusty-code turn would keep arriving as one paste
+    /// even though the OpenAI-compat lane has had real SSE since #3696. Routing
+    /// the streaming call through the IDENTICAL `routes_to_bedrock` gate (rather
+    /// than a second copy of the slug logic) is what guarantees a model cannot
+    /// stream from one backend and block on another.
+    /// What: `bedrock/*` → the Bedrock transport's `chat_stream` (buffered
+    /// today; real `ConverseStream` is #4426); everything else → the
+    /// OpenAI-compat transport's, which is native SSE.
+    /// Test: `dispatch::tests::stream_routes_like_chat`.
+    async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        if Self::routes_to_bedrock(&req.model) {
+            self.bedrock().await?.chat_stream(req).await
+        } else {
+            self.openai_compat.chat_stream(req).await
         }
     }
 }
@@ -218,6 +292,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             usage: None,
+            stop: None,
         };
         // Best-effort: the call may error (missing key) or, with a real ambient
         // key, would attempt a live request — either way we only care that the
@@ -229,5 +304,117 @@ mod tests {
             client.bedrock.get().is_none(),
             "a non-bedrock dispatch must never initialise the Bedrock cell"
         );
+    }
+
+    /// The dispatcher reports its own label, not a backend's (#4425).
+    ///
+    /// Why: naming a backend here would misattribute every log line for the
+    /// other backend, since one dispatcher serves both per request.
+    /// What: assert `name() == "dispatching"`.
+    /// Test: this test.
+    #[test]
+    fn name_is_dispatching() {
+        assert_eq!(DispatchingLlmClient::new().name(), "dispatching");
+    }
+
+    /// Capabilities report the OpenRouter routing default (#4425).
+    ///
+    /// Why: pins the documented answer to the shared trait's model-free
+    /// `capabilities()` question, so a future change to it is a deliberate
+    /// decision rather than a silent drift in what a diagnostic reports.
+    /// What: assert the returned profile's id is OpenRouter.
+    /// Test: this test.
+    #[test]
+    fn capabilities_report_openrouter_default() {
+        assert_eq!(
+            DispatchingLlmClient::new().capabilities().id,
+            ProviderId::OpenRouter
+        );
+    }
+
+    /// `capabilities_for` follows the SAME gate `chat`/`chat_stream` route on
+    /// (#4425).
+    ///
+    /// Why: this dispatcher exists because one shared client serves several
+    /// backends; before #4425 every capability question was answered with
+    /// OpenRouter's profile, so a `bedrock/*` turn was reported as
+    /// OpenAI-dialect tooling with the OpenRouter usage directive — wrong for
+    /// exactly the requests the type exists to handle, and the surface #4426
+    /// builds Bedrock streaming on.
+    /// What: assert the Bedrock slug resolves to the Bedrock profile (whose
+    /// `tool_dialect` is Anthropic, not OpenAI), that the OpenAI-compat lane
+    /// still resolves Fireworks/Together by prefix, and that a plain slug keeps
+    /// OpenRouter. Also assert the answer agrees with `routes_to_bedrock` — the
+    /// single gate — so capabilities and transport can never diverge. No
+    /// network and no AWS credentials: the Bedrock arm reads the registry
+    /// synchronously, which the final assertion pins by checking the lazy cell
+    /// is still empty.
+    /// Test: this test.
+    #[test]
+    fn capabilities_for_follows_slug_routing() {
+        let client = DispatchingLlmClient::new();
+        for (slug, expected) in [
+            (
+                "bedrock/us.anthropic.claude-sonnet-4-6",
+                ProviderId::Bedrock,
+            ),
+            ("anthropic/claude-sonnet-4-5", ProviderId::OpenRouter),
+            (
+                "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+                ProviderId::Fireworks,
+            ),
+            (
+                "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                ProviderId::Together,
+            ),
+        ] {
+            let caps = client.capabilities_for(slug);
+            assert_eq!(caps.id, expected, "capabilities for {slug} must route");
+            assert_eq!(
+                caps.id == ProviderId::Bedrock,
+                DispatchingLlmClient::routes_to_bedrock(slug),
+                "capabilities and transport routing must agree for {slug}"
+            );
+        }
+
+        // The behavioural teeth: Bedrock speaks the Anthropic tool dialect and
+        // never wants OpenRouter's usage directive.
+        let bedrock = client.capabilities_for("bedrock/us.anthropic.claude-sonnet-4-6");
+        assert_eq!(
+            bedrock.tool_dialect,
+            trusty_common::inference::registry::ToolDialect::AnthropicMessages
+        );
+        assert!(!bedrock.detailed_usage_accounting);
+
+        assert!(
+            client.bedrock.get().is_none(),
+            "a capability lookup must not build the Bedrock transport"
+        );
+    }
+
+    /// A streaming dispatch routes by the SAME gate the blocking one uses
+    /// (#4425).
+    ///
+    /// Why: if `chat` and `chat_stream` could disagree, a model would reach one
+    /// backend when the TUI is attached and another when it is not — the worst
+    /// class of bug, because it only appears in one of the two modes.
+    /// What: assert `routes_to_bedrock` (the single gate both call) agrees with
+    /// the provider factory for both families. The transports themselves are
+    /// covered by their own tests; issuing a real stream here would need a
+    /// network.
+    /// Test: this test.
+    #[test]
+    fn stream_routes_like_chat() {
+        for (slug, expect_bedrock) in [
+            ("bedrock/us.anthropic.claude-sonnet-4-6", true),
+            ("openai/gpt-4o-mini", false),
+            ("fireworks/accounts/fireworks/models/x", false),
+        ] {
+            assert_eq!(
+                DispatchingLlmClient::routes_to_bedrock(slug),
+                expect_bedrock,
+                "slug {slug} must route identically for chat and chat_stream"
+            );
+        }
     }
 }
