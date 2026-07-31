@@ -908,15 +908,25 @@ content = "base"
 }
 
 #[test]
-fn agent_tier_for_kind_is_l0_only_for_the_assistant_role() {
-    // The derivation reads ONE value. Everything else — including the empty
-    // string, and including `orchestrator`/`controller` (which sit outside
-    // this model and are handed L0 explicitly at dispatch by
-    // `ctrl_delegate_posture`, not by this function) — lands on L1.
-    assert_eq!(
-        crate::agents::AgentTier::for_kind("assistant"),
-        crate::agents::AgentTier::L0Orchestration
-    );
+fn agent_tier_for_kind_is_l0_for_the_assistant_and_orchestrator_kinds() {
+    // #4497: the derivation is now the ONE mechanism that answers "is this
+    // agent L0?" for BOTH populations. `orchestrator`/`controller` (`pm`, and
+    // a `ctrl` declaring the controller spelling) previously landed on L1
+    // here and were handed L0 by a hardcoded literal at the dispatch call
+    // site (`ctrl_delegate_posture`) — the second mechanism this rule
+    // absorbed. They are still NOT assistants (see
+    // `agents::delegation::assistant_and_orchestrator_kinds_are_disjoint`);
+    // they share only the tier.
+    for l0 in ["assistant", "orchestrator", "controller"] {
+        assert_eq!(
+            crate::agents::AgentTier::for_kind(l0),
+            crate::agents::AgentTier::L0Orchestration,
+            "role {l0:?} is an L0 kind"
+        );
+    }
+    // Everything else — including the empty string and every near-miss
+    // spelling — still lands on L1. The rule recognizes a NAMED set, so a new
+    // specialist role can never fall into L0 by omission.
     for other in [
         "",
         "engineer",
@@ -928,10 +938,12 @@ fn agent_tier_for_kind_is_l0_only_for_the_assistant_role() {
         "ticketing",
         "analysis",
         "observer",
-        "orchestrator",
-        "controller",
         "Assistant",
         "assistant-tier",
+        "Orchestrator",
+        "orchestration",
+        "ctrl",
+        "pm",
     ] {
         assert_eq!(
             crate::agents::AgentTier::for_kind(other),
