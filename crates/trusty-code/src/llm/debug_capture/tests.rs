@@ -10,6 +10,12 @@
 //! a single globally-ordered turn sequence — the same shared-sink shape
 //! `run_task::execute_run_task` and `task::executor::run_and_record` both
 //! use in production.
+//!
+//! #4425 adds the streaming failure modes: a `chat_stream()` that fails at the
+//! OPEN handshake still occupies its reserved turn index (no gap in the
+//! sequence), a stream error is recorded with the ORIGINAL error's
+//! retryable/alarm classification rather than a re-wrapped `Transport`, and the
+//! decorator forwards the model-aware `capabilities_for` of whatever it wraps.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -58,6 +64,84 @@ impl InferenceAdapter for ScriptedLlm {
             }),
             None => Err(InferenceError::MissingConfig("script exhausted".into())),
         }
+    }
+}
+
+/// The error a streaming mock raises, in both failure modes. `MissingConfig`
+/// is deliberately chosen because its classification is the exact INVERSE of
+/// `InferenceError::Transport`'s (`is_alarm` true / `is_retryable` false), so a
+/// record that flattened it into `Transport` is detectable from the transcript
+/// alone (#4425 finding 2).
+const STREAM_FAILURE: &str = "AWS_REGION not set";
+
+/// A mock whose `chat_stream` fails at the stream-OPEN handshake — the stream
+/// is never created, so the caller sees `Err` from `chat_stream` itself.
+///
+/// Why: this is the failure mode #4425 finding 1 is about — the decorator has
+/// already reserved a turn index by the time the handshake fails.
+struct StreamOpenFailsLlm;
+
+#[async_trait]
+impl InferenceAdapter for StreamOpenFailsLlm {
+    crate::llm::mock_adapter_identity!("mock-stream-open-fails");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        Err(InferenceError::MissingConfig(STREAM_FAILURE.into()))
+    }
+
+    async fn chat_stream(&self, _req: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        Err(InferenceError::MissingConfig(STREAM_FAILURE.into()))
+    }
+}
+
+/// A mock whose stream OPENS successfully and then yields one `Err` item.
+///
+/// Why: the mid-flight failure mode (#4425 finding 2) — the decorator observes
+/// a borrowed `&InferenceError` inside the stream's map closure.
+struct StreamErrorsMidFlightLlm;
+
+#[async_trait]
+impl InferenceAdapter for StreamErrorsMidFlightLlm {
+    crate::llm::mock_adapter_identity!("mock-stream-errors");
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        Err(InferenceError::MissingConfig(STREAM_FAILURE.into()))
+    }
+
+    async fn chat_stream(&self, _req: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        Ok(Box::pin(futures_util::stream::iter(vec![Err(
+            InferenceError::MissingConfig(STREAM_FAILURE.into()),
+        )])))
+    }
+}
+
+/// A mock that ROUTES its capability answer by model slug — the shape
+/// `OpenAiCompatClient`/`DispatchingLlmClient` have.
+///
+/// Why: a transparent decorator must not collapse that routing back to one
+/// provider (#4425 finding 3).
+struct RoutingCapabilitiesLlm;
+
+#[async_trait]
+impl InferenceAdapter for RoutingCapabilitiesLlm {
+    fn name(&self) -> &str {
+        "mock-routing"
+    }
+
+    fn capabilities(&self) -> &trusty_common::inference::ProviderCapabilities {
+        trusty_common::inference::capabilities(trusty_common::inference::ProviderId::OpenRouter)
+    }
+
+    fn capabilities_for(&self, model: &str) -> &trusty_common::inference::ProviderCapabilities {
+        if model.starts_with("fireworks/") {
+            trusty_common::inference::capabilities(trusty_common::inference::ProviderId::Fireworks)
+        } else {
+            trusty_common::inference::capabilities(trusty_common::inference::ProviderId::OpenRouter)
+        }
+    }
+
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
+        Err(InferenceError::MissingConfig("test double".into()))
     }
 }
 
@@ -281,6 +365,149 @@ async fn record_captures_error_when_inner_call_fails() {
     assert!(records[0]["response"].is_null());
     let err_text = records[0]["error"].as_str().expect("error is a string");
     assert!(err_text.contains("500"), "error text: {err_text}");
+}
+
+/// A `chat_stream()` that fails at the OPEN handshake still occupies the turn
+/// index it reserved — the sequence has NO gap (#4425 finding 1).
+///
+/// Why: the decorator claims a turn index before calling the inner
+/// `chat_stream`, so an early `?` return left that index permanently unused:
+/// the transcript lost the failing request entirely AND every later record was
+/// offset from a hole no reader could explain. The blocking `chat` path records
+/// in all cases; this pins the streaming path to the same contract.
+/// What: fail a stream-open, then run one successful blocking turn through a
+/// second wrapper on the SAME sink, and assert the recorded `turn_index`
+/// sequence is exactly `[0, 1]` — contiguous from zero. Before the fix the file
+/// held one record at index 1.
+/// Test: this test.
+#[tokio::test]
+async fn stream_open_failure_records_its_reserved_turn_index() {
+    let dir = tempdir().expect("tempdir");
+    let capture_path = dir.path().join("run.jsonl");
+    let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
+
+    let failing: Arc<dyn InferenceAdapter> = Arc::new(StreamOpenFailsLlm);
+    let succeeding: Arc<dyn InferenceAdapter> =
+        Arc::new(ScriptedLlm::new(vec![Ok(tool_call_response())]));
+    let streamer = wrap_with_debug_capture(failing, "pm", Some(&sink));
+    let blocker = wrap_with_debug_capture(succeeding, "python-engineer", Some(&sink));
+
+    let opened = streamer.chat_stream(&sample_request("stream me")).await;
+    assert!(
+        opened.is_err(),
+        "the stream-open error must still propagate to the caller"
+    );
+    blocker
+        .chat(&sample_request("the next turn"))
+        .await
+        .expect("blocking turn succeeds");
+
+    let records = read_records(&capture_path);
+    let indices: Vec<u64> = records
+        .iter()
+        .map(|r| r["turn_index"].as_u64().expect("turn_index is a u64"))
+        .collect();
+    assert_eq!(
+        indices,
+        vec![0, 1],
+        "a failed stream-open must occupy its reserved index — no gap"
+    );
+    assert_eq!(records[0]["role"], "pm");
+    assert!(
+        records[0]["response"].is_null(),
+        "a failed stream-open records no response"
+    );
+    assert_eq!(
+        records[0]["error"],
+        InferenceError::MissingConfig(STREAM_FAILURE.into()).to_string()
+    );
+    // The failing request itself must be in the record — it is the whole point
+    // of capturing the failure.
+    assert_eq!(records[0]["request"]["model"], "openai/gpt-4o-mini");
+}
+
+/// A stream error is recorded with the ORIGINAL error's classification, not a
+/// re-wrapped `Transport` (#4425 finding 2).
+///
+/// Why: the decorator used to synthesise
+/// `InferenceError::Transport(e.to_string())` for the record, which is the one
+/// variant that is ALWAYS retryable and NEVER an alarm. A missing-config or
+/// auth failure therefore appeared in the transcript as a transient network
+/// blip — the exact opposite classification — making `is_retryable`/`is_alarm`
+/// underivable from the capture.
+/// What: drive a stream that yields `MissingConfig` (alarm, not retryable) and
+/// assert the record carries that error's own Display text plus
+/// `error_retryable: false` / `error_alarm: true`. Under the old re-wrapping
+/// both booleans were inverted and the text was double-prefixed with
+/// "inference transport error:".
+/// Test: this test.
+#[tokio::test]
+async fn stream_error_preserves_the_original_error_classification() {
+    let dir = tempdir().expect("tempdir");
+    let capture_path = dir.path().join("run.jsonl");
+    let sink = Arc::new(DebugCaptureSink::open(&capture_path).expect("open sink"));
+
+    let inner: Arc<dyn InferenceAdapter> = Arc::new(StreamErrorsMidFlightLlm);
+    let wrapped = wrap_with_debug_capture(inner, "pm", Some(&sink));
+
+    let mut stream = wrapped
+        .chat_stream(&sample_request("stream me"))
+        .await
+        .expect("the stream opens");
+    let first = stream.next().await.expect("one event");
+    assert!(first.is_err(), "the error must reach the caller unchanged");
+    drop(stream);
+
+    let original = InferenceError::MissingConfig(STREAM_FAILURE.into());
+    assert!(original.is_alarm() && !original.is_retryable());
+
+    let records = read_records(&capture_path);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["error"],
+        original.to_string(),
+        "the recorded error must be the original variant, not a Transport wrapper"
+    );
+    assert_eq!(
+        records[0]["error_retryable"], false,
+        "MissingConfig is not retryable; Transport would have recorded true"
+    );
+    assert_eq!(
+        records[0]["error_alarm"], true,
+        "MissingConfig is an alarm; Transport would have recorded false"
+    );
+}
+
+/// The decorator forwards the model-aware `capabilities_for`, not just
+/// `capabilities()` (#4425 finding 3).
+///
+/// Why: `wrap_with_debug_capture` sits between the agent loop and a per-request
+/// ROUTING adapter on every production path. If the decorator inherited the
+/// trait default it would answer every slug with the wrapped adapter's
+/// model-free profile, silently undoing that routing for anyone with
+/// `TCODE_DEBUG_TRANSCRIPT` set — a capability answer that changes when
+/// debugging is on is worse than none.
+/// What: wrap an adapter that routes `fireworks/*` to the Fireworks profile;
+/// assert the wrapper reports Fireworks for that slug and OpenRouter otherwise.
+/// Test: this test.
+#[tokio::test]
+async fn decorator_forwards_capabilities_for() {
+    let dir = tempdir().expect("tempdir");
+    let sink = Arc::new(DebugCaptureSink::open(&dir.path().join("run.jsonl")).expect("open sink"));
+    let inner: Arc<dyn InferenceAdapter> = Arc::new(RoutingCapabilitiesLlm);
+    let wrapped = wrap_with_debug_capture(inner, "pm", Some(&sink));
+
+    assert_eq!(
+        wrapped
+            .capabilities_for("fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct")
+            .id,
+        trusty_common::inference::ProviderId::Fireworks,
+        "the decorator must forward the wrapped adapter's slug routing"
+    );
+    assert_eq!(
+        wrapped.capabilities_for("openai/gpt-4o-mini").id,
+        trusty_common::inference::ProviderId::OpenRouter
+    );
 }
 
 /// Two wrappers (pm + engineer) sharing ONE sink — the exact shape

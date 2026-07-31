@@ -1,4 +1,4 @@
-//! Boilerplate for the two identity methods of [`trusty_common::inference::InferenceAdapter`]
+//! Boilerplate for the identity methods of [`trusty_common::inference::InferenceAdapter`]
 //! (#4425).
 //!
 //! Why: the shared trait requires `name()` and `capabilities()` from every
@@ -7,7 +7,7 @@
 //! `supports_prompt_caching`, `wants_detailed_usage`, `context_window`) all
 //! read from them. trusty-code has ~20 implementors that are NOT real
 //! providers: scripted offline mocks and transparent decorators. Hand-writing
-//! two near-identical methods (plus their Why/What/Test docs) twenty times
+//! near-identical methods (plus their Why/What/Test docs) twenty times
 //! would bury the behaviour that actually differs between those doubles in
 //! boilerplate. These two macros express the two honest answers once.
 //! What: [`mock_adapter_identity`] for a test double — a caller-supplied label
@@ -48,8 +48,13 @@ macro_rules! mock_adapter_identity {
 /// construction — reporting its own identity would make every telemetry line
 /// attribute the turn to the decorator instead of the real backend, and would
 /// silently change the capability-derived defaults the caller reads.
-/// What: expands to the two trait methods, each delegating to `self.$inner`.
-/// Test: `crate::run_task::recorder` and `crate::llm::debug_capture` tests.
+/// What: expands to the three trait methods, each delegating to `self.$inner`
+/// — including the model-aware `capabilities_for` (#4425), without which a
+/// decorator wrapping a per-request ROUTING adapter would fall back to the
+/// trait default (`capabilities()`) and report the routing default's profile
+/// for every slug, silently undoing the routing the wrapped adapter performs.
+/// Test: `crate::run_task::recorder` and `crate::llm::debug_capture` tests;
+/// `crate::llm::debug_capture::tests::decorator_forwards_capabilities_for`.
 macro_rules! delegating_adapter_identity {
     ($inner:ident) => {
         fn name(&self) -> &str {
@@ -58,6 +63,13 @@ macro_rules! delegating_adapter_identity {
 
         fn capabilities(&self) -> &::trusty_common::inference::ProviderCapabilities {
             self.$inner.capabilities()
+        }
+
+        fn capabilities_for(
+            &self,
+            model: &str,
+        ) -> &::trusty_common::inference::ProviderCapabilities {
+            self.$inner.capabilities_for(model)
         }
     };
 }

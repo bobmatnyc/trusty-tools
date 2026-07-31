@@ -382,14 +382,33 @@ impl InferenceAdapter for OpenAiCompatClient {
     /// Capabilities for the routing DEFAULT (OpenRouter).
     ///
     /// Why: the shared trait's `capabilities()` takes no model argument, but
-    /// this transport serves four providers chosen per request. OpenRouter is
-    /// the default branch of [`Self::provider_for_slug`] and the backend nearly
-    /// every trusty-code slug takes; trusty-code's own per-model decisions go
-    /// through `crate::provider::provider_for(slug)`, not through this method.
+    /// this transport serves four providers chosen per request, so there is no
+    /// model-free answer that is right for all of them. OpenRouter is the
+    /// default branch of [`Self::provider_for_slug`] — the provider a slug with
+    /// no routing prefix actually reaches — so it is the honest answer to the
+    /// model-free question. Callers holding a slug must ask
+    /// [`Self::capabilities_for`] instead, which routes.
     /// What: `capabilities(ProviderId::OpenRouter)`.
     /// Test: `client::tests::capabilities_report_openrouter_default`.
     fn capabilities(&self) -> &ProviderCapabilities {
         capabilities(ProviderId::OpenRouter)
+    }
+
+    /// Capabilities for the provider `model` ACTUALLY routes to (#4425).
+    ///
+    /// Why: this transport is multi-provider by design, and OpenRouter's
+    /// profile is wrong for the other three in ways that reach the wire —
+    /// `detailed_usage_accounting` (the OpenRouter-only usage directive),
+    /// `prompt_caching` (`cache_control` breakpoints), `vision`, and the
+    /// context-window fallback tier all differ. Answering every capability
+    /// question with OpenRouter's profile made "one adapter, many providers"
+    /// silently wrong for `fireworks/*`, `together/*`, and `atlascloud/*`.
+    /// What: resolves `model` through [`Self::provider_for_slug`] — the SAME
+    /// gate [`Self::route`] uses to pick the transport — so capabilities can
+    /// never disagree with where the request is sent.
+    /// Test: `client::tests::capabilities_for_follows_slug_routing`.
+    fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+        capabilities(Self::provider_for_slug(model))
     }
 
     /// Route + issue one blocking chat call through the shared adapter.
@@ -849,5 +868,58 @@ mod tests {
         let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
         assert_eq!(client.capabilities().id, ProviderId::OpenRouter);
         assert_eq!(client.name(), "openrouter");
+    }
+
+    /// `capabilities_for` follows the SAME slug routing `route()` does (#4425).
+    ///
+    /// Why: this transport serves four providers picked per request. Answering
+    /// every capability question with OpenRouter's profile — as it did before
+    /// #4425 — reports `detailed_usage_accounting: true` and
+    /// `prompt_caching: true` for a Fireworks turn, neither of which Fireworks
+    /// honours, and hands the compaction budget OpenRouter's 200K tier for a
+    /// 128K backend. #4426 builds Bedrock on this exact surface.
+    /// What: for one representative slug per routed provider, assert
+    /// `capabilities_for(slug).id` equals the provider `provider_for_slug`
+    /// selects — i.e. the two can never disagree — and spot-check that the
+    /// answer actually DIFFERS from OpenRouter's for a non-OpenRouter slug.
+    /// Test: this test.
+    #[test]
+    fn capabilities_for_follows_slug_routing() {
+        let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
+        for (slug, expected) in [
+            ("anthropic/claude-sonnet-4-5", ProviderId::OpenRouter),
+            ("openai/gpt-4o-mini", ProviderId::OpenRouter),
+            (
+                "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+                ProviderId::Fireworks,
+            ),
+            (
+                "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                ProviderId::Together,
+            ),
+            ("atlascloud/openai/gpt-5.6-sol", ProviderId::AtlasCloud),
+        ] {
+            assert_eq!(
+                client.capabilities_for(slug).id,
+                expected,
+                "capabilities for {slug} must follow its routing target"
+            );
+            assert_eq!(
+                client.capabilities_for(slug).id,
+                OpenAiCompatClient::provider_for_slug(slug),
+                "capabilities and transport routing must agree for {slug}"
+            );
+        }
+
+        // The behavioural teeth: a Fireworks slug must NOT inherit OpenRouter's
+        // usage-directive / caching / context-window profile.
+        let fireworks = client.capabilities_for("fireworks/accounts/x/models/y");
+        assert!(!fireworks.detailed_usage_accounting);
+        assert!(!fireworks.prompt_caching);
+        assert_eq!(fireworks.max_context_window, 128_000);
+        assert_eq!(
+            client.context_window("fireworks/accounts/x/models/y"),
+            128_000
+        );
     }
 }

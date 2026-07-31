@@ -41,7 +41,9 @@
 //! change), env-set produces a JSONL record with the full request messages,
 //! tool-call arguments, and tool results (visible in the NEXT turn's message
 //! history), directory-mode picks a fresh per-run file, and a failed inner
-//! `chat()` call is still recorded (with `error` set, `response: null`).
+//! `chat()` call is still recorded (with `error` set, `response: null`) — as
+//! is a failed `chat_stream()`, at BOTH the stream-open handshake and
+//! mid-flight, with the original error's classification intact (#4425).
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -96,9 +98,18 @@ pub const ENV_VAR: &str = "TCODE_DEBUG_TRANSCRIPT";
 /// the verbatim `ChatRequest` serialised with its normal wire `Serialize`
 /// impl (so `ChatMessage`'s cache_control content-block shape round-trips
 /// exactly as sent); `response` is `Some` on success, `None` on failure (in
-/// which case `error` carries the `InferenceError`'s `Display` text); `usage` is
+/// which case `error` carries the `InferenceError`'s `Display` text and
+/// `error_retryable`/`error_alarm` carry its CLASSIFICATION); `usage` is
 /// the zero value on failure.
-/// Test: `debug_capture::tests::record_serialises_full_request_and_response`.
+///
+/// #4425: `error_retryable`/`error_alarm` exist because `error` is a `String`
+/// — the record cannot hold an `InferenceError` itself (the shared enum is not
+/// `Serialize`/`Deserialize`), so without them a reader would have to
+/// re-classify by pattern-matching Display text. They are the transcript's
+/// machine-readable copy of [`InferenceError::is_retryable`] /
+/// [`InferenceError::is_alarm`], recorded from the ORIGINAL error value.
+/// Test: `debug_capture::tests::record_serialises_full_request_and_response`,
+/// `debug_capture::tests::record_preserves_the_original_error_classification`.
 #[derive(Debug, Clone, Serialize)]
 struct DebugCaptureRecord<'a> {
     turn_index: u64,
@@ -107,6 +118,8 @@ struct DebugCaptureRecord<'a> {
     request: &'a ChatRequest,
     response: Option<ChatResponse>,
     error: Option<String>,
+    error_retryable: Option<bool>,
+    error_alarm: Option<bool>,
     usage: TokenUsage,
 }
 
@@ -194,20 +207,43 @@ impl DebugCaptureSink {
     /// stderr and otherwise swallowed — a debug-capture write must never
     /// fail the underlying LLM call it is observing.
     /// What: builds a [`DebugCaptureRecord`] from `req` and `result`
-    /// (cloning the `ChatResponse` on success; recording `InferenceError`'s
-    /// `Display` text on failure), serialises it to one JSON line, and
+    /// (cloning the `ChatResponse` on success; recording the ORIGINAL
+    /// `InferenceError`'s `Display` text AND its retryable/alarm
+    /// classification on failure), serialises it to one JSON line, and
     /// appends it (with a trailing newline) to the sink's file under its
     /// mutex.
+    ///
+    /// #4425: takes `Result<&ChatResponse, &InferenceError>` rather than
+    /// `&Result<..>` so a caller holding only a BORROWED error (the streaming
+    /// path, whose stream items are `&Result<ChatStreamEvent, InferenceError>`)
+    /// can record the error it actually observed. `InferenceError` is neither
+    /// `Clone` nor cheap to reconstruct, and the previous `&Result<..>`
+    /// signature forced that caller to synthesise a stand-in
+    /// `InferenceError::Transport(e.to_string())` — which silently rewrote
+    /// every error's variant, so `is_retryable`/`is_alarm` recorded below were
+    /// the WRAPPER's classification, not the real failure's.
     fn record(
         &self,
         turn_index: u64,
         role: &str,
         req: &ChatRequest,
-        result: &Result<ChatResponse, InferenceError>,
+        result: Result<&ChatResponse, &InferenceError>,
     ) {
-        let (response, error, usage) = match result {
-            Ok(resp) => (Some(resp.clone()), None, crate::llm::token_usage(resp)),
-            Err(e) => (None, Some(e.to_string()), TokenUsage::default()),
+        let (response, error, error_retryable, error_alarm, usage) = match result {
+            Ok(resp) => (
+                Some(resp.clone()),
+                None,
+                None,
+                None,
+                crate::llm::token_usage(resp),
+            ),
+            Err(e) => (
+                None,
+                Some(e.to_string()),
+                Some(e.is_retryable()),
+                Some(e.is_alarm()),
+                TokenUsage::default(),
+            ),
         };
         let record = DebugCaptureRecord {
             turn_index,
@@ -216,6 +252,8 @@ impl DebugCaptureSink {
             request: req,
             response,
             error,
+            error_retryable,
+            error_alarm,
             usage,
         };
         let line = match serde_json::to_string(&record) {
@@ -289,7 +327,8 @@ impl InferenceAdapter for DebugCaptureLlmClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let turn_index = self.sink.next_turn_index();
         let result = self.inner.chat(req).await;
-        self.sink.record(turn_index, &self.role, req, &result);
+        self.sink
+            .record(turn_index, &self.role, req, result.as_ref());
         result
     }
 
@@ -303,13 +342,30 @@ impl InferenceAdapter for DebugCaptureLlmClient {
     /// What: reserves the turn index UP FRONT (so a streamed turn keeps its
     /// dispatch-order position even though it completes later), forwards every
     /// event unchanged, and writes the capture record from the assembled
-    /// response at the terminal event. A stream that errors mid-flight records
-    /// that error, matching the blocking path.
-    /// Test: `debug_capture::tests::*` cover the blocking path; the streaming
-    /// pass-through is covered end to end by `crate::agent_loop::tests`.
+    /// response at the terminal event. A stream that errors — whether at
+    /// stream-OPEN or mid-flight — records that error under the reserved index
+    /// and then propagates it, exactly as [`Self::chat`] does; the recorded
+    /// error is the ORIGINAL `InferenceError`, so its retryable/alarm
+    /// classification survives into the transcript.
+    /// Test: `debug_capture::tests::*` cover the blocking path;
+    /// `stream_open_failure_records_its_reserved_turn_index` and
+    /// `stream_error_preserves_the_original_error_classification` cover the two
+    /// streaming failure modes; the streaming pass-through is covered end to
+    /// end by `crate::agent_loop::tests`.
     async fn chat_stream(&self, req: &ChatRequest) -> Result<ChatStream, InferenceError> {
         let turn_index = self.sink.next_turn_index();
-        let inner = self.inner.chat_stream(req).await?;
+        // #4425: the index is reserved BEFORE the handshake, so a failed
+        // stream-open must still occupy it — returning `?` here would leave a
+        // permanent GAP in the transcript's turn-index sequence and, worse,
+        // drop the only record of the request that failed. The blocking `chat`
+        // path records in ALL cases; this matches it.
+        let inner = match self.inner.chat_stream(req).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                self.sink.record(turn_index, &self.role, req, Err(&e));
+                return Err(e);
+            }
+        };
         let sink = Arc::clone(&self.sink);
         let role = self.role.clone();
         let req = req.clone();
@@ -321,14 +377,15 @@ impl InferenceAdapter for DebugCaptureLlmClient {
                     if matches!(ev, ChatStreamEvent::Done(_)) {
                         let resp = std::mem::take(&mut assembly)
                             .into_response(String::new(), req.model.clone());
-                        sink.record(turn_index, &role, &req, &Ok(resp));
+                        sink.record(turn_index, &role, &req, Ok(&resp));
                     }
                 }
-                Err(e) => {
-                    let failed: Result<ChatResponse, InferenceError> =
-                        Err(InferenceError::Transport(e.to_string()));
-                    sink.record(turn_index, &role, &req, &failed);
-                }
+                // #4425: record `e` ITSELF, never a re-wrapped
+                // `InferenceError::Transport(e.to_string())` — that flattened
+                // every mid-flight failure into the one variant that is always
+                // retryable and never an alarm, so a 401 or a missing-config
+                // failure was recorded as a transient network blip.
+                Err(e) => sink.record(turn_index, &role, &req, Err(e)),
             }
             event
         })))

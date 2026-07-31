@@ -118,6 +118,13 @@ impl InferenceAdapter for BedrockChatClient {
         self.inner.capabilities()
     }
 
+    // #4425: forward the model-aware form too — a decorator that answered it
+    // from the trait default would silently drop back to `capabilities()` and
+    // stop reflecting the wrapped adapter.
+    fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+        self.inner.capabilities_for(model)
+    }
+
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         self.inner.chat(request).await
     }

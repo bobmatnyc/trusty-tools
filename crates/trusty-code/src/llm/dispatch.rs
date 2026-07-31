@@ -133,21 +133,41 @@ impl InferenceAdapter for DispatchingLlmClient {
 
     /// Capabilities for the DEFAULT backend, not for a specific request.
     ///
-    /// Why (#4425): this is the one genuine impedance mismatch between
-    /// trusty-code and the shared trait. [`InferenceAdapter::capabilities`]
-    /// takes no model argument, so a per-request-routed client cannot answer it
-    /// precisely. trusty-code does not rely on this method for its per-model
-    /// decisions — `agent_loop::build_request` asks `crate::provider::provider_for(slug)`,
-    /// which resolves per model slug — so returning the OpenRouter profile (the
-    /// routing default, and the backend the overwhelming majority of slugs take)
-    /// is honest for diagnostics without any call site depending on it.
-    /// Collapsing that per-slug resolution into the shared registry needs
-    /// slug-level capabilities upstream and is tracked as epic #4429 follow-up
-    /// work, not smuggled in here.
+    /// Why (#4425): [`InferenceAdapter::capabilities`] takes no model argument,
+    /// so a per-request-routed client has no single right answer to it. The
+    /// OpenRouter profile is the routing default — the backend a slug with no
+    /// `bedrock/` or other routing prefix actually reaches — so it is the
+    /// honest answer to the model-free question. Every caller that HAS a slug
+    /// must ask [`Self::capabilities_for`], which routes.
     /// What: `capabilities(ProviderId::OpenRouter)`.
     /// Test: `dispatch::tests::capabilities_report_openrouter_default`.
     fn capabilities(&self) -> &ProviderCapabilities {
         capabilities(ProviderId::OpenRouter)
+    }
+
+    /// Capabilities for the backend `model` ACTUALLY dispatches to (#4425).
+    ///
+    /// Why: this dispatcher's entire purpose is that ONE shared client serves
+    /// several backends, so a capability answer hard-wired to OpenRouter is
+    /// wrong for exactly the requests the type exists to handle. Bedrock's
+    /// profile differs where it matters — `tool_dialect` is
+    /// `AnthropicMessages`, not `OpenAiFunctions`, and it never wants the
+    /// OpenRouter usage directive — and #4426 builds its `ConverseStream`
+    /// transport on this very surface.
+    /// What: routes through the SAME [`Self::routes_to_bedrock`] gate `chat`
+    /// and `chat_stream` use, then delegates to the chosen transport's own
+    /// `capabilities_for` (so the OpenAI-compat lane keeps resolving
+    /// Fireworks/Together/AtlasCloud by prefix). The Bedrock arm reads the
+    /// shared registry directly rather than via [`Self::bedrock`], because that
+    /// builder is async and touches AWS credentials — a capability lookup must
+    /// stay synchronous and side-effect-free (#2245 lazy construction).
+    /// Test: `dispatch::tests::capabilities_for_follows_slug_routing`.
+    fn capabilities_for(&self, model: &str) -> &ProviderCapabilities {
+        if Self::routes_to_bedrock(model) {
+            capabilities(ProviderId::Bedrock)
+        } else {
+            self.openai_compat.capabilities_for(model)
+        }
     }
 
     /// Dispatch `req` to Bedrock or the shared OpenAI-compat transport based on
@@ -309,6 +329,66 @@ mod tests {
         assert_eq!(
             DispatchingLlmClient::new().capabilities().id,
             ProviderId::OpenRouter
+        );
+    }
+
+    /// `capabilities_for` follows the SAME gate `chat`/`chat_stream` route on
+    /// (#4425).
+    ///
+    /// Why: this dispatcher exists because one shared client serves several
+    /// backends; before #4425 every capability question was answered with
+    /// OpenRouter's profile, so a `bedrock/*` turn was reported as
+    /// OpenAI-dialect tooling with the OpenRouter usage directive — wrong for
+    /// exactly the requests the type exists to handle, and the surface #4426
+    /// builds Bedrock streaming on.
+    /// What: assert the Bedrock slug resolves to the Bedrock profile (whose
+    /// `tool_dialect` is Anthropic, not OpenAI), that the OpenAI-compat lane
+    /// still resolves Fireworks/Together by prefix, and that a plain slug keeps
+    /// OpenRouter. Also assert the answer agrees with `routes_to_bedrock` — the
+    /// single gate — so capabilities and transport can never diverge. No
+    /// network and no AWS credentials: the Bedrock arm reads the registry
+    /// synchronously, which the final assertion pins by checking the lazy cell
+    /// is still empty.
+    /// Test: this test.
+    #[test]
+    fn capabilities_for_follows_slug_routing() {
+        let client = DispatchingLlmClient::new();
+        for (slug, expected) in [
+            (
+                "bedrock/us.anthropic.claude-sonnet-4-6",
+                ProviderId::Bedrock,
+            ),
+            ("anthropic/claude-sonnet-4-5", ProviderId::OpenRouter),
+            (
+                "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+                ProviderId::Fireworks,
+            ),
+            (
+                "together/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                ProviderId::Together,
+            ),
+        ] {
+            let caps = client.capabilities_for(slug);
+            assert_eq!(caps.id, expected, "capabilities for {slug} must route");
+            assert_eq!(
+                caps.id == ProviderId::Bedrock,
+                DispatchingLlmClient::routes_to_bedrock(slug),
+                "capabilities and transport routing must agree for {slug}"
+            );
+        }
+
+        // The behavioural teeth: Bedrock speaks the Anthropic tool dialect and
+        // never wants OpenRouter's usage directive.
+        let bedrock = client.capabilities_for("bedrock/us.anthropic.claude-sonnet-4-6");
+        assert_eq!(
+            bedrock.tool_dialect,
+            trusty_common::inference::registry::ToolDialect::AnthropicMessages
+        );
+        assert!(!bedrock.detailed_usage_accounting);
+
+        assert!(
+            client.bedrock.get().is_none(),
+            "a capability lookup must not build the Bedrock transport"
         );
     }
 
