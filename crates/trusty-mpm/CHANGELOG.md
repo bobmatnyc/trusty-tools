@@ -9,6 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- delegation-tracker `agentId` presence-check no longer accepts `null`/`""` (closes [#4163](https://github.com/bobmatnyc/trusty-tools/issues/4163))
+  - `classify_dispatch` decided "we have an agent id" with key-presence alone
+    (`r.get("agentId").is_some()`), while `on_launched`'s consumer rejected a
+    non-string value and `on_subagent_stop`'s consumer rejected an empty
+    string. A `{"agentId": null}` or `{"agentId": ""}` dispatch response took
+    the `Launched` branch and pinned the delegation `Running` with a handle no
+    `SubagentStop` can ever quote back, burning the full 6h staleness window as
+    a phantom in-flight entry. Both call sites now share one extraction,
+    `usable_agent_id` (non-null, non-empty string), so the presence-check and
+    the consumers are structurally incapable of disagreeing again.
+
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`
     instead of `project,local`. Claude Code discovers subagents per settings
