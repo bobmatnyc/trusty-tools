@@ -681,15 +681,14 @@ Per D4:
    pattern-aware `trusty-mpm` known-absent handling in the oracle (§7.5). No new
    infrastructure.
 
-> **Ambiguity in the source material, flagged rather than resolved:** the
-> architecture sketch annotates `scenarios/install-local.sh` with "build first".
-> Read in context with D4 this means *implement this scenario first*, and that is
-> the reading adopted above. It could alternatively be read as *run `cargo build`
-> before `cargo install` inside the guest*. If the latter was intended, note that
-> a separate `cargo build` step is redundant with `cargo install --path` under a
-> shared `CARGO_TARGET_DIR` (§8.6) — it would only add a distinct failure boundary
-> between "compiles" and "installs", which may or may not be wanted. This should
-> be confirmed with the owner before implementation.
+> **Settled:** the architecture sketch annotates `scenarios/install-local.sh` with
+> "build first". This means *implement this scenario first*, consistent with D4
+> (implementation order (c) → (b) → (a)), and that is the reading adopted above.
+> There is no requirement for a separate `cargo build` step preceding `cargo
+> install` in the guest. Note, for completeness, that such a step would be
+> redundant with `cargo install --path` under a shared `CARGO_TARGET_DIR` (§8.6)
+> — it would only add a distinct failure boundary between "compiles" and
+> "installs" — but it is not part of the design.
 
 ---
 
