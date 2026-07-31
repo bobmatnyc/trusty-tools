@@ -144,9 +144,80 @@ fn spawn_command_sets_claude_config_dir() {
         "spawn command must scrub the key (via -u, BEFORE the NAME=VALUE assignment per \
              POSIX env grammar) then set (single-quoted) CLAUDE_CONFIG_DIR: {cmd}"
     );
+    // #4451: with a config dir the spawn relocates the `user` tier onto tm's
+    // own config home, so the flag MUST name that tier — it is where
+    // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives. Carrying
+    // `project,local` here is exactly the regression that left managed
+    // sessions with zero specialists.
     assert!(
-        cmd.contains("--setting-sources project,local"),
-        "isolation flag must still be present with a config dir: {cmd}"
+        cmd.contains("--setting-sources user,project,local"),
+        "a relocated spawn must load the `user` tier: {cmd}"
+    );
+}
+
+#[test]
+fn spawn_command_loads_the_user_tier_only_when_config_dir_is_relocated() {
+    // #4451 both directions in one test, because the two failures are
+    // opposite and each is silent:
+    //   - relocated spawn WITHOUT `user` → no bundled agents resolve
+    //   - non-relocated spawn WITH `user` → the operator's global
+    //     ~/.claude/settings.json hooks bleed back in (#1269)
+    let relocated = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        Some(Path::new(
+            "/home/bob/.trusty-tools/trusty-mpm/claude-config",
+        )),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        relocated.contains("--setting-sources user,project,local"),
+        "relocated spawn must load the tm-owned `user` tier: {relocated}"
+    );
+
+    let ambient = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        ambient.contains("--setting-sources project,local"),
+        "non-relocated spawn must keep the #1269 exclusion: {ambient}"
+    );
+    assert!(
+        !ambient.contains("user,project,local"),
+        "without CLAUDE_CONFIG_DIR the `user` tier is the operator's real \
+         ~/.claude and must stay excluded (#1269): {ambient}"
+    );
+}
+
+#[test]
+fn resume_command_loads_the_user_tier_when_config_dir_is_relocated() {
+    // #4451: a resumed session is as agent-dependent as a fresh one — the
+    // resume path must not be the one that silently keeps the old flag.
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        Some(Path::new(
+            "/home/bob/.trusty-tools/trusty-mpm/claude-config",
+        )),
+        Some("abc-123"),
+        false,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        cmd.contains("--setting-sources user,project,local"),
+        "relocated resume must load the tm-owned `user` tier: {cmd}"
     );
 }
 
@@ -1592,6 +1663,40 @@ fn compose_inplace_args_omits_prompt_flag_when_absent() {
     assert!(
         args.contains(&"--setting-sources".to_owned()),
         "isolation flags are unconditional: {args:?}"
+    );
+}
+
+#[test]
+fn compose_inplace_args_loads_the_user_tier_when_config_dir_is_relocated() {
+    // #4451: the in-place relaunch (bare `tm` inside a managed pane) is a
+    // third spawn path with its own argv builder — it must pick the same
+    // relocated-tier flag, or a relaunched session silently loses every
+    // bundled specialist the pane had before.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().join("workspace-inplace-tier");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let config_dir = tmp.path().join("claude-config");
+
+    let relocated = compose_inplace_args(&cwd, Some(&config_dir), None, None);
+    let idx = relocated
+        .iter()
+        .position(|a| a == "--setting-sources")
+        .expect("setting-sources flag must be present");
+    assert_eq!(
+        relocated[idx + 1],
+        "user,project,local",
+        "relocated in-place relaunch must load the tm-owned `user` tier: {relocated:?}"
+    );
+
+    let ambient = compose_inplace_args(&cwd, None, None, None);
+    let idx = ambient
+        .iter()
+        .position(|a| a == "--setting-sources")
+        .expect("setting-sources flag must be present");
+    assert_eq!(
+        ambient[idx + 1],
+        "project,local",
+        "without a relocated config dir the #1269 exclusion stands: {ambient:?}"
     );
 }
 

@@ -7,6 +7,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
+  - Daemon-managed spawns now launch with `--setting-sources user,project,local`
+    instead of `project,local`. Claude Code discovers subagents per settings
+    tier, and `$CLAUDE_CONFIG_DIR/agents` — where [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)
+    moved the bundled roster — IS the `user` tier, the one tier the old flag
+    dropped. A session showed only the five Claude Code built-ins and answered
+    `Agent type 'rust-engineer' not found` while all 42 agent files sat
+    correctly on disk.
+  - Re-admitting the `user` tier does not re-admit the operator's global
+    `~/.claude/settings.json` hooks that [#1269](https://github.com/bobmatnyc/trusty-tools/issues/1269)
+    excluded: managed spawns relocate `CLAUDE_CONFIG_DIR`, so the `user` tier
+    resolves to the tm-owned config home. Launch paths that do NOT inject
+    `CLAUDE_CONFIG_DIR` (`tm launch`, `tm connect`) keep `project,local`
+    unchanged — the flag is now selected from that one fact rather than
+    hard-coded per call site.
+
+### Added
+
+- `tm doctor` gains an `agent_reachability` check that fails when the bundled roster is unreachable ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
+  - The existing `agents` and `deployment` checks are presence-only — they
+    counted 42 files and diffed them against the canonical roster, and both
+    reported green throughout the outage above. The new check asserts the one
+    thing they cannot: that the settings tier the roster deploys into is a tier
+    the managed spawn's `--setting-sources` flag actually loads. It reads both
+    sides from production code, so moving the deploy destination without
+    updating the flag (what happened here) is a hard `Fail`, not a silent
+    regression.
+
 ### Changed
 
 - bundled agents deploy to the tm-managed user tier, never per-workspace and never to `~/.claude` (closes [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409))

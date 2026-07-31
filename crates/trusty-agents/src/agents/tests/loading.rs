@@ -2143,6 +2143,106 @@ fn bundled_personas_pin_git_reach() {
     }
 }
 
+/// The `cto-assistant` OKG DOCSTORE grant is a shipped, deliberate one, and
+/// this overlay is what owns it.
+///
+/// Why: the grant lived as a hand edit in the DEPLOYED copy only (there is no
+/// API to grant a tool, #3890) until a bundled-agent reprovision overwrote
+/// that file and destroyed it with no `.stale.bak` (#4461). The owner decision
+/// (2026-07-31) was to move it into the bundle so the next reprovision
+/// CONVERGES on it instead of destroying it. Like the git carve-out above it
+/// is a non-obvious re-declaration that reads as redundancy, so a later
+/// tidy-up removes it unless something fails.
+///
+/// The redundancy is real but load-bearing, and that shapes the test: the base
+/// `assistant` has granted all four OKG tools since #3883 and `extends` unions
+/// `[tools].allow` base-first, so the RESOLVED surface keeps both tools even
+/// with this overlay stripped. A resolution-only assertion would therefore stay
+/// green through a full revert of the bundled grant. Both halves are asserted —
+/// resolved reachability (the capability the persona depends on) and the
+/// overlay's own declaration (independence from a base that may narrow later,
+/// exactly as the base narrowing git reach in #4420 already forced once).
+///
+/// Narrowness is pinned on the OVERLAY only, deliberately: this persona does
+/// resolve `okg_ingest_gmail`/`okg_ingest_drive` today, inherited from the
+/// base, so asserting non-reachability would assert a falsehood. What is true
+/// and worth pinning is that this overlay never adds them itself — widening it
+/// has to be a decision taken here, not a side effect of matching the base.
+/// What: resolves the persona through `AgentConfig::by_name` for reachability,
+/// then parses the package TOML directly for what the overlay itself declares.
+/// Test: This function IS the test.
+#[test]
+fn bundled_cto_assistant_pins_okg_docstore_reach() {
+    const GRANTED: [&str; 2] = ["okg_ingest_docstore", "okg_sources"];
+    const NOT_GRANTED_HERE: [&str; 2] = ["okg_ingest_gmail", "okg_ingest_drive"];
+
+    let _guard = ENV_LOCK.blocking_lock();
+    clear_model_env("cto-assistant");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+    }
+    let cfg = AgentConfig::by_name("cto-assistant");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.unwrap_or_else(|e| panic!("'cto-assistant' must resolve: {e}"));
+    let resolved = cfg.tools.allow.as_deref().unwrap_or_else(|| {
+        panic!("'cto-assistant' must ship a restricted [tools].allow, not an absent one")
+    });
+
+    for tool in GRANTED {
+        assert!(
+            crate::ctrl::pm_task::match_any_glob(tool, resolved),
+            "'cto-assistant' must reach '{tool}' — the OKG docstore grant is a \
+             shipped owner decision (2026-07-31), bundled after #4461 destroyed \
+             the deployed hand edit. Resolved allow-list: {resolved:?}"
+        );
+    }
+
+    // The overlay's OWN declaration, pre-union. This is the half that fails if
+    // the bundled grant is reverted; the resolved half above would not, because
+    // the base re-supplies both tools through `extends`. Read as a raw
+    // `toml::Value` rather than an `AgentConfig` because this is an MD package:
+    // `[system_prompt].content` lives in `persona.md`, so a whole-config
+    // deserialize of the TOML alone fails on the missing field.
+    let raw = std::fs::read_to_string(
+        bundled_agents_dir()
+            .join("cto-assistant")
+            .join("agent.toml"),
+    )
+    .expect("the bundled cto-assistant package must exist");
+    let doc: toml::Value = toml::from_str(&raw).expect("the package must parse");
+    let declared: Vec<&str> = doc
+        .get("tools")
+        .and_then(|t| t.get("allow"))
+        .and_then(|a| a.as_array())
+        .expect("the cto-assistant package must declare its own [tools].allow")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    for tool in GRANTED {
+        assert!(
+            declared.contains(&tool),
+            "the cto-assistant package must DECLARE '{tool}' itself rather than \
+             lean on the base's union — that independence is the whole point of \
+             bundling the grant (#3890: no API can re-add it, #4461: a \
+             reprovision eats any out-of-bundle edit). Declared: {declared:?}"
+        );
+    }
+    for tool in NOT_GRANTED_HERE {
+        assert!(
+            !declared.contains(&tool),
+            "the cto-assistant package must NOT declare '{tool}': this grant is \
+             narrow on purpose — docstore ingest only. Widening it is a decision \
+             about what this persona may ingest, not a cleanup to match the base \
+             (which does grant it, and whose union this overlay cannot filter)."
+        );
+    }
+}
+
 /// ADR-0024 decision 4 sub-answer (a), the MIGRATION half: every bundled
 /// assistant persona ships a seeded `[subagents].delegate_allowed`.
 ///
