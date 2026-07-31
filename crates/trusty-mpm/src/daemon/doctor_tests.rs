@@ -102,7 +102,7 @@ async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_twenty_two_checks() {
+async fn run_doctor_produces_twenty_three_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -114,7 +114,8 @@ async fn run_doctor_produces_twenty_two_checks() {
     // nineteen); issue #3453 part 2 adds `output_style_legacy_ids` (nineteen
     // → twenty); issue #3427 adds `scaffold_tracking` (twenty →
     // twenty-one); issue #2867 adds `push_guard` (twenty-one →
-    // twenty-two).
+    // twenty-two); issue #4451 adds `agent_reachability` (twenty-two →
+    // twenty-three).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[]).await;
@@ -122,6 +123,7 @@ async fn run_doctor_produces_twenty_two_checks() {
     let expected = [
         "instructions",
         "agents",
+        "agent_reachability",
         "skills",
         "skill_source",
         "output_style",

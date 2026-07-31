@@ -56,7 +56,8 @@ pub fn resolve_pm_model(config: &MpmConfig, explicit: Option<&str>) -> String {
     crate::core::config::resolve_agent_model(config, "pm", None, explicit)
 }
 
-/// The setting-sources flag every trusty-mpm-spawned `claude` carries.
+/// The setting-sources flag a spawn that does NOT relocate `CLAUDE_CONFIG_DIR`
+/// carries.
 ///
 /// Why (issue #1269 / step 4): the operator's global `~/.claude/settings.json`
 /// carries hooks (e.g. claude-mpm's) that bleed into — and interfere with —
@@ -64,26 +65,95 @@ pub fn resolve_pm_model(config: &MpmConfig, explicit: Option<&str>) -> String {
 /// load ONLY the project (tm-owned workspace `.claude/settings.json`) and local
 /// settings sources, excluding `user`. This is the correct isolation lever: it
 /// does NOT touch `~/.claude.json`, so the ambient OAuth login tm relies on is
-/// preserved.
-/// What: the literal flag string appended to every launch command.
+/// preserved. It stays the flag for launch paths that do NOT inject their own
+/// `CLAUDE_CONFIG_DIR` (`tm launch`, `tm connect`), where the `user` tier still
+/// resolves to the operator's real `~/.claude` and must stay excluded.
+/// What: the literal flag string appended to those launch commands.
 /// Test: `claude_command_includes_setting_sources`.
 pub const SETTING_SOURCES_FLAG: &str = "--setting-sources project,local";
 
-/// The settings tiers [`SETTING_SOURCES_FLAG`] actually enumerates.
+/// The setting-sources flag a spawn that DOES relocate `CLAUDE_CONFIG_DIR`
+/// carries.
 ///
-/// Why (issue #4203): a deploy step that writes agents into a tier this list
-/// does NOT name is a silent no-op — Claude Code never loads them, and nothing
-/// reports an error. Parsing the flag instead of hard-coding
-/// `["project", "local"]` keeps that invariant honest if the flag's value ever
-/// changes: the tier check and the spawned command can never drift apart.
-/// What: splits [`SETTING_SOURCES_FLAG`] at its first space and then the
-/// comma-separated tier list, trimming each name.
-/// Test: `setting_source_tiers_parses_the_flag`.
-pub fn setting_source_tiers() -> Vec<&'static str> {
-    SETTING_SOURCES_FLAG
-        .split_once(' ')
+/// Why (issue #4451): Claude Code discovers subagents (`agents/*.md`) per
+/// settings tier, and `$CLAUDE_CONFIG_DIR/agents` IS the `user` tier — the tier
+/// [`SETTING_SOURCES_FLAG`] deliberately drops. Since #4437 moved the bundled
+/// roster into the tm-managed `CLAUDE_CONFIG_DIR`, a managed session carrying
+/// the `project,local` flag saw ZERO bundled specialists: `Agent type
+/// 'rust-engineer' not found`, every delegation degrading to `general-purpose`,
+/// while the 42 files sat correctly on disk. Adding `user` back is safe here
+/// precisely BECAUSE the spawn relocates `CLAUDE_CONFIG_DIR`: the `user` tier
+/// then resolves to the tm-owned config home, not the operator's `~/.claude`,
+/// so the #1269 isolation goal (keep claude-mpm's global hooks out) is still met
+/// — by the relocation rather than by the exclusion.
+///
+/// Verified live against `claude` 2.1.220 with
+/// `CLAUDE_CONFIG_DIR=~/.trusty-tools/trusty-mpm/claude-config` from a cwd with
+/// no `.claude/`: `project,local` resolves 5 built-ins only, while both the
+/// flag-less default and `user,project,local` resolve all 42 bundled agents and
+/// NONE of the operator's own `~/.claude/agents` entries.
+/// What: the literal flag string appended to relocated launch commands.
+/// Test: `relocated_setting_sources_flag_loads_the_user_tier`,
+/// `setting_sources_flag_picks_by_config_dir`.
+pub const SETTING_SOURCES_FLAG_RELOCATED: &str = "--setting-sources user,project,local";
+
+/// Pick the setting-sources flag matching a spawn's `CLAUDE_CONFIG_DIR` posture.
+///
+/// Why (issue #4451): the two flags are not interchangeable, and picking the
+/// wrong one fails silently in opposite directions — `project,local` on a
+/// relocated spawn hides the bundled roster, `user,project,local` on a
+/// non-relocated spawn re-admits the operator's global hooks (#1269). Deriving
+/// the choice from the one input that decides it (does this spawn inject
+/// `CLAUDE_CONFIG_DIR`?) removes the chance of a call site getting it wrong.
+/// What: [`SETTING_SOURCES_FLAG_RELOCATED`] when `config_dir` is `Some`
+/// (the spawn points `CLAUDE_CONFIG_DIR` at a tm-owned home), otherwise
+/// [`SETTING_SOURCES_FLAG`].
+/// Test: `setting_sources_flag_picks_by_config_dir`.
+pub fn setting_sources_flag(config_dir: Option<&Path>) -> &'static str {
+    if config_dir.is_some() {
+        SETTING_SOURCES_FLAG_RELOCATED
+    } else {
+        SETTING_SOURCES_FLAG
+    }
+}
+
+/// The settings tiers a `--setting-sources <list>` flag actually enumerates.
+///
+/// Why (issue #4203): a deploy step that writes agents into a tier the spawn's
+/// flag does NOT name is a silent no-op — Claude Code never loads them, and
+/// nothing reports an error. Parsing the flag instead of hard-coding the tier
+/// names keeps that invariant honest if either flag's value ever changes: the
+/// tier check and the spawned command can never drift apart.
+/// What: splits `flag` at its first space and then the comma-separated tier
+/// list, trimming each name.
+/// Test: `setting_source_tiers_parses_the_flag`,
+/// `relocated_setting_sources_flag_loads_the_user_tier`.
+pub fn setting_source_tiers_of(flag: &'static str) -> Vec<&'static str> {
+    flag.split_once(' ')
         .map(|(_, list)| list.split(',').map(str::trim).collect())
         .unwrap_or_default()
+}
+
+/// The settings tiers [`SETTING_SOURCES_FLAG`] enumerates.
+///
+/// Why/What: see [`setting_source_tiers_of`]; this is the non-relocated
+/// (`tm launch` / `tm connect`) tier list.
+/// Test: `setting_source_tiers_parses_the_flag`.
+pub fn setting_source_tiers() -> Vec<&'static str> {
+    setting_source_tiers_of(SETTING_SOURCES_FLAG)
+}
+
+/// The settings tiers [`SETTING_SOURCES_FLAG_RELOCATED`] enumerates.
+///
+/// Why (issue #4451): `tm doctor` needs this list to assert that the tier the
+/// bundled roster deploys into is one a managed session actually loads. Reading
+/// it from the flag — rather than re-stating `["user", "project", "local"]` —
+/// is what makes the doctor check a real gate instead of a tautology: change
+/// either the flag or the deploy destination alone and the check fails.
+/// What: see [`setting_source_tiers_of`].
+/// Test: `relocated_setting_sources_flag_loads_the_user_tier`.
+pub fn relocated_setting_source_tiers() -> Vec<&'static str> {
+    setting_source_tiers_of(SETTING_SOURCES_FLAG_RELOCATED)
 }
 
 /// Name the Claude Code settings tier a `.claude/` deploy destination lands in,
@@ -300,9 +370,36 @@ mod tests {
         assert_eq!(setting_source_tiers(), vec!["project", "local"]);
         assert!(
             !setting_source_tiers().contains(&"user"),
-            "the `user` tier is deliberately excluded (issue #1269); a deploy \
-             landing there is invisible to the session"
+            "on a spawn that does NOT relocate CLAUDE_CONFIG_DIR the `user` tier \
+             is the operator's real ~/.claude and stays excluded (issue #1269)"
         );
+    }
+
+    #[test]
+    fn relocated_setting_sources_flag_loads_the_user_tier() {
+        // #4451: bundled agents deploy into $CLAUDE_CONFIG_DIR/agents, which IS
+        // the `user` tier. A relocated spawn that does not load `user` cannot
+        // see a single bundled specialist, however complete the deploy is.
+        assert!(
+            relocated_setting_source_tiers().contains(&"user"),
+            "the relocated spawn must load the `user` tier — that is where the \
+             bundled roster lives once CLAUDE_CONFIG_DIR is redirected"
+        );
+        assert_eq!(
+            relocated_setting_source_tiers(),
+            vec!["user", "project", "local"]
+        );
+    }
+
+    #[test]
+    fn setting_sources_flag_picks_by_config_dir() {
+        // #4451: the choice is derived from the one fact that decides it —
+        // whether the spawn injects its own CLAUDE_CONFIG_DIR.
+        assert_eq!(
+            setting_sources_flag(Some(Path::new("/tm/claude-config"))),
+            SETTING_SOURCES_FLAG_RELOCATED
+        );
+        assert_eq!(setting_sources_flag(None), SETTING_SOURCES_FLAG);
     }
 
     #[test]

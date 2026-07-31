@@ -22,20 +22,36 @@
 //! whether the binary is a dev checkout (git submodule source) or an installed
 //! binary (`~/.trusty-mpm/framework/*`).
 //!
-//! WHICH LAYER ACTUALLY LOADS THE ROSTER (corrected 2026-07-30, issue #4409):
-//! the AGENTS deployed here ARE read by a daemon-managed session. The earlier
-//! reading of this comment — that `--setting-sources project,local` (see
-//! `runtime::claude_code`) excludes the `user` tier `CLAUDE_CONFIG_DIR`
-//! relocates, so only the PROJECT layer delivered the roster — is refuted by
-//! the maintainer's probe matrix on #4409: a probe agent existing ONLY in
-//! `$CLAUDE_CONFIG_DIR/agents/` resolved and executed both at session start
-//! (fresh headless `claude -p` from a workspace with no `.claude/`) and
-//! mid-session. `~/.claude/agents/` is what goes unread, which is documented
-//! behavior — with `CLAUDE_CONFIG_DIR` set, every `~/.claude` path lives under
-//! that directory instead. So this config dir is the ONE tier bundled agents
-//! deploy into, on both the daemon and the flag-less standalone `tm run` path,
-//! which is why provisioning the complete set here remains mandatory. It also
-//! still carries AUTH + TRUST isolation (keychain / `.credentials.json` /
+//! WHICH LAYER ACTUALLY LOADS THE ROSTER (re-corrected 2026-07-31, issue
+//! #4451 — this note supersedes the 2026-07-30 #4409 correction it replaces):
+//! the AGENTS deployed here are read by a daemon-managed session ONLY because
+//! that session's `--setting-sources` list now names the `user` tier.
+//!
+//! The 07-30 correction concluded from a probe matrix that
+//! `$CLAUDE_CONFIG_DIR/agents/` "is discovered", and on that basis #4437 moved
+//! the roster here while the daemon spawn still carried `--setting-sources
+//! project,local`. That probe matrix ran a fresh headless `claude -p` with NO
+//! `--setting-sources` flag, so it measured Claude Code's DEFAULT tier set (all
+//! tiers, `user` included) — not the managed spawn's. Re-run against `claude`
+//! 2.1.220 from a cwd with no `.claude/`, with the same `CLAUDE_CONFIG_DIR`:
+//!
+//!   no flag                          -> all 42 bundled agents resolve
+//!   --setting-sources project,local  -> 5 built-ins only, zero bundled
+//!   --setting-sources user,project,local -> all 42 bundled agents resolve
+//!
+//! So the ORIGINAL reading — `project,local` excludes the `user` tier
+//! `CLAUDE_CONFIG_DIR` relocates — was right about the mechanism; only its
+//! conclusion (that the project layer must therefore deliver the roster) is
+//! obsolete. The fix keeps the roster here and teaches the spawn to load the
+//! tier: see `core::model_inject::SETTING_SOURCES_FLAG_RELOCATED`.
+//!
+//! `~/.claude/agents/` still goes unread, which is documented behavior — with
+//! `CLAUDE_CONFIG_DIR` set, every `~/.claude` path lives under that directory
+//! instead. That is also why re-admitting `user` does not re-admit the
+//! operator's global hooks (#1269). So this config dir is the ONE tier bundled
+//! agents deploy into, on both the daemon and the flag-less standalone `tm run`
+//! path, which is why provisioning the complete set here remains mandatory. It
+//! also still carries AUTH + TRUST isolation (keychain / `.credentials.json` /
 //! `.claude.json` keyed to this path). SKILLS are unchanged: they continue to
 //! deploy per-workspace via `prepare_session`, and this module's skill deploy
 //! remains belt-and-suspenders for the standalone path.

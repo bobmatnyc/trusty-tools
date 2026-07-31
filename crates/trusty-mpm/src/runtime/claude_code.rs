@@ -224,16 +224,26 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// `--setting-sources project,local` is RETAINED and is LOAD-BEARING for where
 /// the roster comes from: it restricts every setting source Claude Code loads —
 /// settings.json, subagents (`agents/*.md`), and skills (`skills/`) — to the
-/// `project` + `local` tiers, EXCLUDING the `user` tier. Because
-/// `CLAUDE_CONFIG_DIR` relocates the `user` tier, the agents/skills/hooks the
-/// daemon provisions INTO that config home are NOT read while this flag is in
-/// force (empirically verified against `claude` 2.1.201, DOC-34 review). The
-/// full framework roster, skills, project hooks (trusty-memory + PM-guard) and
-/// MCP servers are instead delivered by the PROJECT layer — `<workspace>/.claude/
-/// {agents,skills,settings.json,.mcp.json}` — which `session_launch::
-/// prepare_session` (run on every daemon spawn path) deploys and which
-/// `project,local` DOES load. The flag also excludes the operator's global
-/// `~/.claude/settings.json` (#1269). `--dangerously-skip-permissions` keeps the
+/// tiers it names. This spawn ALWAYS injects `CLAUDE_CONFIG_DIR`, so it carries
+/// [`crate::core::model_inject::SETTING_SOURCES_FLAG_RELOCATED`]
+/// (`--setting-sources user,project,local`), selected by
+/// [`crate::core::model_inject::setting_sources_flag`].
+///
+/// Issue #4451 — why `user` is in that list, and why it MUST stay: the earlier
+/// `project,local` value (correct for #1269 when the roster lived in the
+/// project tier) became wrong the moment #4437 moved bundled agents into
+/// `$CLAUDE_CONFIG_DIR/agents`, which IS the `user` tier. A managed session then
+/// resolved zero bundled specialists (`Agent type 'rust-engineer' not found`)
+/// with all 42 files correctly on disk. Re-admitting `user` does NOT re-admit
+/// the operator's global `~/.claude/settings.json` hooks the #1269 exclusion was
+/// protecting against: `CLAUDE_CONFIG_DIR` relocates the whole `user` tier to
+/// the tm-owned config home, so the isolation now comes from the relocation.
+/// Verified live against `claude` 2.1.220 — see the constant's own doc.
+/// Project hooks (trusty-memory + PM-guard), workspace skills and MCP servers
+/// continue to come from the PROJECT layer — `<workspace>/.claude/
+/// {skills,settings.json,.mcp.json}` — which `session_launch::prepare_session`
+/// (run on every daemon spawn path) deploys and which `project,local` loads.
+/// `--dangerously-skip-permissions` keeps the
 /// unattended orchestration session from blocking on per-tool prompts (#1269).
 /// Both flags reuse the shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`]
 /// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
@@ -282,7 +292,9 @@ fn spawn_command(
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
         env_bin_prefix(claude_bin, config_dir, oauth_token),
         prompt_file_flag(prompt_file),
-        crate::core::model_inject::SETTING_SOURCES_FLAG,
+        // #4451: the relocated spawn must load the `user` tier — that is where
+        // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
+        crate::core::model_inject::setting_sources_flag(config_dir),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
         on_exit_hint_suffix(),
     );
@@ -392,7 +404,8 @@ fn resume_command(
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
         env_bin_prefix(claude_bin, config_dir, oauth_token),
         prompt_file_flag(prompt_file),
-        crate::core::model_inject::SETTING_SOURCES_FLAG,
+        // #4451: same relocated-tier contract as `spawn_command`.
+        crate::core::model_inject::setting_sources_flag(config_dir),
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     );
     let cmd = match claude_session_id {
@@ -811,7 +824,8 @@ fn compose_inplace_args(
         args.push(prompt.display().to_string());
     }
     args.extend(
-        crate::core::model_inject::SETTING_SOURCES_FLAG
+        // #4451: in-place relaunch inherits the same relocated-tier contract.
+        crate::core::model_inject::setting_sources_flag(config_dir)
             .split_whitespace()
             .chain(crate::core::model_inject::PERMISSION_MODE_FLAG.split_whitespace())
             .map(str::to_owned),
