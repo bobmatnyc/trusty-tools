@@ -700,6 +700,23 @@ Two conclusions follow:
   is what makes full-stack the sane default scope (§7.5) and makes provisioning
   from a bare base clone on every run affordable (§3.3a).
 
+#### 7.5 Default scope — full stack (single-crate default removed, 2026-07-31)
+
+**The harness's default scope is the full stack — all six primary crates in one
+run, over a shared `CARGO_TARGET_DIR`. The single-crate default scope is removed.**
+
+Single-crate scope was never a design goal; it existed **solely** as a concession
+to the belief that a full-stack run cost 45–90 minutes. With that figure withdrawn
+(§7.4) and the measured full-stack estimate at **4–8 minutes**, the concession has
+nothing left to concede. Restoring full stack as the default also restores what the
+harness is *for*: §2's end-to-end acceptance scenario asserts over the whole DOC-2
+BOM, and a single-crate run cannot exercise the cross-member rollup that DOC-4's
+`--json` oracle (§2.1) reads.
+
+A single-crate run remains available as an **explicit opt-in** for narrowing a
+failure that a full-stack run has already surfaced. It is a debugging affordance,
+not a scope tier, and it never satisfies the §2 acceptance oracle.
+
 ---
 
 ## Dependencies
