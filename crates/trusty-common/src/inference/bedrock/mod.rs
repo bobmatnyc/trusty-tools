@@ -13,28 +13,37 @@
 //! What: [`BedrockAdapter`] wraps a lazily-constructed
 //! `aws_sdk_bedrockruntime::Client` (so a `Configurator` that merely registers
 //! the factory never touches AWS credentials — #2245) and implements
-//! [`InferenceAdapter`]: `chat` converts the request via
-//! [`convert::build_converse_messages`]/[`convert::build_tool_config`], calls
-//! `Converse` (non-streaming), maps SDK errors to [`InferenceError::Provider`],
-//! and converts the response back via [`convert::converse_output_to_chat_response`];
-//! `map_tool_choice` emits Converse's own tool-choice JSON shape. Region resolves
-//! `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`; credentials come from the
-//! standard AWS credential chain (env, `~/.aws/credentials`, IMDS, SSO — so
-//! `AWS_PROFILE=cto` works with zero code changes). [`register_bedrock_factory`]
-//! wires the adapter into a [`Configurator`] under [`ProviderId::Bedrock`].
+//! [`InferenceAdapter`]: `chat` converts the request via [`build_converse_parts`]
+//! (which funnels [`convert::build_converse_messages`]/
+//! [`convert::build_tool_config`]), calls the unary `Converse` operation, maps
+//! SDK errors to [`InferenceError::Provider`], and converts the response back via
+//! [`convert::converse_output_to_chat_response`]; `chat_stream` (#4426) sends the
+//! SAME converted request to `ConverseStream` instead and maps its binary
+//! event-stream framing into the neutral [`ChatStream`] via [`stream`], so a
+//! `bedrock/*` turn streams token-by-token rather than falling back to the
+//! trait's buffered default; `map_tool_choice` emits Converse's own tool-choice
+//! JSON shape. Region resolves `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`;
+//! credentials come from the standard AWS credential chain (env,
+//! `~/.aws/credentials`, IMDS, SSO — so `AWS_PROFILE=cto` works with zero code
+//! changes). [`register_bedrock_factory`] wires the adapter into a
+//! [`Configurator`] under [`ProviderId::Bedrock`].
 //! Test: `super::tests::*` (region resolution, message/tool-choice/response
-//! conversion — all offline, no real AWS) plus an `#[ignore]`-gated live
-//! Converse call; the configurator wiring is covered by
-//! `crates/trusty-common/tests/inference_bedrock.rs`.
+//! conversion, and the `stream_*` suite driving the real streaming path against
+//! a scripted `ConverseStream` event sequence — all offline, no real AWS) plus
+//! `#[ignore]`-gated live `Converse` and `ConverseStream` calls; the configurator
+//! wiring is covered by `crates/trusty-common/tests/inference_bedrock.rs`.
 
 pub(crate) mod cache;
 pub(crate) mod convert;
+pub(crate) mod stream;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_bedrockruntime::Client as BedrockRuntimeClient;
-use aws_sdk_bedrockruntime::types::InferenceConfiguration;
+use aws_sdk_bedrockruntime::types::{
+    InferenceConfiguration, Message, SystemContentBlock, ToolConfiguration,
+};
 use aws_smithy_types::error::display::DisplayErrorContext;
 use aws_types::region::Region;
 use serde_json::{Value, json};
@@ -44,6 +53,7 @@ use crate::inference::adapter::InferenceAdapter;
 use crate::inference::configurator::{Configurator, ResolvedProvider};
 use crate::inference::error::InferenceError;
 use crate::inference::registry::{ProviderCapabilities, ProviderId, capabilities};
+use crate::inference::streaming::ChatStream;
 use crate::inference::types::{ChatRequest, ChatResponse, ToolChoice};
 
 /// Region env var: trusty-specific override (checked before the standard
@@ -180,28 +190,19 @@ impl InferenceAdapter for BedrockAdapter {
     /// `#[ignore]`-gated `live_bedrock_call` exercises this end-to-end.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError> {
         let client = self.client().await?;
-        let (system_blocks, messages) = convert::build_converse_messages(request)?;
-
-        let inference = InferenceConfiguration::builder()
-            .set_max_tokens(request.max_tokens.map(|v| v as i32))
-            .set_temperature(request.temperature)
-            .build();
+        let parts = build_converse_parts(request)?;
 
         let mut sdk_req = client
             .converse()
             .model_id(bedrock_model_id(&request.model))
-            .inference_config(inference)
-            .set_messages(Some(messages));
+            .inference_config(parts.inference)
+            .set_messages(Some(parts.messages));
 
-        if !system_blocks.is_empty() {
-            sdk_req = sdk_req.set_system(Some(system_blocks));
+        if !parts.system.is_empty() {
+            sdk_req = sdk_req.set_system(Some(parts.system));
         }
-
-        if let Some(tools) = &request.tools {
-            let tool_config = convert::build_tool_config(tools, request.tool_choice.as_ref())?;
-            if let Some(tool_config) = tool_config {
-                sdk_req = sdk_req.tool_config(tool_config);
-            }
+        if let Some(tool_config) = parts.tool_config {
+            sdk_req = sdk_req.tool_config(tool_config);
         }
 
         let resp = sdk_req.send().await.map_err(|e| {
@@ -217,6 +218,63 @@ impl InferenceAdapter for BedrockAdapter {
             &resp,
             &request.model,
         ))
+    }
+
+    /// Execute one `ConverseStream` call and yield its events incrementally
+    /// (#4426).
+    ///
+    /// Why: without this override a `bedrock/*` turn used the trait's buffered
+    /// default — the caller waited for the whole answer and then received it as
+    /// a single delta, which is indistinguishable from not streaming at all.
+    /// Bedrock's own streaming operation has been proven in this workspace since
+    /// #3767 (`crate::chat::bedrock_impl`, live on trusty-agents' chat path);
+    /// this is that capability moved onto [`InferenceAdapter`], the surface epic
+    /// #4429 is converging on. Every consumer of the shared adapter — trusty-code
+    /// foremost, which delegates `chat_stream` straight through — gets real token
+    /// streaming with no change of its own.
+    /// What: converts `request` with the SAME [`build_converse_parts`] the unary
+    /// [`Self::chat`] uses (so the two transports can never disagree about
+    /// messages, sampling, or tool config), sends `ConverseStream`, and returns
+    /// the SDK's event receiver wrapped as a [`ChatStream`] via
+    /// [`stream::drive`]. A failed `stream=true` handshake surfaces
+    /// SYNCHRONOUSLY as `Err` (per the trait contract, so the caller may choose
+    /// to retry non-streaming); a mid-stream failure surfaces as a terminal `Err`
+    /// item and never as a `Done`. Dropping the returned stream drops the
+    /// receiver, cancelling the AWS request.
+    /// Test: `super::tests::stream_*` drive [`stream::drive`] over a scripted
+    /// event sequence; `super::tests::live_bedrock_converse_stream` (`#[ignore]`)
+    /// covers this method end to end against the real service.
+    async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        let client = self.client().await?;
+        let parts = build_converse_parts(request)?;
+
+        let mut sdk_req = client
+            .converse_stream()
+            .model_id(bedrock_model_id(&request.model))
+            .inference_config(parts.inference)
+            .set_messages(Some(parts.messages));
+
+        if !parts.system.is_empty() {
+            sdk_req = sdk_req.set_system(Some(parts.system));
+        }
+        if let Some(tool_config) = parts.tool_config {
+            sdk_req = sdk_req.tool_config(tool_config);
+        }
+
+        let output = sdk_req.send().await.map_err(|e| {
+            InferenceError::Provider(format!(
+                "ConverseStream call failed (model={}, region={}): {}",
+                request.model,
+                self.region,
+                DisplayErrorContext(&e)
+            ))
+        })?;
+
+        Ok(stream::drive(stream::SdkEventSource::new(
+            output,
+            &request.model,
+            &self.region,
+        )))
     }
 
     /// Translate a neutral [`ToolChoice`] into Converse's own tool-choice JSON
@@ -241,6 +299,69 @@ impl InferenceAdapter for BedrockAdapter {
             ToolChoice::Function(name) => json!({"tool": {"name": name}}),
         }
     }
+}
+
+/// One [`ChatRequest`] converted into the four pieces both Converse operations
+/// take (#4426).
+///
+/// Why: `Converse` and `ConverseStream` have DIFFERENT fluent-builder types, so
+/// the request assembly cannot be shared by passing a builder around — but the
+/// conversion itself must be shared, or the streaming and buffered transports
+/// silently drift (a `cache_control` marker, a tool-pairing repair, or a
+/// sampling knob honoured on one path and not the other is exactly the class of
+/// bug that makes "streaming broke tool calls" reports). Producing the pieces
+/// once and letting each caller mount them on its own builder keeps a single
+/// conversion with two call sites.
+/// What: `system` is Converse's system-prompt array (empty when the transcript
+/// has no system content); `messages` is the alternation-safe, tool-pairing-
+/// repaired conversation; `inference` carries `max_tokens`/`temperature`;
+/// `tool_config` is `None` when the request declares no tools (or when the
+/// tool-choice mapping says to omit it entirely).
+/// Test: covered through both call sites — `super::tests::*` conversion tests
+/// for the pieces and `super::tests::stream_*` for the streaming mount.
+pub(crate) struct ConverseParts {
+    /// Converse's top-level system-prompt blocks.
+    pub(crate) system: Vec<SystemContentBlock>,
+    /// The user/assistant conversation, role-merged and tool-pairing-repaired.
+    pub(crate) messages: Vec<Message>,
+    /// Sampling configuration (`max_tokens`, `temperature`).
+    pub(crate) inference: InferenceConfiguration,
+    /// Tool definitions + tool choice, when the request declares any.
+    pub(crate) tool_config: Option<ToolConfiguration>,
+}
+
+/// Convert a [`ChatRequest`] into the shared Converse request pieces.
+///
+/// Why: see [`ConverseParts`] — this is the ONE conversion both
+/// [`BedrockAdapter::chat`] and [`BedrockAdapter::chat_stream`] run, so the two
+/// transports are guaranteed to send the same thing.
+/// What: delegates messages/system to [`convert::build_converse_messages`] and
+/// tools to [`convert::build_tool_config`] (only when `request.tools` is set),
+/// and builds the [`InferenceConfiguration`] from `max_tokens`/`temperature`
+/// via `set_*` so an absent knob omits the field rather than sending a default.
+/// Errors propagate from the converters (an unrepresentable message or an
+/// invalid tool schema).
+/// Test: `super::tests::*` (message/tool conversion) and
+/// `super::tests::stream_*`.
+pub(crate) fn build_converse_parts(request: &ChatRequest) -> Result<ConverseParts, InferenceError> {
+    let (system, messages) = convert::build_converse_messages(request)?;
+
+    let inference = InferenceConfiguration::builder()
+        .set_max_tokens(request.max_tokens.map(|v| v as i32))
+        .set_temperature(request.temperature)
+        .build();
+
+    let tool_config = match &request.tools {
+        Some(tools) => convert::build_tool_config(tools, request.tool_choice.as_ref())?,
+        None => None,
+    };
+
+    Ok(ConverseParts {
+        system,
+        messages,
+        inference,
+        tool_config,
+    })
 }
 
 /// Strip the `bedrock/` dispatch-routing prefix from a model slug, yielding the

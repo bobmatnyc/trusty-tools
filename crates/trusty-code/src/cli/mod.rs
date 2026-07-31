@@ -17,11 +17,18 @@
 //! [`cancel::run`], [`transcript::run`], and (#3296)
 //! [`workstream::list`]/[`workstream::get`]/[`workstream::create`]/
 //! [`workstream::activate`]/[`workstream::deactivate`]/[`workstream::close`].
-//! (#4424) [`tui::run`] is the one member that is NOT a JSON-RPC-over-stdio
-//! translator: it is the launch point for the interactive TUI REPL, which
-//! talks to a long-lived `tcode serve --http` daemon instead. It lives here
-//! anyway because it is the same KIND of thing — argument-shaped setup plus
-//! a handoff, with every decision made elsewhere (see its module docs).
+//! (#4424) [`tui::run`] is one of two members that are NOT
+//! JSON-RPC-over-stdio translators: it is the launch point for the
+//! interactive TUI REPL, which talks to a long-lived `tcode serve --http`
+//! daemon instead. It lives here anyway because it is the same KIND of thing
+//! — argument-shaped setup plus a handoff, with every decision made
+//! elsewhere (see its module docs). (#4434) [`legacy_run_task::run`] is the
+//! other: it is `run-task --legacy-in-process`, the pre-#2060 path that runs
+//! the `AgentLoop` in THIS process rather than driving a daemon, so it alone
+//! carries CLI-shaped setup no thin client needs (agent-name validation,
+//! engineer-model resolution, LLM-client construction). It is a subcommand
+//! handler like every other file here, and was moved out of `main.rs` when
+//! that file reached 498 of the 500-SLOC cap; see its module docs.
 //! Test: each submodule's own doc comments note its coverage; the full
 //! spawn+wire behaviour is covered end-to-end by `tests/cli_e2e.rs` against
 //! the real `tcode` binary — these handlers are too thin to usefully unit
@@ -30,6 +37,7 @@
 
 pub mod attach;
 pub mod cancel;
+pub mod legacy_run_task;
 pub mod run_task;
 pub mod session;
 pub mod tcode_exe;

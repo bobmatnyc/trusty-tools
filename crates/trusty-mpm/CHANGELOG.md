@@ -9,6 +9,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- sessions launched via the `trusty-mpm` binary are now auto-discovered, matching `tm`-launched sessions (closes [#4058](https://github.com/bobmatnyc/trusty-tools/issues/4058))
+  - `daemon::discovery`'s tmux-pane predicate only recognised `tm`, so an
+    identical session launched under the crate's other `[[bin]]` target
+    (`trusty-mpm`) never appeared in `GET /sessions` or other discovery
+    lists — no error, just silent invisibility.
+  - The crate had four independent hand-copies of "this crate's own binary
+    names" (`discovery`'s list, hooks' `MPM_BIN_NAMES`, the statusline
+    resolver's `STATUSLINE_BIN_NAMES`, and an inline check in the `tm stop`
+    daemon-PID scan) and they had already drifted once. Three now read from
+    one canonical `core::own_binary_names::OWN_BINARY_NAMES` constant; hooks'
+    list keeps its own array (its PATH-lookup order differs) pinned to the
+    same set by a test.
+
 - delegation-tracker `agentId` presence-check no longer accepts `null`/`""` (closes [#4163](https://github.com/bobmatnyc/trusty-tools/issues/4163))
   - `classify_dispatch` decided "we have an agent id" with key-presence alone
     (`r.get("agentId").is_some()`), while `on_launched`'s consumer rejected a
@@ -36,7 +49,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     `delegation_lookup: "unbridged"` rather than a confident-looking
     `0`/`[]` — an unbridgeable lookup must never be indistinguishable from
     "genuinely none in flight".
-
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`
     instead of `project,local`. Claude Code discovers subagents per settings
