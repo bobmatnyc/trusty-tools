@@ -155,10 +155,19 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// token, though tokens do not contain shell metacharacters in practice) with a
 /// space does not word-split and break the pane. All settings are applied via a
 /// single `env` prefix, consistent with the scrub-only prefix.
-/// What: `env -u ANTHROPIC_API_KEY [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
-/// — each bracketed assignment appears only when its value is `Some`; with
-/// neither, the legacy `env -u ANTHROPIC_API_KEY <claude_bin>` (byte-identical
-/// to the pre-#2246 command). The `-u NAME` option MUST precede any
+/// (4) Issue #4467: Claude Code's own process-local session markers — chiefly
+/// `CLAUDE_CODE_CHILD_SESSION` — are unset via
+/// [`crate::core::claude_env_scrub::env_unset_flags`]. When `tm` is invoked from
+/// inside a Claude Code session it inherits them and passed them straight
+/// through, and an inherited `CLAUDE_CODE_CHILD_SESSION` makes the spawned
+/// `claude` turn session persistence OFF ("Transcript saving is off — inherited
+/// CLAUDE_CODE_CHILD_SESSION marker"), costing the managed session its native
+/// `--resume` / `--continue` / `/rewind` recovery. The scrub list deliberately
+/// EXCLUDES `CLAUDE_CONFIG_DIR` — see that module's `DELIBERATE_SPAWN_ENV`, and
+/// #4455/#4451 for why removing it would re-break the bundled agent roster.
+/// What: `env -u ANTHROPIC_API_KEY <-u marker…> [CLAUDE_CONFIG_DIR='<dir>'] [CLAUDE_CODE_OAUTH_TOKEN='<token>'] <claude_bin>`
+/// — each bracketed assignment appears only when its value is `Some`. The
+/// `-u NAME` option MUST precede any
 /// `NAME=VALUE` assignment per POSIX `env` grammar (`env [OPTION]...
 /// [NAME=VALUE]... [COMMAND]...`); putting an assignment before `-u` makes
 /// `env` stop parsing options at the first `NAME=VALUE` and try to exec `-u`
@@ -170,7 +179,10 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `env_bin_prefix_orders_unset_flag_before_config_dir_assignment`,
 /// `spawn_command_sets_oauth_token_when_available`,
 /// `spawn_command_omits_oauth_token_when_absent`,
-/// `spawn_command_without_token_is_byte_identical_to_pre_2246`.
+/// `spawn_command_without_token_pins_the_exact_command`,
+/// `spawn_command_scrubs_inherited_session_markers`,
+/// `spawn_command_keeps_config_dir_out_of_the_scrub`,
+/// `env_bin_prefix_orders_scrub_flags_before_assignments`.
 ///
 /// `GH_TOKEN`/`GH_USER` (issue #3025) are deliberately NOT assignments on
 /// this prefix — see [`claude_code_gh_env::gh_env_source_prefix`], applied
@@ -178,7 +190,7 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// (review follow-up: embedding a token literally in this `env` command line
 /// would land it in the pane shell's history file and be transiently visible
 /// in `ps` output for the `env` process itself).
-fn env_bin_prefix(
+pub(crate) fn env_bin_prefix(
     claude_bin: &str,
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
@@ -192,7 +204,14 @@ fn env_bin_prefix(
         let quoted = shell_single_quote(token);
         assignments.push_str(&format!(" {OAUTH_TOKEN_ENV_VAR}={quoted}"));
     }
-    format!("env -u ANTHROPIC_API_KEY{assignments} {claude_bin}")
+    // #4467: strip Claude Code's inherited process-local session markers. An
+    // inherited `CLAUDE_CODE_CHILD_SESSION` makes the spawned `claude` disable
+    // transcript saving, so the managed session gets no native `--resume` /
+    // `--continue` / `/rewind` recovery and never appears in `--resume`. These
+    // flags MUST precede `assignments` — POSIX `env` stops parsing options at
+    // the first `NAME=VALUE`, so a `-u` after one is exec'd as a command.
+    let scrub = crate::core::claude_env_scrub::env_unset_flags();
+    format!("env -u ANTHROPIC_API_KEY{scrub}{assignments} {claude_bin}")
 }
 
 /// Build the `--append-system-prompt-file <path>` flag fragment for a spawn

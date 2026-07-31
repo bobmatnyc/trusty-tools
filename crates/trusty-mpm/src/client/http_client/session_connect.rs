@@ -85,11 +85,15 @@ impl DaemonClient {
                 "trusty-mpm-system-prompt-{}.txt",
                 uuid::Uuid::new_v4()
             ));
+            // #4467: the line is built in `core::model_inject` so it carries the
+            // shared inherited-marker scrub and the `transcript_saving` doctor
+            // check can read it. Hand-building it here is what left this launch
+            // path silently saving no transcript.
             match std::fs::write(&path, &prompt) {
-                Ok(()) => format!("claude --append-system-prompt-file {}", path.display()),
+                Ok(()) => crate::core::model_inject::build_client_session_command(Some(&path)),
                 Err(err) => {
                     tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    "claude".to_string()
+                    crate::core::model_inject::build_client_session_command(None)
                 }
             }
         };
@@ -183,11 +187,15 @@ impl DaemonClient {
                 "trusty-mpm-system-prompt-{}.txt",
                 uuid::Uuid::new_v4()
             ));
+            // #4467: the line is built in `core::model_inject` so it carries the
+            // shared inherited-marker scrub and the `transcript_saving` doctor
+            // check can read it. Hand-building it here is what left this launch
+            // path silently saving no transcript.
             match std::fs::write(&path, &prompt) {
-                Ok(()) => format!("claude --append-system-prompt-file {}", path.display()),
+                Ok(()) => crate::core::model_inject::build_client_session_command(Some(&path)),
                 Err(err) => {
                     tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                    "claude".to_string()
+                    crate::core::model_inject::build_client_session_command(None)
                 }
             }
         };

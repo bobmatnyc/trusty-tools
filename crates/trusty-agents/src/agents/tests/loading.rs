@@ -2007,6 +2007,27 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
                     }
                 }
             }
+        } else if crate::agents::AgentTier::for_kind(&cfg.agent.role)
+            == crate::agents::AgentTier::L0Orchestration
+        {
+            // #4497: the orchestrator kind (`pm`) now derives L0 from the SAME
+            // rule instead of from a hardcoded literal at the dispatch call
+            // site. It is not an assistant, so the assistant-population
+            // assertion above must not claim it — but the zero-delta claim
+            // still has to hold, and for the same reason: `pm.toml` declares
+            // no `[tools].allow` at all, and every L0-gated surface is
+            // registered behind one. Assert that directly, so a future edit
+            // adding an allow list to an orchestrator TOML becomes a reviewed
+            // decision rather than a silent shell grant.
+            assert!(
+                cfg.tools.allow.is_none(),
+                "'{name}' (role '{}') is orchestrator-kind and therefore L0. It \
+                 declares a [tools].allow list, so the L0-gated surfaces \
+                 (l0_shell_exec, gh_*, session_state_*) are no longer \
+                 unreachable for it. That is a capability change: review it \
+                 deliberately.",
+                cfg.agent.role
+            );
         } else {
             assert_eq!(
                 cfg.agent.tier(),
@@ -2035,6 +2056,110 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
          filename list; a new one must be a reviewed addition"
     );
 }
+
+/// Every resolvable bundled agent's role and resolved tier, pinned as ONE
+/// table so a change to the derivation rule can never move an agent's tier
+/// unnoticed (#4497).
+///
+/// Why: `AgentTier::for_kind` is the single role-derived rule that decides
+/// which agents are L0. Its population is a security boundary — L0 unlocks
+/// `l0_shell_exec` (#4173), the GitHub PR/CI surface (#4170), the read-only
+/// session-state surface (#4171) and cross-project git scoping (#4222) — so
+/// "which agents are L0" must be reviewable as a literal in one place rather
+/// than re-derived by a reader walking 25 TOMLs. The sibling test
+/// `bundled_assistant_personas_resolve_l0_and_gain_nothing` asserts the
+/// PROPERTY (assistant-kind ⇒ L0, and it gains nothing); this one pins the
+/// resulting TABLE, so widening the rule to a new role shows up as an
+/// explicit diff in a review rather than as a silently-larger L0 population.
+/// What: walks `bundled_agents_dir()` for every resolvable name (flat
+/// `<name>.toml` plus `<name>/agent.toml` packages, deduped), loads each
+/// through the real `AgentConfig::by_name` dispatch loader, and compares
+/// `name\trole\ttier` for all of them against the expected table.
+/// Test: This function IS the test.
+#[test]
+fn bundled_agent_tier_table_is_pinned() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(bundled_agents_dir()).expect("bundled agents dir") {
+        let path = entry.expect("dir entry").path();
+        let name = if path.is_dir() {
+            if !path.join("agent.toml").exists() {
+                continue;
+            }
+            path.file_name().and_then(|n| n.to_str()).map(String::from)
+        } else if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            path.file_stem().and_then(|n| n.to_str()).map(String::from)
+        } else {
+            None
+        };
+        if let Some(name) = name
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names.sort();
+
+    let mut table: Vec<String> = Vec::new();
+    for name in &names {
+        clear_model_env(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{name}' must resolve: {e}"));
+        table.push(format!(
+            "{name}\t{}\t{}",
+            cfg.agent.role,
+            cfg.agent.tier().wire_label()
+        ));
+    }
+
+    let expected: Vec<String> = TIER_TABLE.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        table, expected,
+        "the bundled role/tier table moved. If that is intentional, update \
+         TIER_TABLE — and justify every tier change, because L0 is a \
+         capability boundary, not a label"
+    );
+}
+
+/// The pinned `name<TAB>role<TAB>tier` table asserted by
+/// [`bundled_agent_tier_table_is_pinned`]. Sorted by name.
+///
+/// The L0 population is exactly the five assistant-kind personas (ADR-0024
+/// decision 3) plus `pm`, the one orchestrator-kind agent (#4497). Every
+/// specialist stays L1.
+const TIER_TABLE: &[&str] = &[
+    "analysis-agent\tanalysis\tl1",
+    "assistant\tassistant\tl0",
+    "bedrock-engineer\tengineer\tl1",
+    "claude-code-engineer\tengineer\tl1",
+    "code-agent\tengineer\tl1",
+    "cto-assistant\tassistant\tl0",
+    "ctrl\tassistant\tl0",
+    "docs-agent\tdocumentation\tl1",
+    "engineer\tengineer\tl1",
+    "gpt-engineer\tengineer\tl1",
+    "gpt5-codex-engineer\tengineer\tl1",
+    "izzie\tassistant\tl0",
+    "local-ops-agent\tops\tl1",
+    "observe-agent\tobserver\tl1",
+    "personal-assistant\tassistant\tl0",
+    "plan-agent\tplanner\tl1",
+    "pm\torchestrator\tl0",
+    "postmortem-agent\tanalysis\tl1",
+    "python-engineer\tengineer\tl1",
+    "qa-agent\tqa\tl1",
+    "research-agent\tresearcher\tl1",
+    "ticketing-agent\tticketing\tl1",
+];
 
 /// The owner's 2026-07-30 decision on git reach, pinned against the REAL
 /// bundled roster and the REAL `extends` resolution.

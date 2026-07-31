@@ -205,10 +205,15 @@ async fn start_session_in_place(
             // #2997: disclaim the pane's `claude` off the shared tmux server
             // (same wrapper the daemon + `tm launch`/`connect` paths use).
             // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.
-            let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&format!(
-                "claude {}",
-                trusty_mpm::core::model_inject::PERMISSION_MODE_FLAG
-            ));
+            // #4467: the launch line itself is built in the LIBRARY
+            // (`model_inject::build_inplace_session_command`) so it carries the
+            // shared inherited-marker scrub and is readable by the
+            // `transcript_saving` doctor check. It used to be hand-built here as
+            // `format!("claude {PERMISSION_MODE_FLAG}")` — a sixth interactive
+            // launch line that silently saved no transcript.
+            let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
+                &trusty_mpm::core::model_inject::build_inplace_session_command(),
+            );
             let send = trusty_mpm::core::tmux::send_line(
                 None,
                 &trusty_mpm::core::tmux::TmuxTarget::session(&body.name),
