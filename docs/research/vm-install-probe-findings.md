@@ -724,9 +724,9 @@ no throwaway/calibration clones left on the host.
 | K3 | `cargo install --path crates/trusty-search --locked` wall-clock | _pending_ | _pending_ |
 | K3a | Does workspace `lto = "thin"` apply to a `--path` install? | _pending_ | _pending_ |
 | K3b | Does `ort-sys` download ONNX Runtime inside the guest? | _pending_ | _pending_ |
-| K4 | Is single-crate default scope still justified? | _pending_ | _pending_ |
-| K4b | Does the golden image earn its complexity? | _pending_ | _pending_ |
-| K5 | `rust-toolchain.toml` override in `trusty-git-analytics` | _pending_ | _pending_ |
+| K4 | Is single-crate default scope still justified? | **ANSWERED — no, see K4** | measured + extrapolation |
+| K4b | Does the golden image earn its complexity? | **ANSWERED — KILL, see K4** | measured |
+| K5 | `rust-toolchain.toml` override in `trusty-git-analytics` | **ANSWERED — confirmed real drift, see K5** | measured |
 
 ### K1. `tart stop` asynchrony — **CONFIRMED: `tart stop` silently discards the guest's last writes**
 
@@ -918,10 +918,198 @@ uv 0.12.0 (b88d7c5c4 2026-07-28 aarch64-apple-darwin)
 
 _pending_
 
-### K4. Extrapolation and recommendation — _pending_
+### K4. Extrapolation and recommendation — ANSWERED
 
-_pending_
+Built entirely from numbers already measured and committed in sections G, H, I, K1, K2 and
+K3. **No VM was created or built against for this section** — it is analysis of existing
+data, clearly labelled where it extrapolates beyond what was measured.
 
-### K5. Opportunistic checks — _pending_
+#### K4a. The real cost of a from-source install of a large trusty crate
 
-_pending_
+`crates/trusty-search` — the heaviest crate in the workspace by dependency footprint,
+carrying the `ort`/`ort-sys` ONNX Runtime stack that nothing else in the workspace needs —
+built from a cold registry in:
+
+```
+BUILD_SEC=112     # SKIP_UI_BUILD=1 cargo install --path crates/trusty-search --locked --timings
+409 crates compiled (grep -c '^   Compiling' k3-trusty-search-build.log)
+8 vCPU / 16 GB guest (probe-k2, same sizing K2 set)
+workspace `lto = "thin"` confirmed applied ( -C lto=thin present on the rustc cmdline, K3b Q4)
+ort-sys confirmed downloading + linking ONNX Runtime (cdn.pyke.io tarball, K3b Q3;
+  binaries confirmed runnable, K3b Q5)
+```
+
+Separately, `git clone` of the repo into the guest cost `GIT_CLONE_MS=50131` (50.1 s) — a
+one-time, per-checkout cost paid once regardless of how many crates are subsequently built,
+not a per-crate cost.
+
+**The real cost of a from-source install of trusty-search is 112 seconds** of build time —
+162 s if a fresh `git clone` is included — covering full dependency resolution and download,
+a 409-crate cold compile, thin-LTO linking, and an 89 MB binary with ONNX Runtime linked in,
+on a properly-sized (8 vCPU / 16 GB) guest. This is the *heaviest* crate in the workspace;
+every other primary crate has a smaller dependency graph. Combined with H's tga result
+(131 s, 4 vCPU), this closes out the design-doc estimate of 20–55 minutes per crate as simply
+wrong, not just for a small crate but for the largest one in the tree too.
+
+#### K4b. Full-stack extrapolation — **LABELLED EXTRAPOLATION, not measured**
+
+No test in this pass built more than one crate in a shared target dir. The following is a
+reasoned estimate from the two single-crate data points that exist, not a new measurement,
+and should be treated as a hypothesis for a future K6 pass, not fact.
+
+Primary trusty-* crates: `trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-code`,
+`trusty-mpm`, and `tga`. All six are members of the same workspace `Cargo.lock`, so a shared
+`CARGO_TARGET_DIR` (either `cargo build --workspace` or six sequential `--path` installs
+pointed at the same target dir) means the dependency graph is compiled **once**, not once
+per crate — a crate only pays for its own code plus whatever dependencies aren't already
+built for something else.
+
+Reasoning from the two available data points:
+
+* `trusty-search`'s 112 s already includes the **largest** dependency closure measured in
+  the workspace (409 crates), because it alone carries the ONNX/ML stack. No other listed
+  crate is known to require anything comparably heavy.
+* `tga`'s full closure (211 dependencies, per the workspace `Cargo.lock` dependency graph —
+  note section H's own prose rounded this to "~300" without an exact tally; 211 is the more
+  precise count) built in 131 s at half the core count (4 vCPU) with `lto = false`. Its
+  *incremental*, non-overlapping cost on top of an already-warm 409-crate target dir would
+  be a small fraction of 131 s, since most of tga's own dependency graph is common
+  infrastructure (tokio, clap, serde-family, etc.) that trusty-search's build already
+  compiled.
+
+**Point estimate: roughly 4–8 minutes of wall-clock** for a full `cargo build --workspace`
+(or six installs sharing one `CARGO_TARGET_DIR`) across all six primary crates, on an
+8 vCPU / 16 GB guest, cold registry. This is bounded below by trusty-search's own 112 s
+(nothing finishes faster than the single largest dependency closure) and well below a naive
+additive sum of six independent single-crate builds, which would double-count dependency
+compilation that a shared target dir avoids.
+
+#### K4c. Is single-crate default scope still justified?
+
+**Direct answer: no.** Single-crate default scope was a reasonable mitigation against the
+old 20–55 minute/crate estimate. That estimate is now retired twice over: H showed it wrong
+by 10–25× for a mid-size crate (tga, 131 s), and K3/K4a extend the same disproof to the
+*heaviest* crate in the workspace (trusty-search, 112 s). Even the K4b full-stack estimate —
+taken with full skepticism as an unmeasured extrapolation — lands at single-digit minutes,
+not the tens of minutes that motivated narrowing scope to one crate in the first place.
+Full-stack from-source testing is affordable at this cost for routine harness runs.
+Single-crate default scope should be revisited; it was the right call under the old
+estimate and is no longer justified now that the estimate it was based on has been
+discarded.
+
+#### K4d. Golden image: keep or kill?
+
+**Direct recommendation: KILL.** K2 already reached this conclusion on cost grounds alone;
+K4 reinforces it with the failure-mode evidence gathered since.
+
+| Path to a ready-to-build guest | Cost |
+|---|---|
+| clone a pre-baked golden image | 0.31 s |
+| clone `tahoe-base` + provision (mise + rust@1.91 + uv + gh) | 0.31 s + 30 s ≈ 30 s |
+| **Delta the golden image buys** | **~30 seconds per run** (K2) |
+
+Thirty seconds is the entire quantifiable benefit of maintaining a golden image. Weighed
+against it, this probe has now directly observed three concrete failure modes in the golden
+image approach, not hypothetical ones:
+
+1. **K1: `tart stop` silently discards the guest's last unsynced write, 4 of 5 trials.**
+   A bake pipeline that provisions a VM and then stops it to freeze the image is exactly the
+   operation K1 showed to be unsafe by default.
+2. **This already happened.** The one golden image this workspace actually produced
+   (`trusty-toolchain-20260730`) shipped with `~/.zshenv` missing — verified present and
+   working while the VM was still running, gone after `tart stop`, `cargo` → exit 127 in
+   every downstream clone (sections B/E). K1 is the confirmed root cause.
+3. **The bake script's own purity gate had a false-positive bug.** `scripts/vmtest/bake-golden.sh`
+   requires `setopt NULL_GLOB` specifically because, without it, a non-matching glob
+   (`"$HOME"/.cargo/bin/trusty-*` on a genuinely clean image) is left as a literal unexpanded
+   pattern, which the gate's existence checks would misread — **failing the gate on a clean
+   image**, i.e. exactly when it should pass (comment preserved in the script, lines ~176–177).
+   A verification gate with a demonstrated false-positive-on-clean bug is not a safety net
+   that can be trusted to reliably catch the K1 write-loss failure mode either — a false
+   positive in one direction says nothing about false-negative coverage in the other.
+
+Thirty seconds of savings does not justify a pipeline that has already shipped one
+silently-broken artifact via a data-loss mechanism its own verification gate is not reliably
+positioned to catch. **Recommendation: kill the golden image entirely; provision from
+`tahoe-base` on every run.**
+
+#### K4e. Why 112 s (409 crates, 8 vCPU) beat 131 s (211 deps, 4 vCPU)
+
+trusty-search compiled roughly twice tga's dependency count in *less* wall-clock time. The
+only recorded variable that differs between the two runs, besides dependency-graph size
+itself, is core count: K3's guest was explicitly sized to 8 vCPU / 16 GB
+(`tart set probe-k2 --cpu 8 --memory 16384`, per K2), while H's guest used the base image's
+stock 4 vCPU / 8 GB. Cargo parallelizes independent crates in the build graph across
+available cores, so doubling vCPU count plausibly more than offset the ~2× larger
+dependency graph. If anything this comparison *understates* the vCPU effect, since
+trusty-search also paid thin-LTO link cost that tga's `lto = false` build did not.
+
+**Implication for guest sizing:** vCPU count is the dominant lever for build wall-clock in
+this harness — more so than a crate's own dependency-graph size. A harness budgeting
+compile time should size guests at 8 vCPU (the K2/K3 default), not the base image's stock
+4 vCPU, and should not use a crate's dependency count alone as a proxy for build time
+without accounting for guest core count.
+
+### K5. Opportunistic checks — ANSWERED
+
+Both checks below were run against `probe-k2` (8 vCPU / 16 GB, per K2/K3), which was still
+alive and `running` when this cleanup pass started. **No VM was created for these checks**,
+per instruction.
+
+#### K5a. `trusty-git-analytics` `rust-toolchain.toml` override — CONFIRMED, real drift risk
+
+```
+$ cat crates/trusty-git-analytics/rust-toolchain.toml
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+```
+
+```
+=== workspace root ===
+rustc 1.91.1 (ed61e7d7e 2025-11-07)     # the mise-pinned toolchain from K2/E
+
+=== crates/trusty-git-analytics ===
+info: syncing channel updates for stable-aarch64-apple-darwin
+info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+info: downloading 6 components
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+```
+
+`rustup show` confirms the mechanism precisely: at the workspace root, the active toolchain
+is `1.91.1-aarch64-apple-darwin (active, default)`. Inside
+`crates/trusty-git-analytics`, rustup reports the active toolchain as
+`stable-aarch64-apple-darwin`, `overridden by '.../crates/trusty-git-analytics/rust-toolchain.toml'`
+— and because `stable` was not yet installed on this guest, simply invoking `rustc` there
+triggered an unprompted `rustup toolchain install`, silently pulling 1.97.1.
+
+This is a reproduced hazard, not a theoretical one: any command whose working directory is
+inside `trusty-git-analytics` — including a harness that `cd`s per-crate rather than always
+invoking `cargo -p <crate>` from the workspace root — silently builds and tests against
+1.97.1 instead of the workspace's pinned 1.91.1 (a 6-minor-version drift), with no warning
+beyond an easily-missed `info: syncing channel updates for stable...` line.
+
+**Recommendation:** remove the `channel = "stable"` override in
+`crates/trusty-git-analytics/rust-toolchain.toml` (let it inherit the workspace's pinned
+toolchain), or if a per-crate pin is genuinely needed, pin it to `1.91` explicitly rather
+than the floating `stable` channel.
+
+#### K5b. `launchd` user agents under `tart exec` — CONFIRMED WORKING
+
+A throwaway LaunchAgent (`com.probe.k5test`) was written to `~/Library/LaunchAgents` and
+loaded with `launchctl bootstrap gui/$(id -u) ...` entirely from within a `tart exec`
+session — no SSH, no interactive GUI login.
+
+```
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.probe.k5test.plist  → rc=0
+/tmp/k5-launchd-proof.txt → "hello" + timestamp, written by the RunAtLoad job
+launchctl list | grep k5test → present
+```
+
+The job ran immediately (`RunAtLoad`), wrote its proof file with the expected content, and
+appeared in `launchctl list`. It was booted out (`launchctl bootout gui/$(id -u)/com.probe.k5test`)
+and the plist/proof file removed as cleanup — no state left behind on `probe-k2`.
+
+**Conclusion:** `launchd` user-agent bootstrap works inside a `tart exec`-driven guest in
+the `gui/<uid>` domain, with no headless/no-GUI-session complication observed. This is a
+viable mechanism if a future harness needs to schedule or background work inside a guest.
