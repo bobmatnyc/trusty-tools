@@ -136,11 +136,16 @@ fn spawn_command_sets_claude_config_dir() {
         None,
         None,
     );
+    // #4467 inserted the inherited-marker `-u` flags between the API-key scrub
+    // and the assignment; both must still precede the first NAME=VALUE per POSIX
+    // env grammar, which `env_bin_prefix_orders_scrub_flags_before_assignments`
+    // asserts positionally.
     assert!(
-        cmd.contains(
-            "env -u ANTHROPIC_API_KEY \
-                 CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"
-        ),
+        cmd.contains("env -u ANTHROPIC_API_KEY -u "),
+        "the API-key scrub must still lead the env prefix: {cmd}"
+    );
+    assert!(
+        cmd.contains("CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"),
         "spawn command must scrub the key (via -u, BEFORE the NAME=VALUE assignment per \
              POSIX env grammar) then set (single-quoted) CLAUDE_CONFIG_DIR: {cmd}"
     );
@@ -315,10 +320,15 @@ fn spawn_command_omits_oauth_token_when_absent() {
 }
 
 #[test]
-fn spawn_command_without_token_is_byte_identical_to_pre_2246() {
-    // Zero-regression guard: a caller with no config dir, no prompt file,
-    // and no token must get EXACTLY the same command string this crate
-    // produced before #2246 introduced the extra parameter.
+fn spawn_command_without_token_pins_the_exact_command() {
+    // Full-string pin for the minimal argument set (no config dir, no prompt
+    // file, no token). Supersedes the former
+    // `spawn_command_without_token_is_byte_identical_to_pre_2246` guard: #4467
+    // intentionally changed this string by adding the inherited-marker scrub, so
+    // byte-identity with the pre-#2246 command is no longer the invariant. The
+    // scrub segment is interpolated from production code rather than restated —
+    // its CONTENT is pinned by `core::claude_env_scrub` tests, while this test
+    // pins its POSITION in the assembled command.
     let cmd = spawn_command(
         Path::new(TEST_CWD),
         "claude",
@@ -328,15 +338,123 @@ fn spawn_command_without_token_is_byte_identical_to_pre_2246() {
         None,
         None,
     );
+    let scrub = crate::core::claude_env_scrub::env_unset_flags();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY claude \
+             env -u ANTHROPIC_API_KEY{scrub} claude \
              --setting-sources project,local --dangerously-skip-permissions; \
              echo 'tm: run `tm` to relaunch this session'; }}"
     );
-    assert_eq!(
-        cmd, expected,
-        "no-token command must be byte-identical to pre-#2246"
+    assert_eq!(cmd, expected, "no-token command shape must stay pinned");
+}
+
+#[test]
+fn spawn_command_scrubs_inherited_session_markers() {
+    // #4467: the marker name is HARD-CODED here on purpose. Deriving it from
+    // the constant would make this test pass even if the constant were emptied,
+    // which is the silent failure the issue is about — a managed session that
+    // saves no transcript and reports nothing.
+    let cmd = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"),
+        "spawn must unset the marker that disables transcript saving: {cmd}"
+    );
+    assert!(
+        cmd.contains("-u CLAUDE_CODE_SESSION_ID"),
+        "spawn must unset the parent's session id: {cmd}"
+    );
+    assert!(
+        cmd.contains("-u CLAUDECODE"),
+        "spawn must unset the inherited in-Claude-Code marker: {cmd}"
+    );
+}
+
+#[test]
+fn resume_command_scrubs_inherited_session_markers() {
+    // #4467: a fix covering `spawn_command` alone would leave every RESUMED
+    // session still unable to save transcripts, so the resume path is asserted
+    // independently rather than trusted to share `env_bin_prefix`.
+    let cmd = resume_command(
+        Path::new(TEST_CWD),
+        "claude",
+        None,
+        Some("abc-123"),
+        false,
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"),
+        "resume must unset the marker that disables transcript saving: {cmd}"
+    );
+    assert!(
+        cmd.contains("--resume abc-123"),
+        "the resume selection must survive the scrub: {cmd}"
+    );
+}
+
+#[test]
+fn spawn_command_keeps_config_dir_out_of_the_scrub() {
+    // #4467 over-scrub guard, at the command-string level: `CLAUDE_CONFIG_DIR`
+    // must appear as an ASSIGNMENT and never as a `-u` unset. Scrubbing it would
+    // move the bundled roster out of the `user` settings tier a managed session
+    // loads and silently restore #4451 (every delegation → `general-purpose`).
+    let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
+    let cmd = spawn_command(
+        Path::new(TEST_CWD),
+        "claude",
+        Some(dir),
+        TEST_SESSION_ID,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        !cmd.contains("-u CLAUDE_CONFIG_DIR"),
+        "CLAUDE_CONFIG_DIR must never be unset (#4455 depends on it): {cmd}"
+    );
+    assert!(
+        cmd.contains("CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"),
+        "CLAUDE_CONFIG_DIR must still be assigned right before the binary: {cmd}"
+    );
+}
+
+#[test]
+fn env_bin_prefix_orders_scrub_flags_before_assignments() {
+    // POSIX `env` stops parsing options at the first `NAME=VALUE`, so a `-u`
+    // appearing after an assignment is exec'd as a command
+    // (`env: -u: No such file or directory`) and kills every managed spawn.
+    let dir = Path::new("/tm/config");
+    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"));
+    let last_unset = prefix
+        .rfind("-u ")
+        .expect("prefix must contain at least one -u flag");
+    let first_assignment = prefix
+        .find("CLAUDE_CONFIG_DIR=")
+        .expect("prefix must contain the config-dir assignment");
+    assert!(
+        last_unset < first_assignment,
+        "every -u flag must precede the first NAME=VALUE assignment: {prefix}"
+    );
+    // And the parser the doctor probe relies on must see the marker here.
+    let unset = crate::core::claude_env_scrub::parse_env_unset_vars(&prefix);
+    assert!(
+        unset.contains(&"CLAUDE_CODE_CHILD_SESSION"),
+        "the real spawn prefix must unset the suppressing marker: {unset:?}"
+    );
+    assert!(
+        !unset.contains(&"CLAUDE_CONFIG_DIR"),
+        "the real spawn prefix must NOT unset CLAUDE_CONFIG_DIR: {unset:?}"
     );
 }
 
@@ -354,13 +472,18 @@ fn spawn_command_sets_both_config_dir_and_oauth_token() {
         Some("sk-ant-oat01-fake-token"),
         None,
     );
+    // #4467 inserted the inherited-marker `-u` flags between the API-key scrub
+    // and the assignments, so the assignment run is matched on its own.
     assert!(
         cmd.contains(
-            "env -u ANTHROPIC_API_KEY \
-                 CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' \
+            "CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' \
                  CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-fake-token' claude"
         ),
         "both assignments must coexist, config dir before the token: {cmd}"
+    );
+    assert!(
+        cmd.contains("env -u ANTHROPIC_API_KEY -u "),
+        "the API-key scrub must still lead the env prefix: {cmd}"
     );
 }
 
@@ -407,9 +530,10 @@ fn resume_command_omits_oauth_token_when_absent() {
 }
 
 #[test]
-fn resume_command_without_token_is_byte_identical_to_pre_2246() {
-    // Zero-regression guard, resume-path counterpart to
-    // spawn_command_without_token_is_byte_identical_to_pre_2246.
+fn resume_command_without_token_pins_the_exact_command() {
+    // Full-string pin, resume-path counterpart to
+    // spawn_command_without_token_pins_the_exact_command (see its note on why
+    // #4467 replaced the former pre-#2246 byte-identity guard).
     let cmd = resume_command(
         Path::new(TEST_CWD),
         "claude",
@@ -421,15 +545,16 @@ fn resume_command_without_token_is_byte_identical_to_pre_2246() {
         None,
         None,
     );
+    let scrub = crate::core::claude_env_scrub::env_unset_flags();
     let expected = format!(
         "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
-             env -u ANTHROPIC_API_KEY claude \
+             env -u ANTHROPIC_API_KEY{scrub} claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123; \
              echo 'tm: run `tm` to relaunch this session'; }}"
     );
     assert_eq!(
         cmd, expected,
-        "no-token resume command must be byte-identical to pre-#2246"
+        "no-token resume command shape must stay pinned"
     );
 }
 
@@ -450,8 +575,7 @@ fn env_bin_prefix_quotes_config_dir_with_space() {
     );
     assert!(
         cmd.contains(
-            "env -u ANTHROPIC_API_KEY \
-                 CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config' claude"
+            "CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config' claude"
         ),
         "config dir with a space must be single-quoted and intact: {cmd}"
     );
@@ -534,8 +658,13 @@ fn spawn_command_uses_resolved_binary() {
         None,
         None,
     );
+    // This test owns BINARY RESOLUTION, so it must not couple to the marker
+    // list's contents or order. Matching the bare path (space-delimited on both
+    // sides, so a bare `claude` cannot satisfy it) keeps a marker-list reorder
+    // from failing here with an unrelated message — the scrub itself is asserted
+    // by `spawn_command_scrubs_inherited_session_markers`.
     assert!(
-        cmd.contains("env -u ANTHROPIC_API_KEY /Users/me/.local/bin/claude "),
+        cmd.contains(" /Users/me/.local/bin/claude "),
         "spawn command must invoke the resolved absolute claude path: {cmd}"
     );
 }
@@ -846,11 +975,13 @@ fn resume_command_sets_claude_config_dir() {
         None,
         None,
     );
+    // #4467 inserted the inherited-marker `-u` flags before the assignment.
     assert!(
-        cmd.contains(
-            "env -u ANTHROPIC_API_KEY \
-                 CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"
-        ),
+        cmd.contains("env -u ANTHROPIC_API_KEY -u "),
+        "the API-key scrub must still lead the env prefix: {cmd}"
+    );
+    assert!(
+        cmd.contains("CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"),
         "resume command must export (single-quoted) CLAUDE_CONFIG_DIR after the -u option: {cmd}"
     );
     assert!(

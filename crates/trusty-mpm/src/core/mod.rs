@@ -29,6 +29,11 @@ pub mod bundled_pm_package;
 pub mod catchup;
 pub mod circuit;
 pub mod claude_config;
+// Issue #4467: the shared set of Claude Code process-local session markers every
+// managed spawn must scrub. An inherited `CLAUDE_CODE_CHILD_SESSION` makes
+// Claude Code disable transcript saving, costing the session native
+// `--resume`/`--continue`/`/rewind` recovery.
+pub mod claude_env_scrub;
 // Epic #4183 / #4286: the READER for `CLAUDE.md` named-section instruction
 // overrides. Ships before the floor text that advertises the mechanism —
 // advertising an override no code reads is issue #381 verbatim.

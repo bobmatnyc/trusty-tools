@@ -49,6 +49,13 @@ use doctor_deploy_validate::check_deployment_completeness;
 mod doctor_agent_reachability;
 use doctor_agent_reachability::check_agent_reachability;
 
+// #4467: the same silent-failure shape as #4451, one layer down — a managed
+// spawn that inherits `CLAUDE_CODE_CHILD_SESSION` has transcript saving turned
+// off, so the session is unrecoverable and nothing reported it.
+#[path = "doctor_transcript_saving.rs"]
+mod doctor_transcript_saving;
+use doctor_transcript_saving::check_transcript_saving;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
 #[path = "doctor_staleness.rs"]
@@ -198,7 +205,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_three_checks`,
+/// Test: `run_doctor_produces_twenty_four_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -226,6 +233,11 @@ pub async fn run_doctor(
         // #4451: `check_agents` proves the files exist; this proves the tier
         // they land in is one a managed session's harness actually scans.
         check_agent_reachability(&paths, project_dir),
+        // #4467: and this proves the spawn does not silently lose the session's
+        // own transcript, which costs it all native --resume/--continue/rewind
+        // recovery. No `project_dir`/`paths` input — the invariant is a property
+        // of the spawn command itself, identical for every project.
+        check_transcript_saving(),
         check_skills(skills_root),
         check_skill_source(&paths),
         check_output_style(project_dir, &home),
