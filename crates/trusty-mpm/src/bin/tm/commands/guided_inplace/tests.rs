@@ -766,6 +766,45 @@ fn inplace_exec_command_scrubs_api_key_and_sets_auth_env() {
     );
 }
 
+#[test]
+fn inplace_exec_command_scrubs_inherited_session_markers() {
+    // #4467: a bare `tm` relaunch run from inside a Claude Code session inherits
+    // CLAUDE_CODE_CHILD_SESSION and, without this scrub, the relaunched session
+    // saves no transcript — no --resume, no --continue, no /rewind. The marker
+    // name is hard-coded so this cannot pass vacuously if the shared marker list
+    // is emptied.
+    let resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+
+    let envs: Vec<(String, Option<String>)> = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+
+    assert!(
+        envs.contains(&("CLAUDE_CODE_CHILD_SESSION".to_owned(), None)),
+        "the transcript-suppressing marker must be REMOVED (None): {envs:?}"
+    );
+    assert!(
+        envs.contains(&("CLAUDE_CODE_SESSION_ID".to_owned(), None)),
+        "the parent's session id must be REMOVED (None): {envs:?}"
+    );
+    // Over-scrub guard: the scrub runs BEFORE the deliberate assignments, so
+    // CLAUDE_CONFIG_DIR must survive it as a SET value (#4455 / #4451).
+    assert!(
+        envs.contains(&(
+            "CLAUDE_CONFIG_DIR".to_owned(),
+            Some("/fake/config".to_owned())
+        )),
+        "CLAUDE_CONFIG_DIR must survive the scrub as a set value: {envs:?}"
+    );
+}
+
 #[serial_test::serial]
 #[test]
 fn inplace_exec_command_carries_isolation_flags_and_persona_end_to_end() {

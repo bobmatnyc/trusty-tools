@@ -1118,6 +1118,7 @@ async fn doctor_endpoint_returns_report() {
         "instructions",
         "agents",
         "agent_reachability",
+        "transcript_saving",
         "skills",
         "skill_source",
         "output_style",
