@@ -104,13 +104,47 @@ The earlier rule "No [patch.crates-io] needed" applies only to strictly-internal
 
 ### Sidecar inventory (audit checklist)
 
-When adding a new sidecar to any main crate, update this list:
+When adding a new sidecar to any main crate, update this list. "Bundled binaries"
+means the crate's declared `[[bin]]` targets — the things `cargo install <crate>`
+actually puts on `PATH`. Audit it against the manifests, not against this table.
 
-| Main crate | Bundled binaries | Sidecar lib on crates.io |
+| Main crate (crates.io package) | Bundled binaries | Sidecar lib on crates.io |
 |---|---|---|
 | trusty-search | `trusty-search`, `trusty-embedderd` ✅ (PR #190) | `trusty-embedderd` v0.3.0 ✅ |
-| trusty-memory | `trusty-memory`, `trusty-bm25-daemon` ✅ (PR #191) | `trusty-bm25-daemon` v0.1.0 ✅ (PR #214) |
-| trusty-analyze | `trusty-analyze` (no sidecars) | — |
-| trusty-git-analytics | `tga` (no sidecars) | — |
-| trusty-mpm | `tm`, `trusty-mpm-daemon`, `trusty-mpm-mcp`, `trusty-mpm-tui`, `trusty-mpm-telegram` (feature-gated, publish=false) | n/a |
-| open-mpm | `open-mpm` (publish=false) | n/a |
+| trusty-memory | `trusty-memory`, `trusty-bm25-daemon` ✅ (PR #191), `trusty-memory-mcp-bridge` | `trusty-bm25-daemon` v0.1.0 ✅ (PR #214) |
+| trusty-installer | `trusty-installer`, `tctl` | — |
+| trusty-analyze | `trusty-analyze` (no sidecars; bin gated on the `http-server` feature, which is in `default`) | — |
+| trusty-code | `tcode` (no sidecars) | — |
+| `tga` (dir `crates/trusty-git-analytics`) | `tga` (no sidecars) | — |
+| trusty-mpm | `tm`, `trusty-mpm` — two names, one target (`src/bin/tm/main.rs`), both gated on the `cli` feature, which is in `default` | n/a |
+
+**`trusty-memory` ships three binaries, not two.** `trusty-memory-mcp-bridge`
+(`src/bin/mcp_bridge.rs`) is a deprecation shim for pre-#914 users; `cargo install
+trusty-memory` produces all three in one command. It was missing from this checklist
+and the omission propagated into
+`docs/research/tart-vm-testing-harness/02-design/01-vm-install-harness.md` §7.2
+before being caught. A Single-Install gate cannot detect the loss of a sidecar it
+has never heard of.
+
+**`trusty-mpm` publishes to crates.io.** Its manifest has **no `publish` key**, so
+cargo defaults to `publish = true`; it is live at **v1.0.2** (`cargo search
+trusty-mpm`). The earlier "(feature-gated, publish=false)" parenthetical on this row
+was wrong on both counts and is removed. What *is* feature-gated is internal to the
+single binary: `cli = ["daemon", "tui", "telegram", "slack"]` — the daemon, TUI,
+Telegram, and Slack surfaces are **features compiled into `tm`**, reached as
+subcommands, not separate `[[bin]]` targets. There are no `trusty-mpm-daemon`,
+`trusty-mpm-mcp`, `trusty-mpm-tui`, or `trusty-mpm-telegram` binaries in this crate;
+those names exist on crates.io only as v0.0.0 placeholder reservations. The
+`publish = false` crate in this family is **`trusty-mpm-gui`** (a separate Tauri
+crate, installed separately per the Single-Install convention), which is what the
+old parenthetical was probably remembering.
+
+**Removed row: `open-mpm`.** No such crate exists under `crates/`. It was stale.
+
+Crates with `[[bin]]` targets that are deliberately **not** on this checklist because
+they are not main-crate/sidecar bundles: `trusty-agents` (`tagent`),
+`trusty-channels` (`slack-mcp`, `telegram-mcp`), `trusty-common` (`tickets-mcp`,
+`candle_metal_bench`), `trusty-console`, `trusty-embedderd-py`, `trusty-gworkspace`,
+`trusty-kb`, `trusty-review`, `trusty-sld-lint`, and the `publish = false`
+`trusty-code-gui`, `trusty-mpm-gui`, `trusty-publish-guard`, `trusty-agents-local`.
+Add one here the moment it gains a second bundled binary.

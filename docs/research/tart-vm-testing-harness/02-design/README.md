@@ -20,11 +20,20 @@ specify it.
   installation patterns, the JSON-only assertion oracle, measurement-backed
   operational constraints, cost baseline, isolation guarantee, extension points,
   non-goals, and known gaps.
+- **[02-harness-contracts.md](./02-harness-contracts.md)** — DOC-2. The exact
+  interfaces DOC-1 mandates but does not define: the assertion oracle's JSON schema,
+  the driver's exit-code contract, base-image digest pinning, `--runid` collision
+  prevention, `vmtest clean` semantics, negative-probe mechanics, toolchain path
+  hand-off, configuration and tunables, the `expected-binaries.tsv` schema and
+  `--check-table` algorithm, polling timeouts, provisioning against a preinstalled
+  `mise`, and the scenario↔`lib/` calling convention — plus shell discipline, the
+  `jq` dependency, and a traceability table back to DOC-1.
 
 ## Reading order
 
 Read [`../01-research/conclusions-post-measurement.md`](../01-research/conclusions-post-measurement.md)
-first if you want the *why*; read DOC-1 if you want the *what to build*. Raw
+first if you want the *why*; read DOC-1 if you want the *what to build*; read DOC-2
+if you are the one building it and need the exact interfaces. Raw
 numbers live in [`../01-research/vm-install-probe-findings.md`](../01-research/vm-install-probe-findings.md)
 (measurements A–K) and the logs beside it.
 

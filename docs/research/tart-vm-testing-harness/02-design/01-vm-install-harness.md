@@ -46,18 +46,53 @@ for an untested surface would give the harness a claim it cannot support. If
 `install.sh` coverage is wanted later, it needs its own measurement pass first
 (see §13).
 
-#### D2 — `trusty-mpm` is a documented gap in pattern (a)
+#### D2 — `trusty-mpm` is published, and pattern (a) covers it
 
-`trusty-mpm` carries `publish = false` and is therefore not on crates.io. It
-**cannot** be covered by pattern (a) and the harness must not pretend otherwise.
-It is covered by patterns (b) and (c) only.
+**This decision was reversed on 2026-07-31. The original premise was false.**
+The superseded text asserted that `trusty-mpm` "carries `publish = false` and is
+therefore not on crates.io", and concluded that pattern (a) could not cover it.
+Both halves are wrong.
 
-The alternative — mixing a source build into the "released" scenario so that the
-crate count matches — was rejected. "Released" must mean exactly one thing:
-*what a user gets from crates.io today*. A scenario whose semantics vary per crate
-is a scenario whose failures are ambiguous. The gap is recorded in
-`expected-binaries.tsv` (§7.2) and asserted as a *known exclusion*, not silently
-skipped.
+**The corrected fact.** `crates/trusty-mpm/Cargo.toml` contains **no `publish`
+key at all**. Its `[package]` table (lines 1–13) declares `name`, `version`,
+`edition`, `rust-version`, `license`, `repository`, `description`, `readme`,
+`homepage`, `keywords`, `categories`, and `exclude` — and nothing else. Cargo's
+default in the absence of that key is `publish = true`. Every textual occurrence
+of "publish" in that manifest is a comment *about other crates*, and those
+comments say the opposite of the superseded premise: lines 108–111 and 290–291
+record that the Tauri GUI is deliberately kept in the separate, `publish = false`
+`trusty-mpm-gui` crate precisely so that `trusty-mpm` itself "publishes cleanly to
+crates.io". This mismatch was first written up in
+[DOC-2 §9.5](./02-harness-contracts.md), which flagged the premise but explicitly
+declined to change D2; this amendment closes that open item.
+
+**Verified empirically, 2026-07-31.** `cargo search trusty-mpm --limit 5` returns
+`trusty-mpm = "1.0.2"` — the crate exists on crates.io at version **1.0.2**. The
+registry is the authority here, not the manifest, and it agrees with the manifest.
+(The `crates.io` JSON API was refused for this client under its data-access policy,
+so `cargo search` against the registry index is the evidence of record.)
+
+**The consequence.** `trusty-mpm` **is** installable by `cargo install trusty-mpm
+--locked` and is therefore **coverable by pattern (a)**. The "documented gap" this
+decision used to record **does not exist and is dissolved.** Pattern (a) covers the
+full seven-crate stack (D3), and the harness makes the same claim for all three
+patterns.
+
+What survives the reversal is the *rule*, not the exception it was invented for:
+"released" still means exactly one thing — *what a user gets from crates.io today*
+— and a source build must still never be mixed into the released scenario to make a
+count match. That rule now costs nothing, because nothing needs excluding.
+
+> **Amendment, 2026-07-31 — D2 reversed.** The original D2 was a settled owner
+> decision reached on a premise nobody checked against the manifest: it asserted
+> `publish = false` for a crate that has no `publish` key. Everything downstream of
+> that premise — the pattern-(a) crate count in D3, the known-absent assertions in
+> §7.5, the `expect_a = absent` rows in
+> [DOC-2 §9.3](./02-harness-contracts.md) — inherited the error intact. It is
+> recorded as a reversal rather than a silent edit because a design whose decisions
+> quietly change is a design nobody can audit. The lesson is narrow and worth
+> keeping: a claim about publish status is checkable in one command, and this one
+> was never run until now.
 
 #### D3 — The stack is seven crates
 
@@ -67,11 +102,13 @@ skipped.
 | 2 | `trusty-memory` | `trusty-memory` | yes |
 | 3 | `trusty-analyze` | `trusty-analyze` | yes |
 | 4 | `trusty-code` | `trusty-code` | yes |
-| 5 | `trusty-mpm` | — (`publish = false`) | **no** — D2 |
+| 5 | `trusty-mpm` | `trusty-mpm` (v1.0.2, verified 2026-07-31) | yes — **amended**, D2 |
 | 6 | `trusty-git-analytics` | **`tga`** | yes |
 | 7 | `trusty-installer` | `trusty-installer` | yes |
 
-So pattern (a) covers **six** crates and patterns (b)/(c) cover **seven**.
+So **all three patterns cover all seven crates.** Row 5 previously read
+"— (`publish = false`)" / "**no** — D2"; that is corrected per the D2 reversal
+above.
 
 Note the package-name discontinuity on row 6: the workspace directory is
 `crates/trusty-git-analytics`, the published package name and the binary are both
@@ -81,13 +118,64 @@ Note the package-name discontinuity on row 6: the workspace directory is
 
 Pattern **(c) local-source first**, then (b) branch, then (a) released.
 
-*Rationale:* (c) is the pattern that is fully grounded in measurement — the 112s
-`trusty-search` source build at 8 vCPU/16 GB is a pattern-(c)-shaped measurement —
-**and** it is the only pattern that exercises the transport unique to this harness
-(host→guest source delivery over `tart exec -i`, §5, §6.1). Patterns (b) and (a)
-both delegate source acquisition to the network from inside the guest and reuse
-machinery (b) and (a) have in common with any ordinary `cargo install`. Build the
-risky, novel thing first.
+*Rationale:* (c) exercises the one transport unique to this harness — host→guest
+source delivery as a `tar` over `tart exec -i` (§5, §6.1) — and **that transport
+has never been measured end-to-end**. Patterns (b) and (a) both delegate source
+acquisition to the network from inside the guest, reusing machinery they have in
+common with any ordinary `cargo install`. Build the unverified thing first.
+
+**What the 112s build does and does not establish.** The 112s `trusty-search`
+source build at 8 vCPU/16 GB is a real measurement of *building this workspace from
+a source tree inside a guest*, and §9 quotes it as such. It is **not** a
+measurement of pattern (c)'s transport. Measurement K3 reached that source tree by
+`git clone` **inside the guest** — recorded as `GIT_CLONE_MS=50131` alongside the
+build at
+[`../01-research/vm-install-probe-findings.md:934-942`](../01-research/vm-install-probe-findings.md).
+A guest-side `git clone` is **pattern (b)'s** source delivery, not (c)'s. So the
+build cost generalises across (b) and (c) — both build from an on-disk guest tree —
+while the delivery step that distinguishes (c) remains untested.
+
+**The tar-over-`tart exec -i` pipeline is UNVERIFIED end-to-end.** What was
+measured is a *generic channel property*: 200,000 lines passed through `tart exec`
+untruncated
+([`../01-research/vm-install-probe-findings.md:179`](../01-research/vm-install-probe-findings.md)),
+with exit codes propagating exactly through `-i` (§5.1). That establishes the
+channel can carry volume. It does **not** establish the sequence pattern (c)
+actually needs: host `git ls-files -co --exclude-standard` → `tar` → `tart exec -i`
+→ guest-side unpack → build against the unpacked tree. No such run exists. This is
+**devil's-advocate critique #9** — *"tar transfer: SURVIVES host-side, UNTESTED
+guest-side"* — recorded at
+[`../01-research/devils-advocate-review.md:20`](../01-research/devils-advocate-review.md),
+which also lists "transfer of 81 MiB by any mechanism" among the unmeasured items
+(`:126-127`). The critique was **not addressed** in earlier drafts of this
+document, which claimed the transport had been measured. It had not.
+
+**Why the order still holds — corrected justification.** The (c) → (b) → (a) order
+is unchanged, but it follows from the opposite fact to the one previously given.
+(c) is built first **because its transport is the unverified one**, and building it
+is accepted as the measurement that verifies it. The alternative — write a
+standalone tar-transport probe, measure it, then build (c) — was considered and
+rejected: the probe would be most of `lib/source.sh` with none of its value, and it
+would be a second artifact to keep honest. Implementing (c) first exercises the
+transport against the real payload, on the real path, with the oracle already
+watching, and the first successful pattern-(c) run becomes the recorded
+measurement.
+
+> **Recorded product-owner decision, 2026-07-31.** *Building pattern (c) IS the
+> measurement.* The harness accepts an unverified transport as its first
+> implementation target rather than running a separate probe first. This is a
+> deliberate acceptance of risk, not an oversight: if the tar pipeline does not
+> work, it fails loudly during the first (c) implementation, at which point (b) —
+> whose transport *was* measured, at `GIT_CLONE_MS=50131` — is the fallback that
+> keeps the harness useful. The first successful pattern-(c) run must be recorded
+> as the replacement measurement, in the same way §9 asks for the full-stack
+> timing.
+
+The interfaces this implementation order needs — the `lib/source.sh` signatures,
+the streamed-byte-count logging that turns §6.1's payload estimate into a
+measurement, and the scenario composition that keeps (b) available as a fallback —
+are specified in [DOC-2 §12](./02-harness-contracts.md), with the transport gap
+carried in its open-items list.
 
 #### D5 — Local Tart VM only; dependency download is acceptable
 
@@ -375,7 +463,7 @@ never rely on `mise activate`.
 |---|---|---|
 | **(c) local** | `tar` of `git ls-files -co --exclude-standard`, piped via `tart exec -i` to guest-local disk | 7 crates; includes uncommitted work |
 | **(b) branch** | `git clone` inside the guest (repo is public), checkout branch, `cargo install --path` | 7 crates; committed+pushed state |
-| **(a) released** | `cargo install <crate> --locked` from crates.io | 6 crates — excludes `trusty-mpm` (D2) |
+| **(a) released** | `cargo install <crate> --locked` from crates.io | 7 crates; latest published state (D2 as amended) |
 
 #### 6.1 Pattern (c) — local source
 
@@ -415,7 +503,7 @@ per crate. No host→guest source transfer occurs; the host repository is not re
 
 #### 6.3 Pattern (a) — released
 
-`cargo install <crate> --locked` from crates.io, for the six publishable crates in
+`cargo install <crate> --locked` from crates.io, for all seven publishable crates in
 D3. `--locked` is mandatory — it is what makes the run reproducible against the
 published lockfile rather than against whatever the resolver feels like today.
 
@@ -480,12 +568,26 @@ binaries that install must produce:
 | Crate | Expected binaries |
 |---|---|
 | `trusty-search` | `trusty-search`, `trusty-embedderd` |
-| `trusty-memory` | `trusty-memory`, `trusty-bm25-daemon` |
+| `trusty-memory` | `trusty-memory`, `trusty-bm25-daemon`, `trusty-memory-mcp-bridge` |
 | `trusty-installer` | `trusty-installer`, `tctl` |
 | `trusty-code` | `tcode` |
 | `trusty-analyze` | `trusty-analyze` |
 | `tga` | `tga` |
 | `trusty-mpm` | `tm`, `trusty-mpm` |
+
+> **Amendment, 2026-07-31 — third `trusty-memory` sidecar added.** The row above
+> originally listed two binaries and **omitted `trusty-memory-mcp-bridge`**.
+> `crates/trusty-memory/Cargo.toml` declares **three** `[[bin]]` targets:
+> `trusty-memory` (`src/main.rs`), `trusty-bm25-daemon` (`src/bin/bm25_daemon.rs`),
+> and `trusty-memory-mcp-bridge` (`src/bin/mcp_bridge.rs`) — the last a deprecation
+> shim for pre-#914 users — with a manifest comment stating that `cargo install
+> trusty-memory` "produces all three binaries in one command". The omission was
+> found by enumerating the manifests for
+> [DOC-2 §9.3](./02-harness-contracts.md), whose seed table already carries the
+> third row; this amendment brings DOC-1 into line with it. The same omission
+> exists upstream in the project's Single-Install sidecar inventory checklist
+> (`.claude-mpm/INSTRUCTIONS.md`), which is the likely origin of the error and is
+> corrected in the same PR.
 
 **Why a table and not the documentation:** `docs/reference/release-workflow.md`
 (~lines 450–460) is **stale** with respect to `trusty-console`. Asserting against
@@ -521,24 +623,40 @@ one a user gets.
 Assert that the convention holds: **installing a main crate yields all of that
 crate's sidecar binaries.** Concretely — `cargo install trusty-search` must produce
 *both* `trusty-search` and `trusty-embedderd`; `cargo install trusty-memory` must
-produce *both* `trusty-memory` and `trusty-bm25-daemon`; `cargo install
-trusty-installer` must produce *both* `trusty-installer` and `tctl`.
+produce **all three** of `trusty-memory`, `trusty-bm25-daemon`, and
+`trusty-memory-mcp-bridge`; `cargo install trusty-installer` must produce *both*
+`trusty-installer` and `tctl`.
 
 This is a regression gate on packaging: a crate that stops shipping its sidecar
 still "installs successfully" and still passes a naive smoke test, but leaves the
 user with a stack that cannot start its daemons.
 
+**This gate is only ever as good as §7.2's table.** It cannot detect the loss of a
+binary it has never heard of — an omitted row is not a weaker assertion, it is *no*
+assertion, and it fails silently and permanently. That is exactly what the
+2026-07-31 `trusty-memory-mcp-bridge` omission (§7.2) would have caused: a
+Single-Install gate blind to the third sidecar, passing green while the sidecar
+disappeared. The `--check-table` self-diff (§7.2) exists to make this class of
+omission loud, and it is the reason its diff source must be the `[[bin]]` targets
+themselves rather than any prose inventory that can drift.
+
 #### 7.5 Per-pattern expectations
 
-Because pattern (a) excludes `trusty-mpm` (D2), the oracle must be
-**pattern-aware**: `tm` and `trusty-mpm` are asserted **present** under (b) and (c),
-and asserted **known-absent** under (a). "Known-absent" is an explicit expectation,
-not a skipped assertion — a run that unexpectedly *finds* `tm` under pattern (a)
-means something outside the pattern installed it, which is itself a finding.
+**Amended 2026-07-31 (D2 reversal).** This section previously required `tm` and
+`trusty-mpm` to be asserted **known-absent** under pattern (a), because D2 held that
+`trusty-mpm` was unpublished. It is published (D2 as amended, v1.0.2), so that
+expectation **inverts**: `tm` and `trusty-mpm` are asserted **present** under (a),
+(b), and (c) alike, and `tctl stack doctor --json` must report `trusty-mpm` as
+installed under every pattern. A pattern-(a) run that does *not* find `tm` is now a
+failure, where before it was the expected result.
 
-Correspondingly, `tctl stack doctor --json` under pattern (a) will report
-`trusty-mpm` as not installed. That is the expected result for that pattern and
-must not fail the run.
+The oracle is **still pattern-aware by construction** — `expected-binaries.tsv`
+carries a per-pattern expectation column (DOC-2 §9.1) and the oracle reads it —
+but with the gap dissolved there is currently no in-scope binary whose expectation
+differs across patterns. That is a *fact about today's table*, not a licence to
+collapse the mechanism: the moment any crate legitimately diverges per pattern, the
+column is where that is recorded, and "known-absent" remains an explicit asserted
+expectation rather than a skipped assertion.
 
 ---
 
@@ -667,15 +785,20 @@ meaningful claim rather than a file-existence check.
 
 **Full-stack figure — read this before quoting it.** The 4–8 minute range is an
 **extrapolation**, and it was extrapolated for **six** crates. D3 puts **seven**
-crates in scope, so the real figure is somewhat higher. Two further caveats:
+crates in scope for **every** pattern — including (a), which the superseded D2
+wrongly scoped at six — so the real figure is somewhat higher than the range says,
+in all three patterns rather than just two. No revised number is offered here:
+inventing one would be extrapolating from an extrapolation. Two further caveats:
 
 - The extrapolation assumes the shared `CARGO_TARGET_DIR` amortisation of §8.6.
   Without it the number is not close.
 - The two per-crate measurements above (112s + 131s for two crates) are not
   obviously consistent with 4–8 minutes for six or seven, *except* under strong
   shared-dependency amortisation. Treat 4–8 min as a **low-confidence planning
-  estimate** until a full-stack run is actually timed. The first pattern-(c)
-  full-stack run should be recorded as the replacement measurement.
+  estimate** — and, since the 2026-07-31 D2 amendment widened its scope without
+  re-deriving it, **lower-confidence now than when it was written**. It stands only
+  until a full-stack run is actually timed. The first pattern-(c) full-stack run
+  should be recorded as the replacement measurement.
 
 The ONNX detail matters and is worth keeping explicit: `ort-sys` downloads its
 runtime **successfully inside the guest**. Network-dependent build scripts are not
@@ -694,9 +817,11 @@ Per D4:
    This delivers the entire skeleton plus the novel transport.
 2. **Pattern (b) — branch.** Adds `scenarios/install-branch.sh` and a guest-side
    `git clone` path in `lib/source.sh`. No new infrastructure.
-3. **Pattern (a) — released.** Adds `scenarios/install-released.sh` and
-   pattern-aware `trusty-mpm` known-absent handling in the oracle (§7.5). No new
-   infrastructure.
+3. **Pattern (a) — released.** Adds `scenarios/install-released.sh` only. No new
+   infrastructure. *(Amended 2026-07-31: this step previously also called for
+   pattern-aware `trusty-mpm` known-absent handling in the oracle. The D2 reversal
+   removes that work item — pattern (a) now expects the same seven crates present
+   as (b) and (c), per §7.5.)*
 
 > **Settled:** the architecture sketch annotates `scenarios/install-local.sh` with
 > "build first". This means *implement this scenario first*, consistent with D4
@@ -790,6 +915,21 @@ first.
 - **`install.sh` end-to-end in a guest.** Never tested. This is now out of scope
   per D1, so it is **no longer blocking** — but it also means the harness makes no
   claim whatsoever about the `install.sh` user path.
+- **Pattern (c)'s tar-over-`tart exec -i` transport, end-to-end.** Never measured.
+  What was measured is a generic channel property — 200,000 lines untruncated
+  ([`../01-research/vm-install-probe-findings.md:179`](../01-research/vm-install-probe-findings.md))
+  — not the receive-tar → unpack → build sequence pattern (c) depends on. The 112s
+  build of measurement K3 reached its source tree by guest-side `git clone`
+  (`GIT_CLONE_MS=50131`, `:942`), which is **pattern (b)'s** transport. This is
+  devil's-advocate critique #9
+  ([`../01-research/devils-advocate-review.md:20`](../01-research/devils-advocate-review.md)),
+  and it is **not blocking** only by a **recorded product-owner decision of
+  2026-07-31** — not by any technical finding — namely D4's deliberate acceptance of
+  risk in treating the first pattern-(c) implementation as the validating
+  measurement. Until that run
+  succeeds, the harness's headline transport is unproven. Earlier drafts of D4
+  wrongly claimed it had been measured; that claim is withdrawn.
+
 - **`--dir` mounts in either direction.** Never measured. The harness does not use
   them (§6.4), and any future proposal to use them must measure first.
 - **TCC behaviour under a responsible app other than iTerm2.** **All** TCC
