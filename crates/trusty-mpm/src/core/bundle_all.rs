@@ -176,6 +176,11 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("skills/tm-issues-prune.md", TM_ISSUES_PRUNE),
     // --- Issue #2321: tm CLI operations skill (MCP mgmt, sessions, diagnostics) ---
     overwrite("skills/tm-cli-operations.md", TM_CLI_OPERATIONS),
+    // --- Issue #4447: Slack canvas delivery protocol (creation != delivery) ---
+    overwrite(
+        "skills/tm-slack-canvas-delivery.md",
+        TM_SLACK_CANVAS_DELIVERY,
+    ),
     // --- DOC-28 R1: canonical self-description doc ---
     overwrite("docs/WHAT-IS-TRUSTY-MPM.md", WHAT_IS_TRUSTY_MPM),
     // --- Issue #2034: architecture doc covering memory/sessions/search ---

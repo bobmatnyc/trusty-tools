@@ -130,6 +130,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm.md",
         "skills/tm-issues-prune.md",
         "skills/tm-cli-operations.md",
+        "skills/tm-slack-canvas-delivery.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -204,6 +205,7 @@ fn tm_skills_have_frontmatter() {
         ("tm", TM_OVERVIEW),
         ("tm-issues-prune", TM_ISSUES_PRUNE),
         ("tm-cli-operations", TM_CLI_OPERATIONS),
+        ("tm-slack-canvas-delivery", TM_SLACK_CANVAS_DELIVERY),
     ];
     for (name, content) in skills {
         assert!(
@@ -405,11 +407,14 @@ fn bundle_table_is_complete() {
     //   `CLAUDE.md` actually delivered to users is `CLAUDE_MD_STUB` in
     //   `instruction_pipeline.rs`, a separate string not part of this table.
     //   179 - 1 = 178.
-    assert_eq!(ALL.len(), 178);
+    // Issue #4447 (1): tm-slack-canvas-delivery — a single flat-file bundled
+    //   skill (no references/), the same shape as rust-build-performance.
+    //   178 + 1 = 179.
+    assert_eq!(ALL.len(), 179);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 178, "artifact paths must be unique");
+    assert_eq!(paths.len(), 179, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

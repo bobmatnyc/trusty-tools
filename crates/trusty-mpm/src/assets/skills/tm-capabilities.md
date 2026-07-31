@@ -40,7 +40,7 @@ relevant `references/*.md` file here when you need an exact answer.
 | "What are the exact `tm <command>` subcommands / flags?" | `references/cli.md` (54 top-level commands) |
 | "What MCP tools exist and what parameters do they take?" | `references/mcp-tools.md` (33 tools, plus sibling-daemon pointers) |
 | "What agents can I delegate to, and what do they declare?" | `references/agents.md` (37 concrete agents) |
-| "What skills exist, and are they user-invocable?" | `references/skills.md` (51 bundled skills) |
+| "What skills exist, and are they user-invocable?" | `references/skills.md` (52 bundled skills) |
 | "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (22 checks) |
 | "How do the pieces fit into an end-to-end flow?" | `references/workflows.md` (hand-authored, not generated) |
 
