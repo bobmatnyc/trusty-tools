@@ -12,6 +12,9 @@ use std::process::{Command, Stdio};
 use crate::integrations::analyze_client::{
     AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, ComplexityHotspot, Smell,
 };
+// #4440: the single, shared interpretation of a trusty-search /health payload.
+// This module must CONSUME it rather than re-deriving its own — see `health`.
+use crate::integrations::health::{HealthResponse, ServingState};
 
 use super::{DEFAULT_ANALYZE_BIN, ENV_ANALYZE_BIN, SubprocessReviewReport, map_report};
 
@@ -181,12 +184,36 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// Liveness: probe trusty-search health AND verify the binary is resolvable.
     ///
     /// Why: no analyze daemon exists in the subprocess model; liveness means
-    /// "can we run an analysis?" which requires both trusty-search AND the binary.
-    /// What: GETs `<search_url>/health`, checks `status == "ok"` AND
-    /// `search_reachable` (reusing the same probe URL pattern as the HTTP path
-    /// since trusty-analyze itself calls trusty-search); then verifies the binary
-    /// executes with `--version`.
-    /// Test: `subprocess_client_health_check_fails_gracefully`.
+    /// "can we run an analysis?", which requires both trusty-search (the data
+    /// source `trusty-analyze` itself queries) AND a runnable binary.
+    ///
+    /// Issue #4440: this probe used to deserialise the search payload into a
+    /// private one-field struct and test `status == "ok"` as a literal string —
+    /// a second, cruder copy of the decision
+    /// [`HealthResponse::serving_state`] already makes. trusty-search latches
+    /// `status: "degraded"` for its ENTIRE process lifetime once warm boot skips
+    /// any index (`degraded_by_timeout` / `degraded_by_tcc` are boot-time
+    /// counters that are never decremented), so on a daemon that was up,
+    /// embedder-ready and answering queries normally, the string test pinned
+    /// `has_analysis` at `false` and `context_gate` skipped every single review
+    /// with "trusty-analyze unreachable/not-ready". The search-side gate in
+    /// `pipeline::context_gate` received exactly this fix under #4079; this
+    /// duplicated twin did not. It now CONSUMES `serving_state` so there is one
+    /// place — and only one — that decides what a trusty-search health payload
+    /// means.
+    ///
+    /// What: GETs `<search_url>/health`, deserialises the full
+    /// [`HealthResponse`], and refuses ONLY on [`ServingState::NotServing`]
+    /// (embedder down, or a status that is neither `"ok"` nor `"degraded"`).
+    /// A `Degraded` daemon is answering queries and so passes, carrying
+    /// trusty-search's own status string through verbatim. Then verifies the
+    /// binary executes with `--version`. A genuinely dead dependency — either
+    /// half — still fails: this narrows the false-positive, it does not turn the
+    /// probe into an always-pass.
+    /// Test: `subprocess_client_health_check_fails_gracefully`,
+    /// `subprocess_client_degraded_search_still_has_analysis`,
+    /// `subprocess_client_not_serving_search_has_no_analysis`,
+    /// `subprocess_client_health_preserves_degraded_status_string`.
     async fn health(&self) -> Result<AnalyzeHealthResponse, AnalyzeClientError> {
         // Probe trusty-search /health directly.
         let url = format!("{}/health", self.search_url.trim_end_matches('/'));
@@ -209,14 +236,22 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
             )));
         }
 
-        // Parse the trusty-search health response (same shape the HTTP path uses
-        // via the analyze daemon).
-        #[derive(serde::Deserialize)]
-        struct SearchHealth {
-            status: String,
-        }
-        let sh: SearchHealth = serde_json::from_str(&body)
+        // #4440: parse the FULL trusty-search health payload and delegate the
+        // verdict to the shared `serving_state()`, instead of re-testing
+        // `status == "ok"` on a locally-declared one-field struct. The old
+        // private struct is gone deliberately: keeping it is what let this copy
+        // drift out of sync with the #4079 fix in the first place.
+        let sh: HealthResponse = serde_json::from_str(&body)
             .map_err(|e| AnalyzeClientError::Parse(format!("search health parse: {e}")))?;
+
+        // Refuse ONLY when trusty-search genuinely cannot answer queries.
+        // `Degraded` means "serving, with a named capability gap" — a review can
+        // still be produced against it, and blocking on it is the #4440 bug.
+        if let ServingState::NotServing(reason) = sh.serving_state() {
+            return Err(AnalyzeClientError::Unavailable(format!(
+                "trusty-search at {url} is not serving: {reason}"
+            )));
+        }
 
         // Verify the binary is runnable.
         let binary_ok = {
@@ -240,11 +275,15 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
             )));
         }
 
-        // Express result as AnalyzeHealthResponse: search_reachable = true when
-        // trusty-search reported ok; this mirrors the daemon's own health response.
+        // #4440: `search_reachable` is `is_serving()`, NOT `status == "ok"`.
+        // The `NotServing` case already returned `Err` above, so reaching here
+        // means trusty-search is answering queries — possibly degraded, which is
+        // still analysable. `status` carries trusty-search's own verdict through
+        // verbatim so anything that displays it is never told a degraded daemon
+        // said "ok".
         Ok(AnalyzeHealthResponse {
             status: sh.status.clone(),
-            search_reachable: sh.status == "ok",
+            search_reachable: sh.is_serving(),
         })
     }
 
@@ -253,14 +292,32 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// Why: spec REV-441 applies to the subprocess model too — both the data
     /// source (trusty-search) and the analysis runtime (the binary) must be
     /// confirmed before the pipeline marks analyze available.
-    /// What: calls `health()` and returns `true` only if no error and is_healthy.
+    /// What: calls `health()` — which already enforces BOTH preconditions
+    /// (trusty-search serving, binary runnable) — and gates on
+    /// `search_reachable`.
+    ///
+    /// Issue #4440: this gated on `AnalyzeHealthResponse::is_healthy()`, i.e.
+    /// `status == "ok" && search_reachable`. `is_healthy` is the strict
+    /// "fully nominal" gate, and trusty-search latches `"degraded"` for its whole
+    /// process lifetime after any warm-boot skip, so this returned `false`
+    /// forever on a perfectly serving daemon and `context_gate` skipped every
+    /// review. `search_reachable` is now derived from
+    /// [`HealthResponse::is_serving`], the same three-state classification the
+    /// search-side gate uses, so degraded-but-serving proceeds while a daemon
+    /// that genuinely cannot answer still returns `false`.
+    ///
     /// The `index_id` argument is accepted for trait compatibility but the
     /// subprocess model does not pre-check index existence (the review subcommand
-    /// will surface a missing index as an exit-1 error at call time).
-    /// Test: `subprocess_client_has_analysis_returns_false_on_error`.
+    /// will surface a missing index as an exit-1 error at call time). It is
+    /// effectively dead weight here; removing it would change the shared
+    /// `AnalyzeClient` trait signature and every implementor, so it is left
+    /// alone deliberately — out of scope for a gate-unblocking fix.
+    /// Test: `subprocess_client_has_analysis_returns_false_on_error`,
+    /// `subprocess_client_degraded_search_still_has_analysis`,
+    /// `subprocess_client_not_serving_search_has_no_analysis`.
     async fn has_analysis(&self, _index_id: &str) -> bool {
         match self.health().await {
-            Ok(h) => h.is_healthy(),
+            Ok(h) => h.search_reachable,
             Err(e) => {
                 tracing::debug!("trusty-analyze subprocess health check failed (optional): {e}");
                 false
