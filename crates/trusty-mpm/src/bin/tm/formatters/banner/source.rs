@@ -189,24 +189,36 @@ pub(crate) fn load_banner_art() -> String {
 mod tests {
     use super::*;
 
-    // #4407: these tests mutate `$HOME`, and so must serialise against EVERY
-    // other `$HOME` mutator in this crate — 46 sites across 44 test fns, all of
-    // which use `#[serial_test::serial]`'s unnamed default group.
+    // #4407: these tests mutate `$HOME`, so they must serialise against every
+    // other `$HOME` mutator IN THIS TEST BINARY — the `tm` bin target. That is
+    // 19 HOME-mutating statements in 8 fns across 4 files: these four banner
+    // tests, `commands::pm_guard_bash::tests`'s TMPDIR/HOME expansion test, and
+    // the `set_home` / `with_fake_home` helpers in `commands::session::
+    // start_tests` and `tests_project_trust_tests` (whose single callers are
+    // each `#[serial]`). All are now in `serial_test`'s unnamed default group.
     //
-    // They previously used a FILE-LOCAL `static ENV_LOCK: Mutex<()>` instead,
+    // The scope that matters is the TEST TARGET, not the crate. `#[serial]`
+    // coordinates threads within one test binary and process-global `$HOME` is
+    // per process, so neither can span targets: the trusty-mpm LIB test binary
+    // has its own, larger population of HOME mutators that these tests never
+    // raced, because it is a different process. An env-isolation audit scoped
+    // per crate over-counts by exactly that much.
+    //
+    // These tests previously used a FILE-LOCAL `static ENV_LOCK: Mutex<()>`,
     // whose comment justified it as "the idiomatic solution without adding the
     // `serial_test` crate". That premise was stale (serial_test is already a
     // dev-dependency, used elsewhere in this very bin target) and the mutex was
-    // ineffective for the job: a file-local lock coordinates these five tests
-    // with each other and with NOTHING ELSE, so they raced every `#[serial]`
-    // HOME mutator in the crate, in both directions — a banner test could
-    // repoint `$HOME` mid-flight under another test, and another test could
-    // repoint it under a banner test's `load_banner_art()`. That is the
-    // shared-global-state shape #4407 describes: unrelated plain-mode tests
-    // reddening together and clearing on the next run with no code change.
+    // ineffective for the job: a file-local lock coordinates these tests with
+    // each other and with NOTHING ELSE, so they raced the same-target writers
+    // above in both directions — a banner test could repoint `$HOME` mid-flight
+    // under another test, and another test could repoint it under a banner
+    // test's `load_banner_art()`. That is the shared-global-state shape #4407
+    // describes: unrelated plain-mode tests reddening together and clearing on
+    // the next run with no code change.
     //
-    // Joining the crate's default `#[serial]` group is what actually excludes
-    // the other writers.
+    // Joining the default `#[serial]` group is what actually excludes the other
+    // writers. Verified by reproducing the race against `pm_guard_bash`'s test
+    // with a widened window and confirming it no longer reproduces.
 
     fn temp_dir() -> std::path::PathBuf {
         let base = std::env::temp_dir().join(format!(
