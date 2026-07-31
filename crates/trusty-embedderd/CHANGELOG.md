@@ -5,6 +5,7 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+
 ## [0.3.10] — 2026-07-21
 
 ### Changed
@@ -114,8 +115,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   batch=64 gives the best throughput (~83 cps vs ~77 at 32) at modest extra
   RSS (369 MB vs 285 MB — safely under the CoreML tripwire ceiling). Matches
   the `DEFAULT_COREML_BATCH_SIZE` change in `trusty-search` 0.23.5.
-
-## [Unreleased]
 
 ### Changed
 
