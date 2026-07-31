@@ -26,7 +26,9 @@
 
 use serde_json::json;
 
-use trusty_code::llm::{ChatMessage, ChatRequest, OpenAiCompatClient};
+// #4425: `OpenAiCompatClient::chat` is no longer an inherent method — it is
+// the SHARED `InferenceAdapter::chat`, so the trait must be in scope to call it.
+use trusty_code::llm::{ChatMessage, ChatRequest, InferenceAdapter, OpenAiCompatClient};
 use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::test_support::MockInferenceServer;
 
@@ -56,6 +58,7 @@ fn request_for(model: &str) -> ChatRequest {
         max_tokens: Some(16),
         tools: None,
         tool_choice: None,
+        stop: None,
         usage: None,
     }
 }
@@ -95,7 +98,7 @@ async fn openrouter_routes_through_shared_adapter_and_injects_usage() {
 
     // Response flowed back through the tcode conversion.
     assert_eq!(resp.first_text().as_deref(), Some("pong-mock"));
-    assert_eq!(resp.token_usage().prompt_tokens, 5);
+    assert_eq!(trusty_code::llm::token_usage(&resp).prompt_tokens, 5);
 
     // The shared adapter's outbound wire request.
     let captured = server.last_request().expect("one request captured");
@@ -205,7 +208,7 @@ async fn together_routes_through_shared_adapter_strips_prefix_and_omits_usage() 
 
     // Response flowed back through the tcode conversion.
     assert_eq!(resp.first_text().as_deref(), Some("pong-mock"));
-    assert_eq!(resp.token_usage().prompt_tokens, 5);
+    assert_eq!(trusty_code::llm::token_usage(&resp).prompt_tokens, 5);
 
     let captured = server.last_request().expect("one request captured");
     assert_eq!(captured.method, "POST");
@@ -266,7 +269,7 @@ async fn atlascloud_routes_through_shared_adapter_strips_prefix_and_omits_usage(
 
     // Response flowed back through the tcode conversion.
     assert_eq!(resp.first_text().as_deref(), Some("pong-mock"));
-    assert_eq!(resp.token_usage().prompt_tokens, 5);
+    assert_eq!(trusty_code::llm::token_usage(&resp).prompt_tokens, 5);
 
     let captured = server.last_request().expect("one request captured");
     assert_eq!(captured.method, "POST");

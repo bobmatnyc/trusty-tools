@@ -38,7 +38,7 @@
 //!
 //! **LLM vs. deterministic summary (design decision, ticket-sanctioned):**
 //! the epic's prose says "LLM auto-compresses history", but wiring a
-//! synchronous `LlmClientTrait::chat` call into this turn boundary would
+//! synchronous `InferenceAdapter::chat` call into this turn boundary would
 //! make cadence's own summarisation step a new network-dependent failure
 //! mode for a mechanism whose entire point is to keep the loop robust and
 //! fast — and every turn already pays for one real model round-trip. Per

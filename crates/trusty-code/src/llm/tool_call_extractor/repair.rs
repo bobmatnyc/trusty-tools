@@ -10,7 +10,7 @@
 //! What: [`extract_with_repair`] drives the loop; [`build_corrective_message`]
 //! renders a [`ToolCallExtractError`] into the text sent back to the model.
 //! The loop is generic over how a "retry" is performed (`retry: F`) — callers
-//! typically close over an `Arc<dyn LlmClientTrait>` and the running
+//! typically close over an `Arc<dyn InferenceAdapter>` and the running
 //! transcript, but tests can supply a canned sequence of responses with no
 //! network dependency at all.
 //! Test: `repair::tests::*` — covers "malformed → one repair → success" and

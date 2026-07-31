@@ -88,7 +88,7 @@ use support::{
 /// instead; see `filter_async_kinds`.
 ///
 /// (tcode streaming epic #3696, Gap A, Slice 1) Two `agent_message_delta`
-/// entries were added by this slice: the delegated engineer's own final
+/// entries were added by that slice: the delegated engineer's own final
 /// (text, no-tool-call) turn emits one right after its `bash` `tool_finished`
 /// and before that result unwinds back to the PM's `delegate_to_agent`
 /// `tool_finished`; the PM's own final (text, no-tool-call) turn — the one
@@ -98,6 +98,16 @@ use support::{
 /// of the fixed `TCODE_MOCK_LLM=echo` script (each loop's assistant turns are
 /// scripted, not modeled), so they belong in the ordered baseline rather than
 /// `filter_async_kinds`.
+///
+/// (Gap B — #4425) Each of those two became a PAIR. A text turn now publishes
+/// its content incrementally with `done: false` and closes with one empty
+/// `done: true` delta, so the stream carries two frames per turn rather than
+/// one. The scripted `TCODE_MOCK_LLM=echo` transport has no native streaming,
+/// so the shared adapter's buffered fallback replays each turn as exactly one
+/// content delta — which is why the count is deterministic at two per text
+/// turn. Against a real SSE provider the CONTENT frames multiply with the
+/// token count; the terminal frame stays exactly one, which is the invariant
+/// a consumer keys off.
 const BASELINE_EVENT_KINDS: &[&str] = &[
     "session_started",
     "session_status_changed",
@@ -105,10 +115,12 @@ const BASELINE_EVENT_KINDS: &[&str] = &[
     "tool_started",        // PM: delegate_to_agent
     "tool_started",        // engineer: bash
     "tool_finished",       // engineer: bash
-    "agent_message_delta", // engineer: final text turn (Gap A, Slice 1)
+    "agent_message_delta", // engineer: final text turn — content (done: false)
+    "agent_message_delta", // engineer: final text turn — terminal (done: true)
     "tool_finished",       // PM: delegate_to_agent
     "context_budget",      // PM turn 2 boundary
-    "agent_message_delta", // PM: final text turn (Gap A, Slice 1)
+    "agent_message_delta", // PM: final text turn — content (done: false)
+    "agent_message_delta", // PM: final text turn — terminal (done: true)
     "session_status_changed",
     "session_done",
 ];

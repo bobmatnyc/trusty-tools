@@ -9,7 +9,7 @@
 //! What: Exposes `AgentLoop`, `AgentLoopConfig`, `AgentLoopError`, and (#2056)
 //! `ToolEventSink`. `run` seeds a `Transcript`, then loops: build a
 //! `ChatRequest` from the running history + registry schemas, call
-//! `LlmClientTrait::chat`, accrue usage into a `PerfCollector`, append the
+//! `InferenceAdapter::chat`, accrue usage into a `PerfCollector`, append the
 //! assistant turn, and — if there are tool calls — dispatch each via
 //! `ToolRegistry::dispatch_gated` (notifying the optional sink around each
 //! dispatch) and append the results. Exits with `AgentOutput` in either of two
@@ -41,6 +41,10 @@ mod compaction_control;
 mod error;
 mod goals;
 mod sink;
+// #4425: token-level streaming for one turn (epic #3696 Gap B), kept out of
+// this file so the loop's control flow stays readable and the 500-SLOC cap
+// holds.
+mod streaming;
 pub mod telemetry;
 mod transcript;
 
@@ -59,7 +63,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::llm::{
-    CacheControl, ChatMessage, ChatRequest, ChatResponse, LlmClientTrait, RequestUsageConfig,
+    CacheControl, ChatMessage, ChatRequest, ChatResponse, InferenceAdapter, RequestUsageConfig,
     ToolCall, ToolCallExtractError, ToolCallExtractor, ToolDefinition,
 };
 use crate::mode::HarnessMode;
@@ -234,7 +238,7 @@ impl Default for AgentLoopConfig {
 /// Why: Encapsulates the repetitive, error-prone control flow (call → extract
 /// tool calls → dispatch → append → repeat) behind one `run` method so call
 /// sites express intent ("run this task") not mechanics.
-/// What: Holds the config, an `Arc<dyn LlmClientTrait>` (mockable in tests), an
+/// What: Holds the config, an `Arc<dyn InferenceAdapter>` (mockable in tests), an
 /// `Arc<ToolRegistry>` whose schemas are advertised and whose `dispatch_gated`
 /// executes tool calls, and three OPTIONAL collaborators set via builder
 /// methods after construction: (#2056) a `sink` notified around every tool
@@ -247,7 +251,7 @@ impl Default for AgentLoopConfig {
 /// Test: `agent_loop::tests::*`.
 pub struct AgentLoop {
     config: AgentLoopConfig,
-    llm: Arc<dyn LlmClientTrait>,
+    llm: Arc<dyn InferenceAdapter>,
     registry: Arc<ToolRegistry>,
     sink: Option<Arc<dyn ToolEventSink>>,
     /// (UI Phase 1) The name of the agent this loop runs as, stamped on every
@@ -290,7 +294,7 @@ impl AgentLoop {
     ///
     /// Why: Constructor injection keeps the loop testable — production passes a
     /// real `LlmClient`, tests pass a scripted mock, both as
-    /// `Arc<dyn LlmClientTrait>`.
+    /// `Arc<dyn InferenceAdapter>`.
     /// What: Stores the config, LLM client, and tool registry; `sink`/`cancel`/
     /// `stop_signal` start `None` — attach them via
     /// [`Self::with_tool_event_sink`]/[`Self::with_cancel_flag`]/
@@ -301,7 +305,7 @@ impl AgentLoop {
     /// Test: `agent_loop::tests::two_turn_flow_completes`.
     pub fn new(
         config: AgentLoopConfig,
-        llm: Arc<dyn LlmClientTrait>,
+        llm: Arc<dyn InferenceAdapter>,
         registry: Arc<ToolRegistry>,
     ) -> Self {
         Self {
@@ -644,34 +648,22 @@ impl AgentLoop {
             // a cheap in-loop retry of just this one `chat` call. Deferred
             // (optional fix #5) to keep #2265's required scope (fixes 1-4)
             // tightly bounded.
-            let response = self.llm.chat(&request).await?;
+            // (tcode streaming epic #3696, Gap B — #4425) `chat_turn` issues
+            // the blocking `chat` when no sink is attached (the CLI path,
+            // unchanged) and streams token-by-token when one is, publishing
+            // each chunk through `ToolEventSink::agent_message` with
+            // `done: false` and a final `done: true`. Either way it returns
+            // the same `ChatResponse`, so everything below is
+            // transport-agnostic. `turn_id` is a fresh UUID v4 per turn: it
+            // MUST be unique within the session across every
+            // concurrently-running agent (see `Event::AgentMessageDelta`'s
+            // doc), which a per-agent-local counter restarting from 0 in each
+            // `AgentLoop` instance would NOT guarantee.
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            let response = self.chat_turn(&request, &turn_id).await?;
 
             accrue_usage(perf, &self.config.model, &response);
             transcript.push_response(&response);
-
-            // (tcode streaming epic #3696, Gap A, Slice 1) Publish this
-            // turn's assistant text as a single `done: true` delta. Skipped
-            // for tool-only turns (`first_text` is `None`) and for an empty
-            // string — neither carries anything a streaming UI should render
-            // as a bubble. `turn_id` is a fresh UUID v4 per turn: it MUST be
-            // unique within the session across every concurrently-running
-            // agent (see `Event::AgentMessageDelta`'s doc), which a
-            // per-agent-local counter restarting from 0 in each `AgentLoop`
-            // instance would NOT guarantee.
-            if let Some(sink) = &self.sink
-                && let Some(text) = response.first_text()
-                && !text.is_empty()
-            {
-                let turn_id = uuid::Uuid::new_v4().to_string();
-                sink.agent_message(
-                    self.agent_name(),
-                    self.agent_id_str(),
-                    &turn_id,
-                    &text,
-                    true,
-                )
-                .await;
-            }
 
             let tool_calls = response.first_tool_calls().to_vec();
 
@@ -945,6 +937,10 @@ impl AgentLoop {
             max_tokens: Some(self.config.max_tokens),
             tools,
             tool_choice,
+            // #4425: the shared `ChatRequest` carries a `stop` field trusty-code
+            // has never used; `None` omits it from the wire payload, which is
+            // byte-identical to the pre-migration request.
+            stop: None,
             usage,
         }
     }
@@ -1159,7 +1155,7 @@ async fn notify_result(
 /// keyed by `PERF_PHASE` against the configured model.
 /// Test: `agent_loop::tests::usage_accrues_across_turns`.
 fn accrue_usage(perf: &mut PerfCollector, model: &str, response: &ChatResponse) {
-    let usage = response.clone().token_usage();
+    let usage = crate::llm::token_usage(response);
     perf.record_phase(PERF_PHASE, 0, model, &usage);
 }
 
