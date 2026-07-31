@@ -220,7 +220,10 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> String {
     // #4467: scrub the inherited Claude Code session markers so `tm launch` /
     // `tm connect` / delegations keep native --resume/--continue/rewind.
-    let mut cmd = format!("env{} claude", crate::core::claude_env_scrub::env_unset_flags());
+    let mut cmd = format!(
+        "env{} claude",
+        crate::core::claude_env_scrub::env_unset_flags()
+    );
     if let Some(m) = model {
         cmd.push_str(" --model ");
         cmd.push_str(m);
@@ -276,7 +279,10 @@ mod tests {
     /// POSITION; its CONTENT is pinned by literal name in
     /// `core::claude_env_scrub`'s `every_marker_is_pinned_by_literal_name`.
     fn head() -> String {
-        format!("env{} claude", crate::core::claude_env_scrub::env_unset_flags())
+        format!(
+            "env{} claude",
+            crate::core::claude_env_scrub::env_unset_flags()
+        )
     }
 
     #[test]
@@ -291,10 +297,7 @@ mod tests {
     #[test]
     fn claude_command_with_model() {
         let cmd = build_claude_command(Some("claude-opus-4-5"), None);
-        assert_eq!(
-            cmd,
-            format!("{} --model claude-opus-4-5 {FLAGS}", head())
-        );
+        assert_eq!(cmd, format!("{} --model claude-opus-4-5 {FLAGS}", head()));
     }
 
     /// #4467: this builder is the launch line for `tm launch`, `tm connect` and
@@ -432,10 +435,7 @@ mod tests {
         // same `env <-u marker…>` head — an agent session that saved no
         // transcript was the same defect as a PM session that saved none.
         let cmd = build_agent_command(&cfg, &agent, None, None);
-        assert_eq!(
-            cmd,
-            format!("{} --model claude-haiku-4-5 {FLAGS}", head())
-        );
+        assert_eq!(cmd, format!("{} --model claude-haiku-4-5 {FLAGS}", head()));
     }
 
     #[test]

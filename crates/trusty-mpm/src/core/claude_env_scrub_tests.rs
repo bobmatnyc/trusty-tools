@@ -48,8 +48,7 @@ fn suppressing_marker_is_scrubbed() {
 #[test]
 fn every_marker_is_pinned_by_literal_name() {
     assert_eq!(
-        INHERITED_SESSION_MARKERS,
-        EXPECTED_MARKERS,
+        INHERITED_SESSION_MARKERS, EXPECTED_MARKERS,
         "the scrub list changed. If that is intentional, update EXPECTED_MARKERS in \
          this file too — and re-check the kept/scrubbed rationale in the module doc, \
          since every entry there has a stated reason"

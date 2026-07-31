@@ -68,7 +68,10 @@ pub(crate) fn relaunch_command() -> String {
     // #4467: strip the inherited Claude Code session markers. No `NAME=VALUE`
     // assignments follow, so the POSIX "-u before assignments" rule is trivially
     // satisfied.
-    format!("env{} claude", crate::core::claude_env_scrub::env_unset_flags())
+    format!(
+        "env{} claude",
+        crate::core::claude_env_scrub::env_unset_flags()
+    )
 }
 
 #[cfg(test)]

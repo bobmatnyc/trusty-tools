@@ -91,8 +91,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
 
     // Shell-string builders: parse the `-u` operands out of the `env` prefix.
-    let prefix =
-        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN));
+    let prefix = crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN));
     let launch_line = crate::core::model_inject::build_claude_command(None, None);
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
 
@@ -102,8 +101,10 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         &config_dir,
         None,
     );
-    let stream_cmd =
-        crate::control::backend::stream_json::build_claude_command(std::path::Path::new("/probe"), None);
+    let stream_cmd = crate::control::backend::stream_json::build_claude_command(
+        std::path::Path::new("/probe"),
+        None,
+    );
 
     vec![
         (
