@@ -15,6 +15,16 @@ build-cost model by roughly 20x and killed the golden-image strategy.
 For a newcomer: **README (this file) → `conclusions-post-measurement.md` →
 `vm-install-probe-findings.md` → the rest as background.**
 
+> **Location update (owner decision, post-research):** the harness location was
+> subsequently changed from `scripts/vmtest/` to a project-root `vmtest-harness/`
+> directory. The `members = ["crates/*"]` rationale for keeping the harness outside the
+> Cargo workspace is unchanged — a root-level directory sits even further from that glob
+> than `scripts/` did. Documents below marked **SUPERSEDED** retain the original
+> `scripts/vmtest/` path references as a historical record of what was actually
+> recommended and reviewed at the time; they are deliberately **not** updated. The
+> current specification lives in
+> [`../02-design/01-vm-install-harness.md`](../02-design/01-vm-install-harness.md).
+
 ## Contents
 
 | Document | Status |
