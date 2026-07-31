@@ -109,7 +109,7 @@ pub const ENV_VAR: &str = "TCODE_DEBUG_TRANSCRIPT";
 /// machine-readable copy of [`InferenceError::is_retryable`] /
 /// [`InferenceError::is_alarm`], recorded from the ORIGINAL error value.
 /// Test: `debug_capture::tests::record_serialises_full_request_and_response`,
-/// `debug_capture::tests::record_preserves_the_original_error_classification`.
+/// `debug_capture::tests::stream_error_preserves_the_original_error_classification`.
 #[derive(Debug, Clone, Serialize)]
 struct DebugCaptureRecord<'a> {
     turn_index: u64,
