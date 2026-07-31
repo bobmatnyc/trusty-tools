@@ -16,7 +16,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use trusty_mpm::activity::monitor::{ActivityMonitor, OpenRouterClassifier};
+// #4427: `OpenRouterClassifier` moved to `activity::classifier`; both are
+// re-exported from `activity` so this is the one stable import path.
+use trusty_mpm::activity::{ActivityMonitor, OpenRouterClassifier};
 use trusty_mpm::core::paths::FrameworkPaths;
 use trusty_mpm::session_manager::real_tmux::NoopTmuxDriver;
 use trusty_mpm::session_manager::{ManagedTmuxDriver, RealTmuxDriver, SessionManager};

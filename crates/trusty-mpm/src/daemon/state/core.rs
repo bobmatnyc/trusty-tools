@@ -220,13 +220,13 @@ pub struct DaemonState {
     /// content-hash cache persists between calls; a `OnceLock` defers
     /// construction until the first activity request and amortizes the cost.
     /// What: holds the shared monitor; built on first access using the default
-    /// [`OpenRouterClassifier`] (reads `OPENROUTER_API_KEY` from env).
+    /// [`crate::activity::OpenRouterClassifier`], which resolves an inference
+    /// provider through the shared `trusty_common::inference` credential ladder
+    /// (#4427).
     /// Test: `managed_routes` handler tests exercise this via the router.
     pub(super) activity_monitor: std::sync::OnceLock<
         std::sync::Arc<
-            crate::activity::monitor::ActivityMonitor<
-                crate::activity::monitor::OpenRouterClassifier,
-            >,
+            crate::activity::monitor::ActivityMonitor<crate::activity::OpenRouterClassifier>,
         >,
     >,
 
@@ -658,20 +658,21 @@ impl DaemonState {
     /// shared `ActivityMonitor` whose per-session content-hash cache persists
     /// across requests; a `OnceCell` amortises the construction cost and
     /// guarantees the same cache is reused for every request.
-    /// What: on first call builds `ActivityMonitor<OpenRouterClassifier>` with
-    /// the model from `TRUSTY_LLM_MODEL` (or `openai/gpt-4o-mini`); returns the
-    /// shared `Arc` on every subsequent call.
+    /// What: on first call builds `ActivityMonitor<OpenRouterClassifier>` and
+    /// labels it with the slug the classifier itself resolved (#4427: taken from
+    /// `classifier.model()` rather than re-reading `TRUSTY_LLM_MODEL` here, so
+    /// the model recorded in the cost metrics can never drift from the model
+    /// actually requested); returns the shared `Arc` on every subsequent call.
     /// Test: `handler_activity_cache_hit` in `tests/session_manager_mvp.rs`.
     pub fn activity_monitor(
         &self,
     ) -> std::sync::Arc<
-        crate::activity::monitor::ActivityMonitor<crate::activity::monitor::OpenRouterClassifier>,
+        crate::activity::monitor::ActivityMonitor<crate::activity::OpenRouterClassifier>,
     > {
         self.activity_monitor
             .get_or_init(|| {
-                let model = std::env::var("TRUSTY_LLM_MODEL")
-                    .unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
-                let classifier = crate::activity::monitor::OpenRouterClassifier::new();
+                let classifier = crate::activity::OpenRouterClassifier::new();
+                let model = classifier.model().to_owned();
                 Arc::new(crate::activity::monitor::ActivityMonitor::new(
                     classifier, model,
                 ))
