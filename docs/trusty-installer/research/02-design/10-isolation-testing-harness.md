@@ -751,6 +751,11 @@ Two conclusions follow:
   is what makes full-stack the sane default scope (§7.5) and makes provisioning
   from a bare base clone on every run affordable (§3.3a).
 
+**Pre-warming the cargo registry is explicitly not required.** The 112 s
+`trusty-search` figure above is a **cold-registry** measurement, and the
+owner accepts downloading all crate dependencies on every run; do not add a
+pre-warmed/cached registry to the harness or its base image.
+
 #### 7.5 Default scope — full stack (single-crate default removed, 2026-07-31)
 
 **The harness's default scope is the full stack — all six primary crates in one
