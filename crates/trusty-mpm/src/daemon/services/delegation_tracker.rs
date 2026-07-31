@@ -172,6 +172,28 @@ fn field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// The `agentId` a `tool_response` actually offers as a usable correlation
+/// handle: present, a string, and non-empty.
+///
+/// Why (#4163): [`classify_dispatch`]'s presence-check and [`on_launched`]'s
+/// consumption used to ask different questions —
+/// `r.get("agentId").is_some()` treats `null` and `""` as "we have an id",
+/// while the consumer's `.and_then(Value::as_str)` (for `null`) or
+/// [`on_subagent_stop`]'s `field` (for `""`) both reject them. A response
+/// carrying either shape took the `Launched` branch, pinning the delegation
+/// `Running` with an `agent_id` no `SubagentStop` can ever quote back —
+/// burning the full 6 h staleness window as a phantom in-flight entry. One
+/// extraction used by every site that asks "do we have an agent id" makes
+/// them structurally incapable of disagreeing again.
+/// Test: `null_agent_id_does_not_launch_a_phantom_delegation`,
+/// `empty_string_agent_id_does_not_launch_a_phantom_delegation`.
+fn usable_agent_id(response: &Value) -> Option<&str> {
+    response
+        .get("agentId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
 /// `PreToolUse` on a dispatch tool: a subagent is starting now.
 ///
 /// Why: this is the moment tracking must record a *live* child, so a PM with
@@ -316,7 +338,9 @@ fn tasks_match(declared: &str, dispatched: &str) -> bool {
 /// `post_tool_use_without_tool_response_stays_running`,
 /// `post_tool_use_with_unrecognized_response_stays_running`,
 /// `post_tool_use_with_only_an_agent_id_stays_running`,
-/// `changed_async_status_value_with_an_agent_id_stays_running`.
+/// `changed_async_status_value_with_an_agent_id_stays_running`,
+/// `null_agent_id_does_not_launch_a_phantom_delegation`,
+/// `empty_string_agent_id_does_not_launch_a_phantom_delegation`.
 fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: HookEvent) {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return;
@@ -331,10 +355,10 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
     let response = payload
         .get("tool_response")
         .filter(|r| recognized_response(r));
-    let agent_id = response
-        .and_then(|r| r.get("agentId"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // #4163: use the same extraction `classify_dispatch` uses for its
+    // presence-check, so a null/empty `agentId` is never stored as a handle
+    // nothing can ever resolve.
+    let agent_id = response.and_then(usable_agent_id).map(str::to_string);
     let tier = response
         .and_then(|r| r.get("resolvedModel"))
         .and_then(Value::as_str)
@@ -414,11 +438,14 @@ enum DispatchOutcome {
 ///
 /// What, in order:
 ///
-/// - `Launched` — `isAsync == true`, `status == "async_launched"`, or an
-///   `agentId` is present. An `agentId` is by design the *async* correlation
-///   key; handing one back is evidence of a launch, never of a return. Testing
-///   it first is also what makes a `status` whose **value** drifted (rather than
-///   its key) safe, since such a response still carries its `agentId`.
+/// - `Launched` — `isAsync == true`, `status == "async_launched"`, or a
+///   *usable* `agentId` ([`usable_agent_id`]: non-null, non-empty) is present.
+///   An `agentId` is by design the *async* correlation key; handing one back
+///   is evidence of a launch, never of a return. Testing it first is also
+///   what makes a `status` whose **value** drifted (rather than its key)
+///   safe, since such a response still carries its `agentId`. A `null` or
+///   `""` `agentId` is not a usable handle (#4163) — nothing downstream could
+///   ever resolve it — so it does not take this branch.
 /// - `Returned` — any other recognized response.
 /// - `Unknown` — absent, not an object, or carrying no [`TOOL_RESPONSE_KEYS`]
 ///   member.
@@ -453,14 +480,20 @@ enum DispatchOutcome {
 /// `post_tool_use_with_only_an_agent_id_stays_running`,
 /// `changed_async_status_value_with_an_agent_id_stays_running`,
 /// `synchronous_post_tool_use_completes_delegation`,
-/// `liveness_silent_response_is_read_as_a_return_known_gap`.
+/// `liveness_silent_response_is_read_as_a_return_known_gap`,
+/// `null_agent_id_does_not_launch_a_phantom_delegation`,
+/// `empty_string_agent_id_does_not_launch_a_phantom_delegation`.
 fn classify_dispatch(response: Option<&Value>) -> DispatchOutcome {
     let Some(r) = response else {
         return DispatchOutcome::Unknown;
     };
     if r.get("isAsync").and_then(Value::as_bool) == Some(true)
         || r.get("status").and_then(Value::as_str) == Some("async_launched")
-        || r.get("agentId").is_some()
+        // #4163: was `r.get("agentId").is_some()` — key presence only, so a
+        // `null` or `""` agentId took this branch even though nothing
+        // downstream could ever resolve it. Use the same extraction the
+        // consumer in `on_launched` uses.
+        || usable_agent_id(r).is_some()
     {
         return DispatchOutcome::Launched;
     }
