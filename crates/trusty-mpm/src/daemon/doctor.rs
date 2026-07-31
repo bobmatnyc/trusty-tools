@@ -126,8 +126,12 @@ const PROBE_ATTEMPTS: usize = 3;
 /// attempts stay well inside an interactive `tm doctor` run.
 const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// The trusty-search index `tm doctor` expects to exist for this repo.
-const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
+// #4003: the search-index doctor probe used to hardcode a literal expected
+// index id ("trusty-mpm" — the crate name, not this repo's registered index
+// id "trusty-tools"), so it permanently warned "index missing" against a
+// healthy, fully-indexed project. `expected_search_index_id` below resolves
+// the id the same way every other launch path does, via
+// `trusty_common::derive_index_id`.
 
 /// Run every diagnostic probe and assemble the report.
 ///
@@ -250,7 +254,7 @@ pub async fn run_doctor(
         agent_skills_prose_hints,
     ];
     checks.push(check_memory(&home).await);
-    checks.push(check_search(&home).await);
+    checks.push(check_search(&home, project_dir).await);
     checks.push(check_worktrees(repos_root, active_workspace_paths).await);
     checks.push(check_gh_account().await);
     checks.push(check_oauth_token_config());
@@ -739,15 +743,16 @@ fn interpret_health(
     )
 }
 
-/// Probe the trusty-search sidecar's health and the `trusty-mpm` index.
+/// Probe the trusty-search sidecar's health and this project's index.
 ///
 /// Why: code search backs the PM's "search before grep" rule; both the service
-/// being up *and* the `trusty-mpm` index existing are required for it to work.
+/// being up *and* this project's index existing are required for it to work.
 /// What: resolves the service address, checks `GET /health` (a non-2xx or
-/// transport error is `Fail`), then checks `GET /indexes` for an index named
-/// [`EXPECTED_SEARCH_INDEX`] — a healthy service missing that index is `Warn`.
+/// transport error is `Fail`), then checks `GET /indexes` for the index id
+/// [`expected_search_index_id`] resolves for `project_dir` — a healthy
+/// service missing that index is `Warn`.
 /// Test: `search_unreachable_is_fail`.
-async fn check_search(home: &Path) -> DoctorCheck {
+async fn check_search(home: &Path, project_dir: Option<&Path>) -> DoctorCheck {
     let dir = home.join(".trusty-search");
     let default = TRUSTY_SEARCH_DEFAULT_ADDR
         .parse()
@@ -773,19 +778,21 @@ async fn check_search(home: &Path) -> DoctorCheck {
         }
     }
 
-    // Service is up — confirm the expected index exists.
+    // Service is up — confirm the expected index exists. #4003: the expected
+    // id is DERIVED from the project (same rule `session_launch` and
+    // `trusty-search`'s own `detect_project` use), not a hardcoded literal —
+    // see `expected_search_index_id`.
+    let expected_index = expected_search_index_id(project_dir);
     match http_get_json(&format!("http://{addr}/indexes")).await {
-        Ok(body) if index_present(&body, EXPECTED_SEARCH_INDEX) => DoctorCheck::new(
+        Ok(body) if index_present(&body, &expected_index) => DoctorCheck::new(
             "search",
             CheckStatus::Ok,
-            format!("trusty-search healthy at {addr}, `{EXPECTED_SEARCH_INDEX}` index present"),
+            format!("trusty-search healthy at {addr}, `{expected_index}` index present"),
         ),
         Ok(_) => DoctorCheck::new(
             "search",
             CheckStatus::Warn,
-            format!(
-                "trusty-search healthy at {addr} but the `{EXPECTED_SEARCH_INDEX}` index is missing"
-            ),
+            format!("trusty-search healthy at {addr} but the `{expected_index}` index is missing"),
         ),
         Err(e) => DoctorCheck::new(
             "search",
@@ -793,6 +800,30 @@ async fn check_search(home: &Path) -> DoctorCheck {
             format!("trusty-search healthy at {addr} but listing indexes failed: {e}"),
         ),
     }
+}
+
+/// Resolve the trusty-search index id `tm doctor` should expect for
+/// `project_dir` (#4003).
+///
+/// Why: the probe previously hardcoded a literal expected index name
+/// (`"trusty-mpm"` — the crate name), which diverges from a repo's actual
+/// registered index id (e.g. this repo registers as `"trusty-tools"`), so a
+/// healthy, fully-indexed project permanently reported "index missing".
+/// What: walks up from `project_dir` (falling back to the process cwd when
+/// `None`, matching the daemon's own `run_doctor` default) to the nearest
+/// git root via [`trusty_common::resolve_project_root`], then derives the id
+/// via [`trusty_common::derive_index_id`] — the exact same rule
+/// `core::session_launch` uses to register-and-pin a session's index and
+/// trusty-search's own `detect_project` uses to resolve a bare `search`
+/// call, so all three agree on one id per project (#1373).
+/// Test: `expected_search_index_id_derives_from_project_dir_not_hardcoded`.
+fn expected_search_index_id(project_dir: Option<&Path>) -> String {
+    let start = match project_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    let root = trusty_common::resolve_project_root(&start);
+    trusty_common::derive_index_id(&root)
 }
 
 /// True when `body` mentions an index named `name`.
