@@ -1,6 +1,13 @@
-//! Hermetic test temp-directory helper (#3382).
+//! Shared hermetic test fixtures: temp directories (#3382) and a
+//! guaranteed-dead loopback address (#4306/#4415).
 //!
-//! Why: bare `tempfile::TempDir::new()` resolves via `std::env::temp_dir()`,
+//! Why (dead loopback): see [`dead_loopback_url`] and [`DEAD_LOOPBACK_PORT`].
+//! It lives here, beside `hermetic_temp_dir`, because it is the same kind of
+//! thing — a fixture whose whole job is to remove an ambient dependency from
+//! the tests that use it — and because three separate copies of it had already
+//! drifted across the `tui` test modules.
+//!
+//! Why (temp dirs): bare `tempfile::TempDir::new()` resolves via `std::env::temp_dir()`,
 //! which honors an inherited `$TMPDIR`. A test-invoking harness/sandbox set
 //! `TMPDIR` to a real project directory (observed: `~/trusty-mpm-projects`),
 //! so every bare `TempDir::new()` call in the suite deposited its mktemp
@@ -31,6 +38,101 @@ use std::sync::Once;
 use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
+
+/// The loopback port every dead-daemon test points at (#4306, #4415).
+///
+/// Why this specific port, rather than one the fixture binds for itself: the
+/// fixture needs an address that (a) refuses connections deterministically and
+/// (b) cannot be taken over by any other binder. A privileged loopback port
+/// satisfies both by construction, and — measured on this suite's two targets —
+/// is the only shape that satisfies (a):
+///
+/// * **Refuses, immediately.** Nothing listens, so the kernel answers `RST` →
+///   `ECONNREFUSED`. Measured on macOS: 30/30 connects refused, worst case
+///   132µs. Contrast the obvious-looking alternative of binding a port and
+///   deliberately NOT calling `listen(2)`: that reserves the port, but macOS
+///   silently DROPS the `SYN` instead of resetting it, so the connect times out
+///   (measured: `TimedOut` after a full 10s) rather than being refused — which
+///   would convert every daemon-down test here into a slow one and hand the
+///   error-classification tests a timeout where they assert on a connect error.
+/// * **Unavailable to any other binder.** It is below 1024, so binding it needs
+///   root / `CAP_NET_BIND_SERVICE` (measured: `PermissionDenied` for an
+///   unprivileged bind of both `:1` and `:1023`), and it sits outside every
+///   ephemeral range the OS allocates from (macOS 49152–65535, Linux
+///   `ip_local_port_range` default 32768–60999), so it can never be handed out
+///   as an ephemeral. Port 1 is IANA `tcpmux`, which has no modern
+///   implementation.
+///
+/// What it replaces: three copies of a `dead_loopback_url()` helper
+/// (`tui::project_ctl::poll::tests`, `tui::coordinator::tests`,
+/// `tui::project_ctl::tests`) feeding 13 call sites, each of which obtained a
+/// "known dead" address by binding an ephemeral port and then DROPPING the
+/// listener. Dropping it returns the port to the OS ephemeral pool, so the
+/// premise — "nothing can be listening here" — held only until some other
+/// binder was handed that same port; then the connect SUCCEEDS and the test
+/// asserts against a live socket (`classify_connect_error_is_transport`'s
+/// `expect_err` panics, or the request fails at the HTTP layer and
+/// misclassifies as `NonTransport`). #4415 observed exactly that failure.
+/// Measured on macOS: a bind-and-drop port was reassigned to a competing
+/// binder — and accepted a connection — after 16,103 ephemeral binds, i.e. one
+/// wrap of the 49152–65535 range, which a full suite's port churn reaches.
+const DEAD_LOOPBACK_PORT: u16 = 1;
+
+/// Pin "privileged" at COMPILE time — it is a property of the constant, not of
+/// any particular run, so a future edit that moves the port above 1024 (into
+/// bindable, and eventually ephemeral, territory) must fail the build rather
+/// than wait for a test to notice. Also what keeps
+/// [`tests::dead_loopback_port_is_not_bindable_or_ephemeral`] free of a
+/// `clippy::assertions_on_constants` lint.
+const _: () = assert!(
+    DEAD_LOOPBACK_PORT < 1024,
+    "DEAD_LOOPBACK_PORT must stay below 1024 so binding it requires root and the \
+     OS never hands it out as an ephemeral port (#4306/#4415)"
+);
+
+/// Verifies [`DEAD_LOOPBACK_PORT`]'s premise once per test process.
+static DEAD_PORT_VERIFIED: Once = Once::new();
+
+/// A `127.0.0.1` URL guaranteed to refuse every connection — the ONE
+/// dead-address fixture for this crate (#4306, #4415).
+///
+/// Why: see [`DEAD_LOOPBACK_PORT`] for the full argument and the measurements.
+/// What: returns `http://127.0.0.1:1`, having first confirmed (once per test
+/// process) that the address really does refuse. That check turns the fixture's
+/// one environmental assumption — "no process on this machine listens on
+/// loopback port 1" — into an immediate, named failure instead of a confusing
+/// downstream one: a `expect_err` panic or a `Transport`/`NonTransport`
+/// misclassification several frames away, which is precisely the debugging
+/// experience #4415 describes as training people to re-run rather than
+/// investigate.
+/// Test: [`tests::dead_loopback_url_refuses_every_connect`] and
+/// [`tests::dead_loopback_port_is_not_bindable_or_ephemeral`] pin the two
+/// properties, so the guarantee is verified rather than merely documented.
+pub(crate) fn dead_loopback_url() -> String {
+    DEAD_PORT_VERIFIED.call_once(|| {
+        let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, DEAD_LOOPBACK_PORT));
+        // A generous timeout: it bounds a pathological environment, it does not
+        // define the expectation. The assertion is on the error KIND, so a
+        // machine that refuses slowly still passes and one that accepts (or
+        // silently drops) fails loudly, naming the remedy.
+        match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
+            Ok(_) => panic!(
+                "test_support::dead_loopback_url(): something is LISTENING on {addr}, so the \
+                 dead-address fixture's premise is void (#4306/#4415). Stop that listener, or \
+                 pick another privileged, non-ephemeral loopback port for DEAD_LOOPBACK_PORT."
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            Err(e) => panic!(
+                "test_support::dead_loopback_url(): {addr} neither accepted nor REFUSED the \
+                 connect — it failed with {:?} ({e}) (#4306/#4415). The fixture requires a \
+                 prompt ECONNREFUSED; a dropped SYN (TimedOut) would make every daemon-down \
+                 test slow and would hand the error-classification tests the wrong error kind.",
+                e.kind()
+            ),
+        }
+    });
+    format!("http://127.0.0.1:{DEAD_LOOPBACK_PORT}")
+}
 
 /// Prefix every hermetic test temp directory carries.
 ///
@@ -353,6 +455,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fresh);
         let _ = std::fs::remove_dir_all(&unrelated);
         let _ = std::fs::remove_dir_all(&stale);
+    }
+
+    /// #4306/#4415 property 1 of 2: the address must answer `ECONNREFUSED`,
+    /// and must do so on EVERY attempt.
+    ///
+    /// Deliberately asserts the error KIND, not merely that the connect failed.
+    /// That distinction is load-bearing and was not academic: the first attempt
+    /// at this fixture reserved a port by binding it without `listen(2)`, which
+    /// looked correct and which a "did it fail?" assertion would have passed —
+    /// macOS silently drops the `SYN` there, so connects TIME OUT rather than
+    /// being refused. `classify_connect_error_is_transport` would still have
+    /// gone green (reqwest maps both to `Transport`) while every daemon-down
+    /// test quietly became a multi-second one. Asserting the kind is what
+    /// caught it.
+    #[test]
+    fn dead_loopback_url_refuses_every_connect() {
+        let addr: std::net::SocketAddr = dead_loopback_url()
+            .trim_start_matches("http://")
+            .parse()
+            .expect("the fixture's url must be host:port after the scheme");
+
+        for attempt in 0..50 {
+            let err = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+                .expect_err("nothing may be listening on the dead-address port");
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionRefused,
+                "attempt {attempt} to {addr} must be REFUSED (RST), not dropped: {err:?}"
+            );
+        }
+    }
+
+    /// #4306/#4415 property 2 of 2: the port must be unavailable to any other
+    /// binder. This is the half the old bind-and-drop fixture lacked, and the
+    /// direct cause of the observed flake — so it is asserted, not assumed.
+    ///
+    /// Two independent guarantees, checked separately because either one alone
+    /// would be enough to break if a future edit moved `DEAD_LOOPBACK_PORT`
+    /// into the ephemeral range or above 1024.
+    #[test]
+    fn dead_loopback_port_is_not_bindable_or_ephemeral() {
+        // (a) Privileged: an unprivileged bind must be refused outright, so no
+        //     test — nor any other unprivileged process — can start listening.
+        // "privileged" itself is pinned at compile time next to the constant.
+        let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, DEAD_LOOPBACK_PORT));
+        assert!(
+            std::net::TcpListener::bind(addr).is_err(),
+            "an unprivileged bind of {addr} must fail — a bindable dead-address port is \
+             exactly the invalidated premise #4306 describes"
+        );
+
+        // (b) Never ephemeral: the OS must not hand this port to a competing
+        //     binder. 2,000 binds is a cheap sanity sweep rather than a proof
+        //     (the proof is that the port is below every ephemeral range); it
+        //     exists to catch a future edit that moves the constant.
+        for _ in 0..2_000 {
+            if let Ok(other) = std::net::TcpListener::bind("127.0.0.1:0") {
+                assert_ne!(
+                    other.local_addr().expect("local addr").port(),
+                    DEAD_LOOPBACK_PORT,
+                    "the OS handed a competing binder the dead-address port"
+                );
+            }
+        }
     }
 
     /// Guards against `UNIX_EPOCH` underflow bugs in age math (belt-and-braces).
