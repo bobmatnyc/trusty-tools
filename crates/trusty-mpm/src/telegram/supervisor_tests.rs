@@ -4,10 +4,14 @@
 //! under the 500-SLOC production cap while sharing its private items via
 //! `use super::*`. The tests inject a counting factory so restart, backoff, and
 //! give-up behaviour are verified deterministically with no real Telegram
-//! network. Backoff delays use a millisecond-scale `fast_policy` so the real
-//! sleeps complete near-instantly (no `tokio` `test-util` paused-time feature
-//! is required), and the cancellation test fires shutdown before its long
-//! backoff can elapse.
+//! network. Most backoff delays use a millisecond-scale `fast_policy` so the
+//! real sleeps complete near-instantly, and the cancellation test fires shutdown
+//! before its long backoff can elapse.
+//!
+//! `healthy_run_resets_transient_backoff` is the exception: it asserts an exact
+//! backoff *duration*, which no wall-clock bound can do reliably under load, so
+//! it runs on tokio's paused clock via `start_paused = true`. That is why this
+//! crate's `tokio` dev-dependency enables the `test-util` feature (#4306).
 //! Test: this *is* the test module.
 
 use super::*;
@@ -126,11 +130,11 @@ fn healthy_run_resets_transient_count() {
 /// so under `start_paused` the runtime auto-advances virtual time to each
 /// timer deadline while idle and every gap below is exact and reproducible.
 ///
-/// That exactness lets the assertions get STRICTER, not looser: they now pin
-/// the precise delays (`== delay_for(3)` and `== healthy run + base`) instead
-/// of bounding them. The old `< 20ms` upper bound would have accepted a
-/// regression that reset the counter to `delay_for(2) = 8ms` rather than to
-/// `base = 2ms`; the equality will not.
+/// That exactness lets the assertions get STRICTER, not looser: they now pin the
+/// precise delays against literals (2ms, 8ms, 32ms, and a post-reset 2ms)
+/// instead of bounding them. The old `< 20ms` upper bound would have accepted a
+/// regression that reset the counter to 8ms rather than to base = 2ms; the
+/// equality will not.
 #[tokio::test(start_paused = true)]
 async fn healthy_run_resets_transient_backoff() {
     let policy = BackoffPolicy {
@@ -182,24 +186,27 @@ async fn healthy_run_resets_transient_backoff() {
 
     // Attempts 0-2 exit without awaiting anything, so on the paused clock they
     // consume zero virtual time and each gap is purely the backoff that preceded
-    // it. Pinning all three proves the escalation SCHEDULE, not just that the
-    // last delay was "big" — the previous `>= 25ms` bound could not tell
-    // delay_for(3) from the 400ms cap.
+    // it. The expected delays are LITERALS, not `policy.delay_for(n)` calls: this
+    // test's job is to pin what the supervisor actually waited, and comparing
+    // against the same function that computed the wait would make the assertion
+    // self-referential — a change to `delay_for`'s curve would move the expected
+    // value in lockstep and survive. With base=2ms and factor=4 the schedule is
+    // 2ms, 8ms, 32ms. (`backoff_grows_and_caps` covers the curve itself.)
     assert_eq!(
         starts[1].duration_since(starts[0]),
-        policy.delay_for(1),
-        "first restart must wait exactly base"
+        Duration::from_millis(2),
+        "first restart must wait exactly base = 2ms"
     );
     assert_eq!(
         starts[2].duration_since(starts[1]),
-        policy.delay_for(2),
-        "second restart must wait exactly base*factor"
+        Duration::from_millis(8),
+        "second restart must wait exactly base*factor = 8ms"
     );
     let escalated_gap = starts[3].duration_since(starts[2]);
     assert_eq!(
         escalated_gap,
-        policy.delay_for(3),
-        "pre-reset backoff must be fully escalated to delay_for(3) = base*factor^2"
+        Duration::from_millis(32),
+        "pre-reset backoff must be fully escalated to base*factor^2 = 32ms"
     );
 
     // THE assertion this test exists for. Gap before attempt 4 = the healthy run
@@ -210,11 +217,11 @@ async fn healthy_run_resets_transient_backoff() {
     let post_healthy_total = starts[4].duration_since(starts[3]);
     let backoff_component = post_healthy_total.saturating_sub(healthy_run_duration);
     assert_eq!(
-        backoff_component, policy.base,
-        "post-healthy backoff must reset to exactly base ({:?}); isolated backoff was \
+        backoff_component,
+        Duration::from_millis(2),
+        "post-healthy backoff must reset to exactly base = 2ms; isolated backoff was \
          {backoff_component:?} (total {post_healthy_total:?}, healthy run \
-         {healthy_run_duration:?})",
-        policy.base
+         {healthy_run_duration:?})"
     );
 }
 
