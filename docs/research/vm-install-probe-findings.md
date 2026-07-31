@@ -720,7 +720,7 @@ no throwaway/calibration clones left on the host.
 | # | Question | Answer | Confidence |
 |---|----------|--------|------------|
 | K1 | Is `tart stop` synchronous? Does it lose the last write? | **ANSWERED — state is synchronous, DATA IS NOT. 4 of 5 unsynced last writes were LOST. See K1** | measured |
-| K2 | `PROVISION_SEC` — full mise + rust + uv + gh from a bare clone | _pending_ | _pending_ |
+| K2 | `PROVISION_SEC` — full mise + rust + uv + gh from a bare clone | **ANSWERED — 30 s. See K2** | measured |
 | K3 | `cargo install --path crates/trusty-search --locked` wall-clock | _pending_ | _pending_ |
 | K3a | Does workspace `lto = "thin"` apply to a `--path` install? | _pending_ | _pending_ |
 | K3b | Does `ort-sys` download ONNX Runtime inside the guest? | _pending_ | _pending_ |
@@ -839,9 +839,80 @@ Throwaway VMs (`probe-k1`, `probe-k1-c1`, `probe-k1-c2`, `probe-k1b-{C,D,E}`,
 `probe-k1c{1..4}` and their clones) were all deleted; `tart list` confirms only `tahoe-base`
 and the two OCI base images remain.
 
-### K2. `PROVISION_SEC` — _pending_
+### K2. `PROVISION_SEC` = **30 seconds** — the golden image does not earn its complexity
 
-_pending_
+Log: `docs/research/vm-probe-logs/k2-provision-sec.log`.
+
+Guest configuration actually set (recorded, as required): `tart set probe-k2 --cpu 8
+--memory 16384 --disk-size 100`. The guest confirmed `hw.ncpu=8`, `mem_gb=16`. Host has
+**18 logical cores / 64 GB**, so an 8-vCPU guest leaves ample headroom and does not
+contend with the host.
+
+#### The number
+
+```
+STEP_RUST_MS=20778     # mise use -g rust@1.91  -> rustup-init + 6 components, 1.91.1
+STEP_UV_MS=7947        # mise use -g uv@latest  -> uv 0.12.0, incl. attestation verify
+STEP_GH_MS=616         # gh 2.93.0 ALREADY PRESENT from Homebrew -- nothing to install
+STEP_ZSHENV_MS=617     # write ~/.zshenv
+PROVISION_MS=30079
+PROVISION_SEC=30
+```
+
+**Full toolchain provisioning from a bare `tahoe-base` clone is 30 seconds**, over the
+network, with nothing pre-warmed. The rust toolchain download — the step everyone assumes
+is expensive — is **20.8 s**.
+
+Note `gh` costs nothing: it is preinstalled on `macos-tahoe-base` (2.93.0), as are `git`,
+`curl`, `node`, `python3`, `cmake` and `mise` (2026.6.0). Only `rustc`/`cargo`/`rustup`/`uv`
+were absent.
+
+#### The keep-or-kill arithmetic
+
+| Path to a ready-to-build VM | Cost |
+|---|---|
+| clone golden image | 0.31 s |
+| clone `tahoe-base` + provision | 0.31 s + **30 s** = ~30 s |
+| **Delta the golden image buys** | **~30 seconds per run** |
+
+Thirty seconds. Against that, the golden image costs: a bake script, a bake pipeline, an
+image that goes stale as toolchains move, ~33 GB of image to keep current, and — as
+sections B/E and now K1 establish — **a demonstrated failure mode where it silently ships
+broken and every downstream run fails with `cargo: exit 127`**.
+
+**Recommendation: KILL the golden image.** Provision from `tahoe-base` on each run. See
+K4 for the full argument.
+
+#### Incidental: disk expansion behaviour, re-confirmed
+
+Section G's correction holds exactly. `--disk-size 100` applied to a clone shows the
+*pre-expansion* size on the boot in which it is applied, and the expanded size on the next
+boot:
+
+```
+boot 1: /dev/disk2s1s1    46Gi    12Gi    16Gi    42%    /
+boot 2: /dev/disk2s1s1    93Gi    12Gi    63Gi    16%    /
+```
+
+Any bake or setup script that asserts on free space must do so **after a reboot**, not
+immediately after the resize. Note also that the un-resized default leaves only **16 GiB
+free**, which is not enough headroom for a large from-source build — resizing is not
+optional for this workload.
+
+#### Non-interactive PATH verified both ways
+
+Following K1 discipline (write, `sync`, then verify), `~/.zshenv` was confirmed effective
+in a fresh non-interactive `/bin/zsh` — the exact check the broken golden image failed:
+
+```
+--- /bin/zsh, relying ONLY on ~/.zshenv:
+PATH=/Users/admin/.cargo/bin:/Users/admin/.local/share/mise/shims:/bin:/usr/bin:...
+rustc 1.91.1 (ed61e7d7e 2025-11-07)
+cargo 1.91.1 (ea2d97820 2025-10-10)
+uv 0.12.0 (b88d7c5c4 2026-07-28 aarch64-apple-darwin)
+```
+
+`rustup 1.29.0`, `MSRV_OK` (1.91.1 satisfies the `rust-version = "1.91"` floor).
 
 ### K3. trusty-search from source — _pending_
 
