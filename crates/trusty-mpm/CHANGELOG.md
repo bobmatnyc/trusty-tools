@@ -7,8 +7,110 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
+  - Daemon-managed spawns now launch with `--setting-sources user,project,local`
+    instead of `project,local`. Claude Code discovers subagents per settings
+    tier, and `$CLAUDE_CONFIG_DIR/agents` — where [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)
+    moved the bundled roster — IS the `user` tier, the one tier the old flag
+    dropped. A session showed only the five Claude Code built-ins and answered
+    `Agent type 'rust-engineer' not found` while all 42 agent files sat
+    correctly on disk.
+  - Re-admitting the `user` tier does not re-admit the operator's global
+    `~/.claude/settings.json` hooks that [#1269](https://github.com/bobmatnyc/trusty-tools/issues/1269)
+    excluded: managed spawns relocate `CLAUDE_CONFIG_DIR`, so the `user` tier
+    resolves to the tm-owned config home. Launch paths that do NOT inject
+    `CLAUDE_CONFIG_DIR` (`tm launch`, `tm connect`) keep `project,local`
+    unchanged — the flag is now selected from that one fact rather than
+    hard-coded per call site.
+
 ### Added
 
+- `tm doctor` gains an `agent_reachability` check that fails when the bundled roster is unreachable ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
+  - The existing `agents` and `deployment` checks are presence-only — they
+    counted 42 files and diffed them against the canonical roster, and both
+    reported green throughout the outage above. The new check asserts the one
+    thing they cannot: that the settings tier the roster deploys into is a tier
+    the managed spawn's `--setting-sources` flag actually loads. It reads both
+    sides from production code, so moving the deploy destination without
+    updating the flag (what happened here) is a hard `Fail`, not a silent
+    regression.
+
+### Changed
+
+- bundled agents deploy to the tm-managed user tier, never per-workspace and never to `~/.claude` (closes [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409))
+  - `FrameworkPaths::agent_deploy_dir()` is the single destination for every
+    bundled-agent deploy, validate, staleness, reset, and doctor call site:
+    `$CLAUDE_CONFIG_DIR/agents` (`~/.trusty-tools/trusty-mpm/claude-config/agents`).
+    Unlike `claude_agents_dir()` it is never rewritten project-local by
+    `for_managed_project`/`for_managed_workspace`.
+  - `tm install` no longer writes composed agents into the operator's generic
+    `~/.claude/agents/` — the highest-severity breach on the issue, since that
+    directory belongs to a Claude Code install with nothing to do with
+    trusty-mpm.
+  - Session launch, `tm sessions sync-assets`, and `tm catalog apply` no longer
+    deploy bundled agents into a workspace's `.claude/agents/`. That directory
+    is now reserved for hand-placed (and future project-custom) agents, which
+    are still never touched.
+  - Session launch and sync-assets additionally RETRACT the bundled agents an
+    older binary deployed into a workspace. The project tier outranks the
+    config-dir tier in agent resolution, so a stale copy left behind would
+    shadow the canonical roster permanently and would no longer be refreshed by
+    any deploy — the #4408 shadowing incident made permanent. Retraction removes
+    only manifest-tracked, framework-owned files; hand-placed and user-owned
+    files survive byte-identical, and a corrupt manifest aborts the retraction
+    rather than guessing.
+  - `tm doctor`'s `agents` and `agent_skills` probes, `tm agent list`/`tm agent
+    show`, and the deployment-completeness gate follow the roster to the new
+    tier. Probing the workspace tier after the flip would have reported every
+    healthy install as broken and driven the spawn/resume gate into a permanent
+    repair loop; `tm agent list` would have reported an empty roster.
+  - `tm install --reset-agents --reset-agents-workspaces` now RETRACTS a
+    workspace's bundled agents instead of force-recomposing them. Recomposing
+    was correct while workspaces were a deploy destination; after the flip it
+    re-created, inside live sessions' workspaces, exactly the shadow this change
+    removes. The `--reset-agents <names>` scope is still honored, and removals
+    are reported on their own line.
+  - `tm repair deploy` follows the agent ledger to the new tier and actually
+    removes the scratch files it reports. It previously derived a "base" path
+    from each `*.tmp` orphan and re-derived the old fixed `<name>.tmp` from it,
+    which never matches the per-process scratch names below — so it unlinked
+    nothing while still printing every orphan as removed. It now unlinks the
+    path it found and reports only what it actually deleted.
+  - EVERY writer of the shared agent ledger — session launch, sync-assets,
+    retraction, `tm install --reset-agents`, and `tm catalog apply --prune` —
+    now performs its read-modify-write under the lock below. `reset_agents` and
+    `prune_agents` were the two that ran unlocked against the shared directory,
+    which is the highest-traffic race with a concurrent session launch.
+  - The agent deploy ledger's read-modify-write is now serialised across
+    processes by an advisory lock on a `.trusty-mpm-manifest.json.lock` sidecar,
+    and every atomic write stages through a per-process, per-attempt temp name
+    instead of a fixed `.tmp` sibling. Both were survivable while each workspace
+    had its own deploy directory; against ONE machine-global directory shared by
+    every concurrent session launch, sync-assets run, and `tm catalog apply`,
+    the fixed temp name lets two writers publish torn JSON and the unlocked
+    load-modify-write silently drops one writer's entries — after which the
+    files those entries described are treated as untracked and frozen, which is
+    #4408's failure shape reached by a race.
+  - Known consequences of a machine-global agent tier, neither solved here:
+    - A per-project `[agents] exclude` no longer removes an agent from a
+      session's view — it only refrains from writing it, and a sibling project
+      that selects the agent still puts it there.
+    - `tm catalog apply --prune` now deletes from the one directory EVERY live
+      session reads, mid-session, driven by the daemon-wide baseline manifest.
+      Before the flip it pruned `~/.claude/agents`, which no managed session
+      read, so the blast radius was effectively nil. `--prune` remains opt-in
+      and still only removes manifest-tracked managed files, but an operator
+      running it now affects every running session, not one workspace.
+
+### Removed
+
+- `core::agent_reset::reset_project_agents` — force-recomposed the bundled roster into an arbitrary directory, narrowed by a project's harness roster ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). The workspace sweep was its only caller and now retracts instead, leaving it with zero production callers. A public function that writes the bundled roster into a workspace is exactly the shadow-creating footgun this change removes, so it is deleted rather than left callable. `ResetResult::deselected` is retained for the report's shape but is no longer populated by anything.
+
+### Added
+
+- bundled `tm-slack-canvas-delivery` skill — codifies the Slack canvas delivery protocol (resolve destination, create with native `channel_id` binding to survive free-tier restrictions, post the link, verify the send) so canvas creation alone is never mistaken for delivery ([#4447](https://github.com/bobmatnyc/trusty-tools/issues/4447))
 - `tm` CLI accepts unambiguous abbreviated subcommands, e.g. `tm doc` for `tm doctor` ([#4398](https://github.com/bobmatnyc/trusty-tools/issues/4398))
   - Turns on clap's `infer_subcommands` for the top-level `Cli`, propagating to every nested action enum. Exact matches still win over prefix inference, so ambiguous-prefix pairs (`hook`/`hooks`, `project`/`projects`, `session`/`sessions`, `status`/`statusline`) keep resolving to their own exact command.
 
@@ -119,6 +221,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   additionally filters the surfaced list to non-terminal states as defense in
   depth; and the boot-time reconcile sweep backfills (clears) the stale field
   on any terminal record persisted before this fix.
+- **An unrelated legacy `.trusty-mpm/` override file no longer shadows every
+  CLAUDE.md named-section override (closes
+  [#4399](https://github.com/bobmatnyc/trusty-tools/issues/4399)).**
+  Previously, if ANY ONE of the four replace-semantics legacy files
+  (`PM_INSTRUCTIONS_DEPLOYED.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`,
+  `MEMORY.md`) was present, the whole prompt fell back to the sectionless
+  legacy assembly, and every CLAUDE.md named-section override was reported
+  "not applied" — including sections the legacy file had nothing to do with
+  (an `AGENT_DELEGATION.md` file silently dropped a `WORKFLOW` override
+  authored in `CLAUDE.md`). `WORKFLOW`, `MEMORY` and `AGENT-DELEGATION` are
+  now independently addressable on that legacy path too: a named override for
+  one of those sections lands unless the project's own same-section legacy
+  file is what forced the branch, in which case that file still wins,
+  unchanged. `IDENTITY`/`CORE`/`SEARCH` have no independent slot in the legacy
+  string assembly and remain reported as unapplied, never silently dropped.
 - **A corrupted bundled agent is re-deployed instead of frozen forever (closes
   [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)).** When the
   deployed copy of a bundled agent drifts from the checksum the deploy manifest

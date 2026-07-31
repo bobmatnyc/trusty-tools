@@ -507,7 +507,9 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     // definition (nothing to diff against).
     let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
     fw.trusty_mpm_root = None;
-    let agents_dir = fw.claude_agents_dir();
+    // #4409: the agent ownership manifest lives in the tm-managed config-dir
+    // tier now, not the workspace.
+    let agents_dir = fw.agent_deploy_dir();
     std::fs::create_dir_all(&agents_dir).unwrap();
     AgentManifest::default().save(&agents_dir).unwrap();
     let skills_dir = fw.claude_skills_dir();

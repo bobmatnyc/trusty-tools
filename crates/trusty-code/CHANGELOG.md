@@ -25,6 +25,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`tcode tui` — the TUI REPL is reachable from the CLI (#4424, DOC-50 §4.1 /
+  AC-2.4).** Every DOC-50 MVP slice was merged, but `CodeEngine` had zero
+  production call sites: the whole TUI existed only under `cargo test`. The new
+  subcommand discovers a running `tcode serve --http` daemon (`TCODE_DAEMON_URL`
+  -> `http_addr` file -> `/health` liveness ping), then hands `CodeEngine` to
+  `trusty_tui::run::run`. `--project` is optional (omit for a projectless
+  session) and is canonicalized at the CLI boundary. Discovery runs BEFORE the
+  alternate screen is entered, so a missing daemon prints an actionable
+  `tcode tui: no tcode daemon found — start one with \`tcode serve --http\` …`
+  and exits nonzero rather than flashing a TUI. This MVP does not auto-spawn a
+  daemon (deliberately deferred, DOC-50 §4.1).
+
 - **`Event::AgentMessageDelta` now has a producer (streaming epic #3696,
   Gap A / Slice 1).** The event contract landed in #3701, but no production
   code ever constructed it — `AgentMessageDelta` existed only in `events.rs`

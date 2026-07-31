@@ -17,7 +17,9 @@
 use std::path::Path;
 
 use crate::core::agent_deployer::deploy_agents_filtered;
-use crate::core::agent_manifest::{AgentManifest, MANIFEST_FILE as AGENT_MANIFEST_FILE};
+use crate::core::agent_manifest::{
+    AgentManifest, MANIFEST_FILE as AGENT_MANIFEST_FILE, ManifestError, with_agent_manifest_lock,
+};
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
@@ -46,6 +48,20 @@ pub enum ApplyError {
     /// A filesystem operation during pruning failed.
     #[error("prune io error: {0}")]
     Prune(String),
+}
+
+/// Lift a ledger failure into [`ApplyError`].
+///
+/// Why: `with_agent_manifest_lock` reports a lock-acquisition failure as the
+/// caller's own error type (#4409), which requires this conversion. Prune is
+/// the only stage here that takes the lock directly, so a ledger failure on
+/// this path is always a prune-stage failure.
+/// What: renders the ledger error into the `Prune` variant's message.
+/// Test: exercised by `apply_prune_removes_deselected` (happy path).
+impl From<ManifestError> for ApplyError {
+    fn from(err: ManifestError) -> Self {
+        Self::Prune(err.to_string())
+    }
 }
 
 /// Summary of one [`apply_catalog`] run.
@@ -118,7 +134,9 @@ pub fn apply_catalog<G: GitBackend>(
     };
 
     // 3. Redeploy the manifest-selected agents and skills, refreshing checksums.
-    let agent_target = fw.claude_agents_dir();
+    // #4409: the canonical bundled-agent tier is the tm-managed config dir, so
+    // a catalog apply refreshes THAT, never the workspace's project tier.
+    let agent_target = fw.agent_deploy_dir();
     let deploy = deploy_agents_filtered(&plan.agent_source, &agent_target, |name| {
         plan.agent_selected(name)
     })
@@ -163,8 +181,34 @@ pub fn apply_catalog<G: GitBackend>(
 /// deletes `<target>/<filename>` (ignoring an already-absent file) and drops the
 /// manifest entry; saves the manifest if anything changed. Returns the removed
 /// filenames, sorted.
+///
+/// CONCURRENCY (#4409): the whole load-modify-save runs under the shared ledger
+/// lock, because `target` is now the ONE machine-global agent tier rather than a
+/// per-workspace directory — an unlocked prune racing a session launch's
+/// `deploy_agents_locked` drops the launch's ledger entries, after which those
+/// files are treated as untracked and frozen (#4408's shape, via a race).
+///
+/// The deploy (step 3) and this prune (step 4) are two SEPARATE locked sections,
+/// not one span. A single span would require calling the deployer's unlocked
+/// inner entry point, and exposing that is a worse hazard than the window it
+/// closes: `flock` is not reentrant, so a caller that took the lock and then
+/// reached for the ordinary `deploy_agents_filtered` would self-deadlock. The
+/// residual window means a session launching between the two steps can deploy an
+/// agent this prune then removes; that agent returns on the next launch or
+/// sync-assets, since deploy is idempotent. No update is ever lost.
 /// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`.
 fn prune_agents(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
+    with_agent_manifest_lock(target, || prune_agents_locked(target, plan))
+}
+
+/// The body of [`prune_agents`], run while holding the ledger lock.
+///
+/// Why/What: mirrors `deploy_agents_locked`/`retract_locked` — the critical
+/// section is one expression so the lock's scope cannot be misread. Never call
+/// it directly, and never from inside another `with_agent_manifest_lock` on the
+/// same directory (`flock` on a second descriptor in one process deadlocks).
+/// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`.
+fn prune_agents_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
     let mut manifest = AgentManifest::load(target);
     let mut pruned: Vec<String> = Vec::new();
 

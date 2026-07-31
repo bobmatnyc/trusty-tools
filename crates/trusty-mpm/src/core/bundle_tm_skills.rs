@@ -220,3 +220,18 @@ pub const TM_CLI_OPERATIONS: &str = include_str!("../assets/skills/tm-cli-operat
 /// What: embedded markdown skill file deployed to `skills/tm-issues-prune.md`.
 /// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
 pub const TM_ISSUES_PRUNE: &str = include_str!("../assets/skills/tm-issues-prune.md");
+
+/// Slack canvas delivery protocol — creation is not delivery (issue #4447).
+///
+/// Why: a canvas-create tool call's success response was repeatedly mistaken
+/// for "the user has the document" when no message pointing at the canvas
+/// was ever sent into a destination the user watches. This skill fixes the
+/// completion signal (a successful `slack_send_message`, not the create
+/// response) and documents the native-vs-connector tool split, including the
+/// free-tier `channel_id`-binding requirement and the no-canvas-tool
+/// fallback.
+/// What: embedded markdown skill file deployed to
+/// `skills/tm-slack-canvas-delivery.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_SLACK_CANVAS_DELIVERY: &str =
+    include_str!("../assets/skills/tm-slack-canvas-delivery.md");

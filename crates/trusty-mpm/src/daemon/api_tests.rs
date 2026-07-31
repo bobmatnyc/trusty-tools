@@ -1117,6 +1117,7 @@ async fn doctor_endpoint_returns_report() {
     let expected = [
         "instructions",
         "agents",
+        "agent_reachability",
         "skills",
         "skill_source",
         "output_style",

@@ -275,14 +275,16 @@ pub fn generate_authority(agents: &[AgentSummary]) -> String {
 /// highest precedence first.
 ///
 /// Why (#4069): the roster the PM must route to is whatever Claude Code will
-/// actually load, and that destination differs per launch mode — the daemon
-/// managed-spawn path deploys into `<project>/.claude/agents` (and launches
-/// with `--setting-sources project,local`), the standalone `tm run` driver
-/// deploys into the tm-owned `CLAUDE_CONFIG_DIR`, and the plain `tm session
-/// start` path deploys into the operator's `~/.claude/agents`
-/// ([`FrameworkPaths::default`]). Prompt composition only ever receives a
-/// `project_dir`, so it resolves all three tiers here rather than depending on
-/// a launch-mode value it cannot see.
+/// actually load, and that is a union of tiers rather than a single directory.
+/// Since #4409 every BUNDLED agent deploys into exactly one of them — the
+/// tm-owned `CLAUDE_CONFIG_DIR/agents` — while `<project>/.claude/agents` holds
+/// only agents the operator hand-placed (and, in future, project-custom
+/// trusty-built agents), and `~/.claude/agents` holds whatever the operator's
+/// own generic Claude Code install carries, which tm never writes to. All three
+/// are still scanned because a session can legitimately resolve an agent from
+/// any of them, and the project tier still WINS on a name collision. Prompt
+/// composition only ever receives a `project_dir`, so it resolves all three
+/// tiers here rather than depending on a launch-mode value it cannot see.
 /// What: returns `<project>/.claude/agents`, then the active managed
 /// `CLAUDE_CONFIG_DIR/agents` (the `CLAUDE_CONFIG_DIR` env var when set,
 /// otherwise [`managed_claude_config_dir`]), then

@@ -107,7 +107,8 @@ struct AgentSkillsScan {
 /// [`prose_skill_mentions`] not already covered by `skills:`.
 /// Test: covered indirectly by every `check_agent_skills` test.
 fn scan_agent_skills(paths: &FrameworkPaths) -> AgentSkillsScan {
-    let agents_dir = paths.claude_agents_dir();
+    // #4409: the deployed roster lives in the tm-managed config-dir tier.
+    let agents_dir = paths.agent_deploy_dir();
     let Ok(entries) = std::fs::read_dir(&agents_dir) else {
         return AgentSkillsScan {
             agents_dir,
@@ -287,7 +288,7 @@ mod tests {
     fn all_skills_resolve_is_ok() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         write_agent(
             &agents,
@@ -316,7 +317,7 @@ mod tests {
     fn dangling_skill_reference_is_warn() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         write_agent(
             &agents,
@@ -340,7 +341,7 @@ mod tests {
         // message must still name the mention so it's discoverable.
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         write_agent(
             &agents,
@@ -370,7 +371,7 @@ mod tests {
         // fatigue this split fixes.
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         write_agent(
             &agents,
@@ -396,7 +397,7 @@ mod tests {
         // report zero mentions.
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let agents = paths.claude_agents_dir();
+        let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         write_agent(
             &agents,

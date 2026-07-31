@@ -583,3 +583,51 @@ fn workstream_close_hides_from_default_list_but_include_closed_shows_it() {
         "include-closed list must show the closed workstream: {include_closed_stdout}"
     );
 }
+
+/// `tcode --help` must list the `tui` subcommand (DOC-50 AC-2.4: "the
+/// command exists"). This is the cheapest possible regression guard on the
+/// integration point #4424 added — the whole TUI stack was already merged
+/// and only this CLI surface was missing.
+#[test]
+fn tui_subcommand_is_listed_in_help() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .arg("--help")
+        .output()
+        .expect("spawn tcode --help");
+
+    assert!(output.status.success(), "--help must exit 0: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("tui"),
+        "`tcode --help` must list the tui subcommand: {stdout}"
+    );
+}
+
+/// `tcode tui` with no reachable daemon must fail FAST with an actionable
+/// message and a nonzero exit — never hang, never enter the alternate
+/// screen, and never try to auto-spawn a daemon (explicitly deferred,
+/// DOC-50 §4.1 MVP scope).
+///
+/// `TCODE_DAEMON_URL` is pointed at a port nothing listens on, which also
+/// makes the test deterministic on a developer machine that happens to have
+/// a real daemon running (the env var outranks the discovery file).
+#[test]
+fn tui_without_a_reachable_daemon_errors_cleanly() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .arg("tui")
+        .env("HOME", home.path())
+        .env("TCODE_DAEMON_URL", "http://127.0.0.1:1")
+        .output()
+        .expect("spawn tcode tui");
+
+    assert!(
+        !output.status.success(),
+        "must exit nonzero without a daemon: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tcode tui:") && stderr.contains("tcode serve --http"),
+        "error must name the command and the fix: {stderr}"
+    );
+}

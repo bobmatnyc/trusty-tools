@@ -22,20 +22,39 @@
 //! whether the binary is a dev checkout (git submodule source) or an installed
 //! binary (`~/.trusty-mpm/framework/*`).
 //!
-//! WHICH LAYER ACTUALLY LOADS THE ROSTER (DOC-34 review, empirically verified
-//! against `claude` 2.1.201): the DAEMON managed-spawn path launches `claude`
-//! with `--setting-sources project,local` (see `runtime::claude_code`), which
-//! restricts subagent/skill/settings discovery to the `project` + `local` tiers
-//! and EXCLUDES the `user` tier that `CLAUDE_CONFIG_DIR` relocates. So under the
-//! daemon path the agents/skills deployed HERE are NOT read — the roster is
-//! delivered by the PROJECT layer (`<workspace>/.claude/{agents,skills}`, which
-//! `prepare_session` deploys) and the config-dir roster is belt-and-suspenders
-//! (it would load only if that flag were dropped). The config dir's load-bearing
-//! role on the daemon path is instead AUTH + TRUST isolation (keychain /
-//! `.credentials.json` / `.claude.json` keyed to this path). The **standalone**
-//! `tm run` driver, by contrast, passes NO `--setting-sources` flag, so THERE
-//! the full roster/skills/hooks this module deploys DO load from the config dir —
-//! which is why provisioning the complete set here remains mandatory.
+//! WHICH LAYER ACTUALLY LOADS THE ROSTER (re-corrected 2026-07-31, issue
+//! #4451 — this note supersedes the 2026-07-30 #4409 correction it replaces):
+//! the AGENTS deployed here are read by a daemon-managed session ONLY because
+//! that session's `--setting-sources` list now names the `user` tier.
+//!
+//! The 07-30 correction concluded from a probe matrix that
+//! `$CLAUDE_CONFIG_DIR/agents/` "is discovered", and on that basis #4437 moved
+//! the roster here while the daemon spawn still carried `--setting-sources
+//! project,local`. That probe matrix ran a fresh headless `claude -p` with NO
+//! `--setting-sources` flag, so it measured Claude Code's DEFAULT tier set (all
+//! tiers, `user` included) — not the managed spawn's. Re-run against `claude`
+//! 2.1.220 from a cwd with no `.claude/`, with the same `CLAUDE_CONFIG_DIR`:
+//!
+//!   no flag                          -> all 42 bundled agents resolve
+//!   --setting-sources project,local  -> 5 built-ins only, zero bundled
+//!   --setting-sources user,project,local -> all 42 bundled agents resolve
+//!
+//! So the ORIGINAL reading — `project,local` excludes the `user` tier
+//! `CLAUDE_CONFIG_DIR` relocates — was right about the mechanism; only its
+//! conclusion (that the project layer must therefore deliver the roster) is
+//! obsolete. The fix keeps the roster here and teaches the spawn to load the
+//! tier: see `core::model_inject::SETTING_SOURCES_FLAG_RELOCATED`.
+//!
+//! `~/.claude/agents/` still goes unread, which is documented behavior — with
+//! `CLAUDE_CONFIG_DIR` set, every `~/.claude` path lives under that directory
+//! instead. That is also why re-admitting `user` does not re-admit the
+//! operator's global hooks (#1269). So this config dir is the ONE tier bundled
+//! agents deploy into, on both the daemon and the flag-less standalone `tm run`
+//! path, which is why provisioning the complete set here remains mandatory. It
+//! also still carries AUTH + TRUST isolation (keychain / `.credentials.json` /
+//! `.claude.json` keyed to this path). SKILLS are unchanged: they continue to
+//! deploy per-workspace via `prepare_session`, and this module's skill deploy
+//! remains belt-and-suspenders for the standalone path.
 //!
 //! What: [`ensure_managed_config_dir`] (1) runs the canonical standalone
 //! scaffolding ([`ensure_global_config_dir`] — settings.json + the MPM hook
@@ -59,14 +78,12 @@ use crate::core::standalone::global_config::ensure_global_config_dir;
 /// Why: called from the daemon managed-spawn path immediately before the
 /// launched `claude` is pointed at `config_dir` via `CLAUDE_CONFIG_DIR`, giving
 /// the session an isolated, fully-scaffolded config home (auth, trust, MCP
-/// stubs, output-styles) plus the full framework roster/skills. NOTE (DOC-34
-/// review): under the daemon path's `--setting-sources project,local` flag the
-/// roster/skills deployed here are NOT read (that flag excludes the `user` tier
-/// this dir relocates) — the roster loads from the PROJECT layer via
-/// `prepare_session`; the config-dir provisioning is belt-and-suspenders for the
-/// daemon and load-bearing for the flag-less standalone `tm run` path (see the
-/// module doc). Runs on every spawn because it is cheap and idempotent, matching
-/// the standalone `tm run` contract.
+/// stubs, output-styles) plus the full framework roster/skills. The AGENT
+/// roster deployed here is load-bearing on BOTH the daemon and the standalone
+/// path (issue #4409 — see the module doc's corrected discovery note); the
+/// skill deploy stays belt-and-suspenders for the daemon, since skills still
+/// load from the per-workspace project tier. Runs on every spawn because it is
+/// cheap and idempotent, matching the standalone `tm run` contract.
 /// What: resolves the framework layout from the daemon's fixed home-relative
 /// root ([`FrameworkPaths::default`]), then:
 /// 1. calls [`ensure_global_config_dir`]`(&fw.root, config_dir)` for the shared

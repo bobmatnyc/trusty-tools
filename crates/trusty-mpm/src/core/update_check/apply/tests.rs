@@ -110,7 +110,7 @@ fn apply_redeploys_and_clears_staleness() {
     );
 
     // The deployed files exist where Claude Code reads them.
-    assert!(fw.claude_agents_dir().join("rust-engineer.md").is_file());
+    assert!(fw.agent_deploy_dir().join("rust-engineer.md").is_file());
     assert!(
         fw.claude_skills_dir()
             .join("tm-doctor")
@@ -166,7 +166,7 @@ fn apply_prune_removes_deselected() {
     // First apply deploys BOTH (no exclude).
     write_catalog_manifest(project.path());
     apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
-    assert!(fw.claude_agents_dir().join("drop-me.md").is_file());
+    assert!(fw.agent_deploy_dir().join("drop-me.md").is_file());
 
     // Now narrow the manifest to exclude drop-me, and apply WITH prune.
     fs::write(
@@ -181,16 +181,16 @@ fn apply_prune_removes_deselected() {
         "drop-me must be pruned: {report:?}"
     );
     assert!(
-        !fw.claude_agents_dir().join("drop-me.md").exists(),
+        !fw.agent_deploy_dir().join("drop-me.md").exists(),
         "pruned agent file removed"
     );
     assert!(
-        fw.claude_agents_dir().join("keep-me.md").is_file(),
+        fw.agent_deploy_dir().join("keep-me.md").is_file(),
         "selected agent retained"
     );
 
     // The pruned agent is gone from the manifest too.
-    let manifest = AgentManifest::load(&fw.claude_agents_dir());
+    let manifest = AgentManifest::load(&fw.agent_deploy_dir());
     assert!(!manifest.is_managed("drop-me.md"));
     assert!(manifest.is_managed("keep-me.md"));
 }
@@ -278,7 +278,7 @@ fn apply_prune_spares_user_owned() {
     apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
 
     // User drops their own unrelated file into the agents dir.
-    let user_file = fw.claude_agents_dir().join("my-own.md");
+    let user_file = fw.agent_deploy_dir().join("my-own.md");
     fs::write(&user_file, "USER OWNED").unwrap();
 
     // Apply with prune and a manifest that would NOT select `my-own`.

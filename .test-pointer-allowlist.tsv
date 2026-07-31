@@ -16,7 +16,6 @@
 # this many pre-existing dangling pointers across a workspace where the
 # Test: convention was never mechanically checked before. New pointers
 # introduced from this point on are NOT grandfathered — fix them for real.
-crates/trusty-agents-common/src/agents/manifest.rs	repair_stale_tmp_removes_orphan
 crates/trusty-agents-common/src/compress/tool_output/rtk.rs	compress_tool_output_async_with_path_reports_native_fallback_when_rtk_absent
 crates/trusty-agents-common/src/compress/tool_output/strategy.rs	get_filter_returns_expected_type
 crates/trusty-agents-common/src/lib.rs	execute_outcome_maps_to_tool_result

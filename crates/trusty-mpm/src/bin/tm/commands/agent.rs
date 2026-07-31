@@ -70,12 +70,16 @@ impl SkillTiers {
 ///
 /// Why: `list` and `show` both need the deployed roster's names; sorting
 /// gives stable, scriptable output.
-/// What: reads `paths.claude_agents_dir()`; a missing directory yields an
+/// What: reads `paths.agent_deploy_dir()` — the tm-managed `CLAUDE_CONFIG_DIR`
+/// tier bundled agents deploy into since #4409. Reading the old
+/// `claude_agents_dir()` (`~/.claude/agents`) after that flip would report an
+/// empty roster on a perfectly healthy install. A missing directory yields an
 /// empty list rather than an error (an unprovisioned roster is not this
 /// command's concern — `tm doctor` covers that).
-/// Test: `deployed_agent_names_sorted_and_filtered`.
+/// Test: `deployed_agent_names_sorted_and_filtered`,
+/// `deployed_agent_names_reads_the_managed_agent_tier`.
 fn deployed_agent_names(paths: &FrameworkPaths) -> Vec<String> {
-    let dir = paths.claude_agents_dir();
+    let dir = paths.agent_deploy_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -102,7 +106,7 @@ fn skill_json(skill: &str, tiers: &SkillTiers) -> serde_json::Value {
 
 fn list_agents(paths: &FrameworkPaths, json: bool) -> anyhow::Result<()> {
     let tiers = SkillTiers::resolve(paths);
-    let agents_dir = paths.claude_agents_dir();
+    let agents_dir = paths.agent_deploy_dir();
     let names = deployed_agent_names(paths);
 
     if json {
@@ -137,7 +141,7 @@ fn list_agents(paths: &FrameworkPaths, json: bool) -> anyhow::Result<()> {
 }
 
 fn show_agent(paths: &FrameworkPaths, name: &str, json: bool) -> anyhow::Result<()> {
-    let agents_dir = paths.claude_agents_dir();
+    let agents_dir = paths.agent_deploy_dir();
     let path = agents_dir.join(format!("{name}.md"));
     if !path.is_file() {
         anyhow::bail!("agent `{name}` not found in {}", agents_dir.display());
@@ -230,7 +234,7 @@ mod tests {
     fn deployed_agent_names_sorted_and_filtered() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        let dir = paths.claude_agents_dir();
+        let dir = paths.agent_deploy_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("zebra.md"), "z").unwrap();
         std::fs::write(dir.join("alpha.md"), "a").unwrap();
@@ -239,6 +243,32 @@ mod tests {
 
         let names = deployed_agent_names(&paths);
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
+    }
+
+    #[test]
+    fn deployed_agent_names_reads_the_managed_agent_tier() {
+        // Issue #4409: `tm agent list`/`show` must follow the roster to the
+        // tm-managed `CLAUDE_CONFIG_DIR` tier. Reading the old
+        // `~/.claude/agents` would report an empty roster on a healthy install
+        // — nothing deploys there any more.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+
+        // A leftover in the OLD location must not be picked up…
+        let stale = paths.claude_agents_dir();
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("stale-home-agent.md"), "s").unwrap();
+
+        // …while the canonical tier is what gets listed.
+        let deployed = paths.agent_deploy_dir();
+        std::fs::create_dir_all(&deployed).unwrap();
+        std::fs::write(deployed.join("engineer.md"), "e").unwrap();
+
+        assert_eq!(
+            deployed_agent_names(&paths),
+            vec!["engineer".to_string()],
+            "the roster must come from the tm-managed agent deploy tier only"
+        );
     }
 
     #[test]

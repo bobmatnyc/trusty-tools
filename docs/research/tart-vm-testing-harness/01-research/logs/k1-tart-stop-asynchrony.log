@@ -1,0 +1,68 @@
+=== K1 START 2026-07-31T12:10:08Z ===
+--- host free (KB) before: 555936364
+### clone tahoe-base -> probe-k1
+CLONE_MS=318
+### boot 1
+BOOT1_TO_READY_MS=17514
+STATE_AFTER_BOOT=running
+### VARIANT A: write sentinel then IMMEDIATELY tart stop (no settle delay)
+-rw-r--r--  1 admin  staff  18 Jul 31 12:10 /Users/admin/sentinel_immediate.txt
+SENTINEL_IMMEDIATE
+WRITE_A_RC=0
+STOP_A_EXIT_RC=0
+STOP_A_CMD_RETURN_MS=405
+STATE_IMMEDIATELY_AFTER_STOP_RETURNS=stopped
+STOP_A_TO_ACTUALLY_STOPPED_MS=747
+STOP_A_EXTRA_LAG_AFTER_CMD_RETURN_MS=342
+STATE_FINAL_A=stopped
+### clone the just-stopped VM and check whether sentinel_immediate survived
+--- contents of $HOME in clone c1:
+total 40
+drwxr-x---+ 25 admin  staff   800 Jun  6 09:59 .
+drwxr-xr-x   6 root   admin   192 Jun  6 09:53 ..
+-r--------   1 admin  staff     7 Jun  4 05:10 .CFUserTextEncoding
+drwx------+  2 admin  staff    64 Jun  4 05:15 .Trash
+drwxr-xr-x   3 admin  staff    96 Jun  6 09:58 .cache
+-rw-r--r--   1 admin  staff   266 Jun  6 09:53 .gitconfig
+drwxr-xr-x   3 admin  staff    96 Jun  6 09:59 .homebrew
+drwxr-xr-x   4 admin  staff   128 Jun  6 09:56 .local
+drwxr-xr-x   5 admin  staff   160 Jun  6 09:59 .npm
+lrwxr-xr-x   1 admin  staff    22 Jun  6 09:50 .profile -> /Users/admin/.zprofile
+drwxr-xr-x   5 admin  staff   160 Jun  6 09:58 .rbenv
+drwx------   4 admin  staff   128 Jun  6 09:53 .ssh
+-rw-r--r--   1 admin  staff   165 Jun  6 09:53 .wget-hsts
+-rw-r--r--   1 admin  staff   246 Jun  6 09:59 .zprofile
+-rw-------   1 admin  staff   181 Jun  6 09:59 .zsh_history
+drwx------   4 admin  staff   128 Jul 31 12:10 .zsh_sessions
+drwx------+  3 admin  staff    96 Jun  4 05:10 Desktop
+drwx------+  3 admin  staff    96 Jun  4 05:10 Documents
+drwx------+  3 admin  staff    96 Jun  4 05:10 Downloads
+drwx------@ 83 admin  staff  2656 Jun  6 09:55 Library
+drwx------   4 admin  staff   128 Jun  6 09:58 Movies
+drwx------+  4 admin  staff   128 Jun  6 09:59 Music
+drwx------+  4 admin  staff   128 Jun  4 05:10 Pictures
+drwxr-xr-x+  4 admin  staff   128 Jun  4 05:10 Public
+drwxr-xr-x  10 admin  staff   320 Jun  6 09:53 actions-runner
+--- sentinel_immediate present in c1?
+A_SURVIVED=NO
+### VARIANT B: write sentinel, sync, settle 10s, then tart stop
+BOOT2_TO_READY_MS=28581
+--- does sentinel_immediate exist on the ORIGINAL VM after its own reboot?
+A_ON_ORIGINAL=NO
+SENTINEL_SETTLED
+settling 10s...
+STOP_B_EXIT_RC=0
+STOP_B_CMD_RETURN_MS=508
+STATE_IMMEDIATELY_AFTER_STOP_RETURNS=stopped
+STOP_B_TO_ACTUALLY_STOPPED_MS=1087
+STOP_B_EXTRA_LAG_AFTER_CMD_RETURN_MS=579
+### clone again, check both sentinels
+sentinel_immediate=LOST
+sentinel_settled=SURVIVED(SENTINEL_SETTLED)
+--- host free (KB) after: 555930940
+--- remaining VMs:
+Source Name                                                                                                        Disk Size Accessed     State  
+local  tahoe-base                                                                                                  50   33   1 minute ago stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   1 week ago   stopped
+OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   1 week ago   stopped
+=== K1 DONE 2026-07-31T12:12:06Z ===

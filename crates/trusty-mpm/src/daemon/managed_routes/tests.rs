@@ -738,7 +738,7 @@ async fn checked_summaries_flags_stale_assets_only_for_relevant_states() {
     let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
-        &session_fw.claude_agents_dir(),
+        &session_fw.agent_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -791,7 +791,7 @@ fn deploy_then_drift_catalog(workspace: &std::path::Path) {
     let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workspace);
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
-        &session_fw.claude_agents_dir(),
+        &session_fw.agent_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -987,7 +987,7 @@ async fn checked_summaries_slim_skips_stale_assets_probe() {
     let session_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
     crate::core::agent_deployer::deploy_agents_filtered(
         &bundled,
-        &session_fw.claude_agents_dir(),
+        &session_fw.agent_deploy_dir(),
         |_| true,
     )
     .unwrap();
@@ -1024,39 +1024,45 @@ async fn checked_summaries_slim_skips_stale_assets_probe() {
 /// sessions using the identical (default bundled) catalog source, one fresh
 /// and one genuinely stale, must each get their OWN correct, independent
 /// `stale_assets` verdict.
+///
+/// Issue #4409 rewired the drift vehicle from agents to SKILLS: bundled agents
+/// now deploy into ONE machine-global tier shared by every session, so an
+/// agent can no longer be stale for session A and fresh for session B. Skills
+/// are still deployed per-workspace, so they carry the per-session property
+/// this test exists to pin.
 #[tokio::test]
 #[serial_test::serial]
 async fn checked_summaries_stale_assets_independent_per_session_sharing_one_catalog() {
     let (home, _guard) = fake_home();
     let fw = crate::core::paths::FrameworkPaths::default();
-    let bundled = fw.agent_source_dir();
+    let bundled = fw.skill_source_dir();
     std::fs::create_dir_all(&bundled).unwrap();
-    std::fs::write(bundled.join("rust-engineer.md"), "v1").unwrap();
+    std::fs::write(bundled.join("tm-doctor.md"), "v1").unwrap();
+
+    let deploy_skills = |dest: &std::path::Path| {
+        crate::core::skill_tiers::deploy_all_skill_tiers(
+            &bundled,
+            &fw.user_skill_source_dir(),
+            dest,
+            |_| true,
+        )
+        .unwrap();
+    };
 
     // Session A: deploys while the catalog is at v1, then the catalog moves
     // to v2 — A must end up stale.
     let ws_a = home.path().join("workspace-a");
     std::fs::create_dir_all(&ws_a).unwrap();
     let fw_a = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws_a);
-    crate::core::agent_deployer::deploy_agents_filtered(
-        &bundled,
-        &fw_a.claude_agents_dir(),
-        |_| true,
-    )
-    .unwrap();
-    std::fs::write(bundled.join("rust-engineer.md"), "v2 — catalog moved").unwrap();
+    deploy_skills(&fw_a.claude_skills_dir());
+    std::fs::write(bundled.join("tm-doctor.md"), "v2 — catalog moved").unwrap();
 
     // Session B: deploys AFTER the catalog already moved to v2 — B must stay
     // fresh, sharing the SAME (now-v2) catalog hash cache entry as A.
     let ws_b = home.path().join("workspace-b");
     std::fs::create_dir_all(&ws_b).unwrap();
     let fw_b = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws_b);
-    crate::core::agent_deployer::deploy_agents_filtered(
-        &bundled,
-        &fw_b.claude_agents_dir(),
-        |_| true,
-    )
-    .unwrap();
+    deploy_skills(&fw_b.claude_skills_dir());
 
     let mut a = make_record(None);
     a.state = ManagedSessionState::Active;
