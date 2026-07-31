@@ -343,7 +343,7 @@ mod tests {
     /// (#4414).
     ///
     /// Why: `uv` resolves its cache from `$HOME` (`$HOME/.cache/uv`) at spawn
-    /// time, and ~115 sites across this crate's tests reassign `HOME`
+    /// time, and 161 statements across this crate's tests reassign `HOME`
     /// process-wide to a `TempDir`. Under parallel load the sequence that
     /// actually bit was: a sibling test set `HOME=<tempdir>`, `uv` derived its
     /// cache path from that tempdir, and the sibling's `TempDir` was then
@@ -355,9 +355,10 @@ mod tests {
     /// Measured on `main`: 3 failures in 5 full-suite runs.
     ///
     /// What: acquires `test_env::HOME_LOCK`, the mutex this crate's HOME
-    /// convention is built on. Verified exhaustive for this crate before
-    /// relying on it: all 115 `set_var("HOME", ..)` sites (across 72 test fns)
-    /// hold `HOME_LOCK`, so holding it here excludes every writer — nothing is
+    /// convention is built on. Verified exhaustive for this crate before relying
+    /// on it: all 161 HOME-mutating statements — 116 `set_var("HOME", ..)` plus
+    /// 45 `remove_var("HOME")`, across 72 test fns — sit inside a function that
+    /// holds `HOME_LOCK`, so holding it here excludes every writer. Nothing is
     /// mutating `HOME`, and no sibling's `TempDir` is being reaped, while the
     /// `uv` subprocess runs. That makes the test hermetic with respect to the
     /// variable rather than merely likely to win the race; widening a timeout
