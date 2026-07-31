@@ -84,7 +84,6 @@ const CONSUMED_KEYS: &[&str] = &[
 /// so a caller that already knows the directory exists pays nothing.
 /// Test: `tests::claude_agents_dir_predicate_matches_both_tiers`,
 /// `tests::claude_agents_dir_predicate_rejects_trusty_agents_dir`.
-#[allow(dead_code)] // Wired into `AgentRegistry::load`'s tier selection in the follow-up PR.
 pub(crate) fn is_claude_agents_dir(dir: &Path) -> bool {
     dir.file_name().is_some_and(|n| n == "agents")
         && dir
@@ -107,7 +106,6 @@ pub(crate) fn is_claude_agents_dir(dir: &Path) -> bool {
 /// dropping the agent.
 /// Test: `tests::projects_clean_scalars`, `tests::missing_file_errors`,
 /// `tests::malformed_frontmatter_falls_back_to_file_stem`.
-#[allow(dead_code)] // Wired into `AgentRegistry::load`'s tier selection in the follow-up PR.
 pub(crate) fn load_mpm_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read trusty-mpm agent md {}", path.display()))?;
