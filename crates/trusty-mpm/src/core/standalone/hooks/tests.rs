@@ -426,6 +426,26 @@ fn test_is_mpm_hook_command_recognises_tm_bin_name() {
     );
 }
 
+/// Why (#4058 review round 1 MEDIUM finding 2): `MPM_BIN_NAMES` intentionally
+/// keeps its own array (order `trusty-mpm` then `tm`, load-bearing for
+/// [`resolve_stable_hook_exe`]'s first-hit-wins PATH lookup) rather than
+/// aliasing [`crate::core::own_binary_names::OWN_BINARY_NAMES`] (order `tm`
+/// then `trusty-mpm`, load-bearing for a *different* consumer). Pinning the
+/// SET (order-insensitive) here means a future third `[[bin]]` target added
+/// to one array without the other trips this test instead of drifting silently.
+/// What: asserts both arrays contain exactly the same two names, ignoring order.
+#[test]
+fn test_mpm_bin_names_matches_own_binary_names_set() {
+    let mut mpm_bin_names: Vec<&str> = MPM_BIN_NAMES.to_vec();
+    mpm_bin_names.sort_unstable();
+    let mut own_binary_names: Vec<&str> = crate::core::own_binary_names::OWN_BINARY_NAMES.to_vec();
+    own_binary_names.sort_unstable();
+    assert_eq!(
+        mpm_bin_names, own_binary_names,
+        "MPM_BIN_NAMES and OWN_BINARY_NAMES must stay set-equal even though their order differs"
+    );
+}
+
 /// Why (#2235): dedup that keyed identity on the exact file name ∈
 /// {`trusty-mpm`,`tm`} could never strip a stale entry whose command carried a
 /// Cargo build-artifact path (`.../deps/trusty_mpm-<hash> hook`,
