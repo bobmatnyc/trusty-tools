@@ -40,6 +40,7 @@ use trusty_mpm::client::HealthSnapshot;
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
 use crate::commands::launchd_probe;
+use crate::commands::launchd_probe::LaunchdOwnership as Ownership;
 
 /// Name of this check as it appears in `tm doctor` output.
 pub(crate) const CHECK_NAME: &str = "daemon_orphan";
@@ -71,10 +72,13 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
     };
     // Only ask launchd when a daemon unit is registered; without one there is
     // nothing to compare against and `verdict` short-circuits to `Ok` anyway.
-    let launchd_pid = label.as_deref().and_then(launchd_probe::launchd_owned_pid);
+    let ownership = label
+        .as_deref()
+        .map(launchd_probe::launchd_ownership)
+        .unwrap_or(launchd_probe::LaunchdOwnership::Unavailable);
     verdict(
         label.as_deref(),
-        launchd_pid,
+        ownership,
         snapshot.pid,
         snapshot.supervised,
         snapshot.unsupervised_forced,
@@ -94,18 +98,29 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
 /// 1. No daemon launchd unit registered → `Ok`. A bare dev daemon is the expected
 ///    arrangement, and the supervisor plist does not count (see
 ///    [`launchd_probe::daemon_launchd_label_in`]).
-/// 2. AUTHORITATIVE — the responding daemon reports its pid. Equal to launchd's →
-///    `Ok`; different → orphan. launchd reporting NO pid while something answers is
-///    the #4230 state verbatim: the job is down, yet the port is served.
+/// 2. AUTHORITATIVE — the responding daemon reports its pid, and launchd gave a
+///    POSITIVE answer. Equal pids → `Ok`; different → orphan. `NotRunning` while
+///    something answers is the #4230 state verbatim: the job is down, yet the
+///    port is served.
 /// 3. FALLBACK — the responding daemon predates `pid`. Then and only then does the
 ///    `supervised` self-report decide: `Some(false)` → orphan (the heuristic
 ///    agrees it is hazardous); `Some(true)` or `None` → `Unknown`, never `Ok`,
 ///    because the `getppid() == 1` prong makes `true` non-conclusive.
 ///
-/// An orphan verdict downgrades from `Fail` to `Warn` when `forced` is set — the
-/// operator asked for this with `tm daemon --force`, the opt-in both #4230
-/// refusal messages recommend, so a hard `Fail` there would fire on the escape
-/// hatch the tool itself prescribes.
+/// Two guards keep the hard `Fail` — whose remediation prescribes `kill -TERM` —
+/// off a healthy daemon (#4230 review round 2):
+///
+/// * [`launchd_probe::LaunchdOwnership::Unavailable`] never produces `Fail`. "I
+///   could not ask launchd" is an absence of evidence, and the round-1 error was
+///   exactly this mistake in the other direction. Verified live: with `launchctl`
+///   off `PATH`, the previous code condemned the daemon it had just called `Ok`.
+/// * `NotRunning` escalates to `Fail` only when `supervised != Some(true)`. When
+///   launchd says the job is down and the daemon says it is supervised, the two
+///   authorities contradict and neither can be acted on destructively. This does
+///   not weaken the incident detection: the actual #4230 payload reported
+///   `supervised: false`, so it still lands on `Fail`, and a lying daemon can only
+///   reach `Unknown` — never `Ok`.
+///
 /// Test: `authoritative_fail_when_launchd_runs_a_different_pid`,
 /// `authoritative_fail_when_launchd_runs_nothing_but_a_daemon_answers`,
 /// `authoritative_ok_when_launchd_owns_the_responding_pid`,
@@ -118,10 +133,16 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
 /// `failure_names_the_pid_lookup_the_kill_and_the_launchctl_restart`,
 /// `failure_names_the_force_opt_in`, `failure_names_the_serving_version`,
 /// `failure_is_a_hard_fail_not_a_warn`, `unknown_version_is_labelled_not_blank`,
-/// `remediation_names_the_resolved_label`.
+/// `remediation_names_the_resolved_label`,
+/// `unavailable_launchctl_is_unknown_not_a_fail`,
+/// `unavailable_launchctl_never_prescribes_a_kill`,
+/// `unavailable_message_names_the_domain_cause`,
+/// `not_running_but_supervised_is_unknown_not_a_kill_order`,
+/// `not_running_with_supervised_false_is_still_a_hard_fail`,
+/// `unavailable_with_an_old_daemon_reporting_unsupervised_still_fails`.
 pub(crate) fn verdict(
     label: Option<&str>,
-    launchd_pid: Option<u32>,
+    ownership: launchd_probe::LaunchdOwnership,
     serving_pid: Option<u32>,
     supervised: Option<bool>,
     forced: bool,
@@ -137,13 +158,15 @@ pub(crate) fn verdict(
 
     match serving_pid {
         // Tier 2 — authoritative. Neither side can fake this.
-        Some(serving) => match launchd_pid {
-            Some(owned) if owned == serving => ok(format!(
+        Some(serving) => match ownership {
+            Ownership::Running(owned) if owned == serving => ok(format!(
                 "launchd unit `{label}` owns the daemon answering /health \
                  (pid {serving}, version {})",
                 display_version(version)
             )),
-            Some(owned) => orphan(
+            // Both sides answered positively and they disagree. No self-report can
+            // soften this: it is the lying-daemon case the round-1 review named.
+            Ownership::Running(owned) => orphan(
                 label,
                 forced,
                 version,
@@ -152,7 +175,11 @@ pub(crate) fn verdict(
                      answering /health"
                 ),
             ),
-            None => orphan(
+            // launchd POSITIVELY reports the job down while something serves the
+            // port — #4230 verbatim. Escalate only when the daemon does not also
+            // claim supervision; a contradiction between two authorities is not a
+            // licence to prescribe `kill -TERM`.
+            Ownership::NotRunning if supervised != Some(true) => orphan(
                 label,
                 forced,
                 version,
@@ -161,6 +188,9 @@ pub(crate) fn verdict(
                      job is down), yet pid {serving} is answering /health"
                 ),
             ),
+            Ownership::NotRunning => contradiction(label, version, serving),
+            // Absence of evidence. Never a `Fail`, and never a kill instruction.
+            Ownership::Unavailable => unaskable(label, version, serving),
         },
         // Tier 3 — fallback: the responding daemon is too old to identify itself.
         None => match supervised {
@@ -218,6 +248,70 @@ fn unconfirmable(label: &str, version: &str, reason: &str) -> DoctorCheck {
              re-run `tm doctor`.",
             display_version(version),
             launchd_probe::daemon_restart_command_for(Some(label))
+        ),
+    )
+}
+
+/// Build the `Unknown` verdict for "launchd could not be asked" (#4230 review
+/// round 2).
+///
+/// Why: this is the branch the round-2 review found prescribing a DESTRUCTIVE
+/// remediation on a false reading. `launchctl` not answering is not evidence that
+/// launchd runs nothing — it happens with a scrubbed `PATH`, in a sandbox, and
+/// when the unit is not visible in the caller's bootstrap domain. Since
+/// `KeepAlive {SuccessfulExit: false}` means the job will not come back on its
+/// own, telling the operator to `kill -TERM` a correctly supervised daemon here
+/// costs them the daemon. `--force` is no escape either: it would relabel a
+/// supervised daemon as a deliberate unsupervised one.
+/// What: `Unknown`, naming the pid that answered, the unit, why launchd may have
+/// declined, and a MANUAL comparison the operator can make. Contains no
+/// `kill`/`-TERM` instruction by construction — asserted by a test.
+/// Test: `unavailable_launchctl_is_unknown_not_a_fail`,
+/// `unavailable_launchctl_never_prescribes_a_kill`,
+/// `unavailable_message_names_the_domain_cause`.
+fn unaskable(label: &str, version: &str, serving: u32) -> DoctorCheck {
+    DoctorCheck::new(
+        CHECK_NAME,
+        CheckStatus::Unknown,
+        format!(
+            "cannot determine whether pid {serving} (version {}) answering /health is the \
+             process launchd runs for unit `{label}`: `launchctl` did not answer. That \
+             happens when `launchctl` is not on `PATH`, in a sandbox, or when the unit is \
+             not visible in this shell's bootstrap domain — `launchctl list` resolves \
+             against the caller's domain and an `Aqua`-only agent is invisible from some \
+             contexts. This is NOT evidence of an orphan (issue #4230), so no corrective \
+             action is prescribed. To check by hand, compare `launchctl print \
+             gui/$(id -u)/{label}` against `lsof -nP -iTCP -sTCP:LISTEN | grep tm`.",
+            display_version(version)
+        ),
+    )
+}
+
+/// Build the `Unknown` verdict when launchd and the daemon flatly contradict each
+/// other (#4230 review round 2).
+///
+/// Why: launchd positively reporting the job down while the responding daemon
+/// positively claims supervision cannot both be true. It is a real hazard shape,
+/// but the safe response is to surface the contradiction, not to prescribe a kill:
+/// if the daemon is right, the kill destroys a healthy supervised process. The
+/// round-1 closure is preserved because the actual #4230 payload reported
+/// `supervised: false` and so never reaches here, and because this state can only
+/// ever reach `Unknown` — never `Ok`.
+/// What: `Unknown` naming both claims and the non-destructive way to settle them.
+/// Test: `not_running_but_supervised_is_unknown_not_a_kill_order`.
+fn contradiction(label: &str, version: &str, serving: u32) -> DoctorCheck {
+    DoctorCheck::new(
+        CHECK_NAME,
+        CheckStatus::Unknown,
+        format!(
+            "launchd reports NO running process for unit `{label}`, yet pid {serving} \
+             (version {}) is answering /health AND reports `supervised: true`. Those two \
+             claims contradict, so this is not conclusive and no corrective action is \
+             prescribed (issue #4230) — the daemon's flag has a `getppid() == 1` prong that \
+             a reparented orphan satisfies, but launchd may also be answering from a \
+             domain that cannot see the unit. Settle it with `launchctl print \
+             gui/$(id -u)/{label}` before acting.",
+            display_version(version)
         ),
     )
 }

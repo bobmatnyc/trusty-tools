@@ -414,8 +414,23 @@ The same caveat applies to `.supervised` when it reads **true**: that flag's
 fallback prong is the identical PPID test, so a reparented orphan can report
 `supervised: true`. It is conclusive only when it reads `false`. `tm doctor`'s
 `daemon_orphan` check therefore treats it as a fallback and prefers the PID
-comparison above, reporting `Unknown` rather than a pass when it cannot make that
-comparison.
+comparison above.
+
+When that comparison cannot be made, `daemon_orphan` reports `Unknown` — never a
+pass, and never a failure that would have you kill the listener. There are two
+such states, and neither is evidence of an orphan:
+
+- the responding daemon predates the `pid` field on `/health`, so there is nothing
+  to compare; or
+- `launchctl` could not be asked — missing from `PATH`, sandboxed, or the unit is
+  not visible in the caller's bootstrap domain. `launchctl list <label>` resolves
+  against the caller's domain, and a `LimitLoadToSessionType = Aqua` agent is not
+  visible from every context, where the lookup exits 113 with the same message it
+  gives for a unit that was never loaded.
+
+A hard `Fail` requires a POSITIVE answer from launchd: either a different PID than
+the one serving, or launchd confirming the job is down while something still
+answers the port.
 
 ### Notarization Appendix (Optional — for distributing to OTHER machines)
 

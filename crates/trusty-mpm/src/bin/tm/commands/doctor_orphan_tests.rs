@@ -22,7 +22,7 @@ const LABEL: &str = "com.trusty.mpm";
 fn authoritative_fail_when_launchd_runs_a_different_pid() {
     let check = verdict(
         Some(LABEL),
-        Some(111),
+        Ownership::Running(111),
         Some(222),
         Some(true),
         false,
@@ -46,7 +46,14 @@ fn authoritative_fail_when_launchd_runs_a_different_pid() {
 /// (no PID), and something is nonetheless answering on the port.
 #[test]
 fn authoritative_fail_when_launchd_runs_nothing_but_a_daemon_answers() {
-    let check = verdict(Some(LABEL), None, Some(98606), Some(false), false, "1.0.2");
+    let check = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(98606),
+        Some(false),
+        false,
+        "1.0.2",
+    );
     assert_eq!(check.status, CheckStatus::Fail);
     assert!(
         check.message.contains("98606"),
@@ -60,7 +67,7 @@ fn authoritative_fail_when_launchd_runs_nothing_but_a_daemon_answers() {
 fn authoritative_ok_when_launchd_owns_the_responding_pid() {
     let check = verdict(
         Some(LABEL),
-        Some(73599),
+        Ownership::Running(73599),
         Some(73599),
         Some(true),
         false,
@@ -76,12 +83,19 @@ fn authoritative_ok_when_launchd_owns_the_responding_pid() {
 #[test]
 fn authoritative_verdict_ignores_a_lying_self_report() {
     // Orphan that claims to be supervised — still Fail.
-    let lying_orphan = verdict(Some(LABEL), None, Some(222), Some(true), false, "1.3.0");
+    let lying_orphan = verdict(
+        Some(LABEL),
+        Ownership::Running(111),
+        Some(222),
+        Some(true),
+        false,
+        "1.3.0",
+    );
     assert_eq!(lying_orphan.status, CheckStatus::Fail);
     // launchd genuinely owns it, but the heuristic said false — still Ok.
     let pessimistic = verdict(
         Some(LABEL),
-        Some(333),
+        Ownership::Running(333),
         Some(333),
         Some(false),
         false,
@@ -98,7 +112,15 @@ fn ok_when_no_launchd_unit_is_registered() {
     for supervised in [Some(false), Some(true), None] {
         for pid in [None, Some(222)] {
             assert_eq!(
-                verdict(None, None, pid, supervised, false, "1.3.0").status,
+                verdict(
+                    None,
+                    Ownership::Unavailable,
+                    pid,
+                    supervised,
+                    false,
+                    "1.3.0"
+                )
+                .status,
                 CheckStatus::Ok,
                 "supervised={supervised:?} pid={pid:?}"
             );
@@ -111,7 +133,14 @@ fn ok_when_no_launchd_unit_is_registered() {
 /// heuristic and the registration agree it is hazardous, so this stays a Fail.
 #[test]
 fn fallback_fail_when_old_daemon_reports_unsupervised() {
-    let check = verdict(Some(LABEL), None, None, Some(false), false, "1.0.2");
+    let check = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        None,
+        Some(false),
+        false,
+        "1.0.2",
+    );
     assert_eq!(check.status, CheckStatus::Fail);
 }
 
@@ -121,7 +150,14 @@ fn fallback_fail_when_old_daemon_reports_unsupervised() {
 /// cannot treat it as conclusive either.
 #[test]
 fn fallback_unknown_when_old_daemon_claims_supervised() {
-    let check = verdict(Some(LABEL), None, None, Some(true), false, "1.0.2");
+    let check = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        None,
+        Some(true),
+        false,
+        "1.0.2",
+    );
     assert_eq!(check.status, CheckStatus::Unknown);
     assert_ne!(check.status, CheckStatus::Ok);
     assert!(
@@ -135,7 +171,7 @@ fn fallback_unknown_when_old_daemon_claims_supervised() {
 /// smaller half of the fail-open the review identified.
 #[test]
 fn fallback_unknown_when_supervised_is_absent() {
-    let check = verdict(Some(LABEL), None, None, None, false, "");
+    let check = verdict(Some(LABEL), Ownership::NotRunning, None, None, false, "");
     assert_eq!(check.status, CheckStatus::Unknown);
 }
 
@@ -144,14 +180,14 @@ fn fallback_unknown_when_supervised_is_absent() {
 /// to ignore the check.
 #[test]
 fn warns_not_fails_when_the_operator_forced_it() {
-    for (launchd_pid, serving_pid, supervised) in [
-        (None, Some(222_u32), Some(false)),
-        (Some(111_u32), Some(222_u32), Some(true)),
-        (None, None, Some(false)),
+    for (ownership, serving_pid, supervised) in [
+        (Ownership::NotRunning, Some(222_u32), Some(false)),
+        (Ownership::Running(111), Some(222_u32), Some(true)),
+        (Ownership::NotRunning, None, Some(false)),
     ] {
         let check = verdict(
             Some(LABEL),
-            launchd_pid,
+            ownership,
             serving_pid,
             supervised,
             true,
@@ -160,7 +196,7 @@ fn warns_not_fails_when_the_operator_forced_it() {
         assert_eq!(
             check.status,
             CheckStatus::Warn,
-            "forced run must Warn, not Fail: {launchd_pid:?}/{serving_pid:?}"
+            "forced run must Warn, not Fail: {ownership:?}/{serving_pid:?}"
         );
         assert!(
             check.message.contains("--force"),
@@ -176,7 +212,15 @@ fn warns_not_fails_when_the_operator_forced_it() {
 /// here, which is why the incident dragged on).
 #[test]
 fn failure_names_the_pid_lookup_the_kill_and_the_launchctl_restart() {
-    let msg = verdict(Some(LABEL), None, Some(98606), Some(false), false, "1.0.2").message;
+    let msg = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(98606),
+        Some(false),
+        false,
+        "1.0.2",
+    )
+    .message;
     assert!(msg.contains("lsof"), "message was: {msg}");
     assert!(msg.contains("kill -TERM"), "message was: {msg}");
     assert!(msg.contains("launchctl kickstart"), "message was: {msg}");
@@ -187,7 +231,15 @@ fn failure_names_the_pid_lookup_the_kill_and_the_launchctl_restart() {
 /// unsupervised daemon can silence it correctly instead of ignoring the check.
 #[test]
 fn failure_names_the_force_opt_in() {
-    let msg = verdict(Some(LABEL), None, Some(98606), Some(false), false, "1.0.2").message;
+    let msg = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(98606),
+        Some(false),
+        false,
+        "1.0.2",
+    )
+    .message;
     assert!(msg.contains("tm daemon --force"), "message was: {msg}");
 }
 
@@ -197,8 +249,22 @@ fn failure_names_the_force_opt_in() {
 fn remediation_names_the_resolved_label() {
     let drifted = "com.trusty.mpm.dogfood";
     for check in [
-        verdict(Some(drifted), None, Some(222), Some(false), false, "1.0.2"),
-        verdict(Some(drifted), None, None, Some(true), false, "1.0.2"),
+        verdict(
+            Some(drifted),
+            Ownership::NotRunning,
+            Some(222),
+            Some(false),
+            false,
+            "1.0.2",
+        ),
+        verdict(
+            Some(drifted),
+            Ownership::NotRunning,
+            None,
+            Some(true),
+            false,
+            "1.0.2",
+        ),
     ] {
         assert!(
             check.message.contains(drifted),
@@ -213,7 +279,14 @@ fn remediation_names_the_resolved_label() {
 /// a configuration preference.
 #[test]
 fn failure_is_a_hard_fail_not_a_warn() {
-    let check = verdict(Some(LABEL), None, Some(98606), Some(false), false, "1.0.2");
+    let check = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(98606),
+        Some(false),
+        false,
+        "1.0.2",
+    );
     assert_eq!(check.status, CheckStatus::Fail);
     assert_ne!(check.status, CheckStatus::Warn);
 }
@@ -222,7 +295,15 @@ fn failure_is_a_hard_fail_not_a_warn() {
 /// operator their install shipped nothing.
 #[test]
 fn failure_names_the_serving_version() {
-    let msg = verdict(Some(LABEL), None, Some(98606), Some(false), false, "1.0.2").message;
+    let msg = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(98606),
+        Some(false),
+        false,
+        "1.0.2",
+    )
+    .message;
     assert!(msg.contains("1.0.2"), "message was: {msg}");
 }
 
@@ -230,7 +311,15 @@ fn failure_names_the_serving_version() {
 /// printing a dangling "version ".
 #[test]
 fn unknown_version_is_labelled_not_blank() {
-    let msg = verdict(Some(LABEL), None, Some(98606), Some(false), false, "").message;
+    let msg = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(98606),
+        Some(false),
+        false,
+        "",
+    )
+    .message;
     assert!(msg.contains("version unknown"), "message was: {msg}");
 }
 
@@ -241,4 +330,137 @@ fn unknown_when_no_health_snapshot_is_available() {
     let check = orphan_daemon_check(None);
     assert_eq!(check.status, CheckStatus::Unknown);
     assert_eq!(check.name, CHECK_NAME);
+}
+
+/// Round-2 HIGH, the regression guard. "launchd could not be asked" must never
+/// reach `Fail`. Reproduced live before the fix: with `launchctl` off `PATH`, the
+/// exact daemon the check called `Ok` one line earlier was condemned as an ORPHAN.
+///
+/// The pid deliberately MATCHES what launchd really runs on the test author's host,
+/// so the only thing making this state hazardous-looking is the missing answer.
+#[test]
+fn unavailable_launchctl_is_unknown_not_a_fail() {
+    for supervised in [Some(true), Some(false), None] {
+        let check = verdict(
+            Some(LABEL),
+            Ownership::Unavailable,
+            Some(73599),
+            supervised,
+            false,
+            "1.3.1",
+        );
+        assert_eq!(
+            check.status,
+            CheckStatus::Unknown,
+            "supervised={supervised:?} must be Unknown, got {:?}: {}",
+            check.status,
+            check.message
+        );
+        assert_ne!(check.status, CheckStatus::Fail, "supervised={supervised:?}");
+    }
+}
+
+/// The severity is only half the fix — the TEXT is what the operator acts on. A
+/// `kill -TERM` instruction on an undetermined reading is the destructive half of
+/// the round-2 HIGH, and `KeepAlive {SuccessfulExit: false}` means the job does not
+/// come back on its own afterwards.
+#[test]
+fn unavailable_launchctl_never_prescribes_a_kill() {
+    let msg = verdict(
+        Some(LABEL),
+        Ownership::Unavailable,
+        Some(73599),
+        Some(true),
+        false,
+        "1.3.1",
+    )
+    .message;
+    assert!(!msg.contains("kill"), "must not prescribe a kill: {msg}");
+    assert!(!msg.contains("-TERM"), "must not prescribe a kill: {msg}");
+    assert!(!msg.contains("ORPHAN"), "must not assert an orphan: {msg}");
+}
+
+/// The message must tell the operator WHY launchd may not have answered, because
+/// the most likely cause is invisible to them: `launchctl list` resolves against
+/// the caller's bootstrap domain, so an `Aqua`-only agent cannot be seen from every
+/// context. Without that sentence the `Unknown` looks like a tool bug.
+#[test]
+fn unavailable_message_names_the_domain_cause() {
+    let msg = verdict(
+        Some(LABEL),
+        Ownership::Unavailable,
+        Some(73599),
+        None,
+        false,
+        "1.3.1",
+    )
+    .message;
+    assert!(msg.contains("domain"), "message was: {msg}");
+    assert!(msg.contains("PATH"), "message was: {msg}");
+    assert!(msg.contains(LABEL), "message was: {msg}");
+    assert!(msg.contains("#4230"), "message was: {msg}");
+}
+
+/// Two authorities flatly contradicting each other is not a licence to kill. If the
+/// daemon's `supervised: true` is the honest one, the prescribed kill destroys a
+/// healthy supervised process — and `--force` would not help, it would relabel a
+/// supervised daemon as a deliberate unsupervised one.
+#[test]
+fn not_running_but_supervised_is_unknown_not_a_kill_order() {
+    let check = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(73599),
+        Some(true),
+        false,
+        "1.3.1",
+    );
+    assert_eq!(check.status, CheckStatus::Unknown);
+    assert_ne!(check.status, CheckStatus::Ok, "never a pass either");
+    assert!(
+        !check.message.contains("kill -TERM"),
+        "message was: {}",
+        check.message
+    );
+}
+
+/// The guard above must NOT cost the incident. The real #4230 payload reported
+/// `supervised: false`, so the hard Fail — and its full remediation — still fires
+/// on the population the issue is about. This is the test that would catch the
+/// guard being widened into a blanket downgrade.
+#[test]
+fn not_running_with_supervised_false_is_still_a_hard_fail() {
+    for supervised in [Some(false), None] {
+        let check = verdict(
+            Some(LABEL),
+            Ownership::NotRunning,
+            Some(98606),
+            supervised,
+            false,
+            "1.0.2",
+        );
+        assert_eq!(
+            check.status,
+            CheckStatus::Fail,
+            "supervised={supervised:?} is the #4230 population and must stay Fail: {}",
+            check.message
+        );
+        assert!(check.message.contains("kill -TERM"), "{}", check.message);
+    }
+}
+
+/// The FALLBACK tier does not consult launchd at all, so an unreachable `launchctl`
+/// must not change its answer. A daemon old enough to omit `pid` while admitting
+/// `supervised: false` against a registered unit is hazardous on its own evidence.
+#[test]
+fn unavailable_with_an_old_daemon_reporting_unsupervised_still_fails() {
+    let check = verdict(
+        Some(LABEL),
+        Ownership::Unavailable,
+        None,
+        Some(false),
+        false,
+        "1.0.2",
+    );
+    assert_eq!(check.status, CheckStatus::Fail);
 }

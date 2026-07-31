@@ -19,16 +19,20 @@
 //! consume. [`compute_supervised`], [`compute_no_spawn`] and
 //! [`compute_daemon_refuse`] are pure functions over that boolean (plus, for
 //! supervision, [`trusty_common::update::is_launchd_supervised`]).
-//! [`launchd_owned_pid`] asks launchd which PID it actually runs, so the
+//! [`launchd_ownership`] asks launchd which PID it actually runs, so the
 //! `daemon_orphan` doctor check has an AUTHORITATIVE signal rather than only the
-//! daemon's own heuristic self-report.
+//! daemon's own heuristic self-report. It answers in THREE states
+//! ([`LaunchdOwnership`]) because "launchd runs nothing" and "launchd could not
+//! be asked" carry opposite consequences and the round-2 review found them
+//! conflated.
 //!
 //! Test: `compute_supervised_*`, `compute_no_spawn_*` and
 //! `compute_daemon_refuse_*` below exercise every combination of the pure
 //! decision tables; `daemon_label_*` cover label resolution against temp homes;
-//! `parse_launchctl_pid_*` cover every real `launchctl` output shape. The two
-//! live wrappers ([`daemon_launchd_label`], [`launchd_owned_pid`]) are thin
-//! `$HOME` / subprocess lookups over those tested cores.
+//! `parse_launchctl_pid_*` cover every real `launchctl` output shape and
+//! `ownership_from_output_*` the exit-0 mapping. The two live wrappers
+//! ([`daemon_launchd_label`], [`launchd_ownership`]) are thin `$HOME` /
+//! subprocess lookups over those tested cores.
 
 /// The canonical launchd label for the trusty-mpm DAEMON.
 ///
@@ -56,12 +60,23 @@ pub(crate) const DAEMON_LAUNCHD_LABEL: &str = "com.trusty.mpm";
 /// which is already the repo's convention for this question — prefer the
 /// canonical `com.trusty.mpm.plist`; otherwise accept a drifted
 /// `com.trusty.*mpm*.plist`, excluding `supervisor`/`gui` names, which that
-/// script documents as "distinct services". `None` when neither is present.
+/// script documents as "distinct services" — and, since the round-2 review, only
+/// when that drifted plist's `ProgramArguments` actually run `daemon` (see
+/// [`plist_runs_daemon`]). `None` when neither is present.
+///
+/// The canonical `com.trusty.mpm.plist` short-circuit is deliberately NOT gated on
+/// [`plist_runs_daemon`]: that label is the daemon's by definition, and the
+/// failure modes are asymmetric. A false negative there would make
+/// [`mpm_launchd_plist_exists`] report `false` on a correctly installed host,
+/// standing the #4230 spawn guard down and reintroducing the very orphan this
+/// issue is about. The contents check exists to stop a SIBLING unit being
+/// promoted on the strength of its filename, which is a drift-path-only risk.
 /// Test: `daemon_label_prefers_the_canonical_plist`,
 /// `daemon_label_ignores_a_supervisor_only_home`,
 /// `daemon_label_none_for_an_empty_home`,
 /// `daemon_label_accepts_a_drifted_label`,
-/// `daemon_label_ignores_a_gui_plist`.
+/// `daemon_label_ignores_a_gui_plist`,
+/// `daemon_label_ignores_a_decoy_sibling_unit`.
 pub(crate) fn daemon_launchd_label_in(home: &std::path::Path) -> Option<String> {
     let agents = home.join("Library/LaunchAgents");
     if agents
@@ -81,11 +96,54 @@ pub(crate) fn daemon_launchd_label_in(home: &std::path::Path) -> Option<String> 
                 && !label.contains("supervisor")
                 && !label.contains("gui")
         })
+        // #4230 review round 2 (MEDIUM): the name filter alone accepted ANY
+        // sibling unit as THE daemon — `com.trusty.mpm.logrotate` would have
+        // become the label, and every consequence (the refusal, the restart
+        // recipe, the PID comparison) followed from that wrong unit. This host
+        // already carries a real `com.trusty.trusty-search.logrotate.plist`, so
+        // the shape is not hypothetical. Require the plist to actually run
+        // `daemon` before believing it owns one.
+        .filter(|label| plist_runs_daemon(&agents.join(format!("{label}.plist"))))
         .collect();
     // Sort so a home with several drifted labels resolves deterministically
     // rather than depending on directory-iteration order.
     drifted.sort();
     drifted.into_iter().next()
+}
+
+/// Does this plist's `ProgramArguments` actually run a `daemon` subcommand?
+///
+/// Why (#4230 review round 2): the drifted-label search is a NAME heuristic, and
+/// names lie. The authoritative statement of what a unit runs is its
+/// `ProgramArguments`, which is also how this change already distinguishes the
+/// supervisor plist (`[<tm>, "supervisor"]`). Reading it turns the heuristic into
+/// a check.
+/// What: `true` when any element after the program path is exactly `daemon`.
+/// Deliberately tolerant of the surrounding XML rather than a full plist parse:
+/// scans `<string>…</string>` values inside the `ProgramArguments` array, which
+/// is the shape `trusty-installer`'s `PLIST_TEMPLATE` and the signed installer
+/// both emit. An unreadable or unparseable plist yields `false` — a unit whose
+/// contents cannot be confirmed is not promoted to "the daemon" on the strength
+/// of its filename.
+/// Test: `daemon_label_ignores_a_decoy_sibling_unit`,
+/// `daemon_label_accepts_a_drifted_label`,
+/// `plist_runs_daemon_false_for_a_missing_file`.
+fn plist_runs_daemon(path: &std::path::Path) -> bool {
+    let Ok(xml) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    // Narrow to the ProgramArguments array so a `daemon` string elsewhere in the
+    // plist (a log path like `…/Logs/trusty-mpm/daemon.log`, an environment
+    // variable) cannot be mistaken for an argument.
+    let Some(after_key) = xml.split("<key>ProgramArguments</key>").nth(1) else {
+        return false;
+    };
+    let array = after_key.split("</array>").next().unwrap_or_default();
+    array
+        .split("<string>")
+        .skip(1)
+        .filter_map(|s| s.split("</string>").next())
+        .any(|arg| arg.trim() == "daemon")
 }
 
 /// Resolve the registered trusty-mpm daemon launchd label on this host.
@@ -221,7 +279,35 @@ pub(crate) fn cli_spawn_refusal_hint(label: &str) -> String {
     )
 }
 
-/// Ask launchd for the PID it currently owns for `label`.
+/// What launchd will say about a daemon unit — three states, not two.
+///
+/// Why (#4230 review round 2): the previous probe returned `Option<u32>` and so
+/// collapsed two opposite facts into one `None`. "launchd has this unit loaded
+/// and its job is DOWN" is the #4230 incident verbatim and warrants a hard
+/// `Fail`; "I could not ask launchd" is an absence of evidence and warrants
+/// `Unknown`. Conflating them made `tm doctor` prescribe `kill -TERM` against a
+/// correctly supervised daemon whenever `launchctl` could not answer — a
+/// DESTRUCTIVE action on a false reading, and the round-1 error (absence of
+/// evidence read as evidence of a state) inverted. `KeepAlive
+/// {SuccessfulExit: false}` means the job does not come back on its own after
+/// that kill, so the wrong answer here costs the operator their daemon.
+/// What: `Running(pid)` and `NotRunning` are POSITIVE answers from launchd;
+/// `Unavailable` means the question could not be put to launchd at all.
+/// Test: `ownership_*` and the `verdict_*` cases in `doctor_orphan_tests.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchdOwnership {
+    /// launchd positively reports a live PID for the unit.
+    Running(u32),
+    /// launchd positively reports the unit but no running process — the job is
+    /// down. This is the #4230 state when something else is serving the port.
+    NotRunning,
+    /// launchd could not be asked: `launchctl` missing from `PATH`, a spawn
+    /// failure, or the unit not visible in the caller's bootstrap domain.
+    Unavailable,
+}
+
+/// Ask launchd what it currently runs for `label`, distinguishing "nothing" from
+/// "could not ask".
 ///
 /// Why (#4230 review): the `daemon_orphan` doctor check must not rest on the
 /// daemon's own `supervised` self-report.
@@ -232,22 +318,73 @@ pub(crate) fn cli_spawn_refusal_hint(label: &str) -> String {
 /// to delete `PPID == 1` from the operator checklist, so the check cannot lean on
 /// it either. launchd's own answer is authoritative; a PID comparison against it
 /// is exactly what the revised runbook tells a human to do.
-/// What: shells out to `launchctl list <label>` and parses the PID from its
-/// output. `None` when the unit is not loaded, launchd reports no running PID, or
-/// `launchctl` is unavailable — all of which mean "launchd is not currently
-/// running this unit", which the verdict treats as hazardous only when something
-/// else IS serving.
-/// Test: the parser is unit-tested by `parse_launchctl_pid_*`; the shell-out
+///
+/// Round 2 added the third state and a second probe. `launchctl list <label>`
+/// resolves against the CALLER's bootstrap domain and exits 113
+/// (`Could not find service "…" in domain for port`) when the unit is not
+/// visible there — the same exit code and message it gives for a unit that was
+/// never bootstrapped at all. Those two worlds are indistinguishable from that
+/// answer alone, so a 113 is escalated to an explicit `gui/<uid>` query (the
+/// domain `scripts/install-trusty-mpm-signed.sh` bootstraps into, and the one
+/// this codebase's own restart recipe names) before giving up. Only when BOTH
+/// probes decline does the answer become `Unavailable`.
+/// What: `Running(pid)` / `NotRunning` on an exit-0 answer, according to whether
+/// [`parse_launchctl_pid`] finds a PID; otherwise the `gui/<uid>` retry; else
+/// `Unavailable`.
+/// Test: the parser is unit-tested by `parse_launchctl_pid_*` and the
+/// exit-status-to-state mapping by `ownership_from_output_*`; the shell-out
 /// itself needs a live launchd and is exercised by running `tm doctor`.
-pub(crate) fn launchd_owned_pid(label: &str) -> Option<u32> {
+pub(crate) fn launchd_ownership(label: &str) -> LaunchdOwnership {
+    // Probe 1: the legacy, domain-agnostic API. Cheapest, and the only one that
+    // answers on hosts where the unit lives outside `gui/<uid>`.
+    if let Some(state) = ask_launchctl(&["list".to_string(), label.to_string()]) {
+        return state;
+    }
+    // Probe 2: name the GUI domain explicitly. A `list` that exited non-zero may
+    // simply have been asked from a domain that cannot see an `Aqua`-only agent.
+    let uid = trusty_common::launchd::current_uid();
+    if let Some(state) = ask_launchctl(&["print".to_string(), format!("gui/{uid}/{label}")]) {
+        return state;
+    }
+    LaunchdOwnership::Unavailable
+}
+
+/// Run one `launchctl` query and map a SUCCESSFUL answer onto a positive state.
+///
+/// Why: both probes in [`launchd_ownership`] share the same
+/// "did launchd actually answer?" test, and keeping it in one place is what stops
+/// a future edit from reintroducing the round-2 conflation on one of the two
+/// paths.
+/// What: `None` when `launchctl` could not be spawned or exited non-zero — i.e.
+/// no answer, try the next probe. `Some(Running | NotRunning)` only for exit 0,
+/// where launchd's silence about a PID genuinely means the job is down.
+/// Test: `ownership_from_output_running`, `ownership_from_output_not_running`
+/// cover the mapping; the spawn failure is covered live by scenario C in the PR.
+fn ask_launchctl(args: &[String]) -> Option<LaunchdOwnership> {
     let out = std::process::Command::new("launchctl")
-        .args(["list", label])
+        .args(args)
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    parse_launchctl_pid(&String::from_utf8_lossy(&out.stdout))
+    Some(ownership_from_output(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Map an exit-0 `launchctl` payload onto a POSITIVE ownership state.
+///
+/// Why: separated from the shell-out so the "exit 0 but no PID means the job is
+/// genuinely down" rule is testable without launchd. This is the one place
+/// allowed to read a missing PID as `NotRunning`, and it is only ever reached
+/// after `launchctl` exited 0 — which is what makes that reading safe.
+/// What: `Running(pid)` when [`parse_launchctl_pid`] finds one, else
+/// `NotRunning`.
+/// Test: `ownership_from_output_running`, `ownership_from_output_not_running`.
+fn ownership_from_output(stdout: &str) -> LaunchdOwnership {
+    match parse_launchctl_pid(stdout) {
+        Some(pid) => LaunchdOwnership::Running(pid),
+        None => LaunchdOwnership::NotRunning,
+    }
 }
 
 /// Pure parser for the PID in `launchctl list <label>` / `launchctl print`
@@ -255,9 +392,12 @@ pub(crate) fn launchd_owned_pid(label: &str) -> Option<u32> {
 ///
 /// Why: separated from the shell-out so every real output shape is testable
 /// without launchd. Both forms are handled because the two commands differ and
-/// macOS has changed `list`'s format across releases — a parser that silently
-/// returns `None` on an unrecognised shape would fail OPEN, turning the check
-/// back into the self-report-only version it replaces.
+/// macOS has changed `list`'s format across releases. A parser that silently
+/// returned `None` on an unrecognised shape fails CLOSED (#4230 review round 2,
+/// LOW): its caller [`ownership_from_output`] reads a missing PID as
+/// `NotRunning`, which is a hazard verdict, so an unparsed shape would condemn a
+/// healthy daemon rather than wave it through. Every shape launchd actually
+/// emits is therefore covered by a test.
 /// What: recognises `"PID" = 12345;` (`launchctl list <label>`), `pid = 12345`
 /// (`launchctl print`), and a leading `12345\t` (the tab-separated table form).
 /// `None` when no PID is present — including launchd's `"PID"` absence for a
@@ -377,15 +517,121 @@ mod tests {
         );
     }
 
-    /// Build a temp home containing `LaunchAgents/<name>` for each entry.
+    /// A plist body whose `ProgramArguments` run the given subcommand.
+    ///
+    /// Why: since the round-2 review the drifted-label search reads
+    /// `ProgramArguments`, so a test fixture has to carry a realistic body — a bare
+    /// `<plist/>` would be rejected and the tests would pass for the wrong reason.
+    fn plist_running(subcommand: &str) -> String {
+        format!(
+            "<plist version=\"1.0\"><dict>\
+             <key>Label</key><string>x</string>\
+             <key>ProgramArguments</key><array>\
+             <string>/Users/x/.cargo/bin/trusty-mpm</string>\
+             <string>{subcommand}</string>\
+             </array>\
+             <key>StandardOutPath</key><string>/Users/x/Logs/daemon.log</string>\
+             </dict></plist>"
+        )
+    }
+
+    /// Build a temp home containing `LaunchAgents/<name>` for each entry, each a
+    /// plist that genuinely runs `daemon`.
     fn home_with(plists: &[&str]) -> tempfile::TempDir {
+        home_with_bodies(
+            &plists
+                .iter()
+                .map(|n| (*n, plist_running("daemon")))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Build a temp home with explicit plist bodies, for fixtures that must differ.
+    fn home_with_bodies(plists: &[(&str, String)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let agents = dir.path().join("Library/LaunchAgents");
         std::fs::create_dir_all(&agents).expect("create LaunchAgents");
-        for name in plists {
-            std::fs::write(agents.join(name), "<plist/>").expect("write plist");
+        for (name, body) in plists {
+            std::fs::write(agents.join(name), body).expect("write plist");
         }
         dir
+    }
+
+    /// Round-2 MEDIUM: the name filter alone would promote ANY `com.trusty.*mpm*`
+    /// sibling to "the daemon unit", and every consequence — the spawn refusal, the
+    /// restart recipe, the PID compared against `/health` — would key off the wrong
+    /// unit. A `logrotate` sibling is the concrete shape; this host already carries a
+    /// real `com.trusty.trusty-search.logrotate.plist`.
+    #[test]
+    fn daemon_label_ignores_a_decoy_sibling_unit() {
+        let home =
+            home_with_bodies(&[("com.trusty.mpm.logrotate.plist", plist_running("logrotate"))]);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()),
+            None,
+            "a sibling unit that does not run `daemon` must not become the daemon label"
+        );
+    }
+
+    /// The decoy must lose even when it sorts BEFORE the genuine drifted unit — the
+    /// resolver sorts for determinism, so a contents-blind filter would have picked
+    /// the decoy here.
+    #[test]
+    fn daemon_label_picks_the_daemon_unit_over_an_alphabetically_earlier_decoy() {
+        let home = home_with_bodies(&[
+            ("com.trusty.aaa-mpm.plist", plist_running("logrotate")),
+            ("com.trusty.zzz-mpm.plist", plist_running("daemon")),
+        ]);
+        assert_eq!(
+            daemon_launchd_label_in(home.path()).as_deref(),
+            Some("com.trusty.zzz-mpm")
+        );
+    }
+
+    /// A plist that cannot be read is not promoted on the strength of its filename.
+    #[test]
+    fn plist_runs_daemon_false_for_a_missing_file() {
+        assert!(!plist_runs_daemon(std::path::Path::new(
+            "/nonexistent/com.trusty.mpm.plist"
+        )));
+    }
+
+    /// `daemon` appearing OUTSIDE `ProgramArguments` — a log path is the common case,
+    /// and the real installed plist has exactly that — must not count as an argument.
+    #[test]
+    fn plist_runs_daemon_ignores_daemon_outside_program_arguments() {
+        let home =
+            home_with_bodies(&[("com.trusty.mpm.logrotate.plist", plist_running("logrotate"))]);
+        let path = home
+            .path()
+            .join("Library/LaunchAgents/com.trusty.mpm.logrotate.plist");
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read fixture")
+                .contains("daemon.log"),
+            "fixture must contain the decoy substring for this test to mean anything"
+        );
+        assert!(!plist_runs_daemon(&path));
+    }
+
+    /// An exit-0 `launchctl` answer carrying a PID is a POSITIVE "launchd runs this".
+    #[test]
+    fn ownership_from_output_running() {
+        assert_eq!(
+            ownership_from_output("{\n\t\"PID\" = 73599;\n};"),
+            LaunchdOwnership::Running(73599)
+        );
+    }
+
+    /// An exit-0 answer with NO PID is the positive "the job is down" state — the
+    /// #4230 incident. It is only reachable after `launchctl` exited 0, which is what
+    /// separates it from `Unavailable`.
+    #[test]
+    fn ownership_from_output_not_running() {
+        assert_eq!(
+            ownership_from_output("{\n\t\"LastExitStatus\" = 0;\n};"),
+            LaunchdOwnership::NotRunning
+        );
     }
 
     #[test]

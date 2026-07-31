@@ -380,9 +380,15 @@ naming the right command instead of spawning a second, unsupervised daemon that
 would seize the port and keep serving a stale binary. Use launchd there:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.trusty.mpm   # restart the supervised daemon
-tm doctor                                            # `daemon_orphan` must be OK
+tm doctor            # read the exact recipe from `daemon_orphan` / the refusal message
+tm doctor            # after restarting: `daemon_orphan` must be OK
 ```
+
+Take the label from `tm doctor`'s own output rather than assuming
+`com.trusty.mpm` — the refusal message and every `daemon_orphan` remediation name
+the unit that is actually registered on this host, which is not always the
+canonical label. The recipe has the shape
+`launchctl kickstart -k gui/$(id -u)/<label>`.
 
 `tm stop` still works, but launchd will NOT bring the daemon back on its own
 (`KeepAlive.SuccessfulExit=false`) — use the `kickstart` above. To run an

@@ -99,6 +99,12 @@ pub struct HealthResponse {
     /// response, which the client models as `Option<u32>` → `None` → `Unknown`
     /// rather than a pass.
     /// Test: `health_response_serializes_pid_field`.
+    ///
+    /// `#[serde(default)]` (#4230 review round 2, LOW) matches every other field
+    /// added here: `HealthResponse` derives `Deserialize` as well as `Serialize`,
+    /// so anything deserializing an OLDER daemon's `/health` — which omits `pid`
+    /// entirely — would otherwise get a hard parse error instead of a zero.
+    #[serde(default)]
     pub pid: u32,
     /// Whether this daemon was deliberately started unsupervised via
     /// `tm daemon --force` (issue #4230).
