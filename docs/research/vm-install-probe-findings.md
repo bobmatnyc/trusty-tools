@@ -698,3 +698,52 @@ actually reclaimed.
 nominal / not touched) and the two `ghcr.io/cirruslabs/macos-tahoe-base` OCI-sourced
 entries (pulled base images, not clones) remain. No probe-created VMs, no golden image,
 no throwaway/calibration clones left on the host.
+
+---
+
+## K. Build-cost measurement pass — `tart stop` asynchrony, `PROVISION_SEC`, and trusty-search from source
+
+**Date:** 2026-07-31
+**Branch:** `probe/tart-build-cost` (off `2e2ad22a`)
+**Host:** Darwin 25.5 (Tahoe), Apple Silicon, **18 logical cores**, 64 GB RAM, 530 GiB free at start
+**Scope (fixed by the owner, not up for debate in this section):**
+
+* **Local Tart VM only.** GitHub Actions / CI runners are explicitly out of scope. Nothing
+  here should be extrapolated to or from a GHA runner.
+* **Downloading all crate dependencies from the network is acceptable.** No registry
+  pre-warming was performed or is wanted.
+* **The host repo is never mounted into a guest.** Source reaches the VM only by
+  `git clone` from GitHub inside the guest (the repo is public).
+
+### K answer table
+
+| # | Question | Answer | Confidence |
+|---|----------|--------|------------|
+| K1 | Is `tart stop` synchronous? Does it lose the last write? | _pending_ | _pending_ |
+| K2 | `PROVISION_SEC` — full mise + rust + uv + gh from a bare clone | _pending_ | _pending_ |
+| K3 | `cargo install --path crates/trusty-search --locked` wall-clock | _pending_ | _pending_ |
+| K3a | Does workspace `lto = "thin"` apply to a `--path` install? | _pending_ | _pending_ |
+| K3b | Does `ort-sys` download ONNX Runtime inside the guest? | _pending_ | _pending_ |
+| K4 | Is single-crate default scope still justified? | _pending_ | _pending_ |
+| K4b | Does the golden image earn its complexity? | _pending_ | _pending_ |
+| K5 | `rust-toolchain.toml` override in `trusty-git-analytics` | _pending_ | _pending_ |
+
+### K1. `tart stop` asynchrony — _pending_
+
+_pending_
+
+### K2. `PROVISION_SEC` — _pending_
+
+_pending_
+
+### K3. trusty-search from source — _pending_
+
+_pending_
+
+### K4. Extrapolation and recommendation — _pending_
+
+_pending_
+
+### K5. Opportunistic checks — _pending_
+
+_pending_
