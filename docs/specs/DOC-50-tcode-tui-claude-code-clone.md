@@ -279,9 +279,19 @@ The CodeEngine communicates with a long-lived `tcode serve --http` daemon (defau
 
 2. **Daemon lookup sequence:**
    - Check env var `TCODE_DAEMON_URL` (highest priority).
-   - Read `~/.trusty-code/daemon.json`; validate daemon is alive (http GET /?ping or HEAD / → 200).
-   - If not alive or missing, skip (Phase 2: auto-spawn or fallback).
-   - For MVP: bail with "No daemon found; start one with `tcode daemon --project <path>`" (documented limitation).
+   - Read the discovery file; validate the daemon is alive (`GET /health` → 2xx).
+   - **AUTO-SPAWN (#4512):** if the discovery file is missing or names a dead
+     daemon, start `tcode serve --http` (with `--project <path>` when the TUI
+     has one) and wait for it to answer `/health`. See §4.1.
+   - An unreachable `TCODE_DAEMON_URL` is an ERROR, not a spawn — the operator
+     named an address, and starting a daemon at a different one would ignore
+     that instruction.
+   - **BINDING CHECK (#4512):** a daemon binds exactly one project for its whole
+     life, and `GET /health` now publishes it. A discovered daemon whose binding
+     differs from the TUI's `--project` (in either direction, including
+     projectless-vs-bound) is REFUSED with an error naming both projects — never
+     attached to, and never replaced by a competing daemon on a port already in
+     use.
 
 3. **CodeEngine struct:**
    ```rust
@@ -306,7 +316,12 @@ The CodeEngine communicates with a long-lived `tcode serve --http` daemon (defau
    - Reconnect on 502/503 (daemon restart) or timeout; user sees "Connection lost" status.
    - No local `--stdio` child spawned (daemon is independent).
 
-**MVP Known Limitation:** "tcode tui assumes a running `tcode serve --http` daemon on localhost:7881; see `tcode daemon --project <path>` to start one." Discovery/auto-spawn is Phase 2.
+**RESOLVED (#4512):** this section previously carried an MVP known limitation —
+"tcode tui assumes a running `tcode serve --http` daemon on localhost:7881" with
+auto-spawn deferred to Phase 2. That limitation is GONE: `tcode tui` starts its
+own daemon when none is running (see §4.1). The port reference above was also
+stale — the implemented default is `serve::DEFAULT_HTTP_PORT` = **7882** (7881
+belongs to trusty-memory).
 
 ### 3.5 Step 5: Add widgets and render layer (trusty-tui)
 
@@ -332,6 +347,39 @@ The CodeEngine communicates with a long-lived `tcode serve --http` daemon (defau
 **Goal:** A working, shippable tcode TUI that does the core loop: user types a prompt, the daemon runs an agent, the TUI streams the output.
 
 **Features:**
+- **Daemon auto-spawn (#4512 — AMENDED after the original MVP cut).** Auto-spawn
+  was listed under "OUT of scope (Phase 2+)" when this section was written, and
+  `tcode tui` shipped (#4424, PR #4433) exiting with an actionable "start
+  `tcode serve --http` first" message when no daemon answered. The owner
+  directive of 2026-07-31 overturned that deferral: requiring a human to
+  hand-start a background service before an interactive command works is not a
+  shippable first-run experience. The behaviour is now:
+  - Discovery order is unchanged: `TCODE_DAEMON_URL`, then the `http_addr`
+    discovery file, each verified with a `GET /health` liveness ping.
+  - A live daemon is ATTACHED to — nothing is spawned.
+  - A missing or stale discovery file causes `tcode serve --http` to be spawned
+    as a child (binary resolved via `std::env::current_exe()`, so a locally
+    built binary spawns itself, never a stale `PATH` copy), with
+    `--project <path>` forwarded when the TUI has one and OMITTED when it is
+    projectless. Readiness is awaited via
+    `trusty_common::daemon_guard::spin_until_ready`, raced against the child's
+    exit so a daemon that fails to bind reports that immediately.
+  - **Lifetime: the TUI NEVER stops the daemon** — not even one it started.
+    Per the owner directive of 2026-08-01 the daemon owns PM lifecycle, agent
+    dispatch, and agent communication; CLIs and TUIs *attach* to it, so a
+    client quitting must not destroy live PM or agent work. There is no
+    ownership tracking, no exit-time SIGTERM, and no `kill_on_drop`. A daemon
+    the TUI spawned keeps running afterwards exactly like one started by hand.
+    Quiescence-gated idle exit — a daemon that stops itself once it has no
+    attached clients AND no active PM/agent sessions, allowing safe
+    upgrades/restarts that preserve running sessions — is separate follow-up
+    work and is NOT part of this slice.
+  - An unreachable-but-explicitly-set `TCODE_DAEMON_URL` is an error, not a
+    spawn.
+  - A daemon whose reported project binding differs from the TUI's is refused
+    (§3.4 binding check).
+
+  Implementation: `crates/trusty-code/src/cli/daemon_autospawn.rs`.
 - Streaming chat input/output (assistant responses render in real time).
 - Input composer (multi-line, history, line editing).
 - Slash commands: `/clear` (clear scrollback), `/help` (list commands), `/quit` or Ctrl-D (exit), `/workstream list` (list workstreams), `/workstream activate <id>` (switch workstream).
@@ -351,6 +399,11 @@ The CodeEngine communicates with a long-lived `tcode serve --http` daemon (defau
 
 **Acceptance criteria (MVP):**
 - `tcode tui` command exists and launches the REPL.
+- (#4512) `tcode tui` starts a daemon when none is running, attaches to one that
+  is already running and serving the same project, leaves the daemon running on
+  exit no matter which process started it, and errors rather than spawning when
+  `TCODE_DAEMON_URL` names an unreachable address or when the daemon it found is
+  bound to a different project.
 - User types a prompt, presses Enter, the daemon's response streams to the TUI.
 - `/help` shows a list of slash commands.
 - Scrollback works (Up-arrow, mouse-wheel, Page-up/down).

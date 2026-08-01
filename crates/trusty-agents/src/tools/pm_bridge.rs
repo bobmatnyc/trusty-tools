@@ -49,6 +49,28 @@
 //!
 //! Omitting `specialist` is byte-identical to pre-#4026 behaviour: same route
 //! derivation, same default target, same bare scrubbed transcript back.
+//!
+//! ## Addressable coding PM + execution style (#4349/#4350, spec DOC-62)
+//!
+//! - **#4350, addressability.** `cross_product::CODING_PM_TARGET`
+//!   (`"coding-pm"`) names the external coding project manager the coding lane
+//!   has ALWAYS run (`DEFAULT_TCODE_AGENT`); naming it makes the existing route
+//!   selectable and stylable instead of only reachable by accident of phrasing.
+//!   It is resolved on its own path and is deliberately NOT a member of
+//!   `NON_CODING_TARGETS`, which stays the closed, code-enforced #4126 floor
+//!   for the non-coding vocabulary and is untouched by this change. The
+//!   resolved `DispatchTarget::CodingPm` carries NO caller string onward
+//!   (`backend_agent()` is `None`), so the coding leg's argv is byte-identical
+//!   to an unnamed coding dispatch — naming the PM adds no reach.
+//! - **#4349, style.** `HandoffContext::style` is the caller's ceremony
+//!   REQUEST. It is resolved here — caller > config default > built-in
+//!   `engineer` — and then raised, never lowered, to the lane's own floor and
+//!   to the nearest implemented tier (`vibe` runs `engineer` today and says so,
+//!   DOC-62 SM-9). The resolved record travels outbound as a policy block in
+//!   the preamble and inbound on the `ProposalEnvelope`, so a caller always
+//!   learns what actually ran. Style is an input to that text and to nothing
+//!   else: not to the route, the target, the argv, the allow-set, or any tool
+//!   permission (DOC-62 SM-11).
 
 use std::sync::{Arc, OnceLock};
 
@@ -59,8 +81,9 @@ use serde_json::{Value, json};
 use crate::intent::route::{BridgeRoute, route_task};
 use crate::rbac::ServiceTier;
 use crate::tools::cross_product::{
-    CallerAuthority, HandoffContext, NON_CODING_TARGETS, ProposalEnvelope,
+    CallerAuthority, DispatchTarget, HandoffContext, NON_CODING_TARGETS, ProposalEnvelope,
 };
+use crate::tools::execution_style::{ExecutionStyle, ResolvedStyle};
 use crate::tools::pm_bridge_backend::PmBridgeBackend;
 use crate::tools::subagent_allow::SubagentAllowSet;
 use crate::tools::traits::{ToolExecutor, ToolResult};
@@ -85,6 +108,10 @@ pub struct PmBridgeTool {
     // #4028: envelope provenance/authority for cross-product results.
     origin_agent: String,
     caller_authority: CallerAuthority,
+    // #4350: the calling agent's CONFIGURED default style — the middle
+    // precedence level (DOC-62 §5.3). `None` means "config supplies nothing",
+    // which falls through to the built-in `engineer`.
+    default_style: Option<ExecutionStyle>,
 }
 
 impl PmBridgeTool {
@@ -106,7 +133,27 @@ impl PmBridgeTool {
             allow_set: SubagentAllowSet::empty_over(NON_CODING_TARGETS),
             origin_agent: DEFAULT_ORIGIN_AGENT.to_string(),
             caller_authority: CallerAuthority::Standard,
+            // #4350: no configured default until a registration site supplies
+            // one — the built-in `engineer` then applies, i.e. today's behaviour.
+            default_style: None,
         }
+    }
+
+    /// Attach the calling agent's configured default execution style (#4350).
+    ///
+    /// Why: DOC-62 §5.3's middle precedence level. Read at REGISTRATION time
+    /// from the agent's own config for the same reason `with_allow_set` is:
+    /// `execute` must never consult anything the LLM can influence mid-turn.
+    /// Note what this dial CANNOT do — it selects ceremony and nothing else; it
+    /// is not an input to the allow-set, the route, the target, the argv, or
+    /// any tool permission (DOC-62 SM-11).
+    /// What: replaces the `None` default. A caller-supplied style still wins
+    /// over it, and the lane's own floor still wins over both (DOC-62 §5.4).
+    /// Test: `config_default_style_is_used_when_the_caller_supplies_none`,
+    /// `a_caller_style_beats_the_config_default`.
+    pub fn with_default_style(mut self, style: Option<ExecutionStyle>) -> Self {
+        self.default_style = style;
+        self
     }
 
     /// Attach the calling agent's cross-product allow-set (#4026).
@@ -188,18 +235,29 @@ impl ToolExecutor for PmBridgeTool {
                         // naming any backend or enumerating the roster (the
                         // #3052 PR A CRITICAL-2 rule) — the caller's own
                         // instructions are the source of legitimate names.
+                        // #4350: the reserved coding-PM name is described here
+                        // — the LLM must be able to NAME its coding target — but
+                        // still without identifying any backend product, since
+                        // the black-box contract (#3052 PR B) is unchanged and
+                        // `scrub_branding` still strips identity from results.
                         "specialist": {
                             "type": "string",
-                            "description": "Optional name of a non-coding specialist to hand this to, when your own instructions name one. Omit to let the system choose how to execute the task."
+                            "description": "Optional name of the specialist to hand this to. Use \"coding-pm\" for the project manager that owns code changes: it plans and implements the change itself and hands back a proposal for you to review. Any other name must be one your own instructions name. Omit to let the system choose how to execute the task.",
                         },
                         // #4028: optional HandoffContext-shaped payload.
+                        // #4349: plus the optional style REQUEST.
                         "handoff": {
                             "type": "object",
                             "description": "Optional context to hand along with the task. Keep it small; it is capped.",
                             "properties": {
                                 "summary": { "type": "string" },
                                 "relevant_state": { "type": "string" },
-                                "constraints": { "type": "array", "items": { "type": "string" } }
+                                "constraints": { "type": "array", "items": { "type": "string" } },
+                                "style": {
+                                    "type": "string",
+                                    "enum": ["hack", "vibe", "engineer"],
+                                    "description": "Optional ceremony level requested for a coding handoff: \"hack\" (trivial, no code change), \"vibe\" (small change, reduced process), \"engineer\" (full lifecycle — spec, branch, tests, review). This is a REQUEST: the receiver may apply more ceremony than you ask for and will tell you what it actually applied, but never less. It changes only how carefully the work is done — never what the receiver is allowed to do, and never which checks the repository itself enforces."
+                                }
                             },
                             "additionalProperties": false
                         }
@@ -243,40 +301,82 @@ impl ToolExecutor for PmBridgeTool {
             .get("specialist")
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty());
+        // #4350: the reserved coding-PM name is recognised FIRST and never
+        // consulted against the non-coding allow-set — `CODING_PM_TARGET` is
+        // deliberately absent from `NON_CODING_TARGETS`, which stays the closed
+        // #4126 floor for the non-coding vocabulary only. The two lanes are
+        // separate resolutions over separate vocabularies; neither can widen
+        // the other.
         let target = match requested {
-            Some(name) => match self.allow_set.resolve(name) {
-                Ok(resolved) => Some(resolved),
-                Err(denied) => return ToolResult::err(format!("dispatch_task: {denied}")),
+            Some(name) => match DispatchTarget::for_reserved_name(name) {
+                Some(coding_pm) => Some(coding_pm),
+                None => match self.allow_set.resolve(name) {
+                    Ok(resolved) => Some(DispatchTarget::NonCoding(resolved)),
+                    Err(denied) => return ToolResult::err(format!("dispatch_task: {denied}")),
+                },
             },
             None => None,
         };
 
-        let body = match handoff.render_preamble() {
-            Some(preamble) => format!("{preamble}\n{task}"),
-            None => task.to_string(),
-        };
         // #4026: a named specialist always takes the external-roster leg —
         // that roster is where the non-coding specialists live (#4027), and
         // re-deriving the route would let an unrelated phrase in `task` send
-        // a named target somewhere it does not exist.
+        // a named target somewhere it does not exist. #4350's coding PM lives
+        // on the same leg (it IS that leg's default agent), so naming it forces
+        // the coding lane rather than re-deriving it from the task text.
         let route = match target {
             Some(_) => BridgeRoute::Tcode,
             None => route_task(task),
         };
 
-        match self.backend.run(route, target.as_deref(), &body).await {
+        // #4349/#4350: resolve the style AFTER the lane is known, because the
+        // lane supplies the floor. Caller > config > built-in `engineer`, then
+        // raised (never lowered) to that floor and to the nearest implemented
+        // tier. The result feeds the preamble and the returned envelope; it is
+        // deliberately NOT an input to `route`, `target`, or anything the
+        // backend is handed beyond advisory text (DOC-62 SM-11).
+        let floor = match &target {
+            Some(t) => t.style_floor(),
+            // An unnamed dispatch that the router sends to the coding lane is
+            // still a coding delegation, so it carries the same floor.
+            None => match route {
+                BridgeRoute::Tcode => DispatchTarget::CodingPm.style_floor(),
+                BridgeRoute::Tm => ExecutionStyle::Hack,
+            },
+        };
+        let style = ResolvedStyle::resolve(handoff.style, self.default_style, floor);
+
+        let body = match handoff.render_preamble(Some(&style)) {
+            Some(preamble) => format!("{preamble}\n{task}"),
+            None => task.to_string(),
+        };
+        let reported_style = style.is_explicit().then_some(style);
+
+        match self
+            .backend
+            .run(
+                route,
+                target.as_ref().and_then(DispatchTarget::backend_agent),
+                &body,
+            )
+            .await
+        {
             Ok(out) => {
                 let scrubbed = scrub_branding(&out);
                 match target {
                     // #4028: a cross-product specialist's result is wrapped in
                     // the propose-only envelope — DOC-41 §5.5 line 1398.
-                    Some(name) => ToolResult::ok(
+                    // #4350: carrying the resolved style so the caller can see
+                    // what actually ran (DOC-62 §3.4). Still a proposal; the
+                    // style rides along, it does not upgrade anything.
+                    Some(named) => ToolResult::ok(
                         ProposalEnvelope::for_cross_product(
                             self.origin_agent.clone(),
-                            name,
+                            named.label(),
                             self.caller_authority,
                             scrubbed,
                         )
+                        .with_style(reported_style)
                         .render(),
                     ),
                     // Unnamed dispatch is the pre-#4026 opaque path, returned
