@@ -65,7 +65,7 @@ part**, not as a working feature.
 one.** The canonical OKG is the OKF filesystem tree, **not** trusty-memory's KG.
 §2.1 states it unambiguously so downstream tickets stop building against different
 targets — the substance of #4406. It does **not** retire trusty-memory's KG, whose
-relationship to the OKG is a separate and genuinely open question (§14 Q2).
+relationship to the OKG is a separate and genuinely open question (§14 Q1).
 
 **Third: an OKG store has two population paths, and they are specified
 separately.** Per the owner (2026-08-01), *"extraction is an OPTION for any bound
@@ -184,42 +184,35 @@ distinct from the one just answered.
 **S-1.16** Every ticket descending from this document names the OKF store as its
 target.
 
-### 2.2 Where the store lives — and a conflict that must be resolved now
-
-The owner's 2026-08-01 statement places the store at:
+### 2.2 Where the store lives — settled
 
 ```
-<trusty-agents home> / <agent name> / okg
+${TRUSTY_AGENTS_HOME} / <agent> / okg
+${TRUSTY_AGENTS_HOME} / <agent> / stores / <store-identifier>
 ```
 
-and is explicit that **the agent name sits directly under the home, with no
-intervening `assistants` segment**.
+**The agent name sits DIRECTLY under the home. There is no intervening
+`assistants/` segment.**
 
-Two facts collide with that, and both are load-bearing:
+**S-1.2 — This is settled, not open.** An earlier revision of PR #4523 resolved
+`~/trusty-agents/assistants/<instance>/okg` via an `ASSISTANTS_SUBDIR` constant,
+which contradicted the owner's statement. **That is corrected**: #4523 now
+resolves `~/trusty-agents/<instance>/` and its own module documentation records
+*"no intervening `assistants/` segment"*, with both store paths taken from the
+owner verbatim. This document and #4523 agree, and the question is closed.
 
-1. **Today's path is neither.** `knowledge_dir()`
-   (`crates/trusty-agents/src/tools/okg/mod.rs:93-95`) resolves
-   `$KB_KNOWLEDGE_DIR`, else `<home>/.trusty-agents/knowledge`, and the tree is
-   `<knowledge_dir>/<slug(agent)>` — a flat, dotted, shared pool addressed by
-   naming convention, with no `okg` segment at all. Moving to the owner's layout
-   is a **migration of existing trees**, not a greenfield choice.
+For the record, because it explains the migration ahead: today's shipped path is
+neither. `knowledge_dir()` (`crates/trusty-agents/src/tools/okg/mod.rs:92-106`)
+resolves `$KB_KNOWLEDGE_DIR`, else `<home>/.trusty-agents/knowledge`, and every
+tree is `<knowledge_dir>/<slug(agent)>` — a flat, dotted, shared pool addressed by
+naming convention, with no `okg` segment at all. Moving to the layout above is a
+migration of existing trees.
 
-2. **In-flight PR #4523 (#4325) builds a *different* path.** It defines
-   `ASSISTANTS_DIR_NAME = "trusty-agents"` and `ASSISTANTS_SUBDIR = "assistants"`,
-   resolving to `~/trusty-agents/assistants/<instance>/okg`. Its own test asserts
-   `root.join("izzie").join(OKG_DIR)` under an `assistants` root. That PR is open
-   as this document is written.
-
-The difference is one constant. The cost of getting it wrong is a second
-migration of user-visible, user-editable directories — which #4325 explicitly
-designs for humans to browse and edit. **This document does not choose.** See
-**Q1** (§14). Until Q1 is answered, no ticket may land a path change, and #4523
-is the incumbent.
-
-**S-1.2** Whatever segment set Q1 selects, the layout obligations are fixed:
-the store is per **instance** (not per type), dotless and user-browsable, and
-`ensure()`-style creation is additive and never overwrites a user edit — the
-posture PR #4523 already implements and this document adopts unchanged.
+**S-1.2a** The layout obligations #4523 already implements are adopted unchanged:
+the home is per **instance** (not per type), **dotless** and user-browsable, and
+`ensure()` is additive — it creates only what is missing and **never overwrites a
+file the user edited**, because #4325 makes external modification expected rather
+than an error.
 
 ### 2.3 What the store contains
 
@@ -625,6 +618,46 @@ is a **new source row**, never a mutation of an existing one. Rationale: each
 gets its own ledger, its own watermark, its own schedule, its own credential
 scope, and its own failure state. A composite source hides which half failed.
 
+### 5.5 Config shape: ONE store binding, many stores nested under it
+
+**S-3.7 — Stores nest UNDER the single `[[stores]]` binding; they are never
+sibling bindings.**
+
+This is forced by existing behaviour. `StoresConfig::validate()`
+(`crates/trusty-agents/src/stores/config.rs:172-179`) emits a warning above one
+binding — verbatim: *"N stores bound; the spec allows exactly one OKG store per
+agent (only the first is used as the default search target)"* — pre-existing since
+#3816. If each store became its own `[[stores]]` binding, **every multi-store
+assistant would emit a config warning on every load**, and only the first would be
+used as the default search target. The owner's core scenario — several stores
+feeding one OKG — would look broken by construction.
+
+It also mirrors the canonical model exactly: **one OKG per agent, populated by
+many stores.** One binding, many stores nested under it, is that sentence in
+config form.
+
+```toml
+[[stores]]
+name = "izzie"
+# tree / index / palace / root as today — ONE binding, unchanged
+
+  [[stores.sources]]
+  id = "gmail-sent"
+  kind = "gmail"
+  # … locator params, schedule, credential reference
+```
+
+**S-3.8** `config.toml` already tolerates unknown keys, so the nested array lands
+without a schema fight and an older reader ignores it rather than failing.
+
+**S-3.9** `StoresConfig::validate()`'s one-binding warning is **left exactly as
+it is.** Nesting means it never fires for a legitimate multi-store assistant, so
+there is no reason to weaken a check that still correctly catches a genuinely
+misconfigured second binding.
+
+*(The nested key is spelled `sources` because that is the established config noun;
+per §3.0 the objects it holds are **stores**.)*
+
 ---
 
 ## 6. SPEC-OKGSRC-04 — The Untrusted-Content Boundary {#SPEC-OKGSRC-04~draft}
@@ -662,6 +695,22 @@ this repository's own, recorded, enforced position:
   ingested is itself untrusted, a prompt-injected document could name the next
   path to read — so this is an exfiltration primitive."* Enforced at scan time,
   so a poisoned `registry.toml` row cannot bypass it on a later run.
+
+#### The confinement runs one way, and the direction matters
+
+**S-4.0** `AssistantHome::store_root()` (PR #4523) confines the **destination**,
+not the source. An extractor cannot repoint `okg/` outside the assistant home —
+which is what stops one instance writing into another's store — but **reading
+*from* an arbitrary directory, Gmail, Drive, Slack, Notion, or Granola is
+unaffected by that confinement.**
+
+Stated explicitly because it is easy to read the wrong way round: a reader
+scanning the store roster could assume that because writes are confined, reads
+are too. They are not, and that asymmetry is exactly why this section exists.
+Write confinement is what makes multi-store extraction *safe to land*; it does
+nothing about what the extracted content *says*. Read scope is governed
+separately, by operator configuration re-checked at access time (DOC-55 C6,
+`crates/trusty-kb/src/okg/policy.rs`).
 
 **S-4.1** OKG Sources inherits this threat model in full. No source type may be
 added that widens an assistant's reach without the capability-grant review §13
@@ -768,7 +817,7 @@ With S-4.3…S-4.9 implemented, the residual risk is:
 does is bound the blast radius: the assistant holds no cross-project git
 primitive, no shell reach, and no write-capable tool it did not already hold
 before ingestion. **Accepting this residual risk is an owner decision**, and it
-is Q3 in §14 rather than an assumption buried in a design section.
+is Q2 in §14 rather than an assumption buried in a design section.
 
 ---
 
@@ -790,6 +839,51 @@ from the credential authority and nothing else.
 **S-5.2** A second credential mechanism introduced for any store in §5 is a
 defect under this repo's common-entry-point rule, and is rejected at review
 regardless of expedience.
+
+### 7.1a SECRETS MUST NEVER LAND IN THE ASSISTANT HOME
+
+**S-5.6 — Normative, and the single most important clause in this section.** No
+credential — API key, OAuth token, refresh token, cookie, or bearer — is ever
+written into `${TRUSTY_AGENTS_HOME}/<agent>/`. Not in `config.toml`, not in a
+store's `state.toml`, not in `stores/<id>/`, not anywhere under the home.
+
+The reason is structural, not precautionary: **the home is deliberately browsable
+and user-editable.** #4325 designs it to be opened, read, and hand-edited like a
+`trusty-mpm-projects` directory, and #4523 implements exactly that. Placing a
+Granola API key or a Slack token in a directory the product actively invites users
+to open would put secrets in the one place the design guarantees will be looked
+at — and, for anyone who backs up or syncs that directory, copied.
+
+**S-5.7** A store row therefore carries a **credential reference** — an opaque
+handle resolved by #4040 at use time — and never the credential itself. This is
+what `S-1.5`'s state contents already require, restated here as a prohibition so
+it cannot be read as a preference.
+
+**S-5.8** The same prohibition binds the run log (§12.2) and the extraction
+manifest: neither may record a credential, and neither may echo a request header
+or URL query string that could carry one.
+
+### 7.1b What OKG Sources needs from #4040
+
+Offered as concrete input to an epic that currently carries no child checklist.
+OKG Sources needs exactly five things, and nothing beyond them:
+
+1. **A durable, opaque reference** a store row can hold in plain text under the
+   home without that text being a secret.
+2. **Resolution at use time** to an authenticated client (or a token with a
+   defined lifetime), performed outside the home and never materialised into it.
+3. **Read-scoped grants where the provider can issue them**, and an honest,
+   machine-readable answer when it cannot — see `S-5.3`.
+4. **An observable revocation/expiry signal**, so `S-5.4`'s displayed
+   `needs-credential` state and schedule stop are driven by the authority rather
+   than inferred from a 401.
+5. **Support for two credential shapes**: OAuth (Gmail, Drive, Notion, Slack) and
+   **plain API key** (Granola, and Fireflies later). The API-key shape is the one
+   most likely to be treated as a special case, and it must not be.
+
+**S-5.9** Until #4040 provides these, a store type requiring a credential this
+repo does not already hold stays blocked (`S-5.5`) — it does **not** ship with an
+interim token file, which would be the exact defect `S-5.6` forbids.
 
 ### 7.2 What OKG Sources would otherwise duplicate — the concrete list
 
@@ -1310,7 +1404,33 @@ loading, empty, and error are three distinct states; a failing source renders
 with its reason rather than being hidden; a source with no runs renders an
 explicit empty state, not a zero.
 
-### 12.4 Controls
+### 12.4 The inspection seam needs extending — real work, not an assumption
+
+**S-10.7a** `assistants::health::inspect()` (PR #4523) knows that `okg/` and
+`stores/` exist. It knows **nothing** about last-run time, cursors, coverage, or a
+failing credential, and `HomeIssue` / `HomeIssueKind` are **filesystem-shaped
+today** (`Missing`, `NotADirectory`, `NotAFile`, `Unreadable`, `Malformed`).
+
+`HomeIssueKind` is nonetheless the right home for "this store is stale" and "this
+store's credential is broken", because it is the seam the **concierge already
+narrates from** — which is what makes #4325's guided-remediation requirement
+reachable for stores rather than a second, parallel error channel. But the kinds
+must be **extended to carry store-level state**, and that extension is scoped
+work this epic carries.
+
+**S-10.7b — Nothing under `stores/<id>/` may break home inspection.** #4523
+deliberately made `stores/` inert and pins it: a test writes a corrupt
+`stores/some-remote-store/state.json` and asserts the home still reports healthy.
+That property is preserved — a malformed store state degrades that store, never
+the home.
+
+**S-10.7c** The corollary is the reason `S-10.7a` is not optional: **inspection
+will not notice a broken store until something is built to look.** A store whose
+credential was revoked six weeks ago is, today, indistinguishable from a healthy
+one at the inspection layer. This subsection and §12.2's run log are jointly the
+data source the OKG configuration subpane renders from.
+
+### 12.5 Controls
 
 **S-10.8** The pane is where a user **manages** the schedule the owner's
 requirement gives them: enable/disable a source, change its interval, extend its
@@ -1389,6 +1509,11 @@ construction; each still a capability grant.
 
 Genuine forks only. Each states what stays blocked until answered.
 
+**Resolved since the first draft, recorded so they are not re-opened:** the
+`assistants/` path segment — the agent name sits **directly** under the home, and
+PR #4523 now matches (§2.2); and the config format — **`config.toml`**, no
+migration (§2.7).
+
 **Already decided, recorded here so it is not re-opened:** whether scheduled
 refresh conflicts with explicit-extraction-only. It does not — the owner resolved
 it on 2026-08-01 with *"extraction is an OPTION for any bound store."* OKG
@@ -1399,25 +1524,7 @@ Also settled and recorded in §2.7 so they are not re-raised: **`config.toml`, n
 `config.yaml`** (owner correction 2026-07-29, no format migration); the **dotless**
 home spelling; and that the home is **app-generated, not access-controlled**.
 
-### Q1 — Is there an `assistants/` path segment, or not?
-
-Your 2026-08-01 statement is explicit that the agent name sits **directly** under
-the trusty-agents home, with no intervening `assistants` segment. **In-flight PR
-#4523 builds the opposite**: `ASSISTANTS_DIR_NAME = "trusty-agents"` +
-`ASSISTANTS_SUBDIR = "assistants"` → `~/trusty-agents/assistants/<instance>/okg`.
-Today's shipped path is a third thing entirely
-(`~/.trusty-agents/knowledge/<slug>`).
-
-**No recommendation** — this is a product decision about a user-facing directory,
-and both readings are coherent (a namespace segment leaves room for other object
-kinds under the home; its absence is shorter and is what you specified). The
-decision is a one-constant change **now** and a second migration of
-user-editable directories **later**.
-
-**Blocked until answered:** any path change. #4523 is the incumbent and should
-not be re-pointed on a spec's authority.
-
-### Q2 — What is trusty-memory's KG's relationship to the canonical OKG?
+### Q1 — What is trusty-memory's KG's relationship to the canonical OKG?
 
 **Answered and no longer open:** *which* of the two systems called "OKG" the `okg`
 directory is. Your 2026-08-01 canonical model settles it — the **OKF store**,
@@ -1444,7 +1551,7 @@ an issue-level decision (as #4406 itself suggests).
 **Blocked until answered:** nothing in this epic — every ticket here names the OKF
 store. What stays blocked is #4406's own closure, and any work bridging the two.
 
-### Q3 — Do you accept the residual prompt-injection risk in §6.5?
+### Q2 — Do you accept the residual prompt-injection risk in §6.5?
 
 With the §5 boundary implemented, an assistant may still be influenced by
 attacker-authored text ingested through a legitimate source, fenced as untrusted.
@@ -1461,7 +1568,7 @@ answered:** Phase D in its entirety. This is flagged for explicit sign-off rathe
 than absorbed as a design assumption, because it is a security acceptance and
 those belong to you.
 
-### Q4 — Should scheduled refresh be a listener, or its own runner?
+### Q3 — Should scheduled refresh be a listener, or its own runner?
 
 §8.3 recommends **its own runner**, reusing `listeners::poll`'s *pattern*
 (detached task, interval floor, backoff, `enabled = false` default) without its
@@ -1471,7 +1578,7 @@ flag for free, but would force every scheduled refresh to either wake an
 assistant (contradicting the mechanical, model-free flow) or be an event that
 wakes nobody.
 
-**Blocked until answered:** Phase B's runner ticket. Lower stakes than Q1–Q3 —
+**Blocked until answered:** Phase B's runner ticket. Lower stakes than Q1–Q2 —
 recorded because it is a structural choice a reviewer could reasonably reverse,
 not because the recommendation is weak.
 
@@ -1522,6 +1629,7 @@ not because the recommendation is weak.
 |---|---|
 | 2026-08-01 | Initial draft — store identity and location, source roster, the untrusted-content boundary, #4040 consumption, watermarks, scheduled refresh, trusty-search integration, the source-type extension point, and the K-e observability sub-surface. |
 | 2026-08-01 | §3/§4 split per "extraction is an OPTION for any bound store": stores populate automatically, bound-store extraction stays explicit; contamination guard scoped to the latter; the directory overlap case specified. |
+| 2026-08-01 | Folded in four constraints from PR #4523: stores nest under the single `[[stores]]` binding (§5.5) because `StoresConfig::validate()` warns above one binding; `store_root()` confines the destination, not the source (`S-4.0`); the `HomeIssue`/`HomeIssueKind` inspection seam needs extending to carry store-level state (§12.4); and **credentials must never be written into the browsable assistant home** (§7.1a), with the five things OKG Sources needs from #4040 stated as input (§7.1b). Path-segment question resolved and removed; questions renumbered Q1–Q3. |
 | 2026-08-01 | Restructured around the owner's canonical model — one built OKG per agent, populated by many stores of two kinds (`SPEC-OKGSRC-12~draft`); "store" adopted as the single canonical noun with "OKG Source" recorded as an earlier synonym; bound-store extraction split into its own section (`SPEC-OKGSRC-13~draft`). |
 | 2026-08-01 | §3.4 added: searchable-corpus and OKG-contributor capacities are orthogonal, and search-only is a complete end state, never pending. §10.5–§10.6 added: OKG-first search tiering with attached-store fan-out, and per-result tier/origin provenance (`SPEC-OKGSRC-14~draft`), verified absent today. |
 | 2026-08-01 | §2.4–§2.7 added: `stores/<store-identifier>/` extraction targets for remote stores with the local/remote asymmetry made explicit (`SPEC-OKGSRC-11~draft`); `${TRUSTY_AGENTS_HOME}` recorded as one system value with migration deferred; config-format, dotless, and not-access-controlled recorded as settled. |
