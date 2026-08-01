@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use serial_test::serial;
 
 use crate::assistants::{
-    AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ASSISTANTS_SUBDIR, ATTACHMENTS_DIR,
-    AssistantHome, AssistantHomeConfig, AssistantInstanceId, CONFIG_FILE, INSTRUCTIONS_FILE,
-    OKG_DIR, assistants_root,
+    AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR, AssistantHome,
+    AssistantHomeConfig, AssistantInstanceId, CONFIG_FILE, INSTRUCTIONS_FILE, OKG_DIR,
+    assistants_root,
 };
 
 /// RAII guard setting or clearing a process env var for one test body.
@@ -59,7 +59,9 @@ impl Drop for EnvVarGuard {
 pub(super) fn temp_home() -> (tempfile::TempDir, AssistantHome) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let id = AssistantInstanceId::new("izzie").expect("valid id");
-    let home = AssistantHome::under(tmp.path().join("assistants"), id);
+    // A throwaway root standing in for `~/trusty-agents`; the real spelling is
+    // pinned by `okg_store_path_matches_the_owners_spelling`.
+    let home = AssistantHome::under(tmp.path().join("trusty-agents"), id);
     (tmp, home)
 }
 
@@ -84,7 +86,7 @@ fn layout_matches_the_ticket() {
 /// the whole point of instance isolation.
 #[test]
 fn two_instances_get_separate_homes() {
-    let root = PathBuf::from("/assistants");
+    let root = PathBuf::from("/trusty-agents");
     let izzie = AssistantHome::under(&root, AssistantInstanceId::new("izzie").unwrap());
     let cto = AssistantHome::under(&root, AssistantInstanceId::new("cto-assistant").unwrap());
     assert_ne!(izzie.path(), cto.path());
@@ -112,13 +114,31 @@ fn default_root_is_dotless_under_the_user_home() {
     let _no_override = EnvVarGuard::clear(ASSISTANTS_DIR_ENV);
     let _home = EnvVarGuard::set("HOME", tmp.path());
     let root = assistants_root().expect("HOME is set");
-    assert_eq!(
-        root,
-        tmp.path().join(ASSISTANTS_DIR_NAME).join(ASSISTANTS_SUBDIR)
-    );
+    assert_eq!(root, tmp.path().join(ASSISTANTS_DIR_NAME));
     assert!(
         !ASSISTANTS_DIR_NAME.starts_with('.'),
         "the assistants root must be visible, not hidden"
+    );
+}
+
+/// Why: the owner specified the store path literally on 2026-08-01 —
+/// `trusty-agents/<agent>/okg/`. An intervening `assistants/` segment (the
+/// spelling this PR originally carried) would make every path the OKG Sources
+/// spec is written against wrong, so the full absolute path is pinned here
+/// rather than only the accessors.
+#[test]
+#[serial]
+fn okg_store_path_matches_the_owners_spelling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _no_override = EnvVarGuard::clear(ASSISTANTS_DIR_ENV);
+    let _home = EnvVarGuard::set("HOME", tmp.path());
+
+    let home = AssistantHome::for_instance("izzie").expect("valid id");
+
+    assert_eq!(home.path(), tmp.path().join("trusty-agents").join("izzie"));
+    assert_eq!(
+        home.okg_dir(),
+        tmp.path().join("trusty-agents").join("izzie").join("okg")
     );
 }
 

@@ -18,8 +18,10 @@
 //!   [`AssistantInstanceId`], a VALIDATED instance name (it becomes a directory
 //!   name, so it is checked, never silently slugged).
 //! - `home` — [`AssistantHome`]: the app-generated, DOTLESS, human-browsable
-//!   per-instance home holding `instructions.md`, `config.toml`, `agents/`,
-//!   `okg/` and `attachments/`, plus [`AssistantHome::store_root`], which
+//!   per-instance home at `~/trusty-agents/<instance>/`, holding
+//!   `instructions.md`, `config.toml`, `agents/`, `okg/` and `attachments/`.
+//!   The store path is the owner's, verbatim (2026-08-01):
+//!   `trusty-agents/<agent>/okg/`. Plus [`AssistantHome::store_root`], which
 //!   resolves a `[[stores]]` binding's new `root` field inside that home
 //!   (#4325 requirement 1 — #3890's data-model gap).
 //! - `health` — [`inspect`]: the DETECTION half of #4325's resilience
@@ -37,9 +39,11 @@
 //! Naming caveat (#4406): two unrelated stores are both called "OKG" — the
 //! trusty-kb markdown entity tree and the trusty-memory knowledge graph. #4325
 //! specifies an `okg/` DIRECTORY inside the home, which only the filesystem
-//! tree can be, so [`home::OKG_DIR`] is that tree. The binding's separate
-//! `palace` field is untouched, so whichever store an ADR later makes canonical
-//! can be bound without changing this layout.
+//! tree can be, so [`home::OKG_DIR`] is that tree. The owner CONFIRMED that
+//! shape on 2026-08-01 — `trusty-agents/<agent>/okg/`, a store indexed by
+//! trusty-search — so this is no longer an inference. The binding's separate
+//! `palace` field stays untouched, which keeps the trusty-memory leg addressable
+//! without changing this layout.
 //!
 //! Test: `tests` — the submodules under `assistants/tests/`.
 
@@ -54,8 +58,7 @@ mod tests;
 pub use error::AssistantError;
 pub use health::{HomeHealth, HomeIssue, HomeIssueKind, inspect};
 pub use home::{
-    AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ASSISTANTS_SUBDIR, ATTACHMENTS_DIR,
-    AssistantHome, AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE, OKG_DIR,
-    assistants_root,
+    AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR, AssistantHome,
+    AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE, OKG_DIR, assistants_root,
 };
 pub use instance::{ASSISTANT_ROLE, AssistantInstanceId, is_assistant_role};

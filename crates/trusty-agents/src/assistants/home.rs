@@ -16,6 +16,11 @@
 //! system's obligation is to DETECT that and help ([`super::health`]), never to
 //! defend against it or silently rewrite it.
 //!
+//! The path is the owner's, verbatim (2026-08-01): the store is
+//! `trusty-agents/<agent>/okg/`, so a home is `~/trusty-agents/<instance>/` with
+//! no intervening `assistants/` segment, and that `okg/` tree is the store
+//! trusty-search indexes.
+//!
 //! What: [`assistants_root`] resolves the dotless root holding one home per
 //! instance. [`AssistantHome`] is one instance's home — the five entries
 //! #4325 specifies ([`INSTRUCTIONS_FILE`], [`CONFIG_FILE`], [`AGENTS_DIR`],
@@ -57,13 +62,13 @@ pub const ASSISTANTS_DIR_ENV: &str = "TAGENT_ASSISTANTS_DIR";
 /// — a leading dot would hide it from Finder and from a plain `ls`, which is
 /// the opposite of the decision. The existing dotted `~/.trusty-agents` tree is
 /// app-private config and is untouched by this module.
-/// Test: `super::tests::home_tests::default_root_is_dotless_under_the_user_home`.
-pub const ASSISTANTS_DIR_NAME: &str = "trusty-agents";
-
-/// The subdirectory of [`ASSISTANTS_DIR_NAME`] holding one home per instance.
 ///
-/// Test: `super::tests::home_tests::default_root_is_dotless_under_the_user_home`.
-pub const ASSISTANTS_SUBDIR: &str = "assistants";
+/// It holds one home per instance DIRECTLY — the owner specified the store path
+/// as `trusty-agents/<agent>/okg/` (2026-08-01), so there is no intervening
+/// `assistants/` segment.
+/// Test: `super::tests::home_tests::default_root_is_dotless_under_the_user_home`,
+/// `super::tests::home_tests::okg_store_path_matches_the_owners_spelling`.
+pub const ASSISTANTS_DIR_NAME: &str = "trusty-agents";
 
 /// The instance's own instructions (#4325). Test: `super::tests::home_tests::layout_matches_the_ticket`.
 pub const INSTRUCTIONS_FILE: &str = "instructions.md";
@@ -88,9 +93,9 @@ pub const ATTACHMENTS_DIR: &str = "attachments";
 /// the concierge are the same directory. See [`ASSISTANTS_DIR_NAME`] for why it
 /// is dotless.
 /// What: `$TAGENT_ASSISTANTS_DIR` verbatim when set and non-blank, else
-/// `<user home>/trusty-agents/assistants`. `Err(NoUserHome)` when neither
-/// `$HOME` nor `$USERPROFILE` is set — resolving to the process CWD instead
-/// would scatter user-owned homes wherever the binary happened to start.
+/// `<user home>/trusty-agents`. `Err(NoUserHome)` when neither `$HOME` nor
+/// `$USERPROFILE` is set — resolving to the process CWD instead would scatter
+/// user-owned homes wherever the binary happened to start.
 /// Test: `super::tests::home_tests::default_root_is_dotless_under_the_user_home`,
 /// `super::tests::home_tests::env_override_wins_over_the_user_home`.
 pub fn assistants_root() -> Result<PathBuf, AssistantError> {
@@ -105,9 +110,7 @@ pub fn assistants_root() -> Result<PathBuf, AssistantError> {
         .ok_or(AssistantError::NoUserHome {
             env: ASSISTANTS_DIR_ENV,
         })?;
-    Ok(PathBuf::from(home)
-        .join(ASSISTANTS_DIR_NAME)
-        .join(ASSISTANTS_SUBDIR))
+    Ok(PathBuf::from(home).join(ASSISTANTS_DIR_NAME))
 }
 
 /// One Assistant-type INSTANCE's home directory.

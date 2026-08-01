@@ -11,9 +11,11 @@ Added
   [#3890](https://github.com/bobmatnyc/trusty-tools/issues/3890)). The new
   module supplies the missing container:
   - `AssistantHome` — the app-generated, DOTLESS, human-browsable home at
-    `~/trusty-agents/assistants/<instance>/` (override with
+    `~/trusty-agents/<instance>/` (override with
     `TAGENT_ASSISTANTS_DIR`), holding `instructions.md`, `config.toml`,
-    `agents/`, `okg/` and `attachments/`. `ensure()` is additive and idempotent
+    `agents/`, `okg/` and `attachments/`. The store path is the owner's,
+    verbatim (2026-08-01): `trusty-agents/<agent>/okg/`, indexed by
+    trusty-search. `ensure()` is additive and idempotent
     — it creates what is missing and never overwrites what a user edited,
     because #4325 makes external modification expected rather than an error.
   - `AssistantInstanceId` — a validated instance name. It becomes a directory
