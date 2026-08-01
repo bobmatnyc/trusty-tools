@@ -20,7 +20,7 @@ spec_refs:
 **Last-updated:** 2026-08-01
 **DOC-N claim:** `DOC-63`, scan-before-claim per DOC-38 §4.1. **This document originally claimed `DOC-62` and was renumbered.** Two concurrent spec passes both claimed DOC-62 — this one and PR #4529 (Style Modes for Coding Delegation) — because each correctly scanned `origin/main` and found `DOC-61` as the highest claimed number, and neither could see the other's unmerged branch. #4529 keeps `DOC-62` as the earlier and further-advanced PR; this is a mechanical tie-break. `DOC-63` was verified free three ways: no filename claim or header self-label under `docs/specs/**` or `docs/trusty-installer/research/02-design/**` on `origin/main`; no claim on any remote branch; and **no claim in any open PR** — the last check being precisely the gap that produced the original collision, since `scripts/check_doc_numbers.sh` scans the tree and cannot see an unmerged reservation (its own header states this limitation explicitly). Note also that `DOC-55` is claimed by `okg-universal-importer.md` via self-label only, its filename carrying no number, so a filename scan alone is insufficient in either direction.
 **Builds on:** DOC-55 [Universal OKG Importer](./okg-universal-importer.md) `SPEC-OKGIMPORT-03~draft`/`-04~draft` (the extraction layer and the `Connector` contract this document does **not** re-specify); DOC-57 [Five-Section Agent Configuration](./agent-config-five-sections.md) `SPEC-AGENTCFG-03~draft` (the Knowledge section this document adds a sub-surface to) and `SPEC-AGENTCFG-05~draft` (Listeners, the existing poll machinery); DOC-58 [K-d Attached Search Indexes](./DOC-58-knowledge-kd-attached-indexes.md) `SPEC-KDIDX-01~draft` (the two-tier curated-vs-attached principle this document depends on)
-**Related issues:** #4325 (per-assistant home directory — **in flight, PR #4523**); #3904 (epic: universal assistant-driven OKG importer); #4283 (index→OKG entity extraction); #4007 (epic: curated stores vs attached indexes); #4289 (index a new directory from the config UI); #4363 (extract-entities UI trigger); #4406 (which store is canonical — superseded in framing by §2 here); #4040 (epic: unified credential authority — this document is a **consumer**, never a parallel mechanism)
+**Related issues:** #4325 (per-assistant home directory — **in flight, PR #4523**); #3904 (epic: universal assistant-driven OKG importer); #4283 (index→OKG entity extraction); #4007 (epic: curated stores vs attached indexes); #4289 (index a new directory from the config UI); #4363 (extract-entities UI trigger); #4590 (concierge offers to build an assistant — the build path, §2.1a); #4591 (templates excluded from provisioning only incidentally); #4406 (which store is canonical — superseded in framing by §2 here); #4040 (epic: unified credential authority — this document is a **consumer**, never a parallel mechanism)
 
 ---
 
@@ -183,6 +183,53 @@ distinct from the one just answered.
 
 **S-1.16** Every ticket descending from this document names the OKF store as its
 target.
+
+### 2.1a How an agent — and therefore its OKG — comes into existence
+
+**Owner requirement:** *"the concierge will offer to build an assistant, or the
+user can do it manually."*
+
+**S-1.17 — Two creation paths, one result.** An assistant instance is created
+either by **the concierge proactively offering to build one**, or **manually by
+the user**. Both paths produce the same thing: a per-agent home containing the
+canonical OKG (§2.1) and the `stores/` its OKG is populated from (§2.4). Nothing
+downstream of creation distinguishes them — a concierge-built assistant and a
+hand-built one are the same object, with the same layout, the same store roster,
+and the same trust boundary.
+
+**S-1.18 — The concierge flow is NOT specified here.** It is owned by **#4590**
+("Concierge offers to build a personal assistant on first run"). This document's
+only claim is that the OKG and its stores come into existence through that path;
+the conversation, the prompting, and the first-run timing are #4590's.
+
+#### Creation precedes provisioning — an ordering that is easy to invert
+
+**S-1.19** The concierge (or the user) **creates** the assistant; PR #4523's
+startup provisioning then **finds** it and ensures its home layout via `ensure()`.
+Creation is logically first even though **provisioning is what runs first at
+boot** — provisioning discovers instances that already exist and materializes
+their directories; it never brings an assistant into being. Reading the order off
+the boot sequence gets it backwards, and a design that has provisioning invent
+instances would create homes and OKGs for agents nobody asked for.
+
+**S-1.20 — Two agents that must never be provisioned an OKG.** Both are excluded
+by PR #4523's `is_instance()` rule in `assistants/roster.rs`, which requires
+`role = "assistant"` **and** either being the base `assistant` package or
+declaring `extends = "assistant"`:
+
+- **`ctrl` IS the concierge persona**, not an assistant instance. It declares
+  `role = "assistant"` (a deliberate 2026-07-24 change so Concierge appears in
+  role-filtered pickers) and `kind = "system-tool"`, but neither is nor extends
+  the base. **The GUI's null `activeAgentId` means `ctrl`** — provisioning it a
+  selectable instance home would model the one agent that is not an instance as
+  if it were. It gets no OKG.
+- **`personal-assistant` is a TEMPLATE, not an instance** (owner-confirmed). Its
+  config declares `role = "assistant"` and `hidden = true` with **no `extends`
+  field at all**, so it falls out of the rule — but only *incidentally*, because
+  it happens to extend nothing rather than because anything marks it a template.
+  **A template must never be provisioned a home or an OKG.** Making that explicit
+  rather than incidental is **#4591**; this document states the requirement and
+  leaves the mechanism there.
 
 ### 2.2 Where the store lives — settled
 
@@ -1617,8 +1664,11 @@ not because the recommendation is weak.
 - ADR-0022 (knowledge trees do not sync; a new machine re-ingests from registered
   sources); ADR-0024 (assistants hold authority; sub-agents are in-process leaves
   and must not be given an out-of-process ingestion path)
+- `crates/trusty-agents/src/assistants/roster.rs` (PR #4523) — `is_instance()`,
+  the rule that excludes `ctrl` and `personal-assistant` from provisioning
 - Issues: #4040 (credential authority — consumed), #3904, #4283, #4325 / PR
-  #4523, #4007, #4289, #4363, #4406, #4011, #767 (trusty-search allowlist),
+  #4523, #4007, #4289, #4363, #4406, #4590 (concierge build path), #4591
+  (explicit template marker), #4011, #767 (trusty-search allowlist),
   #64 / #541 (index-root post-filtering)
 
 ---
@@ -1629,6 +1679,7 @@ not because the recommendation is weak.
 |---|---|
 | 2026-08-01 | Initial draft — store identity and location, source roster, the untrusted-content boundary, #4040 consumption, watermarks, scheduled refresh, trusty-search integration, the source-type extension point, and the K-e observability sub-surface. |
 | 2026-08-01 | §3/§4 split per "extraction is an OPTION for any bound store": stores populate automatically, bound-store extraction stays explicit; contamination guard scoped to the latter; the directory overlap case specified. |
+| 2026-08-01 | §2.1a added — the build path the owner stated: the concierge offers to build an assistant, or the user does it manually, both producing the same per-agent home with its OKG and stores. Flow design left to #4590. Records that creation precedes provisioning (even though provisioning runs first at boot), and that `ctrl` (the concierge itself) and `personal-assistant` (a template, #4591) must never be provisioned an OKG. |
 | 2026-08-01 | Folded in four constraints from PR #4523: stores nest under the single `[[stores]]` binding (§5.5) because `StoresConfig::validate()` warns above one binding; `store_root()` confines the destination, not the source (`S-4.0`); the `HomeIssue`/`HomeIssueKind` inspection seam needs extending to carry store-level state (§12.4); and **credentials must never be written into the browsable assistant home** (§7.1a), with the five things OKG Sources needs from #4040 stated as input (§7.1b). Path-segment question resolved and removed; questions renumbered Q1–Q3. |
 | 2026-08-01 | Restructured around the owner's canonical model — one built OKG per agent, populated by many stores of two kinds (`SPEC-OKGSRC-12~draft`); "store" adopted as the single canonical noun with "OKG Source" recorded as an earlier synonym; bound-store extraction split into its own section (`SPEC-OKGSRC-13~draft`). |
 | 2026-08-01 | §3.4 added: searchable-corpus and OKG-contributor capacities are orthogonal, and search-only is a complete end state, never pending. §10.5–§10.6 added: OKG-first search tiering with attached-store fan-out, and per-result tier/origin provenance (`SPEC-OKGSRC-14~draft`), verified absent today. |
