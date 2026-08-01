@@ -52,15 +52,25 @@
 //! fallback at its own layer for a `NotLoaded` member — belt-and-braces, so a
 //! future skip-path regression still self-heals at verify time.
 //!
+//! 🔴 (#4470) Neither of the two branches above may issue its bootstrap until
+//! [`super::port_guard::guard_bootstrap`] clears the member's port.
+//! `launchctl bootstrap` exits 0 even when a foreign, unsupervised process
+//! already owns that port, so an ungated bootstrap reports success while that
+//! process keeps serving the port — possibly from an older binary (#4230). The
+//! guard fails CLOSED and the refusal is reported as
+//! [`BootstrapAction::RefusedForeignPort`], with nothing attempted and nothing
+//! changed.
+//!
 //! Testability: every side effect is behind the [`ServiceEnv`] seam so the
 //! decision logic is unit-tested against an in-memory fake — the tests NEVER
 //! touch `~/Library/LaunchAgents` or invoke `launchctl` against the live
 //! daemons on the host (mirrors trusty-mpm's `FakeNoopTmuxDriver` pattern).
 //!
-//! Test: `tests` covers the member predicate, the opt-out truth table, every
-//! [`bootstrap_one`] branch — including the #3836 defensive-fallback branches
-//! and the #3841 already-installed-path branches — (via `FakeServiceEnv`),
-//! and the [`start_plan`] relaxation used by `lifecycle.rs`.
+//! Test: `service_bootstrap_tests.rs` covers the member predicate, the opt-out
+//! truth table, every [`bootstrap_one`] branch — including the #3836
+//! defensive-fallback branches, the #3841 already-installed-path branches, and
+//! the #4470 port-guard refusals — (via `FakeServiceEnv`), and the
+//! [`start_plan`] relaxation used by `lifecycle.rs`.
 
 /// Environment-variable opt-out for the post-install service bootstrap.
 ///
@@ -83,8 +93,10 @@ pub const NO_SERVICE_ENV: &str = "TCTL_NO_SERVICE_BOOTSTRAP";
 /// the plist directly; `LoadedByFallback` (#3841 — the already-installed
 /// skip-path gap) means a plist ALREADY EXISTED on disk (so `service install`
 /// was never re-run at all) but launchd did not have the label loaded, so the
-/// installer force-bootstrapped the existing plist directly; `Failed` carries
-/// the (non-fatal) error text.
+/// installer force-bootstrapped the existing plist directly;
+/// `RefusedForeignPort` (#4470) means a process launchd does not supervise
+/// already holds the member's port, so no bootstrap was attempted at all;
+/// `Failed` carries the (non-fatal) error text.
 /// Test: `bootstrap_one_*` tests assert each variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BootstrapAction {
@@ -105,11 +117,50 @@ pub enum BootstrapAction {
     /// the same #3832 defense, extended to the already-installed/re-run
     /// path, which previously skipped the postcondition check entirely).
     LoadedByFallback,
+    /// #4470: a process launchd does not supervise already holds this
+    /// member's port, so the bootstrap was REFUSED rather than issued. The
+    /// payload is the operator-facing explanation from
+    /// [`super::port_guard::guard_bootstrap`], naming the offending pid and
+    /// how to clear it. Distinct from `Failed`: nothing was attempted and
+    /// nothing was changed.
+    RefusedForeignPort(String),
     /// Shell-out failed; install continues (fail-soft) but this is surfaced.
     Failed(String),
 }
 
 impl BootstrapAction {
+    /// Whether this outcome must fail the install report (#2566, #4470).
+    ///
+    /// Why: `install_all` folds this into `service_ok`, which
+    /// `InstallReport::build` folds into `all_ok`, which drives the process
+    /// exit code and the `--json` payload. #2566 established the rule that a
+    /// genuine bootstrap failure must never be reported as success. #4470's
+    /// first round then added [`BootstrapAction::RefusedForeignPort`] and did
+    /// NOT add it to the call site's inline `matches!`, so a refusal — the
+    /// guard working exactly as designed, with the daemon consequently not
+    /// running — set `service_ok: true` and `tctl install` exited 0 reporting
+    /// `all_ok: true`. That inverts the entire point of the guard: it turned a
+    /// detected orphan into a silent success. Making this a METHOD on the enum
+    /// rather than an inline match at the call site means a new variant is
+    /// classified once, here, next to its definition.
+    ///
+    /// What: `true` for [`BootstrapAction::Failed`] (a genuine failure) and
+    /// [`BootstrapAction::RefusedForeignPort`] (the daemon is NOT going to be
+    /// running — the install did not achieve what it claims). `false` for the
+    /// three success variants and for `Skipped` (an intentional no-op).
+    ///
+    /// Test: `bootstrap_action_failure_classification_is_exhaustive`,
+    /// `refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code`.
+    pub fn is_failure(&self) -> bool {
+        match self {
+            BootstrapAction::Failed(_) | BootstrapAction::RefusedForeignPort(_) => true,
+            BootstrapAction::Installed
+            | BootstrapAction::InstalledByFallback
+            | BootstrapAction::LoadedByFallback
+            | BootstrapAction::Skipped(_) => false,
+        }
+    }
+
     /// A one-line human summary for the installer narration.
     ///
     /// Why: `install.rs` renders one line per member; centralising the phrasing
@@ -131,6 +182,9 @@ impl BootstrapAction {
             ),
             BootstrapAction::Skipped(reason) => {
                 format!("{binary}: service bootstrap skipped ({reason})")
+            }
+            BootstrapAction::RefusedForeignPort(reason) => {
+                format!("{binary}: service bootstrap REFUSED — {reason}")
             }
             BootstrapAction::Failed(err) => {
                 format!("{binary}: service bootstrap failed (non-fatal): {err}")
@@ -180,7 +234,10 @@ pub fn bootstrap_enabled(no_service_flag: bool, env_opt_out: bool) -> bool {
 /// `is_loaded` (#3836) reports whether launchd currently has the label
 /// loaded at all; `bootstrap_fallback` (#3836) force-bootstraps the
 /// already-written plist directly via `launchctl`, bypassing the component
-/// binary's own (possibly broken) load step.
+/// binary's own (possibly broken) load step; `port_guard` (#4470) answers
+/// "may we bootstrap this member at all, or is a foreign process already on
+/// its port?" — behind the same seam so the refusal path is unit-testable
+/// without an actual squatter binding an actual port.
 /// Test: exercised via `RealServiceEnv` (production) and `FakeServiceEnv` (unit
 /// tests, `bootstrap_one_*`).
 pub trait ServiceEnv {
@@ -197,6 +254,10 @@ pub trait ServiceEnv {
     /// `launchctl`, independent of the component binary's own load logic
     /// (#3836 defensive fallback).
     fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()>;
+    /// #4470: may this member be bootstrapped, or does a process launchd does
+    /// not supervise already hold its port? `Err` carries the operator-facing
+    /// refusal.
+    fn port_guard(&self, binary: &str) -> Result<(), String>;
 }
 
 /// Decide and (via the seam) execute the service bootstrap for one member.
@@ -247,7 +308,17 @@ pub trait ServiceEnv {
 /// `bootstrap_one_reports_failure_when_fallback_also_fails`,
 /// `bootstrap_one_loads_via_fallback_when_plist_present_but_not_loaded`
 /// (THE #3841 miss, pinned against current main),
-/// `bootstrap_one_reports_failure_when_present_but_fallback_fails`.
+/// `bootstrap_one_reports_failure_when_present_but_fallback_fails`,
+/// `bootstrap_one_refuses_when_foreign_process_holds_port` and
+/// `bootstrap_one_refuses_existing_plist_when_foreign_process_holds_port`
+/// (THE #4470 refusals — each asserts NOTHING was installed or bootstrapped).
+///
+/// 🔴 (#4470) Both bootstrap-issuing branches are gated by
+/// [`ServiceEnv::port_guard`] first. `launchctl bootstrap` exits 0 even when a
+/// foreign process already owns the daemon's port, so an ungated bootstrap
+/// reports success while that process keeps serving the port — the #4230
+/// orphan. The gate sits immediately before each side effect, never after, so
+/// a refusal cannot leave launchd or the filesystem half-changed.
 pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
     if !member_has_service_install(binary) {
         return BootstrapAction::Skipped(format!("{binary} has no `service install` subcommand"));
@@ -265,6 +336,15 @@ pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
                     .to_string(),
             );
         }
+        // #4470: the fallback below IS a `launchctl bootstrap`, which exits 0
+        // even when a foreign process already holds the port — check first,
+        // and refuse rather than issue a bootstrap whose success would be a
+        // lie. Placed AFTER the already-loaded skip so a healthy member is
+        // never gated on a port probe, and BEFORE the bootstrap so a refusal
+        // leaves launchd exactly as it found it.
+        if let Err(reason) = env.port_guard(binary) {
+            return BootstrapAction::RefusedForeignPort(reason);
+        }
         return match env.bootstrap_fallback(binary) {
             Ok(()) => BootstrapAction::LoadedByFallback,
             Err(e) => BootstrapAction::Failed(format!(
@@ -272,6 +352,12 @@ pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
                  installer's fallback `launchctl bootstrap` failed: {e}"
             )),
         };
+    }
+    // #4470: `<binary> service install` writes the plist AND bootstraps it, so
+    // the same foreign-port refusal must gate it — before it runs, so a refusal
+    // never leaves a half-installed member behind.
+    if let Err(reason) = env.port_guard(binary) {
+        return BootstrapAction::RefusedForeignPort(reason);
     }
     if let Err(e) = env.run_service_install(binary) {
         return BootstrapAction::Failed(e.to_string());
@@ -382,6 +468,12 @@ impl ServiceEnv for RealServiceEnv {
         super::verify_launchd_state::is_label_loaded(&label)
     }
 
+    // #4470: the one shared implementation of the foreign-port check; the
+    // `tctl start`/`restart` path in `lifecycle.rs` calls the same function.
+    fn port_guard(&self, binary: &str) -> Result<(), String> {
+        super::port_guard::guard_bootstrap(binary)
+    }
+
     fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {
         // `trusty_common::launchd` is itself `#[cfg(target_os = "macos")]`
         // (it shells out to the real `launchctl` binary, which only exists
@@ -468,484 +560,5 @@ fn run_captured(mut cmd: std::process::Command, label: &str) -> anyhow::Result<(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::RefCell;
-
-    /// In-memory [`ServiceEnv`] fake — records `service install` /
-    /// `bootstrap_fallback` calls and simulates plist presence + launchd load
-    /// state, so tests never touch launchd or the real
-    /// `~/Library/LaunchAgents`.
-    ///
-    /// Why the `loaded: true` default (#3836): the pre-existing
-    /// `bootstrap_one_*` tests below construct this via `new(present, fail)`
-    /// and assert the OLD `Installed` outcome — defaulting `loaded` to `true`
-    /// (the honest, common case: `service install` DID load the agent) keeps
-    /// those tests passing unchanged and expresses the #3832 failure mode
-    /// (loaded: false) as an opt-in builder instead.
-    struct FakeServiceEnv {
-        present: bool,
-        fail: bool,
-        loaded: bool,
-        fail_fallback: bool,
-        installed: RefCell<Vec<String>>,
-        fallback_calls: RefCell<Vec<String>>,
-    }
-
-    impl FakeServiceEnv {
-        fn new(present: bool, fail: bool) -> Self {
-            Self {
-                present,
-                fail,
-                loaded: true,
-                fail_fallback: false,
-                installed: RefCell::new(Vec::new()),
-                fallback_calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        /// Builder (#3836): simulate `service install` exiting 0 WITHOUT
-        /// launchd ever loading the label — #3832's exact failure mode.
-        fn not_loaded(mut self) -> Self {
-            self.loaded = false;
-            self
-        }
-
-        /// Builder (#3836): simulate the installer's own fallback
-        /// `launchctl bootstrap` also failing.
-        fn failing_fallback(mut self) -> Self {
-            self.fail_fallback = true;
-            self
-        }
-    }
-
-    impl ServiceEnv for FakeServiceEnv {
-        fn plist_present(&self, _binary: &str) -> bool {
-            self.present
-        }
-        fn run_service_install(&self, binary: &str) -> anyhow::Result<()> {
-            self.installed.borrow_mut().push(binary.to_string());
-            if self.fail {
-                anyhow::bail!("simulated failure");
-            }
-            Ok(())
-        }
-        fn is_loaded(&self, _binary: &str) -> bool {
-            self.loaded
-        }
-        fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {
-            self.fallback_calls.borrow_mut().push(binary.to_string());
-            if self.fail_fallback {
-                anyhow::bail!("simulated fallback failure");
-            }
-            Ok(())
-        }
-    }
-
-    /// Why: the member predicate gates which daemons get a service bootstrap;
-    /// every launchd-managed shared daemon must be recognised.
-    /// What: asserts the five service members return `true`.
-    /// Test: this is the test.
-    #[test]
-    fn service_members_recognised() {
-        for b in [
-            "trusty-search",
-            "trusty-memory",
-            "trusty-analyze",
-            "trusty-review",
-            "trusty-console",
-        ] {
-            assert!(
-                member_has_service_install(b),
-                "{b} should be a service member"
-            );
-        }
-    }
-
-    /// Why: process-managed / non-daemon members must NOT be shelled out to a
-    /// non-existent `service install` subcommand.
-    /// What: asserts trusty-mpm and tga are excluded.
-    /// Test: this is the test.
-    #[test]
-    fn non_service_members_excluded() {
-        assert!(!member_has_service_install("trusty-mpm"));
-        assert!(!member_has_service_install("tga"));
-        assert!(!member_has_service_install("nope"));
-    }
-
-    /// Why: both opt-out paths must disable the step; neither set must enable it.
-    /// What: exercises the four-way truth table.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_enabled_truth_table() {
-        assert!(bootstrap_enabled(false, false));
-        assert!(!bootstrap_enabled(true, false));
-        assert!(!bootstrap_enabled(false, true));
-        assert!(!bootstrap_enabled(true, true));
-    }
-
-    /// Why: the env opt-out is the automation escape hatch; pin that a present
-    /// env value disables the step (flag unset).
-    /// What: `bootstrap_enabled(false, true)` is `false`.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_enabled_respects_env() {
-        assert!(!bootstrap_enabled(false, true));
-        assert!(bootstrap_enabled(false, false));
-    }
-
-    /// Why: a non-service member must be skipped without any install attempt.
-    /// What: asserts `Skipped` and that no install was recorded.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_skips_non_service_member() {
-        let env = FakeServiceEnv::new(false, false);
-        let action = bootstrap_one(&env, "trusty-mpm");
-        assert!(matches!(action, BootstrapAction::Skipped(_)));
-        assert!(env.installed.borrow().is_empty());
-    }
-
-    /// Why: idempotency + non-clobber — an existing, ALREADY LOADED plist
-    /// must be left untouched with NO `service install` call and NO fallback
-    /// bootstrap (no needless restart, no overwrite).
-    /// What: with `present = true` and `loaded` at its default (`true`),
-    /// asserts `Skipped`, no recorded install, and no recorded fallback call.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_skips_when_plist_present_and_loaded() {
-        let env = FakeServiceEnv::new(true, false);
-        let action = bootstrap_one(&env, "trusty-search");
-        assert!(matches!(action, BootstrapAction::Skipped(_)));
-        assert!(
-            env.installed.borrow().is_empty(),
-            "must not re-install over an existing plist"
-        );
-        assert!(
-            env.fallback_calls.borrow().is_empty(),
-            "must not force-bootstrap an already-loaded label"
-        );
-    }
-
-    /// Why: THE #3841 root-cause fix — a plist already present on disk is NOT
-    /// proof launchd has it loaded (a prior run can leave exactly this state,
-    /// #3832's failure signature). Before the fix, `bootstrap_one` returned
-    /// `Skipped` here WITHOUT ever checking `is_loaded`, so the #3836
-    /// defensive postcondition never ran for exactly the damaged machines it
-    /// exists to repair. This test fails against the pre-fix code (it always
-    /// short-circuited to `Skipped` the instant `plist_present` was `true`).
-    /// What: with `present = true` AND `loaded = false` (via `.not_loaded()`),
-    /// asserts `LoadedByFallback`, exactly one recorded `bootstrap_fallback`
-    /// call, and NO `service install` call (non-clobbering — the plist itself
-    /// is never rewritten, only loaded).
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_loads_via_fallback_when_plist_present_but_not_loaded() {
-        let env = FakeServiceEnv::new(true, false).not_loaded();
-        let action = bootstrap_one(&env, "trusty-memory");
-        assert_eq!(action, BootstrapAction::LoadedByFallback);
-        assert_eq!(env.fallback_calls.borrow().as_slice(), ["trusty-memory"]);
-        assert!(
-            env.installed.borrow().is_empty(),
-            "an already-present plist must never be re-installed, only loaded"
-        );
-    }
-
-    /// Why: even on the already-installed path, a fallback failure must be
-    /// surfaced loudly (`Failed`) with a message naming BOTH the plist-not-
-    /// loaded state and the fallback's own failure reason — mirrors
-    /// `bootstrap_one_reports_failure_when_fallback_also_fails` for the
-    /// fresh-install branch.
-    /// What: with `present = true`, `loaded = false`, and the fallback set to
-    /// fail, asserts `Failed` whose message names both facts.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_reports_failure_when_present_but_fallback_fails() {
-        let env = FakeServiceEnv::new(true, false)
-            .not_loaded()
-            .failing_fallback();
-        let action = bootstrap_one(&env, "trusty-review");
-        match action {
-            BootstrapAction::Failed(e) => {
-                assert!(e.contains("not loaded"), "message: {e}");
-                assert!(e.contains("simulated fallback failure"), "message: {e}");
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-    }
-
-    /// Why: the core happy path — a service member with no plist yet gets
-    /// `service install` run exactly once.
-    /// What: with `present = false`, asserts `Installed` and one recorded call.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_installs_when_absent() {
-        let env = FakeServiceEnv::new(false, false);
-        let action = bootstrap_one(&env, "trusty-memory");
-        assert_eq!(action, BootstrapAction::Installed);
-        assert_eq!(env.installed.borrow().as_slice(), ["trusty-memory"]);
-    }
-
-    /// Why: a `service install` failure must be fail-soft — surfaced as
-    /// `Failed`, not a panic or an aborted install.
-    /// What: with the fake set to fail, asserts a `Failed` carrying the error.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_reports_failure() {
-        let env = FakeServiceEnv::new(false, true);
-        let action = bootstrap_one(&env, "trusty-analyze");
-        match action {
-            BootstrapAction::Failed(e) => assert!(e.contains("simulated failure")),
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        assert!(
-            env.fallback_calls.borrow().is_empty(),
-            "a genuine service-install failure must never trigger the fallback \
-             bootstrap — that's only for a misleadingly-successful exit code"
-        );
-    }
-
-    /// Why: #3836 HIGH fix — the common, honest case: `service install`
-    /// exited 0 AND launchd actually loaded the label. Must NOT invoke the
-    /// fallback bootstrap (it would be a needless extra `launchctl` call /
-    /// redundant restart).
-    /// What: with `loaded: true` (the default), asserts plain `Installed` and
-    /// zero fallback calls.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_installed_directly_when_loaded() {
-        let env = FakeServiceEnv::new(false, false);
-        let action = bootstrap_one(&env, "trusty-search");
-        assert_eq!(action, BootstrapAction::Installed);
-        assert!(
-            env.fallback_calls.borrow().is_empty(),
-            "must not force-bootstrap when launchd already loaded the label"
-        );
-    }
-
-    /// Why: THE #3836 HIGH fix's core safety property — #3832's exact
-    /// failure signature (`service install` exits 0 but launchd never loads
-    /// the label) must be caught and repaired, not silently reported as a
-    /// clean `Installed`.
-    /// What: with `loaded: false`, asserts `InstalledByFallback` and exactly
-    /// one recorded `bootstrap_fallback` call for the right binary.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_falls_back_when_not_loaded() {
-        let env = FakeServiceEnv::new(false, false).not_loaded();
-        let action = bootstrap_one(&env, "trusty-memory");
-        assert_eq!(action, BootstrapAction::InstalledByFallback);
-        assert_eq!(env.fallback_calls.borrow().as_slice(), ["trusty-memory"]);
-    }
-
-    /// Why: if EVEN the installer's own direct `launchctl bootstrap` fallback
-    /// fails, that must be surfaced loudly (`Failed`) — never silently
-    /// swallowed — and the error text must explain BOTH what happened (a
-    /// misleading exit code) and why the recovery attempt itself failed, so
-    /// an operator isn't left staring at a bare "Failed" for a
-    /// non-obvious reason.
-    /// What: with `loaded: false` AND the fallback set to fail, asserts
-    /// `Failed` whose message names the fallback failure.
-    /// Test: this is the test.
-    #[test]
-    fn bootstrap_one_reports_failure_when_fallback_also_fails() {
-        let env = FakeServiceEnv::new(false, false)
-            .not_loaded()
-            .failing_fallback();
-        let action = bootstrap_one(&env, "trusty-review");
-        match action {
-            BootstrapAction::Failed(e) => {
-                assert!(e.contains("never loaded"), "message: {e}");
-                assert!(e.contains("simulated fallback failure"), "message: {e}");
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-    }
-
-    /// Why: the narration note must name the member for a scannable install log.
-    /// What: asserts each variant's note contains the binary name.
-    /// Test: this is the test.
-    #[test]
-    fn note_mentions_binary() {
-        assert!(BootstrapAction::Installed
-            .note("trusty-search")
-            .contains("trusty-search"));
-        assert!(BootstrapAction::InstalledByFallback
-            .note("trusty-memory")
-            .contains("trusty-memory"));
-        assert!(BootstrapAction::LoadedByFallback
-            .note("trusty-memory")
-            .contains("trusty-memory"));
-        assert!(BootstrapAction::Skipped("x".into())
-            .note("trusty-memory")
-            .contains("trusty-memory"));
-        assert!(BootstrapAction::Failed("boom".into())
-            .note("trusty-review")
-            .contains("trusty-review"));
-    }
-
-    /// Why: the `tctl start` relaxation is the #2556 lifecycle fix; pin the map.
-    /// What: present → Bootstrap, absent → ServiceInstall.
-    /// Test: this is the test.
-    #[test]
-    fn start_plan_maps_presence() {
-        assert_eq!(start_plan(true), StartPlan::Bootstrap);
-        assert_eq!(start_plan(false), StartPlan::ServiceInstall);
-    }
-
-    /// Redirect the REAL (OS-level) stdout file descriptor to `tmp` for the
-    /// duration of `f`, then restore it — regardless of whether `f` panics.
-    ///
-    /// Why (#3830 regression proof): `Command::status()` "inheriting" stdio
-    /// means a child writes to whatever fd 1 currently points to; the only
-    /// way to OBSERVE that from a test is to control what fd 1 points to
-    /// before spawning, run the command, then read it back. Asserting only
-    /// `result.is_ok()` (a prior version of this test) proves nothing about
-    /// where the child's bytes went — it still passed when code-critic
-    /// reverted `run_captured` to `.status()` on PR #3834.
-    ///
-    /// CRITICAL: fd 1 is process-global, so this must never run as an
-    /// ordinary parallel `#[test]` — the default test harness's OWN per-test
-    /// "test x ... ok" status line is printed by the harness-controller
-    /// thread through the REAL stdout (not the per-test captured sink), and
-    /// can land in `tmp` mid-redirect whenever ANY sibling test finishes on
-    /// another thread (confirmed empirically; mirrors the identical fix in
-    /// `trusty-common::update::tests`). The `#[test]` wrapper below never
-    /// calls this on the main invocation — it re-execs the test binary,
-    /// selecting ONLY the `_inner` test (`--test-threads=1`), so it is the
-    /// sole test running in a dedicated process.
-    ///
-    /// What: `dup`s the real stdout fd aside, `dup2`s `tmp`'s fd onto it,
-    /// runs `f`, restores the saved fd (via a guard so a panic in `f` still
-    /// restores it), and returns `f`'s result.
-    /// Test: used by `run_captured_never_leaks_to_parent_stdio_inner` below.
-    fn with_real_stdout_redirected_to<T>(tmp: &std::fs::File, f: impl FnOnce() -> T) -> T {
-        use std::os::unix::io::AsRawFd;
-
-        /// RAII guard: restores the saved real-stdout fd on drop, so a panic
-        /// in `f` can never leave the process's stdout permanently redirected.
-        struct RestoreStdout(std::os::raw::c_int);
-        impl Drop for RestoreStdout {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::dup2(self.0, libc::STDOUT_FILENO);
-                    libc::close(self.0);
-                }
-            }
-        }
-
-        let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
-        assert!(saved >= 0, "dup(STDOUT_FILENO) failed");
-        let _restore = RestoreStdout(saved);
-
-        let rc = unsafe { libc::dup2(tmp.as_raw_fd(), libc::STDOUT_FILENO) };
-        assert!(rc >= 0, "dup2(tmp, STDOUT_FILENO) failed");
-
-        f()
-    }
-
-    /// Re-exec this test binary, running ONLY `inner_test_name` (an
-    /// `#[ignore]`d test) alone with `--test-threads=1`, and assert it
-    /// exits 0.
-    ///
-    /// Why: see [`with_real_stdout_redirected_to`]'s doc — a test that
-    /// hijacks the process's real stdout fd must run with zero sibling test
-    /// threads.
-    /// What: `Command::new(current_exe())` with
-    /// `[name, "--exact", "--ignored", "--test-threads=1"]`; panics with the
-    /// child's captured stdout/stderr on a non-zero exit.
-    /// Test: exercised by `run_captured_never_leaks_to_parent_stdio` below.
-    fn run_isolated_inner_test(inner_test_name: &str) {
-        let exe = std::env::current_exe().expect("resolve current test binary");
-        let output = std::process::Command::new(&exe)
-            .args([inner_test_name, "--exact", "--ignored", "--test-threads=1"])
-            .output()
-            .expect("re-exec test binary for isolated fd test");
-        assert!(
-            output.status.success(),
-            "isolated test `{inner_test_name}` failed ({}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
-    /// The #3830 regression proof: `run_captured` must NEVER let a child's
-    /// output reach the parent's real (inherited) stdout, no matter how
-    /// noisy the child is or whether it succeeds.
-    ///
-    /// Why: see [`with_real_stdout_redirected_to`]'s doc — this replaces a
-    /// weaker predecessor that only asserted `is_ok()` (code-critic finding
-    /// on PR #3834). `#[ignore]`d + only ever invoked, alone, via
-    /// [`run_isolated_inner_test`] from the `#[test]` wrapper immediately
-    /// below.
-    /// What: redirects the real stdout fd to a tempfile, runs a noisy,
-    /// successful `sh -c` command through `run_captured`, restores stdout,
-    /// then asserts the tempfile received ZERO bytes.
-    /// Test: this is the test (invoked via
-    /// `run_captured_never_leaks_to_parent_stdio`).
-    #[test]
-    #[ignore]
-    fn run_captured_never_leaks_to_parent_stdio_inner() {
-        use std::io::Read;
-
-        let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "for i in $(seq 1 20); do echo \"LEAK_MARKER_3830 stdout $i\"; \
-             echo \"LEAK_MARKER_3830 stderr $i\" >&2; done; exit 0",
-        ]);
-
-        let result =
-            with_real_stdout_redirected_to(tmp.as_file(), || run_captured(cmd, "`noisy-capture`"));
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-
-        let mut contents = String::new();
-        tmp.reopen()
-            .expect("reopen tempfile")
-            .read_to_string(&mut contents)
-            .expect("read tempfile");
-        assert!(
-            contents.is_empty(),
-            "run_captured leaked to the parent's real stdout fd: {contents:?}"
-        );
-    }
-
-    /// `#[test]` entry point for the isolated inner test above — see
-    /// [`run_isolated_inner_test`]'s doc for why this indirection exists.
-    /// This is the test `cargo test` actually runs; it re-execs the binary
-    /// so the real fd-1 hijack happens with zero sibling test threads.
-    /// Test: this wraps `run_captured_never_leaks_to_parent_stdio_inner`.
-    #[test]
-    fn run_captured_never_leaks_to_parent_stdio() {
-        run_isolated_inner_test(
-            "commands::service_bootstrap::tests::run_captured_never_leaks_to_parent_stdio_inner",
-        );
-    }
-
-    /// Why (#3830 regression — the core proof): `run_captured`'s error path
-    /// must be built from the child's CAPTURED stderr. This is only
-    /// reachable at all if the command was run via `.output()`; the pre-fix
-    /// `.status()` call has no `stderr` field to read, so this exact
-    /// assertion would not compile against that code — pinning the fix at
-    /// the type level as well as behaviourally.
-    /// What: runs a command that writes a distinctive marker to stderr and
-    /// exits non-zero; asserts the returned error's message contains that
-    /// exact marker.
-    /// Test: this is the test.
-    #[test]
-    fn run_captured_folds_stderr_into_error() {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args([
-            "-c",
-            "echo 'DISTINCTIVE_MARKER_3830: launchd bootstrap failed' >&2; exit 7",
-        ]);
-        let err = run_captured(cmd, "`fake service install`").expect_err("expected Err");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("DISTINCTIVE_MARKER_3830: launchd bootstrap failed"),
-            "error message did not fold in captured stderr: {msg}"
-        );
-        assert!(msg.contains("fake service install"));
-    }
-}
+#[path = "service_bootstrap_tests.rs"]
+mod tests;
