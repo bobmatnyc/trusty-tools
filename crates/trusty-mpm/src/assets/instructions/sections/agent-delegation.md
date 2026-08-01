@@ -1,9 +1,19 @@
 # Agent Delegation Routing
 
-> This file defines the agent routing table and delegation logic for the PM.
-> Override at project level: .trusty-mpm/AGENT_DELEGATION.md
-> Override at user level:    ~/.trusty-mpm/AGENT_DELEGATION.md
-> System default:            crates/trusty-mpm/src/assets/instructions/AGENT_DELEGATION.md (this file)
+> STATIC: the routing doctrine below is hand-authored, for the universal
+> system agents. It does not change per project.
+>
+> ENRICHED: at composition time, trusty-mpm appends a generated roster built
+> by scanning deployed agents — project `.claude/agents`, the managed
+> `CLAUDE_CONFIG_DIR/agents`, and the framework agents dir, project tier
+> winning on a name collision. The scan reads every `.md` file on disk, so it
+> picks up manifest-declared AND user-installed agents. That roster is
+> required; composition fails without it. Exception: agents whose frontmatter
+> carries `role: base` are filtered out as foundation templates, which
+> currently hides `memory-manager`, `mpm-agent-manager`, and
+> `mpm-skills-manager` (#4589).
+>
+> This file: crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md
 
 ## When to Delegate to Each Agent
 
