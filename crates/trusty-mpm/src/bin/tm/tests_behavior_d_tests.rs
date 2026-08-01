@@ -525,10 +525,15 @@ fn cli_parses_session_prune_worktrees() {
                 SessionAction::PruneWorktrees {
                     force,
                     discard_dirty,
+                    merged_prs,
                 },
         } => {
             assert!(!force, "default must be dry-run (force=false)");
             assert!(!discard_dirty, "default must never discard dirty work");
+            assert!(
+                !merged_prs,
+                "#2919: the merged-PR pass must be off by default"
+            );
         }
         other => panic!("expected session prune-worktrees, got {other:?}"),
     }
@@ -541,12 +546,17 @@ fn cli_parses_session_prune_worktrees() {
                 SessionAction::PruneWorktrees {
                     force,
                     discard_dirty,
+                    merged_prs,
                 },
         } => {
             assert!(force, "--force must set force=true");
             assert!(
                 !discard_dirty,
                 "#4091: --force alone must NOT imply discarding uncommitted work"
+            );
+            assert!(
+                !merged_prs,
+                "#2919: --force alone must NOT imply the merged-PR reclaim pass"
             );
         }
         other => panic!("expected session prune-worktrees, got {other:?}"),
@@ -576,10 +586,51 @@ fn cli_prune_worktrees_discard_dirty_is_opt_in() {
                 SessionAction::PruneWorktrees {
                     force,
                     discard_dirty,
+                    merged_prs,
                 },
         } => {
             assert!(force);
             assert!(discard_dirty, "--discard-dirty must set discard_dirty=true");
+            assert!(
+                !merged_prs,
+                "#2919: --discard-dirty must NOT imply the merged-PR reclaim pass"
+            );
+        }
+        other => panic!("expected session prune-worktrees, got {other:?}"),
+    }
+}
+
+/// #2919: the merged-pull-request reclaim pass requires its own explicit flag.
+///
+/// Why: it is the only reclaim path that acts on GitHub state, so an operator
+/// clearing stale directories must opt into it deliberately rather than
+/// inheriting it from `--force`. Pinning it as a third independent flag is what
+/// keeps anything automatic from ever reaching a merged-PR deletion.
+#[test]
+fn cli_prune_worktrees_merged_prs_is_opt_in() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "prune-worktrees",
+        "--force",
+        "--merged-prs",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::PruneWorktrees {
+                    force,
+                    discard_dirty,
+                    merged_prs,
+                },
+        } => {
+            assert!(force);
+            assert!(merged_prs, "--merged-prs must set merged_prs=true");
+            assert!(
+                !discard_dirty,
+                "#2919: --merged-prs must NOT imply discarding uncommitted work"
+            );
         }
         other => panic!("expected session prune-worktrees, got {other:?}"),
     }

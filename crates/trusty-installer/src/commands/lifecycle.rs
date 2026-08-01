@@ -280,9 +280,20 @@ fn apply_to_member(verb: Verb, m: &StableMember) -> anyhow::Result<String> {
 /// this tctl-managed member, it runs the daemon's own `<binary> service
 /// install` (which writes AND bootstraps the plist) instead of failing. On
 /// non-macOS this is unsupported (launchd is macOS-only) and returns an error.
+///
+/// 🔴 (#4470) Every branch that issues a `launchctl bootstrap` — or a `service
+/// install`, which bootstraps — is gated first by
+/// [`super::port_guard::guard_bootstrap`], the same check `tctl install` uses.
+/// `bootstrap` exits 0 even when a foreign, unsupervised process already owns
+/// the daemon's port, so an ungated one reports success while that process
+/// keeps serving the port (#4230). For `Restart` the gate runs BEFORE the
+/// `bootout`, so a refusal never stops a running daemon and then declines to
+/// bring it back — the fail-open shape where the failure branch has already
+/// advanced state.
 /// Test: the `Start` plist-presence decision is pinned by
-/// `super::service_bootstrap::tests::start_plan_maps_presence`; the actual
-/// `launchctl`/subprocess calls are side-effecting and never run in unit tests.
+/// `super::service_bootstrap::tests::start_plan_maps_presence` and the guard
+/// policy by `super::port_guard::tests`; the actual `launchctl`/subprocess
+/// calls are side-effecting and never run in unit tests.
 #[cfg(target_os = "macos")]
 fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
     use super::service_bootstrap::{start_plan, RealServiceEnv, ServiceEnv, StartPlan};
@@ -332,10 +343,16 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
                     if cfg.is_loaded() {
                         return Ok(format!("{} already loaded (skipped restart)", cfg.label));
                     }
+                    // #4470: refuse rather than issue a bootstrap that would
+                    // report success while a foreign process keeps the port.
+                    super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
                     cfg.bootstrap()?;
                     Ok(format!("bootstrapped {}", cfg.label))
                 }
                 StartPlan::ServiceInstall => {
+                    // #4470: `service install` writes the plist AND bootstraps
+                    // it — gate it before it can leave a half-installed member.
+                    super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
                     RealServiceEnv.run_service_install(binary).map_err(|e| {
                         anyhow::anyhow!(
                             "no launchd plist for {binary} and `service install` failed: {e}"
@@ -346,6 +363,12 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
             }
         }
         Verb::Restart => {
+            // #4470: gate BEFORE the bootout, never after. Refusing after a
+            // successful bootout would stop the daemon and then decline to
+            // start it — a guard that makes things worse when it fires. A
+            // correctly supervised daemon holds its own port here, so this
+            // check passes for the ordinary restart.
+            super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
             // Bootout first (stop); only then bootstrap (start). If bootstrap
             // fails after a successful bootout, surface that the daemon WAS
             // stopped — the operator is now in a stopped (not still-running)

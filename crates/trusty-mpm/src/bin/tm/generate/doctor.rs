@@ -44,6 +44,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Fails when bundled agents deploy into a settings tier a managed session's `--setting-sources` flag never loads — presence-only checks stay green while every delegation degrades to `general-purpose` (issue #4451).",
     ),
     (
+        "asset_tier",
+        "Fails when tm-owned agent files sit in a project's `.claude/agents/` — that tier outranks the canonical `$CLAUDE_CONFIG_DIR/agents/` deploy, so a stale or stub copy shadows the real agent while every presence-only check stays green (issue #4442). Warns for leftovers in `~/.claude/agents/`, which a managed session no longer reads. Read-only; never deletes.",
+    ),
+    (
         "transcript_saving",
         "Fails when a managed spawn would leave Claude Code transcript saving disabled — an inherited `CLAUDE_CODE_CHILD_SESSION` marker costs the session all native `--resume`/`--continue`/`/rewind` recovery, and also fails if the scrub would wrongly take `CLAUDE_CONFIG_DIR` (issue #4467).",
     ),
@@ -98,6 +102,11 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "worktrees",
         "No orphaned git worktrees under the managed workspace root (Fix 1b, #1840).",
+    ),
+    (
+        "worktree_disk",
+        "Bytes held by every git-registered worktree, and how much sits on already-merged \
+         pull requests with no unsaved work (issue #2919).",
     ),
     (
         "gh_account",

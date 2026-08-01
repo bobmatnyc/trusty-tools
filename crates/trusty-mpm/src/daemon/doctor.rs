@@ -49,6 +49,13 @@ use doctor_deploy_validate::check_deployment_completeness;
 mod doctor_agent_reachability;
 use doctor_agent_reachability::check_agent_reachability;
 
+// #4442: the shadowing half — every probe above looks only at the canonical
+// deploy tier, so a stale copy of the same agent in a project's
+// `.claude/agents/` outranks it and wins resolution with all checks green.
+#[path = "doctor_asset_tier.rs"]
+mod doctor_asset_tier;
+use doctor_asset_tier::check_asset_tier;
+
 // #4467: the same silent-failure shape as #4451, one layer down — a managed
 // spawn that inherits `CLAUDE_CODE_CHILD_SESSION` has transcript saving turned
 // off, so the session is unrecoverable and nothing reported it.
@@ -93,6 +100,13 @@ use doctor_scaffold_tracking::check_scaffold_tracking;
 #[path = "doctor_push_guard.rs"]
 mod doctor_push_guard;
 use doctor_push_guard::check_push_guard;
+
+// Split out to keep this file under the 500-SLOC production cap (issue #2919 —
+// the worktree disk-consumption / merged-PR reclaimability probe, the
+// early-warning half of the 1.1 TiB leak post-mortem).
+#[path = "doctor_worktree_disk.rs"]
+mod doctor_worktree_disk;
+use doctor_worktree_disk::check_worktree_disk;
 
 /// Per-probe network timeout.
 ///
@@ -209,7 +223,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_four_checks`,
+/// Test: `run_doctor_produces_twenty_six_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -237,6 +251,10 @@ pub async fn run_doctor(
         // #4451: `check_agents` proves the files exist; this proves the tier
         // they land in is one a managed session's harness actually scans.
         check_agent_reachability(&paths, project_dir),
+        // #4442: and this proves nothing OUTSIDE that tier outranks it — a
+        // project-tier copy of a bundled agent shadows the canonical deploy
+        // while every presence-only probe above stays green.
+        check_asset_tier(&paths, project_dir, &home),
         // #4467: and this proves the spawn does not silently lose the session's
         // own transcript, which costs it all native --resume/--continue/rewind
         // recovery. No `project_dir`/`paths` input — the invariant is a property
@@ -256,6 +274,10 @@ pub async fn run_doctor(
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home, project_dir).await);
     checks.push(check_worktrees(repos_root, active_workspace_paths).await);
+    // #2919: `check_worktrees` above counts ORPHANS and has never reported a
+    // byte, so it read identically whether the worktree store held 4 GiB or the
+    // 1.1 TiB measured on 2026-07-21. This is the disk half.
+    checks.push(check_worktree_disk(repos_root, active_workspace_paths).await);
     checks.push(check_gh_account().await);
     checks.push(check_oauth_token_config());
     let (hooks_contamination, hooks_foreign_conflict) =

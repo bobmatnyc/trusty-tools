@@ -479,8 +479,14 @@ pub(crate) enum SessionAction {
     /// to touch a worktree holding uncommitted or unpushed work (#4091) — it
     /// is reported instead; `--discard-dirty` is the separate, explicit opt-in
     /// that permits destroying that work.
+    /// `--merged-prs` (#2919) adds a second, independent reclaim pass: worktrees
+    /// whose BRANCH has a merged pull request, which is the terminal state
+    /// DOC-52 §3.4 makes the reclamation trigger. It is opt-in because it is the
+    /// only path that acts on GitHub state; nothing automatic ever runs it, and
+    /// it still refuses any worktree a session claims or that holds unsaved work.
     /// Test: `cli_parses_session_prune_worktrees`,
-    /// `cli_prune_worktrees_discard_dirty_is_opt_in`.
+    /// `cli_prune_worktrees_discard_dirty_is_opt_in`,
+    /// `cli_prune_worktrees_merged_prs_is_opt_in`.
     PruneWorktrees {
         /// Actually delete orphaned dirs (default: dry-run / preview only).
         #[arg(long)]
@@ -489,6 +495,10 @@ pub(crate) enum SessionAction {
         /// (#4091). Off by default; this discards that work irreversibly.
         #[arg(long)]
         discard_dirty: bool,
+        /// ALSO reclaim worktrees whose branch's pull request already merged
+        /// (#2919). Off by default. Never destroys unsaved work.
+        #[arg(long)]
+        merged_prs: bool,
     },
     /// Report every git-registered worktree against `sessions.json` (#4288).
     ///
