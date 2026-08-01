@@ -19,6 +19,7 @@
 //! Test: See `tests` submodule — both tools return a graceful error when the
 //! underlying store is missing, and both appear in the research-agent registry.
 
+mod okg_fence;
 mod recall;
 mod vector_search;
 
