@@ -543,15 +543,13 @@ pub fn install_mpm_supervisor_for(
     // Fill the plist template.
     let plist_content = fill_template(home_str, tm_path_str);
 
-    // Create the log directory.
+    // #4470: the two `create_dir_all` calls that used to sit here now run AFTER
+    // the port guard below, so a refusal leaves no empty directories behind.
+    // Only the PATHS are computed here — the downgrade guard needs `plist_path`
+    // to read any existing plist, and reading a file in a non-existent
+    // directory is a plain `Err` it already tolerates.
     let log_dir = home.join(".trusty-mpm").join("logs");
-    std::fs::create_dir_all(&log_dir)
-        .with_context(|| format!("creating log directory {}", log_dir.display()))?;
-
-    // Write the plist.
     let agents_dir = home.join("Library").join("LaunchAgents");
-    std::fs::create_dir_all(&agents_dir)
-        .with_context(|| format!("creating LaunchAgents dir {}", agents_dir.display()))?;
     let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
 
     // #3527: downgrade guard — refuse to replace an already-registered
@@ -593,6 +591,12 @@ pub fn install_mpm_supervisor_for(
     target.launchctl.port_guard().map_err(|reason| {
         anyhow::anyhow!("refusing to bootstrap the trusty-mpm supervisor: {reason}")
     })?;
+
+    // Past the gate: now it is safe to create directories and write.
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("creating log directory {}", log_dir.display()))?;
+    std::fs::create_dir_all(&agents_dir)
+        .with_context(|| format!("creating LaunchAgents dir {}", agents_dir.display()))?;
 
     std::fs::write(&plist_path, &plist_content)
         .with_context(|| format!("writing plist to {}", plist_path.display()))?;

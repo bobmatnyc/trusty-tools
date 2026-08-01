@@ -606,14 +606,22 @@ fn install_mpm_supervisor_for_refuses_when_a_foreign_process_holds_the_superviso
         !calls.iter().any(|c| c.starts_with("bootstrap")),
         "a refusal must not issue a bootstrap: {calls:?}"
     );
-    let plist_path = tmp
-        .path()
-        .join("Library")
-        .join("LaunchAgents")
-        .join(format!("{PLIST_LABEL}.plist"));
+    let agents_dir = tmp.path().join("Library").join("LaunchAgents");
+    let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
     assert!(
         !plist_path.exists(),
         "a refusal must change nothing on disk; found {}",
         plist_path.display()
+    );
+    // A refusal must not even leave the directories behind (round-2 LOW): the
+    // `create_dir_all` calls run after the gate, not before it.
+    assert!(
+        !agents_dir.exists(),
+        "a refusal must not create the LaunchAgents dir; found {}",
+        agents_dir.display()
+    );
+    assert!(
+        !tmp.path().join(".trusty-mpm").join("logs").exists(),
+        "a refusal must not create the log dir"
     );
 }

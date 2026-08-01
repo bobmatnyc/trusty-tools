@@ -422,19 +422,44 @@ fn empty_lsof_output_on_an_occupied_port_is_unknown_not_free() {
 /// free port has to stay `Free`, or no install could ever proceed. This is the
 /// other half of the invariant, and it is what stops the fix above from being
 /// "return Unknown always".
-/// What: binds an OS-assigned port to learn a number, releases it, then asserts
-/// an empty `lsof` result classifies as `Free`.
+/// What: acquires a fresh ephemeral port, releases it, and probes — retrying
+/// with a NEW port if a concurrent test grabbed that one in the gap.
+///
+/// On the retry loop: "release a port, then assert it is free" is inherently
+/// racy in a parallel test binary — another test can bind the released port in
+/// between (measured at 2 reds in 33 runs for the single-shot version). Rather
+/// than pick a fixed port (which trades a race for a false red on any developer
+/// machine already running something there), each attempt uses an independent
+/// OS-assigned port. A real regression — `Free` never being returned — still
+/// fails, because it fails on every one of the attempts; only the race is
+/// absorbed, since N independent fresh ports all being instantly re-taken does
+/// not happen. Load-induced red degrades the gate itself: a suite that goes red
+/// under load trains people to re-run until green, which is how a real failure
+/// gets buried.
 /// Test: This is the test.
 #[test]
 fn empty_lsof_output_on_a_free_port_is_free() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to learn a free port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
+    /// Independent ports to try before declaring a genuine failure.
+    const ATTEMPTS: usize = 25;
 
-    assert_eq!(
-        probe_port_holder_from(port, Ok(("", "exit status: 1"))),
-        PortHolder::Free,
-        "a released port must classify as Free or no install could ever proceed"
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind to learn a free port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let holder = probe_port_holder_from(port, Ok(("", "exit status: 1")));
+        if holder == PortHolder::Free {
+            return;
+        }
+        last = Some((port, holder));
+    }
+
+    panic!(
+        "a released port never classified as Free across {ATTEMPTS} independent ports — \
+         `port_is_bindable` is not returning Free for a bindable port, so no install \
+         could ever proceed. Last observation: {last:?}"
     );
 }
 
@@ -536,25 +561,58 @@ fn resolve_guard_ports_falls_back_to_the_documented_table() {
 /// a fresh machine is a condition it survives by taking the next port. The
 /// guard must therefore be handed the whole range, not just the default, or it
 /// hard-refuses an install that would have worked.
-/// What: with no recorded address, a walking member resolves to every port in
-/// its range, in order, with the documented default first.
+/// What: STAGES the fresh-machine state explicitly — an empty data dir, so
+/// `read_daemon_addr` genuinely finds nothing — then asserts a walking member
+/// resolves to every port in its range, in order, with the default first.
+///
+/// Takes `ENV_TEST_LOCK` for its whole body. `TRUSTY_DATA_DIR_OVERRIDE` is
+/// process-global and sibling tests flip it, so reading `read_daemon_addr`
+/// without the lock races them. The first version of this test also depended on
+/// the AMBIENT host state (it returned early when a real trusty-memory
+/// `http_addr` existed), which meant it silently self-skipped on a developer
+/// machine and only ever ran on CI — green where it could not fail, absent
+/// where it could. Staging the state removes both problems: it now asserts the
+/// same thing everywhere.
 /// Test: This is the test.
 #[test]
 fn resolve_guard_ports_returns_the_whole_walk_range_for_a_fresh_walker() {
-    // Only meaningful when this host has no recorded trusty-memory address; if
-    // one exists, the recorded-port branch is authoritative and is covered by
-    // `resolve_guard_ports_prefers_a_recorded_address`.
-    if trusty_common::read_daemon_addr("trusty-memory")
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return;
-    }
+    use crate::commands::test_support as ts;
+
+    let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = ts::stub_empty_data_dir("port-guard-walk-range");
+
     let ports = resolve_guard_ports("trusty-memory");
+
+    ts::clear_data_dir_override(&dir);
+
     assert_eq!(ports.len(), 10, "ports: {ports:?}");
     assert_eq!(ports.first(), Some(&7070));
     assert_eq!(ports.last(), Some(&7079));
+}
+
+/// Why: the other half of the resolution rule — a member that HAS recorded an
+/// address is checked exactly there, never across a walk range. This is what
+/// keeps the #4230 case strict: a daemon with a known bound port gets a
+/// single-port check, and the range relaxation cannot apply to it.
+/// What: with a planted `http_addr`, a walking member resolves to exactly the
+/// recorded port.
+/// Test: This is the test.
+#[test]
+fn resolve_guard_ports_prefers_a_recorded_address_over_the_walk_range() {
+    use crate::commands::test_support as ts;
+
+    let _guard = ts::ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = ts::stub_data_dir("trusty-memory", "127.0.0.1:7073");
+
+    let ports = resolve_guard_ports("trusty-memory");
+
+    ts::clear_data_dir_override(&dir);
+
+    assert_eq!(
+        ports,
+        vec![7073],
+        "a recorded address is authoritative — no walk range applies"
+    );
 }
 
 /// Why: the walk table decides whether a busy default port is survivable or
