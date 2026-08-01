@@ -59,6 +59,20 @@ pub struct AgentStoreBinding {
     /// Absent = the agent binds no palace (a document-only store).
     #[serde(default)]
     pub palace: Option<String>,
+    /// #4325: where this store's tree lives INSIDE the owning assistant
+    /// instance's home directory, relative to that home. Absent = the home's
+    /// standard `okg/` directory.
+    ///
+    /// Why: before #4325 a binding could name a tree URI but not a per-assistant
+    /// ROOT, so `okg://<agent>` could only ever resolve into the SHARED
+    /// `<knowledge_dir>/<slug>` pool — the data-model gap #3890 recorded. This
+    /// field is what makes "each instance carries its own OKG store" a path
+    /// rather than a naming convention.
+    /// What: a RELATIVE, traversal-free path. It is resolved (and confined)
+    /// by [`crate::assistants::AssistantHome::store_root`], never here — this
+    /// module stays pure serde data.
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 impl AgentStoreBinding {
@@ -98,10 +112,11 @@ impl AgentStoreBinding {
     /// (not an error type) keeps the reason renderable straight into the GUI
     /// card without a second mapping layer.
     /// What: `Some(reason)` for the first problem found, `None` when the
-    /// binding is usable. Checks: non-blank `name`, non-blank `index`, and
-    /// an `okg://` scheme on any explicitly declared `tree`.
+    /// binding is usable. Checks: non-blank `name`, non-blank `index`, an
+    /// `okg://` scheme on any explicitly declared `tree`, and (#4325) a
+    /// `root` that stays inside the assistant's own home.
     /// Test: `validate_flags_blank_name`, `validate_flags_bad_tree_scheme`,
-    /// `validate_accepts_good_binding`.
+    /// `validate_accepts_good_binding`, `validate_flags_escaping_root`.
     pub fn validate(&self) -> Option<String> {
         if self.name.trim().is_empty() {
             return Some("store binding has a blank `name`".to_string());
@@ -120,8 +135,45 @@ impl AgentStoreBinding {
                 self.name
             ));
         }
+        // #4325: a root that is absolute or climbs out with `..` would let one
+        // instance's store name another instance's directory.
+        if let Some(root) = self
+            .root
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            && !is_confined_relative(root)
+        {
+            return Some(format!(
+                "store `{}` declares root `{root}`, which must be relative to the assistant's \
+                 home directory and may not contain `..`",
+                self.name
+            ));
+        }
         None
     }
+}
+
+/// Whether a declared `[[stores]] root` stays inside the assistant's home.
+///
+/// Why: the same rule [`crate::assistants::AssistantHome::store_root`]
+/// enforces when it RESOLVES the path, stated here so a bad value is REPORTED
+/// as a store problem (the module's fail-soft posture) instead of only failing
+/// at resolution time.
+/// What: `true` for a non-empty relative path made of ordinary components;
+/// `false` for anything absolute, prefixed, or containing `..`.
+/// Test: `validate_flags_escaping_root`.
+fn is_confined_relative(root: &str) -> bool {
+    use std::path::{Component, Path};
+    let mut had_normal = false;
+    for component in Path::new(root).components() {
+        match component {
+            Component::Normal(_) => had_normal = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    had_normal
 }
 
 /// The `stores` field of `agent.toml`, in either accepted spelling.
@@ -333,6 +385,40 @@ palace = "owner-profile"
         let b: AgentStoreBinding =
             toml::from_str("name = \"kb\"\ntree = \"okg://izzie\"\nindex = \"bob-kb\"").unwrap();
         assert_eq!(b.validate(), None);
+    }
+
+    /// #4325: the per-assistant `root` must stay inside the instance's own
+    /// home — an absolute or `..`-bearing value would name another instance's
+    /// store.
+    #[test]
+    fn validate_flags_escaping_root() {
+        for bad in [
+            "../cto-assistant/okg",
+            "/tmp/okg",
+            "okg/../../elsewhere",
+            ".",
+        ] {
+            let b: AgentStoreBinding =
+                toml::from_str(&format!("name = \"kb\"\nroot = \"{bad}\"")).unwrap();
+            let reason = b
+                .validate()
+                .unwrap_or_else(|| panic!("`{bad}` should be flagged"));
+            assert!(
+                reason.contains("relative to the assistant"),
+                "reason was: {reason}"
+            );
+        }
+        for good in ["okg", "okg/personal", "./okg"] {
+            let b: AgentStoreBinding =
+                toml::from_str(&format!("name = \"kb\"\nroot = \"{good}\"")).unwrap();
+            assert_eq!(b.validate(), None, "`{good}` should be accepted");
+        }
+        // Absent and blank are both "use the default", not a problem.
+        let absent: AgentStoreBinding = toml::from_str("name = \"kb\"").unwrap();
+        assert_eq!(absent.root, None);
+        assert_eq!(absent.validate(), None);
+        let blank: AgentStoreBinding = toml::from_str("name = \"kb\"\nroot = \"  \"").unwrap();
+        assert_eq!(blank.validate(), None);
     }
 
     #[test]

@@ -66,6 +66,9 @@ pub mod adapters {
 
 pub mod agents;
 pub mod api;
+// #4325: per-assistant home directory + OKG store model — "Assistant" is a
+// TYPE, `izzie`/`cto-assistant` are INSTANCES of it, each with its own home.
+pub mod assistants;
 pub mod ast;
 pub mod build_info;
 pub mod bus;
