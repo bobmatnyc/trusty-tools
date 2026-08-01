@@ -30,6 +30,10 @@ mod session_connect;
 mod tests;
 mod types;
 
+// #4488: re-exported so `connectors::tm` binds the SAME provisioning bound as
+// `DaemonClient::spawn_managed_session` rather than keeping its own copy.
+pub(crate) use config::PROVISION_REQUEST_TIMEOUT;
+
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
     CoordinatorSession, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,

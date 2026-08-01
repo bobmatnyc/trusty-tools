@@ -32,7 +32,8 @@ use trusty_agents_common::connectors::{
 
 use crate::client::{
     ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputResponse, ManagedSessionSummary,
-    ManagedSpawnResponse, http_client::default_client,
+    ManagedSpawnResponse,
+    http_client::{PROVISION_REQUEST_TIMEOUT, default_client},
 };
 use crate::core::discovery::resolve_daemon_url;
 
@@ -69,8 +70,27 @@ impl TmConnector {
     /// Test: every `tm_tests.rs` test builds one of these against an
     /// in-process test daemon's `http://127.0.0.1:<random port>`.
     pub fn with_daemon_url(daemon_url: impl Into<String>) -> Self {
+        Self::with_client(default_client(), daemon_url)
+    }
+
+    /// Build a connector targeting `daemon_url`, REUSING an existing
+    /// `reqwest::Client`.
+    ///
+    /// Why: mirrors [`crate::client::DaemonClient::with_client`] — a caller
+    /// that already configured a client (custom bounds, proxy, pool) must not
+    /// have it silently discarded. It is also the injection seam
+    /// `tm_tests::create_session_outlives_the_default_request_timeout` uses to
+    /// pin, in milliseconds rather than minutes, that
+    /// [`Self::create_session`]'s per-request provisioning override actually
+    /// beats the client-level default (#4488).
+    /// What: stores the caller's client verbatim. Cloning a
+    /// `reqwest::Client` is cheap — it is an `Arc` internally, so the pool and
+    /// settings are shared.
+    /// Test: `tm_tests::create_session_outlives_the_default_request_timeout`,
+    /// `tm_tests::list_sessions_is_bound_by_the_client_level_timeout`.
+    pub fn with_client(http: reqwest::Client, daemon_url: impl Into<String>) -> Self {
         Self {
-            http: default_client(),
+            http,
             daemon_url: daemon_url.into(),
         }
     }
@@ -144,8 +164,24 @@ impl WorkstreamConnector for TmConnector {
     /// fields; `agent` has no equivalent on tm's spawn request and is
     /// silently ignored (see [`CreateSessionReq`]'s docs on why that's
     /// intentional, not a data-loss bug).
+    ///
+    /// The call carries an explicit [`PROVISION_REQUEST_TIMEOUT`] per-request
+    /// override (#4488). The daemon runs `WorkspaceProvisioner::provision`
+    /// SYNCHRONOUSLY inside this request, so its latency is a git clone plus a
+    /// worktree add plus an agent deploy plus a harness spawn — minutes in the
+    /// worst case, and ~9.5s even for this crate's own hermetic
+    /// `file://`-clone test at load 15. The client-level
+    /// `DEFAULT_REQUEST_TIMEOUT` this connector's default client is built with
+    /// is 10s, sized for interactive point reads; applying it here made every
+    /// caller's success contingent on the machine being idle, aborting the
+    /// client mid-provision (surfacing as [`ConnectorError::Transport`]) while
+    /// the daemon kept working and orphaned the session. This is the same
+    /// override, for the same reason, that
+    /// [`crate::client::DaemonClient::spawn_managed_session`] already applies
+    /// to this identical route.
     /// Test: `tm_tests::create_session_full_lifecycle`,
-    /// `tm_tests::create_session_wrong_backend_params_is_invalid_request`.
+    /// `tm_tests::create_session_wrong_backend_params_is_invalid_request`,
+    /// `tm_tests::create_session_outlives_the_default_request_timeout`.
     async fn create_session(&self, req: CreateSessionReq) -> Result<SessionInfo, ConnectorError> {
         let CreateSessionReq {
             task,
@@ -176,10 +212,14 @@ impl WorkstreamConnector for TmConnector {
             "ephemeral": ephemeral,
         });
         let url = format!("{}/api/v1/sessions/managed", self.daemon_url);
+        // #4488: this route provisions SYNCHRONOUSLY (git clone + worktree add
+        // + agent deploy + harness spawn), so it must use the provisioning
+        // bound, not the 10s interactive default the client was built with.
         let resp = self
             .http
             .post(&url)
             .json(&body)
+            .timeout(PROVISION_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(transport_err)?;
