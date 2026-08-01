@@ -186,7 +186,9 @@ async fn build_router_at(
     let workstreams = Arc::new(Mutex::new(workstream_store));
 
     let mut router = Router::new();
-    methods::register(&mut router);
+    // #4512: `health` publishes the binding, so a client that auto-attaches
+    // to a daemon it did not start can tell which project it would drive.
+    methods::register(&mut router, binding.clone());
     crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::fs_browse::protocol::register(&mut router);
     crate::agents::protocol::register(
@@ -251,8 +253,18 @@ pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
         port,
         "tcode serve --http: starting"
     );
+    // #4512: `GET /health` reports this binding, so keep a handle before
+    // `build_router` consumes it.
+    let published_binding = Arc::new(binding.clone());
     let (router, sessions, workstreams) = build_router(binding).await?;
-    http::run_http(router, sessions.clone(), workstreams, port).await?;
+    http::run_http(
+        router,
+        sessions.clone(),
+        workstreams,
+        port,
+        published_binding,
+    )
+    .await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --http: stopped");
     Ok(())

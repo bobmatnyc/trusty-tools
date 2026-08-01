@@ -9,25 +9,44 @@
 //! point and nothing more: it owns no REPL behaviour, no rendering, and no
 //! daemon logic, matching `crate::cli`'s "translate CLI args into a call,
 //! decisions belong elsewhere" contract.
-//! What: [`run`] resolves the optional project path, discovers a LIVE daemon
-//! through `tui_client::discovery` (`TCODE_DAEMON_URL` -> the `http_addr`
-//! discovery file -> a `GET /health` liveness ping), and hands the resulting
-//! `CodeEngine` to `trusty_tui::run::run` together with the shared
-//! `ReplApp` model, its reducer (`trusty_tui::app::apply`), and its renderer
-//! (`trusty_tui::layout::draw`). MVP assumes an ALREADY-RUNNING
-//! `tcode serve --http`: auto-spawning one is explicitly deferred (DOC-50
-//! §4.1 MVP scope), so a missing daemon surfaces `DiscoveryError`'s
-//! actionable message and exits rather than starting anything. Discovery
-//! deliberately runs BEFORE `trusty_tui::run::run` enters the alternate
-//! screen, so that message lands on a normal terminal instead of flashing
-//! behind a TUI that is about to tear itself down.
+//! What: [`run`] resolves the optional project path, obtains a daemon URL to
+//! drive from `super::daemon_autospawn`, and hands a `CodeEngine` pointed at
+//! it to `trusty_tui::run::run` together with the shared `ReplApp` model,
+//! its reducer (`trusty_tui::app::apply`), and its renderer
+//! (`trusty_tui::layout::draw`).
+//!
+//! `tcode tui` AUTO-SPAWNS its daemon (#4512, reversing DOC-50 §4.1's
+//! deferral): discovery is unchanged (`TCODE_DAEMON_URL` -> the `http_addr`
+//! discovery file -> a `GET /health` liveness ping), but a missing or stale
+//! discovery file now starts `tcode serve --http` instead of exiting with an
+//! actionable message.
+//!
+//! **Quitting the TUI never stops the daemon** — not even one this command
+//! started. The daemon owns PM lifecycle, agent dispatch, and agent
+//! communication, and a TUI is one attached client among possibly several,
+//! so a client exit must not end live work (owner directive, 2026-08-01).
+//! There is correspondingly NO teardown step here. An
+//! explicitly-set-but-unreachable `TCODE_DAEMON_URL` still errors rather
+//! than spawning, since starting a daemon at a different address would
+//! ignore that instruction, and a daemon bound to a DIFFERENT project than
+//! this TUI is refused rather than attached to. See
+//! `super::daemon_autospawn` for the whole policy — none of it lives here.
+//!
+//! Daemon resolution deliberately runs BEFORE `trusty_tui::run::run` enters
+//! the alternate screen, so the startup spinner and any failure land on a
+//! normal terminal instead of flashing behind a TUI that is about to tear
+//! itself down.
 //! Test: `tui_tests::*` covers the pure project-resolution helper;
+//! `super::daemon_autospawn`'s tests cover every attach/spawn/binding-check
+//! branch against real child processes;
 //! `tests/cli_e2e.rs::{tui_subcommand_is_listed_in_help,
-//! tui_without_a_reachable_daemon_errors_cleanly}` cover the CLI surface and
-//! the no-daemon path against the REAL binary. The launch path past
-//! discovery needs a real TTY (`trusty_tui::TerminalGuard::enter`) plus a
-//! live daemon, so it is verified by running `tcode tui` by hand; the engine
-//! half is already covered end-to-end by `tests/tui_client_engine.rs`.
+//! tui_auto_spawns_a_daemon_that_outlives_it,
+//! tui_refuses_to_spawn_for_an_unreachable_explicit_daemon_url,
+//! tui_refuses_a_daemon_bound_to_a_different_project}` cover the CLI surface
+//! against the REAL binary. The launch path past daemon resolution needs a
+//! real TTY (`trusty_tui::TerminalGuard::enter`), so it is verified by
+//! running `tcode tui` by hand; the engine half is already covered
+//! end-to-end by `tests/tui_client_engine.rs`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,22 +55,30 @@ use anyhow::{Context, Result};
 use trusty_code::tui_client::CodeEngine;
 use trusty_tui::ReplApp;
 
+use super::daemon_autospawn;
+
 /// Product label for the banner identity line and the `[tcode] ` status
 /// prefix `ReplApp::new` derives from it.
 const PRODUCT_LABEL: &str = "tcode";
 
-/// Launch the TUI REPL, returning once the user quits (or immediately with
-/// an actionable error if no live daemon can be found).
+/// Launch the TUI REPL, returning once the user quits — starting a daemon
+/// first if none is running, and leaving it running on the way out.
 ///
 /// Why/What/Test: see the module docs — this function IS the module.
 /// `project` is `Option` because a projectless session is a first-class
-/// state (`session.create` without a `project`), not a degraded one.
+/// state (`session.create` without a `project`), not a degraded one; it is
+/// forwarded to a spawned daemon so the daemon's binding matches the TUI's,
+/// and checked against a pre-existing daemon's reported binding.
 pub async fn run(project: Option<PathBuf>) -> Result<()> {
     let project = resolve_project(project)?;
-    // #4424: the first production construction of `CodeEngine` — before this
-    // line the whole TUI stack was reachable only from tests.
-    let engine = CodeEngine::discover(project).await?;
+    let http = trusty_code::tui_client::build_http_client();
+    // #4512: attach to a running daemon serving this project, or start one —
+    // replaces #4424's "exit and tell the user to start one". Nothing is
+    // torn down afterwards: the daemon outlives every client (module docs).
+    let daemon_url = daemon_autospawn::ensure_daemon(&http, project.as_deref()).await?;
+    let engine = CodeEngine::with_daemon_url(http, daemon_url, project);
     let app = ReplApp::new(PRODUCT_LABEL, user_label());
+
     trusty_tui::run::run(
         Arc::new(engine),
         app,
