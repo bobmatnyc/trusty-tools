@@ -18,6 +18,8 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::daemon::state::DaemonState;
+use crate::session_manager::worktree_reclaim::ReclaimMode;
+use crate::session_manager::worktree_reclaim_sweep::reclaim_merged_pr_worktrees;
 use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
 /// Request body for POST /api/v1/sessions/managed/prune (#1508).
@@ -82,6 +84,15 @@ pub struct PruneWorktreesRequest {
     /// (#4091). Defaults to false — the fail-safe default.
     #[serde(default)]
     pub discard_dirty: bool,
+    /// When true, ALSO run the merged-pull-request reclaim pass (#2919).
+    ///
+    /// Defaults to false. This is the ONLY way to reach
+    /// [`ReclaimMode::Remove`]; no timer, hook, or daemon sweep sets it, so
+    /// merged-PR reclamation is never unattended. It respects `dry_run` and is
+    /// independent of `discard_dirty` — the merged-PR pass never destroys
+    /// unsaved work under any combination of flags.
+    #[serde(default)]
+    pub merged_prs: bool,
 }
 
 fn default_dry_run() -> bool {
@@ -172,11 +183,75 @@ pub async fn prune_worktrees_route(
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            // #2919: the merged-PR pass runs only on the explicit opt-in, and
+            // only ever in Report mode under `dry_run`. It re-reads the
+            // in-use set itself via `in_use_workspace_paths` above, which was
+            // captured moments ago from the same unfiltered store read.
+            let merged = if req.merged_prs {
+                let mode = if req.dry_run {
+                    ReclaimMode::Report
+                } else {
+                    ReclaimMode::Remove
+                };
+                let root = repos_root.clone();
+                // #2919: a HANDLE to the manager, not a captured path list. The
+                // delete loop calls this closure per candidate and needs the
+                // CURRENT set, not one snapshotted before a survey that takes
+                // minutes. `None` (the store could not be read) refuses.
+                let mgr_for_probe = state.session_manager().await.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let in_use_now = move || -> Option<Vec<std::path::PathBuf>> {
+                        // `None` means "could not be determined", which REFUSES
+                        // the delete. `SessionManager::list` is itself
+                        // infallible, so the only way to fail here is to have no
+                        // runtime to block on — which happens if this closure is
+                        // ever invoked off the blocking pool. `Handle::current`
+                        // would PANIC in that case, unwinding through a delete
+                        // loop mid-sweep; `try_current` turns it into the
+                        // fail-closed refusal the contract already specifies.
+                        let handle = tokio::runtime::Handle::try_current().ok()?;
+                        // Blocking on the runtime is legal from a blocking-pool
+                        // thread (not a runtime worker), and is the only way to
+                        // re-read an async store from the synchronous loop.
+                        Some(
+                            handle
+                                .block_on(mgr_for_probe.list())
+                                .into_iter()
+                                .filter_map(|r| r.workspace_path)
+                                .collect(),
+                        )
+                    };
+                    reclaim_merged_pr_worktrees(&root, &in_use_now, mode)
+                })
+                .await
+                {
+                    Ok(o) => serde_json::json!({
+                        "removed": o.removed,
+                        "removed_bytes": o.removed_bytes,
+                        "refused_at_recheck": o.refused_at_recheck,
+                        "removal_failed": o.removal_failed,
+                        "reclaimable": o.survey.reclaimable,
+                        "reclaimable_measured": o.survey.reclaimable_measured,
+                        "reclaimable_bytes": o.survey.reclaimable_bytes,
+                        "total_bytes": o.survey.total_bytes,
+                        "pr_state_unknown": o.survey.pr_state_unknown,
+                    }),
+                    Err(e) => {
+                        // A panicked pass reclaimed nothing; say so rather than
+                        // omitting the key, which would read as "not requested".
+                        warn!("prune-worktrees route: merged-PR pass panicked: {e}");
+                        serde_json::json!({ "error": e.to_string() })
+                    }
+                }
+            } else {
+                serde_json::Value::Null
+            };
             Json(serde_json::json!({
                 "dry_run": req.dry_run,
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
                 "skipped_dirty": outcome.skipped_dirty,
+                "merged_prs": merged,
             }))
             .into_response()
         }
@@ -242,10 +317,19 @@ mod tests {
             "an unspecified prune must NEVER discard uncommitted work"
         );
 
+        // #2919: the same guarantee for the merged-PR pass. An omitted field —
+        // every pre-#2919 caller — must never enable a GitHub-state-driven
+        // deletion.
+        assert!(
+            !req.merged_prs,
+            "an unspecified prune must NEVER run the merged-PR reclaim pass"
+        );
+
         let explicit: PruneWorktreesRequest =
-            serde_json::from_str(r#"{"dry_run":false,"discard_dirty":true}"#)
+            serde_json::from_str(r#"{"dry_run":false,"discard_dirty":true,"merged_prs":true}"#)
                 .expect("explicit body parses");
         assert!(explicit.discard_dirty, "the opt-in must round-trip");
+        assert!(explicit.merged_prs, "the #2919 opt-in must round-trip");
     }
 
     /// Read a route response's JSON body.
@@ -375,6 +459,7 @@ mod tests {
                 Json(PruneWorktreesRequest {
                     dry_run: true,
                     discard_dirty: false,
+                    merged_prs: false,
                 }),
             )
             .await

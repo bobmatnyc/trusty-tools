@@ -1176,6 +1176,7 @@ async fn doctor_endpoint_returns_report() {
         "memory",
         "search",
         "worktrees",
+        "worktree_disk",
         "gh_account",
         "oauth_token",
         "hooks_contamination",
