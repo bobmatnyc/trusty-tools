@@ -40,9 +40,20 @@
 //!    [`TierOwnership`], a three-state value, never a bool: collapsing
 //!    "untracked" and "tracked as the operator's" into one flag throws away the
 //!    only positive PROOF that a file is not tm's, and a name collision then
-//!    condemns it. [`crate::agents::deployer::retract_framework_agents`] never
-//!    touches an untracked or user-owned file; this module matches that, so
-//!    #4448 cannot quarantine what the deployer would have preserved.
+//!    condemns it. Parity with
+//!    [`crate::agents::deployer::retract_framework_agents`] is HALF, not whole,
+//!    and the missing half is load-bearing for #4448. A USER-OWNED file is
+//!    preserved by both: retraction skips it, and [`classify_tier_resident`]
+//!    returns [`TierResidentClass::Custom`] for it BEFORE any name is compared.
+//!    An UNTRACKED file is preserved by retraction — which can only see ledger
+//!    entries — but is deliberately NOT preserved here:
+//!    `classify_tier_resident("qa", Untracked, {"qa"})` is
+//!    [`TierResidentClass::ShadowsBundled`], pinned by the
+//!    `classify_bundled_name_shadows` test. That asymmetry IS the feature — an
+//!    untracked copy on a bundled name is exactly what retraction cannot reach
+//!    and what #4448 exists to quarantine. Do not read this invariant as a
+//!    proof that untracked files are safe from the sweep; only the user-owned
+//!    ledger entry is such a proof.
 //!
 //! [`TierResidentClass::Custom`] is the exclusion seam for everything else.
 //! Project-tier agents tm never authored are legitimate — hand-placed today,
