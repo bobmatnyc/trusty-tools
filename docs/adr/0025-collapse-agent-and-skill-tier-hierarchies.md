@@ -7,15 +7,6 @@
 - **Decision Drivers:** three unreconciled write paths for the same asset classes, the #4408 silent-shadow incident, migration data-loss risk, precedence resolved by directory order rather than a declared source list
 - **Supersedes / Superseded by:** Supersedes #387 (closed 2026-08-01 as superseded by this ADR)
 
-> **DRAFT NOTE (2026-08-01):** The owner reversed the (B) ruling this section
-> currently records ("one global canonical agent deploy target, no
-> project-scoped agents"). Replacement ruling (C): agents and skills split
-> into **universal** (global, everyone gets them — the (B) behaviour below)
-> and **scaffolded** (deployed into a per-project store selected by detected
-> stack). The Decision section below is PENDING REDESIGN around this split
-> and must not be treated as final. Context, Consequences-so-far, and Related
-> Decisions vetting are unaffected and stand as written.
-
 ## Context
 
 Assets deploy to **three unconnected destinations**, written by three different callers, with no single resolver:
@@ -36,30 +27,62 @@ Known tracked gap, recorded not re-opened: the project-local deploy is one-shot 
 
 ## Decision
 
-The owner ruled Option (B) on 2026-08-01:
+The owner ruled on 2026-08-01. Final ruling on the last open question, verbatim: "agreed on manifest.toml" — extend the existing `manifest.toml`, do NOT add a second file format.
 
-1. **One global canonical agent deploy target. NO project-scoped agents.** #4409 stands untouched; `agent_deploy_dir_is_not_project_local_for_managed_workspace` remains valid and must not be weakened. Projects customize agents ONLY through `manifest.toml` selection and user-tier agents. That a project cannot ship its own agent is a deliberate accepted cost. Per-project canonical agent directories are explicitly deferred to a follow-on ADR if they prove necessary.
-2. Skills are already per-worktree scoped via `for_managed_workspace`; no change needed there.
+1. **Classification is declared per project, in `manifest.toml`.** Each project carries `[agents]`/`[skills]` `include`/`exclude` naming the assets it uses. The classification is a property of the PROJECT, not of the catalog, so it lives with the project — this supersedes any central table. #4409 stands untouched; `agent_deploy_dir_is_not_project_local_for_managed_workspace` remains valid and must not be weakened. A project cannot ship its own agent FILE — it can only select, by name, from the catalog `manifest.toml` resolves against. Per-project canonical agent directories (a project authoring its own agent content) are explicitly deferred to a follow-on ADR if they prove necessary. Skills stay per-worktree scoped via `for_managed_workspace`, unchanged.
+
+   **1a. Why `manifest.toml` and not claude-mpm's file.** claude-mpm's `agents-manifest.yaml` is a three-field format stamp (`repo_format_version`, `min_cli_version`, `migration_notes`) living in the agent repository; it performs no selection. claude-mpm's real selection lives in per-project `.claude-mpm/configuration.yaml`, whose `agent_deployment` and `agent_sync` blocks `manifest.toml` already mirrors. The full mapping: `excluded_agents` → `[agents] exclude`; skill selection → `[skills] include/exclude`; `filter_non_mpm_agents` + `mpm_author_patterns` → `Origin::is_framework_owned`, which is STRICTLY STRONGER because it reads positive provenance from the deploy ledger rather than pattern-matching an author string a user can forge or omit.
+
+   **1b. The one gap, and the schema change that closes it.** `ContentSource` (`Bundled|Catalog`) cannot express claude-mpm's multi-source numeric priority. Replace it with a source list carrying `id`, `path`, `priority`, `enabled`. Additive and contained: a one-entry list reproduces today's behaviour exactly.
+
+2. **The manifest is created once, on request, by `tm-agent-manager`.** When a project has no `manifest.toml`, tm does not silently invent one — it requests creation. `tm-agent-manager` runs stack detection, proposes an agent and skill set, and writes the manifest. It is the SAME component that refuses bundled-name collisions at creation time (#4545) and the same mechanism proposed by #4528. #4528 becomes the implementation vehicle; #4545 folds into it as its collision-refusal requirement — one component, not three designs.
+
 3. Assets come from declared sources with explicit numeric priority, declared in `<root>/agents-sources.toml`, lower wins: project (10), user (30), catalog (50), bundled (90).
+
 4. Precedence is resolved by pure planners with DIFFERENT identity keys by design: agents key on `agents::tier_audit::agent_identity` (frontmatter `name:`, else stem); skills key on the stem (`skills::deployer::skill_stem`). Adding frontmatter-name resolution to skills is explicitly rejected — it would import the agent hazard into a subsystem that does not have it. Agent identity is decoupled from the filename, so a shadow is invisible without reading every file; skill identity IS the filename, so a shadow is visible to `ls`. That is why #4408 happened to agents and has no skill counterpart.
+
 5. A priority tie is a HARD ERROR — reported by `tm doctor`, affected identities refuse to deploy, existing files untouched. Resolution by map-iteration order is #4408 with extra steps.
+
 6. Every override is visible on four surfaces: deploy-time log naming winner/loser/priority; `source` and `overrides` fields on the ledger entries; a `tm doctor` override table; an injected provenance comment in the deployed file.
+
 7. A reserved-name table guards harness built-ins for skills. The existing `/mcp` guard (#2186) generalises from a hard-coded substring to a table checked at deploy AND creation time. The current `stem.to_lowercase().contains("mcp")` is replaced by exact-stem matching — substring matching rejects legitimate names.
+
 8. `Origin::Project` records provenance and MUST NOT satisfy `Origin::is_framework_owned` — that predicate gates `retract_framework_agents`, which runs on every session launch.
-9. `tm-agent-manager` refuses at creation time to produce an agent whose name collides with a bundled one (tracked as #4545).
-10. Migration is report-first and never deletes: first run audits read-only, prints a plan, stops. `tm assets migrate` applies by copy-then-quarantine (rename with undo receipt, per #4448), never deletion. A ledger-proven `TierOwnership::UserOwned` asset is never touched automatically. A corrupt ledger refuses the operation. Migration covers three destinations and states for each whether it is swept, reconciled, or untouched: `~/.claude/skills` UNTOUCHED (and see clause 11 — the write path into it is separately removed, which is not part of the migration); `$CLAUDE_CONFIG_DIR/*` reconciled; `<worktree>/.claude/agents` swept (already is).
-11. **trusty-mpm neither writes to nor reads from `~/.claude/skills`.**
+
+9. **Startup reconciliation extends `retract_framework_agents`; it is not a new sweep.** ⚠️ **Highest-risk clause in this ADR.** At session launch, deployed agents are compared against the manifest. A deployed agent absent from the manifest is removed IF AND ONLY IF `Origin::is_framework_owned` is true for its ledger entry. A non-framework entry is left in place as user-owned. An UNTRACKED file is never touched. This reuses the existing predicate and select-seam verbatim, with the manifest supplying the predicate. It is the only clause that deletes files as a routine part of every session launch, and its blast radius is every agent on the machine if the manifest is misread. A missing, empty, or unparseable manifest MUST fail closed — reconcile nothing.
+
+10. **Stack detection runs ONCE, at manifest creation — not per launch.** The manifest is stable by design and changes only on explicit user or PM request. Detection reuses `language_agent_scope`'s marker probes (`core/manifest/project_lang.rs`); a skills equivalent of that module is on the critical path, not a follow-on. Auto-re-detection at launch is explicitly REJECTED — a manifest that silently rewrites itself is not a declaration.
+
+11. **Drift is reported, never auto-corrected.** When detected markers disagree with the manifest, `tm doctor` reports the discrepancy and names the command to update it. This reporting is the compensating control replacing per-launch re-detection; without it, clause 10 has no safety net. Accepted residual, stated explicitly: between a stack change and someone running `tm doctor`, the project is mis-scaffolded and nothing says so at launch.
+
+12. **Delegation to an unresolvable agent must fail LOUDLY.** A manifest that omits an agent is now the primary way an agent goes missing, and omission is the manifest's normal operating mode rather than an error. This converts "every agent always exists" from an invariant into an assumption; the loud-failure check is what replaces it. No such check was found in the delegation path today — current behaviour on an unresolvable name is UNVERIFIED (see Consequences).
+
+13. `tm-agent-manager` refuses at creation time to produce an agent whose name collides with a bundled one (tracked as #4545, folded into #4528 per clause 2).
+
+14. Migration is report-first and never deletes: first run audits read-only, prints a plan, stops. `tm assets migrate` applies by copy-then-quarantine (rename with undo receipt, per #4448), never deletion. A ledger-proven `TierOwnership::UserOwned` asset is never touched automatically. A corrupt ledger refuses the operation. Migration covers three destinations and states for each whether it is swept, reconciled, or untouched: `~/.claude/skills` UNTOUCHED (and see clause 15 — the write path into it is separately removed, which is not part of the migration); `$CLAUDE_CONFIG_DIR/*` reconciled; `<worktree>/.claude/agents` swept (already is).
+
+15. **trusty-mpm neither writes to nor reads from `~/.claude/skills`.**
     - **The write path is removed.** `tm install` currently deploys bundled skills there by building `FrameworkPaths::default()` and targeting `claude_skills_dir()` → `dirs::home_dir()/.claude/skills` (`bin/tm/commands/install.rs:162-172`, `core/paths.rs:108-135`). That write is the defect, not merely an inconvenience: it puts framework assets into the operator's personal Claude Code directory, which no trusty-mpm session ever reads. trusty-mpm has its own configuration directory and that is the only place framework assets belong.
     - **The directory itself is never swept, never quarantined, and never reported as misplaced.** Its 293 entries are the operator's own personal skills dating to April. Reporting them as misplaced invites someone to write the cleanup. Untouched means untouched.
     - Note the asymmetry that makes this urgent: the agent path has a structural guard binding retraction to the workspace path (`session_launch/mod.rs:589-598`) precisely so it can never reach the operator's real `~/.claude`. The skill path has no equivalent, and one must exist before any skill sweep ships.
     - **Historical writes stay.** trusty-mpm has already written bundled skills into `~/.claude/skills` on existing machines, intermixed with the ~293 personal entries. Those tm-written entries are not reconciled, cleaned up, or swept — not now, not later. They are inert (nothing reads them) and leaving them costs nothing. The directory is the operator's personal directory; trusty-mpm's relationship to it is simply: don't use it.
-12. Selection remains a separate complementary layer: `manifest.toml`'s `[agents]`/`[skills]` include/exclude decides WHICH names deploy; this ADR decides WHICH COPY wins. Selection runs first.
+
+16. Selection remains a separate complementary layer: `manifest.toml`'s `[agents]`/`[skills]` include/exclude decides WHICH names deploy; this ADR decides WHICH COPY wins. Selection runs first.
 
 ## Consequences
 
-**Easier:** the #4408 class becomes impossible in steady state; adding a source becomes a config entry; `tm doctor` can state provenance; #4448's blocker dissolves; removing the `~/.claude/skills` write path shrinks the fragmentation from three destinations to two, with no migration risk, because nothing reads what it wrote.
+**Easier:** the #4408 class becomes impossible in steady state; adding a source becomes a config entry; `tm doctor` can state provenance; #4448's blocker dissolves; removing the `~/.claude/skills` write path shrinks the fragmentation from three destinations to two, with no migration risk, because nothing reads what it wrote; project customization reuses one file format instead of inventing a second.
 
-**Harder:** migration is the dominant risk and it is a data-loss risk; the skill migration is more dangerous than the agent one because the agent path has a guard the skill path lacks; Claude Code's precedence still favours a directory we deliberately empty, so the #4442 doctor probe becomes PERMANENT ENFORCEMENT rather than a transitional check; `Origin::Project` is a live footgun while `is_framework_owned` gates a delete path; following claude-mpm we do NOT add a richer frontmatter identity schema; orphan retraction (#391) becomes a dependency.
+**Harder:** migration is the dominant risk and it is a data-loss risk; the skill migration is more dangerous than the agent one because the agent path has a guard the skill path lacks; Claude Code's precedence still favours a directory we deliberately empty, so the #4442 doctor probe becomes PERMANENT ENFORCEMENT rather than a transitional check; `Origin::Project` is a live footgun while `is_framework_owned` gates a delete path; following claude-mpm we do NOT add a richer frontmatter identity schema; orphan retraction (#391) becomes a dependency; the manifest becomes a per-project maintenance obligation; silent absence (an agent simply not in the manifest) is a live failure class that did not exist before, and it is the manifest's NORMAL operating mode, not an edge case; drift between detected markers and the manifest is now possible and only `tm doctor` surfaces it — between a stack change and the next `tm doctor` run, a project can be silently mis-scaffolded; whether an unresolvable-agent delegation fails loudly today is UNVERIFIED, and clause 12 requires closing that gap before this ADR's assumptions hold in practice.
+
+## Slices
+
+Implementation follows the manifest-first re-stack. Two ordering facts govern the sequence and must not be reordered:
+
+- **Slice 4 — the loud-failure check (clause 12) — ships at the front.** Every selection-related slice that follows leans on it: once a manifest can omit an agent as its normal operating mode, nothing downstream is safe to build until an unresolvable delegation target fails loudly instead of silently.
+- **Slice 12 — startup reconciliation (clause 9).** Gated on slices 4, 11, and 13 being green **in production**, not merely merged — proportionate to it being the highest-risk clause in this ADR, and each requires its own critic pass before slice 12 is allowed to ship.
+
+The full 21-slice sequencing (slices 1–3, 5–10, 13–21) is tracked in the implementation plan rather than reproduced here; this ADR records the two ordering constraints that are load-bearing for review, not the complete task breakdown.
 
 ## Related Decisions
 
@@ -68,9 +91,9 @@ Vetted against prior ADRs on 2026-08-01:
 - **ADR-0002 (single-install convention):** Consistent — extends the same instinct from binaries to assets.
 - **ADR-0008 (project identity):** Extends — must not introduce a second way to name a project.
 - **ADR-0015 (three-product agent composition):** Consistent — ADR-0015 governs FORMAT, this governs SOURCING and DEPLOYMENT for trusty-mpm only.
-- **ADR-0020 (session-owned worktrees):** Consistent, and a deliberate borrowing — its "owner-unknown candidates are NEVER auto-deleted" is the same rule as clause 10. If they ever diverge, ADR-0020's formulation is senior.
+- **ADR-0020 (session-owned worktrees):** Consistent, and a deliberate borrowing — its "owner-unknown candidates are NEVER auto-deleted" is the same rule as clause 14. If they ever diverge, ADR-0020's formulation is senior.
 - **ADR-0023 (worktree authority):** Consistent, with one gap stated openly — ADR-0023 clause 4 requires the ownership index be REBUILDABLE from ground truth. Neither the agent nor the skill ledger is rebuildable today; a lost manifest permanently reclassifies every managed file as untracked, which is #4408's shape reached by data loss. This ADR does not close that gap and does not claim to; filed as follow-up.
 - **ADR-0024 (assistants as L0 delegators):** Consistent, orthogonal axis. Caution: its clause-4 editable sub-agent whitelist must consume this ADR's resolved roster rather than re-deriving one.
 - **Skills have no prior ADR** — this is the first.
-- **DOC-31 (`docs/specs/system-project-agents-skills.md`):** Superseded in part — §191 names committed project-tier agents in `.claude/agents/` as supported, which clause 1 and clause 2 remove. DOC-31 must be rewritten in the change set that lands those clauses.
+- **DOC-31 (`docs/specs/system-project-agents-skills.md`):** Superseded in part — §191 names committed project-tier agents in `.claude/agents/` as supported, which clause 1 removes. DOC-31 must be rewritten in the change set that lands that clause.
 - Note (not fixed here): main has an ADR-0021 numbering collision (`0021-cargo-bin-policy.md` and `0021-slack-inbound-hybrid-gateway-eventstream.md`) needing separate cleanup with `INDEX.md` reconciled.
