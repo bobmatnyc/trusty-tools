@@ -1,12 +1,20 @@
-# Framework-guaranteed-conventions floor guard (issue #3374).
+# Non-overridable instruction floor guard (issues #3374, #4183).
 #
-# Enforces that framework-guaranteed conventions (attribution footer,
-# proportional-documentation policy, ticket-attribution convention) stay in
-# the non-overridable BASE_PM.md floor and that the dead, never-consumed
-# `assets/instructions/CLAUDE.md` stub does not reappear.
+# Enforces that the fixed-tier instruction sections (identity, non-overridable
+# rules, framework-guaranteed conventions) match their committed byte-exact
+# sha256 pins in `scripts/instruction_floor.sha256`, and that the dead,
+# never-consumed `assets/instructions/CLAUDE.md` stub does not reappear.
 #
-# Pure grep/file-existence check — no Rust toolchain or build needed, so this
+# Pure hash/file-existence check — no Rust toolchain or build needed, so this
 # is fast and runs as its own lightweight job (matches line-cap.yml's shape).
+#
+# This workflow file's own bytes are pinned by the guard, and the guard also
+# runs inside ci.yml's required `Format check` job, so deleting or neutering
+# this file turns a required check red rather than silently disarming the gate.
+#
+# The status context this job publishes is its `name:` below. Renaming it
+# requires updating the repo's required-status-check list in the same change,
+# or every open PR blocks on a context that will never report.
 name: Instruction floor guard
 
 on:

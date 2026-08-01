@@ -318,7 +318,7 @@ impl Join {
 /// `File` is the schema-v2 addition (#4318). It exists because the two obvious
 /// alternatives are both bad: inlining `sections/core.md` verbatim turns 23 KB of
 /// reviewable prose into one unreadable JSON line and moves the floor text out of
-/// the files `scripts/check_instruction_floor.sh` greps, while resolving the path
+/// the files `scripts/check_instruction_floor.sh` pins byte-exactly, while resolving the path
 /// on the filesystem at launch would make the delivered system prompt depend on
 /// what happens to be on disk. Resolving through `include_str!` keeps the prose in
 /// markdown, keeps the build hermetic, and makes a renamed section a compile error.
