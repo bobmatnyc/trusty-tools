@@ -39,6 +39,8 @@ pub(crate) mod issue;
 pub(crate) mod launch;
 pub(crate) mod launchd_probe;
 pub(crate) mod managed;
+// #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
+pub(crate) mod managed_merged_prs;
 pub(crate) mod managed_root;
 pub(crate) mod managed_route;
 pub(crate) mod managed_workspace;

@@ -104,6 +104,11 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "No orphaned git worktrees under the managed workspace root (Fix 1b, #1840).",
     ),
     (
+        "worktree_disk",
+        "Bytes held by every git-registered worktree, and how much sits on already-merged \
+         pull requests with no unsaved work (issue #2919).",
+    ),
+    (
         "gh_account",
         "Active `gh` CLI identity is unambiguous — warns on multi-account ambiguity.",
     ),

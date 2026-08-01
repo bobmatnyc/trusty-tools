@@ -101,6 +101,13 @@ use doctor_scaffold_tracking::check_scaffold_tracking;
 mod doctor_push_guard;
 use doctor_push_guard::check_push_guard;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #2919 —
+// the worktree disk-consumption / merged-PR reclaimability probe, the
+// early-warning half of the 1.1 TiB leak post-mortem).
+#[path = "doctor_worktree_disk.rs"]
+mod doctor_worktree_disk;
+use doctor_worktree_disk::check_worktree_disk;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -216,7 +223,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_five_checks`,
+/// Test: `run_doctor_produces_twenty_six_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -267,6 +274,10 @@ pub async fn run_doctor(
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home, project_dir).await);
     checks.push(check_worktrees(repos_root, active_workspace_paths).await);
+    // #2919: `check_worktrees` above counts ORPHANS and has never reported a
+    // byte, so it read identically whether the worktree store held 4 GiB or the
+    // 1.1 TiB measured on 2026-07-21. This is the disk half.
+    checks.push(check_worktree_disk(repos_root, active_workspace_paths).await);
     checks.push(check_gh_account().await);
     checks.push(check_oauth_token_config());
     let (hooks_contamination, hooks_foreign_conflict) =
