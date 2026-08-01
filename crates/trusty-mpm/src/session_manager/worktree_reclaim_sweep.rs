@@ -37,8 +37,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
-    BranchPrState, PrIndex, ReclaimCandidate, ReclaimMode, ReclaimOutcome, ReclaimSurvey,
-    ReclaimVerdict, classify, is_live, measure_bytes_until, pr_state_for_branch, tm_provisioned,
+    BranchPrState, NOT_INSPECTED_REASON, PrIndex, ReclaimCandidate, ReclaimMode, ReclaimOutcome,
+    ReclaimSurvey, ReclaimVerdict, classify, is_live, measure_bytes_until, pr_state_for_branch,
+    tm_provisioned,
 };
 use super::worktree_registry::{list_registered_worktrees, scan_registered_worktrees};
 use super::worktree_safety::inspect_dirt;
@@ -121,7 +122,7 @@ pub(crate) fn survey_with_index(
                 registry_root: scanned.registry_root,
                 bytes: None,
                 pr: BranchPrState::Unknown,
-                verdict: ReclaimVerdict::blocked("survey deadline reached before inspection"),
+                verdict: ReclaimVerdict::blocked(NOT_INSPECTED_REASON),
             });
             continue;
         }
@@ -173,10 +174,21 @@ pub(crate) fn survey_with_index(
 /// post-mortem's eighth constraint is specifically that this feature report
 /// real numbers rather than a claim.
 /// What: two ordered passes over the same slice — reclaimable candidates first,
-/// then the rest — both bounded by the same `deadline`. `total_bytes` degrades
-/// to a floor under pressure (already disclosed as an UNDERCOUNT); the
-/// actionable figure does not.
-/// Test: `survey_measures_reclaimable_worktrees_before_blocked_ones`.
+/// then the rest — both bounded by the same `deadline`.
+///
+/// This ORDERS the degradation; it does not remove it, and an earlier draft of
+/// this comment claimed otherwise. Measured against the real store: the first
+/// reclaimable candidate is 17.8 GiB and consumed the entire 20-second budget
+/// on its own, so four of the five reclaimable worktrees still came back
+/// unmeasured — `reclaimable_bytes` was one worktree's size wearing the whole
+/// set's label, and because every other measurement had also been starved it
+/// happened to equal `total_bytes`, which reads as "all of it is reclaimable".
+/// The `unmeasured`/UNDERCOUNT disclosure covers `total_bytes` only. So
+/// [`ReclaimSurvey::reclaimable_measured`] carries the measured-vs-total count
+/// for the reclaimable set specifically, and every surface that prints
+/// `reclaimable_bytes` must print that qualifier beside it.
+/// Test: `survey_measures_reclaimable_worktrees_before_blocked_ones`,
+/// `survey_discloses_a_partially_measured_reclaimable_set`.
 fn measure_reclaimable_first(candidates: &mut [ReclaimCandidate], deadline: Option<Instant>) {
     for want_reclaimable in [true, false] {
         for c in candidates

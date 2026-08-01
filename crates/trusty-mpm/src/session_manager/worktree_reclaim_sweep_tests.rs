@@ -611,3 +611,132 @@ fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
     assert_eq!(starved.reclaimable_bytes, 0);
     assert!(starved.unmeasured > 0, "and it is disclosed as unmeasured");
 }
+
+#[test]
+fn survey_discloses_a_partially_measured_reclaimable_set() {
+    // Ordering reclaimable-first does NOT remove the degradation, it only moves
+    // it. Measured against the real store: one 17.8 GiB worktree ate the whole
+    // 20 s budget and 4 of 5 reclaimable worktrees still came back unmeasured,
+    // so `reclaimable_bytes` was one worktree's size wearing the set's label.
+    // `reclaimable_measured` is what makes that visible.
+    let fx = GitWorktreeFixture::new();
+    for n in ["partial-a-2919", "partial-b-2919"] {
+        let p = fx.add_worktree(n);
+        land(&p);
+    }
+    let rows = r#"[
+      {"number": 70, "headRefName": "session/partial-a-2919", "state": "MERGED"},
+      {"number": 71, "headRefName": "session/partial-b-2919", "state": "MERGED"}
+    ]"#;
+
+    // Fully measured: measured count equals the reclaimable count.
+    let full = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| PrIndex::from_json(rows, 400),
+        SurveyBudget::default(),
+        false,
+    );
+    assert_eq!(full.reclaimable, 2);
+    assert_eq!(
+        full.reclaimable_measured, 2,
+        "an unbounded survey must measure the whole reclaimable set"
+    );
+
+    // Starved: reclaimable still 2, measured drops — and the byte sum must not
+    // be readable as the whole set's size.
+    let starved = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| PrIndex::from_json(rows, 400),
+        SurveyBudget {
+            measure: Some(std::time::Duration::ZERO),
+            classify: None,
+        },
+        false,
+    );
+    assert_eq!(starved.reclaimable, 2, "classification is unaffected");
+    assert!(
+        starved.reclaimable_measured < starved.reclaimable,
+        "a starved measurement pass must report fewer measured than reclaimable"
+    );
+}
+
+/// Pins what `remove_session_worktree` ACTUALLY returns when git's own removal
+/// fails and the `remove_dir_all` fallback succeeds (#2919).
+///
+/// Why: round-3 review read `decommission.rs` as returning `false` on that
+/// path, which would route a genuinely-deleted worktree into `removal_failed`.
+/// It does not — those `false` values bind `git_success` for the prune/branch-D
+/// step and the function still falls through to its final `true`. Rather than
+/// argue from a reading, this test forces the exact condition with a REAL
+/// git-locked worktree (`git worktree remove --force` exits 128) and asserts
+/// both the return value and that the directory is gone, so the `&&` in the
+/// reclaim loop is pinned against either reading drifting.
+#[test]
+fn remove_session_worktree_reports_success_when_the_fallback_removes_it() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("fallback-removal-2919");
+    land(&path);
+    fx.lock_worktree(&path);
+
+    let reported = crate::session_manager::decommission::remove_session_worktree(&path);
+    assert!(
+        !path.exists(),
+        "precondition: the fallback really did remove the directory"
+    );
+    assert!(
+        reported,
+        "a worktree that is genuinely gone must be reported as removed, not as \
+         `removal_failed` — the reclaim loop's `remove_session_worktree(..) && \
+         !path.exists()` depends on this"
+    );
+}
+
+#[test]
+fn survey_separates_deadline_skips_from_lookup_failures() {
+    // Both read as `BranchPrState::Unknown` but need opposite actions: one says
+    // "raise the budget", the other says "check `gh`". Conflating them cost a
+    // review round establishing that 169 unknowns against the real store were
+    // unreachable repositories and detached HEADs rather than a second bug.
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("cause-split-2919");
+    land(&path);
+
+    // Deadline expired: counted as NOT INSPECTED, and as pr_state_unknown too.
+    let skipped = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| merged_index("session/cause-split-2919", 80),
+        SurveyBudget {
+            measure: None,
+            classify: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        },
+        false,
+    );
+    assert!(
+        skipped.not_inspected > 0,
+        "the deadline skip must be counted"
+    );
+    assert_eq!(
+        skipped.not_inspected, skipped.pr_state_unknown,
+        "a deadline skip must not also read as a lookup failure"
+    );
+
+    // Inspected, but the index answers nothing: a LOOKUP failure, not a skip.
+    let unresolved = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| PrIndex::unavailable(),
+        SurveyBudget::default(),
+        false,
+    );
+    assert_eq!(
+        unresolved.not_inspected, 0,
+        "nothing was skipped — the survey ran to completion"
+    );
+    assert!(
+        unresolved.pr_state_unknown > 0,
+        "but the lookup resolved nothing"
+    );
+}

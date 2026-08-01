@@ -246,13 +246,17 @@ impl PrIndex {
     /// Why: this is the ONLY I/O in the module's classification path, isolated
     /// here so every gate above it is a pure function.
     /// What: `gh pr list --state all --limit <PR_INDEX_LIMIT> --json
-    /// number,headRefName,state`, run with `-C <registry_root>` and with the
-    /// repository-redirecting environment stripped. Any failure to spawn, a
-    /// non-zero exit, or unparsable output all yield
-    /// [`unavailable`](Self::unavailable) — never an empty-but-complete index.
-    /// Test: `gh_command_strips_repository_redirecting_env` (argv/env shape);
-    /// the failure-to-unavailable mapping is covered by
-    /// `pr_index_malformed_json_is_unavailable`.
+    /// number,headRefName,state,isCrossRepository`, run with its WORKING
+    /// DIRECTORY set to `registry_root` (never `-C`, which `gh` does not
+    /// have — see [`gh_command`]) and with the repository-redirecting
+    /// environment stripped. Any failure to spawn, a timeout, a non-zero exit,
+    /// or unparsable output all yield [`unavailable`](Self::unavailable) —
+    /// never an empty-but-complete index.
+    /// Test: `gh_command_passes_no_dash_c_flag`,
+    /// `gh_command_runs_in_the_requested_directory`,
+    /// `gh_command_strips_repository_redirecting_env` (argv/env shape);
+    /// `pr_index_from_gh_reads_this_repository` (a real successful call);
+    /// `pr_index_malformed_json_is_unavailable` (failure-to-unavailable).
     pub(crate) fn from_gh(registry_root: &Path) -> Self {
         let mut cmd = gh_command(registry_root);
         cmd.args(["pr", "list", "--state", "all", "--limit"])
@@ -488,6 +492,16 @@ pub(crate) fn tm_provisioned(path: &Path) -> bool {
         || super::decommission::is_session_worktree(path)
 }
 
+/// The refusal reason a survey records for a worktree it ran out of time to
+/// inspect (#2919).
+///
+/// Why: named rather than inlined so [`ReclaimSurvey::not_inspected`] can count
+/// these WITHOUT the count and the message drifting apart — the whole point is
+/// to distinguish "the probe ran out of time" from "the pull-request lookup
+/// failed", which read identically before.
+/// Test: `survey_separates_deadline_skips_from_lookup_failures`.
+pub(crate) const NOT_INSPECTED_REASON: &str = "survey deadline reached before inspection";
+
 /// Whether a worktree may be reclaimed, or the first reason it may not (#2919).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -643,12 +657,38 @@ pub(crate) struct ReclaimSurvey {
     pub reclaimable_bytes: u64,
     /// How many candidates are reclaimable.
     pub reclaimable: usize,
+    /// How many of the RECLAIMABLE candidates actually had their bytes measured.
+    ///
+    /// Why: `reclaimable_bytes` is a sum over this subset, not over
+    /// `reclaimable`. When measurement is starved — and a single 17.8 GiB
+    /// worktree can consume a 20-second budget by itself — the sum is a floor
+    /// wearing the whole set's label. The `unmeasured` count does NOT cover
+    /// this: it is a whole-survey figure, and a reader cannot subtract it to
+    /// recover how much of the reclaimable set was measured. Every surface that
+    /// prints `reclaimable_bytes` must print this beside it.
+    /// Test: `survey_discloses_a_partially_measured_reclaimable_set`.
+    pub reclaimable_measured: usize,
     /// How many candidates were refused.
     pub blocked: usize,
     /// How many candidates could not be measured (their bytes are missing).
     pub unmeasured: usize,
     /// How many candidates had an indeterminate pull-request state.
+    ///
+    /// This counts BOTH causes, so read it with `not_inspected`: subtracting
+    /// that leaves the ones where the pull-request lookup itself could not
+    /// answer. Separating them is not pedantry — a review round was spent
+    /// establishing that 169 unknowns against the real store were repos the
+    /// authenticated account cannot see plus detached HEADs, not a second bug.
     pub pr_state_unknown: usize,
+    /// How many candidates the survey never inspected, because its classify
+    /// deadline expired first.
+    ///
+    /// Why: these are `Unknown` for a completely different reason from a `gh`
+    /// failure — the probe ran out of time, not out of answers. Reporting them
+    /// as "pull-request state could not be determined" sends an operator to
+    /// `gh auth status` for a problem that is really "raise the budget".
+    /// Test: `survey_separates_deadline_skips_from_lookup_failures`.
+    pub not_inspected: usize,
 }
 
 impl ReclaimSurvey {
@@ -663,6 +703,8 @@ impl ReclaimSurvey {
             total_bytes: 0,
             reclaimable_bytes: 0,
             reclaimable: 0,
+            reclaimable_measured: 0,
+            not_inspected: 0,
             blocked: 0,
             unmeasured: 0,
             pr_state_unknown: 0,
@@ -680,11 +722,18 @@ impl ReclaimSurvey {
             }
             if c.verdict.is_reclaimable() {
                 out.reclaimable += 1;
+                if c.bytes.is_some() {
+                    out.reclaimable_measured += 1;
+                }
             } else {
                 out.blocked += 1;
             }
             if c.pr == BranchPrState::Unknown {
                 out.pr_state_unknown += 1;
+            }
+            if matches!(&c.verdict, ReclaimVerdict::Blocked { reason } if reason == NOT_INSPECTED_REASON)
+            {
+                out.not_inspected += 1;
             }
         }
         out.candidates = candidates;

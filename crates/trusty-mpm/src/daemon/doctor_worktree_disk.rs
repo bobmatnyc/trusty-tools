@@ -128,17 +128,32 @@ fn build_worktree_disk_check(survey: &ReclaimSurvey) -> DoctorCheck {
     // worktree whose PR is older than that window reads "state unknown" and can
     // never be classified here. Saying so is the difference between "nothing is
     // reclaimable" and "we did not look far enough back".
-    let window = if survey.pr_state_unknown > 0 {
-        format!(
-            "; {} worktree(s) had no resolvable pull-request state — this probe reads only the \
-             most recent {} pull requests, so older ones fall outside its window; \
-             `tm session prune-worktrees --merged-prs` resolves those branch-by-branch",
-            survey.pr_state_unknown,
+    // #2919: the two causes of an indeterminate pull-request state are reported
+    // SEPARATELY. They read identically but need opposite actions — one says
+    // "check `gh`", the other says "the probe ran out of time". Conflating them
+    // cost a whole review round establishing that 169 unknowns against the real
+    // store were unreachable repos and detached HEADs, not a bug.
+    let lookup_unknown = survey.pr_state_unknown.saturating_sub(survey.not_inspected);
+    let mut clauses = String::new();
+    if survey.not_inspected > 0 {
+        clauses.push_str(&format!(
+            "; {} worktree(s) were NOT INSPECTED before this probe's {}s classify budget \
+             expired — that is a budget limit, not a `gh` problem",
+            survey.not_inspected,
+            SURVEY_TIMEOUT.as_secs()
+        ));
+    }
+    if lookup_unknown > 0 {
+        clauses.push_str(&format!(
+            "; {lookup_unknown} worktree(s) were inspected but their pull-request state did \
+             not resolve — a detached HEAD, a repository this `gh` account cannot see, or a \
+             branch older than the most recent {} pull requests this probe reads; \
+             `tm session prune-worktrees --merged-prs` resolves that last case \
+             branch-by-branch",
             crate::session_manager::worktree_reclaim::PR_INDEX_LIMIT
-        )
-    } else {
-        String::new()
-    };
+        ));
+    }
+    let window = clauses;
     if survey.pr_state_unknown == total {
         return DoctorCheck::new(
             "worktree_disk",
@@ -155,10 +170,12 @@ fn build_worktree_disk_check(survey: &ReclaimSurvey) -> DoctorCheck {
             "worktree_disk",
             CheckStatus::Warn,
             format!(
-                "{measured}{undercount}; {} of it ({} worktree(s)) sits on branches whose \
-                 pull request already merged and holds no uncommitted or unpushed work — \
-                 reclaim with `tm session prune-worktrees --merged-prs`{window} (#2919)",
+                "{measured}{undercount}; {} across {} of {} worktree(s) measured sits on \
+                 branches whose pull request already merged and holds no uncommitted or \
+                 unpushed work — reclaim with `tm session prune-worktrees \
+                 --merged-prs`{window} (#2919)",
                 human_bytes(survey.reclaimable_bytes),
+                survey.reclaimable_measured,
                 survey.reclaimable
             ),
         );
@@ -253,8 +270,12 @@ pub(super) async fn check_worktree_disk(
             "worktree_disk",
             CheckStatus::Unknown,
             format!(
-                "worktree disk survey exceeded {}s — disk state undetermined (#2919)",
-                SURVEY_TIMEOUT.as_secs()
+                "worktree disk survey exceeded its {}s ceiling ({}s classify + {}s \
+                 measure + {}s subprocess grace) — disk state undetermined (#2919)",
+                (SURVEY_TIMEOUT + SURVEY_TIMEOUT + SURVEY_TIMEOUT_GRACE).as_secs(),
+                SURVEY_TIMEOUT.as_secs(),
+                SURVEY_TIMEOUT.as_secs(),
+                SURVEY_TIMEOUT_GRACE.as_secs()
             ),
         ),
     }

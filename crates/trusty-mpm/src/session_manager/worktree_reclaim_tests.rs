@@ -606,12 +606,16 @@ fn gh_command_runs_in_the_requested_directory() {
 /// Prove a real `gh` call SUCCEEDS and parses — the coverage whose absence let
 /// the `-C` bug ship.
 ///
-/// Skips (rather than fails) when `gh` is missing or unauthenticated, so CI
-/// without credentials stays green; it is the developer-machine and
-/// authenticated-CI run that carries the value. It asserts on a real reply
-/// shape, so a future argv or `--json` field-name regression fails here.
+/// Skips (rather than fails) unless `gh` resolves this exact upstream
+/// repository. A contributor working on a FORK resolves their own repo, which
+/// legitimately has zero pull requests, and an assertion there would go red for
+/// a reason that has nothing to do with this module — and a test that is red on
+/// a fork gets deleted by whoever hits it. Gating on the repository identity,
+/// rather than on "did we get rows", keeps the assertion meaningful wherever it
+/// DOES run.
 #[test]
 fn pr_index_from_gh_reads_this_repository() {
+    const UPSTREAM: &str = "bobmatnyc/trusty-tools";
     if which::which("gh").is_err() {
         eprintln!("skipping: `gh` not on PATH");
         return;
@@ -620,14 +624,31 @@ fn pr_index_from_gh_reads_this_repository() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let index = PrIndex::from_gh(repo_root);
-    if !index.is_complete() && index.branch_count() == 0 {
-        eprintln!("skipping: `gh` unavailable or unauthenticated in this environment");
+    let mut probe = std::process::Command::new("gh");
+    probe.current_dir(repo_root).args([
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+        "-q",
+        ".nameWithOwner",
+    ]);
+    let resolved = match run_with_timeout(probe, std::time::Duration::from_secs(10)) {
+        Some((true, out)) => out.trim().to_string(),
+        _ => {
+            eprintln!("skipping: `gh` cannot resolve a repository here");
+            return;
+        }
+    };
+    if resolved != UPSTREAM {
+        eprintln!("skipping: resolved {resolved:?}, not the upstream {UPSTREAM:?}");
         return;
     }
+    let index = PrIndex::from_gh(repo_root);
     assert!(
         index.branch_count() > 0,
-        "a successful `gh pr list` against this repository must yield branches; \
-         an empty index here means the call failed and every branch will block"
+        "a successful `gh pr list` against {UPSTREAM} must yield branches; an empty \
+         index here means the call failed and every branch will block — which is \
+         exactly what the `gh -C` argv bug produced"
     );
 }

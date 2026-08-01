@@ -55,7 +55,18 @@ pub(crate) fn print_merged_pr_pass(merged: Option<&serde_json::Value>, dry_run: 
             .get("reclaimable_bytes")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        println!("merged-PR pass: {candidates} worktree(s) / {bytes} byte(s) reclaimable (#2919)");
+        // #2919: the byte figure is a sum over the MEASURED subset, so it never
+        // appears without its measured-of-total qualifier — a single 17.8 GiB
+        // worktree can eat the whole measurement budget and leave the rest of
+        // the reclaimable set uncounted.
+        let measured = merged
+            .get("reclaimable_measured")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        println!(
+            "merged-PR pass: {candidates} worktree(s) reclaimable; {bytes} byte(s) \
+             across {measured} of {candidates} measured (#2919)"
+        );
     } else {
         let bytes = merged
             .get("removed_bytes")

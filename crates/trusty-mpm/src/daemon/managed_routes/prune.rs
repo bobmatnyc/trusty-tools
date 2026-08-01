@@ -231,6 +231,7 @@ pub async fn prune_worktrees_route(
                         "refused_at_recheck": o.refused_at_recheck,
                         "removal_failed": o.removal_failed,
                         "reclaimable": o.survey.reclaimable,
+                        "reclaimable_measured": o.survey.reclaimable_measured,
                         "reclaimable_bytes": o.survey.reclaimable_bytes,
                         "total_bytes": o.survey.total_bytes,
                         "pr_state_unknown": o.survey.pr_state_unknown,
