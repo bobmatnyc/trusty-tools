@@ -62,6 +62,7 @@ normative grammar — this note does not restate it.
 | DOC-39 | `SPEC-TCUI-01~draft` … `-09~draft` | [trusty-code Harness UI: Context-First Interactive Surface](./trusty-code-harness-ui.md) | trusty-code — API surface (JSON-RPC + events); SPA (web/Tauri) client downstream |
 | DOC-40 | `SPEC-BGATTACH-01~draft` … `-07~draft` | [Durable Background Agents: Exclusive Attach/Detach Semantics](./durable-background-agents.md) | trusty-mpm — daemon / session-manager / agent delegation; trusty-code — session registry / task executor (cross-crate) |
 | DOC-41 | `SPEC-AGENTFW-01~draft` … `-06~draft` | [Eve-Style Agent Framework for trusty-agents](./trusty-agents-eve-style-agents-spec.md) | trusty-agents — agent definition / runtime / tool-calling / memory |
+| DOC-45 | `SPEC-CREDAUTH-01~draft` … `-11~draft` | [The Credential Authority Model: Principals, Scoping, Revocation, Audit, and the Sub-Agent Boundary](./DOC-45-credential-authority-model.md) | `trusty-common` — the authority (principal, `CredentialRef`, ACL default-deny, revocation, audit, delivery, at-rest storage); `trusty-agents` — assistant/sub-agent principals, MCP delivery, routed-shell environment scrubbing; `trusty-code` — service principals. Cross-product per owner decision ("#4040 yes for agents and code"). Decision record: [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) |
 | DOC-46 | `SPEC-ADR-01~draft` | [Architecture Decision Records (ADR) as First-Class Documentation Artifact](./DOC-46-adr-standard.md) | documentation standard — architecture governance / consistency vetting (cross-crate) |
 | DOC-47 | `SPEC-EVTING-01~draft` … `-04~draft` | [External Event Ingestion — Webhooks & Connector Push](./DOC-47-external-event-ingestion.md) | trusty-agents-common — event seam; trusty-mpm — webhook ingress + goal store; trusty-console — Tailscale Funnel binding |
 | DOC-48 | `SPEC-WS-01~draft` … `-09~draft` | [tcode Workstreams: Durable Named Work Aggregation](./DOC-48-tcode-workstreams.md) | trusty-code — activation-lock exclusivity model, multi-client attach transport (shared with trusty-agents #3052), RPC/REST/CLI surfaces |
@@ -126,6 +127,29 @@ normative grammar — this note does not restate it.
 > (note: `{#SPEC-…}` cross-links are best-effort on github.com — GitHub does not
 > honor explicit heading IDs, DOC-38 §4.3 — so this link lands on the file; scan
 > for §4.1 from there).
+
+> **Catalog note — `DOC-45` claimed, and a correction to the note above.** The
+> note above states that *"DOC-44/45 are claimed by the unmerged
+> `spec-twin-lead-architecture` branch"*. That is correct for **`DOC-44`** and
+> **wrong for `DOC-45`**: the branch carries exactly one numbered spec file
+> (`docs/specs/DOC-44-engineering-lead-twin-orchestration.md`, renumbered from
+> `DOC-42` on 2026-07-18), and that branch's own catalog note reads *"Next free
+> `DOC-N` = `DOC-45`"* — it explicitly does **not** claim 45. The only other
+> claimant `DOC-45` ever had was PR **#3039** (*"docs(spec): DOC-45 — Remote MCP
+> credential delivery for fleet sessions"*), which is **CLOSED**; its subject
+> (#3038) was folded into epic #4040 and is now carried by the `DOC-45` row above
+> plus #4568. **`DOC-45` is claimed as of 2026-08-01** by [The Credential
+> Authority Model](./DOC-45-credential-authority-model.md) (#4563) — the number
+> #4040's own body reserved for this work. Verified free four ways per the
+> scan-before-claim rule: no filename claim or header self-label under
+> `docs/specs/**` or `docs/trusty-installer/research/02-design/**` on
+> `origin/main`; no claim in any **OPEN** pull request — the check
+> `scripts/check_doc_numbers.sh` structurally cannot make (its own header says so),
+> and the gap that produced the `DOC-62` collision; no claim on the
+> `spec-twin-lead-architecture` branch; and no live claimant among closed PRs.
+> **`DOC-44` remains claimed by that branch and is still not free.** The next-free
+> hint is unchanged at **`DOC-64`** — `DOC-45` is a back-fill of a reserved
+> number, not an advance of the high-water mark.
 
 ## Status lifecycle
 
