@@ -13,9 +13,12 @@ Added
   - `AssistantHome` — the app-generated, DOTLESS, human-browsable home at
     `~/trusty-agents/<instance>/` (override with
     `TAGENT_ASSISTANTS_DIR`), holding `instructions.md`, `config.toml`,
-    `agents/`, `okg/` and `attachments/`. The store path is the owner's,
-    verbatim (2026-08-01): `trusty-agents/<agent>/okg/`, indexed by
-    trusty-search. `ensure()` is additive and idempotent
+    `agents/`, `okg/`, `attachments/` and `stores/`. Both store paths are the
+    owner's, verbatim (2026-08-01): `trusty-agents/<agent>/okg/` (indexed by
+    trusty-search) and `trusty-agents/<agent>/stores/<store-identifier>/` (one
+    subdirectory per remote store). This change creates the `stores/` PARENT
+    only — store-identifier derivation, extraction state and extraction logic
+    belong to a separate spec. `ensure()` is additive and idempotent
     — it creates what is missing and never overwrites what a user edited,
     because #4325 makes external modification expected rather than an error.
   - `AssistantInstanceId` — a validated instance name. It becomes a directory

@@ -24,7 +24,8 @@
 //! What: [`assistants_root`] resolves the dotless root holding one home per
 //! instance. [`AssistantHome`] is one instance's home — the five entries
 //! #4325 specifies ([`INSTRUCTIONS_FILE`], [`CONFIG_FILE`], [`AGENTS_DIR`],
-//! [`OKG_DIR`], [`ATTACHMENTS_DIR`]) as typed accessors, plus
+//! [`OKG_DIR`], [`ATTACHMENTS_DIR`]) plus [`STORES_DIR`] (owner, 2026-08-01),
+//! as typed accessors, plus
 //! [`AssistantHome::ensure`], the app-generated creation the ticket's
 //! "AUTO-CREATED, APP-GENERATED" wording names. `ensure` is additive and
 //! idempotent: it creates what is missing and never overwrites what is there,
@@ -86,6 +87,21 @@ pub const OKG_DIR: &str = "okg";
 
 /// Binary files attached to this instance's chat (#4325). Test: `super::tests::home_tests::layout_matches_the_ticket`.
 pub const ATTACHMENTS_DIR: &str = "attachments";
+
+/// One subdirectory per remote store this instance pulls from (owner,
+/// 2026-08-01): `<home>/stores/<store-identifier>/`.
+///
+/// Why: the extraction target and extraction state for a remote store (when it
+/// was last pulled, what came back) need somewhere to live that is per-instance
+/// and per-store. Creating the PARENT here means the slice that defines what
+/// goes inside it does not need a PR just to add a `mkdir`.
+/// What: the directory only. Store-identifier derivation, the extraction-state
+/// record, per-store subdirectories and all extraction logic are deliberately
+/// NOT here — a separate spec defines what lives under
+/// `stores/<store-identifier>/`.
+/// Test: `super::tests::home_tests::layout_matches_the_ticket`,
+/// `super::tests::health_tests::reports_a_deleted_stores_directory`.
+pub const STORES_DIR: &str = "stores";
 
 /// The dotless root holding one home directory per assistant instance.
 ///
@@ -184,6 +200,15 @@ impl AssistantHome {
         self.path.join(ATTACHMENTS_DIR)
     }
 
+    /// The parent of this instance's per-remote-store directories.
+    ///
+    /// Why/What: see [`STORES_DIR`] — this PR creates the parent and nothing
+    /// under it.
+    /// Test: `super::tests::home_tests::layout_matches_the_ticket`.
+    pub fn stores_dir(&self) -> PathBuf {
+        self.path.join(STORES_DIR)
+    }
+
     /// Whether the home directory exists on disk.
     ///
     /// Test: `super::tests::home_tests::ensure_creates_the_whole_layout`.
@@ -255,8 +280,8 @@ impl AssistantHome {
     /// already exists is left exactly as the user left it, including a file
     /// they emptied or rewrote. Overwriting would make the directory
     /// app-owned in the sense the owner explicitly ruled out.
-    /// What: creates the home, [`AGENTS_DIR`], [`OKG_DIR`] and
-    /// [`ATTACHMENTS_DIR`], and writes [`INSTRUCTIONS_FILE`] /
+    /// What: creates the home, [`AGENTS_DIR`], [`OKG_DIR`],
+    /// [`ATTACHMENTS_DIR`] and [`STORES_DIR`], and writes [`INSTRUCTIONS_FILE`] /
     /// [`CONFIG_FILE`] ONLY when absent. Returns the paths it actually
     /// created, so a caller can report what it generated rather than guess.
     /// Idempotent: a second call on an intact home creates nothing.
@@ -270,6 +295,7 @@ impl AssistantHome {
             self.agents_dir(),
             self.okg_dir(),
             self.attachments_dir(),
+            self.stores_dir(),
         ] {
             if !dir.is_dir() {
                 std::fs::create_dir_all(&dir).map_err(|source| AssistantError::Io {

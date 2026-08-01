@@ -19,9 +19,12 @@
 //!   name, so it is checked, never silently slugged).
 //! - `home` — [`AssistantHome`]: the app-generated, DOTLESS, human-browsable
 //!   per-instance home at `~/trusty-agents/<instance>/`, holding
-//!   `instructions.md`, `config.toml`, `agents/`, `okg/` and `attachments/`.
-//!   The store path is the owner's, verbatim (2026-08-01):
-//!   `trusty-agents/<agent>/okg/`. Plus [`AssistantHome::store_root`], which
+//!   `instructions.md`, `config.toml`, `agents/`, `okg/`, `attachments/` and
+//!   `stores/`. Both paths are the owner's, verbatim (2026-08-01):
+//!   `trusty-agents/<agent>/okg/` and
+//!   `trusty-agents/<agent>/stores/<store-identifier>/` — this module creates
+//!   the `stores/` PARENT only; what lives beneath it is a separate spec.
+//!   Plus [`AssistantHome::store_root`], which
 //!   resolves a `[[stores]]` binding's new `root` field inside that home
 //!   (#4325 requirement 1 — #3890's data-model gap).
 //! - `health` — [`inspect`]: the DETECTION half of #4325's resilience
@@ -32,9 +35,19 @@
 //!   Inspecting one yields findings, not errors.
 //!
 //! Deliberately NOT here: the writable store-config path (#3890), index→OKG
-//! entity extraction (#4283), the attached-index cap (#4282), and any migration
-//! of the existing dotted `~/.trusty-agents` tree — #4325 confirms the dotless
-//! decision but does not require auto-relocation.
+//! entity extraction (#4283), the attached-index cap (#4282), everything under
+//! [`home::STORES_DIR`] (store-identifier derivation, extraction state,
+//! per-store subdirectories, extraction logic — a separate spec owns those),
+//! and any migration of the existing dotted `~/.trusty-agents` tree — #4325
+//! confirms the dotless decision but does not require auto-relocation.
+//!
+//! Ownership, not enforcement: "app-generated" was narrowed by the owner
+//! (2026-07-29) to mean the app OWNS THE ORIGIN of the directory. Access control
+//! is explicitly out of scope — there is no write-enforcement, no floor, no
+//! narrow-only semantics. Users may change anything in here; the system's job is
+//! to notice and help, which is what [`inspect`] is for. TOML is likewise
+//! confirmed, not assumed: `config.toml` stays TOML and no format migration is
+//! in scope.
 //!
 //! Naming caveat (#4406): two unrelated stores are both called "OKG" — the
 //! trusty-kb markdown entity tree and the trusty-memory knowledge graph. #4325
@@ -59,6 +72,7 @@ pub use error::AssistantError;
 pub use health::{HomeHealth, HomeIssue, HomeIssueKind, inspect};
 pub use home::{
     AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR, AssistantHome,
-    AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE, OKG_DIR, assistants_root,
+    AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE, OKG_DIR, STORES_DIR,
+    assistants_root,
 };
 pub use instance::{ASSISTANT_ROLE, AssistantInstanceId, is_assistant_role};

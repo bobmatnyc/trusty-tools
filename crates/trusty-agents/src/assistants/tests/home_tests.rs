@@ -1,7 +1,8 @@
 //! Layout, resolution and app-generated creation of an assistant home (#4325).
 //!
-//! Why: the layout is a product decision the ticket states literally (five
-//! entries, dotless, TOML config), and `ensure` is the "AUTO-CREATED,
+//! Why: the layout is a product decision stated literally — the ticket's five
+//! entries plus `stores/` (owner, 2026-08-01), dotless, TOML config — and
+//! `ensure` is the "AUTO-CREATED,
 //! APP-GENERATED" half — its additive-only behaviour is what makes external
 //! edits safe, so it is pinned rather than assumed.
 //! What: layout accessors, root resolution (default + env override), and the
@@ -15,7 +16,7 @@ use serial_test::serial;
 
 use crate::assistants::{
     AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR, AssistantHome,
-    AssistantHomeConfig, AssistantInstanceId, CONFIG_FILE, INSTRUCTIONS_FILE, OKG_DIR,
+    AssistantHomeConfig, AssistantInstanceId, CONFIG_FILE, INSTRUCTIONS_FILE, OKG_DIR, STORES_DIR,
     assistants_root,
 };
 
@@ -65,8 +66,9 @@ pub(super) fn temp_home() -> (tempfile::TempDir, AssistantHome) {
     (tmp, home)
 }
 
-/// Why: #4325 names the five entries literally; this is the layout contract
-/// every later issue (#4282, #4283) resolves against.
+/// Why: #4325 names its five entries literally and the owner added `stores/`
+/// on 2026-08-01; this is the layout contract every later issue (#4282, #4283,
+/// the OKG Sources spec) resolves against.
 #[test]
 fn layout_matches_the_ticket() {
     let (_tmp, home) = temp_home();
@@ -78,6 +80,9 @@ fn layout_matches_the_ticket() {
     assert_eq!(home.agents_dir(), root.join(AGENTS_DIR));
     assert_eq!(home.okg_dir(), root.join(OKG_DIR));
     assert_eq!(home.attachments_dir(), root.join(ATTACHMENTS_DIR));
+    // #4325 (owner, 2026-08-01): one subdirectory per remote store lives under
+    // `stores/`. This PR creates the parent only.
+    assert_eq!(home.stores_dir(), root.join(STORES_DIR));
     // Constructing a home must not touch the filesystem.
     assert!(!home.exists());
 }
@@ -140,6 +145,15 @@ fn okg_store_path_matches_the_owners_spelling() {
         home.okg_dir(),
         tmp.path().join("trusty-agents").join("izzie").join("okg")
     );
+    // `<trusty-agents home>/<agent>/stores/` — the parent of the per-remote-store
+    // directories, same owner message.
+    assert_eq!(
+        home.stores_dir(),
+        tmp.path()
+            .join("trusty-agents")
+            .join("izzie")
+            .join("stores")
+    );
 }
 
 #[test]
@@ -157,13 +171,25 @@ fn ensure_creates_the_whole_layout() {
     let (_tmp, home) = temp_home();
     let created = home.ensure().expect("ensure");
     assert!(home.exists());
-    for path in [home.agents_dir(), home.okg_dir(), home.attachments_dir()] {
+    for path in [
+        home.agents_dir(),
+        home.okg_dir(),
+        home.attachments_dir(),
+        home.stores_dir(),
+    ] {
         assert!(path.is_dir(), "{} should be a directory", path.display());
     }
+    // The parent only — nothing is created beneath `stores/`; a separate spec
+    // defines what `stores/<store-identifier>/` holds.
+    assert_eq!(
+        std::fs::read_dir(home.stores_dir()).unwrap().count(),
+        0,
+        "stores/ must ship empty"
+    );
     for path in [home.instructions_path(), home.config_path()] {
         assert!(path.is_file(), "{} should be a file", path.display());
     }
-    assert_eq!(created.paths.len(), 6, "created: {:?}", created.paths);
+    assert_eq!(created.paths.len(), 7, "created: {:?}", created.paths);
 
     // The seeded config parses back into the shape health checks against, and
     // carries the instance id.

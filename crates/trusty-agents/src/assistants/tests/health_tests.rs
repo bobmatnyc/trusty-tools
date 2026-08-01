@@ -45,6 +45,43 @@ fn reports_a_deleted_layout_directory() {
     assert_eq!(issue.path, home.okg_dir());
 }
 
+/// Why: `stores/` (owner, 2026-08-01) gets the SAME detection as every other
+/// layout directory — a user who deletes it must be told, not silently left
+/// with nowhere for a remote store's extraction state to land.
+#[test]
+fn reports_a_deleted_stores_directory() {
+    let (_tmp, home) = temp_home();
+    home.ensure().unwrap();
+    std::fs::remove_dir_all(home.stores_dir()).unwrap();
+
+    let health = inspect(&home);
+    assert_eq!(health.issues.len(), 1, "issues: {:?}", health.issues);
+    let issue = &health.issues[0];
+    assert_eq!(issue.kind, HomeIssueKind::Missing);
+    assert_eq!(issue.entry, "stores");
+    assert_eq!(issue.path, home.stores_dir());
+    assert!(!issue.remedy.is_empty());
+}
+
+/// Why: `stores/` holds one subdirectory per remote store. Whatever a later
+/// spec puts in there is the user's and the extractor's, so inspection must
+/// look at the directory itself and never at its contents.
+#[test]
+fn ignores_whatever_lives_under_stores() {
+    let (_tmp, home) = temp_home();
+    home.ensure().unwrap();
+    std::fs::create_dir_all(home.stores_dir().join("some-remote-store")).unwrap();
+    std::fs::write(
+        home.stores_dir()
+            .join("some-remote-store")
+            .join("state.json"),
+        "{not even valid json",
+    )
+    .unwrap();
+
+    assert!(inspect(&home).is_healthy());
+}
+
 #[test]
 fn reports_a_deleted_instructions_file() {
     let (_tmp, home) = temp_home();

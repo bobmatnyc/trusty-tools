@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use super::home::{
     AGENTS_DIR, ATTACHMENTS_DIR, AssistantHome, AssistantHomeConfig, CONFIG_FILE,
-    INSTRUCTIONS_FILE, OKG_DIR,
+    INSTRUCTIONS_FILE, OKG_DIR, STORES_DIR,
 };
 
 /// What is wrong with one entry of an assistant's home.
@@ -179,6 +179,9 @@ pub fn inspect(home: &AssistantHome) -> HomeHealth {
         (AGENTS_DIR, home.agents_dir()),
         (OKG_DIR, home.okg_dir()),
         (ATTACHMENTS_DIR, home.attachments_dir()),
+        // #4325: `stores/` gets the same detection as every other layout
+        // directory (owner, 2026-08-01).
+        (STORES_DIR, home.stores_dir()),
     ] {
         check_dir(entry, &path, &mut issues);
     }
