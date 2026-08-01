@@ -66,6 +66,22 @@ pub enum ExecutionStyle {
 }
 
 impl ExecutionStyle {
+    /// Every variant, in ascending ceremony order (#4353).
+    ///
+    /// Why: the GUI style selector (#4353) has to draw one control per style
+    /// and ask the resolver what each would actually do. Spelling the three
+    /// names again at that call site would put the closed vocabulary decision 1
+    /// fixes into a second place, which is precisely what the enum exists to
+    /// prevent — so the one list lives here and every consumer iterates it.
+    /// What: `[Hack, Vibe, Engineer]`, in the same ascending-ceremony order the
+    /// derived `Ord` gives. **A new variant MUST be added here too**; the
+    /// ordering half of that obligation is pinned mechanically below, and the
+    /// membership half by [`ExecutionStyle::as_str`]'s exhaustive match, which
+    /// stops compiling until a new variant is named.
+    /// Test: `all_is_sorted_by_ascending_ceremony`,
+    /// `all_round_trips_through_the_wire_form`.
+    pub const ALL: [Self; 3] = [Self::Hack, Self::Vibe, Self::Engineer];
+
     /// The built-in default when neither the caller nor config supplies one
     /// (DOC-62 §5.2).
     ///

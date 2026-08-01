@@ -691,6 +691,81 @@ async fn subagents_route_cross_product_grants_a_declared_floor_target() {
     assert_eq!(rejected[0]["name"], "engineer");
 }
 
+/// #4353: the route reports the coding lane as its own labelled mechanism, with
+/// resolutions produced by the real resolver.
+///
+/// Why: this is the end-to-end half of `coding_surface`'s unit tests. Those pin
+/// the payload's shape; this pins that the ROUTE reads the agent's real
+/// `[subagents] default_style` and hands it to the resolver — the one step a
+/// unit test over a plain function cannot cover, and the one whose failure mode
+/// (a config default that is parsed but never consulted) is silent: the pane
+/// would render a perfectly plausible resolution attributed to the built-in.
+/// It also pins that the coding target never leaks into the NON-coding
+/// vocabulary, which is what keeps `NON_CODING_TARGETS` a closed #4126 floor.
+#[tokio::test]
+async fn subagents_route_reports_the_coding_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent(
+        dir.path(),
+        "codey",
+        "assistant",
+        None,
+        &["dispatch_task"],
+        None,
+    );
+    // Appended rather than threaded through `write_agent`, for the same reason
+    // `write_assistant_with_whitelist` appends: only this test cares about the
+    // style default, and an extra parameter would make fifteen unrelated
+    // fixtures read as if ceremony configuration were part of what they test.
+    let path = dir.path().join("codey.toml");
+    let existing = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!("{existing}\n[subagents]\ndefault_style = \"vibe\"\n"),
+    )
+    .unwrap();
+
+    let resp = subagents_at(&[dir.path().to_path_buf()], "codey", dir.path()).await;
+    let body = body_json(resp).await;
+    let coding = &body["coding"];
+
+    assert_eq!(coding["mechanism"], "coding");
+    assert_eq!(coding["target"], "coding-pm");
+    assert_eq!(
+        coding["tool_granted"], true,
+        "`dispatch_task` is allow-listed"
+    );
+    assert_eq!(
+        coding["gated_by_allowed"], false,
+        "the coding name resolves before the non-coding allow-set is consulted"
+    );
+
+    // The config default was READ, and the no-override row attributes the value
+    // to it rather than to the built-in.
+    assert_eq!(coding["config_default"], "vibe");
+    let rows = coding["resolutions"].as_array().unwrap();
+    let no_override = rows
+        .iter()
+        .find(|r| r["caller"].is_null())
+        .expect("a no-override row");
+    assert_eq!(no_override["resolution"]["source"], "config");
+    assert_eq!(no_override["resolution"]["requested"], "vibe");
+    // SM-9, end to end: the configured `vibe` runs `engineer` and says why.
+    assert_eq!(no_override["resolution"]["effective"], "engineer");
+    assert_eq!(
+        no_override["resolution"]["escalations"],
+        serde_json::json!(["tier-unimplemented"])
+    );
+
+    // The coding target stays out of the non-coding half entirely — no card,
+    // and nothing rejected, because nothing declared it.
+    let cp_targets = body["cross_product"]["targets"].as_array().unwrap();
+    assert!(
+        cp_targets.iter().all(|t| t["name"] != "coding-pm"),
+        "the coding PM must never appear as a non-coding specialist: {cp_targets:?}"
+    );
+}
+
 /// Registered ≠ granted: a worker-role agent never gets `delegate_to_agent`
 /// registered at all (`build_registry_for_agent` routes only
 /// `role == "assistant"` into the tier registry), so the pane must say so

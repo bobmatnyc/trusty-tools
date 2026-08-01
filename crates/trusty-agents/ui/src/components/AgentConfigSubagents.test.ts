@@ -125,14 +125,18 @@ afterEach(() => {
 });
 
 describe('AgentConfigSubagents — the two mechanisms', () => {
-  it('labels both mechanisms separately rather than flattening them', () => {
+  it('labels every mechanism separately rather than flattening them', () => {
     render(payload());
     expect(target.textContent).toContain('In-product');
     expect(target.textContent).toContain('delegate_to_agent');
     expect(target.textContent).toContain('Cross-product');
     expect(target.textContent).toContain('dispatch_task');
-    // The two sections must be distinct elements, not one merged list.
-    expect(target.querySelectorAll('section').length).toBe(2);
+    // #4353: a THIRD mechanism (coding), for the same reason the first two are
+    // kept apart — its target resolves on a different code path over a
+    // different vocabulary. Each must be a distinct element, never one merged
+    // list; merging would imply one enforcement layer governs all three.
+    expect(target.textContent).toContain('Coding');
+    expect(target.querySelectorAll('section').length).toBe(3);
   });
 
   // REWRITTEN by ADR-0024 decision 4, which made the in-product set

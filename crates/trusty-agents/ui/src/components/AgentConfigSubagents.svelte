@@ -46,11 +46,21 @@
    * (role-eligible MINUS kind-refused) and names peer assistants as refused,
    * so a reader can predict the cards the pane draws.
    *
+   * #4353 adds a THIRD labelled group for the same reason the first two are
+   * kept apart: coding delegation resolves over its own vocabulary on its own
+   * code path — the reserved `coding-pm` name is recognised BEFORE the
+   * non-coding allow-set is consulted and is deliberately absent from that
+   * floor — so folding it into the cross-product list would imply
+   * `[subagents].allowed` gates it, which it does not. It lives in
+   * `AgentConfigCoding.svelte`; see that component for why the style selector
+   * renders the EFFECTIVE style rather than the requested one.
+   *
    * DOC-57 still documents five sections; #4182 amends it. This pane cites the
    * decision, it does not restate the spec.
    * Test: `AgentConfigSubagents.test.ts`.
    */
   import type { AgentSubagents } from '../lib/agentConfig';
+  import AgentConfigCoding from './AgentConfigCoding.svelte';
 
   /** Loaded by the shell from `GET /api/agents/:name/subagents`; `null` while loading. */
   export let data: AgentSubagents | null = null;
@@ -282,5 +292,8 @@
         {crossGranted.length} of {crossTargets.length} cross-product specialists granted.
       </p>
     </section>
+
+    <!-- ── Coding: dispatch_task → the tcode project manager (#4353) ─────── -->
+    <AgentConfigCoding data={data.coding} />
   {/if}
 </div>

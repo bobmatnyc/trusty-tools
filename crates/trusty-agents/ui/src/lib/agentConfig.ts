@@ -581,6 +581,79 @@ export interface SubagentCrossProduct {
   rejected: { name: string; reason: string }[];
 }
 
+/**
+ * The closed style vocabulary (DOC-62 §5.1), lowercase on the wire.
+ *
+ * Mirrors the Rust `ExecutionStyle`. Deliberately a union of literals rather
+ * than a `string`: DOC-62 makes the enum closed precisely so a fourth,
+ * undocumented tier cannot appear without a decision, and a `string` here would
+ * reopen that on the client side.
+ */
+export type ExecutionStyle = 'hack' | 'vibe' | 'engineer';
+
+/**
+ * One resolved style, verbatim from the Rust `ResolvedStyle` (DOC-62 §3.4).
+ *
+ * The reporting contract, not a display convenience: `effective` is what will
+ * ACTUALLY run and `requested` is only what was asked for, and DOC-62 SM-4
+ * exists because a surface that renders the request is a surface where "not
+ * run" quietly reads as "fine". Anything user-facing must read `effective`.
+ * `escalations` explains every difference between the two — it is empty exactly
+ * when the request was honoured as-is, so it can be rendered unconditionally.
+ */
+export interface StyleResolution {
+  /** The value that entered resolution; `null` when no level supplied one. */
+  requested: ExecutionStyle | null;
+  /** Which precedence level supplied `requested` (DOC-62 §5.3). */
+  source: 'caller' | 'config' | 'built-in';
+  /** What will actually be applied — never below the request or the floor. */
+  effective: ExecutionStyle;
+  /** Why `effective` differs from `requested`; raises only, in order. */
+  escalations: ('callee-floor' | 'tier-unimplemented')[];
+}
+
+/** One selector row: what a given per-delegation request resolves to. */
+export interface StyleResolutionRow {
+  /** `null` is the no-override row — the assistant supplies no style. */
+  caller: ExecutionStyle | null;
+  resolution: StyleResolution;
+}
+
+/**
+ * The coding half: the addressable tcode coding PM and its style resolution
+ * (#4353; DOC-62).
+ *
+ * A THIRD mechanism, never a `cross_product` target. The reserved `target` name
+ * is recognised before the non-coding allow-set is consulted and is absent from
+ * that floor, so `[subagents].allowed` does not gate it — `gated_by_allowed`
+ * states that positively rather than leaving it to be inferred from an absence.
+ * Reachability is `tool_granted` and nothing else.
+ *
+ * `resolutions` is the reason this pane can be honest. Every row is computed
+ * server-side by the real resolver over the real lane floor and the agent's real
+ * `[subagents] default_style`, so the pane renders effective-vs-requested
+ * without porting precedence, the §5.4 ceiling, or SM-9's `vibe` → `engineer`
+ * fail-safe. Never recompute any of that client-side: a second copy is exactly
+ * the drift the sibling halves' server-resolution rule exists to prevent.
+ */
+export interface SubagentCoding {
+  mechanism: 'coding';
+  tool: string;
+  /** Whether this agent holds `dispatch_task` — the only reachability gate. */
+  tool_granted: boolean;
+  /** The reserved coding-PM name (`CODING_PM_TARGET`), served, never hardcoded. */
+  target: string;
+  /** Always `false`: `[subagents].allowed` does not gate the coding lane. */
+  gated_by_allowed: boolean;
+  /** The ceremony floor this lane imposes (DOC-62 §5.4). */
+  lane_floor: ExecutionStyle;
+  /** `ExecutionStyle::BUILT_IN_DEFAULT` — what an unconfigured agent gets. */
+  built_in_default: ExecutionStyle;
+  /** This agent's `[subagents] default_style`; `null` when it declares none. */
+  config_default: ExecutionStyle | null;
+  resolutions: StyleResolutionRow[];
+}
+
 /** `GET /api/agents/:name/subagents`'s wire shape (#4029). */
 export interface AgentSubagents {
   /**
@@ -591,6 +664,12 @@ export interface AgentSubagents {
   resolved: boolean;
   in_product: SubagentInProduct;
   cross_product: SubagentCrossProduct;
+  /**
+   * #4353. Optional so a pre-#4353 sidecar renders the two older mechanisms
+   * rather than throwing — same posture as `AgentSkillGroup.providers`. The
+   * pane says the lane is unreported instead of drawing a hardcoded stand-in.
+   */
+  coding?: SubagentCoding;
   config_error?: string;
 }
 

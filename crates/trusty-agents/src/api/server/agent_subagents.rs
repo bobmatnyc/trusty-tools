@@ -35,6 +35,14 @@
 //!   (`agents::config::SubagentsConfig`), intersected with the bridge's own
 //!   `NON_CODING_TARGETS` floor by `SubagentAllowSet` — fail-closed per OQ-7,
 //!   with an absent section granting NOTHING.
+//! - **`coding`** (#4353, DOC-62) — `dispatch_task` addressed to the reserved
+//!   `cross_product::CODING_PM_TARGET` (`"coding-pm"`), the SOLE coding
+//!   delegation surface (epic #4345 decision 2). A third mechanism, not a
+//!   third entry in `cross_product`: the reserved name is recognised BEFORE the
+//!   non-coding allow-set is consulted and is deliberately absent from that
+//!   floor, so `[subagents].allowed` does not gate it. This half additionally
+//!   reports what a style REQUEST would resolve to, computed by
+//!   `ResolvedStyle::resolve` itself — see [`coding_surface`].
 //!
 //! **Honesty rules this route holds to.** Every one exists because the
 //! alternative is a config pane that advertises a capability the enforcement
@@ -105,7 +113,8 @@ use crate::agents::{AgentConfig, AgentTier};
 use crate::ctrl::pm_task::match_any_glob;
 use crate::runtime::tool_registry::{ASSISTANT_ALLOWED_DELEGATE_ROLES, ASSISTANT_TIER_ROLE};
 use crate::skills::manifest::{SkillCatalog, effective_tool_patterns};
-use crate::tools::cross_product::NON_CODING_TARGETS;
+use crate::tools::cross_product::{CODING_PM_TARGET, DispatchTarget, NON_CODING_TARGETS};
+use crate::tools::execution_style::{ExecutionStyle, ResolvedStyle};
 use crate::tools::subagent_allow::{SubagentAllowSet, TargetDenied};
 
 /// The in-product delegation tool this section reports on.
@@ -188,6 +197,10 @@ pub(super) async fn subagents_at(
                     "resolved": false,
                     "in_product": empty_in_product(),
                     "cross_product": empty_cross_product(),
+                    // #4353: an unresolvable config yields no style default
+                    // either, so the resolutions fall through to the built-in
+                    // — reported, not omitted, so the pane renders its shell.
+                    "coding": coding_surface(None, false),
                     "config_error": format!("{e:#}"),
                 })),
             )
@@ -214,6 +227,7 @@ pub(super) async fn subagents_at(
     let in_product = in_product_surface(dirs, name, &cfg, grants(DELEGATE_TOOL)).await;
     let cross_product =
         cross_product_surface(cfg.subagents.allowed.as_deref(), grants(DISPATCH_TOOL));
+    let coding = coding_surface(cfg.subagents.default_style, grants(DISPATCH_TOOL));
 
     (
         StatusCode::OK,
@@ -221,6 +235,7 @@ pub(super) async fn subagents_at(
             "resolved": true,
             "in_product": in_product,
             "cross_product": cross_product,
+            "coding": coding,
         })),
     )
         .into_response()
@@ -537,6 +552,80 @@ fn cross_product_surface(declared: Option<&[String]>, tool_granted: bool) -> Val
     })
 }
 
+/// The `coding` half: the addressable tcode coding PM and what a style request
+/// to it would ACTUALLY resolve to (#4353; DOC-62 §3.4, §5.3, §7.3).
+///
+/// Why: #4350 made the external coding project manager addressable by the
+/// reserved name `coding-pm`, but nothing served that fact, so the Sub-agents
+/// pane could only have hardcoded it — and a hardcoded copy of a reserved
+/// literal is the drift this module's "no second copy of any gate" rule
+/// forbids. The style half has the same problem in a sharper form. DOC-62 §5.4
+/// makes a caller-supplied style a CEILING REQUEST the callee may raise but
+/// never lower, and SM-9 currently raises `vibe` to `engineer` because the VIBE
+/// tier is unimplemented (#2596) — so the style a user picks is frequently NOT
+/// the style that runs. A selector that displayed the request would therefore
+/// be displaying something false. OQ-6's answer is to render the EFFECTIVE
+/// style and its resolution path instead, which is only honest if the numbers
+/// come from the real resolver: every row below is produced by
+/// [`ResolvedStyle::resolve`] itself, over the real lane floor
+/// ([`DispatchTarget::CodingPm`]'s `style_floor`) and the agent's real
+/// `[subagents] default_style`. Nothing here re-implements precedence,
+/// escalation, or the SM-9 fail-safe; a client rendering this payload cannot
+/// disagree with the bridge because it never computes anything.
+///
+/// This is a THIRD labelled mechanism, deliberately not folded into
+/// `cross_product`. The two resolve over different vocabularies on different
+/// code paths: `cross_product` is `[subagents].allowed` intersected with
+/// `NON_CODING_TARGETS`, while `coding-pm` is recognised BEFORE that allow-set
+/// is consulted and is deliberately absent from that floor
+/// (`DispatchTarget::for_reserved_name`). Merging them would imply
+/// `[subagents].allowed` gates the coding lane, which it does not —
+/// `gated_by_allowed: false` says so explicitly rather than leaving a reader to
+/// infer it from an absence.
+/// What: `{mechanism, tool, tool_granted, target, gated_by_allowed, lane_floor,
+/// built_in_default, config_default, resolutions}`. `resolutions` carries one
+/// row per selectable control in the GUI — the no-override row (`caller: null`)
+/// plus one per [`ExecutionStyle::ALL`] entry — each holding the serialized
+/// [`ResolvedStyle`] (`requested`/`source`/`effective`/`escalations`), which IS
+/// DOC-62 §3.4's reporting contract. Reachability is `tool_granted` and nothing
+/// else: the coding lane consults no allow-set, so an agent holding
+/// `dispatch_task` can address the coding PM and one that does not, cannot.
+/// Test: `coding_surface_names_the_reserved_target_and_is_not_allowlist_gated`,
+/// `coding_surface_reports_every_request_resolving_to_engineer_today`,
+/// `coding_surface_reports_the_config_default_and_its_source`,
+/// `subagents_route_reports_the_coding_lane`.
+fn coding_surface(config_default: Option<ExecutionStyle>, tool_granted: bool) -> Value {
+    let floor = DispatchTarget::CodingPm.style_floor();
+    // The no-override row FIRST, matching the order the selector draws: "leave
+    // it to the assistant" is the default control, and the explicit styles are
+    // the override.
+    let resolutions: Vec<Value> = std::iter::once(None)
+        .chain(ExecutionStyle::ALL.into_iter().map(Some))
+        .map(|caller| {
+            json!({
+                "caller": caller.map(ExecutionStyle::as_str),
+                "resolution": ResolvedStyle::resolve(caller, config_default, floor),
+            })
+        })
+        .collect();
+
+    json!({
+        "mechanism": "coding",
+        "tool": DISPATCH_TOOL,
+        "tool_granted": tool_granted,
+        "target": CODING_PM_TARGET,
+        // Stated as a POSITIVE fact rather than left to inference: the coding
+        // name resolves before `SubagentAllowSet` is consulted, so an operator
+        // adding it to `[subagents].allowed` would be doing nothing (and would
+        // in fact land in `cross_product.rejected`).
+        "gated_by_allowed": false,
+        "lane_floor": floor.as_str(),
+        "built_in_default": ExecutionStyle::BUILT_IN_DEFAULT.as_str(),
+        "config_default": config_default.map(ExecutionStyle::as_str),
+        "resolutions": resolutions,
+    })
+}
+
 /// The `in_product` payload for an agent whose config did not resolve — empty,
 /// with the mechanism vocabulary still present so the pane renders its shell.
 fn empty_in_product() -> Value {
@@ -678,6 +767,96 @@ mod unit_tests {
                 .unwrap()
                 .contains("NON_CODING_TARGETS")
         );
+    }
+
+    /// Helper: the `resolution` object for one selector row, by its `caller`
+    /// key (`None` = the no-override row).
+    fn row(body: &Value, caller: Option<&str>) -> Value {
+        body["resolutions"]
+            .as_array()
+            .expect("resolutions is an array")
+            .iter()
+            .find(|r| r["caller"] == json!(caller))
+            .unwrap_or_else(|| panic!("no resolution row for {caller:?}"))["resolution"]
+            .clone()
+    }
+
+    /// #4353: the coding lane is named by the RESERVED literal and is not
+    /// gated by `[subagents].allowed` — the two facts a pane would otherwise
+    /// have to hardcode or infer, and the second of which is easy to get
+    /// backwards because every OTHER cross-product target IS allow-list gated.
+    #[test]
+    fn coding_surface_names_the_reserved_target_and_is_not_allowlist_gated() {
+        let body = coding_surface(None, true);
+        assert_eq!(body["mechanism"], "coding");
+        assert_eq!(body["tool"], DISPATCH_TOOL);
+        assert_eq!(body["target"], CODING_PM_TARGET);
+        assert_eq!(body["gated_by_allowed"], false);
+        assert_eq!(body["tool_granted"], true);
+        // The reserved coding name must never appear on the NON-coding floor —
+        // if it ever did, the two lanes would have merged and this payload's
+        // separation would be a fiction.
+        assert!(!NON_CODING_TARGETS.contains(&CODING_PM_TARGET));
+    }
+
+    /// DOC-62 SM-9 + §5.4, at the surface that reports them: the coding lane's
+    /// floor is `vibe`, `vibe` is unimplemented, so EVERY request — including
+    /// `hack`, and including no request at all — currently resolves to
+    /// `engineer`. A pane must be able to say that truthfully; this asserts the
+    /// payload gives it the material to, rather than the pane inferring it.
+    #[test]
+    fn coding_surface_reports_every_request_resolving_to_engineer_today() {
+        let body = coding_surface(None, true);
+        assert_eq!(body["lane_floor"], "vibe");
+        assert_eq!(body["built_in_default"], "engineer");
+        // One row per selectable control: no-override plus each style.
+        assert_eq!(
+            body["resolutions"].as_array().unwrap().len(),
+            ExecutionStyle::ALL.len() + 1
+        );
+
+        for caller in [None, Some("hack"), Some("vibe"), Some("engineer")] {
+            let r = row(&body, caller);
+            assert_eq!(r["effective"], "engineer", "caller={caller:?}: {r}");
+        }
+
+        // …and it says WHY, per style. `hack` is raised twice (the lane floor,
+        // then the unimplemented tier); `vibe` only by the tier; `engineer` was
+        // already there and must carry no escalation at all — reporting one
+        // would be as misleading as reporting none for `hack`.
+        assert_eq!(
+            row(&body, Some("hack"))["escalations"],
+            json!(["callee-floor", "tier-unimplemented"])
+        );
+        assert_eq!(
+            row(&body, Some("vibe"))["escalations"],
+            json!(["tier-unimplemented"])
+        );
+        assert_eq!(row(&body, Some("engineer"))["escalations"], json!([]));
+    }
+
+    /// The resolution PATH (DOC-62 §3.4) has to be visible, not just the
+    /// outcome: with a config default set, the no-override row must attribute
+    /// the value to `config`, and an explicit request must still win and say
+    /// `caller`. Without this the pane could not tell a user whether their
+    /// `agent.toml` was read at all.
+    #[test]
+    fn coding_surface_reports_the_config_default_and_its_source() {
+        let body = coding_surface(Some(ExecutionStyle::Vibe), true);
+        assert_eq!(body["config_default"], "vibe");
+
+        let no_override = row(&body, None);
+        assert_eq!(no_override["source"], "config");
+        assert_eq!(no_override["requested"], "vibe");
+        assert_eq!(no_override["effective"], "engineer");
+
+        let explicit = row(&body, Some("engineer"));
+        assert_eq!(explicit["source"], "caller");
+
+        // With NO config default the same row falls through to the built-in.
+        let bare = coding_surface(None, false);
+        assert_eq!(bare["config_default"], Value::Null);
+        assert_eq!(row(&bare, None)["source"], "built-in");
     }
 
     /// The two mechanisms' TARGET vocabularies are disjoint — if they were ever
