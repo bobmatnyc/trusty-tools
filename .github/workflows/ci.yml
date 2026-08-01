@@ -632,14 +632,34 @@ jobs:
       # and no extra tool or build. See .github/scripts/
       # attribute_test_failures.py for the full rationale and doctest
       # handling.
+      # #4614: this step could not fail. It ran `cargo test ... | tee` inside an
+      # `if`, under GitHub's implicit `bash -e {0}` — no pipefail anywhere in
+      # this file (zero `shell:` keys). The `if` therefore tested `tee`'s exit
+      # code, which is always 0, so the success branch always ran and the
+      # `${PIPESTATUS[0]}` branch was dead code. A required check reported green
+      # on every test failure, on every commit, for as long as it existed.
+      #
+      # Fixed structurally rather than by enabling a shell option: there is no
+      # pipe left, so `$?` is `cargo test`'s own exit code and no option can
+      # change that. `shell: bash` is a second, independent backstop — it also
+      # sets `-o pipefail`, so any pipe added here later still reports failure.
+      # Neither mechanism depends on the other.
+      #
+      # Trade-off, deliberate: output lands in the job log via `cat` when the
+      # step finishes instead of streaming live. `test-output.log` is unchanged,
+      # so attribute_test_failures.py reads exactly what it did before. Scoped
+      # to this step, NOT `defaults.run.shell` — flipping the whole workflow to
+      # pipefail at once would change every other step's failure semantics in
+      # the same commit.
       - name: cargo test --workspace
+        shell: bash
         run: |
-          if cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
-              -- --skip update::tests::cache_fresh_returns_some_when_newer 2>&1 | tee test-output.log; then
-            test_status=0
-          else
-            test_status=${PIPESTATUS[0]}
-          fi
+          set -uo pipefail
+          test_status=0
+          cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
+              -- --skip update::tests::cache_fresh_returns_some_when_newer \
+              > test-output.log 2>&1 || test_status=$?
+          cat test-output.log
           if [ "$test_status" -ne 0 ]; then
             echo "::group::Per-crate failure attribution (closes #950, via #4402)"
             python3 .github/scripts/attribute_test_failures.py
