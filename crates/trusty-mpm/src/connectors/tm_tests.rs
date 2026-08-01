@@ -192,14 +192,25 @@ async fn create_session_outlives_the_default_request_timeout() {
 }
 
 /// Negative control for [`create_session_outlives_the_default_request_timeout`]:
-/// the override must be SCOPED to the provisioning route, not a blanket
-/// un-bounding of the connector. A point read against the same slow stub, with
-/// the same client, must still be cut off by the client-level bound.
+/// the provisioning override must be SCOPED to the provisioning route. A point
+/// read against the same slow stub, through the same connector, must still be
+/// cut off by that connector's client-level bound.
 ///
-/// Why this control matters: without it, the sibling test would also pass if
-/// someone "fixed" #4488 by removing the client's timeout entirely — which is
-/// the #2471 regression (an unbounded client hanging a caller for the
-/// multi-minute OS socket timeout), not a fix.
+/// What this catches, precisely (#4488 review, M3): a change that widens the
+/// override from one route to the whole connector — a `RequestBuilder::timeout`
+/// moved onto a shared helper, or the client itself rebuilt with the
+/// provisioning bound. Under any of those the sibling test still passes while
+/// every point read silently inherits a 180s ceiling, so this is the only
+/// assertion in the pair that would notice.
+///
+/// What it does NOT catch, despite an earlier version of this comment claiming
+/// otherwise: removal of the timeout from the PRODUCTION client built by
+/// `http_client::config::build_client`. Both tests here construct their own
+/// client via [`client_bounded_at`] — that is what makes them run in
+/// milliseconds instead of minutes — so neither one observes the production
+/// default at all. `config::tests::build_client_bounds_a_stalled_connection`
+/// and `config::tests::default_client_uses_default_bounds` are what guard the
+/// #2471 regression; this test is not a second line of defence for it.
 #[tokio::test]
 async fn list_sessions_is_bound_by_the_client_level_timeout() {
     let url = spawn_slow_stub_daemon(std::time::Duration::from_millis(400)).await;
@@ -211,10 +222,17 @@ async fn list_sessions_is_bound_by_the_client_level_timeout() {
         .list_sessions()
         .await
         .expect_err("a 400ms response must not beat a 100ms client-level bound");
-    assert!(
-        matches!(err, ConnectorError::Transport(_)),
-        "expected a Transport timeout, got {err:?}"
-    );
+    // `decode_err` also produces `Transport`, so the variant alone cannot tell
+    // a timeout from a malformed body (#4488 review, LOW). Rule the decode
+    // path out by its literal prefix: reaching it would mean the stub answered
+    // WITHIN the bound and the assertion above proved nothing about timeouts.
+    match err {
+        ConnectorError::Transport(ref msg) => assert!(
+            !msg.starts_with("failed to decode daemon response"),
+            "expected a transport-level timeout, got a decode failure: {msg}"
+        ),
+        other => panic!("expected ConnectorError::Transport, got {other:?}"),
+    }
 }
 
 /// Build a local, offline-clonable bare git repo with one commit on `main`.
