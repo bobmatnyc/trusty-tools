@@ -113,10 +113,12 @@ enum Command {
     /// The daemon is located by `TCODE_DAEMON_URL`, else the `http_addr`
     /// discovery file, and is liveness-pinged before use. When nothing
     /// answers, one is STARTED automatically (#4512, reversing DOC-50 §4.1's
-    /// deferral) and stopped again when the REPL exits — a pre-existing
-    /// daemon is attached to and left running. A `TCODE_DAEMON_URL` that is
-    /// set but unreachable is an error rather than a spawn, so an explicit
-    /// address is never quietly replaced with a different one. See
+    /// deferral) — and LEFT RUNNING when the REPL exits, since the daemon
+    /// owns PM lifecycle and agent dispatch and this TUI is only one of its
+    /// attached clients. A `TCODE_DAEMON_URL` that is set but unreachable is
+    /// an error rather than a spawn, so an explicit address is never quietly
+    /// replaced with a different one, and a daemon bound to a DIFFERENT
+    /// project than `--project` is refused rather than attached to. See
     /// `crate::cli::tui` for the wiring and `crate::cli::daemon_autospawn`
     /// for the policy.
     Tui {

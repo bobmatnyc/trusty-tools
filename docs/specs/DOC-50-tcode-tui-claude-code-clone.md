@@ -286,6 +286,12 @@ The CodeEngine communicates with a long-lived `tcode serve --http` daemon (defau
    - An unreachable `TCODE_DAEMON_URL` is an ERROR, not a spawn — the operator
      named an address, and starting a daemon at a different one would ignore
      that instruction.
+   - **BINDING CHECK (#4512):** a daemon binds exactly one project for its whole
+     life, and `GET /health` now publishes it. A discovered daemon whose binding
+     differs from the TUI's `--project` (in either direction, including
+     projectless-vs-bound) is REFUSED with an error naming both projects — never
+     attached to, and never replaced by a competing daemon on a port already in
+     use.
 
 3. **CodeEngine struct:**
    ```rust
@@ -358,13 +364,20 @@ belongs to trusty-memory).
     projectless. Readiness is awaited via
     `trusty_common::daemon_guard::spin_until_ready`, raced against the child's
     exit so a daemon that fails to bind reports that immediately.
-  - **Ownership:** a daemon the TUI spawned is OWNED by the TUI and stopped on
-    exit — SIGTERM plus a grace period so axum drains in-flight requests (the
-    connection-safe restart convention, #534), escalating to SIGKILL only if it
-    ignores SIGTERM. A pre-existing daemon the TUI merely attached to is NEVER
-    killed on exit.
+  - **Lifetime: the TUI NEVER stops the daemon** — not even one it started.
+    Per the owner directive of 2026-08-01 the daemon owns PM lifecycle, agent
+    dispatch, and agent communication; CLIs and TUIs *attach* to it, so a
+    client quitting must not destroy live PM or agent work. There is no
+    ownership tracking, no exit-time SIGTERM, and no `kill_on_drop`. A daemon
+    the TUI spawned keeps running afterwards exactly like one started by hand.
+    Quiescence-gated idle exit — a daemon that stops itself once it has no
+    attached clients AND no active PM/agent sessions, allowing safe
+    upgrades/restarts that preserve running sessions — is separate follow-up
+    work and is NOT part of this slice.
   - An unreachable-but-explicitly-set `TCODE_DAEMON_URL` is an error, not a
     spawn.
+  - A daemon whose reported project binding differs from the TUI's is refused
+    (§3.4 binding check).
 
   Implementation: `crates/trusty-code/src/cli/daemon_autospawn.rs`.
 - Streaming chat input/output (assistant responses render in real time).
@@ -387,8 +400,10 @@ belongs to trusty-memory).
 **Acceptance criteria (MVP):**
 - `tcode tui` command exists and launches the REPL.
 - (#4512) `tcode tui` starts a daemon when none is running, attaches to one that
-  is already running, stops only a daemon it started itself, and errors rather
-  than spawning when `TCODE_DAEMON_URL` names an unreachable address.
+  is already running and serving the same project, leaves the daemon running on
+  exit no matter which process started it, and errors rather than spawning when
+  `TCODE_DAEMON_URL` names an unreachable address or when the daemon it found is
+  bound to a different project.
 - User types a prompt, presses Enter, the daemon's response streams to the TUI.
 - `/help` shows a list of slash commands.
 - Scrollback works (Up-arrow, mouse-wheel, Page-up/down).

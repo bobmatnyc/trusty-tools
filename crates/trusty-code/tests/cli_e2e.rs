@@ -605,19 +605,27 @@ fn tui_subcommand_is_listed_in_help() {
 
 /// `tcode tui` auto-spawns a daemon when none is running (#4512, reversing
 /// DOC-50 §4.1's deferral) — it must NEVER exit telling the operator to go
-/// start one by hand.
+/// start one by hand — and that daemon must OUTLIVE the TUI, because it owns
+/// PM lifecycle and agent dispatch (owner directive, 2026-08-01).
 ///
 /// `TRUSTY_DATA_DIR_OVERRIDE` isolates the `http_addr` discovery file (and
 /// the spawned daemon's log) into a temp directory, so this stays a genuine
 /// "no daemon known" case on a developer machine that has one running.
 /// Evidence of the spawn is the daemon log file the auto-spawn path opens
-/// for the child: asserting on THAT rather than on a successful launch keeps
-/// the test valid even when the default port is already taken by a foreign
-/// daemon (the child then dies on bind, which is its own reported error).
-/// The launch still fails afterwards, because a test harness has no TTY for
-/// the alternate screen — that is expected and unrelated.
-#[test]
-fn tui_auto_spawns_a_daemon_when_none_is_running() {
+/// for the child. The launch itself still fails afterwards, because a test
+/// harness has no TTY for the alternate screen — that is expected and
+/// unrelated, and it is precisely the "the TUI exited" moment a teardown
+/// would have fired at.
+///
+/// The survival half is CONDITIONAL on the child actually binding: the
+/// spawned daemon uses the well-known default port, so a foreign daemon
+/// already holding it makes ours die on bind (its own reported error). The
+/// isolated `http_addr` file is written only by OUR child, so its presence is
+/// the exact "our daemon came up" signal — when it is absent the test still
+/// asserts everything that does not depend on a free port. This test kills
+/// the daemon it caused to start; nothing else will.
+#[tokio::test]
+async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     let data_dir = tempfile::tempdir().expect("data dir tempdir");
     let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
         .arg("tui")
@@ -638,6 +646,112 @@ fn tui_auto_spawns_a_daemon_when_none_is_running() {
     assert!(
         !stderr.contains("no tcode daemon found"),
         "must never bail with the old start-one-yourself message: {stderr}"
+    );
+
+    let Some(addr) = std::fs::read_to_string(data_dir.path().join("trusty-code/http_addr"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        // The default port was already taken; see this test's docs.
+        return;
+    };
+
+    let health: serde_json::Value = reqwest::get(format!("http://{addr}/health"))
+        .await
+        .expect("the spawned daemon must still be serving /health after the TUI exited")
+        .json()
+        .await
+        .expect("/health must return JSON");
+    assert_eq!(health["status"], "ok");
+    assert_eq!(
+        health["binding"]["state"], "projectless",
+        "a projectless TUI must have spawned a projectless daemon: {health}"
+    );
+
+    let pid = health["pid"].as_u64().expect("/health must report a pid") as libc::pid_t;
+    // SAFETY: `pid` was just reported by a live daemon this test caused to
+    // start; `kill` has no memory-safety effects.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+}
+
+/// A daemon bound to a DIFFERENT project must be refused, not attached to:
+/// auto-attach picks daemons up off a well-known address, so without this
+/// check a TUI launched in project B drives project A's daemon and every
+/// session lands in the wrong repository (#4512).
+///
+/// Driven end-to-end against the REAL binary on both sides — a genuine
+/// `tcode serve --http --project A` daemon on an OS-assigned port, and a real
+/// `tcode tui --project B` pointed at it.
+#[tokio::test]
+async fn tui_refuses_a_daemon_bound_to_a_different_project() {
+    use std::io::BufRead;
+
+    let their_project = tempfile::tempdir().expect("their project");
+    let our_project = tempfile::tempdir().expect("our project");
+    let daemon_data = tempfile::tempdir().expect("daemon data dir");
+    let tui_data = tempfile::tempdir().expect("tui data dir");
+
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .args(["serve", "--http", "--port", "0", "--project"])
+        .arg(their_project.path())
+        .env("TRUSTY_DATA_DIR_OVERRIDE", daemon_data.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn tcode serve --http");
+
+    // `run_http` prints `listening on http://127.0.0.1:<port>` to stderr as
+    // soon as it binds — the only place the OS-assigned port is reported.
+    let mut reader = std::io::BufReader::new(daemon.stderr.take().expect("daemon stderr"));
+    let url = loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).expect("read daemon stderr") == 0 {
+            panic!("daemon exited before reporting its address");
+        }
+        if let Some(idx) = line.find("http://") {
+            break line[idx..].trim().to_string();
+        }
+    };
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+        .arg("tui")
+        .arg("--project")
+        .arg(our_project.path())
+        .env("TRUSTY_DATA_DIR_OVERRIDE", tui_data.path())
+        .env("TCODE_DAEMON_URL", &url)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn tcode tui");
+    daemon.kill().expect("stop the test daemon");
+    daemon.wait().expect("reap the test daemon");
+
+    assert!(
+        !output.status.success(),
+        "must exit nonzero on a binding mismatch: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let theirs = their_project
+        .path()
+        .canonicalize()
+        .expect("canonicalize theirs");
+    let ours = our_project
+        .path()
+        .canonicalize()
+        .expect("canonicalize ours");
+    assert!(
+        stderr.contains(&theirs.display().to_string())
+            && stderr.contains(&ours.display().to_string()),
+        "error must name BOTH projects: {stderr}"
+    );
+    assert!(
+        !tui_data
+            .path()
+            .join("trusty-code/tui-spawned-daemon.log")
+            .exists(),
+        "must not start a competing daemon: {stderr}"
     );
 }
 

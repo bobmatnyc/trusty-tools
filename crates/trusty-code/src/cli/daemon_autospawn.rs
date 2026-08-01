@@ -1,5 +1,5 @@
-//! Attach to a running `tcode serve --http` daemon, or START one — with
-//! ownership tracked so only a daemon WE started is ever stopped (#4512).
+//! Attach to a running `tcode serve --http` daemon, or START one — and
+//! then LEAVE IT RUNNING, whoever started it (#4512).
 //!
 //! Why: `tcode tui` shipped (#4424, PR #4433) refusing to run without a
 //! hand-started daemon: discovery failed, the command printed an "actionable
@@ -9,27 +9,41 @@
 //! directive of 2026-07-31 overturns that deferral. This module is the
 //! resulting policy layer, kept OUT of `tui.rs` so the launch path stays a
 //! thin "resolve args -> build engine -> run" wiring file (`crate::cli`'s
-//! contract) and so the lifetime rules below are stated in one place.
+//! contract) and so the lifetime and binding rules below are stated in one
+//! place.
+//!
+//! **The TUI never stops the daemon.** Per the owner directive of
+//! 2026-08-01, the tcode daemon is the process that owns PM lifecycle, agent
+//! dispatch, and inter-agent communication; a TUI is one of possibly several
+//! CLIs/TUIs *attached* to it. Quitting a client must therefore never end
+//! live PM or agent work, so this module signals the daemon on exit under NO
+//! circumstance — not even one it started itself. A daemon `tcode tui`
+//! spawned simply keeps running afterwards, exactly like one started by
+//! hand. Quiescence-gated idle exit (a daemon that stops itself once it has
+//! no attached clients AND no active PM/agent sessions) is separate
+//! follow-up work, deliberately not implemented here: getting it wrong in
+//! either direction destroys work or leaks processes, and it needs its own
+//! lease/refcount design rather than a client-side kill.
+//!
 //! What: [`ensure_daemon`] resolves a daemon URL through the UNCHANGED
 //! discovery order (`TCODE_DAEMON_URL`, then the `http_addr` file, each
-//! liveness-pinged — `tui_client::discovery::lookup_daemon`) and returns a
-//! [`DaemonSession`] carrying that URL plus who owns the process:
+//! liveness-pinged — `tui_client::discovery::lookup_daemon`) and returns the
+//! base URL to drive:
 //!
-//! * **Live daemon found** -> [`Ownership::Attached`]. Nothing is spawned,
-//!   and [`DaemonSession::shutdown`] is a NO-OP: a daemon we merely attached
-//!   to belongs to whoever started it (possibly another TUI, an IDE, or a
-//!   long-running dev daemon) and must survive our exit.
+//! * **Live daemon found, serving the SAME project** -> attach. Nothing is
+//!   spawned and nothing is owned.
+//! * **Live daemon found, serving a DIFFERENT project** -> hard error naming
+//!   both projects (see [`check_binding`]). We neither attach — that would
+//!   silently operate against the wrong repository — nor start a competing
+//!   daemon on a port that is already taken.
 //! * **`TCODE_DAEMON_URL` set but unreachable** -> hard error naming that
 //!   URL. Auto-spawn deliberately does NOT apply here: the operator named an
 //!   address, and starting a daemon at a DIFFERENT address (the default
 //!   port) would silently ignore that instruction.
 //! * **Discovery file stale or absent** -> spawn
-//!   `<current_exe> serve --http [--project <path>]` as a child, wait for it
-//!   to answer `GET /health`, and return [`Ownership::Spawned`]. We started
-//!   it, so we stop it: [`DaemonSession::shutdown`] sends SIGTERM and waits
-//!   out a grace period so axum drains in-flight requests (the workspace's
-//!   connection-safe restart convention, #534), escalating to SIGKILL only
-//!   if the daemon ignores SIGTERM.
+//!   `<current_exe> serve --http [--project <path>]` as a child and wait for
+//!   it to answer `GET /health`. The child handle is dropped once it is
+//!   healthy; the daemon outlives this process.
 //!
 //! The binary is resolved with [`super::tcode_exe::resolve`]
 //! (`std::env::current_exe()`), never a bare `tcode` PATH lookup, so a
@@ -41,9 +55,10 @@
 //! `Child::wait` so a daemon that dies on startup (e.g. its port is taken)
 //! reports THAT immediately instead of spinning out the whole budget.
 //! Test: `daemon_autospawn_tests::*` (sibling file, per the 500-SLOC
-//! production cap) covers all four branches against a `wiremock` health
-//! endpoint and stub child binaries — attach-without-spawning, spawn,
-//! never-kill-what-we-did-not-spawn, and refuse-to-spawn-for-an-explicit-URL.
+//! production cap) covers every branch against a `wiremock` health endpoint
+//! and stub child binaries — attach-without-spawning, spawn, refuse-for-an-
+//! explicit-URL, refuse-on-a-binding-mismatch, and the universal
+//! never-signal-the-daemon-on-exit rule.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -52,22 +67,19 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use tokio::process::{Child, Command};
 use trusty_code::serve::DEFAULT_HTTP_PORT;
-use trusty_code::tui_client::discovery::{DAEMON_URL_ENV, Lookup, Source, lookup_daemon};
+use trusty_code::tui_client::discovery::{
+    DAEMON_URL_ENV, Lookup, ReportedBinding, Source, lookup_daemon,
+};
 use trusty_common::daemon_guard::{DaemonGuardConfig, spin_until_ready};
 
-/// How long a daemon WE spawned gets to become healthy before we give up,
-/// stop it, and report the failure.
+/// How long a daemon WE spawned gets to become healthy before we give up and
+/// report the failure.
 ///
 /// Shorter than `daemon_guard::DEFAULT_STARTUP_TIMEOUT` (30s) because this
 /// wait sits between the operator pressing Enter and a TUI appearing — 20s
 /// of spinner is already the outer edge of tolerable, and a tcode daemon
 /// that has not bound its port by then is not about to.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// How long a daemon we own gets to drain and exit after SIGTERM before we
-/// escalate to SIGKILL. Matches the sibling sidecar teardown in
-/// `trusty-agents`' Tauri shell, whose axum drain is the same shape.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Filename (under `resolve_data_dir("trusty-code")`) the spawned daemon's
 /// stdout/stderr are appended to.
@@ -80,64 +92,16 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// the file in the error message.
 const DAEMON_LOG_FILENAME: &str = "tui-spawned-daemon.log";
 
-/// Who owns the daemon's process lifetime — the distinction the whole
-/// module exists to enforce.
-#[derive(Debug)]
-pub enum Ownership {
-    /// The daemon was already running. We did not start it, so we never
-    /// stop it.
-    Attached,
-    /// We started this daemon, so we are responsible for stopping it.
-    Spawned(Child),
-}
-
-/// A daemon `tcode tui` is about to drive, plus who owns its lifetime.
-#[derive(Debug)]
-pub struct DaemonSession {
-    /// Base URL (no trailing slash) the engine should target.
-    pub url: String,
-    ownership: Ownership,
-}
-
-impl DaemonSession {
-    /// Stop the daemon IF we started it; leave a pre-existing one running.
-    ///
-    /// Why: killing a daemon we merely attached to would tear the rug out
-    /// from under whoever actually started it — another TUI, an editor
-    /// integration, or a dev daemon deliberately left running. Ownership is
-    /// therefore recorded at attach/spawn time, not inferred here.
-    /// What: no-op for [`Ownership::Attached`]; for [`Ownership::Spawned`],
-    /// SIGTERM -> wait up to [`SHUTDOWN_GRACE`] for a graceful axum drain ->
-    /// SIGKILL + reap only if it ignored SIGTERM. Consumes `self` so a
-    /// session cannot be shut down twice.
-    /// Test: `daemon_autospawn_tests::{shutdown_stops_a_daemon_we_spawned,
-    /// shutdown_leaves_a_pre_existing_daemon_running}`.
-    pub async fn shutdown(self) {
-        match self.ownership {
-            Ownership::Attached => {
-                tracing::debug!(
-                    url = %self.url,
-                    "tcode tui: leaving the pre-existing daemon running (we did not start it)"
-                );
-            }
-            Ownership::Spawned(child) => {
-                tracing::debug!(url = %self.url, "tcode tui: stopping the daemon it started");
-                terminate(child, SHUTDOWN_GRACE).await;
-            }
-        }
-    }
-}
-
-/// Resolve a live daemon URL, starting a daemon if none is running.
+/// Resolve a live daemon URL for `project`, starting a daemon if none is
+/// running.
 ///
 /// Why/What/Test: see module docs — this function IS the policy.
-/// `project` mirrors `tcode tui`'s own `--project`: it is forwarded to a
-/// spawned daemon so the daemon's binding matches the TUI's, and OMITTED
-/// when the TUI is projectless (a first-class state, not a degraded one).
-pub async fn ensure_daemon(
-    client: &reqwest::Client,
-    project: Option<&Path>,
-) -> Result<DaemonSession> {
+/// `project` mirrors `tcode tui`'s own `--project` (already canonicalized by
+/// `cli::tui::resolve_project`): it is forwarded to a spawned daemon so the
+/// daemon's binding matches the TUI's, OMITTED when the TUI is projectless (a
+/// first-class state, not a degraded one), and — since #4512 — checked
+/// against the binding an already-running daemon reports.
+pub async fn ensure_daemon(client: &reqwest::Client, project: Option<&Path>) -> Result<String> {
     let tcode_exe = super::tcode_exe::resolve()?;
     let health_url = format!("http://127.0.0.1:{DEFAULT_HTTP_PORT}");
     ensure_daemon_with(client, project, &tcode_exe, &health_url).await
@@ -148,20 +112,19 @@ pub async fn ensure_daemon(
 /// Why: mirrors `cli_client::StdioRpcClient::spawn`'s established shape —
 /// the library half takes an explicit binary path so it stays testable with
 /// a stub, and the `std::env`/well-known-port policy lives in the one CLI
-/// wrapper above. Tests drive the real spawn/wait/teardown machinery
-/// against a stub child and a `wiremock` health endpoint, with no dependence
-/// on the developer's actual port 7882 or `$HOME`.
+/// wrapper above. Tests drive the real spawn/wait machinery against a stub
+/// child and a `wiremock` health endpoint, with no dependence on the
+/// developer's actual port 7882 or `$HOME`.
 async fn ensure_daemon_with(
     client: &reqwest::Client,
     project: Option<&Path>,
     tcode_exe: &Path,
     health_base_url: &str,
-) -> Result<DaemonSession> {
+) -> Result<String> {
     match lookup_daemon(client).await {
-        Lookup::Live(url) => Ok(DaemonSession {
-            url,
-            ownership: Ownership::Attached,
-        }),
+        // #4512: a daemon answering is not the same as a daemon serving the
+        // project we mean to work in.
+        Lookup::Live { url, binding } => check_binding(&url, &binding, project).map(|()| url),
         // An explicit instruction we must not second-guess — see module docs.
         Lookup::Dead {
             url,
@@ -172,6 +135,69 @@ async fn ensure_daemon_with(
             ..
         }
         | Lookup::Absent => spawn_and_wait(project, tcode_exe, health_base_url).await,
+    }
+}
+
+/// Accept a discovered daemon only if it serves the project the client wants.
+///
+/// Why: a daemon binds exactly one `ProjectBinding` for its whole life
+/// (`serve::build_router`), and auto-attach picks daemons up off a
+/// well-known port without the operator choosing one. Before #4512 the
+/// binding was not even on the wire, so a TUI launched in project B would
+/// attach to project A's daemon and every session, index, and file operation
+/// would land in the wrong repository — silently. Mismatch is therefore a
+/// hard error, and it is deliberately NOT an auto-spawn trigger: the port is
+/// already taken, so "just start our own" would either fail to bind or race
+/// the incumbent.
+///
+/// A projectless client meeting a project-bound daemon (and the reverse) is
+/// a MISMATCH, not a compatible pair. Projectless is a deliberate,
+/// first-class state — chat/planning with no index, no diff target and no
+/// project-scoped memory — so attaching a projectless TUI to a bound daemon
+/// would silently grant it a project the operator never named (exactly the
+/// implicit-binding bug `ProjectBinding` exists to prevent), and attaching a
+/// project-bound TUI to a projectless daemon would silently withdraw the
+/// indexing and git affordances the operator explicitly asked for. Neither
+/// side can be repaired after the fact, because the daemon's binding is
+/// fixed at its startup.
+///
+/// A daemon that reports NO binding ([`ReportedBinding::Unreported`], i.e. a
+/// build older than #4512) is refused as well. It fails CLOSED on purpose:
+/// the whole point of the check is that an unverified project is how work
+/// lands in the wrong repository, and "old daemon" is not evidence that its
+/// project is right. The remedy — restart it — is in the message.
+/// What: `Ok(())` when both sides name the same project or both are
+/// projectless; otherwise an error naming `url`, both projects, and the ways
+/// forward.
+/// Test: `daemon_autospawn_tests::{refuses_a_daemon_bound_to_another_project,
+/// refuses_a_project_bound_client_against_a_projectless_daemon,
+/// refuses_a_daemon_that_cannot_report_its_binding,
+/// attaches_to_a_live_daemon_without_spawning}`.
+fn check_binding(url: &str, reported: &ReportedBinding, wanted: Option<&Path>) -> Result<()> {
+    let wanted_label = wanted
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<projectless>".to_string());
+    match (reported, wanted) {
+        (ReportedBinding::Projectless, None) => Ok(()),
+        (ReportedBinding::Bound(root), Some(wanted)) if root == wanted => Ok(()),
+        (ReportedBinding::Unreported, _) => Err(anyhow!(
+            "the tcode daemon at {url} does not report which project it serves, \
+             so `tcode tui` cannot confirm it is bound to {wanted_label} — and \
+             attaching to the wrong project would run every session against the \
+             wrong repository. That daemon predates the binding check (#4512): \
+             stop it and let `tcode tui` start a current one, or restart it from \
+             this build of `tcode serve --http`."
+        )),
+        _ => Err(anyhow!(
+            "the tcode daemon at {url} serves a different project than this TUI: \
+             daemon = {daemon}, requested = {wanted_label}. `tcode tui` will not \
+             attach to it (every session would run against the wrong project) and \
+             will not start a competing daemon on a port that is already in use. \
+             Either relaunch this TUI against {daemon}, or stop that daemon and \
+             let this one start its own, or point `{DAEMON_URL_ENV}` at a daemon \
+             serving {wanted_label}.",
+            daemon = reported.describe(),
+        )),
     }
 }
 
@@ -190,11 +216,17 @@ fn explicit_url_unreachable(url: &str) -> anyhow::Error {
 }
 
 /// Spawn a daemon and block until it answers `GET {health_base_url}/health`.
+///
+/// The `Child` handle is dropped on every path, without a kill: a daemon
+/// this process started is a daemon it must not stop (module docs). Even the
+/// failure paths leave it alone — a half-started daemon may still be binding
+/// its port, and killing it would be the same "client tears down a shared
+/// service" mistake at a worse moment. The error names the log file instead.
 async fn spawn_and_wait(
     project: Option<&Path>,
     tcode_exe: &Path,
     health_base_url: &str,
-) -> Result<DaemonSession> {
+) -> Result<String> {
     let log_path = daemon_log_path();
     let mut child = spawn_daemon(tcode_exe, project, log_path.as_deref())?;
     let config = DaemonGuardConfig {
@@ -210,7 +242,7 @@ async fn spawn_and_wait(
     // taken exits in milliseconds, and spinning out the full budget to then
     // report a timeout would hide the real cause. Bound to an `Outcome` so
     // the `&mut child` borrow the `wait()` future holds ends with the
-    // `select!` expression, leaving `child` movable below.
+    // `select!` expression.
     let outcome = tokio::select! {
         ready = spin_until_ready(&config) => Outcome::Ready(ready),
         exit = child.wait() => Outcome::Exited(exit.map(|s| s.to_string())),
@@ -227,16 +259,9 @@ async fn spawn_and_wait(
                     log_path.as_deref(),
                 ));
             }
-            Ok(DaemonSession {
-                url: health_base_url.to_string(),
-                ownership: Ownership::Spawned(child),
-            })
+            Ok(health_base_url.to_string())
         }
-        Outcome::Ready(Err(e)) => {
-            // Never leak the child we just gave up on.
-            terminate(child, SHUTDOWN_GRACE).await;
-            Err(e)
-        }
+        Outcome::Ready(Err(e)) => Err(e),
         Outcome::Exited(status) => {
             let detail = match status {
                 Ok(s) => format!("it exited during startup ({s})"),
@@ -255,11 +280,10 @@ enum Outcome {
 
 /// Build and spawn `<tcode_exe> serve --http [--project <path>]`.
 ///
-/// `kill_on_drop(true)` is a BACKSTOP, not the teardown path: a panic or
-/// early return that drops the session without calling
-/// [`DaemonSession::shutdown`] must not leak a daemon holding the port. The
-/// graceful SIGTERM path in [`terminate`] always runs first on the normal
-/// exit, reaping the child so this drop hook becomes a no-op.
+/// There is deliberately no `kill_on_drop(true)`: the spawned daemon must
+/// survive this process, so the one thing the `Child` handle must NOT do is
+/// signal it when the TUI's stack unwinds (module docs, owner directive
+/// 2026-08-01).
 fn spawn_daemon(
     tcode_exe: &Path,
     project: Option<&Path>,
@@ -279,7 +303,7 @@ fn spawn_daemon(
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
-    cmd.kill_on_drop(true).spawn().with_context(|| {
+    cmd.spawn().with_context(|| {
         format!(
             "tcode tui: could not start a daemon with `{} serve --http`",
             tcode_exe.display()
@@ -329,45 +353,6 @@ fn exited_early(detail: &str, log_path: Option<&Path>) -> anyhow::Error {
          holding port {DEFAULT_HTTP_PORT} is the usual cause.",
         log_hint(log_path)
     )
-}
-
-/// SIGTERM -> grace -> SIGKILL, reaping the child either way.
-///
-/// Why: SIGTERM lets `tcode serve --http`'s axum server run its graceful
-/// shutdown (`trusty_common::shutdown_signal`) and drain in-flight requests,
-/// per the workspace's connection-safe restart convention (#534) — a bare
-/// kill would drop live SSE subscribers mid-stream. The SIGKILL escalation
-/// exists so a wedged daemon still cannot outlive the TUI and keep the port.
-/// Mirrors `trusty-agents`' `ui/src-tauri/src/sidecar.rs::terminate_child`
-/// (that one is `pub(crate)` inside a Tauri binary crate, so it cannot be
-/// imported — only its shape reused).
-async fn terminate(mut child: Child, grace: Duration) {
-    // Already gone: reap without signalling.
-    if let Ok(Some(_)) = child.try_wait() {
-        return;
-    }
-
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // SAFETY: `pid` names a child process we spawned and have not yet
-        // reaped, and `SIGTERM` is a valid signal. `kill` has no
-        // memory-safety effects — a already-exited pid merely returns ESRCH,
-        // which is exactly the case the `try_wait` above handles.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-            return;
-        }
-        tracing::warn!(
-            pid,
-            ?grace,
-            "tcode daemon did not exit on SIGTERM within grace; sending SIGKILL"
-        );
-    }
-
-    let _ = child.start_kill();
-    let _ = child.wait().await;
 }
 
 #[cfg(test)]
