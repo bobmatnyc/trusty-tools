@@ -112,6 +112,18 @@ pub struct SourceSpec {
     /// (doc stores); a windowed Gmail pull can never imply deletion.
     #[serde(default)]
     pub tombstone_deleted: bool,
+    /// Operator designation that this source's corpus was authored by the
+    /// user, making it the single carve-out from the untrusted default
+    /// (#4532, DOC-63 §6.3 `S-4.3`).
+    ///
+    /// Consulted ONLY for a [`Locator::DocStore`]; on any remote locator it is
+    /// ignored rather than honoured, because no remote corpus has an
+    /// enforceable author constraint (DOC-63 §6.4 `S-4.8`/`S-4.9`). Defaults
+    /// to `false`, so every registry row written before this field existed
+    /// loads as untrusted — the fail-closed direction.
+    /// See [`super::trust::TrustLabel::for_source`].
+    #[serde(default)]
+    pub user_authored: bool,
     /// ISO-8601 timestamp of first registration. Never rewritten on update.
     pub added_at: String,
     /// Where this source's items come from.
@@ -136,9 +148,25 @@ impl SourceSpec {
             collection,
             enabled: true,
             tombstone_deleted: false,
+            user_authored: false,
             added_at: added_at.to_string(),
             locator,
         }
+    }
+
+    /// Designate this source's corpus user-authored (#4532).
+    ///
+    /// Why: the designation is an OPERATOR act, so it needs an explicit,
+    /// greppable call site rather than a struct-literal field that a future
+    /// connector could set while assembling a spec from fetched data.
+    /// What: sets [`Self::user_authored`]. Whether it changes anything is
+    /// [`super::trust::TrustLabel::for_source`]'s decision, not this
+    /// setter's — a remote locator keeps the untrusted label regardless.
+    /// Test: `only_a_designated_directory_is_user_authored`,
+    /// `remote_kinds_are_always_untrusted`.
+    pub fn with_user_authored(mut self, user_authored: bool) -> Self {
+        self.user_authored = user_authored;
+        self
     }
 
     /// The source kind string (delegates to the locator tag).

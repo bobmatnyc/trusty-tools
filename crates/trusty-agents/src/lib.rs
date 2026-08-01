@@ -136,6 +136,7 @@ pub mod ticketing;
 pub mod tm;
 pub mod tmux;
 pub mod tools;
+pub mod untrusted;
 pub mod update;
 pub mod usage;
 pub mod workflow;

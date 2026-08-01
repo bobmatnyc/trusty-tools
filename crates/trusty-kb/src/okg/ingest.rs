@@ -30,6 +30,7 @@ use serde_yaml::Value as Yaml;
 
 use crate::okg::ledger::{ItemStatus, Ledger, LedgerRecord, Watermark};
 use crate::okg::registry::SourceSpec;
+use crate::okg::trust::TrustLabel;
 use crate::store::KbStore;
 
 /// How many entity paths an [`IngestReport`] lists before truncating.
@@ -275,6 +276,20 @@ impl KbStore {
         fm.insert(yaml("source_id"), yaml(&spec.id));
         fm.insert(yaml("source_kind"), yaml(spec.kind()));
         fm.insert(yaml("source_item_id"), yaml(&item.item_id));
+        // #4532 / DOC-63 §6.3 `S-4.3`: the trust label is stamped HERE, by the
+        // engine, from the operator-written `SourceSpec` alone — `item` is not
+        // consulted. Its position in this envelope is the enforcement: the
+        // connector-field merge below skips any key already present, so a
+        // fetcher emitting `trust: user-authored` is shadowed out rather than
+        // honoured. Provenance (`source_id`/`source_kind`) says WHERE content
+        // came from; this says how much of it may be believed, which is the
+        // signal the retrieval fence reads.
+        // Test: `ingest_stamps_the_trust_label`,
+        // `connector_cannot_override_the_trust_label`.
+        fm.insert(
+            yaml(crate::okg::trust::TRUST_KEY),
+            yaml(TrustLabel::for_source(spec).as_str()),
+        );
         if let Some(ts) = item.timestamp.as_deref() {
             fm.insert(yaml("source_timestamp"), yaml(ts));
         }
