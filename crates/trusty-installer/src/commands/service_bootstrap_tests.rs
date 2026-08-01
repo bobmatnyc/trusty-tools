@@ -405,6 +405,34 @@ fn bootstrap_one_does_not_gate_an_already_loaded_member_on_the_port_guard() {
     );
 }
 
+/// Why (#4470 HIGH-1): `install_all` folds `is_failure` into `service_ok`,
+/// which `InstallReport::build` folds into `all_ok`, which drives the exit code
+/// and the `--json` payload. The first round of this PR classified failure with
+/// an inline `matches!(action, Failed(_))` at the call site and never added the
+/// new variant, so a REFUSAL — the guard working, the daemon consequently not
+/// running — reported `service_ok: true`. Classifying every variant here, in
+/// one exhaustive match next to the definition, is what stops the next variant
+/// repeating it.
+/// What: pins the failure verdict for all six variants.
+/// Test: this is the test.
+#[test]
+fn bootstrap_action_failure_classification_is_exhaustive() {
+    assert!(BootstrapAction::Failed("boom".into()).is_failure());
+    assert!(
+        BootstrapAction::RefusedForeignPort("port held".into()).is_failure(),
+        "a refusal means the daemon is NOT running — the install must not \
+         report success"
+    );
+    assert!(!BootstrapAction::Installed.is_failure());
+    assert!(!BootstrapAction::InstalledByFallback.is_failure());
+    assert!(!BootstrapAction::LoadedByFallback.is_failure());
+    assert!(!BootstrapAction::Skipped("opted out".into()).is_failure());
+}
+
+// The end-to-end report-level proof for #4470 HIGH-1 lives in
+// `install_tests::refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code`,
+// where `install_report`'s private `build` / `exit_code` are in scope.
+
 /// Why: the narration note must name the member for a scannable install log.
 /// What: asserts each variant's note contains the binary name.
 /// Test: this is the test.

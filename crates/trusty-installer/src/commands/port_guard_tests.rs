@@ -259,6 +259,226 @@ fn override_does_not_manufacture_a_rejection() {
     );
 }
 
+// ── decide_over_range: the walking-daemon fix ───────────────────────────────
+
+/// Why (#4470 MEDIUM-3): the core of the fix. A walking daemon whose default
+/// port is squatted simply takes the next one, so the guard must proceed. Before
+/// this, a single unrelated listener on 7070 hard-refused a fresh trusty-memory
+/// install that would have succeeded.
+/// What: 7070 held by a foreign process, 7071 free → `Proceed`, and the probe
+/// stops as soon as it finds the usable port.
+/// Test: This is the test.
+#[test]
+fn decide_over_range_proceeds_when_any_candidate_is_usable() {
+    let probed = std::cell::RefCell::new(Vec::new());
+    let verdict = decide_over_range(
+        "trusty-memory",
+        &[7070, 7071, 7072],
+        |port| {
+            probed.borrow_mut().push(port);
+            if port == 7070 {
+                (PortHolder::Held(9931), LaunchdOwner::NotRunning)
+            } else {
+                (PortHolder::Free, LaunchdOwner::NotRunning)
+            }
+        },
+        false,
+    );
+    assert_eq!(verdict, PortVerdict::Proceed);
+    assert_eq!(
+        probed.into_inner(),
+        vec![7070, 7071],
+        "must stop at the first usable port, not probe the whole range"
+    );
+}
+
+/// Why: the range relaxation must not become a blanket pass. When the daemon
+/// genuinely has nowhere to go, the refusal must still fire — and must name the
+/// PRIMARY port, since that is the one the operator expects the daemon on.
+/// What: every candidate held by a foreign process → `Reject` naming the first
+/// port, its pid, and how many candidates were tried.
+/// Test: This is the test.
+#[test]
+fn decide_over_range_refuses_only_when_every_candidate_is_taken() {
+    let verdict = decide_over_range(
+        "trusty-memory",
+        &[7070, 7071],
+        |_| (PortHolder::Held(9931), LaunchdOwner::NotRunning),
+        false,
+    );
+    let PortVerdict::Reject(msg) = verdict else {
+        panic!("expected Reject, got {verdict:?}");
+    };
+    assert!(msg.contains("7070"), "must name the primary port: {msg}");
+    assert!(msg.contains("9931"), "must name the holder pid: {msg}");
+    assert!(
+        msg.contains("all 2 candidate ports"),
+        "must say the whole range was tried: {msg}"
+    );
+}
+
+/// Why: THE fail-closed property, carried through the range relaxation. An
+/// unreadable probe must never count as a usable port — otherwise widening the
+/// guard to a range would have quietly reintroduced the fail-open branch the
+/// single-port version was careful to avoid.
+/// What: every candidate `Unknown` → `Reject`, never `Proceed`.
+/// Test: This is the test.
+#[test]
+fn decide_over_range_refuses_when_every_candidate_is_unreadable() {
+    let verdict = decide_over_range(
+        "trusty-memory",
+        &[7070, 7071, 7072],
+        |_| {
+            (
+                PortHolder::Unknown("probe failed".to_owned()),
+                LaunchdOwner::Running(4242),
+            )
+        },
+        false,
+    );
+    assert!(
+        matches!(verdict, PortVerdict::Reject(_)),
+        "an unreadable range must refuse, not proceed: {verdict:?}"
+    );
+}
+
+// ── the override's value semantics ──────────────────────────────────────────
+
+/// Why (#4470 MEDIUM-2): every refusal message says "set
+/// `TCTL_ALLOW_FOREIGN_PORT=1`", which teaches value semantics. Under the
+/// original presence check, an operator setting `=0` to turn the bypass OFF
+/// turned it ON — disarming a safety guard by trying to arm it.
+/// What: only affirmative values enable the bypass; unset, empty, `0`, and
+/// `false` all leave the guard armed. Case and surrounding space are ignored.
+/// Test: This is the test.
+#[test]
+fn override_env_value_requires_an_affirmative_value() {
+    for on in ["1", "true", "TRUE", "yes", " 1 ", "Yes"] {
+        assert!(
+            override_from_env_value(Some(on)),
+            "{on:?} should enable the bypass"
+        );
+    }
+    for off in ["0", "", "false", "no", "off", " ", "2"] {
+        assert!(
+            !override_from_env_value(Some(off)),
+            "{off:?} must NOT enable a safety bypass"
+        );
+    }
+    assert!(
+        !override_from_env_value(None),
+        "unset must keep the guard armed"
+    );
+}
+
+// ── the bind cross-check ────────────────────────────────────────────────────
+
+/// Why (#4470 MEDIUM-1): without root, `lsof` reports only the caller's own
+/// processes, so a root-owned or other-user listener produces the same empty
+/// output as a free port. Trusting that emptiness classified a foreign holder
+/// as `Free` and PROCEEDED — a fail-open branch inside a fail-closed function.
+/// The bind cross-check is what distinguishes "nothing there" from "something
+/// there I cannot see".
+///
+/// THE test for this fix. It hands the classifier an EMPTY `lsof` observation
+/// for a port that is genuinely occupied — which is exactly what a non-root
+/// `lsof` returns for a root-owned or other-user listener. Under the pre-fix
+/// code that combination returned `Free` and the guard PROCEEDED past a foreign
+/// holder.
+///
+/// This test fails if the bind cross-check is removed from
+/// `probe_port_holder_from`.
+///
+/// Note on why the observation is injected rather than left to the real `lsof`:
+/// a fixture listener the test owns is one `lsof` CAN see, so a test that just
+/// binds a port and calls the real probe gets `Held` and never reaches the
+/// cross-check at all — it passes identically against the fail-open version.
+/// That weaker test was written first here and mutation-testing caught it.
+///
+/// What: binds a real listener, then asserts an empty `lsof` result classifies
+/// as `Unknown` (naming the port and pointing at `sudo lsof`), never `Free`.
+/// Test: This is the test.
+#[test]
+fn empty_lsof_output_on_an_occupied_port_is_unknown_not_free() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture listener");
+    let port = listener.local_addr().expect("local addr").port();
+
+    let holder = probe_port_holder_from(port, Ok(("", "exit status: 1")));
+    assert_ne!(
+        holder,
+        PortHolder::Free,
+        "an occupied port that `lsof` could not see must never classify as Free — \
+         that is the non-root blindness this cross-check exists to close"
+    );
+    let PortHolder::Unknown(why) = holder else {
+        panic!("expected Unknown, got {holder:?}");
+    };
+    assert!(why.contains(&port.to_string()), "must name the port: {why}");
+    assert!(why.contains("sudo lsof"), "must be actionable: {why}");
+    drop(listener);
+}
+
+/// Why: the cross-check must not make the guard refuse everything — a genuinely
+/// free port has to stay `Free`, or no install could ever proceed. This is the
+/// other half of the invariant, and it is what stops the fix above from being
+/// "return Unknown always".
+/// What: binds an OS-assigned port to learn a number, releases it, then asserts
+/// an empty `lsof` result classifies as `Free`.
+/// Test: This is the test.
+#[test]
+fn empty_lsof_output_on_a_free_port_is_free() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to learn a free port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+
+    assert_eq!(
+        probe_port_holder_from(port, Ok(("", "exit status: 1"))),
+        PortHolder::Free,
+        "a released port must classify as Free or no install could ever proceed"
+    );
+}
+
+/// Why: the common case — `lsof` names the holder, so the guard can report the
+/// pid and the cross-check is unnecessary. Pins that a named pid short-circuits
+/// (no bind attempt, no chance of a spurious `Unknown`).
+/// What: a `p<pid>` observation classifies as `Held(pid)` even for a port that
+/// is actually free.
+/// Test: This is the test.
+#[test]
+fn lsof_naming_a_pid_reports_it_held() {
+    assert_eq!(
+        probe_port_holder_from(65000, Ok(("p4242\n", "exit status: 0"))),
+        PortHolder::Held(4242)
+    );
+}
+
+/// Why: `lsof` missing from `PATH` or failing to spawn is an unanswerable
+/// probe, which the fail-closed contract turns into a refusal — never a pass.
+/// What: an `Err` observation classifies as `Unknown` relaying the cause.
+/// Test: This is the test.
+#[test]
+fn lsof_spawn_failure_is_unknown() {
+    let holder = probe_port_holder_from(65000, Err("No such file or directory"));
+    let PortHolder::Unknown(why) = holder else {
+        panic!("expected Unknown, got {holder:?}");
+    };
+    assert!(why.contains("No such file or directory"), "why: {why}");
+}
+
+/// Why: output that exists but yields no pid means the probe ran and could not
+/// be understood — indeterminate, so a refusal. Reading it as "free" would be a
+/// second fail-open branch alongside the one MEDIUM-1 closed.
+/// What: non-empty unparseable output classifies as `Unknown`.
+/// Test: This is the test.
+#[test]
+fn unparseable_lsof_output_is_unknown() {
+    let holder = probe_port_holder_from(65000, Ok(("garbage output\n", "exit status: 0")));
+    assert!(
+        matches!(holder, PortHolder::Unknown(_)),
+        "expected Unknown, got {holder:?}"
+    );
+}
+
 // ── the lsof field parser ───────────────────────────────────────────────────
 
 /// Why: the PID the refusal names comes straight out of this parser; a wrong
@@ -305,11 +525,62 @@ fn parse_lsof_pids_ignores_other_fields() {
 /// non-daemon resolves to `None` rather than a guessed port.
 /// Test: This is the test.
 #[test]
-fn resolve_guard_port_falls_back_to_the_documented_table() {
+fn resolve_guard_ports_falls_back_to_the_documented_table() {
     // `tga` is not a daemon and binds nothing: never guess a port for it.
-    assert_eq!(resolve_guard_port("tga"), None);
+    assert!(resolve_guard_ports("tga").is_empty());
     // A name no daemon uses has no recorded address and no table entry.
-    assert_eq!(resolve_guard_port("definitely-not-a-trusty-daemon"), None);
+    assert!(resolve_guard_ports("definitely-not-a-trusty-daemon").is_empty());
+}
+
+/// Why (#4470 MEDIUM-3): trusty-memory WALKS `7070..=7079`, so a busy 7070 on
+/// a fresh machine is a condition it survives by taking the next port. The
+/// guard must therefore be handed the whole range, not just the default, or it
+/// hard-refuses an install that would have worked.
+/// What: with no recorded address, a walking member resolves to every port in
+/// its range, in order, with the documented default first.
+/// Test: This is the test.
+#[test]
+fn resolve_guard_ports_returns_the_whole_walk_range_for_a_fresh_walker() {
+    // Only meaningful when this host has no recorded trusty-memory address; if
+    // one exists, the recorded-port branch is authoritative and is covered by
+    // `resolve_guard_ports_prefers_a_recorded_address`.
+    if trusty_common::read_daemon_addr("trusty-memory")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return;
+    }
+    let ports = resolve_guard_ports("trusty-memory");
+    assert_eq!(ports.len(), 10, "ports: {ports:?}");
+    assert_eq!(ports.first(), Some(&7070));
+    assert_eq!(ports.last(), Some(&7079));
+}
+
+/// Why: the walk table decides whether a busy default port is survivable or
+/// fatal, so a wrong entry either hard-refuses a legitimate install (false
+/// walker omitted) or silently proceeds past a squatter (non-walker listed as
+/// walking). Pin it against the daemons' own documented behaviour.
+/// What: trusty-memory walks `7070..=7079` (its `commands/doctor/checks.rs` and
+/// `commands/daemon_guard.rs` both say so); every other stable-set member is
+/// pinned to one port and has no range.
+/// Test: This is the test.
+#[test]
+fn walk_range_matches_the_daemons_documented_behaviour() {
+    assert_eq!(walk_range_for("trusty-memory"), Some(7070..=7079));
+    for pinned in [
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-review",
+        "trusty-console",
+    ] {
+        assert_eq!(
+            walk_range_for(pinned),
+            None,
+            "{pinned} is pinned to one port; listing it as a walker would let the \
+             guard proceed past a squatter on its real port"
+        );
+    }
 }
 
 /// Why: `guard_bootstrap` treats "this member has no port" as vacuously fine.
@@ -327,7 +598,7 @@ fn every_launchd_member_has_a_guardable_port() {
             continue;
         }
         assert!(
-            resolve_guard_port(&m.binary).is_some(),
+            !resolve_guard_ports(&m.binary).is_empty(),
             "launchd member {} has no port the #4470 guard can check",
             m.binary
         );

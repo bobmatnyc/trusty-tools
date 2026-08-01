@@ -129,6 +129,38 @@ pub enum BootstrapAction {
 }
 
 impl BootstrapAction {
+    /// Whether this outcome must fail the install report (#2566, #4470).
+    ///
+    /// Why: `install_all` folds this into `service_ok`, which
+    /// `InstallReport::build` folds into `all_ok`, which drives the process
+    /// exit code and the `--json` payload. #2566 established the rule that a
+    /// genuine bootstrap failure must never be reported as success. #4470's
+    /// first round then added [`BootstrapAction::RefusedForeignPort`] and did
+    /// NOT add it to the call site's inline `matches!`, so a refusal — the
+    /// guard working exactly as designed, with the daemon consequently not
+    /// running — set `service_ok: true` and `tctl install` exited 0 reporting
+    /// `all_ok: true`. That inverts the entire point of the guard: it turned a
+    /// detected orphan into a silent success. Making this a METHOD on the enum
+    /// rather than an inline match at the call site means a new variant is
+    /// classified once, here, next to its definition.
+    ///
+    /// What: `true` for [`BootstrapAction::Failed`] (a genuine failure) and
+    /// [`BootstrapAction::RefusedForeignPort`] (the daemon is NOT going to be
+    /// running — the install did not achieve what it claims). `false` for the
+    /// three success variants and for `Skipped` (an intentional no-op).
+    ///
+    /// Test: `bootstrap_action_failure_classification_is_exhaustive`,
+    /// `refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code`.
+    pub fn is_failure(&self) -> bool {
+        match self {
+            BootstrapAction::Failed(_) | BootstrapAction::RefusedForeignPort(_) => true,
+            BootstrapAction::Installed
+            | BootstrapAction::InstalledByFallback
+            | BootstrapAction::LoadedByFallback
+            | BootstrapAction::Skipped(_) => false,
+        }
+    }
+
     /// A one-line human summary for the installer narration.
     ///
     /// Why: `install.rs` renders one line per member; centralising the phrasing

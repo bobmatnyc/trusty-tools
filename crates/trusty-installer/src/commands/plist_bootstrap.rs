@@ -87,7 +87,30 @@ pub trait LaunchctlPort {
     fn bootout(&self, domain: &str, plist_path: &Path);
     /// `launchctl bootstrap <domain> <plist_path>`.
     fn bootstrap(&self, domain: &str, plist_path: &Path) -> Result<(), String>;
+    /// #4470: may the supervisor be bootstrapped, or does a process launchd
+    /// does not supervise already hold [`SUPERVISOR_METRICS_PORT`]? `Err`
+    /// carries the operator-facing refusal.
+    ///
+    /// Behind this seam rather than called directly for the #3551 reason the
+    /// rest of the trait exists: a test must never reach the real `lsof` /
+    /// `launchctl` / live port. [`StubLaunchctl`] answers from memory.
+    fn port_guard(&self) -> Result<(), String>;
 }
+
+/// The loopback port the supervisor's metrics server binds.
+///
+/// Why (#4470): the supervisor is NOT a stable-set member, so it is absent from
+/// `probe_http::fixed_port_for` — deliberately, since `tctl` must not probe it
+/// as a member. It still binds a port, and
+/// `trusty-mpm/src/supervisor/http.rs::bind` does so BEFORE the supervision
+/// loop and fails fast on collision. With `KeepAlive=true` launchd then
+/// restarts it into the same collision forever. So this bootstrap needs the
+/// same foreign-port guard every member bootstrap gets, and needs its port
+/// named somewhere the guard can read.
+/// What: `7881`, the `TRUSTY_MPM_SUPERVISOR_ADDR` value in [`PLIST_TEMPLATE`].
+/// Test: `tests::supervisor_port_matches_the_plist_template` pins the two
+/// together, so editing the template without editing this constant fails.
+pub const SUPERVISOR_METRICS_PORT: u16 = 7881;
 
 /// Production [`LaunchctlPort`]: shells out to the real `launchctl` binary.
 ///
@@ -114,6 +137,16 @@ impl LaunchctlPort for RealLaunchctl {
             Err(String::from_utf8_lossy(&out.stderr).into_owned())
         }
     }
+
+    fn port_guard(&self) -> Result<(), String> {
+        // #4470: the supervisor pins one port and never walks, so the
+        // candidate list is exactly one entry.
+        super::port_guard::guard_bootstrap_label(
+            "trusty-mpm supervisor",
+            PLIST_LABEL,
+            &[SUPERVISOR_METRICS_PORT],
+        )
+    }
 }
 
 /// Test-only [`LaunchctlPort`]: records every call it receives and never
@@ -137,6 +170,12 @@ pub struct StubLaunchctl {
     calls: std::sync::Mutex<Vec<String>>,
     /// When `Some`, `bootstrap` returns this as `Err` instead of `Ok(())`.
     pub fail_bootstrap: Option<String>,
+    /// #4470: when `Some`, `port_guard` refuses with this reason — simulating
+    /// a foreign process on the supervisor's port without binding one.
+    pub refuse_port: Option<String>,
+    /// #4470: labels `port_guard` was consulted for, kept OUT of `calls` so
+    /// the #3551 launchd-isolation assertions keep their exact meaning.
+    port_guard_calls: std::sync::Mutex<Vec<String>>,
 }
 
 impl StubLaunchctl {
@@ -145,10 +184,23 @@ impl StubLaunchctl {
         Self::default()
     }
 
-    /// Every call recorded so far, in order, as `"bootout <domain> <path>"` /
-    /// `"bootstrap <domain> <path>"` strings.
+    /// Every LAUNCHD call recorded so far, in order, as `"bootout <domain>
+    /// <path>"` / `"bootstrap <domain> <path>"` strings. The #4470 port-guard
+    /// consultations are deliberately NOT here — see [`Self::port_guard_calls`].
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Labels the #4470 port guard was consulted for, in order.
+    ///
+    /// Why: lets a test assert the guard actually ran (and for which label)
+    /// without disturbing [`Self::calls`], which the #3551 isolation tests
+    /// assert on as the exact launchd invocation sequence.
+    pub fn port_guard_calls(&self) -> Vec<String> {
+        self.port_guard_calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -167,6 +219,23 @@ impl LaunchctlPort for StubLaunchctl {
             .push(format!("bootstrap {domain} {}", plist_path.display()));
         match &self.fail_bootstrap {
             Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    fn port_guard(&self) -> Result<(), String> {
+        // Recorded SEPARATELY from `calls`: `calls()` is asserted on by the
+        // #3551 isolation tests as the exact sequence of launchd invocations
+        // ("every launchctl call targets the injected domain", "exactly
+        // bootout + bootstrap"). The port guard is not a launchctl call, and
+        // folding it in there would weaken assertions that exist to prove a
+        // test can never reach the live launchd domain.
+        self.port_guard_calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(PLIST_LABEL.to_owned());
+        match &self.refuse_port {
+            Some(reason) => Err(reason.clone()),
             None => Ok(()),
         }
     }
@@ -507,6 +576,23 @@ pub fn install_mpm_supervisor_for(
             }
         }
     }
+
+    // #4470: refuse BEFORE the bootout below, never between it and the
+    // bootstrap. `bootout` stops the running supervisor; refusing after it
+    // would leave the machine with no supervisor at all — the same
+    // "stop it, then decline to bring it back" shape the `lifecycle::Restart`
+    // gate avoids. Also before the plist write, so a refusal changes nothing
+    // on disk either.
+    //
+    // This site was MISSED by #4470's first round, which enumerated the member
+    // bootstrap paths and stopped there. It matters more than a member's:
+    // `supervisor/http.rs::bind` binds SUPERVISOR_METRICS_PORT before the
+    // supervision loop and fails fast, and the plist sets `KeepAlive=true`, so
+    // a foreign holder makes launchd restart the supervisor into the same
+    // collision indefinitely.
+    target.launchctl.port_guard().map_err(|reason| {
+        anyhow::anyhow!("refusing to bootstrap the trusty-mpm supervisor: {reason}")
+    })?;
 
     std::fs::write(&plist_path, &plist_content)
         .with_context(|| format!("writing plist to {}", plist_path.display()))?;

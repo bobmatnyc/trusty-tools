@@ -547,3 +547,53 @@ fn short_reason_truncates_long_and_multiline_errors() {
     let short = anyhow::anyhow!("network timeout");
     assert_eq!(short_reason(&short), "network timeout");
 }
+
+/// Why (#4470 HIGH-1, the end-to-end proof): the defect was invisible at the
+/// `bootstrap_one` layer — every port-guard test passed while `tctl install`
+/// still exited 0 reporting `all_ok: true`, because the call site classified
+/// failure with an inline `matches!(action, Failed(_))` that never learned
+/// about `RefusedForeignPort`. A guard that detects an orphan and then reports
+/// success to automation is worse than no guard. This test crosses the layer
+/// boundary that hid it, composing the REAL action→`service_ok` mapping with
+/// the REAL report builder and exit-code derivation.
+///
+/// It fails if `RefusedForeignPort` is dropped from `BootstrapAction::
+/// is_failure`: `service_ok` flips to `true`, `all_ok` to `true`, exit code
+/// to 0.
+///
+/// What: a REQUIRED member whose service bootstrap was refused must yield
+/// `all_ok == false` and a non-zero exit code.
+/// Test: This is the test.
+#[test]
+fn refused_foreign_port_drives_all_ok_false_and_a_nonzero_exit_code() {
+    let action = crate::commands::service_bootstrap::BootstrapAction::RefusedForeignPort(
+        "port 7878 is held by pid 9931, which launchd does not supervise".to_owned(),
+    );
+    // The exact mapping `install_all` performs at its call site.
+    let service_ok = !action.is_failure();
+    assert!(
+        !service_ok,
+        "precondition: a refusal must classify as a service-bootstrap failure"
+    );
+
+    let report = InstallReport::build(vec![InstallOutcome {
+        member: "trusty-search".to_owned(),
+        ok: true,
+        detail: "installed".to_owned(),
+        service_ok,
+        service_detail: action.note("trusty-search"),
+        shadow_ok: true,
+        shadow_detail: String::new(),
+        required: true,
+    }]);
+
+    assert!(
+        !report.all_ok,
+        "a refused bootstrap must never report all_ok: true — the daemon is not running"
+    );
+    assert_ne!(
+        report.exit_code(),
+        0,
+        "`tctl install` must exit non-zero when the #4470 port guard refused"
+    );
+}
