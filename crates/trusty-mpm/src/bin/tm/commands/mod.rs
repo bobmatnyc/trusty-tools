@@ -35,6 +35,9 @@ pub(crate) mod hook_payload;
 pub(crate) mod hook_rewrite;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
+// split out of `install` for the 500-SLOC production cap.
+pub(crate) mod install_skills;
 pub(crate) mod issue;
 pub(crate) mod launch;
 pub(crate) mod launchd_probe;

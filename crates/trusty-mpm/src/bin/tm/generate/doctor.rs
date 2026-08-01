@@ -80,6 +80,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Deployed skill content matches the bundled/embedded source (issue #2876).",
     ),
     (
+        "skill_unmanaged",
+        "Reports UNKNOWN when a bundled skill is deployed to a tier whose `.trusty-mpm-skills-manifest.json` does not track it — the tier planner classifies it project-custom and drops it from every deploy, so no `tm` command can refresh it and `skill_staleness` (which compares against that same manifest) cannot see it at all. Never `Ok` for such a skill: content alone cannot distinguish an orphaned tm deployment from a deliberate customization. Scans `$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, and the project's `.claude/skills`. Read-only; `tm install --reconcile-skills` is the repair (issue #4605).",
+    ),
+    (
         "legacy_sources",
         "No legacy global instruction sources linger from a pre-migration install (issue #2876).",
     ),
