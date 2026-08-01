@@ -387,9 +387,72 @@ fn quarantine_writes_a_recovery_receipt() {
 
     let receipt = std::fs::read_to_string(tmp.path().join(RECEIPT_FILE)).unwrap();
     assert!(receipt.contains("qa.md.disabled"), "names the moved file");
-    assert!(receipt.contains("qa.md\""), "names the restore target");
+    assert!(
+        receipt.contains("qa.md'"),
+        "names the restore target, quoted"
+    );
     assert!(receipt.contains("mv "), "gives a copy-pasteable undo");
     assert!(receipt.contains("4448"), "points at the explanation");
+}
+
+// ---------------------------------------------------------------------------
+// The undo command is executable INPUT to a shell, so it is an injection
+// surface. Filenames are attacker-influenced: they are whatever landed in the
+// directory.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shell_quote_neutralises_expansion() {
+    // `{:?}` emits DOUBLE quotes, inside which all three of these still fire.
+    assert_eq!(shell_quote("a$(id)b"), "'a$(id)b'");
+    assert_eq!(shell_quote("a`id`b"), "'a`id`b'");
+    assert_eq!(shell_quote("a${HOME}b"), "'a${HOME}b'");
+}
+
+#[test]
+fn shell_quote_escapes_a_quote() {
+    // The one character single quotes cannot contain: close, escape, reopen.
+    assert_eq!(shell_quote("it's"), r"'it'\''s'");
+}
+
+#[cfg(unix)]
+#[test]
+fn receipt_undo_command_survives_a_hostile_filename() {
+    // The real proof: RUN the printed command. A filename carrying a command
+    // substitution and an embedded single quote must restore the file and
+    // execute nothing. Under the old `{:?}` formatting the payload fired.
+    let tmp = tempfile::tempdir().unwrap();
+    let evil = "it's evil$(touch PWNED)`touch PWNED2`.md";
+    // The FILE name carries the payload; the frontmatter `name:` is what makes
+    // it classify as a shadow.
+    std::fs::write(tmp.path().join(evil), doc("qa")).unwrap();
+
+    let out = quarantine_shadowing_agents(tmp.path(), &roster(&["qa"])).unwrap();
+    assert_eq!(out.quarantined.len(), 1);
+    assert!(!tmp.path().join(evil).exists(), "precondition: it moved");
+
+    let receipt = std::fs::read_to_string(tmp.path().join(RECEIPT_FILE)).unwrap();
+    let mv = receipt
+        .lines()
+        .find(|l| l.trim_start().starts_with("mv "))
+        .expect("receipt must carry an mv line");
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(mv)
+        .current_dir(tmp.path())
+        .status()
+        .unwrap();
+
+    assert!(status.success(), "the undo must actually run: {mv}");
+    assert!(
+        tmp.path().join(evil).is_file(),
+        "the undo must restore the file under its original name"
+    );
+    assert!(
+        !tmp.path().join("PWNED").exists() && !tmp.path().join("PWNED2").exists(),
+        "the filename's payload must never execute: {mv}"
+    );
 }
 
 #[test]

@@ -1822,6 +1822,167 @@ fn prepare_session_never_retracts_the_operator_home_agents_tier() {
 
 #[test]
 #[serial_test::serial]
+fn prepare_session_quarantines_a_shadowing_workspace_agent() {
+    // #4448 APPROVAL PATH. `prepare_session_inner` is the primary
+    // move-authorizing call site — it fires on every session launch — and
+    // deleting the quarantine call from it left the ENTIRE suite green before
+    // this test existed. An unwitnessed move-authorizing path is exactly the
+    // shape that must never ship.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+    seed_bundled_agents(&fw);
+
+    // An untracked project-tier file resolving to a bundled name: no ledger
+    // claims it, so #4409's retraction cannot see it, yet it outranks the
+    // canonical tier in agent resolution.
+    let ws_agents = project.join(".claude").join("agents");
+    std::fs::create_dir_all(&ws_agents).unwrap();
+    let stale = "---\nagent_type: claude-mpm\nname: rust-engineer\n---\n\nlegacy\n";
+    std::fs::write(ws_agents.join("rust-engineer.md"), stale).unwrap();
+    // …beside a project agent tm does not ship, which must survive.
+    let mine = ws_agents.join("my-own-agent.md");
+    let mine_body = "---\nname: my-own-agent\n---\n\nMine.\n";
+    std::fs::write(&mine, mine_body).unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        !ws_agents.join("rust-engineer.md").exists(),
+        "the shadowing copy must stop resolving after a launch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws_agents.join("rust-engineer.md.disabled")).unwrap(),
+        stale,
+        "renamed, never deleted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&mine).unwrap(),
+        mine_body,
+        "a project's own agent must survive byte-identical"
+    );
+    assert!(
+        ws_agents
+            .join(trusty_agents_common::agents::quarantine::RECEIPT_FILE)
+            .is_file(),
+        "the operator must be able to find and undo this without reading a log"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_never_quarantines_the_operator_home_agents_tier() {
+    // #4448, the counterpart to
+    // `prepare_session_never_retracts_the_operator_home_agents_tier` — and
+    // STRICTLY more dangerous than it. `prepare_session` is called with a
+    // HOME-TIER `FrameworkPaths::default()` on two production paths (non-git
+    // `tm session start`, TUI `/connect`), where `fw.claude_agents_dir()` IS
+    // the operator's real `~/.claude/agents`. Retraction aimed there is a
+    // near-no-op, because nothing in that directory is ledger-tracked; the
+    // quarantine aimed there would move UNTRACKED files, which is ALL that
+    // directory contains. Binding it to `project_dir` is what makes that
+    // impossible; this pins it.
+    //
+    // The retraction test does not cover this: its fixture deploys a
+    // manifest-TRACKED roster, which the quarantine ignores by construction.
+    // The dangerous shape is an operator's own hand-placed file on a bundled
+    // name, so that is what this stages.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+    seed_bundled_agents(&fw);
+
+    let home_agents = fw.claude_agents_dir();
+    std::fs::create_dir_all(&home_agents).unwrap();
+    // UNTRACKED and on a bundled name — precisely what the quarantine moves in
+    // a workspace, and precisely what it must never move here.
+    let hand_placed = home_agents.join("rust-engineer.md");
+    let body = "---\nname: rust-engineer\n---\n\nthe operator's own tuning\n";
+    std::fs::write(&hand_placed, body).unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(&hand_placed).unwrap(),
+        body,
+        "the operator's own ~/.claude/agents file must survive byte-identical"
+    );
+    assert!(
+        !home_agents.join("rust-engineer.md.disabled").exists(),
+        "prepare_session must never quarantine in the operator's home tier"
+    );
+    assert!(
+        !home_agents
+            .join(trusty_agents_common::agents::quarantine::RECEIPT_FILE)
+            .exists(),
+        "not even a receipt may be written into a directory tm does not own"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_retraction_and_quarantine_split_the_tiers_cleanly() {
+    // #4448. Retraction owns the ledger-tracked tier; the quarantine owns the
+    // untracked remainder. Staged together, the two must reach the end state
+    // below — the tracked copies DELETED by retraction (no `.disabled` for
+    // them), the untracked shadow RENAMED.
+    //
+    // MEASURED, not assumed: swapping the two call sites leaves this and the
+    // whole suite green, and so does removing the quarantine's `Untracked`
+    // narrowing. Both were run. The order is therefore NOT load-bearing for
+    // correctness, and this test deliberately does not pretend otherwise — it
+    // pins the combined END STATE, not a sequence. The reason the orders
+    // converge is the narrowing: the quarantine refuses every file retraction
+    // will delete, so neither can reach the other's tier whichever runs first.
+    // That narrowing is pinned where it IS observable — the unit-level
+    // `quarantine_never_moves_a_tracked_framework_file_on_a_bundled_name` and
+    // `movable_truth_table_is_exhaustive`, both of which fail when it is
+    // dropped. Order-independence is the property worth having here; a test
+    // asserting a sequence that does not change behaviour would only look like
+    // coverage.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+    seed_bundled_agents(&fw);
+
+    let ws_agents = project.join(".claude").join("agents");
+    // A legacy per-workspace deploy an older binary performed: ledger-tracked,
+    // framework-owned. Retraction's case.
+    crate::core::agent_deployer::deploy_agents(&fw.agents, &ws_agents).unwrap();
+    assert!(ws_agents.join("rust-engineer.md").exists());
+    // …plus an untracked shadow no ledger names. The quarantine's case.
+    std::fs::write(
+        ws_agents.join("helper.md"),
+        "---\nname: base-engineer\n---\n\nlegacy shadow\n",
+    )
+    .unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        !ws_agents.join("rust-engineer.md").exists()
+            && !ws_agents.join("rust-engineer.md.disabled").exists(),
+        "a ledger-tracked framework copy is retraction's to DELETE, never the \
+         quarantine's to rename"
+    );
+    assert!(
+        !ws_agents.join("helper.md").exists(),
+        "the untracked shadow must be quarantined"
+    );
+    assert!(ws_agents.join("helper.md.disabled").is_file());
+}
+
+#[test]
+#[serial_test::serial]
 fn prepare_session_manifest_filters_agent_set() {
     // Why: HR-2 — a project manifest's `[agents] include` must restrict WHICH
     // agents the harness deploys.

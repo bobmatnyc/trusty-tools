@@ -30,11 +30,18 @@
 //!   deliberate guard against the fail-open shape (the failure branch falling
 //!   through to the action anyway) that this repo keeps re-growing.
 //!
-//! Pairing: run it AFTER [`crate::agents::deployer::retract_framework_agents`]
-//! on the same directory. Retraction owns the tracked tier (it deletes
-//! framework-owned entries and prunes the ledger); this owns the untracked
-//! remainder retraction structurally cannot reach. Run in the other order the
-//! two would contend over the same files for no benefit.
+//! Pairing: run it alongside
+//! [`crate::agents::deployer::retract_framework_agents`] on the same directory
+//! — conventionally after, matching both call sites. Retraction owns the
+//! tracked tier (it deletes framework-owned entries and prunes the ledger);
+//! this owns the untracked remainder retraction structurally cannot reach.
+//!
+//! The order is a convention, NOT a correctness requirement, and the
+//! distinction is measured rather than assumed: swapping the two call sites
+//! leaves the whole suite green. They converge because the `Untracked`
+//! narrowing refuses every file retraction will delete, so neither operation
+//! can reach the other's tier whichever runs first. Keep the narrowing even if
+//! the order ever changes — the narrowing is what carries the guarantee.
 //!
 //! Test: `quarantine_tests.rs`.
 
@@ -379,6 +386,27 @@ fn file_name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Quote `s` so a POSIX shell reads it as exactly one literal word.
+///
+/// Why: the receipt prints an `mv` an operator is invited to paste into a
+/// shell, and the paths in it are attacker-influenced — a filename is whatever
+/// landed in the directory. Rust's `{:?}` looked like quoting but emits DOUBLE
+/// quotes, and a shell still expands `$(…)`, `${…}` and backticks inside those.
+/// A file named `evil$(rm -rf ~).md` would then execute on paste. The undo path
+/// for a destructive operation is the last place that may be approximately
+/// correct.
+/// What: wraps `s` in SINGLE quotes, inside which POSIX shells treat every
+/// character literally, and rewrites each embedded `'` as `'\''` (close, escape
+/// a literal quote, reopen) — the only sequence single quotes cannot contain.
+/// A non-UTF-8 path is lossily converted before quoting, so the printed command
+/// may not resolve for such a file; that is a legibility limit, never an
+/// injection one, since the lossy replacement character is inert.
+/// Test: `shell_quote_neutralises_expansion`, `shell_quote_escapes_a_quote`,
+/// `receipt_undo_command_survives_a_hostile_filename`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// Append this run's moves to the directory's recovery receipt.
 ///
 /// Why: a rename an operator cannot explain or undo is worse than the shadow it
@@ -386,9 +414,15 @@ fn file_name_of(path: &Path) -> String {
 /// was moved and why, and gives a copy-pasteable undo — none of which a
 /// `tracing::warn!` into a daemon log delivers.
 /// What: appends (never truncates — an earlier sweep's record must survive) a
-/// timestamped stanza naming every rename and the `mv` that reverses it.
+/// timestamped stanza naming every rename and the `mv` that reverses it. Every
+/// path is [`shell_quote`]d, never `{:?}`-formatted: Rust's `Debug` produces
+/// DOUBLE quotes, inside which a shell still expands `$(…)` and backticks, so a
+/// filename could execute code the moment the operator pasted the undo. An undo
+/// command for a destructive operation that can run arbitrary code is worse than
+/// offering no undo at all.
 /// Test: `quarantine_writes_a_recovery_receipt`,
-/// `receipt_appends_across_runs`.
+/// `receipt_appends_across_runs`,
+/// `receipt_undo_command_survives_a_hostile_filename`.
 fn write_receipt(dir: &Path, result: &QuarantineResult) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -405,8 +439,12 @@ fn write_receipt(dir: &Path, result: &QuarantineResult) -> std::io::Result<()> {
     ));
     for moved in &result.quarantined {
         body.push_str(&format!(
-            "  # shadowed bundled agent: {}\n  mv {:?} {:?}\n",
-            moved.name, moved.to, moved.from
+            "  # shadowed bundled agent: {}\n  mv {} {}\n",
+            // The name is attacker-influenced too (it is frontmatter), and it
+            // sits on a `#` comment line where only a newline could escape.
+            moved.name.replace(['\n', '\r'], " "),
+            shell_quote(&moved.to.to_string_lossy()),
+            shell_quote(&moved.from.to_string_lossy()),
         ));
     }
 
