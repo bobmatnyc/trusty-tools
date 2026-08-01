@@ -21,6 +21,10 @@ pub mod artifact;
 pub mod auto_resume;
 pub mod budget;
 pub mod bundle;
+// #4448: the bundled-agent NAME roster, shared by `tm doctor`'s asset_tier
+// probe and the session-launch quarantine so report and repair cannot disagree
+// about what counts as bundled.
+pub mod bundled_roster;
 // Epic #4183: the DEFAULT (bundled-fallback) PM prompt, re-sourced through
 // `instruction_package`. Byte-identical to the legacy assembly it replaces; the
 // override configurations stay on that legacy path by design.

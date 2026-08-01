@@ -28,6 +28,8 @@
 use std::path::Path;
 
 use super::settings::deploy_output_style;
+use trusty_agents_common::agents::quarantine::quarantine_shadowing_agents;
+
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
 use crate::core::agent_skill_codeploy::co_deploy_skill_set;
 use crate::core::paths::FrameworkPaths;
@@ -90,6 +92,23 @@ pub struct SyncAssetsReport {
     /// — e.g. a corrupt ownership ledger, which it refuses to act on.
     /// Test: `sync_assets_reports_retraction_failure_on_corrupt_manifest`.
     pub retraction_error: Option<String>,
+    /// Agent filenames renamed out of the resolution path this run (#4448).
+    ///
+    /// Why: a quarantine MOVES an operator's file. Reporting it only through a
+    /// log line would repeat the exact failure this issue documents — the
+    /// deployer's skip-and-warn fired on eight separate days with no follow-up.
+    /// The on-disk receipt is the durable record; this is how the operator
+    /// running sync-assets learns it happened in the same breath as the sync.
+    /// What: the ORIGINAL filenames (pre-rename), empty on the common no-op.
+    /// Test: `sync_assets_quarantines_a_shadowing_untracked_agent`.
+    pub agents_quarantined: Vec<String>,
+    /// Why the #4448 quarantine could not run, if it refused.
+    ///
+    /// What: `None` on success (including "nothing to sweep"); `Some(detail)`
+    /// when the sweep refused — an unbuildable roster or a corrupt ledger, both
+    /// of which mean the shadowing (if any) is still live.
+    /// Test: `sync_assets_reports_quarantine_refusal_on_corrupt_manifest`.
+    pub quarantine_error: Option<String>,
 }
 
 /// Re-run the roster + output-style deploy against an EXISTING session's
@@ -117,7 +136,9 @@ pub struct SyncAssetsReport {
 /// `sync_assets_refreshes_project_output_style`,
 /// `sync_assets_never_touches_hand_placed_agent`,
 /// `sync_assets_repairs_drifted_bundled_agent`,
-/// `sync_assets_retracts_workspace_bundled_agents`.
+/// `sync_assets_retracts_workspace_bundled_agents`,
+/// `sync_assets_quarantines_a_shadowing_untracked_agent`,
+/// `sync_assets_reports_quarantine_refusal_on_corrupt_manifest`.
 pub fn sync_session_assets(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -159,6 +180,37 @@ pub fn sync_session_assets(
             }
         };
 
+    // #4448: sweep the untracked shadows the retraction above cannot see. Same
+    // order as `prepare_session_inner` — retraction owns the ledger-tracked
+    // tier, this owns the untracked remainder. A refusal is reported, never
+    // fatal: a workspace that cannot be swept must not block the asset refresh.
+    let mut agents_quarantined = Vec::new();
+    let quarantine_error = match quarantine_shadowing_agents(
+        &project_dir.join(".claude").join("agents"),
+        &crate::core::bundled_roster::bundled_roster(fw),
+    ) {
+        Ok(swept) => {
+            agents_quarantined = swept
+                .quarantined
+                .iter()
+                .map(|q| {
+                    q.from
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| q.name.clone())
+                })
+                .collect();
+            None
+        }
+        Err(err) => {
+            tracing::warn!(
+                project_dir = %project_dir.display(),
+                "shadowing-agent quarantine did not run during sync-assets: {err}"
+            );
+            Some(err.to_string())
+        }
+    };
+
     let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
     let skill_deploy: DeployStats = deploy_all_skill_tiers(
         &plan.skill_source,
@@ -179,6 +231,8 @@ pub fn sync_session_assets(
         skills_skipped: skill_deploy.skipped,
         output_style_synced,
         retraction_error,
+        agents_quarantined,
+        quarantine_error,
     })
 }
 
@@ -459,6 +513,111 @@ mod tests {
             report
                 .agents_deployed
                 .contains(&"rust-engineer.md".to_string())
+        );
+    }
+
+    #[test]
+    fn sync_assets_quarantines_a_shadowing_untracked_agent() {
+        // Issue #4448: the file retraction cannot see. No ledger names it, so
+        // it survived every #4409 sweep — while outranking the canonical tier
+        // and silently winning every delegation to `rust-engineer`.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fw = FrameworkPaths::under(tmp.path().join("home"));
+        fw.trusty_mpm_root = None;
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(
+            bundled.join("rust-engineer.md"),
+            "---\nname: rust-engineer\n---\nv1",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut ws_fw = fw.clone();
+        ws_fw.claude_agents = project_dir.join(".claude").join("agents");
+        ws_fw.claude_skills = project_dir.join(".claude").join("skills");
+
+        let legacy = project_dir.join(".claude").join("agents");
+        std::fs::create_dir_all(&legacy).unwrap();
+        // A claude-mpm-era file: untracked, on a bundled name.
+        let stale = "---\nagent_type: claude-mpm\nname: rust-engineer\n---\nlegacy\n";
+        std::fs::write(legacy.join("rust-engineer.md"), stale).unwrap();
+        // …and the operator's own agent beside it, which must survive.
+        let mine = legacy.join("my-own-agent.md");
+        std::fs::write(&mine, "---\nname: my-own-agent\n---\n\nMine.\n").unwrap();
+
+        let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
+
+        assert_eq!(report.quarantine_error, None);
+        assert_eq!(
+            report.agents_quarantined,
+            vec!["rust-engineer.md".to_string()]
+        );
+        assert!(
+            !legacy.join("rust-engineer.md").exists(),
+            "the shadow must stop resolving"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("rust-engineer.md.disabled")).unwrap(),
+            stale,
+            "renamed, never deleted"
+        );
+        assert!(mine.is_file(), "a custom project agent must survive");
+        assert!(
+            legacy
+                .join(trusty_agents_common::agents::quarantine::RECEIPT_FILE)
+                .is_file(),
+            "the operator must be able to find and undo this without reading a log"
+        );
+    }
+
+    #[test]
+    fn sync_assets_reports_quarantine_refusal_on_corrupt_manifest() {
+        // Fail closed and SAY SO. A corrupt ledger cannot distinguish the
+        // operator's own agent from a stale one, so nothing moves — but the
+        // shadowing is still live, which is precisely what the operator needs
+        // told.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut fw = FrameworkPaths::under(tmp.path().join("home"));
+        fw.trusty_mpm_root = None;
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(
+            bundled.join("rust-engineer.md"),
+            "---\nname: rust-engineer\n---\nv1",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let mut ws_fw = fw.clone();
+        ws_fw.claude_agents = project_dir.join(".claude").join("agents");
+        ws_fw.claude_skills = project_dir.join(".claude").join("skills");
+
+        let legacy = project_dir.join(".claude").join("agents");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("rust-engineer.md"), "legacy\n").unwrap();
+        std::fs::write(
+            legacy.join(crate::core::agent_manifest::MANIFEST_FILE),
+            b"not valid json{{{",
+        )
+        .unwrap();
+
+        let report = sync_session_assets(&ws_fw, &project_dir).unwrap();
+
+        assert!(
+            report
+                .quarantine_error
+                .as_deref()
+                .is_some_and(|e| e.contains("corrupt")),
+            "the refusal must be reported, got: {:?}",
+            report.quarantine_error
+        );
+        assert!(report.agents_quarantined.is_empty());
+        assert!(
+            legacy.join("rust-engineer.md").is_file(),
+            "an unreadable ledger must move NOTHING"
         );
     }
 }

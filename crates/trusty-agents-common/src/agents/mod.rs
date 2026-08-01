@@ -32,6 +32,10 @@ pub mod deployer;
 pub mod frontmatter;
 pub mod manifest;
 pub mod metadata;
+// #4448: the repair counterpart to `tier_audit` — renames untracked project-tier
+// files that shadow a bundled agent name out of the resolution path. Consumes
+// `tier_audit`'s verdicts; defines no ownership predicate of its own.
+pub mod quarantine;
 // #4442: the shared "is this file outside the canonical tier tm's?" classifier,
 // consumed by `tm doctor`'s asset_tier probe and (#4448) its quarantine
 // counterpart.

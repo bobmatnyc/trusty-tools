@@ -12,7 +12,7 @@
 
 use super::*;
 use trusty_agents_common::agents::manifest::{AgentManifest, ManifestEntry, Origin, checksum};
-use trusty_agents_common::agents::tier_audit::TierResidentClass;
+use trusty_agents_common::agents::tier_audit::{TierOwnership, TierResidentClass};
 
 /// A hermetic `FrameworkPaths` whose agent SOURCE dir is inside `base`.
 ///
@@ -64,6 +64,7 @@ fn scan(label: &'static str, dir: &Path, names: &[&str]) -> TierScan {
                 path: dir.join(format!("{s}.md")),
                 name: (*s).to_owned(),
                 class: TierResidentClass::ShadowsBundled,
+                ownership: TierOwnership::Untracked,
             })
             .collect(),
     }

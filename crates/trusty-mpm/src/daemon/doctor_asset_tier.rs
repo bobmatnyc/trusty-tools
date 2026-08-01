@@ -24,10 +24,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use trusty_agents_common::agents::tier_audit::{
-    MisplacedAgent, agent_identity, audit_agent_tier, bundled_agent_names,
-};
+use trusty_agents_common::agents::tier_audit::MisplacedAgent;
+use trusty_agents_common::agents::tier_audit::audit_agent_tier;
 
+use crate::core::bundled_roster::bundled_roster;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
 
@@ -51,10 +51,10 @@ struct TierScan {
 ///
 /// Why: see the module doc — this is the shadowing half of the deploy story,
 /// which every presence-only check is structurally unable to fail on.
-/// What: builds the canonical bundled-NAME roster (see [`bundled_roster`] — the
-/// on-disk agent source UNION the agents embedded in this binary, so the roster
-/// is never empty and the probe can never fall back to a false "nothing is
-/// bundled" green), then scans `<project_dir>/.claude/agents/` and
+/// What: builds the canonical bundled-NAME roster via
+/// [`crate::core::bundled_roster::bundled_roster`] — the SAME builder #4448's
+/// quarantine uses, so report and repair cannot disagree about what is bundled
+/// — then scans `<project_dir>/.claude/agents/` and
 /// `<home>/.claude/agents/`, skipping the canonical
 /// [`FrameworkPaths::agent_deploy_dir`] itself and any duplicate path. Verdict
 /// per [`verdict`].
@@ -93,34 +93,6 @@ pub(super) fn check_asset_tier(
 /// The `.claude/agents` tier under `base`.
 fn agent_tier_of(base: &Path) -> PathBuf {
     base.join(".claude").join("agents")
-}
-
-/// The canonical bundled-agent stem roster.
-///
-/// Why: an empty roster would classify every shadowing copy as a legitimate
-/// custom agent — a silent false green in exactly the check that exists to
-/// stop silent false greens. The on-disk source directory is the accurate
-/// authority (it is literally what the deployer reads), but it is absent on a
-/// binary-only install, so the agents compiled into this binary backstop it.
-/// What: [`bundled_agent_names`] over [`FrameworkPaths::agent_source_dir`],
-/// unioned with every `agents/*.md` entry of [`crate::core::bundle::ALL`]. The
-/// embedded half runs the SAME [`agent_identity`] rule over the artifact's
-/// contents rather than its `rel_path`, so both halves are keyed by declared
-/// `name:` — the bundle ships files whose stem and name differ (`BASE-AGENT.md`
-/// declares `name: base-agent`), and a stem-keyed half would silently exempt
-/// them.
-/// Test: `roster_falls_back_to_the_embedded_bundle`,
-/// `roster_keys_the_embedded_half_by_declared_name`.
-fn bundled_roster(paths: &FrameworkPaths) -> BTreeSet<String> {
-    let mut names = bundled_agent_names(&paths.agent_source_dir());
-    names.extend(crate::core::bundle::ALL.iter().filter_map(|artifact| {
-        let file_name = artifact.rel_path.strip_prefix("agents/")?;
-        if !file_name.ends_with(".md") {
-            return None;
-        }
-        Some(agent_identity(artifact.contents, file_name))
-    }));
-    names
 }
 
 /// Pure verdict over the scanned tiers.

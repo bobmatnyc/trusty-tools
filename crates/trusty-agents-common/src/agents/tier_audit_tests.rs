@@ -313,6 +313,61 @@ fn audit_tolerates_a_corrupt_manifest() {
     let found = audit_agent_tier(tmp.path(), &roster(&["qa"]));
     assert_eq!(found.len(), 1, "found: {found:?}");
     assert_eq!(found[0].class, TierResidentClass::ShadowsBundled);
+    // The degrade's cost, stated: a corrupt ledger makes EVERY file read as
+    // untracked, which is why #4448's quarantine refuses instead of degrading.
+    assert_eq!(found[0].ownership, TierOwnership::Untracked);
+}
+
+#[test]
+fn audit_reports_the_raw_ownership() {
+    // #4448 narrows on `ownership`, so the audit must carry it, not just the
+    // class — recomputing it at the consumer would fork the predicate.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("qa.md"), doc("qa")).unwrap();
+    std::fs::write(tmp.path().join("engineer.md"), doc("engineer")).unwrap();
+    track(tmp.path(), "engineer.md", Origin::Bundled);
+
+    let found = audit_agent_tier(tmp.path(), &roster(&["qa", "engineer"]));
+    let seen: Vec<(&str, TierOwnership)> = found
+        .iter()
+        .map(|f| (f.name.as_str(), f.ownership))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("engineer", TierOwnership::FrameworkOwned),
+            ("qa", TierOwnership::Untracked),
+        ]
+    );
+}
+
+#[test]
+fn audit_with_manifest_honours_the_supplied_ledger() {
+    // The seam #4448 needs: the caller's ledger decides ownership, so a strict
+    // load at the call site is not overridden by a re-read here.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("qa.md"), doc("qa")).unwrap();
+    // On-disk ledger says nothing; the SUPPLIED one says the operator owns it.
+    let mut manifest = AgentManifest::default();
+    manifest.managed.insert(
+        "qa.md".to_owned(),
+        ManifestEntry {
+            source_chain: vec![],
+            checksum: checksum("whatever"),
+            deployed_at: "2026-07-31T00:00:00Z".to_owned(),
+            origin: Origin::User,
+        },
+    );
+
+    assert_eq!(
+        audit_agent_tier(tmp.path(), &roster(&["qa"])).len(),
+        1,
+        "with no ledger on disk this is a shadowing file"
+    );
+    assert!(
+        audit_agent_tier_with_manifest(tmp.path(), &roster(&["qa"]), &manifest).is_empty(),
+        "the supplied ledger's user-owned entry must exempt it"
+    );
 }
 
 #[test]

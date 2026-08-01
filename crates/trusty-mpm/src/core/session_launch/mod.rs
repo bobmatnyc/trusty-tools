@@ -83,6 +83,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
+// #4448: the untracked-shadow sweep that pairs with the retraction above.
 use crate::core::agent_skill_codeploy::{co_deploy_skill_set, log_declared_skills};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
@@ -96,6 +97,7 @@ use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
     write_output_style, write_project_hooks, write_status_line,
 };
+use trusty_agents_common::agents::quarantine::quarantine_shadowing_agents;
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
 /// for reuse by `core::standalone::settings_defaults` (issue #2214).
@@ -613,6 +615,37 @@ fn prepare_session_inner(
                  copies may shadow the canonical roster until this is resolved."
             );
             roster_errors.push(format!("agent retraction failed: {err}"));
+        }
+    }
+
+    // #4448, the half retraction structurally cannot reach: a project-tier file
+    // that NO ledger names. Retraction above works from manifest entries, and
+    // since #4437 nothing deploys into a workspace tier either, so a
+    // claude-mpm-era `qa.md` sitting here is unreachable by every tm operation
+    // — while still OUTRANKING the canonical roster in agent resolution. This
+    // renames exactly those to `*.md.disabled` (never deletes) and leaves a
+    // recovery receipt in the directory. Runs AFTER retraction on purpose:
+    // retraction owns the tracked tier, this owns the untracked remainder.
+    // Non-fatal, like every other roster step here.
+    match quarantine_shadowing_agents(
+        &project_dir.join(".claude").join("agents"),
+        &crate::core::bundled_roster::bundled_roster(fw),
+    ) {
+        Ok(swept) if swept.changed() => {
+            tracing::warn!(
+                project_dir = %project_dir.display(),
+                count = swept.quarantined.len(),
+                "quarantined untracked project-tier agent file(s) that were shadowing \
+                 bundled agents (issue #4448)"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                project_dir = %project_dir.display(),
+                "shadowing-agent quarantine did not run: {err}"
+            );
+            roster_errors.push(format!("agent quarantine failed: {err}"));
         }
     }
 

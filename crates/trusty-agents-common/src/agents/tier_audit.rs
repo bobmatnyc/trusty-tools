@@ -40,9 +40,20 @@
 //!    [`TierOwnership`], a three-state value, never a bool: collapsing
 //!    "untracked" and "tracked as the operator's" into one flag throws away the
 //!    only positive PROOF that a file is not tm's, and a name collision then
-//!    condemns it. [`crate::agents::deployer::retract_framework_agents`] never
-//!    touches an untracked or user-owned file; this module matches that, so
-//!    #4448 cannot quarantine what the deployer would have preserved.
+//!    condemns it. Parity with
+//!    [`crate::agents::deployer::retract_framework_agents`] is HALF, not whole,
+//!    and the missing half is load-bearing for #4448. A USER-OWNED file is
+//!    preserved by both: retraction skips it, and [`classify_tier_resident`]
+//!    returns [`TierResidentClass::Custom`] for it BEFORE any name is compared.
+//!    An UNTRACKED file is preserved by retraction — which can only see ledger
+//!    entries — but is deliberately NOT preserved here:
+//!    `classify_tier_resident("qa", Untracked, {"qa"})` is
+//!    [`TierResidentClass::ShadowsBundled`], pinned by the
+//!    `classify_bundled_name_shadows` test. That asymmetry IS the feature — an
+//!    untracked copy on a bundled name is exactly what retraction cannot reach
+//!    and what #4448 exists to quarantine. Do not read this invariant as a
+//!    proof that untracked files are safe from the sweep; only the user-owned
+//!    ledger entry is such a proof.
 //!
 //! [`TierResidentClass::Custom`] is the exclusion seam for everything else.
 //! Project-tier agents tm never authored are legitimate — hand-placed today,
@@ -128,9 +139,18 @@ impl TierResidentClass {
 /// it resolves under (to explain), and the reason (to choose a severity) travel
 /// together.
 /// What: the path as scanned, the agent name per [`agent_identity`] — which is
-/// NOT necessarily the filename stem — and the classification, never
-/// [`TierResidentClass::Custom`], which [`audit_agent_tier`] filters out.
-/// Test: `audit_reports_a_shadowing_stub`.
+/// NOT necessarily the filename stem — the classification, never
+/// [`TierResidentClass::Custom`] (which [`audit_agent_tier`] filters out), and
+/// the raw [`TierOwnership`] the verdict was reached from.
+///
+/// `ownership` travels alongside `class` because the two consumers need
+/// DIFFERENT slices of the same verdict and neither may recompute it: doctor
+/// reports every tm-owned file regardless of ownership, while #4448's
+/// quarantine narrows to the untracked ones — the only files no ledger names,
+/// hence the only ones it can move without desynchronising a ledger it never
+/// writes. Recomputing ownership at the quarantine would fork the predicate
+/// this module exists to keep single.
+/// Test: `audit_reports_a_shadowing_stub`, `audit_reports_the_raw_ownership`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MisplacedAgent {
     /// Full path of the offending file.
@@ -139,6 +159,8 @@ pub struct MisplacedAgent {
     pub name: String,
     /// Why this file is tm's.
     pub class: TierResidentClass,
+    /// What this directory's ledger said about the file, as classified.
+    pub ownership: TierOwnership,
 }
 
 /// The name an agent file resolves under.
@@ -276,14 +298,40 @@ pub fn classify_tier_resident(
 /// `audit_flags_a_renamed_file_that_declares_a_bundled_name`,
 /// `audit_ignores_a_bundled_filename_that_declares_a_custom_name`.
 pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> Vec<MisplacedAgent> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
     let manifest = match AgentManifest::load_checked(dir) {
         ManifestLoad::Ok(m) => m,
         // Corrupt ledger: keep the roster-based half of the verdict rather than
         // reporting nothing. See the doc comment.
         ManifestLoad::Corrupt(_) => AgentManifest::default(),
+    };
+    audit_agent_tier_with_manifest(dir, bundled, &manifest)
+}
+
+/// [`audit_agent_tier`]'s scan, against a ledger the CALLER loaded.
+///
+/// Why: the scan loop must exist exactly once, but the two consumers cannot
+/// share a manifest-load POLICY. This read-only probe degrades a corrupt ledger
+/// to [`AgentManifest::default`] so the roster half of the verdict survives;
+/// #4448's quarantine must instead refuse outright, because that degrade
+/// silently converts every [`TierOwnership::UserOwned`] file into an
+/// [`TierOwnership::Untracked`] one — turning the operator's own agent into a
+/// move candidate. Parameterising the ledger keeps the policy at the call site
+/// and the loop here, so a fix to either cannot land on one consumer only.
+/// What: identical to [`audit_agent_tier`] except `manifest` is supplied.
+/// Lists `.md` files directly under `dir` (never recursing — the tier is flat),
+/// resolves each one's [`agent_identity`], reads [`ownership_of`] from
+/// `manifest`, classifies with [`classify_tier_resident`], and returns the
+/// non-[`TierResidentClass::Custom`] results sorted by name. A
+/// missing/unreadable `dir` returns an empty vec.
+/// Test: `audit_with_manifest_honours_the_supplied_ledger`, plus every
+/// `audit_*` case through the [`audit_agent_tier`] wrapper.
+pub fn audit_agent_tier_with_manifest(
+    dir: &Path,
+    bundled: &BTreeSet<String>,
+    manifest: &AgentManifest,
+) -> Vec<MisplacedAgent> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
 
     let mut found: Vec<MisplacedAgent> = entries
@@ -295,11 +343,13 @@ pub fn audit_agent_tier(dir: &Path, bundled: &BTreeSet<String>) -> Vec<Misplaced
             }
             let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
             let name = agent_identity(&content, &file_name);
-            let class = classify_tier_resident(&name, ownership_of(&manifest, &file_name), bundled);
+            let ownership = ownership_of(manifest, &file_name);
+            let class = classify_tier_resident(&name, ownership, bundled);
             class.is_tm_owned().then(|| MisplacedAgent {
                 path: entry.path(),
                 name,
                 class,
+                ownership,
             })
         })
         .collect();
