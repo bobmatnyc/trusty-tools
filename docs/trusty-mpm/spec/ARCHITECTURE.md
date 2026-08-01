@@ -293,6 +293,36 @@ Built in `api::router` (`daemon/api.rs:72-127`). Default base
 
 ## 7. Instruction-assembly pipeline
 
+> **Stale as of 2026-08-01** (last reviewed 2026-05-29, predates #381,
+> #4183, and #4324). Three corrections to the section below, kept
+> otherwise as the historical 2026-05-29 record:
+> 1. **No generated output file.** There is no stable
+>    `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` the pipeline
+>    writes and rereads. The composed prompt goes to a per-launch temp file
+>    ([`model_inject.rs:44-46`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/model_inject.rs#L44-L46))
+>    for `claude --append-system-prompt-file`
+>    ([`runtime/claude_code.rs:842`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/runtime/claude_code.rs#L842))
+>    and is stashed at `<project>/.trusty-mpm/last-instructions.md` for
+>    inspection
+>    ([`session_launch/mod.rs:756`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/session_launch/mod.rs#L756)).
+> 2. **`PM_INSTRUCTIONS`/`WORKFLOW`/`AGENT_DELEGATION`/`BASE_PM` as
+>    monolithic files are gone** (#4183, landed 2026-07-28) — replaced by
+>    eight per-section files under `assets/instructions/sections/`, composed
+>    from
+>    [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+>    (schema v2). `instruction_pipeline.rs` still owns assembly; its internal
+>    section sourcing changed.
+> 3. **"No Rust code reads these [override] files" (FR-IN-4) is no longer
+>    true.** The five-file `.trusty-mpm/` override surface is read by
+>    [`instruction_overrides.rs:52-60`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60).
+>    Project customization is named sections in the root `CLAUDE.md`, added
+>    by #4324 and read first
+>    ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
+>    `HOST_FILES[0]` wins). The `.trusty-mpm/` files remain in the current
+>    binary's read paths;
+>    [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
+>    their removal.
+
 Two layers operate (`core/instruction_pipeline.rs`):
 
 **(a) System-prompt assembly** (`:31-72`) — `include_str!` concat at compile time:

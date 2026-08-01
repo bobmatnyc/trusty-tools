@@ -231,10 +231,25 @@ instructions/`:
   itself (a narrow allowlist: git ops, reading ≤3 small config files, 3-5
   orientation greps — `PM_INSTRUCTIONS.md:37-46`).
 
+  > **Citation note (2026-08-01).** `BASE_PM.md` and `PM_INSTRUCTIONS.md` as
+  > standalone files were replaced by per-section files under
+  > `assets/instructions/sections/` (#4183, landed 2026-07-28, after this
+  > ADR). The quotes above are unchanged in substance; their current
+  > locations are
+  > [`sections/identity.md:7`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/identity.md#L7)
+  > ("Role: orchestration + delegation, never direct impl"),
+  > [`sections/core.md:8-9`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L8-L9)
+  > ("PM = orchestrator + QA coordinator..."), and
+  > [`sections/core.md:118`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L118)
+  > ("Each delegation reloads ~95K tokens..."). This is a citation-location
+  > correction only; it does not touch this ADR's Decision.
+
 **The owner named the limit of this analogy himself**, and it is real and
 load-bearing: the PM is delegation-ONLY specifically *for context economy*
 — it never acts directly on source code (P1 in its own prohibitions table,
-`PM_INSTRUCTIONS.md:17`) because every direct action it might take is
+`PM_INSTRUCTIONS.md:17`, now
+[`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L11))
+because every direct action it might take is
 better done by a specialist whose OWN context is scoped to the task, and
 reloading that specialist repeatedly is the expensive part the PM's
 posture is designed to minimize. **The trusty-agents assistant's context is
