@@ -274,6 +274,25 @@ pub struct SubagentsConfig {
     /// `bundled_assistant_personas_seed_the_reachable_subagent_whitelist`.
     #[serde(default)]
     pub delegate_allowed: Option<Vec<String>>,
+
+    /// The CONFIGURED default execution style for this agent's coding
+    /// delegations (#4350; spec DOC-62 §5.2/§5.3, middle precedence level).
+    ///
+    /// Why: DOC-62 §5.2 records that no style/rigor field exists anywhere today
+    /// and that #4350 introduces one. It lives beside the other cross-product
+    /// keys because it configures the SAME surface — what `dispatch_task` hands
+    /// to an external target — and an additive key avoids reinterpreting either
+    /// existing list. Absent is the safe posture: it falls through to the
+    /// built-in `engineer`, which is exactly today's behaviour, so no agent
+    /// silently loses ceremony by not being updated.
+    /// What: `hack` / `vibe` / `engineer`; anything else is a config parse
+    /// error, never a silent default. A per-delegation value from the caller
+    /// outranks this, and the target lane's own floor outranks both — this key
+    /// can lower ceremony no more than a caller can.
+    /// Test: `subagents_config_parses_default_style`,
+    /// `subagents_config_rejects_an_unknown_default_style`.
+    #[serde(default)]
+    pub default_style: Option<crate::tools::execution_style::ExecutionStyle>,
 }
 
 /// Optional `[skills]` section in agent TOML (#3933).

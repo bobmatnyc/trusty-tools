@@ -59,8 +59,8 @@ use anyhow::Result;
 
 use super::cli_def::check_credentials_and_warn;
 use crate::{
-    agents, api, build_info, bus, ctrl, logging, mcp, memory, process_tracker, registry, repl,
-    search, session_registry, tools, workflow,
+    agents, api, assistants, build_info, bus, ctrl, logging, mcp, memory, process_tracker,
+    registry, repl, search, session_registry, tools, workflow,
 };
 
 use build_info::BuildInfo;
@@ -171,6 +171,28 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     let bundled_agents_report = agents::bundled::ensure_bundled_agents_deployed()
         .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled agents to $HOME"))
         .unwrap_or_default();
+
+    // #4325: create each Assistant INSTANCE's home directory
+    // (`~/trusty-agents/<instance>/`) so the layout exists before anything
+    // reaches for it. Placed here, immediately after the bundled roster is on
+    // disk, for two reasons: the roster is what this enumerates (an instance
+    // with no `agent.toml` yet is not discoverable), and this line runs BEFORE
+    // the `--api`/`--serve` early dispatch below — so one call covers the API
+    // server, the Tauri GUI (which spawns `--api` as a sidecar), the `start`
+    // daemon, the REPL/TUI, and every one-shot subcommand. It does NOT cover
+    // `config` and `mcp-serve`, which return before `run_startup_init` runs;
+    // both are deliberately daemon-less and neither touches an assistant home.
+    //
+    // Unlike the state-dir `create_dir_all` further down, this CANNOT fail the
+    // boot: `provision_startup_homes` returns a report, never a `Result`. A
+    // read-only `$HOME`, a denied permission, or a file left where a directory
+    // belongs is logged with its remedy and the app starts degraded — the same
+    // best-effort posture as the bundled-agent deploy above, and the reason the
+    // sidecar's `cwd=/` EROFS crash cannot recur here (the root resolves from
+    // `$HOME`/`$USERPROFILE`, never the cwd). It creates only what is missing
+    // and never rewrites a file the user edited; there is no migration of the
+    // existing dotted `~/.trusty-agents` tree.
+    let _assistant_homes = assistants::provision_startup_homes();
 
     // #366: Credential onboarding banner. After env loading is the right time
     // to check — both `.env.local` files and the host environment have been

@@ -23,6 +23,9 @@ fn binding(palace: Option<&str>) -> StoresConfig {
             tree: Some("okg://izzie".to_string()),
             index: Some("bob-kb".to_string()),
             palace: palace.map(str::to_string),
+            // #4325: no per-assistant home root — these tests exercise the
+            // palace leg, which the new field does not touch.
+            root: None,
         }],
     }
 }
