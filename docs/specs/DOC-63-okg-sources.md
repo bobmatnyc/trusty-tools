@@ -11,14 +11,14 @@ spec_refs:
     anchor: SPEC-KDIDX-01~draft
 ---
 
-# DOC-62 — OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary
+# DOC-63 — OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary
 
 **Status:** Draft
-**Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-14~draft` (DOC-62)
+**Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-14~draft` (DOC-63)
 **Subsystem:** trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credentials consumption, Knowledge config pane; trusty-kb — `okg` engine (ledger, registry, entity tree); trusty-search — index over the store
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
 **Last-updated:** 2026-08-01
-**DOC-N claim:** `DOC-62`, scan-before-claim per DOC-38 §4.1. Verified free by scanning every filename claim and header self-label under `docs/specs/**` and `docs/trusty-installer/research/02-design/**`: the highest claimed number is `DOC-61` (Canonical Agent Standard). `DOC-55` is claimed by `okg-universal-importer.md` via self-label only (its filename carries no number), which is why a filename scan alone is insufficient. Matches the "next free `DOC-N` = `DOC-62`" hint in `docs/specs/README.md`; `scripts/check_doc_numbers.sh` was green before and after this document landed.
+**DOC-N claim:** `DOC-63`, scan-before-claim per DOC-38 §4.1. **This document originally claimed `DOC-62` and was renumbered.** Two concurrent spec passes both claimed DOC-62 — this one and PR #4529 (Style Modes for Coding Delegation) — because each correctly scanned `origin/main` and found `DOC-61` as the highest claimed number, and neither could see the other's unmerged branch. #4529 keeps `DOC-62` as the earlier and further-advanced PR; this is a mechanical tie-break. `DOC-63` was verified free three ways: no filename claim or header self-label under `docs/specs/**` or `docs/trusty-installer/research/02-design/**` on `origin/main`; no claim on any remote branch; and **no claim in any open PR** — the last check being precisely the gap that produced the original collision, since `scripts/check_doc_numbers.sh` scans the tree and cannot see an unmerged reservation (its own header states this limitation explicitly). Note also that `DOC-55` is claimed by `okg-universal-importer.md` via self-label only, its filename carrying no number, so a filename scan alone is insufficient in either direction.
 **Builds on:** DOC-55 [Universal OKG Importer](./okg-universal-importer.md) `SPEC-OKGIMPORT-03~draft`/`-04~draft` (the extraction layer and the `Connector` contract this document does **not** re-specify); DOC-57 [Five-Section Agent Configuration](./agent-config-five-sections.md) `SPEC-AGENTCFG-03~draft` (the Knowledge section this document adds a sub-surface to) and `SPEC-AGENTCFG-05~draft` (Listeners, the existing poll machinery); DOC-58 [K-d Attached Search Indexes](./DOC-58-knowledge-kd-attached-indexes.md) `SPEC-KDIDX-01~draft` (the two-tier curated-vs-attached principle this document depends on)
 **Related issues:** #4325 (per-assistant home directory — **in flight, PR #4523**); #3904 (epic: universal assistant-driven OKG importer); #4283 (index→OKG entity extraction); #4007 (epic: curated stores vs attached indexes); #4289 (index a new directory from the config UI); #4363 (extract-entities UI trigger); #4406 (which store is canonical — superseded in framing by §2 here); #4040 (epic: unified credential authority — this document is a **consumer**, never a parallel mechanism)
 
