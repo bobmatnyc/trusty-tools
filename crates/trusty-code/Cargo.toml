@@ -153,3 +153,8 @@ tower = { workspace = true }
 # a real bound socket so `reqwest` (SSE included) drives it exactly like a
 # real `tcode serve --http` daemon, without spawning the real binary.
 wiremock = { workspace = true }
+# `llm::client::tests` (#4614): the missing-credential tests clear a provider's
+# API-key env var so they assert unconditionally instead of skipping on a
+# developer machine that has one. `#[serial]` joins the workspace-wide
+# exclusion group so that mutation cannot race a parallel test thread.
+serial_test = { workspace = true }
