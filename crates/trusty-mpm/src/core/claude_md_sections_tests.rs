@@ -984,9 +984,19 @@ fn a_marked_block_in_instructions_md_is_delivered_once() {
         prompt.contains("STILL_ADDITIVE"),
         "unmarked prose still added"
     );
+    // Not a blanket `!contains("TRUSTY-MPM:")`: the Non-Overridable Rules floor
+    // itself now documents the marker grammar with a `<TOKEN>` placeholder
+    // example, so that literal substring legitimately appears in every
+    // composed prompt. What must never leak is THIS override's own concrete
+    // WORKFLOW marker lines.
+    let workflow_token = section_token(SectionId::Workflow);
     assert!(
-        !prompt.contains("TRUSTY-MPM:"),
-        "markers never reach the prompt"
+        !prompt.contains(&format!("<!-- TRUSTY-MPM: {workflow_token} START")),
+        "this override's start marker never reaches the prompt"
+    );
+    assert!(
+        !prompt.contains(&format!("<!-- TRUSTY-MPM: {workflow_token} END")),
+        "this override's end marker never reaches the prompt"
     );
     assert_eq!(
         prompt.matches("SECTIONED_WORKFLOW").count(),

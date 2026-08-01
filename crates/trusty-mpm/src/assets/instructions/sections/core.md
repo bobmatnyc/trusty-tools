@@ -38,7 +38,7 @@ headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
 
 | Action | Limit |
 |--------|-------|
-| Git ops | `git status/add/commit/log/push/diff/branch/pull/stash` |
+| Git ops | `git status/add/commit/log/diff/pull/stash` |
 | Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
 | Grep/Glob | 3-5 orientation searches |
 | TodoWrite | Progress tracking |
@@ -52,7 +52,7 @@ See AGENT_DELEGATION.md for full routing table. Quick reference:
 | Agent | Triggers | Default Model |
 |-------|----------|---------------|
 | Research | codebase understanding, investigation, file analysis, architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | sonnet |
-| Engineer (all langs) | code changes, impl, refactor | sonnet |
+| Engineer (all langs) | code changes, impl, refactor | opus |
 | Local Ops | localhost, PM2, docker, ports, `make`, version/release/publish | sonnet |
 | QA (Web/API/general) | test, verify, check, browser, screenshot, DOM | sonnet |
 | Documentation Agent | docs, README, API docs | haiku |
@@ -85,7 +85,7 @@ still fails, report the deployment gap to the user rather than degrading.
 
 ## Model Selection Protocol
 
-**EVERY Agent tool call MUST include `model: "sonnet"` or `model: "haiku"`.** No exceptions. Omitting it = opus = 5-34x waste.
+**EVERY Agent tool call MUST include an explicit `model`: `"opus"`, `"sonnet"`, or `"haiku"`.** No exceptions. Omitting it defaults to opus for every task, not just coding ones — 5-34x waste on the tasks that don't need it.
 
 1. **User preference is BINDING.** If user specifies model, honor for entire task.
 2. **Default routing:**
@@ -301,14 +301,8 @@ Final `git status` before session end.
 These are trusty-mpm framework defaults; they take precedence over whatever the
 underlying harness (e.g. native Claude Code) would otherwise emit.
 
-**Attribution footer.** Every commit message and PR body ends with exactly:
-
-```
-🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
-```
-
-NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
-trailer — replace the harness default with the footer above.
+**Attribution footer.** See Framework-Guaranteed Conventions (non-overridable) —
+that section is the one canonical statement of the footer text.
 
 **Issue / PR ownership (multi-harness support).** When creating a GitHub issue
 or PR, the default is `--label trusty-mpm --label ws/<session-name>
