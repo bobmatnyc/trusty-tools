@@ -32,3 +32,7 @@ pub mod deployer;
 pub mod frontmatter;
 pub mod manifest;
 pub mod metadata;
+// #4442: the shared "is this file outside the canonical tier tm's?" classifier,
+// consumed by `tm doctor`'s asset_tier probe and (#4448) its quarantine
+// counterpart.
+pub mod tier_audit;
