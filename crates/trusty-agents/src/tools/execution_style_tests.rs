@@ -15,11 +15,12 @@
 use super::*;
 
 /// Every style, for exhaustive cross-products.
-const ALL: [ExecutionStyle; 3] = [
-    ExecutionStyle::Hack,
-    ExecutionStyle::Vibe,
-    ExecutionStyle::Engineer,
-];
+///
+/// #4353 promoted this list into the production type (`ExecutionStyle::ALL`)
+/// because the GUI selector needs it too. It is ALIASED rather than re-spelled:
+/// two arrays could drift, and a cross-product silently stopping short of a
+/// variant is exactly the gap these tests exist to close.
+const ALL: [ExecutionStyle; 3] = ExecutionStyle::ALL;
 
 // =====================================================================
 // The vocabulary (DOC-62 §5.1)
@@ -35,6 +36,38 @@ fn ceremony_order_is_ascending() {
         ExecutionStyle::Hack.max(ExecutionStyle::Engineer),
         ExecutionStyle::Engineer
     );
+}
+
+/// `ALL` is in ascending ceremony order (#4353).
+///
+/// Why: the GUI selector renders the styles in array order and calls the value
+/// "more/less ceremony" in its copy. If the array ever stopped agreeing with
+/// `Ord`, the pane would present the escalation direction backwards while the
+/// resolver kept raising correctly — a lie the resolver's own tests cannot see.
+#[test]
+fn all_is_sorted_by_ascending_ceremony() {
+    assert!(
+        ALL.windows(2).all(|w| w[0] < w[1]),
+        "ExecutionStyle::ALL must ascend in ceremony: {ALL:?}"
+    );
+    assert_eq!(
+        *ALL.last().expect("non-empty"),
+        ExecutionStyle::BUILT_IN_DEFAULT
+    );
+}
+
+/// Every entry in `ALL` is a real wire value (#4353).
+///
+/// Why: the selector keys its controls on `as_str`, and the config default it
+/// compares against arrives over serde. A variant present in `ALL` but absent
+/// from the serde vocabulary would render a control no config could ever match.
+#[test]
+fn all_round_trips_through_the_wire_form() {
+    for style in ALL {
+        let back: ExecutionStyle = serde_json::from_str(&format!("\"{}\"", style.as_str()))
+            .expect("every ALL entry is a wire value");
+        assert_eq!(back, style);
+    }
 }
 
 /// The wire form is lowercase, and `as_str` matches it exactly.

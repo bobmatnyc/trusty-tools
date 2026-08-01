@@ -66,13 +66,17 @@
   // now); `ModelSwitcher` stays here since model/provider is a separate,
   // unrelated axis Bob's directive didn't touch.
   // #4098: 'costs' added for the Costs tab (COST-09).
-  export let activeView: 'chat' | 'events' | 'costs' = 'chat';
+  // #4404: 'assistants' added — the landing picker, and the app's default view.
+  export let activeView: 'assistants' | 'chat' | 'events' | 'costs' = 'assistants';
   export let apiReady = false;
 
   const desktop = isDesktop();
   const dispatch = createEventDispatcher<{ 'switch-view': { view: typeof activeView } }>();
 
   const tabs: { id: typeof activeView; label: string }[] = [
+    // #4404: first, and the default — the picker is the landing view, so the
+    // tab order matches the order a user meets the surfaces in.
+    { id: 'assistants', label: 'Assistants' },
     { id: 'chat', label: 'Chat' },
     { id: 'events', label: 'Events' },
     // #4098: spend by agent/model/day, from GET /api/costs.
