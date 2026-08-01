@@ -14,7 +14,7 @@ spec_refs:
 # DOC-62 — OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary
 
 **Status:** Draft
-**Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-11~draft` (DOC-62)
+**Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-14~draft` (DOC-62)
 **Subsystem:** trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credentials consumption, Knowledge config pane; trusty-kb — `okg` engine (ledger, registry, entity tree); trusty-search — index over the store
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
 **Last-updated:** 2026-08-01
@@ -26,12 +26,26 @@ spec_refs:
 
 ## 1. Executive Summary
 
-An assistant instance owns a directory of knowledge — its **OKG store** — and that
-store is built and kept current from **OKG Sources**: a local directory, Gmail,
-Drive, Slack, Notion, Granola, and whatever comes next. This document specifies
-the source catalog, the scheduled refresh, the credential dependency, the
-observability surface, and — most importantly — **the boundary that keeps
-ingested third-party content from being read as instruction**.
+**Each agent has exactly one canonical OKG** — an OKF store, internal, **built**,
+and indexed by trusty-search — **populated by one or more document STORES**, each
+either a pointer to a local directory or an extract from a connected system
+(Gmail, Drive, Slack, Notion, Granola). That model, stated by the owner on
+2026-08-01, is the spine of this document; §2.1 unpacks it and §3 specifies the
+two store kinds.
+
+This document specifies the store roster, the scheduled refresh, the credential
+dependency, search tiering, the observability surface, and — most importantly —
+**the boundary that keeps ingested third-party content from being read as
+instruction**.
+
+Three properties of the model do most of the work. **Built** means the OKG is a
+*derived* artifact, so it is rebuildable and idempotency is a property of the
+build rather than a nice-to-have (`S-1.13`). **Two store kinds** means the
+local/remote distinction is the primary type distinction, not an implementation
+detail: kind 1 materializes nothing, kind 2 gets an extraction target holding its
+state (§2.4). And a store's two capacities — **searchable corpus** and **OKG
+contributor** — are **orthogonal**: search-only attachment is a complete,
+legitimate end state, never a pending one (§3.4).
 
 Three framing statements govern everything below.
 
@@ -47,9 +61,11 @@ to an index. Nothing in this document may be read as describing current
 behavior. Where an existing mechanism is cited, it is cited as a **reusable
 part**, not as a working feature.
 
-**Second: "OKG" names two unconnected stores today, and this document picks
-one.** §2 states it unambiguously so downstream tickets stop building against
-different targets. This is the substance of #4406.
+**Second: "OKG" names two unconnected stores today, and the owner's model picks
+one.** The canonical OKG is the OKF filesystem tree, **not** trusty-memory's KG.
+§2.1 states it unambiguously so downstream tickets stop building against different
+targets — the substance of #4406. It does **not** retire trusty-memory's KG, whose
+relationship to the OKG is a separate and genuinely open question (§14 Q2).
 
 **Third: an OKG store has two population paths, and they are specified
 separately.** Per the owner (2026-08-01), *"extraction is an OPTION for any bound
@@ -59,37 +75,114 @@ bound stores** are any index the assistant binds; pulling entities out of one is
 an **option invoked by an explicit command**, never automatic. The paths differ
 by source kind, not by processing stage, and §3 keeps them first-class and
 distinct rather than unifying them behind a flag. The contamination guard belongs
-to path 2 alone (§3.2), and §3.3 specifies the deliberate overlap case where one
-directory is both.
+to bound-store extraction alone (§4.2), and §3.3 specifies the deliberate overlap
+case where one directory is both a store and a bindable index.
 
-The genuinely new surface area here, relative to DOC-55, is: the named source
-roster and its per-source constraints (§4); the credential dependency on #4040
-(§6); **scheduled refresh, which does not exist in any form** (§8); the
-untrusted-content boundary (§5); the source-type registry as an open extension
-point (§10); and the Sources sub-surface of the Knowledge pane (§11).
+The genuinely new surface area here, relative to DOC-55, is: the store roster and
+its per-store constraints (§5); the credential dependency on #4040 (§7);
+**scheduled refresh, which does not exist in any form** (§9); **search tiering and
+result provenance, which also do not exist** (§10.5–§10.6 — `vector_search`
+queries exactly one index today); the untrusted-content boundary (§6); the
+store-type registry as an open extension point (§11); and the Sources sub-surface
+of the Knowledge pane (§12).
 
 ---
 
 ## 2. SPEC-OKGSRC-01 — The Store: Which "OKG", and Where {#SPEC-OKGSRC-01~draft}
 
-### 2.1 Which store (settles #4406's framing)
+### 2.1 The canonical model
 
-**Normative.** The `okg` directory specified here is the **trusty-kb markdown
-entity tree** — the store written by `KbStore::put_entity`
-(`crates/trusty-kb/src/okg/mod.rs`) and populated by the `okg_ingest_*` tools.
-It is **not** the trusty-memory knowledge graph behind `kg_assert` / `kg_query`
-(`crates/trusty-memory/src/service/core_kg.rs`).
+**Owner statement (2026-08-01), the spine of this document:**
 
-The owner's phrasing — "an OKF store indexed by trusty-search" — settles this on
-its own: a trusty-search index is built over a **filesystem tree**, and the
-trusty-memory KG is not a filesystem tree. Stating it explicitly is the point.
-#4406 verified that the two stores are unbridged, that nothing calls between
-them, and that `kg_query` returns empty for both populated palaces. Any bridge
-between them is **out of scope here** and remains #4406's question.
+> *"Each agent has one canonical OKG which is an OKF store, internal, built,
+> indexed by trusty-search. These are POPULATED by one or more document STORES,
+> either a pointer to a local directory, or an extract from a connected system."*
 
-**S-1.1** Every ticket descending from this document names the trusty-kb entity
-tree as its target. A ticket that means the trusty-memory KG is not descended
-from this document and must say so.
+```
+        agent
+          │
+          ▼  exactly one
+    ┌───────────────────────────────────────┐
+    │  canonical OKG                        │
+    │  · an OKF store        (format)       │
+    │  · internal            (agent-owned)  │
+    │  · BUILT               (derived)      │
+    │  · indexed by trusty-search           │
+    └───────────────────────────────────────┘
+          ▲  populated by one or more
+          │
+    ┌─────┴─────────────────┬───────────────────────────┐
+    │  STORE kind 1         │  STORE kind 2             │
+    │  pointer to a local   │  extract from a connected │
+    │  directory            │  system                   │
+    │  (nothing materialized)│ (materialized target +   │
+    │                       │   extraction state)       │
+    └───────────────────────┴───────────────────────────┘
+```
+
+**S-1.0 — Cardinality.** Exactly **one** canonical OKG per agent. Not zero, not
+many. It is populated by **one or more** stores. Store count varies; OKG count
+does not.
+
+#### The four properties, each load-bearing
+
+- **An OKF store** — the format. OKF v0.1, whose defining rule is that `type` is
+  the only required field (`crates/trusty-kb/src/schema.rs:324`).
+- **Internal** — it belongs to the agent. It is **not** a user-managed corpus, and
+  it is not something the user points at; the user points at *stores*, and the OKG
+  is what results.
+- **Built** — see below. This is the property most likely to be lost.
+- **Indexed by trusty-search** — §9.
+
+#### "Built" is the property that must not be lost {#SPEC-OKGSRC-12~draft}
+
+**S-1.13** The OKG is a **derived artifact, not an authored one.** It is the build
+product of its stores. Three consequences, all normative, none optional:
+
+1. **Rebuildability.** Given the store set and the credentials, the OKG can be
+   rebuilt. Nothing about it may be recoverable *only* from the tree — a
+   hand-authored entity with no store behind it is outside the model. This is what
+   ADR-0022 already assumes when it decides knowledge trees do not sync and a new
+   machine **re-ingests from registered stores**.
+2. **Idempotency is a property of the build, not a nice-to-have.** A build run
+   twice produces the same OKG. This reframes §7 entirely: the ledger, the
+   fingerprints, and the interval watermarks are not defensive plumbing bolted onto
+   a fetcher — they are what makes "built" mean anything. A pipeline that
+   duplicates on re-run has not built an artifact; it has appended to a pile.
+3. **The store set is the source of truth, and the OKG is downstream of it.**
+   Removing a store is a meaningful operation with a defined effect on the build
+   (DOC-55's tombstoning), rather than an edit to a config that leaves orphaned
+   content behind.
+
+**S-1.14 — Corollary for the user-editable home.** #4325 makes hand-editing the
+home expected, and S-1.13 does **not** override that: a user edit inside `okg/` is
+tolerated, never clobbered by `ensure()`, and never treated as an error. What
+S-1.13 forbids is the *system* treating hand-authored content as a first-class
+input it depends on. Rebuild is a deliberate operation, not something a scheduled
+run performs behind the user's back.
+
+#### Which of the two "OKG" systems — settled
+
+**Normative, and this closes #4406's question for this document's purposes.** The
+canonical OKG is the **OKF store**: the trusty-kb-shaped filesystem tree written
+by `KbStore::put_entity` (`crates/trusty-kb/src/okg/mod.rs`), internal, built, and
+indexed by trusty-search. It is **not** trusty-memory's knowledge graph behind
+`kg_assert` / `kg_query` (`crates/trusty-memory/src/service/core_kg.rs`).
+
+The owner's own phrasing settles it independently: a trusty-search index is built
+over a filesystem tree, and the trusty-memory KG is not a filesystem tree.
+
+**S-1.15 — What this does NOT say about trusty-memory's KG.** Naming the OKF
+store canonical **does not retire, absorb, or deprecate** the trusty-memory KG. It
+is a separate, unconnected system — verified 2026-07-30 that nothing bridges the
+two — and a prior owner decision established that every assistant gets **a memory
+palace by default AND a default OKG**. Both therefore exist by design and this
+document does not collapse them. What remains genuinely unresolved is the
+KG's relationship to the OKG going forward, which is a **new** question (§14 Q2),
+distinct from the one just answered.
+
+**S-1.16** Every ticket descending from this document names the OKF store as its
+target.
 
 ### 2.2 Where the store lives — and a conflict that must be resolved now
 
@@ -120,7 +213,7 @@ Two facts collide with that, and both are load-bearing:
 The difference is one constant. The cost of getting it wrong is a second
 migration of user-visible, user-editable directories — which #4325 explicitly
 designs for humans to browse and edit. **This document does not choose.** See
-**Q1** (§13). Until Q1 is answered, no ticket may land a path change, and #4523
+**Q1** (§14). Until Q1 is answered, no ticket may land a path change, and #4523
 is the incumbent.
 
 **S-1.2** Whatever segment set Q1 selects, the layout obligations are fixed:
@@ -141,7 +234,7 @@ posture PR #4523 already implements and this document adopts unchanged.
 │       ├── registry.toml             # SourceSpec rows (DOC-55 §2.1)
 │       ├── <source-id>.jsonl         # append-only item ledger
 │       ├── <source-id>.index.jsonl   # index-feed journal
-│       └── <source-id>.runs.jsonl    # NEW — the extraction log (§11)
+│       └── <source-id>.runs.jsonl    # NEW — the extraction log (§12)
 ├── stores/                           # NEW — one per REMOTE store (§2.4)
 │   └── <store-identifier>/
 │       ├── state.toml                # extraction state: last run, coverage
@@ -172,7 +265,7 @@ implementation detail.**
 |---|---|---|
 | Where the corpus lives | Already on the user's disk, in place | Behind an API; nothing local until fetched |
 | Extraction target | **None.** Watched in place | `stores/<store-identifier>/` |
-| Freshness mechanism | The trusty-search watcher over the directory (§9.1) | Scheduled fetch (§8) |
+| Freshness mechanism | The trusty-search watcher over the directory (§10.1) | Scheduled fetch (§9) |
 | Duplication on disk | None — the files are the corpus | One materialized copy, and only one (S-1.7) |
 
 The asymmetry follows from the corpora themselves: a local directory is already a
@@ -195,13 +288,13 @@ rather than a naming inconvenience.
   terminal state;
 - **what was pulled** — the per-item manifest: item id, fingerprint, fetch time,
   and where it landed;
-- **coverage** — the interval watermark (§7.2), in the interval form that makes
+- **coverage** — the interval watermark (§8.2), in the interval form that makes
   extension work in both directions;
 - **credential reference** — the #4040 handle used, never the credential;
 - enough, jointly, that re-running duplicates nothing and *"extend by N more
   months"* fetches only the delta.
 
-**S-1.6 — This is where the watermark lives.** §7's coverage state is not a
+**S-1.6 — This is where the watermark lives.** §8's coverage state is not a
 free-floating file: for a remote store it lives in that store's own directory
 under `stores/`. One directory is the whole truth about one remote store.
 
@@ -275,136 +368,208 @@ than a settings change.
 
 ---
 
-## 3. SPEC-OKGSRC-02 — Two Population Paths {#SPEC-OKGSRC-02~draft}
+## 3. SPEC-OKGSRC-02 — Stores: Two Kinds {#SPEC-OKGSRC-02~draft}
 
-An OKG store is populated by **two distinct paths**, distinguished by the **kind
-of source**, not by processing stage. The owner's formulation (2026-08-01):
-**"extraction is an OPTION for any bound store."** The two paths differ in
-trigger, in ownership, and in contamination risk, and this document specifies
-them as first-class and separate. They are deliberately **not** unified into one
-pipeline with a flag.
+### 3.0 Terminology: one noun, not two objects
 
-### 3.1 The two paths
+The seven population types were first called **"OKG Sources"** and are now called
+**document STORES**. **These are the same concept named twice, not two objects.**
 
-| | **Path 1 — OKG Sources** | **Path 2 — Bound stores** |
+**S-2.0** This document's canonical noun is **store**, matching both the owner's
+latest framing and the `stores/` path segment. *"OKG Source"* is recorded as an
+**earlier synonym** so a reader of tickets filed under the old name is not
+confused. Modelling Sources and Stores as separate entities would be a spec-level
+duplication of exactly the kind this effort exists to eliminate.
+
+The document title retains "OKG Sources" as the feature's established name; every
+normative clause below says *store*.
+
+### 3.1 A store is exactly one of two kinds
+
+**S-2.1** A store is **either** a pointer to a local directory **or** an extract
+from a connected system. There is no third kind, and the distinction is the
+**primary type distinction** — not an implementation detail of a single pipeline.
+
+| | **Kind 1 — local-directory pointer** | **Kind 2 — connected-system extract** |
 |---|---|---|
-| What it is | A configured pipeline over an external corpus | Any search store or index the assistant binds |
-| The seven kinds | directory, Gmail (sent, dated), Drive directory, Slack sent, Slack channel, Notion directory, Granola | Not a source kind at all — an existing index |
-| Trigger | **Automatic**, on a user-managed schedule | **Explicit command only** — never automatic, never a side effect |
-| Optionality | Configured once, then runs | Extraction is an **option** available for the bound store |
-| Output | Lands in the `okg` store and is indexed by trusty-search | Entities pulled OUT of the bound store INTO the OKG |
-| Governing statement | 2026-08-01 OKG Sources | 2026-07-29 assistant store model |
-| Owned by | §4–§9 of this document | #4283, framed by §3.3 here |
+| What it is | A **pointer**. Nothing is materialized. | An **extraction** with a materialized target |
+| Members | (a) an arbitrary directory | (b) Gmail · (c) Drive · (d) Slack sent · (e) Slack channel · (f) Notion · (g) Granola |
+| On-disk footprint | None beyond its registration | `stores/<store-identifier>/` — state + manifest + staged content (§2.4) |
+| Freshness | trusty-search watcher over the directory (§10.1) | Scheduled extraction (§9) |
+| Credential | None | Brokered by #4040 (§6) |
+| Coverage state | With its registration | In its own store directory (`S-1.6`) |
+| Trust | `untrusted-external` unless operator-designated user-authored | Always `untrusted-external` (§6) |
 
-**There is no tension between the two decisions.** "Never as a side effect"
-governs pulling entities out of a corpus the user bound for reading; "refreshed
-automatically on a schedule" governs pipelines the user configured for exactly
-that purpose. Automatic is the whole point of path 1; explicit is the whole point
-of path 2.
+**S-2.2 — Why kind 1 materializes nothing.** A local directory is already a
+durable, watchable, user-owned artifact. Materializing a copy would duplicate the
+corpus and create a second thing to keep in sync. It is a **pointer** precisely
+because the bytes are already there.
 
-**S-2.1** Path 1 pushes automatically on its schedule. Configuring an OKG Source
-**is** the user's instruction to keep it current; no further per-run consent is
-required, and requiring one would defeat the feature.
+**S-2.3 — Why kind 2 must materialize.** A remote corpus has no local existence.
+There is nothing to watch and nothing to re-read without re-fetching, so an
+extraction target that also holds extraction state is what makes the build
+idempotent and re-derivable (`S-1.13`). §2.4–§2.5 specify it.
 
-**S-2.2** Path 2 extracts **only when explicitly asked**. Binding a store never
-extracts from it, and no schedule, refresh, or background job may invoke path-2
-extraction. This document specifies no automatic path-2 trigger and forbids one.
+### 3.2 Both kinds populate the OKG automatically
 
-### 3.2 Why path 2 must stay explicit — the contamination guard
+**S-2.4** Both store kinds are **configured pipelines**, and both populate the
+canonical OKG **automatically** — kind 1 through the watcher, kind 2 on its
+user-managed schedule. Configuring a store **is** the user's instruction to keep
+it current; no further per-run consent is required, and requiring one would
+defeat the feature.
 
-The guard belongs to **path 2 only**, and the reason is mechanical rather than
-stylistic.
+**S-2.5** Store output lands in the assistant's **own** OKG and its **own** index
+(§9) — never in a third-party corpus. This is what makes §4's contamination guard
+unnecessary for stores, and necessary for the thing §4 governs.
+
+### 3.3 The deliberate overlap: a directory that is also a bound index
+
+Kind (a) is registered as a store **and** attached to the assistant as a project
+**and** indexed by trusty-search (§5.2). So one directory is simultaneously a
+kind-1 store and a bindable search index — which §4 governs separately.
+
+**S-2.6** A directory registered as a store has its index recorded as
+**store-owned**. Offering §4 extraction over that index would re-derive, from
+chunks, content the ledger already ingested from the files — a second copy by a
+second route, with a different `item_id` scheme and therefore invisible to dedup.
+
+**S-2.7** The surface therefore **declines §4 extraction for a store-owned index
+and says why**, rather than silently succeeding. A **non-owned** bound index — one
+the user attached that no store produced — remains fully eligible.
+
+**S-2.8** Ownership is a property of the **index registration**, recorded in
+§5.2's single all-or-none operation, so the two mechanisms cannot disagree about
+who owns a corpus.
+
+### 3.4 A store has two INDEPENDENT capacities
+
+**S-2.9 — Searchable corpus and OKG contributor are orthogonal, not stages of one
+pipeline.** A store has two capacities and they are set independently:
+
+| Capacity | Meaning |
+|---|---|
+| **Searchable corpus** | Attached and indexed; reachable by search fan-out (§10.5) |
+| **OKG contributor** | Extracted into the canonical OKG |
+
+A store may be **either, both, or search-only**. There is no ordering between
+them and neither implies the other.
+
+**S-2.10 — Search-only is a COMPLETE, LEGITIMATE end state.** Owner, 2026-08-01:
+*"It is perfectly legitimate NOT to sync OKG to an external store — there's a
+cost of syncing stores, and a search duplication."* Two stated reasons, both
+recorded here as rationale:
+
+1. **Cost.** Extraction is not free — API calls, fetch time, storage, and for a
+   connected system a rate-limited third-party budget.
+2. **Search duplication.** Content indexed in an attached store and again in the
+   OKG is indexed twice, and a fan-out query would then return both copies.
+
+**S-2.11 — "Not extracted" is NEVER a pending, incomplete, or error state.** This
+is normative and it constrains three surfaces:
+
+- the **config surface** must not warn, nag, or badge a search-only store as
+  unfinished;
+- **health and inspection findings** must not report unextracted content as a
+  defect, and must emit no metric that frames extraction coverage as a
+  completeness score to be driven upward;
+- the **OKG configuration subpane** (§12) renders search-only as a **stated
+  configuration**, alongside extracted stores, never as a call to action.
+
+**S-2.12 — Extraction coverage is partial by nature.** Owner: *"Not all useful
+content in a store will be entity-extractable."* The OKG holds **entities**; a
+store holds **documents**. Content yielding no entities is still valuable to
+search. Partial coverage is therefore the expected steady state, not a quality
+failure, and **search fan-out is what makes that content reachable at all** — which
+is precisely why fan-out is a load-bearing mechanism rather than optional
+decoration, and why search-only attachment is worth having.
+
+**S-2.13** This is the same axis as §4: extraction from a bound store is an
+explicit option, never automatic. §4 gives the *mechanism and its guard*; this
+subsection gives the *reason a user would legitimately decline it*. **They are one
+concept, not two mechanisms.**
+
+---
+
+## 4. SPEC-OKGSRC-13 — Extraction From a Bound Search Store {#SPEC-OKGSRC-13~draft}
+
+**This is a third, distinct thing.** It is neither store kind, and it is specified
+separately so it is not confused with them.
+
+### 4.1 What it is
+
+An assistant may bind **any** search store or index. Pulling entities **out of** a
+bound store **into** the OKG is an **option** available for that store. Owner,
+2026-08-01: *"extraction is an OPTION for any bound store."*
+
+| | **Stores** (§3) | **Bound-store extraction** (this section) |
+|---|---|---|
+| What | A configured pipeline over an external corpus | An existing index the assistant binds for reading |
+| Trigger | **Automatic** — watcher or schedule | **Explicit command only** |
+| Optionality | Configured once, then runs | An option, invoked deliberately |
+| Owned by | §5–§12 of this document | #4283 |
+
+**S-13.1** Binding a store never extracts from it. **No schedule, refresh, or
+background job may invoke bound-store extraction.** This document specifies no
+automatic trigger for it and forbids one.
+
+### 4.2 Why it must stay explicit — the contamination guard
+
+The guard belongs **here alone**, and the reason is mechanical.
 
 **Verified against `origin/main` (4e67493b).** `feed_bound_index`
 (`crates/trusty-agents/src/tools/okg/index_feed.rs:32-50`) runs at the tail of
 every OKG ingest and pushes what that run wrote into **the agent's bound search
 index** — resolved by `resolve_feed` → `crate::stores::bound_index_for_tree`
-(`:53-77`) and pushed through `feed_source`/`HttpIndexFeed`. So the binding is
-**bidirectional in effect**: an index bound for reading also receives OKG output.
+(`:53-77`), pushed through `feed_source` / `HttpIndexFeed`. The binding is
+therefore **bidirectional in effect**: an index bound for reading also receives
+OKG output.
 
-The consequence, stated plainly: if extraction from a bound store were automatic,
-binding a **populated** corpus — an existing code index, a document index such as
-the 201k-chunk `cto-duetto` index — would cause generated entities to be mixed
-back into a store the user never intended to mutate. The user bound it to *read*
-it.
+So if extraction from a bound store were automatic, binding a **populated**
+corpus — an existing code or document index, such as the 201k-chunk `cto-duetto`
+index — would mix generated entities into a store the user bound only to *read*.
 
-**S-2.3** Explicit-only extraction is the mitigation for that hazard, and it is
-the whole mitigation. A path-2 extraction is a deliberate act against a named
-store, at a moment the user chose.
+**S-13.2** Explicit-only extraction is the mitigation, and it is the whole
+mitigation: a deliberate act against a named store, at a moment the user chose.
 
-**S-2.4** Path 1 does not carry this hazard and is not constrained by it. An OKG
-Source's output lands in the assistant's **own** store and its **own** index
-(§9) — a tree the product generated and owns — never in a third-party corpus the
-user bound for reading.
+**S-13.3** Stores (§3) carry no such hazard and are not constrained by it
+(`S-2.5`).
 
-### 3.3 The overlap case: a directory that is both
+### 4.3 Scope boundary
 
-Source kind (a) is deliberately **both**: an arbitrary directory registered as an
-OKG Source is *also* attached to the assistant as a project and *also* indexed by
-trusty-search (§4.2). That one directory is therefore simultaneously a path-1
-source and a path-2 bindable index. The owner's model implies this edge and it
-must not be left to chance.
-
-**S-2.5 — Path 1 owns a directory it ingests; path 2 must not re-ingest it.**
-When a directory is registered as an OKG Source, its trusty-search index is
-recorded as **path-1 owned**. Offering path-2 extraction over that index would
-re-derive, from chunks, content the ledger already ingested from the files — a
-second copy of the same corpus, arriving by a second route, with a different
-`item_id` scheme and therefore invisible to the ledger's dedup.
-
-**S-2.6** The surface therefore **declines path-2 extraction for a path-1-owned
-index and says why**, rather than silently succeeding. The user is told the
-directory is already an OKG Source and that its content is already flowing.
-
-**S-2.7** A **non-owned** bound index — one the user attached that no OKG Source
-produced — remains fully eligible for path-2 extraction. S-2.5 narrows the offer
-to exactly the double-ingest case; it does not restrict bound-store extraction
-generally.
-
-**S-2.8** Ownership is a property of the **index registration**, recorded when
-the directory source is registered (§4.2's single all-or-none operation), so the
-two paths cannot disagree about who owns a corpus.
-
-### 3.4 What this document does and does not specify
-
-**S-2.9** This document specifies **path 1 in full**: the roster (§4), the trust
-boundary (§5), credentials (§6), watermarks (§7), scheduling (§8), indexing (§9),
-the extension point (§10), and observability (§11).
-
-**S-2.10** **Path 2 is #4283's**, and is not re-specified here. This document
-constrains it in exactly three ways — it stays explicit (S-2.2), it declines
-path-1-owned indexes (S-2.6), and its results are counted and displayed
-separately from path-1 ingestion (§11) so a user can always tell which path
-produced what.
+**S-13.4** **#4283 owns this in full**; it is not re-specified here. This document
+constrains it in exactly three ways: it stays explicit (S-13.1), it declines
+store-owned indexes (S-2.7), and its results are counted and displayed separately
+from store ingestion (§12) so a user can always tell which mechanism produced
+what.
 
 ---
 
-## 4. SPEC-OKGSRC-03 — The Source Roster {#SPEC-OKGSRC-03~draft}
+## 5. SPEC-OKGSRC-03 — The Store Roster {#SPEC-OKGSRC-03~draft}
 
-A **source** is one registered binding of an assistant's OKG store to an
-external corpus. Sources are rows in `_sources/registry.toml` (DOC-55 §5.3); a
-source type is the `kind` in the open `Locator::Connector` variant. This section
-specifies the seven named types and their per-type constraints; §10 specifies how
-an eighth arrives.
+A **store** is one registered binding of an agent's canonical OKG to an external
+corpus (§3.0: *"OKG Source"* is the earlier synonym). Stores are rows in
+`_sources/registry.toml` (DOC-55 §5.3); a store type is the `kind` in the open
+`Locator::Connector` variant. This section specifies the seven named types and
+their per-type constraints; §11 specifies how an eighth arrives.
 
-### 4.1 The roster
+### 5.1 The roster
 
 | # | Type | Locator params | Windowed? | Constraint (normative) |
 |---|---|---|---|---|
-| a | `directory` | `path`, `extensions`, `recursive` | no — full corpus | Also attached to the assistant as a **project** and indexed by trusty-search. See §4.2. |
-| b | `gmail` | `identity`, `months_back`, `query` | **yes** | **SENT messages only** (§4.3). Idempotent, date-bounded, extendable by N more months. |
+| a | `directory` | `path`, `extensions`, `recursive` | no — full corpus | Also attached to the assistant as a **project** and indexed by trusty-search. See §5.2. |
+| b | `gmail` | `identity`, `months_back`, `query` | **yes** | **SENT messages only** (§5.3). Idempotent, date-bounded, extendable by N more months. |
 | c | `drive` | `identity`, `folder_id`, `recursive` | no, iff fully recursive | Additional directories are additional sources, not a widened one. |
-| d | `slack-sent` | `workspace`, `months_back` | **yes** | **SENT messages only** (§4.3). |
+| d | `slack-sent` | `workspace`, `months_back` | **yes** | **SENT messages only** (§5.3). |
 | e | `slack-channel` | `workspace`, `channel`, `months_back` | yes | One source per channel. Additional channels are additional sources. |
 | f | `notion` | `workspace`, `page_or_database_id`, `recursive` | no, iff enumerable | Additional Notion directories are additional sources. |
-| g | `granola` | `identity` (API key ref), `months_back` | yes | Meeting transcripts. Credential is an **API key**, not OAuth — §6. |
+| g | `granola` | `identity` (API key ref), `months_back` | yes | Meeting transcripts. Credential is an **API key**, not OAuth — §7. |
 
 Every one of these is a DOC-55 `Connector` (`kind` + `list` + `fetch`) and
 inherits `C1`…`C8` unchanged. **This document adds no dedup, no tombstoning, and
 no entity-writing semantics** — that would be a second implementation of
 machinery DOC-55 already owns.
 
-### 4.2 (a) is two bindings, and the duality is the requirement
+### 5.2 (a) is two bindings, and the duality is the requirement
 
 The owner's statement for a directory source is that it is *also* attached to
 the assistant as a "project" and *also* indexed by trusty-search. That is one
@@ -427,12 +592,12 @@ new directory from the config UI, with an overlap guard against existing index
 roots" half — this document **sequences against #4289, it does not duplicate
 it.**
 
-### 4.3 SENT-only: what it is and what it is not
+### 5.3 SENT-only: what it is and what it is not
 
 Gmail (b) and Slack (d) are constrained to the user's **own outbound** content.
 This is simultaneously a signal-quality choice (outbound writing is the best
 available proxy for how the user thinks and what they commit to) and a **partial
-security mitigation** (§5.4). It is not a full mitigation, and §5.4 says why.
+security mitigation** (§6.4). It is not a full mitigation, and §6.4 says why.
 
 **S-3.3** The SENT-only constraint is enforced **in the connector's `list`, at
 the query**, not by filtering after fetch. Gmail: `in:sent`. Slack: the
@@ -442,17 +607,17 @@ one bug away from being written.
 
 **S-3.4** (c) `drive`, (e) `slack-channel`, (f) `notion`, and (g) `granola` have
 **no equivalent constraint and cannot have one** — a Drive folder, a channel, a
-Notion tree, and a meeting transcript are all inherently multi-author. §5 governs
+Notion tree, and a meeting transcript are all inherently multi-author. §6 governs
 them.
 
-### 4.4 Extension of an existing source
+### 5.4 Extension of an existing source
 
 The owner requires all extractions to be extendable: N more months of Gmail,
 more Drive directories, more Slack channels, more Notion directories.
 
 **S-3.5** Extending a **window** (b, d, e, g: `months_back` grows) is an
 `upsert` of the same source row — the DOC-55 additive path, preserving
-`added_at` and the ledger — and MUST fetch only the delta. §7.2 specifies the
+`added_at` and the ledger — and MUST fetch only the delta. §8.2 specifies the
 watermark state that makes "only the delta" true.
 
 **S-3.6** Extending **coverage** (c, e, f: another directory, channel, or page)
@@ -462,7 +627,7 @@ scope, and its own failure state. A composite source hides which half failed.
 
 ---
 
-## 5. SPEC-OKGSRC-04 — The Untrusted-Content Boundary {#SPEC-OKGSRC-04~draft}
+## 6. SPEC-OKGSRC-04 — The Untrusted-Content Boundary {#SPEC-OKGSRC-04~draft}
 
 **This is the most important section in this document.** Every remote source in
 §4 ingests content the user did not author and does not control, into a store an
@@ -470,7 +635,7 @@ assistant then reads as knowledge. That is a prompt-injection surface **by
 construction**, not by accident, and the surface widens with every source type
 added.
 
-### 5.1 This repo already has an active threat model on exactly this shape
+### 6.1 This repo already has an active threat model on exactly this shape
 
 This is not a hypothetical imported from general LLM-security literature. It is
 this repository's own, recorded, enforced position:
@@ -499,10 +664,10 @@ this repository's own, recorded, enforced position:
   so a poisoned `registry.toml` row cannot bypass it on a later run.
 
 **S-4.1** OKG Sources inherits this threat model in full. No source type may be
-added that widens an assistant's reach without the capability-grant review §12
+added that widens an assistant's reach without the capability-grant review §13
 separates out.
 
-### 5.2 What exists today, and the one thing that does not
+### 6.2 What exists today, and the one thing that does not
 
 Two of the three necessary mechanisms are already built:
 
@@ -524,12 +689,12 @@ memory-drawer path, not the search path.
 assistant's memory drawers are fenced; the OKG store this document fills from
 Gmail, Drive, Slack, Notion, and Granola is not.
 
-### 5.3 Normative requirements
+### 6.3 Normative requirements
 
 **S-4.3 — Every ingested item is labelled at write time.** Every document
 written by an OKG source carries, in its frontmatter, `source_id`, `source_kind`,
 `ingested_at` (all three exist today) **plus a new `trust` field** with the value
-`untrusted-external` for every source type in §4 except a `directory` source
+`untrusted-external` for every store kind in §5 except a `directory` source
 whose root the operator has explicitly designated user-authored. The label is
 written by the engine, not the connector — a connector cannot mark its own output
 trusted.
@@ -558,10 +723,10 @@ mitigation, not a guarantee — no delimiter reliably survives an adversarial
 instruction, and this document does not claim otherwise. The load-bearing control
 stays the one already pinned: an assistant that ingests untrusted content does
 not hold primitives worth attacking. Consequently **every new source type is
-reviewed as a capability grant** (§12), and any ticket that both adds a source
+reviewed as a capability grant** (§13), and any ticket that both adds a source
 and widens tool reach is split into two.
 
-### 5.4 SENT-only: an analysis, not a claim of sufficiency
+### 6.4 SENT-only: an analysis, not a claim of sufficiency
 
 The Gmail and Slack SENT-only constraint (§4.3) is a real, meaningful partial
 mitigation. The user authored the outbound corpus, so the dominant injection
@@ -589,9 +754,9 @@ to prevent.
 `granola` have **no author constraint whatsoever**, and none is possible. A
 Granola transcript is a recording of other people talking; a Notion page is
 whatever a colleague wrote; a shared Drive folder is arbitrary. These are
-unambiguously and irreducibly untrusted, and §5.3 is the whole of their defence.
+unambiguously and irreducibly untrusted, and §6.3 is the whole of their defence.
 
-### 5.5 Residual risk, stated for the owner rather than papered over
+### 6.5 Residual risk, stated for the owner rather than papered over
 
 With S-4.3…S-4.9 implemented, the residual risk is:
 
@@ -603,13 +768,13 @@ With S-4.3…S-4.9 implemented, the residual risk is:
 does is bound the blast radius: the assistant holds no cross-project git
 primitive, no shell reach, and no write-capable tool it did not already hold
 before ingestion. **Accepting this residual risk is an owner decision**, and it
-is Q3 in §13 rather than an assumption buried in a design section.
+is Q3 in §14 rather than an assumption buried in a design section.
 
 ---
 
-## 6. SPEC-OKGSRC-05 — Credentials: A Consumer of Epic #4040 {#SPEC-OKGSRC-05~draft}
+## 7. SPEC-OKGSRC-05 — Credentials: A Consumer of Epic #4040 {#SPEC-OKGSRC-05~draft}
 
-### 6.1 The rule
+### 7.1 The rule
 
 Gmail, Drive, Slack, Notion, and Granola all require credentials. **OKG Sources
 designs none of it.** Epic #4040 — "unified credential authority, delivery, and
@@ -622,11 +787,11 @@ resolution order. This restates DOC-55's connector obligation **C8** verbatim in
 force. A source type receives an already-resolved, already-scoped client handle
 from the credential authority and nothing else.
 
-**S-5.2** A second credential mechanism introduced for any source in §4 is a
+**S-5.2** A second credential mechanism introduced for any store in §5 is a
 defect under this repo's common-entry-point rule, and is rejected at review
 regardless of expedience.
 
-### 6.2 What OKG Sources would otherwise duplicate — the concrete list
+### 7.2 What OKG Sources would otherwise duplicate — the concrete list
 
 Named so reviewers can recognise the duplication if it is attempted:
 
@@ -643,7 +808,7 @@ Named so reviewers can recognise the duplication if it is attempted:
   every other source here, which is precisely why it must route through the
   common authority rather than a per-source special case.
 
-### 6.3 Two honesty requirements inherited from today's state
+### 7.3 Two honesty requirements inherited from today's state
 
 **S-5.3 — Scope truth.** The base persona's own comment
 (`agent.toml:105-113`) records that the Google-backed ingest tools reuse
@@ -655,24 +820,24 @@ than implying a read-only grant that does not exist — the error the comment
 itself calls out as having previously been claimed and been false.
 
 **S-5.4 — Revocation is observable.** When #4040 revokes or expires a
-credential, the affected sources move to a named, displayed failure state (§11)
+credential, the affected stores move to a named, displayed failure state (§12)
 and their schedules stop. A scheduled source silently failing forever on an
 expired token is the failure mode this clause exists to prevent.
 
 **S-5.5 — Ordering.** Every source type requiring a credential this repo does not
 already hold (Slack, Notion, Granola) is **blocked on #4040** and is not
-scheduled. §12 marks these explicitly. Sources reusing credentials already held
+scheduled. §13 marks these explicitly. Sources reusing credentials already held
 (directory, Gmail, Drive) may proceed as plumbing.
 
 ---
 
-## 7. SPEC-OKGSRC-06 — Idempotency, Watermarks, and Incremental Extraction {#SPEC-OKGSRC-06~draft}
+## 8. SPEC-OKGSRC-06 — Idempotency, Watermarks, and Incremental Extraction {#SPEC-OKGSRC-06~draft}
 
 "Idempotent, date-bounded, extendable by N more months" implies two properties
 that must be made true by durable state, not by hope: re-running must not
 duplicate, and extending the window must fetch only the delta.
 
-### 7.1 Reuse, do not reinvent
+### 8.1 Reuse, do not reinvent
 
 The machinery exists in `trusty-kb::okg` and this document specifies **no new
 deduplication**. Per DOC-55 §2.2, inherited unchanged:
@@ -692,7 +857,7 @@ deduplication**. Per DOC-55 §2.2, inherited unchanged:
 (DOC-55 C1/C2) and writes no dedup logic of its own. Where a system offers no
 revision signal, it sets `volatile = true` rather than inventing a constant.
 
-### 7.2 The watermark: where "only the delta" lives
+### 8.2 The watermark: where "only the delta" lives
 
 **S-6.2** Each source carries a durable **watermark** — for a remote store in
 that store's own directory under `stores/` (§2.4, `S-1.6`), for a local directory
@@ -721,7 +886,7 @@ causes duplication is rejected.
 deletion detection for a windowed source. `enumerates_full_corpus` stays false
 for (b), (d), (e), and (g) permanently, whatever the window.
 
-### 7.3 Durability of the source registry
+### 8.3 Durability of the source registry
 
 ADR-0022 (`docs/adr/0022-knowledge-tree-sync-model.md`) decides that knowledge
 trees do **not** sync with agent config, and that a new machine **re-ingests from
@@ -735,7 +900,7 @@ from the tree.
 
 ---
 
-## 8. SPEC-OKGSRC-07 — Scheduled Refresh {#SPEC-OKGSRC-07~draft}
+## 9. SPEC-OKGSRC-07 — Scheduled Refresh {#SPEC-OKGSRC-07~draft}
 
 The owner's requirement: all sources are refreshed on **a schedule the user
 manages**, so new mail, messages, transcripts and folder docs land in the store
@@ -747,7 +912,7 @@ and no job registry anywhere in the workspace — grep for `cron`, `job_schedule
 states the consequence outright: *"A crawl cannot be scripted, cron'd, or run in
 CI."*
 
-### 8.1 Where schedules live
+### 9.1 Where schedules live
 
 **S-7.1** A schedule is a **per-source field on the source row**, not a separate
 scheduler config. One row is the whole truth about a source: locator, window,
@@ -771,7 +936,7 @@ enabled = true
   enabled = true
 ```
 
-### 8.2 Granularity, and the case against cron
+### 9.2 Granularity, and the case against cron
 
 **S-7.2** Granularity is a **coarse interval** — `1h`, `6h`, `24h`, `7d` — with a
 floor, not a cron expression. Rationale, in order of weight:
@@ -794,7 +959,7 @@ local history poll. Its value is an implementation ticket, not a spec constant.
 `ListenerConfig`'s safe-by-default posture (`config.rs:74-77`). Registering a
 source never silently starts background network activity against a user's mail.
 
-### 8.3 Which mechanism runs it — reuse the pattern, not the module
+### 9.3 Which mechanism runs it — reuse the pattern, not the module
 
 There is a real fork here and this document takes a position while flagging it
 (Q4).
@@ -821,7 +986,7 @@ exists for.
 `match cfg.connector.as_str()`. The refresh runner resolves source types through
 the §10 registry. An unknown kind is a **loud error**, never a silent skip.
 
-### 8.4 Failure
+### 9.4 Failure
 
 **S-7.7** A failed run is recorded (§11), never silently retried into oblivion:
 
@@ -844,7 +1009,7 @@ multiple of its own interval is displayed as **stale with its reason**, not as
 merely "last run: <old date>". This is the `never fabricate` posture DOC-58 KD-13
 and DOC-57 G-4 already impose on the Knowledge pane.
 
-### 8.5 Overlap
+### 9.5 Overlap
 
 **S-7.10** A source has **at most one run in flight**. If a tick arrives while
 the previous run is still going, the tick is **skipped, not queued** — and the
@@ -865,13 +1030,13 @@ scheduler's job.
 
 ---
 
-## 9. SPEC-OKGSRC-08 — trusty-search Integration {#SPEC-OKGSRC-08~draft}
+## 10. SPEC-OKGSRC-08 — trusty-search Integration {#SPEC-OKGSRC-08~draft}
 
 The owner's framing is "indexed by trusty-search … standard file-watching
 behavior." Verified against the real API, that is **half right**, and the half
 that is wrong matters.
 
-### 9.1 What is actually true
+### 10.1 What is actually true
 
 - **trusty-search does watch index roots automatically.** `watcher_manager.rs`
   starts a watcher when an index is registered (warm-boot restore or
@@ -891,19 +1056,19 @@ backstop** that catches out-of-band edits — which #4325 guarantees, since user
 are expected to hand-edit the store. Neither is removed in favour of the other,
 and the push feed never assumes the watcher ran.
 
-### 9.2 Index cardinality
+### 10.2 Index cardinality
 
 **S-8.2** **One index per assistant store**, not one per source. The store is one
 tree; sources are rows within it; a search over "what this assistant knows" is
 one query. Per-source indexes would multiply index count by source count, fragment
-every query, and multiply the leak surface named in §9.4 below.
+every query, and multiply the leak surface named in §10.4 below.
 
 **S-8.3** This is the **K-a curated tier** (DOC-58 `SPEC-KDIDX-01~draft`). A
 `directory` source's own index (§4.2 fact 3) is a **K-d attached index** and a
 different object. KD-1 holds: the two lists are never the same list, and a
 surface showing an id in both dedups it and presents it once under its K-a role.
 
-### 9.3 Creation is not automatic today, and that is a gap this spec must own
+### 10.3 Creation is not automatic today, and that is a gap this spec must own
 
 **Nothing in trusty-agents ever calls `create_index`** — verified by grep. Index
 creation is out-of-band ops work, and DOC-58 §9 makes GUI creation an explicit
@@ -923,7 +1088,7 @@ a general reopening of it: creating an index over a directory the user named
 or the index cannot be created. This is a real prerequisite step that a design
 assuming "just call create_index" would miss.
 
-### 9.4 Two operational hazards, cited from real incidents
+### 10.4 Two operational hazards, cited from real incidents
 
 **S-8.6 — Root containment.** trusty-search post-filters every search result
 whose path escapes the index root (issues #64/#541): the push succeeds, chunks
@@ -944,15 +1109,90 @@ operation.
 the store's index is registered against the stable assistant home — never against
 a worktree or temporary path.
 
+### 10.5 Search tiering: OKG first, attached stores as fan-out {#SPEC-OKGSRC-14~draft}
+
+**Owner requirement (2026-08-01):** *"the internal OKG has priority for search,
+then attached stores for fan out."*
+
+**S-14.1 — Two tiers, ordered.** Tier 1 is the agent's canonical OKG index. Tier 2
+is every attached store index. Tier 1 has priority.
+
+#### What "priority" means — resolved, with reasoning
+
+Two readings produce materially different latency and recall:
+
+| Reading | Behaviour |
+|---|---|
+| **Short-circuit** | Query tier 1; query tier 2 only if tier 1 did not satisfy the query |
+| **Rank-above** | Query all tiers, ordering results so tier 1 outranks tier 2 |
+
+**S-14.2 — Rank-above is normative. Short-circuit is rejected**, and the owner's
+own rationale is what settles it: *"Not all useful content in a store will be
+entity-extractable."* A query the OKG appears to satisfy may still have better
+material in an attached store — precisely the content that yielded no entities.
+Short-circuiting would suppress exactly the material that search-only attachment
+exists to make reachable (`S-2.12`), and it would do so **invisibly**: the user
+would see a plausible answer and never learn a better one was skipped. That
+converts the owner's legitimate search-only configuration into a trap.
+
+Recall is the property being protected. Latency is bounded instead by mechanism:
+
+**S-14.3** Tiers are queried **concurrently**, not sequentially, so fan-out costs
+roughly the slowest tier rather than their sum.
+
+**S-14.4** Each tier carries a **per-tier result budget and timeout**. A slow or
+unreachable attached store degrades to fewer tier-2 results — never to a failed
+search, and never to a stalled one.
+
+**S-14.5** An unreachable tier-2 index is reported alongside the results, not
+silently dropped. This is DOC-58 KD-13's never-fabricate posture: a search that
+quietly covered less than the user believes is worse than one that says so.
+
+**S-14.6** Tier order is **not** a relevance score. Tier 1 outranks tier 2 at
+equal-or-comparable relevance; it does not promote a weak OKG match above a
+strong attached-store match. Tier is a tie-break and an ordering preference over
+comparable results, not an override of the ranker.
+
+### 10.6 Result provenance — a verified gap, not an assumption
+
+Epic #4007's "Done when" includes *"every result identifies its tier and
+origin."* The tiering requirement above makes that clause load-bearing: **if tier
+1 outranks tier 2, a consumer must be able to tell which tier produced a
+result.**
+
+**Verified against `origin/main` — it does not exist.** `VectorSearchTool`
+resolves exactly **one** index per call: `effective_index_id`
+(`crates/trusty-agents/src/tools/memory/vector_search.rs:221`) returns
+`Option<String>`, and `daemon_query` (`:453`) queries that single index. The
+agent's OKG index (`default_index_id`, `:75`) and its attached indexes
+(`attached_index_ids`, `:80`) are both known to the tool, but they are offered as
+**alternatives the caller chooses between**, not tiers queried together. So today:
+
+- there is **no fan-out** — a call reaches one index;
+- there is therefore **no tier or origin field on a result**, because provenance
+  is implicit in the caller's own choice of `index_id`.
+
+**S-14.7** Fan-out and per-result tier/origin ship **together**. Fan-out without
+provenance would merge two tiers into an undifferentiated list at the exact moment
+differentiating them starts to matter — and would silently close out #4007's
+acceptance criterion rather than satisfy it.
+
+**S-14.8** Every result carries its **tier** (1 or 2) and its **origin** (the
+index id, and for a tier-1 result the contributing store where known — the
+`source_id` provenance already stamped at ingest,
+`crates/trusty-kb/src/okg/ingest.rs:275-276`). Origin composes with the trust
+label (§6.3): a consumer can see both where a result came from and whether it is
+untrusted-derived.
+
 ---
 
-## 10. SPEC-OKGSRC-09 — The Extension Point {#SPEC-OKGSRC-09~draft}
+## 11. SPEC-OKGSRC-09 — The Extension Point {#SPEC-OKGSRC-09~draft}
 
 The owner requires that future source types — Notion meeting transcripts,
 Fireflies transcripts — drop in without touching the core. **The source-type set
 is an extension point, not a fixed enum.**
 
-### 10.1 What blocks that today
+### 11.1 What blocks that today
 
 `Locator` (`crates/trusty-kb/src/okg/registry.rs:47-80`) is a **closed**,
 externally-tagged three-variant enum. Adding Slack means editing `trusty-kb`.
@@ -966,7 +1206,7 @@ already on disk) and add one open variant
 **is** the kind, so the two can never disagree. An unknown `kind` at ingest time
 is a clear "no source type registered for kind X" error, never a silent skip.
 
-### 10.2 What a source type must provide
+### 11.2 What a source type must provide
 
 A source type is DOC-55's `Connector` (`kind` + `list` + `fetch` +
 `enumerates_full_corpus` + `ceiling` + `chunk`) plus exactly what this document's
@@ -974,19 +1214,19 @@ new obligations require:
 
 | Obligation | Provided as | Why it is required here |
 |---|---|---|
-| **Auth** | A *declaration* of the credential it needs (provider, shape, scope) — resolved by #4040, never held | §6; C8 forbids holding one |
+| **Auth** | A *declaration* of the credential it needs (provider, shape, scope) — resolved by #4040, never held | §7; C8 forbids holding one |
 | **Enumerate** | `list(locator, window, max) -> Listing` — descriptors, not bodies | Lets the ledger be consulted before fetch (C3) |
 | **Fetch delta** | `fetch(&[ItemRef]) -> Vec<FetchedBlob>` | Called only for items the ledger reports not-current |
 | **Normalize to OKF** | `FetchedBlob { bytes, type_hint, fields }` | Extraction to OKF text is DOC-55 §4's job, **not the source type's** — the source type never parses formats |
 | **Watermark** | Report the interval actually covered by a completed `list` | §7.2; without it "N more months" cannot be a delta |
-| **Schedule defaults** | A suggested interval and its floor | §8.2; a provider knows its own rate limits |
-| **Trust posture** | Whether the corpus can be author-constrained, and how | §5.3; must be declared, and defaults to `untrusted-external` |
+| **Schedule defaults** | A suggested interval and its floor | §9.2; a provider knows its own rate limits |
+| **Trust posture** | Whether the corpus can be author-constrained, and how | §6.3; must be declared, and defaults to `untrusted-external` |
 
 **S-9.2** A source type provides **no** dedup, tombstoning, entity writing,
 watermark *storage*, extraction, credential storage, or scheduling. Those are all
 core. This is what makes the extension point real rather than nominal.
 
-### 10.3 Registry shape
+### 11.3 Registry shape
 
 **S-9.3** Mirror the house precedent: a family constructor returning trait
 objects — `okg_source_types() -> Vec<Arc<dyn SourceType>>`, exactly as
@@ -997,7 +1237,7 @@ whole drive loop is testable against a fake with no daemon and no network.
 **S-9.4** Registration is the **only** core edit adding a source type requires.
 No match arm in the runner, no enum variant, no registry-format change.
 
-### 10.4 The two named future cases, walked through
+### 11.4 The two named future cases, walked through
 
 **Fireflies (meeting transcripts).** `kind = "fireflies"`; params
 `{ identity, months_back }`; credential: API key, declared, resolved by #4040
@@ -1019,12 +1259,12 @@ Both drop in. That is the test this section had to pass.
 
 ---
 
-## 11. SPEC-OKGSRC-10 — Observability: The OKG Sources Sub-surface {#SPEC-OKGSRC-10~draft}
+## 12. SPEC-OKGSRC-10 — Observability: The OKG Sources Sub-surface {#SPEC-OKGSRC-10~draft}
 
 The owner requires that OKG Source extractions be **logged and displayed in an
 OKG configuration subpane**.
 
-### 11.1 Where it goes
+### 12.1 Where it goes
 
 **S-10.1** Sources are a sub-surface of the **Knowledge** pane (DOC-57
 `SPEC-AGENTCFG-03~draft`), not a new top-level pane. Knowledge is already "one
@@ -1034,7 +1274,7 @@ fills K-a. A separate pane would force a user asking "what does this assistant
 know?" to correlate across two places, which is the exact failure DOC-57 §8.2 G-2
 created the Knowledge pane to fix.
 
-### 11.2 The log
+### 12.2 The log
 
 **S-10.2** Each run appends one record to `_sources/<id>.runs.jsonl` — the one
 file this document adds to the existing `_sources/` layout. Per record:
@@ -1047,7 +1287,7 @@ covered; items listed / fetched / ingested / skipped / errored; index counters
 the item and index journals. It is a display and diagnosis record — **never** an
 input to a correctness decision, which stays with the ledger and the watermark.
 
-### 11.3 What the pane shows
+### 12.3 What the pane shows
 
 **S-10.4** Per source: kind, locator summary, coverage window, schedule and
 whether it is enabled, last run outcome with timestamp, next run, credential
@@ -1056,9 +1296,9 @@ internal — a user is entitled to see that their assistant's knowledge includes
 content other people wrote.
 
 **S-10.5** The counters from §3 are **displayed separately and never summed**:
-*ingested by an OKG Source* (path 1, scheduled) and *extracted from a bound
-store* (path 2, explicit) are different numbers produced by different triggers
-over different corpora. Collapsing them into one "items" figure would erase the
+*ingested by a store* (§3, automatic) and *extracted from a bound store* (§4,
+explicit) are different numbers produced by different triggers over different
+corpora. Collapsing them into one "items" figure would erase the
 §3 distinction on the exact surface where a user forms their mental model of it.
 
 **S-10.6** Index state is surfaced as its own counter, per DOC-55 §7.2.2: "N
@@ -1070,42 +1310,44 @@ loading, empty, and error are three distinct states; a failing source renders
 with its reason rather than being hidden; a source with no runs renders an
 explicit empty state, not a zero.
 
-### 11.4 Controls
+### 12.4 Controls
 
 **S-10.8** The pane is where a user **manages** the schedule the owner's
 requirement gives them: enable/disable a source, change its interval, extend its
 window (S-3.5), add a source, and trigger a run now. Editing writes through the
-same registered path as every other write, and remains subject to §6 (a source
+same registered path as every other write, and remains subject to §7 (a store
 needing a credential the authority will not grant cannot be enabled).
 
 **S-10.9** "Extract entities" from a **bound store** is a separate, explicit
-control with its own button and its own counter (§3 path 2, #4363). It is never
+control with its own button and its own counter (§4, #4363). It is never
 scheduled, never implied by binding, and is declined with a reason for a
-path-1-owned index (S-2.6). Path-1 ingestion and path-2 extraction are labelled
-distinctly on this surface so a user can always tell which path produced what.
+store-owned index (S-2.7). Store ingestion (§3) and bound-store extraction (§4)
+are labelled distinctly on this surface so a user can always tell which mechanism
+produced what. A **search-only** store renders as a stated configuration, never as
+pending (S-2.11).
 
 ---
 
-## 12. Phased Delivery and Relationship to Existing Work
+## 13. Phased Delivery and Relationship to Existing Work
 
-### 12.1 This document does not duplicate the M2 OKG issues
+### 13.1 This document does not duplicate the M2 OKG issues
 
 Five issues already on milestone 22 **are the unbuilt feature**, not polish on
 it. This document sequences against them and absorbs none of their scope:
 
 | Issue | What it owns | Relationship |
 |---|---|---|
-| #3904 (epic) | The universal importer: extraction layer, connector contract, assistant-driven crawl, deterministic CLI — DOC-55 | **Prerequisite.** §4, §7, and §10 build on its `Connector` contract. This document adds the roster, schedule, trust, and observability layers on top. |
-| #4283 | Index→OKG entity extraction (the "explicit extraction command") | **Owns path 2 of §3** in full. Not re-specified here; §3 constrains it in exactly three ways (S-2.2, S-2.6, S-2.10). |
+| #3904 (epic) | The universal importer: extraction layer, connector contract, assistant-driven crawl, deterministic CLI — DOC-55 | **Prerequisite.** §5, §8, and §11 build on its `Connector` contract. This document adds the roster, schedule, trust, and observability layers on top. |
+| #4283 | Index→OKG entity extraction (the "explicit extraction command") | **Owns §4 in full.** Not re-specified here; §3 constrains it in exactly three ways (S-2.2, S-2.6, S-2.10). |
 | #4325 / PR #4523 | Per-assistant home directory and store root | **Owns §2.2's layout.** Q1 is a question *for* it, filed against it. |
-| #4007 (epic) | Curated stores vs attached indexes (two-tier) | **Owns §9.2's tier distinction** via DOC-58. Depended on, not restated. |
-| #4289 | Index a new directory from the config UI, with overlap guard | **Owns fact (3) of §4.2.** The directory source's K-d half. |
+| #4007 (epic) | Curated stores vs attached indexes (two-tier) | **Owns §10.2's tier distinction** via DOC-58. Depended on, not restated. |
+| #4289 | Index a new directory from the config UI, with overlap guard | **Owns fact (3) of §5.2.** The directory source's K-d half. |
 | #4363 | Extract-entities UI trigger | **Owns S-10.9's control.** |
 
 **Any new ticket below that overlaps one of these is a defect in this
 decomposition, not a parallel effort.**
 
-### 12.2 Two ticket classes, separated on purpose
+### 13.2 Two ticket classes, separated on purpose
 
 - **Plumbing** — mechanism over corpora already reachable, no new external reach.
   Schedulable now.
@@ -1113,17 +1355,17 @@ decomposition, not a parallel effort.**
   provider, a new credential, a new corpus class. **Gated on #4040 and on the
   §5 boundary landing. Marked blocked, never scheduled.**
 
-### 12.3 Phases
+### 13.3 Phases
 
-**Phase A — Foundations (plumbing).** The trust label and its carrier (§5.3
+**Phase A — Foundations (plumbing).** The trust label and its carrier (§6.3
 S-4.3/S-4.4); fencing lifted to a shared seam and applied to the search path
 (S-4.5/S-4.6); the interval watermark (§7.2); the run log and the K-e sub-surface
 (§11), read-only. Net effect: **what is already ingested becomes labelled,
 fenced, and visible.** No new reach at all.
 
 **Phase B — Scheduled refresh for already-reachable sources (plumbing).** The
-per-source schedule field; the refresh runner (§8.3) with failure, overlap, and
-staleness; the store's own index created with the store (§9.3). Sources: (a)
+per-source schedule field; the refresh runner (§9.3) with failure, overlap, and
+staleness; the store's own index created with the store (§10.3). Stores: (a)
 `directory`, (b) `gmail`, (c) `drive` — all three reuse credentials this repo
 already holds. Net effect: **the sources that work today refresh on a
 user-managed schedule.**
@@ -1138,20 +1380,20 @@ core edit.**
 separate grant, each carries its own read-confinement gate (DOC-55 C6), and each
 is reviewed against §5 individually. **Not scheduled.**
 
-**Phase E — Future types.** Fireflies, Notion transcripts (§10.4). Drop-in by
+**Phase E — Future types.** Fireflies, Notion transcripts (§11.4). Drop-in by
 construction; each still a capability grant.
 
 ---
 
-## 13. Open Questions for the Owner
+## 14. Open Questions for the Owner
 
 Genuine forks only. Each states what stays blocked until answered.
 
 **Already decided, recorded here so it is not re-opened:** whether scheduled
 refresh conflicts with explicit-extraction-only. It does not — the owner resolved
 it on 2026-08-01 with *"extraction is an OPTION for any bound store."* OKG
-Sources (path 1) push automatically on a schedule; bound stores (path 2) extract
-only when explicitly asked. §3 specifies both. This is **not** an open question.
+Stores (§3) populate the OKG automatically — by watcher or on a schedule; bound
+stores (§4) are extracted only when explicitly asked. This is **not** an open question.
 
 Also settled and recorded in §2.7 so they are not re-raised: **`config.toml`, not
 `config.yaml`** (owner correction 2026-07-29, no format migration); the **dotless**
@@ -1175,24 +1417,34 @@ user-editable directories **later**.
 **Blocked until answered:** any path change. #4523 is the incumbent and should
 not be re-pointed on a spec's authority.
 
-### Q2 — Confirm: the `okg` directory is the trusty-kb entity tree
+### Q2 — What is trusty-memory's KG's relationship to the canonical OKG?
 
-§2.1 states this normatively — the `okg` directory is the **trusty-kb markdown
-entity tree** (`KbStore::put_entity`), **not** the trusty-memory knowledge graph
-behind `kg_assert`/`kg_query`. Your own phrasing, *"an OKF store indexed by
-trusty-search"*, settles it: a trusty-search index is built over a filesystem
-tree, and the trusty-memory KG is not one.
+**Answered and no longer open:** *which* of the two systems called "OKG" the `okg`
+directory is. Your 2026-08-01 canonical model settles it — the **OKF store**,
+internal, built, indexed by trusty-search (§2.1).
 
-It is raised anyway because #4406 verified that **two unconnected stores are both
-called "OKG"**, that nothing bridges them, and that six M2 issues were already
-building against the name without stating which. A one-word confirmation
-eliminates the class of defect #4406 was filed to prevent.
+**Still open, and a different question:** what happens to **trusty-memory's KG**
+(`kg_assert` / `kg_query`). Naming the OKF store canonical does not retire,
+absorb, or deprecate it, and this document deliberately does not imply that it
+does. The relevant facts:
 
-**Recommendation:** confirm the trusty-kb entity tree. **Blocked until answered:**
-nothing — §2.1 already carries the statement and every ticket in this epic names
-that target. This is a confirm-or-correct, and correcting it later is expensive.
+- The two are **separate and unbridged** — verified 2026-07-30 that nothing calls
+  between them, and that `kg_query` returns empty for both populated palaces.
+- A prior owner decision established that every assistant gets **a memory palace
+  by default AND a default OKG**, so both exist by design.
 
-### Q3 — Do you accept the residual prompt-injection risk in §5.5?
+The fork: do they stay two independent systems with distinct jobs (entities built
+from stores vs. structured recall), does one feed the other in a defined
+direction, or does one eventually subsume the other?
+
+**No recommendation** — a product question about two systems whose intended
+division of labour only you can state, and it likely warrants an ADR rather than
+an issue-level decision (as #4406 itself suggests).
+
+**Blocked until answered:** nothing in this epic — every ticket here names the OKF
+store. What stays blocked is #4406's own closure, and any work bridging the two.
+
+### Q3 — Do you accept the residual prompt-injection risk in §6.5?
 
 With the §5 boundary implemented, an assistant may still be influenced by
 attacker-authored text ingested through a legitimate source, fenced as untrusted.
@@ -1225,7 +1477,7 @@ not because the recommendation is weak.
 
 ---
 
-## 14. References
+## 15. References
 
 - `crates/trusty-kb/src/okg/` — engine: `ingest.rs` (the `SourceItem` seam,
   provenance frontmatter at `:275-276`), `registry.rs` (`Locator`, `SourceSpec`),
@@ -1264,10 +1516,12 @@ not because the recommendation is weak.
 
 ---
 
-## 15. Change Log
+## 16. Change Log
 
 | Date | Change |
 |---|---|
 | 2026-08-01 | Initial draft — store identity and location, source roster, the untrusted-content boundary, #4040 consumption, watermarks, scheduled refresh, trusty-search integration, the source-type extension point, and the K-e observability sub-surface. |
-| 2026-08-01 | §3 rewritten to the owner's two-population-path model ("extraction is an OPTION for any bound store"); contamination guard scoped to path 2; the directory overlap case specified. |
+| 2026-08-01 | §3/§4 split per "extraction is an OPTION for any bound store": stores populate automatically, bound-store extraction stays explicit; contamination guard scoped to the latter; the directory overlap case specified. |
+| 2026-08-01 | Restructured around the owner's canonical model — one built OKG per agent, populated by many stores of two kinds (`SPEC-OKGSRC-12~draft`); "store" adopted as the single canonical noun with "OKG Source" recorded as an earlier synonym; bound-store extraction split into its own section (`SPEC-OKGSRC-13~draft`). |
+| 2026-08-01 | §3.4 added: searchable-corpus and OKG-contributor capacities are orthogonal, and search-only is a complete end state, never pending. §10.5–§10.6 added: OKG-first search tiering with attached-store fan-out, and per-result tier/origin provenance (`SPEC-OKGSRC-14~draft`), verified absent today. |
 | 2026-08-01 | §2.4–§2.7 added: `stores/<store-identifier>/` extraction targets for remote stores with the local/remote asymmetry made explicit (`SPEC-OKGSRC-11~draft`); `${TRUSTY_AGENTS_HOME}` recorded as one system value with migration deferred; config-format, dotless, and not-access-controlled recorded as settled. |
