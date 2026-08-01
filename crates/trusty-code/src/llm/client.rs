@@ -267,11 +267,15 @@ impl OpenAiCompatClient {
     /// only once the key is confirmed does it resolve + build the Fireworks
     /// adapter. Together (#2494) and AtlasCloud (#2536) follow the identical
     /// contract against `TOGETHER_API_KEY` / `ATLASCLOUD_API_KEY` respectively.
-    /// For OpenRouter, resolves on an `openrouter/` routing
-    /// slug (a missing key surfaces as the resolver's own `MissingCredential`,
-    /// mapped to `MissingConfig`). The resolved model slug is irrelevant to the
-    /// built adapter (it sends the per-request wire model), so a fixed routing
-    /// slug is used.
+    /// OpenRouter — the default route, and so the first one a new operator hits
+    /// — follows the SAME contract against `OPENROUTER_API_KEY` (#4614). Until
+    /// #4436 deleted the `convert::map_error` bridge this was achieved by
+    /// mapping the resolver's own `MissingCredential`; the explicit guard now
+    /// states it directly, and carries the actionable message
+    /// `MissingCredential` structurally cannot. Only once the key is confirmed
+    /// does it resolve on an `openrouter/` routing slug — the resolved model
+    /// slug is irrelevant to the built adapter (it sends the per-request wire
+    /// model), so a fixed routing slug is used.
     /// Test: `client::tests::missing_openrouter_key_errors_at_chat_time`,
     /// `client::tests::missing_fireworks_key_errors_not_falls_back`,
     /// `client::tests::missing_together_key_errors_not_falls_back`,
@@ -321,6 +325,15 @@ impl OpenAiCompatClient {
                 atlascloud::build(&resolved, &self.atlascloud_base)
             }
             _ => {
+                // #4614: restores the mapping #4436 dropped with `convert::map_error`.
+                if resolve_key_with("openrouter", self.store.as_ref()).is_none() {
+                    return Err(InferenceError::MissingConfig(
+                        "OPENROUTER_API_KEY is required to reach an openrouter model. Export it \
+                         (e.g. `export OPENROUTER_API_KEY=sk-or-...`), add it to .env.local, or \
+                         set it via `tcode config keys set openrouter`."
+                            .to_string(),
+                    ));
+                }
                 let resolved = provider_for("openrouter/route", self.store.as_ref())?;
                 openrouter::build(&resolved, &self.openrouter_base)
             }
@@ -438,7 +451,53 @@ impl InferenceAdapter for OpenAiCompatClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use trusty_common::inference::credentials::MemoryKeyStore;
+
+    /// RAII guard clearing one credential env var for the duration of a test.
+    ///
+    /// Why (#4614): the missing-credential tests below used to SKIP whenever the
+    /// ambient environment carried a real key — so on any developer machine that
+    /// has one they reported `ok` without executing a single assertion, and the
+    /// contract they pin was only ever checked hermetically in CI. That is what
+    /// let a real regression (the dropped `MissingConfig` mapping) sit
+    /// undetected. The skip existed for a sound reason — with a real key present
+    /// `chat()` would issue a LIVE API call — so the fix is not to delete the
+    /// guard but to remove its cause: clear the var, and no live call is
+    /// reachable by construction.
+    /// What: saves the previous value, removes the var, and restores the exact
+    /// prior state on drop (including "was unset"). The value is never read,
+    /// logged, or asserted on — only moved.
+    /// Test: `missing_openrouter_key_errors_at_chat_time`,
+    /// `missing_fireworks_key_errors_not_falls_back`,
+    /// `missing_together_key_errors_not_falls_back`,
+    /// `missing_atlascloud_key_errors_not_falls_back`.
+    struct ClearedKey {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl ClearedKey {
+        fn new(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: serialized against every other env-mutating test by
+            // `#[serial]`, matching the workspace-wide convention.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for ClearedKey {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     /// A plain (non-fireworks) slug selects OpenRouter.
     ///
@@ -571,21 +630,25 @@ mod tests {
         );
     }
 
-    /// With an empty store and (assumed) no `OPENROUTER_API_KEY` env, an
-    /// OpenRouter chat fails at `chat()` time with a `MissingConfig` — never at
-    /// construction (#2245 deferred-failure contract).
+    /// With an empty store and no `OPENROUTER_API_KEY` env, an OpenRouter chat
+    /// fails at `chat()` time with an actionable `MissingConfig` naming the env
+    /// var — never at construction (#2245 deferred-failure contract), and never
+    /// as the bare `MissingCredential` the shared resolver raises (#4614).
     ///
     /// Why: pins that construction is credential-free and that the missing-key
-    /// error is actionable and surfaces only when a request needs it.
-    /// What: build with an empty `MemoryKeyStore`; if the ambient env happens to
-    /// carry a real key (dev machines), skip the assertion rather than make a
-    /// live call — the hermetic case (no env key) is what CI exercises.
+    /// error is actionable and surfaces only when a request needs it. OpenRouter
+    /// is the default route, so this is the error a new operator sees first —
+    /// "no credential resolved for provider openrouter" tells them nothing they
+    /// can act on, which is exactly what the three sibling providers below
+    /// already refuse to emit.
+    /// What: clear the env var for the test body and build with an empty
+    /// `MemoryKeyStore`, so NOTHING can resolve a credential and no live call is
+    /// reachable; assert the variant AND that the message names the env var.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn missing_openrouter_key_errors_at_chat_time() {
-        if std::env::var("OPENROUTER_API_KEY").is_ok_and(|v| !v.is_empty()) {
-            return; // real key present locally — don't issue a live call
-        }
+        let _cleared = ClearedKey::new("OPENROUTER_API_KEY");
         let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new())); // empty store
         let req = ChatRequest {
             model: "openai/gpt-4o-mini".into(),
@@ -601,10 +664,15 @@ mod tests {
             .chat(&req)
             .await
             .expect_err("must fail without a key");
-        assert!(
-            matches!(err, InferenceError::MissingConfig(_)),
-            "expected MissingConfig, got: {err:?}"
-        );
+        match err {
+            InferenceError::MissingConfig(msg) => {
+                assert!(
+                    msg.contains("OPENROUTER_API_KEY"),
+                    "unhelpful message: {msg}"
+                )
+            }
+            other => panic!("expected MissingConfig naming OPENROUTER_API_KEY, got: {other:?}"),
+        }
     }
 
     /// A `fireworks/*` request with no `FIREWORKS_API_KEY` fails with an
@@ -613,15 +681,14 @@ mod tests {
     /// Why: the shared resolver's stage-1 falls through to OpenRouter when a
     /// family key is absent; for an explicit tcode fireworks route that would be
     /// a wrong-provider misroute, so `build_adapter` turns it into a clear error.
-    /// What: with an empty store (and, when present locally, a real
-    /// `FIREWORKS_API_KEY` shadowing it, in which case skip), assert
-    /// `MissingConfig`.
+    /// What: with the env var cleared for the test body (#4614 — the former
+    /// skip-when-set guard meant this asserted nothing on a machine that has a
+    /// real key) and an empty store, assert `MissingConfig`.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn missing_fireworks_key_errors_not_falls_back() {
-        if std::env::var("FIREWORKS_API_KEY").is_ok_and(|v| !v.is_empty()) {
-            return; // real key present locally — the fall-back guard isn't exercised
-        }
+        let _cleared = ClearedKey::new("FIREWORKS_API_KEY");
         let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
         let req = ChatRequest {
             model: "fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct".into(),
@@ -655,15 +722,13 @@ mod tests {
     /// family key is absent; for an explicit tcode together route that would be a
     /// wrong-provider misroute, so `build_adapter` turns it into a clear error —
     /// the same contract as Fireworks.
-    /// What: with an empty store (and, when present locally, a real
-    /// `TOGETHER_API_KEY` shadowing it, in which case skip), assert
-    /// `MissingConfig` naming `TOGETHER_API_KEY`.
+    /// What: with the env var cleared for the test body (#4614) and an empty
+    /// store, assert `MissingConfig` naming `TOGETHER_API_KEY`.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn missing_together_key_errors_not_falls_back() {
-        if std::env::var("TOGETHER_API_KEY").is_ok_and(|v| !v.is_empty()) {
-            return; // real key present locally — the fall-back guard isn't exercised
-        }
+        let _cleared = ClearedKey::new("TOGETHER_API_KEY");
         let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
         let req = ChatRequest {
             model: "together/meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
@@ -695,15 +760,13 @@ mod tests {
     /// family key is absent; for an explicit tcode atlascloud route that would be
     /// a wrong-provider misroute, so `build_adapter` turns it into a clear error —
     /// the same contract as Fireworks and Together.
-    /// What: with an empty store (and, when present locally, a real
-    /// `ATLASCLOUD_API_KEY` shadowing it, in which case skip), assert
-    /// `MissingConfig` naming `ATLASCLOUD_API_KEY`.
+    /// What: with the env var cleared for the test body (#4614) and an empty
+    /// store, assert `MissingConfig` naming `ATLASCLOUD_API_KEY`.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn missing_atlascloud_key_errors_not_falls_back() {
-        if std::env::var("ATLASCLOUD_API_KEY").is_ok_and(|v| !v.is_empty()) {
-            return; // real key present locally — the fall-back guard isn't exercised
-        }
+        let _cleared = ClearedKey::new("ATLASCLOUD_API_KEY");
         let client = OpenAiCompatClient::with_store(Box::new(MemoryKeyStore::new()));
         let req = ChatRequest {
             model: "atlascloud/openai/gpt-5.6-sol".into(),
