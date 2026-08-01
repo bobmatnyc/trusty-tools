@@ -209,6 +209,28 @@ pub fn build_source_map(source_dir: &Path) -> SourceMap {
 pub(crate) struct Frontmatter {
     pub(crate) name: Option<String>,
     pub(crate) role: Option<String>,
+    /// The agent's declared domain under the spelling claude-mpm-format
+    /// artifacts use (#4511).
+    ///
+    /// Why: `role:` is the spelling trusty-mpm's own source assets and this
+    /// composer's emit path use, but the deployed `.claude/agents/*.md`
+    /// artifacts that originate from claude-mpm carry `agent_type:` and no
+    /// `role:` at all. A consumer reading a deployed artifact through
+    /// [`super::metadata::AgentMetadata`] therefore saw no domain whatsoever,
+    /// and trusty-agents' `mpm_bridge` had to fail closed on every such file
+    /// (issue #4511). Modelling the key here is what lets ONE reader answer
+    /// "what domain does this file declare?" for both artifact dialects
+    /// instead of each consumer hand-rolling a second scan.
+    /// What: READ-ONLY. Parsed and projected onto
+    /// [`super::metadata::AgentMetadata::agent_type`], and deliberately NOT
+    /// merged across an `extends` chain nor re-emitted by
+    /// [`merge_frontmatter`] — this composer canonicalises on `role:`, and
+    /// emitting a second domain key would change the bytes of every deployed
+    /// artifact for a field nothing in the compose path consumes. Dropping it
+    /// on emit is exactly what happened before this field existed, so compose
+    /// output is byte-identical.
+    /// Test: `agent_type_is_parsed_but_never_emitted`.
+    pub(crate) agent_type: Option<String>,
     pub(crate) description: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) extends: Option<String>,
@@ -510,6 +532,12 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
             .map(|v| unescape_yaml_double_quoted(&v)),
         role: fields
             .remove("role")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        // #4511: the claude-mpm-format spelling of the same declaration. Read
+        // with the identical unescape treatment as `role` so both dialects
+        // reach a consumer in the same shape.
+        agent_type: fields
+            .remove("agent_type")
             .map(|v| unescape_yaml_double_quoted(&v)),
         description: fields
             .remove("description")

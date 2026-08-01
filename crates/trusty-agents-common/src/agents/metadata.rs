@@ -23,8 +23,12 @@
 //! in-memory document — used by the co-deploy path, which already holds the
 //! freshly composed string) and [`read_agent_metadata`] (read a file from
 //! disk — used by doctor and the CLI, which look at already-deployed files).
+//! Both spellings of an agent's declared domain are projected (#4511):
+//! `role:` (this crate's composer emit, and trusty-mpm's source assets) and
+//! `agent_type:` (what claude-mpm-format deployed artifacts carry instead).
 //! Test: `metadata_from_str_reads_skills`, `metadata_from_missing_file_is_default`,
-//! `metadata_from_str_malformed_frontmatter_is_default` in this file.
+//! `metadata_from_str_malformed_frontmatter_is_default`,
+//! `metadata_from_str_reads_agent_type` in this file.
 
 use std::path::Path;
 
@@ -46,6 +50,25 @@ pub struct AgentMetadata {
     pub name: Option<String>,
     /// The `role:` field.
     pub role: Option<String>,
+    /// The `agent_type:` field — the SAME declaration as [`Self::role`] under
+    /// the spelling claude-mpm-format artifacts use (#4511).
+    ///
+    /// Why: a deployed `.claude/agents/*.md` artifact that originated from
+    /// claude-mpm declares `agent_type:` and no `role:` at all, so a consumer
+    /// reading one through this projection saw no domain and had to fall back
+    /// to a fail-closed default. Carrying both spellings lets a consumer
+    /// resolve the domain from ONE reader rather than re-scanning the file
+    /// with a second, divergent grammar.
+    /// What: `None` when the key is absent (the norm for trusty-mpm's own
+    /// source assets and for anything this crate's composer emitted, since
+    /// [`crate::agents::builder::compose_agent`] canonicalises on `role:` and
+    /// never emits this key). It is a DECLARATION, not a resolved value:
+    /// consumers must translate it through their own reviewed table before it
+    /// reaches any authorization decision — trusty-agents does exactly that in
+    /// `agents::claude_mpm_role::normalize_role`.
+    /// Test: `metadata_from_str_reads_agent_type`,
+    /// `metadata_from_str_agent_type_absent_is_none`.
+    pub agent_type: Option<String>,
     /// The `description:` field.
     pub description: Option<String>,
     /// The `model:` field.
@@ -77,6 +100,7 @@ impl From<Frontmatter> for AgentMetadata {
         Self {
             name: fm.name,
             role: fm.role,
+            agent_type: fm.agent_type,
             description: fm.description,
             model: fm.model,
             extends: fm.extends,
@@ -150,6 +174,27 @@ mod tests {
         assert_eq!(meta.model.as_deref(), Some("sonnet"));
         assert_eq!(meta.extends.as_deref(), Some("base-engineer"));
         assert_eq!(meta.skills, vec!["toolchains-rust-core"]);
+    }
+
+    /// #4511: the claude-mpm-format artifact shape — `agent_type:` carries
+    /// the domain and `role:` is absent entirely. Before this projection
+    /// existed a consumer reading such a file saw NO declared domain at all.
+    #[test]
+    fn metadata_from_str_reads_agent_type() {
+        let doc = "---\nname: aws-ops\nagent_type: ops\nversion: \"1.0.0\"\n---\n\nBody.\n";
+        let meta = agent_metadata_from_str(doc);
+        assert_eq!(meta.agent_type.as_deref(), Some("ops"));
+        assert_eq!(meta.role, None, "this dialect declares no `role:`");
+    }
+
+    /// The two spellings are independent fields, never merged or aliased here
+    /// — deciding which one wins is the CONSUMER's reviewed policy, not this
+    /// read-only projection's.
+    #[test]
+    fn metadata_from_str_agent_type_absent_is_none() {
+        let meta = agent_metadata_from_str("---\nname: plain\nrole: engineer\n---\n\nBody.\n");
+        assert_eq!(meta.role.as_deref(), Some("engineer"));
+        assert_eq!(meta.agent_type, None);
     }
 
     #[test]
