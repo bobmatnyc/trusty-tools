@@ -5,10 +5,11 @@
 //!      (`query_headcount`, `query_budget`, `query_risks`,
 //!      `query_work_classification`) that nothing in the live dispatch path
 //!      implements (#3700) — the Rust-native implementation
-//!      (`crates/cto-assistant` + `crates/tc-services::cto_db` +
-//!      `crates/trusty-cto-db`) still compiles and is fully tested, but its
-//!      only `install_plugins(...)` call site was removed by PR #3310, and
-//!      resurrecting it would re-embed CTO-specific business logic in Rust —
+//!      (the former `crates/cto-assistant`, dissolved in #3732, over
+//!      `crates/tc-services::cto_db` + `crates/trusty-cto-db`) compiled and
+//!      was fully tested, but its only `install_plugins(...)` call site was
+//!      removed by PR #3310, and resurrecting it would re-embed
+//!      CTO-specific business logic in Rust —
 //!      exactly what #3656 objects to (DOC-41 §2.0 "declarative-only"
 //!      agents). The owner's directive is to move that business logic into a
 //!      *skill* instead (Python code + data, bundled together), while
