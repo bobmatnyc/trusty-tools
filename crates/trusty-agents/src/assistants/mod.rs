@@ -31,6 +31,13 @@
 //!   requirement. External modification is expected, so the system reports
 //!   missing/malformed entries with a remedy the concierge can narrate; it
 //!   never auto-migrates and never overwrites.
+//! - `roster` — [`discover_instances`]: which configs are instances of the
+//!   type. `role = "assistant"` alone is not the rule — `ctrl` declares it too
+//!   and is the concierge, not a selectable instance.
+//! - `provision` — [`provision_startup_homes`]: the STARTUP call (owner,
+//!   2026-08-01). Runs on every launch, creates what is missing, and CANNOT
+//!   fail — a home the app cannot create becomes a reported issue with a
+//!   remedy, never a failed boot.
 //! - `error` — [`AssistantError`], for resolving and creating a home.
 //!   Inspecting one yields findings, not errors.
 //!
@@ -64,6 +71,8 @@ pub mod error;
 pub mod health;
 pub mod home;
 pub mod instance;
+pub mod provision;
+pub mod roster;
 
 #[cfg(test)]
 mod tests;
@@ -76,3 +85,8 @@ pub use home::{
     assistants_root,
 };
 pub use instance::{ASSISTANT_ROLE, AssistantInstanceId, is_assistant_role};
+pub use provision::{
+    ProvisionedHome, StartupProvisioning, provision, provision_all, provision_startup_homes,
+    provision_startup_homes_in,
+};
+pub use roster::{ASSISTANT_BASE, discover_instances};

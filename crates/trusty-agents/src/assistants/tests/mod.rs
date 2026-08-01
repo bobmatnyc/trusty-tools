@@ -5,10 +5,14 @@
 //! and what the system says when a user changes it from outside.
 //! What: `instance_tests` (id validation), `home_tests` (layout, resolution,
 //! idempotent creation), `store_root_tests` (the new `[[stores]] root` field's
-//! confinement), `health_tests` (detection of missing/malformed entries).
+//! confinement), `health_tests` (detection of missing/malformed entries),
+//! `provision_tests` (startup provisioning, including the failure modes that
+//! must not take startup down), `roster_tests` (which configs are instances).
 //! Test: this module IS the test surface.
 
 mod health_tests;
 mod home_tests;
 mod instance_tests;
+mod provision_tests;
+mod roster_tests;
 mod store_root_tests;

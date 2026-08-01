@@ -50,6 +50,11 @@ pub enum HomeIssueKind {
     Unreadable,
     /// The entry was read but its content is not what it must be.
     Malformed,
+    /// #4325: the app tried to create the entry at startup and could not
+    /// (read-only filesystem, permission denied, no space, a file sitting where
+    /// a directory belongs). Startup continues regardless — see
+    /// [`super::provision`].
+    NotCreatable,
 }
 
 impl HomeIssueKind {
@@ -64,6 +69,7 @@ impl HomeIssueKind {
             Self::NotAFile => "not a file",
             Self::Unreadable => "unreadable",
             Self::Malformed => "malformed",
+            Self::NotCreatable => "could not be created",
         }
     }
 }
