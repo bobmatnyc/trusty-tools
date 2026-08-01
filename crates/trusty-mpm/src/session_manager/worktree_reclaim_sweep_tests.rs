@@ -536,9 +536,17 @@ fn e2e_survey_against_a_real_store() {
     println!("elapsed           = {:?}", started.elapsed());
     println!("candidates        = {}", s.candidates.len());
     println!("reclaimable       = {}", s.reclaimable);
-    println!("reclaimable_bytes = {}", s.reclaimable_bytes);
+    println!(
+        "reclaimable_bytes = {} (across {} of {} measured)",
+        s.reclaimable_bytes, s.reclaimable_measured, s.reclaimable
+    );
     println!("total_bytes       = {}", s.total_bytes);
-    println!("pr_state_unknown  = {}", s.pr_state_unknown);
+    println!(
+        "pr_state_unknown  = {} (of which not_inspected = {}, lookup-unresolved = {})",
+        s.pr_state_unknown,
+        s.not_inspected,
+        s.pr_state_unknown.saturating_sub(s.not_inspected)
+    );
     println!("unmeasured        = {}", s.unmeasured);
     for c in s.candidates.iter().filter(|c| c.verdict.is_reclaimable()) {
         println!(
