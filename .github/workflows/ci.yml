@@ -104,6 +104,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Duplicated on purpose from .github/workflows/instruction-floor-guard.yml.
+      # That workflow is not (yet) a required status check, so deleting the file
+      # would silently disarm the floor guard. `Format check` IS required and has
+      # no path filter, so running the guard here means the instruction floor
+      # stays enforced even if its own workflow is removed. The guard also pins
+      # that workflow's bytes, so neutering it fails here too. Costs ~1s.
+      - name: Instruction floor guard (#3374, also runs standalone)
+        run: bash scripts/check_instruction_floor.sh
+
       - name: Install stable toolchain with rustfmt
         uses: dtolnay/rust-toolchain@stable
         with:

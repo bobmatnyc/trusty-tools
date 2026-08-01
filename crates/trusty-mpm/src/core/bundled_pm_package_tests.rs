@@ -189,7 +189,7 @@ fn bundled_manifest_parses_and_validates() {
 fn manifest_prose_lives_in_markdown_not_in_the_json() {
     // The point of the v2 `file` body kind. Inlining the sections would turn
     // `core.md` into a single 23 KB JSON line and move the floor text out of the
-    // files `scripts/check_instruction_floor.sh` greps, so the manifest must stay
+    // files `scripts/check_instruction_floor.sh` pins, so the manifest must stay
     // small and must reference its bulk prose by path. The inline `text` blocks it
     // DOES carry are short authored rules, not lifted section bodies.
     assert!(
