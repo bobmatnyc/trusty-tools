@@ -67,6 +67,22 @@ correct**, plus the gaps that remain.
 
 ### 2.1 Instruction assembly — implemented (PR #1389)
 
+> **Stale as of 2026-08-01** (this DOC-29 BHV-01 cites this section as its
+> "Canonical source" — see that entry's own stale-note). #4183
+> (2026-07-28) replaced the four monolithic files below with per-section
+> files under `assets/instructions/sections/`, composed from
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> (schema v2); `assemble_system_prompt()`/`resolve_pm_prompt()`/
+> `build_instructions()`/`prepare_session()` still exist and still own this
+> pipeline, just sourcing content differently. Project customization is
+> named sections in the root `CLAUDE.md`, added by #4324 and read first
+> ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72)).
+> The five `.trusty-mpm/` files
+> ([`instruction_overrides.rs:52-60`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60))
+> remain in the current binary's read paths;
+> [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
+> their removal.
+
 `assemble_system_prompt()` concatenates the PM instruction floor in a fixed
 order: `PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION → BASE_PM`. Runtime
 overrides are resolved by `resolve_pm_prompt()` from `<project>/.trusty-mpm/`,
