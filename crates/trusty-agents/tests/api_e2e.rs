@@ -115,7 +115,7 @@ async fn test_unknown_task_id_returns_404() {
 #[ignore = "requires OPENROUTER_API_KEY (or ANTHROPIC_API_KEY)"]
 async fn test_ctrl_chat_hello() {
     load_env_local();
-    let server = ApiServer::spawn().await.expect("spawn api server");
+    let mut server = ApiServer::spawn().await.expect("spawn api server");
     let id = server
         .submit_task_json(serde_json::json!({
             "task": "hello, please reply with a short greeting",
@@ -143,7 +143,7 @@ async fn test_ctrl_chat_hello() {
 #[ignore = "requires OPENROUTER_API_KEY (or ANTHROPIC_API_KEY)"]
 async fn test_ctrl_knows_self_project() {
     load_env_local();
-    let server = ApiServer::spawn().await.expect("spawn api server");
+    let mut server = ApiServer::spawn().await.expect("spawn api server");
     let id = server
         .submit_task_json(serde_json::json!({
             "task": "what project are you running inside? answer briefly.",
@@ -165,7 +165,7 @@ async fn test_ctrl_knows_self_project() {
 async fn test_ctrl_connects_to_test_project() {
     load_env_local();
     let project = support::project::Project::new();
-    let server = ApiServer::spawn().await.expect("spawn api server");
+    let mut server = ApiServer::spawn().await.expect("spawn api server");
 
     let task = format!(
         "you are connected to a project at {}. List the agent names you find under .trusty-agents/agents/.",
