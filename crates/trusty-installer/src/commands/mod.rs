@@ -26,6 +26,13 @@ pub mod picker;
 pub mod plist_bootstrap;
 pub mod plist_label;
 pub mod port;
+// #4470: refuse a `launchctl bootstrap` when a foreign process holds the port.
+pub mod port_guard;
+// #4470: fail-loud inventory — a NEW `launchctl bootstrap` site must fail a
+// test rather than silently bypass the guard above (the #4475 pattern).
+#[cfg(test)]
+#[path = "bootstrap_sites_tests.rs"]
+mod bootstrap_sites_tests;
 pub mod prereqs;
 pub mod probe;
 // #4246: the HTTP `/health` transport behind every health verdict.
