@@ -1878,6 +1878,79 @@ mod agent_name_resolves_tests {
     }
 }
 
+/// The zero-delta capability check for ONE L0 persona, expressed as a
+/// `Result` so the identical rule can be run against both the real bundled
+/// roster and a fixture that deliberately violates it (#4519).
+///
+/// Why: the guard this backs used to iterate `cfg.tools.allow` directly, which
+/// is NOT the set of tools a persona can actually reach. `[skills].allow`
+/// compiles down to exact tool names and is UNIONED into the allow patterns by
+/// `skills::manifest::effective_tool_patterns`, and the builtin skill
+/// `orchestration-shell-run` expands to exactly `l0_shell_exec` — so adding one
+/// `[skills]` line to a persona (including `izzie`, which ingests untrusted
+/// Gmail/Drive/Calendar content) would hand it a real unsandboxed shell while
+/// the guard stayed green. Returning `Err` instead of panicking is what makes
+/// that claim provable: a self-asserting test body can only ever show that it
+/// passes, never that it CATCHES the case it is supposed to catch.
+/// What: given a persona's effective allow patterns, returns `Err(message)` for
+/// the first entry that reaches an L0-gated surface — an
+/// `L0_ONLY_SESSION_STATE_TOOLS` entry, `l0_shell_exec`, or any `GH_TOOL_NAMES`
+/// entry. Matching stays GLOB-based, never equality, because `[tools].allow`
+/// entries are glob patterns and a persona declaring `l0_*` or `*` reaches the
+/// shell just as surely as one naming it outright.
+/// Test: `bundled_assistant_personas_resolve_l0_and_gain_nothing` (real roster,
+/// expected `Ok`), `skills_allow_shell_expansion_is_caught_by_the_l0_guard`
+/// (fixture persona, expected `Err`).
+fn l0_persona_capability_delta(
+    name: &str,
+    effective_allow: Option<&[String]>,
+) -> Result<(), String> {
+    let Some(allow) = effective_allow else {
+        return Ok(());
+    };
+    for granted in allow {
+        if crate::tools::session_state::is_l0_only_session_state_tool(granted) {
+            return Err(format!(
+                "'{name}' names the L0-gated tool '{granted}' in its effective allow set — \
+                 becoming L0 would GRANT it, which is a capability change this \
+                 PR does not carry. Review it deliberately."
+            ));
+        }
+        // #4173: the same zero-delta claim for the L0-only shell/build/test
+        // executor. Matched as a GLOB, not by equality, because
+        // `[tools].allow` entries are glob patterns — a persona declaring
+        // `l0_*` or `*` would reach the shell just as surely as one naming it
+        // outright, and an equality check would miss both.
+        if crate::ctrl::pm_task::match_any_glob(
+            crate::tools::l0_exec::L0_SHELL_EXEC,
+            std::slice::from_ref(granted),
+        ) {
+            return Err(format!(
+                "'{name}' grants '{granted}' in its effective allow set (`[tools].allow` \
+                 unioned with the tools `[skills].allow` expands to), which matches the \
+                 L0-only execution grant '{}' — as an L0 persona it would hold a \
+                 real shell. That is a capability change, not a side effect: \
+                 review it deliberately.",
+                crate::tools::l0_exec::L0_SHELL_EXEC
+            ));
+        }
+        // #4170: and for the L0-only GitHub PR/CI surface. Same glob
+        // reasoning; every name checked, so a tool added to `GH_TOOL_NAMES` is
+        // covered without editing this test.
+        for gh in crate::tools::gh_tools::GH_TOOL_NAMES {
+            if crate::ctrl::pm_task::match_any_glob(gh, std::slice::from_ref(granted)) {
+                return Err(format!(
+                    "'{name}' grants '{granted}' in its effective allow set, which matches \
+                     the L0-only GitHub tool '{gh}' — as an L0 persona it would \
+                     hold it. That is a capability change, not a side effect: \
+                     review it deliberately."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ADR-0024 decision 3, asserted against the REAL bundled roster rather than a
 /// synthetic fixture: every assistant-kind persona resolves L0, every
 /// sub-agent stays L1, and the flip grants nothing today.
@@ -1894,13 +1967,19 @@ mod agent_name_resolves_tests {
 /// tier-conditioned capability that exists in code today is #4171's read-only
 /// session-state surface, `retain_tier_permitted` is DENY-ONLY (it never adds a
 /// tool), and no bundled assistant names an `L0_ONLY_SESSION_STATE_TOOLS` entry
-/// in its resolved `[tools].allow` — so the L0 flip registers three executors
+/// in its resolved allow set — so the L0 flip registers three executors
 /// that every shipped persona then intersects away, and the observable
 /// capability delta is zero. If a future persona edit changes that, this test
 /// fails and the grant becomes a reviewed decision instead of a side effect.
+///
+/// That delta is measured over the EFFECTIVE allow patterns — `[tools].allow`
+/// UNIONED with the exact tool names `[skills].allow` expands to — not over the
+/// raw `[tools].allow` list, because a `[skills]` grant reaches the same tools
+/// (#4519).
 /// What: walks `bundled_agents_dir()` for every resolvable agent name, loads it
 /// through the real `AgentConfig::by_name` dispatch loader, and asserts the
-/// kind/tier correspondence plus the empty capability delta.
+/// kind/tier correspondence plus the empty capability delta via
+/// `l0_persona_capability_delta`.
 /// Test: This function IS the test.
 #[test]
 fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
@@ -1936,6 +2015,13 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
         "sanity: the bundled roster should be substantial, got {names:?}"
     );
 
+    // The builtin catalog only — deliberately NOT `with_authored(...)`. Bundled
+    // personas ship with the crate, so the skills they can name are the builtin
+    // ones; folding in project-local authored skills would make this guard's
+    // verdict depend on the developer's checkout instead of on the shipped
+    // files.
+    let skill_catalog = crate::skills::manifest::SkillCatalog::builtin();
+
     let mut assistants: Vec<String> = Vec::new();
     for name in &names {
         clear_model_env(name);
@@ -1965,47 +2051,20 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
             );
             // The zero-delta claim: nothing this persona is allowed to call is
             // gated on L0, so becoming L0 hands it no new tool.
-            if let Some(allow) = cfg.tools.allow.as_deref() {
-                for granted in allow {
-                    assert!(
-                        !crate::tools::session_state::is_l0_only_session_state_tool(granted),
-                        "'{name}' names the L0-gated tool '{granted}' in [tools].allow — \
-                         becoming L0 would GRANT it, which is a capability change this \
-                         PR does not carry. Review it deliberately."
-                    );
-                    // #4173: the same zero-delta claim for the L0-only
-                    // shell/build/test executor. Matched as a GLOB, not by
-                    // equality, because `[tools].allow` entries are glob
-                    // patterns — a persona declaring `l0_*` or `*` would reach
-                    // the shell just as surely as one naming it outright, and
-                    // an equality check would miss both.
-                    assert!(
-                        !crate::ctrl::pm_task::match_any_glob(
-                            crate::tools::l0_exec::L0_SHELL_EXEC,
-                            std::slice::from_ref(granted)
-                        ),
-                        "'{name}' declares '{granted}' in [tools].allow, which matches the \
-                         L0-only execution grant '{}' — as an L0 persona it would hold a \
-                         real shell. That is a capability change, not a side effect: \
-                         review it deliberately.",
-                        crate::tools::l0_exec::L0_SHELL_EXEC
-                    );
-                    // #4170: and for the L0-only GitHub PR/CI surface. Same
-                    // glob reasoning; every name checked, so a tool added to
-                    // `GH_TOOL_NAMES` is covered without editing this test.
-                    for gh in crate::tools::gh_tools::GH_TOOL_NAMES {
-                        assert!(
-                            !crate::ctrl::pm_task::match_any_glob(
-                                gh,
-                                std::slice::from_ref(granted)
-                            ),
-                            "'{name}' declares '{granted}' in [tools].allow, which matches \
-                             the L0-only GitHub tool '{gh}' — as an L0 persona it would \
-                             hold it. That is a capability change, not a side effect: \
-                             review it deliberately."
-                        );
-                    }
-                }
+            //
+            // #4519: measured over the EFFECTIVE patterns, not the raw
+            // `[tools].allow`. `[skills].allow` compiles down to exact tool
+            // names that are UNIONED into the allow set, and the builtin skill
+            // `orchestration-shell-run` expands to `l0_shell_exec` — so reading
+            // `cfg.tools.allow` alone would let a one-line `[skills]` addition
+            // hand a persona a real shell with this guard still green.
+            let (effective_allow, _unresolved) = crate::skills::manifest::effective_tool_patterns(
+                cfg.tools.allow.as_ref(),
+                cfg.skills.allow.as_ref(),
+                &skill_catalog,
+            );
+            if let Err(msg) = l0_persona_capability_delta(name, effective_allow.as_deref()) {
+                panic!("{msg}");
             }
         } else if crate::agents::AgentTier::for_kind(&cfg.agent.role)
             == crate::agents::AgentTier::L0Orchestration
@@ -2054,6 +2113,108 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
         ],
         "the assistant-kind population is fixed by role, not by a guessed \
          filename list; a new one must be a reviewed addition"
+    );
+}
+
+/// The blind spot #4519 closes, pinned as an executable claim: an assistant
+/// persona that reaches `l0_shell_exec` through `[skills].allow` — declaring no
+/// `[tools].allow` at all — must be REJECTED by the L0 guard, and the guard's
+/// pre-fix form must be shown to have MISSED it.
+///
+/// Why: `bundled_assistant_personas_resolve_l0_and_gain_nothing` is a
+/// self-asserting sweep over the shipped roster. It can only ever demonstrate
+/// that today's files pass; it cannot demonstrate that the rule it applies
+/// actually catches a violation, and for `[skills]` grants it did not. The
+/// builtin skill `orchestration-shell-run` expands to exactly `l0_shell_exec`
+/// (`skills::manifest::builtin::ops`), and `effective_tool_patterns` unions
+/// that expansion into the allow set — so a one-line `[skills]` addition to any
+/// assistant persona, `izzie` included (it ingests untrusted Gmail/Drive/
+/// Calendar content), would have handed it a real unsandboxed shell with the
+/// guard still green. No bundled persona declares a `[skills]` block today, so
+/// this was latent rather than live exposure; this test is what keeps it that
+/// way.
+/// What: parses a fixture persona through the real `AgentConfig::from_toml_str`,
+/// asserts it derives L0 from `role = "assistant"`, then asserts BOTH halves of
+/// the fix — the effective (tools ∪ skills) patterns are rejected by
+/// `l0_persona_capability_delta` with a message naming `l0_shell_exec`, AND the
+/// raw `[tools].allow` the guard used to read is accepted, which is the
+/// regression this fix removes.
+/// Test: This function IS the test.
+#[test]
+fn skills_allow_shell_expansion_is_caught_by_the_l0_guard() {
+    let toml_str = r#"
+[agent]
+name = "shell-via-skills"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "fixture: reaches the shell through a skill grant, not a tool grant"
+
+[llm]
+temperature = 0.7
+max_tokens = 1024
+
+[system_prompt]
+content = "fixture persona"
+
+[skills]
+allow = ["orchestration-shell-run"]
+"#;
+    let cfg = AgentConfig::from_toml_str(toml_str, Path::new("shell-via-skills.toml"))
+        .expect("fixture persona must parse");
+
+    // Precondition: the fixture is L0 for the same derived reason every real
+    // assistant is, so the L0-gated executor is registered for it.
+    assert_eq!(
+        cfg.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration,
+        "fixture must derive L0 from role = \"assistant\", or it proves nothing"
+    );
+    // Precondition: the grant arrives ONLY via `[skills]`. If this ever gains a
+    // `[tools].allow` the mutation half below stops meaning anything.
+    assert!(
+        cfg.tools.allow.is_none(),
+        "fixture must declare no [tools].allow — the whole point is that the \
+         shell arrives via skill expansion"
+    );
+
+    let catalog = crate::skills::manifest::SkillCatalog::builtin();
+    let (effective_allow, unresolved) = crate::skills::manifest::effective_tool_patterns(
+        cfg.tools.allow.as_ref(),
+        cfg.skills.allow.as_ref(),
+        &catalog,
+    );
+    assert!(
+        unresolved.is_empty(),
+        "the builtin catalog must resolve 'orchestration-shell-run'; unresolved: {unresolved:?}"
+    );
+    assert!(
+        effective_allow
+            .as_deref()
+            .is_some_and(|p| p.iter().any(|t| t == crate::tools::l0_exec::L0_SHELL_EXEC)),
+        "sanity: the skill must expand to '{}', else this fixture is not the \
+         case under test; got {effective_allow:?}",
+        crate::tools::l0_exec::L0_SHELL_EXEC
+    );
+
+    // (1) The fix: the guard now CATCHES it.
+    let caught = l0_persona_capability_delta("shell-via-skills", effective_allow.as_deref());
+    let msg = caught.expect_err(
+        "the L0 guard must REJECT a persona that reaches l0_shell_exec through \
+         [skills].allow — if this is Ok the blind spot #4519 closes is back",
+    );
+    assert!(
+        msg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        "the rejection must name the tool it is protecting; got: {msg}"
+    );
+
+    // (2) The mutation check, kept executable rather than left as a one-off
+    // manual observation: feeding the guard the RAW `[tools].allow` — exactly
+    // what it read before #4519 — accepts this persona. That is the blind spot,
+    // and asserting it here means a revert to the old form cannot land green.
+    assert!(
+        l0_persona_capability_delta("shell-via-skills", cfg.tools.allow.as_deref()).is_ok(),
+        "the pre-fix guard form (raw [tools].allow) must be shown to MISS this \
+         persona; if it now catches it, this test no longer proves the fix"
     );
 }
 
