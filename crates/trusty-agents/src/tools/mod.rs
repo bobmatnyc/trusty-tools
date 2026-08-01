@@ -17,6 +17,9 @@ pub mod ast_tools;
 // #4026/#4028: cross-product subagent allow-set + propose-only envelope.
 pub mod cross_product;
 pub mod delegate;
+// #4349/#4350 (spec DOC-62): the closed ceremony vocabulary for coding
+// delegation, and the raise-never-lower resolution that applies it.
+pub mod execution_style;
 pub mod file_filter;
 pub mod finish_task;
 pub mod format_translator;

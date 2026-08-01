@@ -456,7 +456,10 @@ pub async fn run_pm_task_with_history(
         // `user_authority` has no `AgentConfig` field yet (#3074/AUTH-1), so
         // the fail-closed `Standard` tier is reported until it lands — never
         // an invented tier.
-        .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard),
+        .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard)
+        // #4350: the middle precedence level (DOC-62 §5.3). Absent =
+        // built-in `engineer` = today's behaviour.
+        .with_default_style(pm_cfg.subagents.default_style),
     ));
     let stop_pending: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let active_project_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
