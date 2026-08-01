@@ -452,7 +452,16 @@ async fn main() -> anyhow::Result<()> {
             force,
             reset_agents,
             reset_agents_workspaces,
-        }) => install(force, reset_agents, reset_agents_workspaces).await,
+            reconcile_skills,
+        }) => {
+            install(
+                force,
+                reset_agents,
+                reset_agents_workspaces,
+                reconcile_skills,
+            )
+            .await
+        }
         Some(Command::Hook { pm_guard }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await

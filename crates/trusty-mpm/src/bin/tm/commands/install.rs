@@ -35,6 +35,16 @@
 /// only forces the specific files a plain deploy would otherwise leave
 /// alone, and re-registers everything else it touches.
 ///
+/// `reconcile_skills` (issue #4605) is the same explicit reconciliation path
+/// for SKILLS. A bundled skill absent from a deploy target's ownership
+/// manifest is classified project-custom by the tier planner and excluded from
+/// `bundled_deploy` before the deployer's ownership check ever runs, so no
+/// deploy reaches it and the normal install output cannot even mention it.
+/// When `false` (the default) the install REPORTS those skills, per tier; when
+/// `true` it adopts and refreshes them, backing up every file it touches
+/// first. Skills whose name matches nothing bundled are never touched either
+/// way — they are the operator's.
+///
 /// `reset_agents_workspaces` (issue #2508) additionally sweeps every intact
 /// session workspace's project-local `.claude/agents/` through the SAME
 /// reset, each gated by that workspace's OWN resolved harness plan (so an
@@ -55,6 +65,7 @@ pub(crate) async fn install(
     force: bool,
     reset_agents: Option<Vec<String>>,
     reset_agents_workspaces: bool,
+    reconcile_skills: bool,
 ) -> anyhow::Result<()> {
     let paths = trusty_mpm::core::paths::FrameworkPaths::default();
     let report = install_to(&paths, force)?;
@@ -176,6 +187,20 @@ pub(crate) async fn install(
     .stats;
     for line in skill_report_lines(&skill_deploy) {
         println!("  {line}");
+    }
+
+    // Issue #4605: the deploy above is structurally unable to mention a
+    // bundled skill that its target's manifest does not track — the tier
+    // planner classifies it project-custom and drops it before
+    // `deploy_skills_filtered` runs, so it appears as neither deployed,
+    // skipped, NOR unchanged. Say so, for every deploy tier, and offer the one
+    // command that fixes it. `--reconcile-skills` runs that command.
+    if reconcile_skills {
+        crate::commands::install_skills::reconcile_skills(&paths, None)?;
+    } else {
+        for line in crate::commands::install_skills::unmanaged_report_lines(&paths, None) {
+            println!("  {line}");
+        }
     }
 
     // DOC-42 (issue #2889): a full `tm install` already deploys every bundled

@@ -69,6 +69,14 @@ use doctor_transcript_saving::check_transcript_saving;
 mod doctor_staleness;
 use doctor_staleness::{check_legacy_instruction_sources, check_skill_staleness};
 
+// #4605: the reachability half for SKILLS — `check_skill_staleness` above
+// compares against the deploy MANIFEST, so a bundled skill absent from that
+// manifest is outside everything it can see and reports a clean `Ok` while the
+// file on disk serves text the current binary removed.
+#[path = "doctor_skill_unmanaged.rs"]
+mod doctor_skill_unmanaged;
+use doctor_skill_unmanaged::check_skill_unmanaged;
+
 // Split out to keep this file under the 500-SLOC production cap (DOC-42,
 // issue #2889 — the agent-bundled-skills dangling-reference / prose-mention
 // probe).
@@ -223,7 +231,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_six_checks`,
+/// Test: `run_doctor_produces_twenty_seven_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -267,6 +275,10 @@ pub async fn run_doctor(
         check_output_style_legacy_ids(project_dir, &home),
         check_deployment_completeness(&paths),
         check_skill_staleness(&paths),
+        // #4605: and this proves the manifest that check consults actually
+        // covers the deployed skills — an untracked bundled skill is
+        // unreachable by every deploy and invisible to staleness.
+        check_skill_unmanaged(&paths, project_dir),
         check_legacy_instruction_sources(&home),
         agent_skills,
         agent_skills_prose_hints,
