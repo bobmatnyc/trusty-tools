@@ -7,10 +7,10 @@ Added
   -> `http_addr` file -> `/health` liveness ping), then hands `CodeEngine` to
   `trusty_tui::run::run`. `--project` is optional (omit for a projectless
   session) and is canonicalized at the CLI boundary. Discovery runs BEFORE the
-  alternate screen is entered, so a missing daemon prints an actionable
-  `tcode tui: no tcode daemon found — start one with \`tcode serve --http\` …`
-  and exits nonzero rather than flashing a TUI. This MVP does not auto-spawn a
-  daemon (deliberately deferred, DOC-50 §4.1).
+  alternate screen is entered, so any daemon-resolution failure lands on a
+  normal terminal rather than flashing a TUI. As shipped this MVP did not
+  auto-spawn a daemon; that was reversed in the same release — see the #4512
+  entry below.
 
 - **`Event::AgentMessageDelta` now has a producer (streaming epic #3696,
   Gap A / Slice 1).** The event contract landed in #3701, but no production

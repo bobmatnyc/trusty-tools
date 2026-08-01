@@ -10,23 +10,37 @@
 //! plain-text `http_addr` file) instead. This module is the READ side of
 //! that convention; `crate::serve::discovery`'s `write_http_addr_file` is
 //! the write side, called from `crate::serve::http::run_http`.
-//! What: [`discover_daemon_url`] tries, in order, [`DAEMON_URL_ENV`] (an
+//! What: [`lookup_daemon`] tries, in order, [`DAEMON_URL_ENV`] (an
 //! explicit override — trusted without a liveness check of its own source,
 //! but still ping-verified before use, same as the file-sourced candidate)
 //! then the `http_addr` discovery file; whichever candidate is found is
 //! verified alive via `GET {url}/health` (the SAME route
 //! `crate::serve::methods::health_payload` answers, already the
-//! ecosystem-standard liveness probe per `crate::serve::http`'s docs) before
-//! being returned. No candidate, or a candidate that fails the liveness
-//! ping, produces a [`DiscoveryError`] with an actionable message — never a
-//! silent `None`/default.
+//! ecosystem-standard liveness probe per `crate::serve::http`'s docs). It
+//! reports the outcome as a three-way [`Lookup`] — live, found-but-dead
+//! (naming its [`Source`]), or no candidate at all — because a CALLER has to
+//! branch on WHICH source failed: `tcode tui` auto-spawns a daemon when the
+//! discovery file is stale or absent, but must NOT when
+//! [`DAEMON_URL_ENV`] explicitly named an address, since spawning
+//! something at a DIFFERENT address would quietly ignore that instruction
+//! (#4512). A live daemon additionally carries the [`ReportedBinding`] it
+//! published, because "a daemon is answering" is NOT the same question as
+//! "that daemon serves the project I mean to work in" — see
+//! [`ReportedBinding`]. [`discover_daemon_url`] is the attach-only wrapper
+//! over it, collapsing the same three outcomes into a [`DiscoveryError`]
+//! with an actionable message — never a silent `None`/default.
 //! Test: `discovery_tests::*` for the pure candidate-selection logic (env
-//! var precedence, file fallback, "neither present" case); the liveness-ping
-//! branch is covered end-to-end in `tests/tui_client_engine.rs` against a
-//! mock daemon (a unit test would need a real bound socket to ping, which
-//! belongs in that hermetic integration suite, not here).
+//! var precedence, file fallback, "neither present" case), the
+//! [`Lookup`]-to-[`DiscoveryError`] collapse, and [`ReportedBinding`]
+//! parsing; the liveness-ping branch is covered end-to-end in
+//! `tests/tui_client_engine.rs` against a mock daemon (a unit test would need
+//! a real bound socket to ping, which belongs in that hermetic integration
+//! suite, not here).
 
+use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::binding::ProjectBinding;
 
 /// Environment variable that, when set to a non-empty value, names the
 /// daemon URL directly — highest-priority discovery source (DOC-50 §3.4
@@ -40,21 +54,116 @@ pub const DAEMON_URL_ENV: &str = "TCODE_DAEMON_URL";
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Which discovery source produced a candidate URL — carried into
-/// [`DiscoveryError::NotAlive`] so the error message tells the operator
-/// WHERE the stale/wrong pointer came from.
+/// [`Lookup::Dead`] (and from there into [`DiscoveryError::NotAlive`]) so the
+/// error message tells the operator WHERE the stale/wrong pointer came from,
+/// and so `tcode tui`'s auto-spawn can tell an EXPLICIT instruction it must
+/// obey ([`Source::Env`]) from a stale file it may replace ([`Source::File`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Source {
+pub enum Source {
+    /// [`DAEMON_URL_ENV`] named the URL — an explicit operator instruction.
     Env,
+    /// The `http_addr` discovery file named the URL — a best-effort pointer
+    /// a previous daemon left behind.
     File,
 }
 
 impl Source {
-    fn as_str(self) -> &'static str {
+    /// Human-readable name for error messages ("from {found_via}").
+    pub fn as_str(self) -> &'static str {
         match self {
             Source::Env => "TCODE_DAEMON_URL",
             Source::File => "discovery file",
         }
     }
+}
+
+/// The project binding a live daemon published on `GET /health` (#4512).
+///
+/// Why: a `tcode serve --http` daemon binds exactly ONE `ProjectBinding` at
+/// `crate::serve::build_router` time and keeps it for its whole life. Until
+/// #4512 that binding was invisible to clients, which was harmless while
+/// `tcode tui` refused to run without a hand-started daemon — the operator
+/// who started it knew what it was bound to. Auto-attach removes that
+/// guarantee: a TUI launched in project B finds project A's daemon on the
+/// well-known port and would drive it, so every session, index, and file
+/// operation would silently land in the wrong project. Making the binding
+/// part of the lookup result is what lets a caller refuse.
+/// What: the daemon's bound project root, or an explicit projectless state,
+/// or [`Unreported`](ReportedBinding::Unreported) when `/health` answered but
+/// carried no usable `binding` field — a daemon older than #4512, or one
+/// whose payload could not be parsed. Those two are deliberately the same
+/// variant: both mean "this daemon's project CANNOT be verified", and a
+/// caller must treat an unverifiable daemon the same way regardless of why.
+/// Test: `discovery_tests::reported_binding_parses_every_health_shape`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportedBinding {
+    /// The daemon reported it serves no project.
+    Projectless,
+    /// The daemon reported this canonical project root.
+    Bound(PathBuf),
+    /// `/health` answered, but with no parseable `binding` field.
+    Unreported,
+}
+
+impl ReportedBinding {
+    /// Read a [`ReportedBinding`] out of a `GET /health` body.
+    ///
+    /// Why/What: reuses `ProjectBinding`'s own `Deserialize` (the
+    /// `{state, root}` wire shape defined once in `crate::binding`) rather
+    /// than re-spelling that shape here, so the reader can never drift from
+    /// the writer. A missing or malformed field is
+    /// [`Unreported`](ReportedBinding::Unreported), never a guess.
+    /// Test: `discovery_tests::reported_binding_parses_every_health_shape`.
+    pub fn from_health(health: &serde_json::Value) -> Self {
+        let Some(raw) = health.get("binding") else {
+            return Self::Unreported;
+        };
+        match serde_json::from_value::<ProjectBinding>(raw.clone()) {
+            Ok(binding) => match binding.root() {
+                Some(root) => Self::Bound(root.to_path_buf()),
+                None => Self::Projectless,
+            },
+            Err(_) => Self::Unreported,
+        }
+    }
+
+    /// How to name this binding in an operator-facing message.
+    ///
+    /// Why: a mismatch error has to print BOTH sides, and "no project" has to
+    /// read as a deliberate state rather than as missing information.
+    /// Test: `discovery_tests::reported_binding_describes_each_state`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Projectless => "<projectless>".to_string(),
+            Self::Bound(root) => root.display().to_string(),
+            Self::Unreported => "<unreported — daemon predates #4512>".to_string(),
+        }
+    }
+}
+
+/// The three distinguishable outcomes of one daemon lookup.
+///
+/// Why: [`DiscoveryError`] collapses "found but dead" and "nothing found"
+/// into two error variants that both mean "you can't attach", which is all
+/// an attach-only caller needs. Auto-spawn needs MORE: it must refuse to
+/// spawn when [`Source::Env`] named a dead address (spawning would land at a
+/// different address and ignore the operator's explicit instruction), while
+/// treating a dead or absent discovery file as a green light (#4512). It
+/// also needs the live daemon's [`ReportedBinding`], since attaching to a
+/// daemon bound to a DIFFERENT project is worse than not attaching at all.
+/// Test: `discovery_tests::lookup_collapses_into_discovery_errors`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// A candidate answered `GET {url}/health` — attach to it, if `binding`
+    /// is the project the caller wants.
+    Live {
+        url: String,
+        binding: ReportedBinding,
+    },
+    /// A candidate URL was named by `source` but is not responding.
+    Dead { url: String, source: Source },
+    /// Neither source named a candidate URL.
+    Absent,
 }
 
 /// See module docs.
@@ -81,26 +190,55 @@ pub enum DiscoveryError {
     },
 }
 
-/// Resolve and verify a live daemon URL, per this module's docs.
+/// Resolve a candidate daemon URL and report whether it is live, per this
+/// module's docs.
 ///
-/// Why/What: see module docs. `client` is caller-supplied (rather than built
-/// internally) so `CodeEngine` can reuse the SAME pooled `reqwest::Client`
-/// for both this ping and every later `POST /rpc`/SSE call — one connection
-/// pool for the engine's whole lifetime, not one throwaway client per call.
+/// Why/What: see module docs — this is the source-aware primitive
+/// [`discover_daemon_url`] and `tcode tui`'s auto-spawn (#4512) are both
+/// built on. `client` is caller-supplied (rather than built internally) so
+/// `CodeEngine` can reuse the SAME pooled `reqwest::Client` for both this
+/// ping and every later `POST /rpc`/SSE call — one connection pool for the
+/// engine's whole lifetime, not one throwaway client per call.
 /// Test: `discovery_tests::env_var_wins_over_file`,
 /// `discovery_tests::env_var_trailing_slash_is_stripped`,
-/// `discovery_tests::blank_env_var_is_ignored`; the liveness branch (and the
-/// "neither source present" -> `NotFound` case) is covered by
-/// `tests/tui_client_engine.rs`.
+/// `discovery_tests::blank_env_var_is_ignored` cover candidate selection;
+/// the liveness branch is covered by `tests/tui_client_engine.rs` and (for
+/// the spawn decision it feeds) `cli::daemon_autospawn`'s tests.
+pub async fn lookup_daemon(client: &reqwest::Client) -> Lookup {
+    let Some((url, source)) = candidate_url() else {
+        return Lookup::Absent;
+    };
+    match probe_health(client, &url).await {
+        Some(health) => Lookup::Live {
+            url,
+            binding: ReportedBinding::from_health(&health),
+        },
+        None => Lookup::Dead { url, source },
+    }
+}
+
+/// Resolve and verify a live daemon URL, failing when none can be attached
+/// to — the attach-only view of [`lookup_daemon`].
+///
+/// Why: `CodeEngine::discover` (and every non-TUI caller) only ever wants
+/// "give me a live daemon or an actionable error"; the three-way [`Lookup`]
+/// distinction matters solely to the auto-spawn path.
+/// Test: `discovery_tests::lookup_collapses_into_discovery_errors`;
+/// end-to-end in `tests/tui_client_engine.rs`.
 pub async fn discover_daemon_url(client: &reqwest::Client) -> Result<String, DiscoveryError> {
-    let (url, source) = candidate_url().ok_or(DiscoveryError::NotFound)?;
-    if ping_alive(client, &url).await {
-        Ok(url)
-    } else {
-        Err(DiscoveryError::NotAlive {
+    collapse(lookup_daemon(client).await)
+}
+
+/// The pure [`Lookup`] -> [`DiscoveryError`] mapping, split out of
+/// [`discover_daemon_url`] so it is unit testable without a bound socket.
+fn collapse(lookup: Lookup) -> Result<String, DiscoveryError> {
+    match lookup {
+        Lookup::Live { url, .. } => Ok(url),
+        Lookup::Dead { url, source } => Err(DiscoveryError::NotAlive {
             url,
             found_via: source.as_str(),
-        })
+        }),
+        Lookup::Absent => Err(DiscoveryError::NotFound),
     }
 }
 
@@ -119,14 +257,21 @@ fn candidate_url() -> Option<(String, Source)> {
     Some((format!("http://{addr}"), Source::File))
 }
 
-/// `GET {base_url}/health`, bounded by [`PING_TIMEOUT`] — `true` iff it
-/// returns a success (2xx) status.
-async fn ping_alive(client: &reqwest::Client, base_url: &str) -> bool {
+/// `GET {base_url}/health`, bounded by [`PING_TIMEOUT`] — `Some(body)` iff
+/// it returns a success (2xx) status with a JSON body.
+///
+/// #4512: this used to answer a bare `bool`. The BODY is now needed too, for
+/// the `binding` field the caller checks before attaching; a 2xx whose body
+/// will not parse as JSON still counts as alive (the daemon is answering),
+/// and degrades to `Value::Null`, from which
+/// [`ReportedBinding::from_health`] correctly reports `Unreported`.
+async fn probe_health(client: &reqwest::Client, base_url: &str) -> Option<serde_json::Value> {
     let url = format!("{base_url}/health");
-    match client.get(&url).timeout(PING_TIMEOUT).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
+    let resp = client.get(&url).timeout(PING_TIMEOUT).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
     }
+    Some(resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
 #[cfg(test)]
@@ -200,6 +345,91 @@ mod discovery_tests {
         let msg = DiscoveryError::NotFound.to_string();
         assert!(msg.contains("tcode serve --http"));
         assert!(msg.contains(DAEMON_URL_ENV));
+    }
+
+    /// Every `Lookup` outcome must collapse to the matching attach-only
+    /// result — pinned because `tcode tui`'s auto-spawn now branches on the
+    /// SAME three outcomes (#4512), and the two views must stay agreed on
+    /// what each one means.
+    #[test]
+    fn lookup_collapses_into_discovery_errors() {
+        assert_eq!(
+            collapse(Lookup::Live {
+                url: "http://127.0.0.1:7882".to_string(),
+                binding: ReportedBinding::Projectless,
+            }),
+            Ok("http://127.0.0.1:7882".to_string())
+        );
+        assert_eq!(
+            collapse(Lookup::Dead {
+                url: "http://127.0.0.1:7882".to_string(),
+                source: Source::Env,
+            }),
+            Err(DiscoveryError::NotAlive {
+                url: "http://127.0.0.1:7882".to_string(),
+                found_via: "TCODE_DAEMON_URL",
+            })
+        );
+        assert_eq!(collapse(Lookup::Absent), Err(DiscoveryError::NotFound));
+    }
+
+    /// Every shape a real `GET /health` body can take must map to the right
+    /// `ReportedBinding` — including the two "cannot verify" shapes, which
+    /// must NOT be mistaken for a projectless daemon (#4512).
+    #[test]
+    fn reported_binding_parses_every_health_shape() {
+        use serde_json::json;
+
+        let bound = json!({
+            "server": "tcode",
+            "binding": {"state": crate::binding::STATE_GIT_REPO, "root": "/tmp/proj"},
+        });
+        assert_eq!(
+            ReportedBinding::from_health(&bound),
+            ReportedBinding::Bound(PathBuf::from("/tmp/proj"))
+        );
+
+        let projectless = json!({
+            "binding": {"state": crate::binding::STATE_PROJECTLESS, "root": null},
+        });
+        assert_eq!(
+            ReportedBinding::from_health(&projectless),
+            ReportedBinding::Projectless
+        );
+
+        // A pre-#4512 daemon: `/health` answers, but with no binding at all.
+        let old = json!({"server": "tcode", "version": "0.2.0", "status": "ok"});
+        assert_eq!(
+            ReportedBinding::from_health(&old),
+            ReportedBinding::Unreported,
+            "a daemon that reports nothing must never read as projectless"
+        );
+
+        // A malformed payload is equally unverifiable, never a guess.
+        let malformed = json!({"binding": {"state": "who knows"}});
+        assert_eq!(
+            ReportedBinding::from_health(&malformed),
+            ReportedBinding::Unreported
+        );
+        assert_eq!(
+            ReportedBinding::from_health(&serde_json::Value::Null),
+            ReportedBinding::Unreported
+        );
+    }
+
+    /// Each state must render an operator-readable name — the mismatch error
+    /// prints both sides, so "no project" must not come out blank.
+    #[test]
+    fn reported_binding_describes_each_state() {
+        assert_eq!(ReportedBinding::Projectless.describe(), "<projectless>");
+        assert_eq!(
+            ReportedBinding::Bound(PathBuf::from("/tmp/proj")).describe(),
+            "/tmp/proj"
+        );
+        assert!(
+            ReportedBinding::Unreported.describe().contains("4512"),
+            "an unverifiable daemon must say why it cannot be checked"
+        );
     }
 
     /// `DiscoveryError::NotAlive`'s message must name both the dead URL and
