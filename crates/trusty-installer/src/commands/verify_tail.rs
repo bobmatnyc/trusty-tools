@@ -397,9 +397,15 @@ fn bounded_attempts(remaining: Duration) -> u32 {
 /// for whether it succeeded. Returns `None` (nothing attempted) when the
 /// plist is not present at all — that is a genuine "never installed" state a
 /// `launchctl bootstrap` cannot repair (there is no plist to load), not this
-/// failure mode.
+/// failure mode. Also returns `None` when the #4470 port guard refuses: this
+/// is the THIRD site in the crate that issues a `launchctl bootstrap`, and
+/// #3841's lesson is that a fix applied to only some branches leaves exactly
+/// the damaged machines on an ungated one. A bootstrap into a port a foreign
+/// process already owns would exit 0 and report a repair that did not happen,
+/// so the refusal is surfaced on stderr and nothing is attempted.
 /// Test: `tests::apply_not_loaded_fallback_*` (via `FakeServiceEnv`, composed
-/// through [`apply_not_loaded_fallback`] below).
+/// through [`apply_not_loaded_fallback`] below), and
+/// `tests::attempt_verify_fallback_refuses_on_foreign_port`.
 ///
 /// `#[cfg(any(test, target_os = "macos"))]`: the only PRODUCTION call site
 /// ([`apply_not_loaded_fallback_real`]'s macOS branch) is itself macOS-only —
@@ -415,6 +421,11 @@ fn attempt_verify_fallback(
     binary: &str,
 ) -> Option<bool> {
     if !env.plist_present(binary) {
+        return None;
+    }
+    // #4470: never issue a bootstrap whose success would be a lie.
+    if let Err(reason) = env.port_guard(binary) {
+        eprintln!("{binary}: skipping the verify-tail bootstrap repair — {reason}");
         return None;
     }
     Some(env.bootstrap_fallback(binary).is_ok())

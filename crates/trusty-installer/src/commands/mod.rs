@@ -26,6 +26,8 @@ pub mod picker;
 pub mod plist_bootstrap;
 pub mod plist_label;
 pub mod port;
+// #4470: refuse a `launchctl bootstrap` when a foreign process holds the port.
+pub mod port_guard;
 pub mod prereqs;
 pub mod probe;
 // #4246: the HTTP `/health` transport behind every health verdict.
