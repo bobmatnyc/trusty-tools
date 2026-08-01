@@ -12,37 +12,56 @@ effort: medium
 
 trusty-mpm has no separate "workflow engine" a project configures at
 runtime — the PM's phase/gate behavior comes from the bundled instruction
-assets, and a project customizes it by dropping override files into
-`<project>/.trusty-mpm/`. This skill documents that mechanism, which is
-implemented (not aspirational) in `core/instruction_overrides.rs` +
-`core/instruction_pipeline.rs`.
+package, and a project customizes it via marker blocks in `CLAUDE.md` or
+override files in `<project>/.trusty-mpm/`. This skill documents that
+mechanism, which is implemented (not aspirational) in
+`core/instruction_overrides.rs`, `core/instruction_pipeline.rs`, and
+`core/claude_md_sections.rs`.
 
 ## How the PM Prompt Is Assembled
 
-`core/instruction_pipeline.rs` bundles four compile-time assets:
-`PM_INSTRUCTIONS` (the canonical prohibitions/CB/QA-gate/workflow
-summary), `WORKFLOW` (the 5-phase execution detail), `AGENT_DELEGATION`
-(the routing table), and `BASE_PM` (the non-overridable floor). At session
-start, `core/instruction_overrides.rs::resolve_pm_prompt` reads
-`<project>/.trusty-mpm/` for override files and layers them onto those
-bundled defaults:
+The bundled PM prompt has one source of truth: the JSON manifest
+`assets/instructions/pm-instruction-package.json` (schema v2), embedded at
+compile time via `bundled_pm_package.rs`. It declares section order and
+composition; the prose for each section is stored separately in
+`assets/instructions/sections/*.md`, pulled in as `include_str!` constants
+registered in the `SECTION_SOURCES` table (`core/instruction_pipeline.rs`)
+— a missing section file is a compile error, not a launch-time surprise.
+Three sections (identity, non-overridable-rules,
+framework-guaranteed-conventions — the "floor") are tier `fixed` and cannot
+be overridden by any project.
 
-| Override file | Effect | Replaces |
+At session start, `core/instruction_overrides.rs::resolve_pm_prompt` (reached
+via `build_system_prompt_for*`) composes the final prompt. It is not a file a
+user edits — it's composed fresh per launch. See "Inspecting the Resolved
+Prompt" below for where that composed prompt is stashed.
+
+A project can customize the non-floor sections two ways:
+
+| Channel | Where | Effect |
 |---|---|---|
-| `.trusty-mpm/INSTRUCTIONS.md` | **Appended** (additive) after the PM body | nothing — pure addition |
-| `.trusty-mpm/AGENT_DELEGATION.md` | **Replaces** the bundled agent-routing section | `AGENT_DELEGATION.md` |
-| `.trusty-mpm/WORKFLOW.md` | **Replaces** the bundled workflow-phase section | `WORKFLOW.md` |
-| `.trusty-mpm/MEMORY.md` | **Slotted** as a delimited block right after PM_INSTRUCTIONS | (no standalone bundled memory asset) |
-| `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` | **Full replacement** of the entire PM body — short-circuits WORKFLOW/AGENT_DELEGATION | everything except `BASE_PM.md` |
+| Named-section marker | `<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `<!-- TRUSTY-MPM: <TOKEN> END -->` in `CLAUDE.md` or `.trusty-mpm/INSTRUCTIONS.md` (first host wins, `core/claude_md_sections.rs`) | Replaces exactly that section |
+| Per-file override | `.trusty-mpm/INSTRUCTIONS.md` (additive) / `AGENT_DELEGATION.md` / `WORKFLOW.md` / `MEMORY.md` / `PM_INSTRUCTIONS_DEPLOYED.md` (full-body replacement) | Replaces the matching section, or the whole body |
 
-**`BASE_PM.md` is never overridable.** Even a full `PM_INSTRUCTIONS_DEPLOYED.md`
-replacement gets the `BASE_PM` floor appended last — this is a hard
-invariant enforced by `resolve_pm_prompt`, not a convention.
+Both channels are live. `CLAUDE.md` is the surface project customization is
+consolidating onto (#4183/#4286), but the five per-file overrides still work
+exactly as before, and a same-section per-file override always wins over a
+named marker for that section.
+
+**The floor is never overridable.** Even `PM_INSTRUCTIONS_DEPLOYED.md`'s
+full-body replacement still gets the floor appended last — a hard invariant
+enforced by `resolve_pm_prompt`, not a convention.
 
 Robustness: a missing `.trusty-mpm/` directory, a missing override file, an
 empty override file, or an unreadable override file all fall back silently
 to the bundled default (with a `tracing::warn!` for the empty/unreadable
 cases) — a customization attempt never blanks a section or crashes launch.
+
+The agent-delegation roster is DYNAMIC, not authored prose: it comes from
+`deployed_roster_section` → `roster_from_dirs`, a union of the project tier,
+`$CLAUDE_CONFIG_DIR/agents`, and `~/.claude/agents`, rendered by
+`generate_authority`. It is non-droppable — `validate_roster` rejects a
+package where the roster generator is optional or absent (#4069).
 
 ## Making a Change
 
@@ -76,13 +95,13 @@ checks for this file's presence as a proxy for "has the pipeline run".
 
 ## The Bundled 5-Phase Model
 
-The default `WORKFLOW.md` (replaceable via the override above) documents:
-Research (conditional) → Code Analysis review (mandatory gate) →
-Implementation → QA (mandatory gate) → Documentation. See
-`PM_INSTRUCTIONS.md`'s `## Workflow (5-phase)` table for the condensed
-version and skip conditions. This is genuinely tm's bundled default, not a
-claude-mpm holdover — but a project is free to replace the whole section via
-`.trusty-mpm/WORKFLOW.md` if its delivery process differs (e.g. no Code
+The bundled workflow section (`assets/instructions/sections/workflow.md`,
+replaceable via the override above) documents: Research (conditional) →
+Code Analysis review (mandatory gate) → Implementation → QA (mandatory
+gate) → Documentation, with skip conditions. This is genuinely tm's bundled
+default, not a claude-mpm holdover — but a project is free to replace the
+whole section via a `WORKFLOW` override (named marker or
+`.trusty-mpm/WORKFLOW.md`) if its delivery process differs (e.g. no Code
 Analysis gate, an extra Security phase, a different QA routing rule).
 
 ## Verification Gates
