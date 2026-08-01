@@ -14,7 +14,7 @@ spec_refs:
 # DOC-62 — OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary
 
 **Status:** Draft
-**Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-10~draft` (DOC-62)
+**Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-11~draft` (DOC-62)
 **Subsystem:** trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credentials consumption, Knowledge config pane; trusty-kb — `okg` engine (ledger, registry, entity tree); trusty-search — index over the store
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
 **Last-updated:** 2026-08-01
@@ -133,21 +133,145 @@ posture PR #4523 already implements and this document adopts unchanged.
 ```
 <assistant home>/
 ├── instructions.md
-├── config.toml            # or config.yaml — see Q2
+├── config.toml                       # TOML, settled (§2.6)
 ├── agents/
-├── okg/                   # THIS document's subject
-│   ├── <collection>/…     # entity + document markdown, the trusty-kb tree
+├── okg/                              # the OKF entity tree — one per assistant
+│   ├── <collection>/…                # entity + document markdown
 │   └── _sources/
-│       ├── registry.toml        # SourceSpec rows (DOC-55 §2.1)
-│       ├── <source-id>.jsonl    # append-only item ledger
-│       ├── <source-id>.index.jsonl  # index-feed journal
-│       └── <source-id>.runs.jsonl   # NEW — the extraction log (§11)
+│       ├── registry.toml             # SourceSpec rows (DOC-55 §2.1)
+│       ├── <source-id>.jsonl         # append-only item ledger
+│       ├── <source-id>.index.jsonl   # index-feed journal
+│       └── <source-id>.runs.jsonl    # NEW — the extraction log (§11)
+├── stores/                           # NEW — one per REMOTE store (§2.4)
+│   └── <store-identifier>/
+│       ├── state.toml                # extraction state: last run, coverage
+│       ├── manifest.jsonl            # what was pulled, per item
+│       └── content/…                 # materialized extracted content
 └── attachments/
 ```
 
-`_sources/` is the existing DOC-55 layout, unchanged. This document adds exactly
-one file to it: the per-source **run log** (§11.2), which is what makes
-extractions displayable rather than merely having happened.
+`_sources/` is the existing DOC-55 layout, unchanged. This document adds one file
+to it — the per-source **run log** (§11.2) — and one new sibling directory,
+`stores/`, specified next.
+
+### 2.4 Remote stores get an extraction target; local directories do not {#SPEC-OKGSRC-11~draft}
+
+**Owner requirement (2026-08-01):** a remote store — one that is **not a directory
+on the user's own computer** — needs an **extraction target** that also holds
+extraction state: time of last extraction, what was pulled, and so on. The path
+shape is:
+
+```
+<trusty-agents home> / <agent> / stores / <store-identifier>/
+```
+
+**S-1.3 — The local/remote asymmetry is a stated requirement, not an
+implementation detail.**
+
+| | **Local directory** (kind (a)) | **Remote store** (kinds (b)–(g)) |
+|---|---|---|
+| Where the corpus lives | Already on the user's disk, in place | Behind an API; nothing local until fetched |
+| Extraction target | **None.** Watched in place | `stores/<store-identifier>/` |
+| Freshness mechanism | The trusty-search watcher over the directory (§9.1) | Scheduled fetch (§8) |
+| Duplication on disk | None — the files are the corpus | One materialized copy, and only one (S-1.7) |
+
+The asymmetry follows from the corpora themselves: a local directory is already a
+durable, watchable, user-owned artifact and materializing a second copy of it
+would be pure duplication. A remote corpus has no local existence at all, so
+there is nothing to watch and nothing to re-read without re-fetching.
+
+**S-1.4 — The store identifier is validated, never silently slugged.** It becomes
+a directory name, so it is constrained to a conservative character set, rejected
+rather than coerced when invalid, and unique within the assistant. PR #4523 set
+exactly this precedent for the instance name (`AssistantInstanceId`, a *validated*
+name rather than a slugged one) and this follows it. Silent slugging is
+specifically rejected: two distinct stores whose identifiers slug to the same
+directory would silently share extraction state, which is a data-corruption shape
+rather than a naming inconvenience.
+
+**S-1.5 — Extraction state, minimum contents.** Per remote store:
+
+- **last extraction** — start and end timestamp of the most recent run, and its
+  terminal state;
+- **what was pulled** — the per-item manifest: item id, fingerprint, fetch time,
+  and where it landed;
+- **coverage** — the interval watermark (§7.2), in the interval form that makes
+  extension work in both directions;
+- **credential reference** — the #4040 handle used, never the credential;
+- enough, jointly, that re-running duplicates nothing and *"extend by N more
+  months"* fetches only the delta.
+
+**S-1.6 — This is where the watermark lives.** §7's coverage state is not a
+free-floating file: for a remote store it lives in that store's own directory
+under `stores/`. One directory is the whole truth about one remote store.
+
+### 2.5 Content materializes under `stores/`, then flows into `okg/`
+
+**S-1.7 — Position, stated rather than left ambiguous.** For a remote store,
+fetched content **materializes under `stores/<id>/content/`**, and the OKG
+entities derived from it are written into `okg/`. `stores/<id>/` is an extraction
+target, not merely a state file — which is what "extraction target" names.
+
+Why this way, given it puts a copy on disk:
+
+1. **A remote fetch is not re-readable.** Once a Gmail window is fetched, the only
+   way to re-derive an entity without re-fetching is to have kept the bytes.
+   Improving an extractor (DOC-55 §4.5 bumps `Extractor::version()` and
+   invalidates exactly the affected items) then costs a local re-derivation
+   rather than a full re-pull against a rate-limited third-party API.
+2. **It makes the state honest.** "What was pulled" is checkable against what is
+   on disk, rather than being an assertion only the ledger can make.
+3. **It matches the owner's word.** An *extraction target* is a place things land.
+
+**S-1.8 — But the corpus must not exist twice under `okg/`.** `stores/<id>/content/`
+is the **fetched-bytes staging tier**; `okg/` holds the derived entities. They are
+different representations, not two copies of the same one. The trusty-search index
+over the store (§9) is registered over **`okg/` only** — indexing
+`stores/*/content/` as well would return both the raw and derived forms for one
+query, which is the duplicate-results failure this clause exists to prevent.
+
+**S-1.9 — Retention is bounded and configurable.** Staged content is a cache with
+provenance, not an archive: it is prunable without loss of correctness, because
+the ledger and the entity tree are the durable record. A store whose staged
+content has been pruned re-fetches on demand rather than reporting corruption.
+
+**S-1.10 — A local directory source stages nothing.** No `stores/` entry is
+created for kind (a). Its coverage state lives with its source row, and its
+freshness comes from the watcher.
+
+### 2.6 The home is one system-level value; relocating it needs a migration
+
+**Owner requirement (2026-08-01), recorded as a constraint and deliberately not
+designed here:** the trusty-agents home is a **single `${TRUSTY_AGENTS_HOME}`
+system configuration that cannot be changed without a migration process.**
+
+**S-1.11** Every path in this document — `okg/`, `stores/`, `agents/`,
+`attachments/` — resolves beneath that one value. There is exactly one home
+setting, and relocating it is a **migration**, not a configuration edit.
+
+Why this is worth stating now: today there is no such single value. The only
+lever is `KB_KNOWLEDGE_DIR`, a **process-global env var that relocates every
+agent's tree at once** (`crates/trusty-agents/src/tools/okg/mod.rs:92-106`;
+every tree is `<knowledge_dir>/<slug(agent)>`), and on `origin/main`
+`AgentStoreBinding` (`crates/trusty-agents/src/stores/config.rs:49-62`) carries
+`name` / `tree` / `index` / `palace` and **no root or path field at all** — PR
+#4523 is what adds one. So per-store relocation is not merely unmigrated, it is
+currently unexpressible.
+
+**S-1.12 — The migration process is explicitly out of scope and deferred.** This
+document does not design it, and this epic does not build it. Noted here as a
+forward reference so a later relocation is understood as migration work rather
+than a settings change.
+
+### 2.7 Settled, so they are not re-litigated
+
+- **`config.toml`, not `config.yaml`** — owner correction, 2026-07-29. TOML stays;
+  there is no format migration. PR #4523 built it correctly.
+- **Dotless** — the home carries no leading dot. Confirmed.
+- **App-generated, not "protected"** — the home is generated by the product and
+  expected to be browsed and hand-edited by the user. **Access control is out of
+  scope**; earlier drafts describing it as protected were narrowed by the owner,
+  and this document specifies no enforcement.
 
 ---
 
@@ -570,7 +694,9 @@ revision signal, it sets `volatile = true` rather than inventing a constant.
 
 ### 7.2 The watermark: where "only the delta" lives
 
-**S-6.2** Each source row carries a durable **watermark** in `_sources/`,
+**S-6.2** Each source carries a durable **watermark** — for a remote store in
+that store's own directory under `stores/` (§2.4, `S-1.6`), for a local directory
+source alongside its source row in `_sources/` —
 recording the high-water mark of what has been enumerated: for date-bounded
 sources (b, d, e, g) the covered interval `[earliest_covered, latest_covered]`;
 for enumerable sources (a, c, f) the last full-enumeration timestamp and the
@@ -1027,6 +1153,10 @@ it on 2026-08-01 with *"extraction is an OPTION for any bound store."* OKG
 Sources (path 1) push automatically on a schedule; bound stores (path 2) extract
 only when explicitly asked. §3 specifies both. This is **not** an open question.
 
+Also settled and recorded in §2.7 so they are not re-raised: **`config.toml`, not
+`config.yaml`** (owner correction 2026-07-29, no format migration); the **dotless**
+home spelling; and that the home is **app-generated, not access-controlled**.
+
 ### Q1 — Is there an `assistants/` path segment, or not?
 
 Your 2026-08-01 statement is explicit that the agent name sits **directly** under
@@ -1045,18 +1175,22 @@ user-editable directories **later**.
 **Blocked until answered:** any path change. #4523 is the incumbent and should
 not be re-pointed on a spec's authority.
 
-### Q2 — `config.toml` or `config.yaml` in the assistant home?
+### Q2 — Confirm: the `okg` directory is the trusty-kb entity tree
 
-The 2026-07-29 decision wrote `config.yaml`. PR #4523 built `config.toml`,
-citing an owner clarification of the same date and matching every other agent
-config in the repo. The provenance of the clarification is not independently
-verifiable from the tree.
+§2.1 states this normatively — the `okg` directory is the **trusty-kb markdown
+entity tree** (`KbStore::put_entity`), **not** the trusty-memory knowledge graph
+behind `kg_assert`/`kg_query`. Your own phrasing, *"an OKF store indexed by
+trusty-search"*, settles it: a trusty-search index is built over a filesystem
+tree, and the trusty-memory KG is not one.
 
-**Recommendation:** confirm **TOML** — it is what shipped, it matches
-`agent.toml`, and a format split inside one home directory is a durable papercut.
-Flagged rather than assumed because a YAML/TOML change was implied and never
-confirmed. **Blocked until answered:** nothing material; this is a
-confirm-or-correct.
+It is raised anyway because #4406 verified that **two unconnected stores are both
+called "OKG"**, that nothing bridges them, and that six M2 issues were already
+building against the name without stating which. A one-word confirmation
+eliminates the class of defect #4406 was filed to prevent.
+
+**Recommendation:** confirm the trusty-kb entity tree. **Blocked until answered:**
+nothing — §2.1 already carries the statement and every ticket in this epic names
+that target. This is a confirm-or-correct, and correcting it later is expensive.
 
 ### Q3 — Do you accept the residual prompt-injection risk in §5.5?
 
@@ -1134,4 +1268,6 @@ not because the recommendation is weak.
 
 | Date | Change |
 |---|---|
-| 2026-08-01 | Initial draft — store identity and location, source roster, the untrusted-content boundary, #4040 consumption, watermarks, scheduled refresh, trusty-search integration, the source-type extension point, and the K-e observability sub-surface. Five open questions raised for owner sign-off. |
+| 2026-08-01 | Initial draft — store identity and location, source roster, the untrusted-content boundary, #4040 consumption, watermarks, scheduled refresh, trusty-search integration, the source-type extension point, and the K-e observability sub-surface. |
+| 2026-08-01 | §3 rewritten to the owner's two-population-path model ("extraction is an OPTION for any bound store"); contamination guard scoped to path 2; the directory overlap case specified. |
+| 2026-08-01 | §2.4–§2.7 added: `stores/<store-identifier>/` extraction targets for remote stores with the local/remote asymmetry made explicit (`SPEC-OKGSRC-11~draft`); `${TRUSTY_AGENTS_HOME}` recorded as one system value with migration deferred; config-format, dotless, and not-access-controlled recorded as settled. |
