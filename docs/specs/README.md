@@ -78,6 +78,7 @@ normative grammar — this note does not restate it.
 | DOC-60 | `SPEC-AGENTBUS-01~draft` | [Unified Agent Communication: User ↔ Assistant, Assistant ↔ Sub-Agent, Assistant ↔ Assistant](./DOC-60-bus-based-agent-messaging.md) | trusty-mpm (bus host, daemon) — trusty-agents (assistants, sub-agents, ctrl) — trusty-channels (Slack/Telegram/etc.) — trusty-memory (consolidation target) — trusty-search (index target) |
 | DOC-61 | `SPEC-AGENTSTD-01~draft` | [Canonical Agent Standard: A Shared Source Model for trusty-mpm, trusty-code, and trusty-agents](./DOC-61-canonical-agent-standard.md) | cross-crate — trusty-mpm (source model owner today), trusty-code (per-product builder, prospective), trusty-agents (assistant/sub-agent split, `agents::config`) |
 | DOC-62 | `SPEC-STYLE-01~draft` … `-10~draft` | [Style Modes for Coding Delegation: `hack` / `vibe` / `engineer`](./DOC-62-style-modes-coding-delegation.md) | cross-crate — trusty-agents (delegation surface, `HandoffContext`, preamble carriage); trusty-code (style parameter, internal pipeline selection); trusty-mpm/GUI (style selector, downstream) |
+| DOC-63 | `SPEC-OKGSRC-01~draft` … `-14~draft` | [OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary](./DOC-63-okg-sources.md) | trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credential consumption, Knowledge config pane; trusty-kb — `okg` engine; trusty-search — index over the store |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -91,10 +92,10 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-63`** (updated 2026-08-01 — DOC-62 claimed by
-> [Style Modes for Coding Delegation](./DOC-62-style-modes-coding-delegation.md)
-> (#4346), scan-before-claim verified against `origin/main` **and every remote
-> branch**; DOC-60 claimed by
+> **Next free `DOC-N` = `DOC-64`** (updated 2026-08-01 — DOC-63 claimed by
+> [OKG Sources](./DOC-63-okg-sources.md), and DOC-62 by the concurrently-authored
+> Style Modes for Coding Delegation spec (PR #4529) — the two claimed DOC-62
+> simultaneously and OKG Sources renumbered; DOC-60 claimed by
 > [Unified Agent Communication](./DOC-60-bus-based-agent-messaging.md) (retitled from
 > "Bus-Based Agent Messaging" in its Rev 1 update to reflect its now-unified
 > user↔assistant / assistant↔sub-agent / assistant↔assistant scope; filename
