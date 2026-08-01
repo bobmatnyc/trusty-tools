@@ -52,7 +52,7 @@ See AGENT_DELEGATION.md for full routing table. Quick reference:
 | Agent | Triggers | Default Model |
 |-------|----------|---------------|
 | Research | codebase understanding, investigation, file analysis, architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | sonnet |
-| Engineer (all langs) | code changes, impl, refactor | sonnet |
+| Engineer (all langs) | code changes, impl, refactor | opus |
 | Local Ops | localhost, PM2, docker, ports, `make`, version/release/publish | sonnet |
 | QA (Web/API/general) | test, verify, check, browser, screenshot, DOM | sonnet |
 | Documentation Agent | docs, README, API docs | haiku |
