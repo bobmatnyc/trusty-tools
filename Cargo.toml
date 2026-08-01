@@ -44,7 +44,6 @@ exclude = []
 # either way — only the bare-command default is affected, so forgetting to add
 # a new crate here is a mildly stale default, not a build break).
 default-members = [
-    "crates/cto-assistant",
     "crates/tc-services",
     "crates/trusty-agents",
     "crates/trusty-agents-common",

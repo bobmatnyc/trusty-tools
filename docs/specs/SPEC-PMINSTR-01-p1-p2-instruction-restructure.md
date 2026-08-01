@@ -23,6 +23,39 @@ spec_refs:
 
 ---
 
+> **Supersession note (2026-08-01).** §5.5 recommendation 1 ("do not make
+> `CLAUDE.md` the core project-override mechanism, in either its current
+> Markdown form or a hypothetical restructured JSON form") is **superseded by
+> [#4324](https://github.com/bobmatnyc/trusty-tools/pull/4324)**, merged
+> 2026-07-29 — a *third* form neither this section nor the JSON-in-Markdown
+> alternative it argues against anticipated: named-section markers
+> (`<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `END`) inside a project's own
+> `CLAUDE.md`, read by
+> [`claude_md_sections.rs`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72).
+> `CLAUDE.md` is `HOST_FILES[0]` and wins a same-section collision over
+> `.trusty-mpm/INSTRUCTIONS.md` (`HOST_FILES[1]`) — see
+> [`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
+> [`:34`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L34).
+> Recommendation 2 (do not loosen `claude-md-guard.yml` /
+> `check_claude_md_not_tracked.sh`) was **not** contradicted — that guard
+> still runs unmodified and still only checks that *this repo's own*
+> root `CLAUDE.md` stays untracked (issue #2299/#2647 self-referential
+> concern); it was never a guard against a target project's `CLAUDE.md`
+> carrying override markers, so #4324 shipping a target-project override
+> reader required no change to it.
+>
+> Beyond the mechanism, the **direction** is also settled, not just added
+> alongside the old one: project customization is named sections in the
+> root `CLAUDE.md`. The `.trusty-mpm/` per-file override surface remains in
+> the current binary's read paths — it has not been removed and nothing
+> here should be read as claiming otherwise — but
+> [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks its
+> removal, not its indefinite parallel existence. See §5.5 inline for the
+> per-item detail. This note records the reversal; §5 below is left as
+> originally written.
+
+---
+
 ## 1. Problem Statement {#SPEC-PMINSTR-01~draft}
 
 **ID:** SPEC-PMINSTR-01~draft
@@ -183,6 +216,26 @@ that the *footer/docs/ticket conventions* survive full replacement (they
 live in `BASE_PM.md`'s own body) — but nothing verifies that the
 Prohibitions table itself survives, because it doesn't; it isn't in
 `BASE_PM.md` at all.
+
+> **Accuracy note (2026-08-01).** `PM_INSTRUCTIONS.md` and `BASE_PM.md` as
+> monolithic files are gone (#4183); the current bundled manifest is
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> (schema v2), whose `sections[]` each carry an explicit
+> `customization_tier`. The Prohibitions table now lives under the heading
+> `## Prohibitions (CANONICAL -- single source of truth)` inside
+> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L11)
+> — and the `core` section is tagged
+> [`"customization_tier": "project"`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L14-L16),
+> not `fixed`. This finding's recommendation — promote Prohibitions to
+> `fixed` — was **not** adopted; only three sections ship `fixed`:
+> `identity`, `non-overridable-rules`, `framework-guaranteed-conventions`
+> ([`pm-instruction-package.json:8-10,42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L8-L10)).
+> The gap this finding describes is real and current, not merely historical
+> — tracked by
+> [#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573)
+> ("Prohibitions and Circuit Breakers tables are tier 'project' — deletable,
+> unguarded at merge", milestone 1.3.2, open). Promoting the tier is a code
+> change tracked there, not made by this doc.
 
 ### Finding: Mis-tiering #2 (inverse) — safety-critical project rules sit in the least-protected tier
 
@@ -594,10 +647,41 @@ Code's own ancestor-directory `CLAUDE.md` semantics.
    reads.** Do not make `CLAUDE.md` the core project-override mechanism, in
    either its current Markdown form or a hypothetical restructured JSON
    form.
+
+   > **Superseded (2026-08-01) by [#4324](https://github.com/bobmatnyc/trusty-tools/pull/4324).**
+   > This did not happen. #4324 added named-section markers
+   > (`<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `END`) read directly out of
+   > a project's `CLAUDE.md` by
+   > [`claude_md_sections.rs`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
+   > and `CLAUDE.md` is scanned *first* —
+   > `HOST_FILES = ["CLAUDE.md", ".trusty-mpm/INSTRUCTIONS.md"]`
+   > ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72)),
+   > with `CLAUDE.md` winning a same-section collision
+   > ([`:34`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L34)).
+   > **The direction is also settled, not merely added alongside the old
+   > one.** Project customization is named sections in the root `CLAUDE.md`.
+   > The five `.trusty-mpm/` per-file overrides (`INSTRUCTIONS.md`,
+   > `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`,
+   > `PM_INSTRUCTIONS_DEPLOYED.md`; constants at
+   > [`instruction_overrides.rs:52-60`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60))
+   > remain in the current binary's read paths — nothing has removed them,
+   > and this note does not claim otherwise — but
+   > [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
+   > their removal, not their standing as a co-equal, indefinitely-supported
+   > alternative to `CLAUDE.md`.
 2. **Do not loosen `claude-md-guard.yml` / `check_claude_md_not_tracked.sh`.**
    The guard's condition is correct and orthogonal to file format or size;
    loosening it for "a small disciplined JSON file" doesn't address the
    actual failure mode and reopens a path to the #2647-class regression.
+
+   > **Still accurate.** The guard
+   > (`.github/workflows/claude-md-guard.yml`,
+   > `scripts/check_claude_md_not_tracked.sh`) runs unmodified and was never
+   > loosened. It checks only that *this repo's own* root `CLAUDE.md` stays
+   > untracked (the #2299/#2647 duplicate-context-load concern); it does not
+   > and never did restrict a *target* project's `CLAUDE.md` from carrying
+   > override markers, so #4324 required no change to it. Recommendation 1
+   > above is the one superseded — this one was not.
 3. **Preserve the existing untracked-stub division of labor explicitly** as
    a named design principle in the new system, not an incidental side
    effect: `CLAUDE.md` remains the harness-native, untracked, per-workspace

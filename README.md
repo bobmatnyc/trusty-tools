@@ -149,7 +149,6 @@ documentation.
 | `trusty-agents` | Agent orchestration platform |
 | `trusty-agents-common` | Shared types and utilities for agent framework |
 | `trusty-agents-local` | Local agent runtime implementation |
-| `cto-assistant` | CTO domain assistant |
 
 ## Architecture
 
