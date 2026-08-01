@@ -19,8 +19,9 @@
 //!       `trusty_agents::adapters`, and `trusty_agents::session_registry` for
 //!       source-level compatibility with the existing call sites in
 //!       `crates/trusty-agents/src/**`.
-//! Test: Compile-tested transitively via `crates/cto-assistant` (downstream
-//!       agent) and `crates/trusty-agents` (host).
+//! Test: Compile-tested transitively via `crates/trusty-agents` (host);
+//!       `ToolResult`'s predicates are covered by
+//!       `tool_result_is_error_distinguishes_variants`.
 
 /// Portable perf value types: `TokenUsage`, `PhaseRecord`, `PerfTotals`, `PerfRecord`.
 ///
@@ -269,7 +270,7 @@ impl ToolResult {
     ///
     /// Why: Dispatch paths need a cheap predicate to log/branch on failure.
     /// What: Returns `true` for any `Error`, `false` for `Success`.
-    /// Test: `cto_assistant::execute_outcome_maps_to_tool_result` checks this.
+    /// Test: `tool_result_is_error_distinguishes_variants`.
     pub fn is_error(&self) -> bool {
         matches!(self, ToolResult::Error { .. })
     }
@@ -279,7 +280,7 @@ impl ToolResult {
     /// Why: Callers that distinguish fatal-vs-recoverable need this to decide
     ///      whether to retry or bail.
     /// What: True only for `Error { recoverable: false, .. }`.
-    /// Test: `cto_assistant::execute_outcome_maps_to_tool_result`.
+    /// Test: `tool_result_is_fatal_only_for_non_recoverable`.
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
@@ -450,11 +451,46 @@ impl AgentPlugin {
     ///      leaving fields uninitialised when the struct grows.
     /// What: Stores the persona name (converting `impl Into<String>` so
     ///       call sites can pass `&str` literals) and the tool vector.
-    /// Test: Indirectly via `cto_assistant::agent_plugin()`.
+    /// Test: Indirectly via `agent_plugin_lookup_returns_matching_plugin`
+    ///       (`trusty-agents`), which constructs plugins through this ctor.
     pub fn new(persona_name: impl Into<String>, tools: Vec<Arc<dyn ToolExecutor>>) -> Self {
         Self {
             persona_name: persona_name.into(),
             tools,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies `is_error` splits `Success` from both `Error` flavours.
+    ///
+    /// Why: Dispatch paths branch on this predicate to decide whether to feed
+    ///      the LLM an `is_error: true` tool result. This assertion used to
+    ///      live in `crates/cto-assistant`, deleted in #3732 — it belongs
+    ///      beside the type it covers, not in a downstream agent crate.
+    /// What: Asserts `ok` is not an error while `err`/`fatal` both are.
+    /// Test: self.
+    #[test]
+    fn tool_result_is_error_distinguishes_variants() {
+        assert!(!ToolResult::ok("done").is_error());
+        assert!(ToolResult::err("retry me").is_error());
+        assert!(ToolResult::fatal("bad creds").is_error());
+    }
+
+    /// Verifies `is_fatal` is true only for the non-recoverable error.
+    ///
+    /// Why: Callers stop the loop on fatal and keep going on recoverable;
+    ///      conflating the two either hangs on unrecoverable failures or
+    ///      aborts on transient ones.
+    /// What: Asserts `fatal` is fatal while `err` and `ok` are not.
+    /// Test: self.
+    #[test]
+    fn tool_result_is_fatal_only_for_non_recoverable() {
+        assert!(ToolResult::fatal("bad creds").is_fatal());
+        assert!(!ToolResult::err("retry me").is_fatal());
+        assert!(!ToolResult::ok("done").is_fatal());
     }
 }

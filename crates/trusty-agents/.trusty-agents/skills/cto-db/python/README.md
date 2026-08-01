@@ -33,17 +33,20 @@ The four tables/view this skill queries (`person`, `rd_budget_2026`,
 `user_work_distribution`, `v_needs_review`) match the schema already
 documented — and unit-tested against an in-memory fixture with the same
 shape — in `crates/trusty-cto-db/src/lib.rs`. That Rust crate (plus
-`crates/tc-services::cto_db` and `crates/cto-assistant`) implements the same
-four tools natively in Rust, fully tested, but was never wired into any
-built binary: the only `install_plugins(...)` call site that registered it
-was removed by PR #3310 ("sever cto-assistant edge"), and nothing has called
-it since (issues #3656, #3700, #3732). This Python skill is a parallel,
+`crates/tc-services::cto_db` and the since-deleted `crates/cto-assistant`)
+implemented the same four tools natively in Rust, fully tested, but was
+never wired into any built binary: the only `install_plugins(...)` call site
+that registered it was removed by PR #3310 ("sever cto-assistant edge"), and
+nothing called it after that (issues #3656, #3700, #3732). This Python skill
+is a parallel,
 from-scratch reimplementation — chosen over resurrecting that Rust wiring
 per the owner's explicit architectural directive that CTO DB business logic
 belongs in a skill, not hardcoded as a hand-written Rust `ToolExecutor`
 inside/adjacent to the agent (see #3656's DOC-41 §2.0 "declarative-only"
-objection). The old Rust crates are left untouched; dissolving them is
-separate, larger scope (#3732).
+objection). `crates/cto-assistant` — the agent-specific adapter layer — was
+dissolved in #3732 once this skill reached parity. The host-agnostic
+`crates/trusty-cto-db` and `crates/tc-services::cto_db` are left untouched;
+assessing them is separate scope.
 
 ## Package layout
 

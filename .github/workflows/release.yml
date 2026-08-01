@@ -412,7 +412,7 @@ jobs:
             echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-bm25-daemon, trusty-embedderd, trusty-progress,"
-            echo "  trusty-agents*, trusty-mpm-gui, tc-services, cto-assistant,"
+            echo "  trusty-agents*, trusty-mpm-gui, tc-services,"
             echo "  trusty-cto-db, trusty-gworkspace, and any future library crate."
             echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
             echo "above (see the 'TO ADD A NEW CRATE' note) — otherwise this skip is correct."
