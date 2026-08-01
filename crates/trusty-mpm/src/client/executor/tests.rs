@@ -196,7 +196,7 @@ async fn execute_doctor_against_test_daemon() {
     match executor.execute(TrustyCommand::Doctor).await {
         CommandResult::Doctor(report) => {
             // This test owns the EXECUTOR round-trip, not the check roster.
-            // The exact count is pinned by `run_doctor_produces_twenty_six_checks`
+            // The exact count is pinned by `run_doctor_produces_twenty_seven_checks`
             // and `doctor_endpoint_returns_report`, both of which derive it from
             // their own name list — duplicating a bare literal here just made it a
             // fourth place to forget (#4090 review LOW-1).
