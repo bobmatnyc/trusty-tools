@@ -26,13 +26,23 @@
 //! is left `None` so `registry::resolve_extends_in_map` never chases an mpm
 //! base name that does not exist in this registry.
 //!
+//! ONE role derivation, shared with dispatch (#4511): the artifact's declared
+//! domain is resolved by [`super::claude_mpm_role::normalize_role`] — the same
+//! reviewed table the by-name dispatch path (`claude_mpm_loader`) calls — and
+//! both dialect keys (`role:` and `agent_type:`) are handed to it. Passing
+//! only one meant the catalog and dispatch could report different roles for
+//! the same file; the mapping itself is never re-derived here.
+//!
 //! What: [`load_mpm_agent`] (read one file, warn about every field this crate
 //! has no home for, project the rest) and [`is_claude_agents_dir`] (the
 //! predicate that selects the `.claude/agents` tier).
 //! Test: `tests::*` in `mpm_bridge_tests.rs` — scalar projection, `extends:`
 //! ignored, `skills:` never becoming a permission grant, `tier` never
 //! populated, `tools:` mapped to the exact-name allowlist, the aggregated
-//! drop warning, and the directory predicate.
+//! drop warning, the directory predicate, the role derivation
+//! (`agent_type_is_the_deployed_domain_fallback`,
+//! `catalog_and_dispatch_derive_the_same_role`), and the capability-neutrality
+//! proof (`normalized_mpm_role_still_reaches_nothing`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -61,6 +71,11 @@ use crate::llm::adapter::adapter_for_model;
 const CONSUMED_KEYS: &[&str] = &[
     "name",
     "role",
+    // #4511: consumed as the `role:` fallback — see `project_mpm_agent`. It
+    // moved out of the drop warning here because it is now genuinely read;
+    // leaving it listed as dropped would be the inverse of the lie the
+    // warning exists to prevent.
+    "agent_type",
     "description",
     "model",
     "max_tokens",
@@ -246,19 +261,25 @@ fn extract_body(raw: &str) -> String {
 /// What, field by field:
 /// - `name` -> `agent.name`, falling back to `default_name` (the file stem),
 ///   exactly as `parse_md_agent` identifies an unnamed file.
-/// - `role` -> `agent.role`, NORMALIZED through
-///   [`super::claude_mpm_role::normalize_role`] (#4502) rather than copied
-///   verbatim. `role` is a load-bearing security discriminator — it selects
-///   the tool-registry branch in `build_registry_for_agent` and is checked
-///   against `ASSISTANT_ALLOWED_DELEGATE_ROLES` at every delegation — so a
-///   value arriving from a `.md` artifact must clear a reviewed table before
-///   it reaches those gates. An absent or unrecognized value yields
-///   `claude_mpm_role::UNMAPPED_ROLE` (`"agent"`), byte-identical to
-///   `parse_md_agent`'s default, so switching this tier's parser still
-///   changes no agent's role and therefore no agent's derived tier (see
-///   below). Only `role` is consulted here: `AgentMetadata` carries no
-///   `agent_type`, which is the key trusty-mpm's composer actually emits — so
-///   in practice every deployed artifact resolves to the sentinel today.
+/// - `role` (preferred) then `agent_type` (fallback) -> `agent.role`,
+///   NORMALIZED through [`super::claude_mpm_role::normalize_role`]
+///   (#4502, #4511) rather than copied verbatim. `role` is a load-bearing
+///   security discriminator — it selects the tool-registry branch in
+///   `build_registry_for_agent` and is checked against
+///   `ASSISTANT_ALLOWED_DELEGATE_ROLES` at every delegation — so a value
+///   arriving from a `.md` artifact must clear a reviewed table before it
+///   reaches those gates. BOTH keys are passed because deployed artifacts
+///   carry two dialects: trusty-mpm's own composer emits `role:`, while a
+///   claude-mpm-format artifact carries `agent_type:` and no `role:` at all.
+///   Passing only `role` (#4511's defect) meant this CATALOG path resolved
+///   every claude-mpm-format artifact to the fail-closed sentinel while the
+///   by-name DISPATCH path (`claude_mpm_loader`, which passes both since
+///   #4506) resolved its real domain — one artifact, two answers. The
+///   preference ORDER, the trimming/case-folding, and the fail-closed
+///   fallback all live in `normalize_role`; nothing about the mapping is
+///   re-derived here, which is the point. An absent or unrecognized value
+///   still yields `claude_mpm_role::UNMAPPED_ROLE` (`"agent"`),
+///   byte-identical to `parse_md_agent`'s default.
 /// - `description` -> `agent.description`; `model` -> `agent.model` after
 ///   `resolve_model` (the same `TAGENT_MODEL_*` / default env resolution
 ///   `parse_md_agent` applies on its non-`extends` path — this tier is always
@@ -311,12 +332,15 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
         agent: AgentInfo {
             name,
             // #4502: NORMALIZED, never a verbatim copy — see this function's
-            // doc comment and `super::claude_mpm_role::normalize_role`. Only
-            // `role` is available here (`AgentMetadata` carries no
-            // `agent_type`), so the deployed artifacts — which declare
-            // `agent_type` and no `role` — resolve to the fail-closed
-            // sentinel, byte-identical to the literal this replaced.
-            role: super::claude_mpm_role::normalize_role(meta.role.as_deref(), None),
+            // doc comment and `super::claude_mpm_role::normalize_role`.
+            // #4511: BOTH dialect keys are handed to that one shared function,
+            // so this CATALOG path and the by-name DISPATCH path
+            // (`claude_mpm_loader`) can no longer disagree about the role of
+            // the same file on disk.
+            role: super::claude_mpm_role::normalize_role(
+                meta.role.as_deref(),
+                meta.agent_type.as_deref(),
+            ),
             model,
             description: meta.description.unwrap_or_default(),
             persistent_session: false,

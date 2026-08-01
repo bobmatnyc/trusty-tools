@@ -104,6 +104,137 @@ async fn spawn_test_daemon() -> (tempfile::TempDir, String) {
     (root_guard, format!("http://{addr}"))
 }
 
+/// Serve a stub daemon whose managed-session routes each sleep `delay` before
+/// answering, on a random loopback port. Returns the base URL.
+///
+/// Why (#4488): the real [`create_session_full_lifecycle`] cannot pin WHICH
+/// timeout bounds the provisioning POST — it just runs the real handler and
+/// hopes the machine is fast enough, which is precisely the load-sensitivity
+/// that made it flake. This stub inverts the control: the TEST owns the
+/// server-side latency, so the bound under test can be exercised in
+/// milliseconds instead of the 180s the production constant names, with no
+/// wall-clock guess anywhere in the assertion.
+/// What: `POST /api/v1/sessions/managed` sleeps then returns a minimal valid
+/// [`ManagedSpawnResponse`]; `GET /api/v1/sessions/managed` sleeps then
+/// returns an empty fleet. Both routes share `delay` so the two tests below
+/// differ only in which one they call.
+async fn spawn_slow_stub_daemon(delay: std::time::Duration) -> String {
+    use axum::routing::post;
+
+    let spawn_body = serde_json::json!({
+        "id": "11111111-1111-1111-1111-111111111111",
+        "name": "stub-session",
+        "state": "active",
+    });
+    let router = axum::Router::new().route(
+        "/api/v1/sessions/managed",
+        post(move || async move {
+            tokio::time::sleep(delay).await;
+            axum::Json(spawn_body)
+        })
+        .get(move || async move {
+            tokio::time::sleep(delay).await;
+            axum::Json(serde_json::json!({ "sessions": [] }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    format!("http://{addr}")
+}
+
+/// A `reqwest::Client` whose CLIENT-LEVEL request timeout is `bound` — the
+/// millisecond-scale stand-in for production's 10s `DEFAULT_REQUEST_TIMEOUT`.
+fn client_bounded_at(bound: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(bound)
+        .build()
+        .expect("build bounded test client")
+}
+
+/// #4488 regression: `create_session` must survive a daemon that takes LONGER
+/// than the client-level default request timeout to answer.
+///
+/// The daemon provisions synchronously inside this request (git clone +
+/// worktree add + agent deploy + harness spawn). Before the fix the connector
+/// let the 10s interactive `DEFAULT_REQUEST_TIMEOUT` bound that work, so
+/// `create_session_full_lifecycle` — which measured 9.54s at load 15 — passed
+/// only on an idle machine and failed under load with a `Transport` error,
+/// while the daemon kept provisioning and orphaned the session.
+///
+/// Load-robust by construction: the client bound is 100ms and the stub answers
+/// at 400ms, but the assertion is that the request SUCCEEDS, which the
+/// 180s per-request provisioning override guarantees no matter how slow or
+/// loaded the machine running this test is. Nothing here gets faster-or-fails.
+#[tokio::test]
+async fn create_session_outlives_the_default_request_timeout() {
+    let url = spawn_slow_stub_daemon(std::time::Duration::from_millis(400)).await;
+    let connector = TmConnector::with_client(
+        client_bounded_at(std::time::Duration::from_millis(100)),
+        url,
+    );
+    let req = CreateSessionReq {
+        task: "provision me".into(),
+        name_hint: None,
+        agent: None,
+        backend: BackendParams::Tm {
+            repo_url: "file:///dev/null".into(),
+            git_ref: "main".into(),
+            runtime: None,
+            ephemeral: true,
+        },
+    };
+    let info = connector.create_session(req).await.expect(
+        "create_session must apply the provisioning timeout override, not the \
+         client-level default",
+    );
+    assert_eq!(info.id, "11111111-1111-1111-1111-111111111111");
+}
+
+/// Negative control for [`create_session_outlives_the_default_request_timeout`]:
+/// the provisioning override must be SCOPED to the provisioning route. A point
+/// read against the same slow stub, through the same connector, must still be
+/// cut off by that connector's client-level bound.
+///
+/// What this catches, precisely (#4488 review, M3): a change that widens the
+/// override from one route to the whole connector — a `RequestBuilder::timeout`
+/// moved onto a shared helper, or the client itself rebuilt with the
+/// provisioning bound. Under any of those the sibling test still passes while
+/// every point read silently inherits a 180s ceiling, so this is the only
+/// assertion in the pair that would notice.
+///
+/// What it does NOT catch, despite an earlier version of this comment claiming
+/// otherwise: removal of the timeout from the PRODUCTION client built by
+/// `http_client::config::build_client`. Both tests here construct their own
+/// client via [`client_bounded_at`] — that is what makes them run in
+/// milliseconds instead of minutes — so neither one observes the production
+/// default at all. `config::tests::build_client_bounds_a_stalled_connection`
+/// and `config::tests::default_client_uses_default_bounds` are what guard the
+/// #2471 regression; this test is not a second line of defence for it.
+#[tokio::test]
+async fn list_sessions_is_bound_by_the_client_level_timeout() {
+    let url = spawn_slow_stub_daemon(std::time::Duration::from_millis(400)).await;
+    let connector = TmConnector::with_client(
+        client_bounded_at(std::time::Duration::from_millis(100)),
+        url,
+    );
+    let err = connector
+        .list_sessions()
+        .await
+        .expect_err("a 400ms response must not beat a 100ms client-level bound");
+    // `decode_err` also produces `Transport`, so the variant alone cannot tell
+    // a timeout from a malformed body (#4488 review, LOW). Rule the decode
+    // path out by its literal prefix: reaching it would mean the stub answered
+    // WITHIN the bound and the assertion above proved nothing about timeouts.
+    match err {
+        ConnectorError::Transport(ref msg) => assert!(
+            !msg.starts_with("failed to decode daemon response"),
+            "expected a transport-level timeout, got a decode failure: {msg}"
+        ),
+        other => panic!("expected ConnectorError::Transport, got {other:?}"),
+    }
+}
+
 /// Build a local, offline-clonable bare git repo with one commit on `main`.
 ///
 /// Why: [`create_session_full_lifecycle`] needs a `repo_url` the daemon's

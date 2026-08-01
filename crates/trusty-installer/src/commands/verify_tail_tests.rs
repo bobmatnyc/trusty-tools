@@ -457,6 +457,8 @@ struct FakeServiceEnv {
     present: bool,
     fail_fallback: bool,
     fallback_calls: std::cell::RefCell<Vec<String>>,
+    /// #4470: when `true`, the port guard refuses this member.
+    refuse_port: bool,
 }
 
 impl super::super::service_bootstrap::ServiceEnv for FakeServiceEnv {
@@ -476,6 +478,13 @@ impl super::super::service_bootstrap::ServiceEnv for FakeServiceEnv {
         }
         Ok(())
     }
+    fn port_guard(&self, _binary: &str) -> Result<(), String> {
+        if self.refuse_port {
+            Err("port 7878 is held by pid 9931, which launchd does not supervise".to_owned())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Why: THE #3849 code-critic MEDIUM 2 core coverage gap — scenario (a):
@@ -493,6 +502,7 @@ fn apply_not_loaded_fallback_heals_after_poll_when_fallback_succeeds() {
         present: true,
         fail_fallback: false,
         fallback_calls: std::cell::RefCell::new(Vec::new()),
+        refuse_port: false,
     };
     let responses = std::cell::RefCell::new(vec![
         health_str::HEALTHY.to_owned(),
@@ -535,6 +545,7 @@ fn apply_not_loaded_fallback_reports_still_not_loaded_when_fallback_fails() {
         present: true,
         fail_fallback: true,
         fallback_calls: std::cell::RefCell::new(Vec::new()),
+        refuse_port: false,
     };
     let (health, down_state, attempted) = apply_not_loaded_fallback(
         &env,
@@ -566,6 +577,7 @@ fn apply_not_loaded_fallback_noop_when_no_plist() {
         present: false,
         fail_fallback: false,
         fallback_calls: std::cell::RefCell::new(Vec::new()),
+        refuse_port: false,
     };
     let (health, down_state, attempted) = apply_not_loaded_fallback(
         &env,
@@ -596,6 +608,7 @@ fn apply_not_loaded_fallback_uses_instant_probe_when_budget_exhausted() {
         present: true,
         fail_fallback: false,
         fallback_calls: std::cell::RefCell::new(Vec::new()),
+        refuse_port: false,
     };
     let waits = std::cell::RefCell::new(0u32);
     let (health, down_state, attempted) = apply_not_loaded_fallback(
@@ -614,6 +627,38 @@ fn apply_not_loaded_fallback_uses_instant_probe_when_budget_exhausted() {
         *waits.borrow(),
         0,
         "an exhausted budget must use a single instant probe, never wait/poll"
+    );
+}
+
+/// Why (#4470): `attempt_verify_fallback` is the THIRD site in this crate that
+/// issues a `launchctl bootstrap`, and #3841's lesson is that a guard applied
+/// to only some branches leaves exactly the damaged machines on an ungated one.
+/// A bootstrap into a port a foreign process already owns exits 0 and reports a
+/// repair that did not happen.
+///
+/// This test fails if the guard is removed from that function: without it the
+/// fallback runs, `fallback_calls` records `trusty-memory`, and the return value
+/// becomes `Some(true)` instead of `None`.
+///
+/// What: with the plist present but the port held by an unsupervised process,
+/// asserts nothing was attempted and no bootstrap was issued.
+/// Test: This is the test.
+#[test]
+fn attempt_verify_fallback_refuses_on_foreign_port() {
+    let env = FakeServiceEnv {
+        present: true,
+        fail_fallback: false,
+        fallback_calls: std::cell::RefCell::new(Vec::new()),
+        refuse_port: true,
+    };
+    assert_eq!(
+        attempt_verify_fallback(&env, "trusty-memory"),
+        None,
+        "a refused port guard must report NOTHING attempted"
+    );
+    assert!(
+        env.fallback_calls.borrow().is_empty(),
+        "a refusal must not issue a `launchctl bootstrap`"
     );
 }
 
