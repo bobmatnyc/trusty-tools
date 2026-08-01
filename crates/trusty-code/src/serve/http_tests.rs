@@ -23,7 +23,7 @@ async fn router_and_sessions() -> (Arc<Router>, Arc<SessionRegistry>, SharedWork
     let sessions = Arc::new(SessionRegistry::new());
     let workstreams = test_workstreams_store().await;
     let mut router = Router::new();
-    crate::serve::methods::register(&mut router);
+    crate::serve::methods::register(&mut router, crate::binding::ProjectBinding::None);
     crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     (Arc::new(router), sessions, workstreams)
 }
@@ -43,6 +43,14 @@ async fn test_workstreams_store() -> SharedWorkstreamStore {
     Arc::new(tokio::sync::Mutex::new(store))
 }
 
+/// The projectless binding every route test that doesn't specifically
+/// exercise `GET /health`'s binding field passes to `build_axum_router`
+/// (#4512 made it a required parameter so the daemon can publish which
+/// project it serves).
+fn test_binding() -> Arc<crate::binding::ProjectBinding> {
+    Arc::new(crate::binding::ProjectBinding::None)
+}
+
 async fn body_json(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
@@ -53,7 +61,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 #[tokio::test]
 async fn http_rpc_ping_returns_pong() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
     let req_body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
 
     let resp = app
@@ -79,7 +87,7 @@ async fn http_rpc_ping_returns_pong() {
 #[tokio::test]
 async fn http_rpc_malformed_json_returns_parse_error() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -103,7 +111,7 @@ async fn http_rpc_malformed_json_returns_parse_error() {
 #[tokio::test]
 async fn http_health_matches_jsonrpc_health_payload() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -118,7 +126,36 @@ async fn http_health_matches_jsonrpc_health_payload() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let v = body_json(resp).await;
-    assert_eq!(v, health_payload());
+    assert_eq!(v, health_payload(&crate::binding::ProjectBinding::None));
+}
+
+/// `GET /health` must publish the daemon's OWN binding, not a placeholder —
+/// this is the field `cli::daemon_autospawn` compares before attaching, so a
+/// daemon that reported the wrong project would defeat the whole check
+/// (#4512).
+#[tokio::test]
+async fn http_health_reports_the_daemons_project_binding() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let binding = crate::binding::ProjectBinding::resolve(Some(project.path().to_path_buf()))
+        .expect("tempdir must bind");
+    let (router, sessions, workstreams) = router_and_sessions().await;
+    let app = build_axum_router(router, sessions, workstreams, Arc::new(binding.clone()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["binding"], binding.to_json());
+    assert_eq!(v["pid"], std::process::id());
 }
 
 /// `GET /sessions` (the #2983 Slice 2 REST route group, merged in by
@@ -130,7 +167,7 @@ async fn http_health_matches_jsonrpc_health_payload() {
 #[tokio::test]
 async fn http_rest_sessions_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -167,7 +204,7 @@ async fn http_rest_sessions_route_is_merged_in() {
 async fn http_rest_post_sessions_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let sessions_for_seeding = sessions.clone();
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let create_resp = app
         .clone()
@@ -253,7 +290,7 @@ async fn http_rest_post_tasks_route_is_merged_in() {
     let project = tempfile::tempdir().expect("project tempdir");
     let workstreams = test_workstreams_store().await;
     let mut router = Router::new();
-    crate::serve::methods::register(&mut router);
+    crate::serve::methods::register(&mut router, crate::binding::ProjectBinding::None);
     crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::task::protocol::register(
         &mut router,
@@ -263,7 +300,7 @@ async fn http_rest_post_tasks_route_is_merged_in() {
         agents.path().to_path_buf(),
         workstreams.clone(),
     );
-    let app = build_axum_router(Arc::new(router), sessions, workstreams);
+    let app = build_axum_router(Arc::new(router), sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -300,14 +337,19 @@ async fn http_rest_get_fs_route_is_merged_in() {
     // has it wired.
     let sessions = Arc::new(SessionRegistry::new());
     let mut router = Router::new();
-    crate::serve::methods::register(&mut router);
+    crate::serve::methods::register(&mut router, crate::binding::ProjectBinding::None);
     crate::session::protocol::register(
         &mut router,
         sessions.clone(),
         test_workstreams_store().await,
     );
     crate::fs_browse::protocol::register(&mut router);
-    let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
+    let app = build_axum_router(
+        Arc::new(router),
+        sessions,
+        test_workstreams_store().await,
+        test_binding(),
+    );
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let resp = app
@@ -339,14 +381,19 @@ async fn http_rest_get_projects_route_is_merged_in() {
     // also has it wired, mirroring `http_rest_get_fs_route_is_merged_in`.
     let sessions = Arc::new(SessionRegistry::new());
     let mut router = Router::new();
-    crate::serve::methods::register(&mut router);
+    crate::serve::methods::register(&mut router, crate::binding::ProjectBinding::None);
     crate::session::protocol::register(
         &mut router,
         sessions.clone(),
         test_workstreams_store().await,
     );
     crate::fs_browse::protocol::register(&mut router);
-    let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
+    let app = build_axum_router(
+        Arc::new(router),
+        sessions,
+        test_workstreams_store().await,
+        test_binding(),
+    );
 
     let resp = app
         .oneshot(
@@ -376,7 +423,7 @@ async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
     let sessions = Arc::new(SessionRegistry::new());
     let project = tempfile::tempdir().expect("project tempdir");
     let mut router = Router::new();
-    crate::serve::methods::register(&mut router);
+    crate::serve::methods::register(&mut router, crate::binding::ProjectBinding::None);
     crate::session::protocol::register(
         &mut router,
         sessions.clone(),
@@ -390,7 +437,12 @@ async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
         &mut router,
         crate::skills::protocol::SkillsCatalogState::new(Some(project.path())),
     );
-    let app = build_axum_router(Arc::new(router), sessions, test_workstreams_store().await);
+    let app = build_axum_router(
+        Arc::new(router),
+        sessions,
+        test_workstreams_store().await,
+        test_binding(),
+    );
 
     let agents_resp = app
         .clone()
@@ -431,7 +483,7 @@ async fn http_rest_get_agent_and_skill_catalog_routes_are_merged_in() {
 async fn http_rest_get_session_agents_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -460,7 +512,7 @@ async fn http_rest_get_session_agents_route_is_merged_in() {
 async fn http_rest_get_session_budget_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -488,7 +540,7 @@ async fn http_rest_get_session_budget_route_is_merged_in() {
 async fn http_rest_get_session_search_audit_route_is_merged_in() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -525,11 +577,11 @@ async fn http_rest_get_workstreams_route_is_merged_in() {
         .expect("load");
     let workstreams = Arc::new(tokio::sync::Mutex::new(store));
     let mut router = Router::new();
-    crate::serve::methods::register(&mut router);
+    crate::serve::methods::register(&mut router, crate::binding::ProjectBinding::None);
     crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::workstreams::protocol::register(&mut router, workstreams.clone());
     let id = workstreams.lock().await.create("t").await.expect("create");
-    let app = build_axum_router(Arc::new(router), sessions, workstreams);
+    let app = build_axum_router(Arc::new(router), sessions, workstreams, test_binding());
 
     let resp = app
         .clone()
@@ -564,7 +616,7 @@ async fn http_rest_get_workstreams_route_is_merged_in() {
 #[tokio::test]
 async fn http_session_events_sse_unknown_session_returns_404() {
     let (router, sessions, workstreams) = router_and_sessions().await;
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(
@@ -594,7 +646,7 @@ async fn http_session_events_sse_unknown_session_returns_404() {
 async fn http_session_events_sse_streams_replay() {
     let (router, sessions, workstreams) = router_and_sessions().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let app = build_axum_router(router, sessions, workstreams);
+    let app = build_axum_router(router, sessions, workstreams, test_binding());
 
     let resp = app
         .oneshot(

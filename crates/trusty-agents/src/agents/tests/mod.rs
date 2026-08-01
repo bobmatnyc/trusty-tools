@@ -714,6 +714,80 @@ delegate_allowed = ["research-agent", "ticketing-agent"]
     );
 }
 
+/// #4350 (DOC-62 §5.2): `[subagents] default_style` parses into the closed
+/// `ExecutionStyle` vocabulary and stays independent of the two name lists.
+///
+/// Why: this is the CONFIG precedence level for coding-delegation ceremony. It
+/// must be a separate, additive key — reinterpreting either name list would
+/// make one config line mean two things — and it must be `None` when absent so
+/// an un-updated agent keeps today's built-in `engineer` behaviour.
+/// What: the key parses; absent leaves it `None`.
+/// Test: this function IS the test.
+#[test]
+fn subagents_config_parses_default_style() {
+    let base = r#"
+[agent]
+name = "seeded"
+role = "assistant"
+model = "m"
+description = "d"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig =
+        toml::from_str(&format!("{base}\n[subagents]\ndefault_style = \"vibe\"\n"))
+            .expect("parses");
+    assert_eq!(
+        cfg.subagents.default_style,
+        Some(crate::tools::execution_style::ExecutionStyle::Vibe)
+    );
+    assert!(cfg.subagents.allowed.is_none());
+    assert!(cfg.subagents.delegate_allowed.is_none());
+
+    let absent: AgentConfig = toml::from_str(base).expect("parses");
+    assert!(
+        absent.subagents.default_style.is_none(),
+        "an absent key must not invent a style"
+    );
+}
+
+/// An unrecognized style in config is a PARSE ERROR, never a silent default
+/// (DOC-62 §5.1) — the same rule the delegation parameter follows.
+///
+/// Why: silently mapping an unknown style onto a default is indistinguishable,
+/// from the operator's side, from the style having been honoured.
+/// What: a bad value fails `toml::from_str`.
+/// Test: this function IS the test.
+#[test]
+fn subagents_config_rejects_an_unknown_default_style() {
+    let toml_str = r#"
+[agent]
+name = "seeded"
+role = "assistant"
+model = "m"
+description = "d"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[subagents]
+default_style = "turbo"
+"#;
+    assert!(
+        toml::from_str::<AgentConfig>(toml_str).is_err(),
+        "an unknown style must not parse"
+    );
+}
+
 // --- `AgentInfo::tier` (#4168, epic #4167 — L0/L1 orchestration model) ---
 //
 // Fail-closed contract: absent, blank, or unrecognized `[agent].tier` must

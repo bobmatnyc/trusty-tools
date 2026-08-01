@@ -20,5 +20,5 @@ mod session_events;
 pub mod sse;
 mod workstream_subscription;
 
-pub use engine::CodeEngine;
+pub use engine::{CodeEngine, build_http_client};
 pub use error::EngineError;

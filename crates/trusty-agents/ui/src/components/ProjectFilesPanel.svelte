@@ -8,10 +8,17 @@
    * without either touching the other's file.
    *
    * What: the documents drawer of an expanded project card. Lists a directory
-   * through #4357's `files/list`, opens markdown through `files/read` into the
-   * editor, and saves through `files/write`. Non-markdown entries are listed
-   * but not openable in this slice — the seam #4360 replaces with a
-   * document-type table and a view-only preview.
+   * through #4357's `files/list`, opens editable documents through `files/read`
+   * into the editor, and saves through `files/write`. Every row's affordance
+   * comes from the document-type table in `lib/projectFiles` (#4360) — this
+   * component classifies nothing itself.
+   *
+   * VIEW-ONLY ROWS ARE THE #4401 SEAM: a known-but-not-editable document is
+   * listed, named as view-only, and left unopenable. Rendering one is the
+   * canvas viewer's job (#4401), which still has open owner questions about the
+   * Mermaid render path and the preview UX — opening a preview here would
+   * answer them by fiat. The row, its label and the `readonly` wiring below are
+   * deliberately everything that slice needs and nothing more.
    *
    * DEGRADE, NEVER FAKE: #4357's routes are not merged yet. When they answer
    * 404 this panel says so and shows the daemon's own message, matching
@@ -24,7 +31,10 @@
   import { AlertCircle, ChevronLeft, FileText, Folder, Loader2, Save } from 'lucide-svelte';
   import type MarkdownEditor from './MarkdownEditor.svelte';
   import {
-    isMarkdownPath,
+    documentKindFor,
+    documentTypeFor,
+    editRefusalReason,
+    isEditablePath,
     listProjectFiles,
     readProjectFile,
     writeProjectFile,
@@ -69,6 +79,18 @@
 
   $: dirty = openPath !== '' && draft !== savedText;
 
+  /**
+   * Editability of the open document, straight from the table.
+   *
+   * Derived rather than hardcoded `false`: only editable documents can be
+   * opened from this list today, so this does resolve to `false` — but it is
+   * the wire #4401 needs. Mounting a view-only document in this pane then
+   * flips the editor to read-only and drops the save affordance with no
+   * further gating logic, which is exactly why `MarkdownEditor` takes
+   * `readonly` as a prop instead of sniffing the path.
+   */
+  $: viewOnly = openPath !== '' && !isEditablePath(openPath);
+
   /** Parent directory of `path`, or `''` at the project root. */
   function parentOf(path: string): string {
     const cut = path.lastIndexOf('/');
@@ -99,7 +121,7 @@
       await loadDir(entry.path);
       return;
     }
-    if (!isMarkdownPath(entry.path)) return;
+    if (!isEditablePath(entry.path)) return;
     loadingDoc = true;
     openError = '';
     savedAt = '';
@@ -125,7 +147,11 @@
   }
 
   async function save() {
-    if (!openPath || saving) return;
+    // `viewOnly` guards the keyboard path, not just the button: CodeMirror's
+    // `Mod-S` binding still fires in a read-only document, and letting it
+    // through would surface `writeProjectFile`'s refusal as an error banner
+    // for a document the user was never offered a way to save.
+    if (!openPath || saving || viewOnly) return;
     saving = true;
     openError = '';
     try {
@@ -183,13 +209,14 @@
   {:else}
     <ul class="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
       {#each entries as entry (entry.path)}
-        {@const editable = entry.is_dir || isMarkdownPath(entry.path)}
+        {@const kind = entry.is_dir ? 'directory' : documentKindFor(entry.path)}
+        {@const openable = kind === 'directory' || kind === 'editable'}
         <li>
           <button
             type="button"
             on:click={() => open(entry)}
-            disabled={!editable}
-            title={editable ? entry.path : 'Only markdown files can be opened yet'}
+            disabled={!openable}
+            title={openable ? entry.path : editRefusalReason(entry.path)}
             class="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors {entry.path ===
             openPath
               ? 'bg-foundry-light-primary/10 dark:bg-foundry-primary/10 text-foundry-light-primary dark:text-foundry-primary'
@@ -201,6 +228,19 @@
               <FileText class="h-3.5 w-3.5 shrink-0" />
             {/if}
             <span class="flex-1 truncate font-mono">{entry.name}</span>
+            <!-- Why the badge and not just the `title`: a tooltip is invisible
+                 on touch and to a keyboard user tabbing a disabled row, and
+                 "why can't I open this" is the whole question this slice
+                 answers. #4401 replaces the view-only badge with a way in. -->
+            {#if kind === 'view-only'}
+              <span class="shrink-0 text-[10px] text-foundry-light-muted dark:text-foundry-text/50">
+                {documentTypeFor(entry.path)?.label} · view-only
+              </span>
+            {:else if kind === 'unsupported'}
+              <span class="shrink-0 text-[10px] text-foundry-light-muted/70 dark:text-foundry-text/40">
+                unsupported
+              </span>
+            {/if}
             {#if !entry.is_dir && entry.size != null}
               <span class="shrink-0 text-[10px] text-foundry-light-muted dark:text-foundry-text/50">
                 {entry.size} B
@@ -233,22 +273,31 @@
         <code class="flex-1 truncate font-mono text-xs text-foundry-light-text dark:text-foundry-text">
           {openPath}
         </code>
-        {#if dirty}
-          <span class="text-[10px] text-foundry-amber">unsaved</span>
-        {:else if savedAt}
+        <!-- No save affordance for a document the table will not let us write:
+             offering a button whose only outcome is `writeProjectFile`'s
+             refusal would be a lie the user has to click to discover. -->
+        {#if viewOnly}
           <span class="text-[10px] text-foundry-light-muted dark:text-foundry-text/50">
-            saved {savedAt}
+            view-only
           </span>
+        {:else}
+          {#if dirty}
+            <span class="text-[10px] text-foundry-amber">unsaved</span>
+          {:else if savedAt}
+            <span class="text-[10px] text-foundry-light-muted dark:text-foundry-text/50">
+              saved {savedAt}
+            </span>
+          {/if}
+          <button
+            type="button"
+            on:click={save}
+            disabled={saving || !dirty}
+            class="inline-flex items-center gap-1 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-2.5 py-1 text-xs font-medium text-white hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:opacity-50"
+          >
+            <Save class="h-3 w-3" />
+            {saving ? 'Saving…' : 'Save'}
+          </button>
         {/if}
-        <button
-          type="button"
-          on:click={save}
-          disabled={saving || !dirty}
-          class="inline-flex items-center gap-1 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-2.5 py-1 text-xs font-medium text-white hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:opacity-50"
-        >
-          <Save class="h-3 w-3" />
-          {saving ? 'Saving…' : 'Save'}
-        </button>
         <button
           type="button"
           on:click={closeDoc}
@@ -262,7 +311,8 @@
           <svelte:component
             this={Editor}
             value={draft}
-            ariaLabel="Markdown editor for {openPath}"
+            readonly={viewOnly}
+            ariaLabel="{viewOnly ? 'Read-only view of' : 'Markdown editor for'} {openPath}"
             placeholder="This document is empty."
             on:change={(e) => (draft = e.detail.value)}
             on:save={save}

@@ -112,7 +112,14 @@ fn workstream_subcommand(line: &str) -> Option<&str> {
     None
 }
 
-fn build_http_client() -> reqwest::Client {
+/// The pooled `reqwest::Client` every `CodeEngine` call (discovery ping,
+/// `POST /rpc`, SSE) shares.
+///
+/// Why: `pub` since #4512 so `tcode tui`'s auto-spawn path — which resolves
+/// the daemon URL itself, then hands it to [`CodeEngine::with_daemon_url`] —
+/// builds its liveness-probe client with the SAME pool settings the engine
+/// would have used, rather than a second, divergent client.
+pub fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .pool_idle_timeout(Duration::from_secs(90))
         .connect_timeout(Duration::from_secs(5))
