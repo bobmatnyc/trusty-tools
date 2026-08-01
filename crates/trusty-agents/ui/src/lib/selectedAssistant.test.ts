@@ -7,7 +7,7 @@
 // `SelectionStorage` (no jsdom `localStorage` dependency), including a
 // storage that throws on every operation.
 // Test: this file.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   SELECTED_ASSISTANT_KEY,
   defaultSelectionStorage,
@@ -102,12 +102,24 @@ describe('selected-assistant codec (#4281)', () => {
   });
 
   it('defaultSelectionStorage_returns_null_when_unavailable', () => {
-    // No stub is installed here, and this environment genuinely has no
-    // `localStorage` (Node 26's own global shadows jsdom's) — so this is the
-    // real absent-storage path, not a simulation of it.
+    // Both branches are FORCED rather than inherited from the runtime: CI runs
+    // Node 20, where jsdom's `localStorage` is present, while Node 22+ defines
+    // its own `localStorage` global (undefined unless `--localstorage-file` is
+    // passed) that shadows jsdom's. Asserting whichever the host happens to
+    // provide would make this test pass on one and fail on the other.
+    vi.stubGlobal('localStorage', undefined);
     expect(defaultSelectionStorage()).toBeNull();
     expect(readSelectedAssistant()).toBeNull();
     expect(() => persistSelectedAssistant('izzie')).not.toThrow();
+    vi.unstubAllGlobals();
+  });
+
+  it('defaultSelectionStorage_resolves_the_global_when_present', () => {
+    const storage = fakeStorage('izzie');
+    vi.stubGlobal('localStorage', storage);
+    expect(defaultSelectionStorage()).toBe(storage);
+    expect(readSelectedAssistant()).toBe('izzie');
+    vi.unstubAllGlobals();
   });
 });
 

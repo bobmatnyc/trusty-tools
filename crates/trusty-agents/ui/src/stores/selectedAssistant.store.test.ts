@@ -7,12 +7,13 @@
 // `lib/selectedAssistant.test.ts`; this file pins the wiring — seed,
 // write-through, and stale-pointer reconciliation against the live roster.
 // What: store-level tests over `activeAgentId` against a stubbed
-// `globalThis.localStorage`. The stub is not a convenience — under Node 26 the
-// runtime defines its own `localStorage` global (undefined unless
-// `--localstorage-file` is passed), which shadows jsdom's, so `localStorage`
-// is genuinely absent in this environment. That is itself worth knowing: the
-// production code's "no storage ⇒ no persistence, never a throw" guard is
-// exercised by every OTHER test file in this suite for free.
+// `globalThis.localStorage`. The stub is not a convenience — whether a real
+// one exists at all depends on the host: CI runs Node 20, where jsdom supplies
+// it, while Node 22+ defines its own `localStorage` global (undefined unless
+// `--localstorage-file` is passed) that shadows jsdom's. Stubbing makes these
+// tests assert the same thing on both, and incidentally means the production
+// "no storage ⇒ no persistence, never a throw" guard is exercised for free by
+// every other test file in this suite on the newer runtime.
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
