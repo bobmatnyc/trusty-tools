@@ -51,15 +51,16 @@ part**, not as a working feature.
 one.** §2 states it unambiguously so downstream tickets stop building against
 different targets. This is the substance of #4406.
 
-**Third: the owner has issued two decisions that are in tension, and this
-document does not resolve the tension by fiat.** The 2026-07-29 store model
-requires entities to enter the OKG **only via an explicit extraction command,
-never as a side effect**; the 2026-08-01 OKG Sources statement requires sources
-to refresh **automatically on a user-managed schedule**. §3 presents the
-two-step reading that reconciles them — documents flow automatically, entity
-distillation stays explicit — as a **recommendation carrying the owner's
-signature requirement**, and Q1 (§13) states what breaks under each alternative.
-No ticket in §12 that depends on Q1 is scheduled.
+**Third: an OKG store has two population paths, and they are specified
+separately.** Per the owner (2026-08-01), *"extraction is an OPTION for any bound
+store."* **Path 1 — OKG Sources** are configured pipelines over the seven kinds
+in §4; they refresh **automatically** on a user-managed schedule. **Path 2 —
+bound stores** are any index the assistant binds; pulling entities out of one is
+an **option invoked by an explicit command**, never automatic. The paths differ
+by source kind, not by processing stage, and §3 keeps them first-class and
+distinct rather than unifying them behind a flag. The contamination guard belongs
+to path 2 alone (§3.2), and §3.3 specifies the deliberate overlap case where one
+directory is both.
 
 The genuinely new surface area here, relative to DOC-55, is: the named source
 roster and its per-source constraints (§4); the credential dependency on #4040
@@ -119,10 +120,10 @@ Two facts collide with that, and both are load-bearing:
 The difference is one constant. The cost of getting it wrong is a second
 migration of user-visible, user-editable directories — which #4325 explicitly
 designs for humans to browse and edit. **This document does not choose.** See
-**Q2** (§13). Until Q2 is answered, no ticket may land a path change, and #4523
+**Q1** (§13). Until Q1 is answered, no ticket may land a path change, and #4523
 is the incumbent.
 
-**S-1.2** Whatever segment set Q2 selects, the layout obligations are fixed:
+**S-1.2** Whatever segment set Q1 selects, the layout obligations are fixed:
 the store is per **instance** (not per type), dotless and user-browsable, and
 `ensure()`-style creation is additive and never overwrites a user edit — the
 posture PR #4523 already implements and this document adopts unchanged.
@@ -132,7 +133,7 @@ posture PR #4523 already implements and this document adopts unchanged.
 ```
 <assistant home>/
 ├── instructions.md
-├── config.toml            # or config.yaml — see Q3
+├── config.toml            # or config.yaml — see Q2
 ├── agents/
 ├── okg/                   # THIS document's subject
 │   ├── <collection>/…     # entity + document markdown, the trusty-kb tree
@@ -150,70 +151,107 @@ extractions displayable rather than merely having happened.
 
 ---
 
-## 3. SPEC-OKGSRC-02 — The Two-Step Model: Documents Flow, Entities Are Distilled {#SPEC-OKGSRC-02~draft}
+## 3. SPEC-OKGSRC-02 — Two Population Paths {#SPEC-OKGSRC-02~draft}
 
-### 3.1 The tension, stated plainly
+An OKG store is populated by **two distinct paths**, distinguished by the **kind
+of source**, not by processing stage. The owner's formulation (2026-08-01):
+**"extraction is an OPTION for any bound store."** The two paths differ in
+trigger, in ownership, and in contamination risk, and this document specifies
+them as first-class and separate. They are deliberately **not** unified into one
+pipeline with a flag.
 
-| Decision | Date | Requirement |
+### 3.1 The two paths
+
+| | **Path 1 — OKG Sources** | **Path 2 — Bound stores** |
 |---|---|---|
-| Assistant store model (#4325) | 2026-07-29 | Entities enter the OKG **only via an explicit entity-extraction command — never implicitly, never as a side effect of ingestion.** |
-| OKG Sources (this document) | 2026-08-01 | Sources are refreshed **by the system on a user-managed schedule**, so new mail, messages, transcripts and folder docs are **automatically** extracted, placed in the OKG store, and indexed. |
+| What it is | A configured pipeline over an external corpus | Any search store or index the assistant binds |
+| The seven kinds | directory, Gmail (sent, dated), Drive directory, Slack sent, Slack channel, Notion directory, Granola | Not a source kind at all — an existing index |
+| Trigger | **Automatic**, on a user-managed schedule | **Explicit command only** — never automatic, never a side effect |
+| Optionality | Configured once, then runs | Extraction is an **option** available for the bound store |
+| Output | Lands in the `okg` store and is indexed by trusty-search | Entities pulled OUT of the bound store INTO the OKG |
+| Governing statement | 2026-08-01 OKG Sources | 2026-07-29 assistant store model |
+| Owned by | §4–§9 of this document | #4283, framed by §3.3 here |
 
-Read flatly, "never as a side effect" and "automatically on a schedule"
-contradict. The 2026-07-29 decision is not a preference to be overridden: it was
-recorded as eliminating a real contamination hazard — today's binding pushes OKG
-output back INTO the bound index at the end of every run, so binding a populated
-source corpus (the 201k-chunk `cto-duetto` index) would mix generated entities
-into that corpus.
+**There is no tension between the two decisions.** "Never as a side effect"
+governs pulling entities out of a corpus the user bound for reading; "refreshed
+automatically on a schedule" governs pipelines the user configured for exactly
+that purpose. Automatic is the whole point of path 1; explicit is the whole point
+of path 2.
 
-### 3.2 The recommended reading — RECOMMENDATION, NOT A DECISION
+**S-2.1** Path 1 pushes automatically on its schedule. Configuring an OKG Source
+**is** the user's instruction to keep it current; no further per-run consent is
+required, and requiring one would defeat the feature.
 
-The two statements describe **two different steps that this repo already treats
-as different**, and the code says so in its own words. `okg/mod.rs:1-10`:
+**S-2.2** Path 2 extracts **only when explicitly asked**. Binding a store never
+extracts from it, and no schedule, refresh, or background job may invoke path-2
+extraction. This document specifies no automatic path-2 trigger and forbids one.
 
-> These four tools make ingestion mechanical and convergent: the engine in
-> `trusty-kb::okg` owns the ledger and the entity writes, and the assistant
-> stays free to do the part that actually needs a model — **distilling those
-> ingested items into people/organizations/events entities.**
+### 3.2 Why path 2 must stay explicit — the contamination guard
 
-That is the split, already load-bearing, already documented, and #4406 confirmed
-its consequence: **there is no LLM call anywhere in the OKG ingest path.**
+The guard belongs to **path 2 only**, and the reason is mechanical rather than
+stylistic.
 
-So:
+**Verified against `origin/main` (4e67493b).** `feed_bound_index`
+(`crates/trusty-agents/src/tools/okg/index_feed.rs:32-50`) runs at the tail of
+every OKG ingest and pushes what that run wrote into **the agent's bound search
+index** — resolved by `resolve_feed` → `crate::stores::bound_index_for_tree`
+(`:53-77`) and pushed through `feed_source`/`HttpIndexFeed`. So the binding is
+**bidirectional in effect**: an index bound for reading also receives OKG output.
 
-- **Step 1 — DOCUMENT FLOW (mechanical, scheduled, automatic).** A source's
-  items are fetched, extracted to text, written into the `okg` tree as
-  documents, and indexed by trusty-search. No model in the loop; fully
-  deterministic; idempotent under the DOC-55 ledger. **This is what the
-  2026-08-01 statement makes automatic.**
-- **Step 2 — ENTITY DISTILLATION (model-driven, explicit).** Turning those
-  documents into people / organization / event entities. **This is what the
-  2026-07-29 decision requires to stay an explicit command.**
+The consequence, stated plainly: if extraction from a bound store were automatic,
+binding a **populated** corpus — an existing code index, a document index such as
+the 201k-chunk `cto-duetto` index — would cause generated entities to be mixed
+back into a store the user never intended to mutate. The user bound it to *read*
+it.
 
-Under this reading both decisions hold simultaneously and neither is weakened:
-scheduled refresh never manufactures an entity, and the explicit-extraction
-guarantee is untouched.
+**S-2.3** Explicit-only extraction is the mitigation for that hazard, and it is
+the whole mitigation. A path-2 extraction is a deliberate act against a named
+store, at a moment the user chose.
 
-**S-2.1 (conditional on Q1).** If the two-step reading is confirmed, a scheduled
-refresh MUST NOT invoke a distillation model, MUST NOT write entity records, and
-MUST report its output as *documents ingested*, never as *entities extracted*.
-The two counters are separately named on every surface (§11).
+**S-2.4** Path 1 does not carry this hazard and is not constrained by it. An OKG
+Source's output lands in the assistant's **own** store and its **own** index
+(§9) — a tree the product generated and owns — never in a third-party corpus the
+user bound for reading.
 
-**S-2.2 (conditional on Q1).** The contamination hazard is closed at its actual
-cause independently of Q1: a scheduled refresh feeds **the store's own index**
-(§9) and never an attached third-party index. Binding a populated source corpus
-must remain incapable of receiving generated content.
+### 3.3 The overlap case: a directory that is both
 
-### 3.3 What breaks under each alternative
+Source kind (a) is deliberately **both**: an arbitrary directory registered as an
+OKG Source is *also* attached to the assistant as a project and *also* indexed by
+trusty-search (§4.2). That one directory is therefore simultaneously a path-1
+source and a path-2 bindable index. The owner's model implies this edge and it
+must not be left to chance.
 
-| Reading | Consequence if chosen |
-|---|---|
-| **Two-step (recommended)** | Both decisions hold. Cost: "automatically extracted" in the owner's sentence means *documents extracted from the source*, not *entities extracted into the graph* — a wording the GUI must not blur, or users will expect entities to appear on a schedule and see none. |
-| **Fully automatic (schedule distills entities too)** | Overrides the 2026-07-29 decision and re-opens the contamination hazard it closed. Also requires an extraction model tier, a token budget, and a failure policy for a model call inside a background job — none of which exist. |
-| **Fully explicit (no scheduled flow at all)** | Contradicts the 2026-08-01 statement outright and deletes §8 entirely. The feature reduces to a manual importer, which is #3904. |
+**S-2.5 — Path 1 owns a directory it ingests; path 2 must not re-ingest it.**
+When a directory is registered as an OKG Source, its trusty-search index is
+recorded as **path-1 owned**. Offering path-2 extraction over that index would
+re-derive, from chunks, content the ledger already ingested from the files — a
+second copy of the same corpus, arriving by a second route, with a different
+`item_id` scheme and therefore invisible to the ledger's dedup.
 
-**Blocked until Q1 is answered:** §8's runner semantics, the §11 counters, and
-every §12 ticket marked `Q1`.
+**S-2.6** The surface therefore **declines path-2 extraction for a path-1-owned
+index and says why**, rather than silently succeeding. The user is told the
+directory is already an OKG Source and that its content is already flowing.
+
+**S-2.7** A **non-owned** bound index — one the user attached that no OKG Source
+produced — remains fully eligible for path-2 extraction. S-2.5 narrows the offer
+to exactly the double-ingest case; it does not restrict bound-store extraction
+generally.
+
+**S-2.8** Ownership is a property of the **index registration**, recorded when
+the directory source is registered (§4.2's single all-or-none operation), so the
+two paths cannot disagree about who owns a corpus.
+
+### 3.4 What this document does and does not specify
+
+**S-2.9** This document specifies **path 1 in full**: the roster (§4), the trust
+boundary (§5), credentials (§6), watermarks (§7), scheduling (§8), indexing (§9),
+the extension point (§10), and observability (§11).
+
+**S-2.10** **Path 2 is #4283's**, and is not re-specified here. This document
+constrains it in exactly three ways — it stays explicit (S-2.2), it declines
+path-1-owned indexes (S-2.6), and its results are counted and displayed
+separately from path-1 ingestion (§11) so a user can always tell which path
+produced what.
 
 ---
 
@@ -441,7 +479,7 @@ With S-4.3…S-4.9 implemented, the residual risk is:
 does is bound the blast radius: the assistant holds no cross-project git
 primitive, no shell reach, and no write-capable tool it did not already hold
 before ingestion. **Accepting this residual risk is an owner decision**, and it
-is Q4 in §13 rather than an assumption buried in a design section.
+is Q3 in §13 rather than an assumption buried in a design section.
 
 ---
 
@@ -633,7 +671,7 @@ source never silently starts background network activity against a user's mail.
 ### 8.3 Which mechanism runs it — reuse the pattern, not the module
 
 There is a real fork here and this document takes a position while flagging it
-(Q5).
+(Q4).
 
 **Listeners are the wrong home, but the right pattern.** DOC-47's `EventSource`
 contract is a **push/webhook event ingress producing `Goal`s in the SM goal
@@ -892,10 +930,10 @@ internal — a user is entitled to see that their assistant's knowledge includes
 content other people wrote.
 
 **S-10.5** The counters from §3 are **displayed separately and never summed**:
-*documents ingested* and *entities extracted* are different numbers produced by
-different triggers. Collapsing them into one "items" figure would erase the §3
-distinction on the exact surface where a user would form their mental model of
-it.
+*ingested by an OKG Source* (path 1, scheduled) and *extracted from a bound
+store* (path 2, explicit) are different numbers produced by different triggers
+over different corpora. Collapsing them into one "items" figure would erase the
+§3 distinction on the exact surface where a user forms their mental model of it.
 
 **S-10.6** Index state is surfaced as its own counter, per DOC-55 §7.2.2: "N
 documents ingested" alone is not a complete answer, and "ingested but not yet
@@ -914,10 +952,11 @@ window (S-3.5), add a source, and trigger a run now. Editing writes through the
 same registered path as every other write, and remains subject to §6 (a source
 needing a credential the authority will not grant cannot be enabled).
 
-**S-10.9** "Extract entities" is a **separate, explicit control** with its own
-button and its own counter (§3, #4363). Under the recommended two-step reading it
-is the only way entities are ever produced, and the UI must make that obvious
-rather than incidental.
+**S-10.9** "Extract entities" from a **bound store** is a separate, explicit
+control with its own button and its own counter (§3 path 2, #4363). It is never
+scheduled, never implied by binding, and is declined with a reason for a
+path-1-owned index (S-2.6). Path-1 ingestion and path-2 extraction are labelled
+distinctly on this surface so a user can always tell which path produced what.
 
 ---
 
@@ -931,8 +970,8 @@ it. This document sequences against them and absorbs none of their scope:
 | Issue | What it owns | Relationship |
 |---|---|---|
 | #3904 (epic) | The universal importer: extraction layer, connector contract, assistant-driven crawl, deterministic CLI — DOC-55 | **Prerequisite.** §4, §7, and §10 build on its `Connector` contract. This document adds the roster, schedule, trust, and observability layers on top. |
-| #4283 | Index→OKG entity extraction (the "explicit extraction command") | **Owns step 2 of §3.** Not re-specified here. §3 tells it what it must remain. |
-| #4325 / PR #4523 | Per-assistant home directory and store root | **Owns §2.2's layout.** Q2 is a question *for* it, filed against it. |
+| #4283 | Index→OKG entity extraction (the "explicit extraction command") | **Owns path 2 of §3** in full. Not re-specified here; §3 constrains it in exactly three ways (S-2.2, S-2.6, S-2.10). |
+| #4325 / PR #4523 | Per-assistant home directory and store root | **Owns §2.2's layout.** Q1 is a question *for* it, filed against it. |
 | #4007 (epic) | Curated stores vs attached indexes (two-tier) | **Owns §9.2's tier distinction** via DOC-58. Depended on, not restated. |
 | #4289 | Index a new directory from the config UI, with overlap guard | **Owns fact (3) of §4.2.** The directory source's K-d half. |
 | #4363 | Extract-entities UI trigger | **Owns S-10.9's control.** |
@@ -961,7 +1000,7 @@ per-source schedule field; the refresh runner (§8.3) with failure, overlap, and
 staleness; the store's own index created with the store (§9.3). Sources: (a)
 `directory`, (b) `gmail`, (c) `drive` — all three reuse credentials this repo
 already holds. Net effect: **the sources that work today refresh on a
-user-managed schedule.** *Depends on Q1.*
+user-managed schedule.**
 
 **Phase C — The open extension point (plumbing).** `Locator::Connector`; the
 `SourceType` trait and registry; existing sources refactored behind it with
@@ -982,26 +1021,13 @@ construction; each still a capability grant.
 
 Genuine forks only. Each states what stays blocked until answered.
 
-### Q1 — Does "automatically extracted" mean documents, or entities as well?
+**Already decided, recorded here so it is not re-opened:** whether scheduled
+refresh conflicts with explicit-extraction-only. It does not — the owner resolved
+it on 2026-08-01 with *"extraction is an OPTION for any bound store."* OKG
+Sources (path 1) push automatically on a schedule; bound stores (path 2) extract
+only when explicitly asked. §3 specifies both. This is **not** an open question.
 
-**The contradiction.** The 2026-07-29 store model requires entities to enter the
-OKG *only via an explicit extraction command, never as a side effect*. The
-2026-08-01 OKG Sources statement requires sources to be *automatically extracted,
-placed in the OKG store, and indexed* on a user-managed schedule.
-
-**Recommendation:** the two-step reading (§3.2) — **documents flow
-automatically; entity distillation stays explicit**. It is supported by the code
-in its own words (`okg/mod.rs:1-10`: the engine is mechanical, *"the assistant
-stays free to do the part that actually needs a model — distilling those ingested
-items into people/organizations/events entities"*), by the verified absence of
-any LLM call in the ingest path, and it keeps both decisions intact.
-§3.3 tabulates what breaks under each alternative.
-
-**Blocked until answered:** §8's runner semantics, §11's counters, and all of
-Phase B. **Not decided here**, because the 2026-07-29 decision was recorded as
-eliminating a contamination hazard, and a spec pass does not override that.
-
-### Q2 — Is there an `assistants/` path segment, or not?
+### Q1 — Is there an `assistants/` path segment, or not?
 
 Your 2026-08-01 statement is explicit that the agent name sits **directly** under
 the trusty-agents home, with no intervening `assistants` segment. **In-flight PR
@@ -1019,7 +1045,7 @@ user-editable directories **later**.
 **Blocked until answered:** any path change. #4523 is the incumbent and should
 not be re-pointed on a spec's authority.
 
-### Q3 — `config.toml` or `config.yaml` in the assistant home?
+### Q2 — `config.toml` or `config.yaml` in the assistant home?
 
 The 2026-07-29 decision wrote `config.yaml`. PR #4523 built `config.toml`,
 citing an owner clarification of the same date and matching every other agent
@@ -1032,7 +1058,7 @@ Flagged rather than assumed because a YAML/TOML change was implied and never
 confirmed. **Blocked until answered:** nothing material; this is a
 confirm-or-correct.
 
-### Q4 — Do you accept the residual prompt-injection risk in §5.5?
+### Q3 — Do you accept the residual prompt-injection risk in §5.5?
 
 With the §5 boundary implemented, an assistant may still be influenced by
 attacker-authored text ingested through a legitimate source, fenced as untrusted.
@@ -1049,7 +1075,7 @@ answered:** Phase D in its entirety. This is flagged for explicit sign-off rathe
 than absorbed as a design assumption, because it is a security acceptance and
 those belong to you.
 
-### Q5 — Should scheduled refresh be a listener, or its own runner?
+### Q4 — Should scheduled refresh be a listener, or its own runner?
 
 §8.3 recommends **its own runner**, reusing `listeners::poll`'s *pattern*
 (detached task, interval floor, backoff, `enabled = false` default) without its
@@ -1059,7 +1085,7 @@ flag for free, but would force every scheduled refresh to either wake an
 assistant (contradicting the mechanical, model-free flow) or be an event that
 wakes nobody.
 
-**Blocked until answered:** Phase B's runner ticket. Lower stakes than Q1–Q4 —
+**Blocked until answered:** Phase B's runner ticket. Lower stakes than Q1–Q3 —
 recorded because it is a structural choice a reviewer could reasonably reverse,
 not because the recommendation is weak.
 
