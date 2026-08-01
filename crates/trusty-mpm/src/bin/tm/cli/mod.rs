@@ -421,6 +421,16 @@ pub(crate) enum Command {
     /// excludes is never resurrected (issue #2462's `[agents].exclude` roster
     /// filter). Requires `--reset-agents` (there is nothing "workspace" to
     /// reset without it).
+    ///
+    /// `--reconcile-skills` (issue #4605) is the same explicit reconciliation
+    /// path for SKILLS: a bundled skill absent from its deploy target's
+    /// manifest is classified project-custom by the tier planner and dropped
+    /// from every deploy before the ownership check runs, so no `tm` command
+    /// can reach it and a shipped fix reaches zero sessions. Passing the flag
+    /// adopts those skills — and ONLY those whose name matches a currently
+    /// bundled skill — into each tier's manifest and refreshes them, after
+    /// copying every file it touches under
+    /// `~/.trusty-mpm/backup-reconcile-skills-<timestamp>/`.
     Install {
         /// Reset user-owned (seed-once) artifacts back to the shipped
         /// default. Framework-owned artifacts always refresh on install
@@ -437,6 +447,11 @@ pub(crate) enum Command {
         /// `.claude/agents/` (issue #2508). Requires `--reset-agents`.
         #[arg(long, requires = "reset_agents")]
         reset_agents_workspaces: bool,
+        /// Adopt bundled skills a deploy tier does not track and refresh them
+        /// (issue #4605). Backs up every file it touches first. Never touches
+        /// a skill whose name matches nothing bundled.
+        #[arg(long)]
+        reconcile_skills: bool,
     },
     /// Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop).
     ///

@@ -1170,6 +1170,7 @@ async fn doctor_endpoint_returns_report() {
         "output_style_legacy_ids",
         "deployment",
         "skill_staleness",
+        "skill_unmanaged",
         "legacy_sources",
         "agent_skills",
         "agent_skills_prose_hints",
