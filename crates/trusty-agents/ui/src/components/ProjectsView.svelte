@@ -31,6 +31,7 @@
     Pause,
     Trash2,
     Link2,
+    FileText,
   } from 'lucide-svelte';
   import {
     projectsList,
@@ -44,6 +45,7 @@
   } from '../stores/app';
   import { relativeTime, githubUrl } from '../lib/utils';
   import { recaps } from '../stores/recap';
+  import ProjectFilesPanel from './ProjectFilesPanel.svelte';
 
   const dispatch = createEventDispatcher<{ navigate: { view: 'chat' } }>();
 
@@ -60,6 +62,21 @@
   let sessionError = '';
   let attachModalName: string | null = null;
   let attachCopied = false;
+
+  /**
+   * #4359: projects whose Documents drawer is open. Kept as an explicit opt-in
+   * set (rather than rendering the panel with every expanded card) so browsing
+   * a project root is a deliberate act — the file routes are per-project I/O,
+   * not something an expand should trigger for every card on screen.
+   */
+  let documentsOpen = new Set<string>();
+
+  function toggleDocuments(id: string) {
+    const next = new Set(documentsOpen);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    documentsOpen = next;
+  }
 
   // #458: Add-project-by-path form state.
   let showAddForm = false;
@@ -705,14 +722,32 @@
                   </p>
                 {/if}
 
-                <button
-                  type="button"
-                  on:click={() => newSession(project)}
-                  class="mt-2 inline-flex items-center gap-1 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/60 hover:border-foundry-light-primary dark:hover:border-foundry-primary hover:text-foundry-light-primary dark:hover:text-foundry-primary transition-colors"
-                >
-                  <Plus class="h-3 w-3" />
-                  New Session
-                </button>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    on:click={() => newSession(project)}
+                    class="inline-flex items-center gap-1 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/60 hover:border-foundry-light-primary dark:hover:border-foundry-primary hover:text-foundry-light-primary dark:hover:text-foundry-primary transition-colors"
+                  >
+                    <Plus class="h-3 w-3" />
+                    New Session
+                  </button>
+                  <!-- #4359: markdown documents in this project root. -->
+                  <button
+                    type="button"
+                    on:click={() => toggleDocuments(project.id)}
+                    class="inline-flex items-center gap-1 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-1.5 text-xs text-foundry-light-muted dark:text-foundry-text/60 hover:border-foundry-light-primary dark:hover:border-foundry-primary hover:text-foundry-light-primary dark:hover:text-foundry-primary transition-colors"
+                    aria-expanded={documentsOpen.has(project.id)}
+                  >
+                    <FileText class="h-3 w-3" />
+                    Documents
+                  </button>
+                </div>
+
+                {#if documentsOpen.has(project.id)}
+                  <div class="mt-3 border-t border-foundry-light-border dark:border-foundry-border pt-3">
+                    <ProjectFilesPanel projectId={project.id} />
+                  </div>
+                {/if}
               </div>
             {/if}
           </li>
