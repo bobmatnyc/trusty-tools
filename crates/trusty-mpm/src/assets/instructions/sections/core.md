@@ -38,7 +38,7 @@ headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
 
 | Action | Limit |
 |--------|-------|
-| Git ops | `git status/add/commit/log/diff/branch/pull/stash` |
+| Git ops | `git status/add/commit/log/diff/pull/stash` |
 | Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
 | Grep/Glob | 3-5 orientation searches |
 | TodoWrite | Progress tracking |

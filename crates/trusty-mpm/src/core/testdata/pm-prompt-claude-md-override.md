@@ -38,7 +38,7 @@ headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
 
 | Action | Limit |
 |--------|-------|
-| Git ops | `git status/add/commit/log/diff/branch/pull/stash` |
+| Git ops | `git status/add/commit/log/diff/pull/stash` |
 | Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
 | Grep/Glob | 3-5 orientation searches |
 | TodoWrite | Progress tracking |
@@ -582,7 +582,8 @@ nothing else:
 
 Three tokens are `fixed` tier and can never be overridden: `IDENTITY`,
 `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`. A marker aimed at
-one of these is silently ignored — the bundled section stays in force.
+one of these is declined and logged as a warning — the bundled section stays
+in force.
 
 Trigger phrases -> act immediately, always in `CLAUDE.md`:
 - "remember/always/never/for this project" -> plain `CLAUDE.md` prose (no
@@ -592,7 +593,8 @@ Trigger phrases -> act immediately, always in `CLAUDE.md`:
 - "memory behavior" -> `MEMORY` block
 
 After writing: confirm the marker pair (or the added prose), note "takes
-effect at next session startup." Verify the resolved prompt:
+effect at next session startup." Inspect the markers in place:
+`grep -n 'TRUSTY-MPM:' CLAUDE.md`. Verify the resolved prompt:
 `tm session instructions` (or read `.trusty-mpm/last-instructions.md`).
 
 The `.trusty-mpm/` override files (`.trusty-mpm/INSTRUCTIONS.md`,
