@@ -10,22 +10,38 @@
 //! different shapes.
 //! What: `register` wires both methods into a [`Router`]; `ping` returns
 //! `{"pong": true}`; `health` returns [`health_payload`]'s server name,
-//! crate version, and a static `"ok"` status.
+//! crate version, static `"ok"` status, pid, and the daemon's project
+//! binding.
 //! Test: `methods::tests::*`.
+
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router, RpcError};
 
 /// Register every proof-of-life method onto `router`.
 ///
 /// Why: keeps `crate::serve::build_router` a one-line call as more method
 /// groups (session/task/harness) register themselves the same way later.
-/// What: registers `"ping"` and `"health"`.
-/// Test: `methods_register_wires_ping_and_health`.
-pub fn register(router: &mut Router) {
+/// `binding` is taken here — rather than `health` staying a bare `fn` — so
+/// the daemon can REPORT which project it serves (#4512): a daemon binds
+/// exactly one `ProjectBinding` for its whole life, and a client that
+/// auto-attaches to a daemon it did not start has no other way to tell
+/// whether it is about to operate against the wrong project.
+/// What: registers `"ping"` and `"health"`; `binding` is shared into the
+/// `health` closure behind an `Arc` so answering a probe never clones a
+/// `PathBuf`.
+/// Test: `methods_register_wires_ping_and_health`,
+/// `health_reports_the_daemons_project_binding`.
+pub fn register(router: &mut Router, binding: ProjectBinding) {
     router.register("ping", ping);
-    router.register("health", health);
+    let binding = Arc::new(binding);
+    router.register("health", move |params: Value, ctx: ConnectionContext| {
+        let binding = binding.clone();
+        async move { health(&binding, params, ctx).await }
+    });
 }
 
 /// `ping` — returns `{"pong": true}` regardless of `params`.
@@ -38,33 +54,54 @@ async fn ping(_params: Value, _ctx: ConnectionContext) -> Result<Value, RpcError
     Ok(json!({"pong": true}))
 }
 
-/// `health` — returns server identity, crate version, and status.
+/// `health` — returns server identity, crate version, status, and binding.
 ///
 /// Why: a slightly richer proof-of-life than `ping` that a caller can use to
-/// confirm which build of `tcode` it is talking to.
+/// confirm which build of `tcode` — and, since #4512, which PROJECT — it is
+/// talking to.
 /// What: ignores `params` and the connection context, never fails; the
 /// payload is [`health_payload`].
-/// Test: `health_returns_server_identity`.
-async fn health(_params: Value, _ctx: ConnectionContext) -> Result<Value, RpcError> {
-    Ok(health_payload())
+/// Test: `health_returns_server_identity`,
+/// `health_reports_the_daemons_project_binding`.
+async fn health(
+    binding: &ProjectBinding,
+    _params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    Ok(health_payload(binding))
 }
 
-/// The shared `health` payload: `{"server","version","status"}`.
+/// The shared `health` payload:
+/// `{"server","version","status","pid","binding"}`.
 ///
 /// Why: pulled out of the `health` JSON-RPC handler so
 /// `crate::serve::http::health_handler` (`GET /health`) can return the
 /// identical shape without duplicating the `json!` literal — one source of
 /// truth for what "healthy" means over either transport.
+///
+/// `pid` and `binding` are ADDITIVE (#4512) — every field that was here
+/// before is unchanged, so an older client that only reads
+/// `server`/`version`/`status` keeps working. They exist because a daemon
+/// binds exactly one `ProjectBinding` at `build_router` time and holds it for
+/// its whole life, while `tcode tui` now AUTO-ATTACHES to whatever daemon
+/// discovery finds. Without the binding on the wire, a TUI launched in
+/// project B silently drives project A's daemon; `pid` is what lets an
+/// operator (or a test) identify and signal the exact process it found.
 /// What: `server = "tcode"`, `version = crate::VERSION`
-/// (`CARGO_PKG_VERSION`), `status = "ok"`. Never fails — there is no
-/// fallible state to check yet; a future ticket that adds real readiness
-/// checks (e.g. project root validity) will extend this function.
-/// Test: `health_payload_has_expected_shape`.
-pub(crate) fn health_payload() -> Value {
+/// (`CARGO_PKG_VERSION`), `status = "ok"`, `pid = std::process::id()`,
+/// `binding = ProjectBinding::to_json()` (the SAME `{state, root}` wire shape
+/// `Session` already serialises, not a second spelling). Never fails — there
+/// is no fallible state to check; a future ticket that adds real readiness
+/// checks will extend this function.
+/// Test: `health_payload_has_expected_shape`,
+/// `health_payload_reports_a_bound_project_root`.
+pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
     json!({
         "server": "tcode",
         "version": crate::VERSION,
         "status": "ok",
+        "pid": std::process::id(),
+        "binding": binding.to_json(),
     })
 }
 
@@ -90,7 +127,7 @@ mod tests {
     /// `health` must report the server name, version, and "ok" status.
     #[tokio::test]
     async fn health_returns_server_identity() {
-        let result = health(Value::Null, test_ctx())
+        let result = health(&ProjectBinding::None, Value::Null, test_ctx())
             .await
             .expect("health must not fail");
         assert_eq!(result["server"], "tcode");
@@ -98,14 +135,45 @@ mod tests {
         assert_eq!(result["version"], crate::VERSION);
     }
 
-    /// `health_payload` (shared with the HTTP `GET /health` route) must
-    /// carry the same three fields.
+    /// `health_payload` (shared with the HTTP `GET /health` route) must carry
+    /// the original three fields UNCHANGED plus #4512's additive `pid` and
+    /// `binding` — pinned so the backward-compatible promise in this
+    /// function's docs can't be broken by a later edit.
     #[test]
     fn health_payload_has_expected_shape() {
-        let v = health_payload();
+        let v = health_payload(&ProjectBinding::None);
         assert_eq!(v["server"], "tcode");
         assert_eq!(v["status"], "ok");
         assert_eq!(v["version"], crate::VERSION);
+        assert_eq!(v["pid"], std::process::id());
+        assert_eq!(v["binding"]["state"], crate::binding::STATE_PROJECTLESS);
+        assert!(v["binding"]["root"].is_null());
+    }
+
+    /// A BOUND daemon must publish its project root, since that is the field
+    /// `cli::daemon_autospawn` compares against the client's own project
+    /// before attaching (#4512).
+    #[test]
+    fn health_payload_reports_a_bound_project_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binding = ProjectBinding::resolve(Some(dir.path().to_path_buf())).expect("must bind");
+        let v = health_payload(&binding);
+        assert_eq!(
+            v["binding"]["root"],
+            json!(binding.label().expect("a bound binding has a root"))
+        );
+    }
+
+    /// The `health` METHOD (not just the payload helper) must carry the
+    /// daemon's binding, so the STDIO transport reports it too.
+    #[tokio::test]
+    async fn health_reports_the_daemons_project_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let binding = ProjectBinding::resolve(Some(dir.path().to_path_buf())).expect("must bind");
+        let result = health(&binding, Value::Null, test_ctx())
+            .await
+            .expect("health must not fail");
+        assert_eq!(result["binding"], binding.to_json());
     }
 
     /// `register` must wire both methods so the router recognises them
@@ -115,7 +183,7 @@ mod tests {
         use trusty_common::mcp::Request;
 
         let mut router = Router::new();
-        register(&mut router);
+        register(&mut router, ProjectBinding::None);
 
         for method in ["ping", "health"] {
             let req = Request {

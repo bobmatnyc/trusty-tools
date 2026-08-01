@@ -107,14 +107,20 @@ enum Command {
         port: Option<u16>,
     },
 
-    /// Launch the interactive TUI REPL against a running `tcode serve --http`
-    /// daemon (#4424; DOC-50 §4.1, AC-2.4).
+    /// Launch the interactive TUI REPL, starting a `tcode serve --http`
+    /// daemon if one isn't already running (#4424; auto-spawn #4512).
     ///
     /// The daemon is located by `TCODE_DAEMON_URL`, else the `http_addr`
-    /// discovery file, and is liveness-pinged before use. This MVP does NOT
-    /// auto-spawn one (deliberately deferred, DOC-50 §4.1): start
-    /// `tcode serve --http` first, or the command exits with an actionable
-    /// message. See `crate::cli::tui` for the wiring.
+    /// discovery file, and is liveness-pinged before use. When nothing
+    /// answers, one is STARTED automatically (#4512, reversing DOC-50 §4.1's
+    /// deferral) — and LEFT RUNNING when the REPL exits, since the daemon
+    /// owns PM lifecycle and agent dispatch and this TUI is only one of its
+    /// attached clients. A `TCODE_DAEMON_URL` that is set but unreachable is
+    /// an error rather than a spawn, so an explicit address is never quietly
+    /// replaced with a different one, and a daemon bound to a DIFFERENT
+    /// project than `--project` is refused rather than attached to. See
+    /// `crate::cli::tui` for the wiring and `crate::cli::daemon_autospawn`
+    /// for the policy.
     Tui {
         /// Path to the project root the REPL's session binds to.
         ///
@@ -377,8 +383,11 @@ async fn main() -> Result<()> {
         } => run_serve(project, stdio, http, port).await,
 
         // #4424: the launch point for the TUI REPL — reuses `run_thin_client`
-        // so a discovery failure prints `tcode tui: <actionable message>` and
-        // exits nonzero, exactly like every other subcommand's failure.
+        // so a daemon-resolution failure prints `tcode tui: <actionable
+        // message>` and exits nonzero, exactly like every other subcommand's
+        // failure.
+        // #4512: that failure is now rare — a missing daemon is started, not
+        // reported.
         Command::Tui { project } => run_thin_client(cli::tui::run(project), "tui").await,
 
         Command::RunTask {
