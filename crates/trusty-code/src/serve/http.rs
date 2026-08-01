@@ -58,23 +58,27 @@ use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 use trusty_common::mcp::Response;
 
+use crate::binding::ProjectBinding;
 use crate::jsonrpc::{ConnectionContext, Router};
 use crate::serve::methods::health_payload;
 use crate::serve::rest;
 use crate::session::SessionRegistry;
 use crate::workstreams::SharedWorkstreamStore;
 
-/// Shared axum state: the JSON-RPC router (for `POST /rpc`) and the session
+/// Shared axum state: the JSON-RPC router (for `POST /rpc`), the session
 /// registry (for the SSE route, which reads it directly rather than going
-/// through the router).
+/// through the router), and the daemon's project binding (for `GET /health`).
 ///
-/// Why: both fields are `Arc` so cloning per-request (axum requires `State`
-/// to be `Clone`) is cheap and every route sees the same daemon-wide
-/// instances.
+/// Why: every field is an `Arc` so cloning per-request (axum requires
+/// `State` to be `Clone`) is cheap and every route sees the same daemon-wide
+/// instances. `binding` is here rather than resolved per request because a
+/// daemon binds exactly ONE project for its whole life — that immutability
+/// is precisely what makes it worth publishing on `/health` (#4512).
 #[derive(Clone)]
 struct HttpState {
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
+    binding: Arc<ProjectBinding>,
 }
 
 /// Build the pure axum router (no listener bound) exposing `POST /rpc`,
@@ -125,10 +129,12 @@ pub fn build_axum_router(
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
+    binding: Arc<ProjectBinding>,
 ) -> AxumRouter {
     let state = HttpState {
         router: router.clone(),
         sessions,
+        binding,
     };
     let core = AxumRouter::new()
         .route("/rpc", post(rpc_handler))
@@ -179,10 +185,16 @@ async fn rpc_handler(State(state): State<HttpState>, body: Bytes) -> Json<Respon
 /// confirm a daemon is alive. Reusing [`health_payload`] — the exact
 /// function the `health` JSON-RPC method calls — keeps the two transports
 /// from drifting into two different health shapes.
-/// What: always returns HTTP 200 with `{"server","version","status"}`.
-/// Test: `http_health_matches_jsonrpc_health_payload`.
-async fn health_handler() -> Json<serde_json::Value> {
-    Json(health_payload())
+///
+/// #4512: this is also the route `tcode tui`'s auto-attach reads the
+/// daemon's `binding` from before deciding whether attaching would put it on
+/// the wrong project, which is why the handler now needs `State`.
+/// What: always returns HTTP 200 with
+/// `{"server","version","status","pid","binding"}`.
+/// Test: `http_health_matches_jsonrpc_health_payload`,
+/// `http_health_reports_the_daemons_project_binding`.
+async fn health_handler(State(state): State<HttpState>) -> Json<serde_json::Value> {
+    Json(health_payload(&state.binding))
 }
 
 /// `GET /sessions/{id}/events` — Server-Sent Events stream of a session's
@@ -275,6 +287,9 @@ pub async fn run_http(
     sessions: Arc<SessionRegistry>,
     workstreams: SharedWorkstreamStore,
     port: u16,
+    // #4512: published on `GET /health` so an auto-attaching client can tell
+    // WHICH project this daemon serves before it starts driving it.
+    binding: Arc<ProjectBinding>,
 ) -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)
@@ -301,7 +316,7 @@ pub async fn run_http(
         );
     }
 
-    let app = build_axum_router(Arc::new(router), sessions, workstreams);
+    let app = build_axum_router(Arc::new(router), sessions, workstreams, binding);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await

@@ -209,12 +209,28 @@ inline. Detailed source citations live in [COMPONENTS.md](./COMPONENTS.md) and
 
 ### 4.10 Instruction assembly & customization
 
+> **Stale as of 2026-08-01.** This table (last reviewed 2026-05-29) predates
+> both the #381 fix (project overrides became real reads, not advertised
+> no-ops) and #4183 (the four monolithic files below were replaced by
+> per-section files composed from a JSON manifest). FR-IN-4's "no Rust code
+> reads these files" is no longer true: the five-file `.trusty-mpm/` surface
+> is read by
+> [`instruction_overrides.rs`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60).
+> Project customization is named sections in the root `CLAUDE.md`, added by
+> #4324 and read first
+> ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
+> `HOST_FILES[0]` wins). The `.trusty-mpm/` files remain in the current
+> binary's read paths;
+> [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
+> their removal. The rest of this table is left as the historical
+> 2026-05-29 record rather than rewritten row-by-row.
+
 | Req | Intent | Status |
 |---|---|---|
 | FR-IN-1 | Every launched session receives identical, version-controlled PM instructions (`PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION → BASE_PM`, `BASE_PM` last as the non-overridable floor). | ✅ — compile-time `include_str!` concat (`instruction_pipeline.rs:31-72`), passed via `--append-system-prompt-file`. |
 | FR-IN-2 | Runtime merge composes framework + delegation authority (generated from deployed agents) + project `CLAUDE.md`. | ✅ — `build_instructions` (`instruction_pipeline.rs:163-204`); stash at `.trusty-mpm/last-instructions.md`. |
 | FR-IN-3 | First-launch instruction stash matches the actual system prompt; `tm install` does not overwrite the assembled prompt with a stub. | 🟡 — defects: stash diverges (**#382**), `tm install` overwrites the prompt with a 4-line stub (**#383**). |
-| FR-IN-4 | Project override system: `.trusty-mpm/{INSTRUCTIONS,AGENT_DELEGATION,WORKFLOW,MEMORY,PM_INSTRUCTIONS_DEPLOYED}.md` customize/replace PM behaviour. | 🔵 — advertised in `BASE_PM.md:17-33`; **no Rust code reads these files** (only `CLAUDE.md` is read). Trust gap. |
+| FR-IN-4 | Project override system: `.trusty-mpm/{INSTRUCTIONS,AGENT_DELEGATION,WORKFLOW,MEMORY,PM_INSTRUCTIONS_DEPLOYED}.md` customize/replace PM behaviour. | 🔵 — advertised in `BASE_PM.md:17-33`; **no Rust code reads these files** (only `CLAUDE.md` is read). Trust gap. *(Superseded — see stale-banner above: these files ARE read as of the #381 fix and remain live.)* |
 | FR-IN-5 | `PM_INSTRUCTIONS_VERSION` marker gates instruction upgrades. | 🔵 — marker present (`= 0014`) but inert. Tracked by **#384**. |
 
 ### 4.11 Memory routing & protection

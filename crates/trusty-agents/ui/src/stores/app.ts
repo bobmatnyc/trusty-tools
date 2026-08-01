@@ -10,6 +10,12 @@ import {
 } from '../lib/roster';
 import type { ModelsCatalogResponse, PickerEntry } from '../lib/models';
 import { fillDeltaIntoList } from '../lib/chatStream';
+// #4281: selected-assistant persistence — see `lib/selectedAssistant.ts`.
+import {
+  persistSelectedAssistant,
+  readSelectedAssistant,
+  reconcileSelectedAssistant,
+} from '../lib/selectedAssistant';
 
 /**
  * Why: The sidebar needs a single source of truth for the list of chat
@@ -141,8 +147,21 @@ export const activeProjectId = writable<string>('ctrl');
  * this is `null`, rather than forwarding it.
  * Test: `AgentSwitcher.svelte` sets this on row click; `InputArea.svelte`
  * reads it into the submission payload (only when non-null).
+ *
+ * #4281: the selection now SURVIVES RELAUNCH. This store is the persistence
+ * surface — seeded from localStorage at import time and written back on every
+ * change by the subscription below, so any selection site (the header
+ * switcher, the sidebar's workstream resume, and #4404's assistant picker)
+ * sticks by simply calling `activeAgentId.set(id)`; there is no separate
+ * "save" call to forget. `null` remains Concierge on both sides of the codec.
  */
-export const activeAgentId = writable<string | null>(null);
+export const activeAgentId = writable<string | null>(readSelectedAssistant());
+
+// #4281: write-through, so no current or future selection site can forget to
+// persist. Subscribing (rather than wrapping every `.set`) makes the store
+// itself the single choke point; the first, synchronous invocation just
+// re-writes the value we seeded from.
+activeAgentId.subscribe((id) => persistSelectedAssistant(id));
 
 /** `GET /api/agents` catalog (`.trusty-agents/agents/*.toml`), #407. */
 export const catalogAgents = writable<CatalogAgent[]>([]);
@@ -167,6 +186,30 @@ export const agentRoster = derived(
   [catalogAgents, overlayAgents],
   ([$catalogAgents, $overlayAgents]) => buildRoster($catalogAgents, $overlayAgents),
 );
+
+/**
+ * Why (#4281): a persisted selection is a pointer into a roster the user can
+ * change between launches, so it has to be re-validated once the real roster
+ * lands — otherwise a deleted assistant would ride into `TaskRequest.agent`
+ * and fail on the user's first message. Reconciling HERE (a subscription on
+ * the merged roster) rather than in a component keeps the guarantee
+ * independent of which surface happens to be mounted: the picker (#4404), the
+ * header switcher, and a headless boot all get the same behaviour. An empty
+ * roster is deliberately NOT treated as stale — see
+ * `reconcileSelectedAssistant`'s doc comment for why "not loaded" must never
+ * be mistaken for "gone".
+ * What: demotes a stale selection to Concierge (`null`) as soon as a
+ * populated roster contradicts it; a no-op in every other case (the
+ * conditional `set` also keeps this from re-notifying on unrelated catalog
+ * refreshes).
+ * Test: `stores/selectedAssistant.store.test.ts` — the stale/empty-roster
+ * cases.
+ */
+agentRoster.subscribe((roster) => {
+  const current = get(activeAgentId);
+  const reconciled = reconcileSelectedAssistant(current, roster);
+  if (reconciled !== current) activeAgentId.set(reconciled);
+});
 
 /**
  * Why: `GET /api/agents` is a plain REST endpoint (unlike the overlay tier),

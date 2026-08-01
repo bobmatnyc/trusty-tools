@@ -50,6 +50,19 @@
 #     check_line_cap.sh's own classification (basename `tests.rs`, or ending
 #     `_test.rs`/`_tests.rs`, or a `/tests/` or `/benches/` path segment). A
 #     test-only edit has no user-visible change to describe.
+#   - the crate no longer EXISTS at HEAD — i.e. the PR deleted it outright
+#     (`crates/<crate>/Cargo.toml` is gone). Deleting a crate deletes every
+#     `crates/<crate>/src/**` file, which reads as a source change and demanded
+#     a fragment; but the fragment would have to live in the very directory
+#     being removed, and `assemble-changelog.sh <crate>` cannot run for a crate
+#     that is not there. The requirement was unsatisfiable, so a crate deletion
+#     could never go green (found by #3732, which dissolved `cto-assistant`).
+#     This exempts the DELETED crate only. Every crate that survives the PR is
+#     still checked exactly as before, so the removal is still recorded — in
+#     the surviving crate whose users are the ones who notice it (for #3732,
+#     `crates/trusty-agents/changelog.d/`). A crate whose src/** merely shrank
+#     is NOT exempt: the Cargo.toml probe is what distinguishes a dissolution
+#     from a large deletion inside a crate that still exists.
 #   - the path is under a `testdata/` directory. Golden fixtures live in
 #     `src/**/testdata/` in this workspace, so regenerating a snapshot counted as
 #     a source change and demanded a changelog fragment for a file that is, by
@@ -183,6 +196,10 @@ while IFS= read -r path; do
       crate="$(printf '%s' "$path" | sed -E 's#^crates/([^/]+)/src/.*#\1#')"
       [[ "$crate" == */* ]] && continue
       is_test_path "$path" && continue
+      # The crate was dissolved by this PR — there is no changelog.d/ left to
+      # put a fragment in, and the assembler cannot run for it. See the
+      # "crate no longer EXISTS at HEAD" exemption above.
+      git cat-file -e "HEAD:crates/${crate}/Cargo.toml" 2>/dev/null || continue
       needs="${needs}${crate}"$'\n'
       ;;
   esac
@@ -261,7 +278,8 @@ assembles the fragments (scripts/assemble-changelog.sh).
 
 Preview what will be released:  bash scripts/assemble-changelog.sh <crate> --stdout
 
-Exempt: docs-only, CI-only, test-only, and testdata/ changes.
+Exempt: docs-only, CI-only, test-only, and testdata/ changes, plus a crate this
+PR deleted outright (record the removal in a surviving crate's fragment).
 EOF
   exit 1
 fi

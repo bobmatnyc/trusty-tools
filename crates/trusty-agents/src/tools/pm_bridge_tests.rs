@@ -514,3 +514,265 @@ fn widened_schema_names_no_backend_or_roster() {
     }
     assert!(schema.contains("specialist"));
 }
+
+// =====================================================================
+// The addressable coding PM (#4350) and execution style (#4349)
+// =====================================================================
+
+/// The reserved name reaches the coding lane WITHOUT any allow-set grant —
+/// `coding-pm` is not on the non-coding floor and is not resolved through it.
+#[tokio::test]
+async fn coding_pm_is_addressable_without_a_non_coding_grant() {
+    let backend = Arc::new(RecordingBackend::new("proposed diff"));
+    // No `with_allow_set`: named NON-CODING targeting stays fully disabled.
+    let tool = PmBridgeTool::new(backend.clone());
+
+    let result = tool
+        .execute(json!({
+            "task": "add a null check to the parser",
+            "specialist": "coding-pm",
+        }))
+        .await;
+
+    assert!(!result.is_error(), "expected success: {}", result.content());
+    let invoked = backend.invoked_with.lock().unwrap();
+    assert_eq!(invoked.len(), 1);
+    assert_eq!(invoked[0].0, BridgeRoute::Tcode);
+    // The structural guarantee: no caller string crosses into the agent slot.
+    assert_eq!(
+        invoked[0].1, None,
+        "the coding lane must receive no caller-supplied agent name"
+    );
+}
+
+/// Naming the coding PM adds NO reach: the backend call is identical to the
+/// unnamed coding dispatch the router already produces for the same task.
+#[tokio::test]
+async fn naming_the_coding_pm_matches_the_unnamed_coding_dispatch() {
+    let task = "fix the failing unit test in parser.rs";
+
+    let unnamed_backend = Arc::new(RecordingBackend::new("ok"));
+    PmBridgeTool::new(unnamed_backend.clone())
+        .execute(json!({ "task": task }))
+        .await;
+
+    let named_backend = Arc::new(RecordingBackend::new("ok"));
+    PmBridgeTool::new(named_backend.clone())
+        .execute(json!({ "task": task, "specialist": "coding-pm" }))
+        .await;
+
+    let unnamed = unnamed_backend.invoked_with.lock().unwrap();
+    let named = named_backend.invoked_with.lock().unwrap();
+    assert_eq!(
+        (unnamed[0].0, &unnamed[0].1, &unnamed[0].2),
+        (named[0].0, &named[0].1, &named[0].2),
+        "addressing the coding PM must not change what crosses the boundary"
+    );
+}
+
+/// A coding-PM result is wrapped in the propose-only envelope, same as any
+/// other cross-product target.
+#[tokio::test]
+async fn coding_pm_result_is_wrapped_as_a_proposal() {
+    let backend = Arc::new(RecordingBackend::new("here is a diff"));
+    let tool = PmBridgeTool::new(backend);
+
+    let result = tool
+        .execute(json!({ "task": "rename the field", "specialist": "coding-pm" }))
+        .await;
+
+    assert!(!result.is_error());
+    assert!(
+        result.content().contains("PROPOSAL"),
+        "{}",
+        result.content()
+    );
+    assert!(
+        result.content().contains("\"disposition\": \"proposal\""),
+        "{}",
+        result.content()
+    );
+}
+
+/// A non-coding name is STILL denied when no allow-set is configured — making
+/// the coding PM addressable did not open the named-specialist lane.
+#[tokio::test]
+async fn the_coding_pm_name_does_not_open_the_non_coding_lane() {
+    let backend = Arc::new(RecordingBackend::new("never"));
+    let tool = PmBridgeTool::new(backend.clone());
+
+    for name in ["research", "ticketing", "engineer", "coding_pm", "pm"] {
+        let result = tool
+            .execute(json!({ "task": "do the thing", "specialist": name }))
+            .await;
+        assert!(
+            result.is_error(),
+            "{name} must be denied: {}",
+            result.content()
+        );
+    }
+    assert!(
+        backend.invoked_with.lock().unwrap().is_empty(),
+        "a denial must dispatch nothing"
+    );
+}
+
+/// **AC-9 / SM-11.** Style never touches the tool surface: for the SAME task,
+/// all three styles produce the same route, the same target, and the same
+/// RBAC restriction. Only the advisory preamble text differs.
+#[tokio::test]
+async fn style_does_not_change_the_route_target_or_rbac_surface() {
+    let mut observed = Vec::new();
+    for style in ["hack", "vibe", "engineer"] {
+        let backend = Arc::new(RecordingBackend::new("ok"));
+        let tool = PmBridgeTool::new(backend.clone())
+            .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics]);
+        tool.execute(json!({
+            "task": "add a null check to the parser",
+            "specialist": "coding-pm",
+            "handoff": { "style": style },
+        }))
+        .await;
+        assert_eq!(
+            tool.restricted_tiers(),
+            &[ServiceTier::ReadOnly, ServiceTier::Analytics],
+            "style must not change the RBAC surface"
+        );
+        let invoked = backend.invoked_with.lock().unwrap();
+        observed.push((invoked[0].0, invoked[0].1.clone()));
+    }
+    assert!(
+        observed.windows(2).all(|w| w[0] == w[1]),
+        "style changed the dispatch surface: {observed:?}"
+    );
+}
+
+/// The advisory policy block travels with the task, and reports the SM-9
+/// fallback rather than pretending `vibe` ran.
+#[tokio::test]
+async fn a_styled_coding_delegation_carries_the_policy_preamble() {
+    let backend = Arc::new(RecordingBackend::new("ok"));
+    let tool = PmBridgeTool::new(backend.clone());
+
+    let result = tool
+        .execute(json!({
+            "task": "add a null check to the parser",
+            "specialist": "coding-pm",
+            "handoff": { "style": "vibe" },
+        }))
+        .await;
+
+    let invoked = backend.invoked_with.lock().unwrap();
+    let body = &invoked[0].2;
+    assert!(body.contains("Delegation policy"), "{body}");
+    assert!(
+        body.contains("Effective execution style: engineer"),
+        "{body}"
+    );
+    assert!(body.contains("tier-unimplemented"), "{body}");
+    assert!(body.ends_with("add a null check to the parser"), "{body}");
+    // …and the caller is told in the RESULT too (DOC-62 §3.4 / AC-4).
+    assert!(
+        result.content().contains("tier-unimplemented"),
+        "{}",
+        result.content()
+    );
+}
+
+/// AC-2: with no style anywhere, the task body is byte-identical to today's.
+#[tokio::test]
+async fn an_unstyled_dispatch_carries_no_policy_block() {
+    let backend = Arc::new(RecordingBackend::new("ok"));
+    let tool = PmBridgeTool::new(backend.clone());
+
+    let result = tool
+        .execute(json!({ "task": "fix the failing unit test in parser.rs" }))
+        .await;
+
+    let invoked = backend.invoked_with.lock().unwrap();
+    assert_eq!(invoked[0].2, "fix the failing unit test in parser.rs");
+    assert!(!result.content().contains("Delegation policy"));
+}
+
+/// The configured default is the middle precedence level and is honoured when
+/// the caller supplies nothing.
+#[tokio::test]
+async fn config_default_style_is_used_when_the_caller_supplies_none() {
+    let backend = Arc::new(RecordingBackend::new("ok"));
+    let tool = PmBridgeTool::new(backend.clone()).with_default_style(Some(
+        crate::tools::execution_style::ExecutionStyle::Engineer,
+    ));
+
+    tool.execute(json!({ "task": "fix the failing unit test in parser.rs" }))
+        .await;
+
+    let invoked = backend.invoked_with.lock().unwrap();
+    assert!(
+        invoked[0].2.contains("Effective execution style: engineer"),
+        "{}",
+        invoked[0].2
+    );
+}
+
+/// caller > config: a per-delegation value outranks the configured default —
+/// but still cannot lower ceremony below the lane's floor.
+#[tokio::test]
+async fn a_caller_style_beats_the_config_default() {
+    let backend = Arc::new(RecordingBackend::new("ok"));
+    let tool = PmBridgeTool::new(backend.clone()).with_default_style(Some(
+        crate::tools::execution_style::ExecutionStyle::Engineer,
+    ));
+
+    tool.execute(json!({
+        "task": "add a null check to the parser",
+        "specialist": "coding-pm",
+        "handoff": { "style": "hack" },
+    }))
+    .await;
+
+    let invoked = backend.invoked_with.lock().unwrap();
+    let body = &invoked[0].2;
+    assert!(body.contains("Requested style was hack"), "{body}");
+    // …and the callee floor plus the unimplemented tier still raise it.
+    assert!(
+        body.contains("Effective execution style: engineer"),
+        "{body}"
+    );
+}
+
+/// An unrecognized style is a recoverable caller error and dispatches nothing.
+#[tokio::test]
+async fn an_unknown_style_is_rejected_before_dispatch() {
+    let backend = Arc::new(RecordingBackend::new("never"));
+    let tool = PmBridgeTool::new(backend.clone());
+
+    let result = tool
+        .execute(json!({
+            "task": "add a null check",
+            "handoff": { "style": "turbo" },
+        }))
+        .await;
+
+    assert!(result.is_error(), "{}", result.content());
+    assert!(
+        backend.invoked_with.lock().unwrap().is_empty(),
+        "nothing may be dispatched on an invalid style"
+    );
+}
+
+/// The schema names the coding PM (so the model can address it) and enumerates
+/// the closed style vocabulary, while still naming no backend product.
+#[test]
+fn schema_advertises_the_coding_pm_and_the_closed_style_vocabulary() {
+    let tool = PmBridgeTool::new(Arc::new(RecordingBackend::new("ok")));
+    let schema = serde_json::to_string(&tool.schema()).expect("schema serializes");
+    assert!(schema.contains("coding-pm"), "{schema}");
+    assert!(schema.contains("hack"), "{schema}");
+    assert!(schema.contains("vibe"), "{schema}");
+    for forbidden in ["tcode", "trusty-code", "trusty-mpm"] {
+        assert!(
+            !schema.to_ascii_lowercase().contains(forbidden),
+            "schema leaked backend identity {forbidden}: {schema}"
+        );
+    }
+}

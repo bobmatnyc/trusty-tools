@@ -1,17 +1,23 @@
-// Why (#4359): this module is the only place that knows what "editable" means
-// in this slice and what the #4357 routes look like, so the two regressions
-// worth locking down are the write gate (a non-markdown write must never reach
-// the network) and the request shape (path travels as a query parameter, not
-// baked into the route, or every path containing `/` breaks). The list
-// envelope tolerance matters too — #4357 has not landed, and a client that
-// only accepts one of the two obvious JSON shapes fails on merge day.
-// What: `isMarkdownPath` classification, both `files/list` envelopes, the URL
-// each helper builds, and `writeProjectFile`'s refusal.
+// Why (#4360): this module is the only place that knows what a file may do
+// here and what the #4357 routes look like, so the regressions worth locking
+// down are the gate (a non-editable write must never reach the network), the
+// three-way classification the UI reads, and the request shape (path travels
+// as a query parameter, not baked into the route, or every path containing `/`
+// breaks). The list envelope tolerance matters too — #4357 has not landed, and
+// a client that only accepts one of the two obvious JSON shapes fails on merge
+// day. The table is asserted as a whole because "which types are allowed" is
+// the deliverable, so silently gaining or losing a row should fail here.
+// What: `DOCUMENT_TYPES` and its three-way classification, both `files/list`
+// envelopes, the URL each helper builds, and `writeProjectFile`'s refusal.
 // Test: this file.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  isMarkdownPath,
+  DOCUMENT_TYPES,
+  documentKindFor,
+  documentTypeFor,
+  editRefusalReason,
+  isEditablePath,
   listProjectFiles,
   readProjectFile,
   writeProjectFile,
@@ -44,19 +50,78 @@ const ENTRY = {
   modified: '2026-08-01T00:00:00Z',
 };
 
-describe('isMarkdownPath', () => {
-  it('accepts both markdown extensions, case-insensitively', () => {
-    expect(isMarkdownPath('docs/README.md')).toBe(true);
-    expect(isMarkdownPath('NOTES.MD')).toBe(true);
-    expect(isMarkdownPath('legacy.markdown')).toBe(true);
+describe('DOCUMENT_TYPES', () => {
+  it('enumerates exactly the agreed set, and only markdown is editable', () => {
+    expect(DOCUMENT_TYPES.map((t) => t.extension)).toEqual([
+      '.md',
+      '.markdown',
+      '.pdf',
+      '.docx',
+      '.xlsx',
+      '.xls',
+      '.txt',
+      '.csv',
+    ]);
+    expect(DOCUMENT_TYPES.filter((t) => t.kind === 'editable').map((t) => t.extension)).toEqual([
+      '.md',
+      '.markdown',
+    ]);
   });
 
-  it('rejects the document types #4360 will render view-only', () => {
-    expect(isMarkdownPath('spec.pdf')).toBe(false);
-    expect(isMarkdownPath('sheet.xlsx')).toBe(false);
-    expect(isMarkdownPath('notes.txt')).toBe(false);
-    // A directory named like a document is still not a markdown file.
-    expect(isMarkdownPath('md')).toBe(false);
+  it('leaves the types still awaiting an owner call unsupported', () => {
+    // Absent from the table means refused — the safe default. Adding any of
+    // these is an owner decision (#4360), not a silent widening.
+    for (const path of ['deck.pptx', 'diagram.png', 'photo.jpg', 'notes.rst', 'plan.org']) {
+      expect(documentKindFor(path)).toBe('unsupported');
+    }
+  });
+});
+
+describe('documentKindFor', () => {
+  it('classifies markdown as editable, case-insensitively', () => {
+    expect(documentKindFor('docs/README.md')).toBe('editable');
+    expect(documentKindFor('NOTES.MD')).toBe('editable');
+    expect(documentKindFor('legacy.markdown')).toBe('editable');
+    expect(isEditablePath('docs/README.md')).toBe(true);
+  });
+
+  it('classifies the extractable and plain-text formats as view-only', () => {
+    for (const path of ['spec.pdf', 'brief.docx', 'sheet.xlsx', 'old.xls', 'a.txt', 'b.csv']) {
+      expect(documentKindFor(path)).toBe('view-only');
+      expect(isEditablePath(path)).toBe(false);
+    }
+  });
+
+  it('refuses anything the table does not claim', () => {
+    expect(documentKindFor('main.rs')).toBe('unsupported');
+    // A file with no extension is not a document.
+    expect(documentKindFor('md')).toBe('unsupported');
+    expect(documentKindFor('LICENSE')).toBe('unsupported');
+    // A dotfile's leading dot is not an extension.
+    expect(documentKindFor('.gitignore')).toBe('unsupported');
+  });
+
+  it('reads the extension off the base name, not the whole path', () => {
+    // A dotted directory must not lend its suffix to an extensionless file.
+    expect(documentKindFor('docs/v1.md/NOTES')).toBe('unsupported');
+    expect(documentKindFor('docs/v1.2/README.md')).toBe('editable');
+  });
+
+  it('does not confuse extensions that are prefixes of one another', () => {
+    // `.xlsx`.endsWith('.xls') would be a false match under naive suffix logic.
+    expect(documentTypeFor('sheet.xlsx')?.label).toBe('Excel workbook');
+    expect(documentTypeFor('notes.markdown')?.extension).toBe('.markdown');
+  });
+});
+
+describe('editRefusalReason', () => {
+  it('says nothing about an editable document', () => {
+    expect(editRefusalReason('README.md')).toBeNull();
+  });
+
+  it('names the type for a view-only document and the gap for an unknown one', () => {
+    expect(editRefusalReason('spec.pdf')).toContain('PDF documents are view-only');
+    expect(editRefusalReason('main.rs')).toContain('.rs is not a supported document type');
   });
 });
 
@@ -109,11 +174,37 @@ describe('writeProjectFile', () => {
     });
   });
 
-  it('refuses a non-markdown write without touching the network (#4359 gate)', async () => {
+  it('refuses a view-only write without touching the network (#4360 gate)', async () => {
     const fn = stubFetch(200, {});
     await expect(writeProjectFile('p', 'report.pdf', 'x')).rejects.toThrow(
-      /Only markdown files are editable/,
+      /PDF documents are view-only/,
     );
     expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unsupported write without touching the network', async () => {
+    const fn = stubFetch(200, {});
+    await expect(writeProjectFile('p', 'src/main.rs', 'x')).rejects.toThrow(
+      /not a supported document type/,
+    );
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('gates the write on the same table the UI reads', async () => {
+    // The guard must not carry its own list: every view-only and unsupported
+    // type is refused, and every editable one is attempted. A second list
+    // would let the panel offer what the client then rejects.
+    const fn = stubFetch(200, {});
+    for (const type of DOCUMENT_TYPES) {
+      const path = `doc${type.extension}`;
+      if (type.kind === 'editable') {
+        await expect(writeProjectFile('p', path, 'x')).resolves.toBeUndefined();
+      } else {
+        await expect(writeProjectFile('p', path, 'x')).rejects.toThrow(/view-only/);
+      }
+    }
+    expect(fn).toHaveBeenCalledTimes(
+      DOCUMENT_TYPES.filter((t) => t.kind === 'editable').length,
+    );
   });
 });
