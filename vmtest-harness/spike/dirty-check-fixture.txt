@@ -1,0 +1,11 @@
+This file is a TRACKED fixture for `spike-transport.sh --dirty-check`.
+
+It exists so that the dirty-worktree check has a tracked file it can safely
+modify: `--dirty-check` appends a unique sentinel line to it, streams the
+worktree to a guest, asserts the sentinel arrived, and then reverts this file
+with `git checkout --`. Nothing reads its content but that check.
+
+Do not add anything below this line — the sentinel is asserted to be the file's
+last line, and the whole file's `cksum` is compared host-to-guest.
+
+It is deleted along with the rest of `vmtest-harness/spike/` at P3-T4.

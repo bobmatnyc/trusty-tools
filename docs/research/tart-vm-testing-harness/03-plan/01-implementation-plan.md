@@ -346,13 +346,26 @@ This is the task the whole phase exists for.
   # host
   git ls-files -co --exclude-standard | wc -l          # -> H
   # guest, via tart exec
-  find /Users/admin/vmtest-src -type f | wc -l         # -> G
+  find /Users/admin/vmtest-src ! -type d | wc -l       # -> G
   ```
   (1) `G == H`; (2) the logged byte count is > 80,000,000 (DOC-1 §6.1 measured
   ~81 MiB across 5,306 files by `git archive`, a **lower bound** since `-o` adds
   untracked-but-not-ignored files); (3) `test -d /Users/admin/vmtest-src/target`
   is **false**; (4) the pipeline's exit status is 0 with `pipefail` set.
-- **Depends:** P1-T5
+
+  > **Correction, 2026-08-01 (UTC) — the guest-side count is `! -type d`, not
+  > `-type f`. Do not revert it.** As originally written this acceptance check
+  > **failed on a correct transfer**. This repo carries **4 tracked symlinks**
+  > (`git ls-files -s | awk '$1=="120000"' | wc -l` → 4). `git ls-files` counts
+  > them, `tar` transfers them correctly *as symlinks*, and `find -type f` does
+  > **not** count them — so the literal check reported `G = H − 4` and would have
+  > condemned a transfer that was byte-for-byte right. `! -type d` counts regular
+  > files **and** symlinks, which is the set comparable to `git ls-files`'s output.
+  > This is not a loosening: it is the same equality over the correct set, and it
+  > is what the Phase 1 run of 2026-07-31 actually asserted (`5337 == 5337`, with
+  > `-type f` logged alongside at `5333` precisely so the 4-file gap stays visible).
+  > **P3-T4 must carry `! -type d` into `lib/source.sh`.** Recorded in
+  > [MANIFEST.md](./MANIFEST.md) Phase 1, Deviations item 1.
 
 ### P1-T7 — Build one crate from the unpacked tree
 
@@ -593,13 +606,37 @@ debugging argument parsing while a VM boots.
     cleanup trap still run.
 - **Acceptance:** two mechanical checks —
   ```sh
-  grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest'
+  grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest' \
+      --exclude-dir=spike          # exemption EXPIRES at P3-T4 — see below
   ```
   lists **only** `vmtest-harness/lib/vm.sh` (this is the DOC-1 §3.2 invariant and
   it must stay true for the life of the harness); and `bash -n
   vmtest-harness/lib/vm.sh` is silent. `lib/` files define **functions and nothing
   else** — no top-level statements, no `set`, no side effects at source time
   (§12.1); a stray `set +e` in a library would silently disarm the driver.
+
+  > **Correction, 2026-08-01 (UTC) — the grep is scoped to the production tree;
+  > `spike/` is exempt until P3-T4. Owner decision.** As originally written this
+  > check was **unsatisfiable**: it required the grep to list *only* `lib/vm.sh`,
+  > but `vmtest-harness/spike/spike-transport.sh` necessarily contains `tart` (it
+  > *is* the tart boundary during Phase 1) and is not deleted until **P3-T4**, one
+  > phase later. P2-T4 and P3-T4 could not both be satisfied. Opened as a forward
+  > conflict by Phase 1 ([MANIFEST.md](./MANIFEST.md) Phase 1, Deviations item 4)
+  > and decided here.
+  >
+  > **The invariant itself is NOT weakened.** It is DOC-1 §3.2 and it still says
+  > exactly one file in the production tree may name the OS: `lib/vm.sh`. What is
+  > scoped is the *search path*, not the rule — `spike/` is disposable Phase 1
+  > scaffolding that was never production code (see the spike's own header).
+  >
+  > **The exemption EXPIRES at P3-T4**, which deletes `vmtest-harness/spike/`
+  > outright (P3-T4 *Files*: "**delete** `vmtest-harness/spike/`"; its acceptance
+  > requires `ls vmtest-harness/spike` to **fail**). Once that lands,
+  > `--exclude-dir=spike` matches nothing and the scoped grep and the unscoped
+  > grep are the same command. **P3-T4 must delete the `--exclude-dir=spike`
+  > argument in the same commit that deletes the directory** — an exemption whose
+  > subject no longer exists is how a temporary exception becomes a permanent one.
+  > A reviewer of P3-T4 should check for both deletions.
 - **Depends:** P2-T1
 
 ### P2-T5 — Preflight
@@ -808,7 +845,25 @@ sequence of install steps plus the expectations that follow from them* (DOC-1
     call the functions, not the file.
 - **Acceptance:** `vmtest run local` logs the byte count; `ls vmtest-harness/spike`
   fails; `git log --stat` shows the spike deleted in the same commit that adds
-  `lib/source.sh`.
+  `lib/source.sh`. **Plus, added 2026-08-01: P2-T4's `--exclude-dir=spike`
+  exemption is deleted in that same commit, and the unscoped
+  `grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest'` lists only
+  `lib/vm.sh`.**
+
+  > **Correction, 2026-08-01 (UTC) — two things this task must carry.** Both are
+  > consequences of Phase 1's findings; neither changes what P3-T4 does, only what
+  > it must be checked for.
+  >
+  > 1. **Port `find … ! -type d`, not `find … -type f`.** P1-T6's acceptance was
+  >    corrected on this date because `-type f` misses this repo's 4 tracked
+  >    symlinks and therefore fails a correct transfer. `lib/source.sh` inherits
+  >    the corrected form.
+  > 2. **Retire P2-T4's `spike/` exemption here.** P2-T4's grep carries
+  >    `--exclude-dir=spike` because this task is what removes its subject. Deleting
+  >    `vmtest-harness/spike/` without also deleting that argument leaves a
+  >    permanent exemption for a directory that no longer exists — the DOC-1 §3.2
+  >    invariant would then be enforced by a command that has quietly stopped being
+  >    able to catch a violation in a re-created `spike/`.
 - **Depends:** P3-T3, P1-T6
 
 ### P3-T5 — `scenarios/install-local.sh` (delivery only) and scenario dispatch
