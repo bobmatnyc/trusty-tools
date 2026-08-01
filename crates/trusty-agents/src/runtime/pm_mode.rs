@@ -130,7 +130,10 @@ pub(super) async fn run_pm() -> Result<()> {
                     NON_CODING_TARGETS,
                     pm_cfg.subagents.allowed.as_deref(),
                 ))
-                .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard),
+                .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard)
+                // #4350: configured default style (DOC-62 §5.3); absent =
+                // built-in `engineer` = today's behaviour.
+                .with_default_style(pm_cfg.subagents.default_style),
         ));
     }
     // #304: Coordinator-facing shell executor — see `tools::run_bash`.
