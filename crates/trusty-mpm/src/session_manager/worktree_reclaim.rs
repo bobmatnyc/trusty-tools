@@ -259,7 +259,19 @@ impl PrIndex {
             .arg(PR_INDEX_LIMIT.to_string())
             .args(["--json", PR_JSON_FIELDS]);
         match run_with_timeout(cmd, GH_TIMEOUT) {
-            Some((true, stdout)) => Self::from_json(&stdout, PR_INDEX_LIMIT),
+            Some((true, stdout)) => {
+                let index = Self::from_json(&stdout, PR_INDEX_LIMIT);
+                // #2919: logged because "resolved 0 branches" is the signature
+                // of a call that ran but answered nothing — the shape the bogus
+                // `-C` flag produced, which was otherwise invisible.
+                tracing::debug!(
+                    root = %registry_root.display(),
+                    branches = index.branch_count(),
+                    complete = index.is_complete(),
+                    "worktree-reclaim: built pull-request index (#2919)"
+                );
+                index
+            }
             _ => {
                 tracing::debug!(
                     root = %registry_root.display(),
@@ -282,6 +294,17 @@ impl PrIndex {
     /// Test: `pr_index_truncated_reply_makes_absent_branches_unknown`.
     pub(crate) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    /// How many branches this index resolved (#2919).
+    ///
+    /// Why: a successful `gh` call against a repository with pull requests
+    /// yields a non-zero count, and a FAILED one yields zero — which is what
+    /// makes `pr_index_from_gh_reads_this_repository` able to tell a working
+    /// call from the silently-blocking one the `-C` bug produced.
+    /// Test: `pr_index_from_gh_reads_this_repository`.
+    pub(crate) fn branch_count(&self) -> usize {
+        self.by_branch.len()
     }
 
     /// The state this index reports for `branch`.
@@ -308,14 +331,31 @@ impl PrIndex {
 
 /// A `gh` invocation rooted at `dir` with a sanitised environment (#2919).
 ///
-/// Why: see [`GH_STRIPPED_ENV`]. The pager and prompt suppression are not
-/// cosmetic — an interactive prompt in a daemon-run probe hangs it forever.
-/// What: `gh -C <dir>` with the redirecting variables removed and
-/// pager/prompt/colour disabled.
-/// Test: `gh_command_strips_repository_redirecting_env`.
+/// Why: `gh` resolves the repository from its WORKING DIRECTORY. It has no
+/// global `-C` flag — that is a `git` habit, and carrying it across made every
+/// call in this module fail at flag parsing with
+/// `unknown shorthand flag: 'C' in -C` (verified against gh 2.96.0;
+/// `gh --help` mentions no `-C`). The failure was silent by design: a failed
+/// call yields [`PrIndex::unavailable`], every branch reads
+/// [`BranchPrState::Unknown`], `classify` gate 4 blocks every candidate, and
+/// the delete loop never executes — so `--merged-prs` reclaimed zero bytes
+/// ALWAYS, and `tm doctor` blamed `gh auth status` for what was an argv bug.
+/// Nothing in the test suite noticed, because no test ever ran a SUCCESSFUL
+/// `gh` call. Hence `current_dir`, and hence
+/// `gh_command_passes_no_dash_c_flag`.
+///
+/// The pager and prompt suppression are not cosmetic either — an interactive
+/// prompt in a daemon-run probe hangs it forever. See [`GH_STRIPPED_ENV`] for
+/// the environment scrub.
+/// What: `gh` with its working directory set to `dir`, the repository-
+/// redirecting variables removed, and pager/prompt/colour disabled.
+/// Test: `gh_command_passes_no_dash_c_flag`,
+/// `gh_command_runs_in_the_requested_directory`,
+/// `gh_command_strips_repository_redirecting_env`.
 fn gh_command(dir: &Path) -> Command {
     let mut cmd = Command::new("gh");
-    cmd.arg("-C").arg(dir);
+    // #2919: `current_dir`, NEVER `-C` — `gh` has no such flag.
+    cmd.current_dir(dir);
     for key in GH_STRIPPED_ENV {
         cmd.env_remove(key);
     }

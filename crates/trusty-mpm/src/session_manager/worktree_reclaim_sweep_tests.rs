@@ -238,14 +238,13 @@ fn survey_past_its_classify_deadline_reclaims_nothing() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("deadline-2919");
     land(&path);
-    let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let s = survey_with_index(
         &fx.repos_root,
         &[],
         &|_: &Path| merged_index("session/deadline-2919", 40),
         SurveyBudget {
-            measure: Some(expired),
-            classify: Some(expired),
+            measure: Some(std::time::Duration::ZERO),
+            classify: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
         },
         false,
     );
@@ -262,13 +261,12 @@ fn survey_past_its_measure_deadline_still_classifies() {
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("measure-2919");
     land(&path);
-    let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let s = survey_with_index(
         &fx.repos_root,
         &[],
         &|_: &Path| merged_index("session/measure-2919", 41),
         SurveyBudget {
-            measure: Some(expired),
+            measure: Some(std::time::Duration::ZERO),
             classify: None,
         },
         false,
@@ -494,4 +492,122 @@ fn reclaim_uses_an_unbounded_budget() {
     // gets reclaimed.
     let b = SurveyBudget::unbounded();
     assert!(b.measure.is_none() && b.classify.is_none());
+}
+
+/// END-TO-END probe against a REAL worktree store (#2919 acceptance criterion).
+///
+/// Why: 51 green unit tests, 8 caught mutations, and 24 green CI checks all
+/// passed while `gh` was being invoked with a flag it does not have, so the
+/// feature classified NOTHING as reclaimable and the delete loop never ran
+/// once. Every one of those signals is blind to "the survey works but always
+/// returns zero", because zero is also the correct answer for a workspace with
+/// nothing to reclaim. Only running it against a real store distinguishes them.
+///
+/// What: surveys `TM_2919_E2E_ROOT` and prints the real counts. It ASSERTS that
+/// pull-request state resolved for at least one worktree — that is the
+/// assertion the `-C` bug would have failed, and it does not depend on the
+/// store happening to contain a reclaimable worktree today.
+///
+/// Opt-in by env var because it needs an authenticated `gh` and a real
+/// multi-worktree store; it is a reproducible harness for the reviewer, not a
+/// CI gate. Run it with:
+///
+/// ```text
+/// TM_2919_E2E_ROOT=~/trusty-mpm-projects \
+///   cargo test -p trusty-mpm --lib e2e_survey_against_a_real_store -- --nocapture
+/// ```
+#[test]
+fn e2e_survey_against_a_real_store() {
+    let Ok(root) = std::env::var("TM_2919_E2E_ROOT") else {
+        eprintln!("skipping: set TM_2919_E2E_ROOT to run the end-to-end probe");
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let started = std::time::Instant::now();
+    // Byte measurement is bounded here (a full walk of a real ~1 TiB store
+    // exceeds ten minutes and is not what this probe is proving); CLASSIFY is
+    // deliberately unbounded, because classification is the thing under test.
+    let budget = SurveyBudget {
+        measure: Some(std::time::Duration::from_secs(20)),
+        classify: None,
+    };
+    let s = survey(&root, &[], budget, true);
+    println!("--- #2919 e2e survey of {} ---", root.display());
+    println!("elapsed           = {:?}", started.elapsed());
+    println!("candidates        = {}", s.candidates.len());
+    println!("reclaimable       = {}", s.reclaimable);
+    println!("reclaimable_bytes = {}", s.reclaimable_bytes);
+    println!("total_bytes       = {}", s.total_bytes);
+    println!("pr_state_unknown  = {}", s.pr_state_unknown);
+    println!("unmeasured        = {}", s.unmeasured);
+    for c in s.candidates.iter().filter(|c| c.verdict.is_reclaimable()) {
+        println!(
+            "RECLAIMABLE {} branch={:?} pr={:?} bytes={:?}",
+            c.path.display(),
+            c.branch,
+            c.pr,
+            c.bytes
+        );
+    }
+    assert!(!s.candidates.is_empty(), "the store must hold worktrees");
+    assert!(
+        s.pr_state_unknown < s.candidates.len(),
+        "pull-request state resolved for NONE of {} worktrees — this is exactly \
+         the signature of the `gh -C` argv bug, where every call failed and every \
+         branch blocked",
+        s.candidates.len()
+    );
+}
+
+#[test]
+fn survey_measures_reclaimable_worktrees_before_blocked_ones() {
+    // Under a budget too small for everything, the RECLAIMABLE worktree must be
+    // the one that gets measured. Observed against the real store before this
+    // ordering existed: 5 reclaimable worktrees and `reclaimable_bytes = 0`,
+    // because the budget was spent on 264 blocked ones first.
+    let fx = GitWorktreeFixture::new();
+    let reclaimable = fx.add_worktree("measure-order-reclaimable-2919");
+    land(&reclaimable);
+    // A second worktree that classification will BLOCK (its PR is open).
+    let blocked = fx.add_worktree("measure-order-blocked-2919");
+    land(&blocked);
+
+    let rows = r#"[
+      {"number": 60, "headRefName": "session/measure-order-reclaimable-2919", "state": "MERGED"},
+      {"number": 61, "headRefName": "session/measure-order-blocked-2919", "state": "OPEN"}
+    ]"#;
+    let s = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| PrIndex::from_json(rows, 400),
+        SurveyBudget::default(),
+        false,
+    );
+    let r = s
+        .candidates
+        .iter()
+        .find(|c| c.path == reclaimable)
+        .expect("listed");
+    assert!(r.verdict.is_reclaimable(), "{:?}", r.verdict);
+    assert!(
+        r.bytes.is_some() && s.reclaimable_bytes > 0,
+        "the reclaimable worktree must carry real bytes, got {:?} / total {}",
+        r.bytes,
+        s.reclaimable_bytes
+    );
+
+    // And with an ALREADY-EXPIRED budget nothing is measured, so the ordering
+    // cannot be mistaken for "reclaimable ones ignore the deadline".
+    let starved = survey_with_index(
+        &fx.repos_root,
+        &[],
+        &|_: &Path| PrIndex::from_json(rows, 400),
+        SurveyBudget {
+            measure: Some(std::time::Duration::ZERO),
+            classify: None,
+        },
+        false,
+    );
+    assert_eq!(starved.reclaimable_bytes, 0);
+    assert!(starved.unmeasured > 0, "and it is disclosed as unmeasured");
 }

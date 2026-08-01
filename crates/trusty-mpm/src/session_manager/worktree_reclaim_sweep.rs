@@ -34,7 +34,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::worktree_reclaim::{
     BranchPrState, PrIndex, ReclaimCandidate, ReclaimMode, ReclaimOutcome, ReclaimSurvey,
@@ -59,8 +59,15 @@ use super::worktree_safety::inspect_dirt;
 /// `survey_past_its_measure_deadline_still_classifies`.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SurveyBudget {
-    /// Stop measuring bytes after this instant; the rest report `unmeasured`.
-    pub measure: Option<Instant>,
+    /// How long the MEASUREMENT PHASE may run, starting when it begins.
+    ///
+    /// A duration rather than an instant, deliberately. Measurement is a second
+    /// pass that runs after classification, and classification against the real
+    /// store takes ~92 seconds — so an absolute instant computed at survey
+    /// start had already expired before the phase began, and NOTHING was
+    /// measured (observed: `unmeasured = 269` of 269). A duration is allotted
+    /// to the phase itself and cannot be consumed by the phase before it.
+    pub measure: Option<Duration>,
     /// Stop classifying after this instant; the rest are `Blocked`.
     pub classify: Option<Instant>,
 }
@@ -137,7 +144,8 @@ pub(crate) fn survey_with_index(
             &inspect_dirt,
         );
         candidates.push(ReclaimCandidate {
-            bytes: measure_bytes_until(&scanned.path, budget.measure),
+            // Measured in a SECOND pass — see below.
+            bytes: None,
             path: scanned.path,
             branch: scanned.branch,
             registry_root: scanned.registry_root,
@@ -145,7 +153,39 @@ pub(crate) fn survey_with_index(
             verdict,
         });
     }
+    // The measurement deadline starts HERE, when the phase does — not when the
+    // survey did. See `SurveyBudget::measure`.
+    let measure_deadline = budget.measure.map(|d| Instant::now() + d);
+    measure_reclaimable_first(&mut candidates, measure_deadline);
     ReclaimSurvey::from_candidates(candidates)
+}
+
+/// Measure bytes, spending the budget on the RECLAIMABLE worktrees first
+/// (#2919).
+///
+/// Why: measurement is the expensive half and the budget usually runs out. When
+/// it ran out in scan order, the reclaimable worktrees — the only ones an
+/// operator can act on — were routinely the ones left unmeasured. Observed
+/// end-to-end against the real store: 5 reclaimable worktrees, and
+/// `reclaimable_bytes = 0`, because the budget was consumed measuring 264
+/// blocked ones first. "0 bytes reclaimable" alongside "5 worktrees
+/// reclaimable" is not a partial answer, it is a WRONG one, and the 2026-07-21
+/// post-mortem's eighth constraint is specifically that this feature report
+/// real numbers rather than a claim.
+/// What: two ordered passes over the same slice — reclaimable candidates first,
+/// then the rest — both bounded by the same `deadline`. `total_bytes` degrades
+/// to a floor under pressure (already disclosed as an UNDERCOUNT); the
+/// actionable figure does not.
+/// Test: `survey_measures_reclaimable_worktrees_before_blocked_ones`.
+fn measure_reclaimable_first(candidates: &mut [ReclaimCandidate], deadline: Option<Instant>) {
+    for want_reclaimable in [true, false] {
+        for c in candidates
+            .iter_mut()
+            .filter(|c| c.verdict.is_reclaimable() == want_reclaimable)
+        {
+            c.bytes = measure_bytes_until(&c.path, deadline);
+        }
+    }
 }
 
 /// [`survey_with_index`] against the real `gh`-backed index.
@@ -331,8 +371,13 @@ pub(crate) fn reclaim_with_probes(
     let mut fresh_indexes: BTreeMap<PathBuf, PrIndex> = BTreeMap::new();
     for candidate in approved {
         let path = candidate.path;
-        // FRESH, per candidate, immediately before this candidate's delete.
-        let in_use_now = (probes.in_use_now)();
+        // The pull-request lookups go FIRST because they are the slow part —
+        // measured 322-366 ms for a per-branch call and 1220 ms for the bulk
+        // one, against a 10 s ceiling. Reading liveness before them would date
+        // the liveness snapshot by that whole interval for no reason: a session
+        // attaching during the network call would be invisible. Ordering the
+        // network work first and the liveness read last makes the snapshot
+        // single-digit milliseconds old at the moment it is judged (#2919).
         let index = fresh_indexes
             .entry(candidate.registry_root.clone())
             .or_insert_with(|| (probes.index_for)(&candidate.registry_root));
@@ -343,6 +388,9 @@ pub(crate) fn reclaim_with_probes(
         {
             pr_now = pr_state_for_branch(&candidate.registry_root, branch);
         }
+        // FRESH, per candidate, and now genuinely immediately before the
+        // re-check that judges it.
+        let in_use_now = (probes.in_use_now)();
         if let Some(reason) = recheck_before_delete(&path, in_use_now.as_deref(), &pr_now) {
             tracing::warn!(
                 path = %path.display(),

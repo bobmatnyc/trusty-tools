@@ -200,11 +200,19 @@ pub async fn prune_worktrees_route(
                 // minutes. `None` (the store could not be read) refuses.
                 let mgr_for_probe = state.session_manager().await.clone();
                 match tokio::task::spawn_blocking(move || {
-                    let handle = tokio::runtime::Handle::current();
                     let in_use_now = move || -> Option<Vec<std::path::PathBuf>> {
-                        // Legal from a blocking-pool thread (not a runtime
-                        // worker), and the only way to re-read an async store
-                        // from inside the synchronous delete loop.
+                        // `None` means "could not be determined", which REFUSES
+                        // the delete. `SessionManager::list` is itself
+                        // infallible, so the only way to fail here is to have no
+                        // runtime to block on — which happens if this closure is
+                        // ever invoked off the blocking pool. `Handle::current`
+                        // would PANIC in that case, unwinding through a delete
+                        // loop mid-sweep; `try_current` turns it into the
+                        // fail-closed refusal the contract already specifies.
+                        let handle = tokio::runtime::Handle::try_current().ok()?;
+                        // Blocking on the runtime is legal from a blocking-pool
+                        // thread (not a runtime worker), and is the only way to
+                        // re-read an async store from the synchronous loop.
                         Some(
                             handle
                                 .block_on(mgr_for_probe.list())

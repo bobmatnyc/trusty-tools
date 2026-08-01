@@ -441,6 +441,27 @@ fn classify_blocks_a_worktree_trusty_mpm_does_not_own() {
 }
 
 #[test]
+fn the_remover_really_refuses_what_tm_provisioned_rejects() {
+    // Ties the classifier's predicate to the REMOVER's actual behaviour rather
+    // than to a copy of its rules. Without this the two can drift silently and
+    // the classifier goes back to advertising worktrees that cannot be removed.
+    let fx = GitWorktreeFixture::new();
+    let parent = fx.repo.join(".claude").join("worktrees");
+    let path = fx.add_worktree_at(&parent, "remover-refuses-2919");
+    assert!(
+        !tm_provisioned(&path),
+        "precondition: the classifier rejects this shape"
+    );
+    let removed = crate::session_manager::decommission::remove_session_worktree(&path);
+    assert!(!removed, "the remover must refuse it too");
+    assert!(
+        path.exists(),
+        "and must leave the directory on disk — which is exactly why \
+         classifying it Reclaimable produced a `removal_failed` report"
+    );
+}
+
+#[test]
 fn tm_provisioned_matches_the_removers_own_predicate() {
     // Both tiers `remove_session_worktree` accepts must be accepted here, or
     // the classifier and the remover disagree in the OTHER direction and real
@@ -531,11 +552,82 @@ fn run_with_timeout_kills_a_hung_child() {
 
 #[test]
 fn pr_state_for_branch_maps_a_failed_call_to_unknown() {
-    // No repository here, so `gh` cannot resolve one and fails — which must
-    // block, not read as "this branch has no PR".
+    // Any `gh` failure must block, not read as "this branch has no PR".
+    //
+    // NOTE on what this does and does not prove: an earlier version of this
+    // comment claimed the failure came from `gh` being unable to resolve a
+    // repository here. That was wrong, and the wrongness mattered — while the
+    // module passed a bogus `-C` flag, `gh` died at FLAG PARSING and this test
+    // was green for that reason instead, so it would have passed identically
+    // against a perfectly valid repository. It pins the failure-to-`Unknown`
+    // mapping only. `gh_command_passes_no_dash_c_flag` pins the argv, and
+    // `pr_index_from_gh_reads_this_repository` proves a real call succeeds.
     let tmp = tempfile::tempdir().expect("tempdir");
     assert_eq!(
         pr_state_for_branch(tmp.path(), "feat/whatever"),
         BranchPrState::Unknown
+    );
+}
+
+/// `gh` has no `-C` flag, and passing one made every call in this module fail
+/// at flag parsing — silently, because a failed call blocks rather than errors.
+///
+/// Why this is an argv test and not a behaviour test: the behaviour of the bug
+/// was "nothing is ever reclaimable", which is indistinguishable from a correct
+/// run against a workspace with no merged-PR worktrees. Only the argv
+/// distinguishes them.
+#[test]
+fn gh_command_passes_no_dash_c_flag() {
+    let cmd = gh_command(Path::new("/tmp"));
+    let args: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !args.iter().any(|a| a == "-C"),
+        "`gh` has no -C flag (verified against gh 2.96.0: `unknown shorthand \
+         flag: 'C' in -C`); argv was {args:?}"
+    );
+    assert!(
+        args.is_empty(),
+        "gh_command must contribute no positional args of its own; got {args:?}"
+    );
+}
+
+#[test]
+fn gh_command_runs_in_the_requested_directory() {
+    // The repository is resolved from the working directory, so this IS the
+    // repository selection — if it stops being set, every call silently
+    // resolves whatever repository the daemon happens to be sitting in.
+    let cmd = gh_command(Path::new("/tmp"));
+    assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp")));
+}
+
+/// Prove a real `gh` call SUCCEEDS and parses — the coverage whose absence let
+/// the `-C` bug ship.
+///
+/// Skips (rather than fails) when `gh` is missing or unauthenticated, so CI
+/// without credentials stays green; it is the developer-machine and
+/// authenticated-CI run that carries the value. It asserts on a real reply
+/// shape, so a future argv or `--json` field-name regression fails here.
+#[test]
+fn pr_index_from_gh_reads_this_repository() {
+    if which::which("gh").is_err() {
+        eprintln!("skipping: `gh` not on PATH");
+        return;
+    }
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let index = PrIndex::from_gh(repo_root);
+    if !index.is_complete() && index.branch_count() == 0 {
+        eprintln!("skipping: `gh` unavailable or unauthenticated in this environment");
+        return;
+    }
+    assert!(
+        index.branch_count() > 0,
+        "a successful `gh pr list` against this repository must yield branches; \
+         an empty index here means the call failed and every branch will block"
     );
 }

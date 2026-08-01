@@ -227,7 +227,7 @@ pub(super) async fn check_worktree_disk(
     // subprocesses, which a deadline check cannot interrupt mid-call.
     let deadline = std::time::Instant::now() + SURVEY_TIMEOUT;
     let budget = SurveyBudget {
-        measure: Some(deadline),
+        measure: Some(SURVEY_TIMEOUT),
         classify: Some(deadline),
     };
     // #2919: `per_branch_fallback: false`. Resolving a truncated index costs one
@@ -235,7 +235,7 @@ pub(super) async fn check_worktree_disk(
     // the probe discloses the truncation instead, and the operator-invoked
     // reclaim path does the per-branch work.
     let joined = tokio::time::timeout(
-        SURVEY_TIMEOUT + SURVEY_TIMEOUT_GRACE,
+        SURVEY_TIMEOUT + SURVEY_TIMEOUT + SURVEY_TIMEOUT_GRACE,
         tokio::task::spawn_blocking(move || survey(&root, &active, budget, false)),
     )
     .await;

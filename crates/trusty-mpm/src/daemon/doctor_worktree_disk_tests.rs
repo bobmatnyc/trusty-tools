@@ -223,7 +223,9 @@ fn worktree_disk_timeout_is_a_bounded_constant() {
     // response it reports in. A 30-second budget did exactly that, failing
     // `execute_doctor_against_test_daemon` with "daemon unreachable".
     assert!(SURVEY_TIMEOUT.as_secs() > 0, "the probe must do some work");
-    let worst_case = SURVEY_TIMEOUT + SURVEY_TIMEOUT_GRACE;
+    // Two phases now — classify, then measure — each bounded by SURVEY_TIMEOUT,
+    // plus the subprocess grace. That is the real ceiling the client must clear.
+    let worst_case = SURVEY_TIMEOUT + SURVEY_TIMEOUT + SURVEY_TIMEOUT_GRACE;
     assert!(
         worst_case < std::time::Duration::from_secs(10),
         "budget+grace ({worst_case:?}) must stay under the client request timeout"
