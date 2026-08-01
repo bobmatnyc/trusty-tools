@@ -10,19 +10,47 @@
 //! What: `ApiServer::spawn()` picks a free TCP port (by binding to port 0
 //! and reading back the assignment), copies the repo-bundled `.trusty-agents/`
 //! config into a tempdir, spawns `trusty-agents --api --port <port>` with that
-//! tempdir as cwd, and polls `/api/health` for up to 5s before returning.
-//! `submit_task` POSTs `/api/task`, `wait_for_task` polls `/api/task/:id`
-//! until the response leaves `running` or a 120s timeout elapses.
+//! tempdir as cwd, and polls `/api/health` until the endpoint answers (see
+//! [`READY_TIMEOUT`]) before returning. `submit_task` POSTs `/api/task`,
+//! `wait_for_task` polls `/api/task/:id` until the response leaves `running`
+//! or a 120s timeout elapses.
 //! Test: Exercised by `tests/api_e2e.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use tempfile::TempDir;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+
+/// Ceiling on how long [`ApiServer::spawn`] waits for `/api/health` to answer.
+///
+/// Why (#4488): this used to be 5s — a latency BUDGET, not a bound. The child
+/// is a freshly `exec`'d debug binary that runs `runtime::startup::
+/// run_startup_init` (deploying ~30 bundled agent files into its isolated
+/// `$HOME`) before it ever binds the port, so 5s is a bet on the machine being
+/// idle. It held on CI's single-tenant runner and lost locally at load 22-38,
+/// where `api_e2e.rs` went red 3/3. The wait itself was already condition-based
+/// polling; only the ceiling was a guess, so it is now sized as a genuine
+/// "something is wrong" bound rather than an expected-latency one. Overshooting
+/// costs nothing on the happy path: the loop returns the instant health answers,
+/// and a child that dies fails immediately via `try_wait` rather than sitting
+/// out the ceiling.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Interval between `/api/health` polls.
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Per-attempt bound on one `/api/health` request.
+///
+/// Why: without it a single request that connects and then stalls would burn
+/// the whole [`READY_TIMEOUT`] in one attempt, turning a bounded retry loop
+/// back into a single fixed wait.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One-shot test harness: a running `trusty-agents --api` child + its base URL.
 pub struct ApiServer {
@@ -45,16 +73,26 @@ pub struct ApiServer {
     port: u16,
     child: Option<Child>,
     base_url: String,
+    /// Everything the child has written to stdout/stderr so far, line by line.
+    ///
+    /// Why (#4488): two reasons, both load-related. (1) The child's stdout and
+    /// stderr are `piped()`; nothing used to read them, so a chatty startup
+    /// could fill the ~64KB pipe buffer and block the child *before* it bound
+    /// the port — a hang the old 5s wait reported only as an anonymous
+    /// "did not become healthy". Draining continuously removes that failure
+    /// mode entirely. (2) When readiness genuinely fails, the child's own
+    /// output is the diagnosis; without it every failure looks identical.
+    output: Arc<Mutex<String>>,
 }
 
 impl ApiServer {
     /// Spawn `trusty-agents --api --port <free_port>` in a tempdir with the
-    /// repo-bundled `.trusty-agents/` config copied in, and wait up to 5s for
+    /// repo-bundled `.trusty-agents/` config copied in, and wait for
     /// `/api/health` to return 200.
     ///
     /// Why: Tests need a real, isolated server they can hit over loopback.
     /// What: Picks a free port via the bind-to-0 trick, copies config,
-    /// spawns the binary, polls health.
+    /// spawns the binary, drains its stdout/stderr, polls health.
     /// Test: Implicit — every e2e test calls this.
     pub async fn spawn() -> Result<Self> {
         let root = tempfile::tempdir().context("create tempdir")?;
@@ -69,7 +107,7 @@ impl ApiServer {
         let port = pick_free_port().context("pick free port")?;
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_tagent"));
 
-        let child = Command::new(&binary)
+        let mut child = Command::new(&binary)
             .current_dir(root.path())
             .env("HOME", home.path())
             .arg("--api")
@@ -82,17 +120,38 @@ impl ApiServer {
             .spawn()
             .with_context(|| format!("spawn {} --api", binary.display()))?;
 
+        // #4488: drain both pipes so a chatty startup cannot block the child
+        // on a full pipe buffer, and so a readiness failure carries the
+        // child's own explanation.
+        let output = Arc::new(Mutex::new(String::new()));
+        if let Some(out) = child.stdout.take() {
+            spawn_stdout_drain(out, Arc::clone(&output));
+        }
+        if let Some(err) = child.stderr.take() {
+            spawn_stderr_drain(err, Arc::clone(&output));
+        }
+
         let base_url = format!("http://127.0.0.1:{port}");
-        let server = Self {
+        let mut server = Self {
             _root: root,
             _home: home,
             port,
             child: Some(child),
             base_url,
+            output,
         };
 
-        server.wait_for_health(Duration::from_secs(5)).await?;
+        server.wait_for_health(READY_TIMEOUT).await?;
         Ok(server)
+    }
+
+    /// Snapshot of everything the child has printed so far.
+    fn captured_output(&self) -> String {
+        match self.output.lock() {
+            Ok(buf) if buf.is_empty() => "<child produced no output>".to_string(),
+            Ok(buf) => buf.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// Base URL of the running server, e.g. `http://127.0.0.1:54321`.
@@ -106,19 +165,39 @@ impl ApiServer {
         self.port
     }
 
-    /// Poll `GET /api/health` until it returns 200 or `timeout` elapses.
+    /// Poll `GET /api/health` until it returns 200, the child dies, or
+    /// `timeout` elapses.
     ///
-    /// Why: The child is spawned async; we need a deterministic readiness
-    /// signal before the test issues real requests, otherwise tests race
-    /// and fail intermittently.
-    /// What: Polls every 50ms with a fresh `reqwest::Client` so DNS / pool
-    /// state is not a confound.
+    /// Why: The child is spawned async; we need a real readiness SIGNAL before
+    /// the test issues requests, otherwise tests race and fail intermittently.
+    /// The condition being waited on is "the endpoint answers" — never "N
+    /// seconds have passed" (#4488).
+    /// What: Polls every [`READY_POLL_INTERVAL`] with one bounded client so
+    /// DNS / pool state is not a confound. Each pass first asks `try_wait`
+    /// whether the child is still alive: a child that exited can never become
+    /// healthy, so that case returns immediately with the exit status and the
+    /// child's captured output instead of waiting out the ceiling and
+    /// reporting a bare timeout. The ceiling is therefore only ever reached by
+    /// a child that is alive but wedged.
     /// Test: Implicit — used by `spawn()`.
-    async fn wait_for_health(&self, timeout: Duration) -> Result<()> {
+    async fn wait_for_health(&mut self, timeout: Duration) -> Result<()> {
         let url = format!("{}/api/health", self.base_url);
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(READY_PROBE_TIMEOUT)
+            .build()
+            .context("build health-probe client")?;
         let start = Instant::now();
         loop {
+            if let Some(child) = self.child.as_mut()
+                && let Some(status) = child.try_wait().context("poll api server child")?
+            {
+                return Err(anyhow!(
+                    "api server exited with {status} before answering {url} \
+                     (after {:?})\n--- child output ---\n{}",
+                    start.elapsed(),
+                    self.captured_output()
+                ));
+            }
             if let Ok(resp) = client.get(&url).send().await
                 && resp.status().is_success()
             {
@@ -126,11 +205,12 @@ impl ApiServer {
             }
             if start.elapsed() > timeout {
                 return Err(anyhow!(
-                    "api server did not become healthy at {url} within {:?}",
-                    timeout
+                    "api server did not answer {url} within {timeout:?} (child \
+                     still running)\n--- child output ---\n{}",
+                    self.captured_output()
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(READY_POLL_INTERVAL).await;
         }
     }
 
@@ -177,21 +257,34 @@ impl ApiServer {
     }
 
     /// As `wait_for_task` but with a caller-specified timeout.
+    ///
+    /// #4488: a single failed GET no longer aborts the wait. The loop's
+    /// condition is "the task left `running`"; a transport hiccup on one poll
+    /// (the server is busy running the task's subprocess, which is exactly
+    /// when the machine is most loaded) says nothing about that condition, so
+    /// it is retried like any other not-yet-satisfied poll. The last failure
+    /// is carried into the timeout message so a genuinely broken server still
+    /// reports why.
     pub async fn wait_for_task_with_timeout(&self, id: &str, timeout: Duration) -> Result<Value> {
         let url = format!("{}/api/task/{id}", self.base_url);
         let client = reqwest::Client::new();
         let start = Instant::now();
+        // Assigned on every path through the loop body before the timeout
+        // check reads it, so it needs no (dead) initial value.
+        let mut last: String;
         loop {
-            let resp = client.get(&url).send().await.context("GET /api/task/:id")?;
-            let v: Value = resp.json().await.context("parse task body")?;
-            let status = v["status"].as_str().unwrap_or("");
-            if status != "running" {
-                return Ok(v);
+            match poll_task_once(&client, &url).await {
+                Ok(v) => {
+                    if v["status"].as_str().unwrap_or("") != "running" {
+                        return Ok(v);
+                    }
+                    last = format!("last body: {v}");
+                }
+                Err(e) => last = format!("last poll error: {e:#}"),
             }
             if start.elapsed() > timeout {
                 return Err(anyhow!(
-                    "task {id} did not finish within {:?}; last body: {v}",
-                    timeout
+                    "task {id} did not finish within {timeout:?}; {last}"
                 ));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -210,6 +303,53 @@ impl Drop for ApiServer {
             let _ = child.start_kill();
         }
     }
+}
+
+/// One `GET /api/task/:id` attempt, decoded as JSON.
+///
+/// Why: factored out of [`ApiServer::wait_for_task_with_timeout`] so the
+/// retry loop there has a single fallible unit to match on, instead of two
+/// `?`s that each turn a transient hiccup into a hard test failure (#4488).
+async fn poll_task_once(client: &reqwest::Client, url: &str) -> Result<Value> {
+    let resp = client.get(url).send().await.context("GET /api/task/:id")?;
+    resp.json().await.context("parse task body")
+}
+
+/// Continuously append the child's stdout lines to `sink`.
+fn spawn_stdout_drain(pipe: ChildStdout, sink: Arc<Mutex<String>>) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(pipe).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            append_line(&sink, "out", &line);
+        }
+    });
+}
+
+/// Continuously append the child's stderr lines to `sink`.
+fn spawn_stderr_drain(pipe: ChildStderr, sink: Arc<Mutex<String>>) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(pipe).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            append_line(&sink, "err", &line);
+        }
+    });
+}
+
+/// Append one `[stream] line` to the shared capture buffer.
+///
+/// A poisoned mutex is recovered from rather than propagated: a drain task
+/// that panicked must not also blind the readiness failure message that is
+/// the whole point of capturing this output.
+fn append_line(sink: &Arc<Mutex<String>>, stream: &str, line: &str) {
+    let mut buf = match sink.lock() {
+        Ok(b) => b,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    buf.push('[');
+    buf.push_str(stream);
+    buf.push_str("] ");
+    buf.push_str(line);
+    buf.push('\n');
 }
 
 /// Bind a TCP listener on `127.0.0.1:0`, read the assigned port, and drop
