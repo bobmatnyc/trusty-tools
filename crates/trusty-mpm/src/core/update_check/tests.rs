@@ -505,21 +505,24 @@ fn detect_user_modified_managed_not_reported() {
 fn classify_drift_reconciles_on_disk() {
     // Unit-level: on-disk content matching the catalog hash is never drift, even
     // with no manifest entry; a managed+unmodified changed file is Changed.
+    // #4322: the third argument is now the on-disk CHECKSUM, not the on-disk
+    // content — the hashing moved to the call site so a fleet-wide caller can
+    // hash the shared deployed-agent tree once instead of once per session.
     let cat = checksum("catalog content");
     // Deployed-but-unmanifested and current → None (reconcile).
     assert_eq!(
-        super::classify_drift(&cat, None, Some("catalog content")),
+        super::classify_drift(&cat, None, Some(&checksum("catalog content"))),
         None
     );
     // Managed, unmodified on disk, catalog changed → Changed.
     let recorded = checksum("old content");
     assert_eq!(
-        super::classify_drift(&cat, Some(&recorded), Some("old content")),
+        super::classify_drift(&cat, Some(&recorded), Some(&checksum("old content"))),
         Some(ChangeKind::Changed)
     );
     // Managed, user-modified on disk, catalog changed → None (apply skips).
     assert_eq!(
-        super::classify_drift(&cat, Some(&recorded), Some("user edit")),
+        super::classify_drift(&cat, Some(&recorded), Some(&checksum("user edit"))),
         None
     );
 }
@@ -576,9 +579,12 @@ fn catalog_hashes_compute_is_unknown_without_either_source() {
         &root.path().join("no-skills"),
     );
     let report = cache.detect(
-        &AgentManifest::default(),
+        &DeployedAgentHashes::with_manifest(
+            AgentManifest::default(),
+            &root.path().join("dep-agents"),
+            &cache,
+        ),
         &SkillManifest::default(),
-        &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
@@ -632,9 +638,8 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
     let cache = CatalogHashes::compute(&catalog_agents, &catalog_skills);
 
     let report_a = cache.detect(
-        &a_agent_manifest,
+        &DeployedAgentHashes::with_manifest(a_agent_manifest.clone(), &a_agents_dir, &cache),
         &a_skill_manifest,
-        &a_agents_dir,
         &a_skills_dir,
         |_| true,
         |_| true,
@@ -646,9 +651,8 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
     );
 
     let report_b = cache.detect(
-        &b_agent_manifest,
+        &DeployedAgentHashes::with_manifest(b_agent_manifest.clone(), &b_agents_dir, &cache),
         &b_skill_manifest,
-        &b_agents_dir,
         &b_skills_dir,
         |_| true,
         |_| true,

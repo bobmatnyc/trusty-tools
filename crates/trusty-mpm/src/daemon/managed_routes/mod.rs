@@ -963,4 +963,6 @@ pub async fn stop_managed_session(
 }
 
 #[cfg(test)]
+mod staleness_bench_tests;
+#[cfg(test)]
 mod tests;

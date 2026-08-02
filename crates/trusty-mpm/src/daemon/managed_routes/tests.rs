@@ -78,7 +78,11 @@ impl ManagedTmuxDriver for PaneAwareTmux {
 }
 
 /// Build a minimal [`SessionRecord`] suitable for serialization tests.
-fn make_record(source_id: Option<&str>) -> SessionRecord {
+///
+/// `pub(super)` so the sibling `staleness_bench_tests` benchmark module can
+/// build its synthetic fleet from the identical record shape the unit tests
+/// use, rather than maintaining a second, drift-prone copy.
+pub(super) fn make_record(source_id: Option<&str>) -> SessionRecord {
     SessionRecord {
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test-session".into(),
@@ -631,7 +635,7 @@ fn injection_status_wire_stringifies_other_variants() {
 /// in production). Any test exercising `checked_summaries` must therefore
 /// point `$HOME` at a throwaway tempdir so the probe reads a fake framework
 /// tree, never the developer's real one.
-struct HomeGuard(Option<String>);
+pub(super) struct HomeGuard(Option<String>);
 impl Drop for HomeGuard {
     fn drop(&mut self) {
         // SAFETY: paired with `#[serial_test::serial]` — no other thread
@@ -644,7 +648,11 @@ impl Drop for HomeGuard {
 }
 
 /// Point `$HOME` at a fresh tempdir for the duration of the guard.
-fn fake_home() -> (tempfile::TempDir, HomeGuard) {
+///
+/// `pub(super)` so the sibling `staleness_bench_tests` module isolates its
+/// fixture exactly as the unit tests do — a benchmark that read the
+/// developer's real `~/.trusty-mpm` would measure an uncontrolled tree.
+pub(super) fn fake_home() -> (tempfile::TempDir, HomeGuard) {
     let home = tempfile::TempDir::new().unwrap();
     let prior = std::env::var("HOME").ok();
     // SAFETY: serialized via `#[serial_test::serial]` on every caller.
@@ -1083,4 +1091,211 @@ async fn checked_summaries_stale_assets_independent_per_session_sharing_one_cata
         "session B deployed against the current v2 catalog — must stay fresh, \
          even though it shares the SAME cached catalog hashes as session A"
     );
+}
+
+// ── #4322: sharing the DEPLOYED-agent read across the fleet ──────────────────
+
+/// Deploy `count` workspaces' SKILL trees from a shared bundled skill source,
+/// returning one `Active` record per workspace.
+///
+/// Why: the #4322 fleet tests all need the same shape — one machine-global
+/// agent deploy dir (#4409) plus N per-workspace skill trees — and building it
+/// inline three times would let the three tests drift apart.
+fn fleet_with_deployed_skills(home: &std::path::Path, count: usize) -> Vec<SessionRecord> {
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled_agents = fw.agent_source_dir();
+    let bundled_skills = fw.skill_source_dir();
+    std::fs::create_dir_all(&bundled_agents).unwrap();
+    std::fs::create_dir_all(&bundled_skills).unwrap();
+    std::fs::write(bundled_agents.join("rust-engineer.md"), "agent v1").unwrap();
+    std::fs::write(bundled_skills.join("tm-doctor.md"), "skill v1").unwrap();
+    crate::core::agent_deployer::deploy_agents_filtered(
+        &bundled_agents,
+        &fw.agent_deploy_dir(),
+        |_| true,
+    )
+    .unwrap();
+
+    (0..count)
+        .map(|i| {
+            let ws = home.join(format!("fleet-ws-{i}"));
+            std::fs::create_dir_all(&ws).unwrap();
+            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+            crate::core::skill_tiers::deploy_all_skill_tiers(
+                &bundled_skills,
+                &fw.user_skill_source_dir(),
+                &ws_fw.claude_skills_dir(),
+                |_| true,
+            )
+            .unwrap();
+            let mut r = make_record(None);
+            r.state = ManagedSessionState::Active;
+            r.workspace_path = Some(ws);
+            r
+        })
+        .collect()
+}
+
+/// Issue #4322: the machine-global deployed-AGENT directory must be read ONCE
+/// per listing, not once per session.
+///
+/// Why: this is the performance claim made mechanically checkable. #4409 made
+/// `FrameworkPaths::agent_deploy_dir()` a single path every managed session
+/// resolves identically, so `tm ls` was opening the same agent files once per
+/// session — on the reported 32-session fleet, 42 files re-read 32 times for
+/// 32 byte-identical answers. A read COUNT (rather than a wall-clock
+/// assertion) is the right pin: it does not move with machine load or
+/// page-cache state, so it cannot flake, and it is exactly the quantity cold
+/// `tm ls` latency scales with.
+/// What: builds a 4-session fleet, runs the real `stale_assets_for_many` hot
+/// path, and asserts the deployed-side read count equals
+/// `1 agent + 4 skills`, not `4 agents + 4 skills`. Reverting the hoist (moving
+/// `DeployedAgentHashes::read` back inside the per-session fan-out) makes this
+/// observe 8 reads instead of 5 and fail.
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet() {
+    let (home, _guard) = fake_home();
+    let records = fleet_with_deployed_skills(home.path(), 4);
+
+    crate::core::update_check::reset_deployed_read_log();
+    let result = stale_assets_for_many(records).await;
+    let reads = crate::core::update_check::deployed_read_count();
+
+    assert_eq!(result.len(), 4, "every session must still get a verdict");
+    assert_eq!(
+        reads, 5,
+        "the ONE catalog agent must be read once for the whole fleet and each \
+         of the 4 per-workspace skills once each (1 + 4 = 5). Observing 8 means \
+         the machine-global agent directory is being re-read per session — the \
+         #4322 fan-out this PR removed"
+    );
+}
+
+/// Issue #4322 correctness gate: sharing the deployed-agent read WITHIN one
+/// listing must not outlive that listing.
+///
+/// Why: the failure mode a reviewer must rule out is a cache that keeps
+/// answering from stale bytes after the assets genuinely change. This PR
+/// shares the read across sessions but retains NOTHING between calls, and this
+/// test is what proves it: it runs the fan-out, mutates the shared agent tree
+/// on disk, and runs it again in the SAME process with no reset of any kind.
+/// The second call must see the change. A cross-request memo (the mtime-keyed
+/// design #4322 sketched as step 3) is exactly what would fail here.
+/// What: fresh fleet reports not-stale; the catalog then moves under it; the
+/// very next call reports stale.
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_assets_for_many_sees_an_agent_change_on_the_very_next_call() {
+    let (home, _guard) = fake_home();
+    let records = fleet_with_deployed_skills(home.path(), 3);
+
+    let before = stale_assets_for_many(records.clone()).await;
+    assert!(
+        records.iter().all(|r| !before[&r.id]),
+        "a freshly deployed fleet must start out fresh, else the assertion \
+         below is vacuous"
+    );
+
+    // The catalog moves under the live process — no restart, no cache reset.
+    let fw = crate::core::paths::FrameworkPaths::default();
+    std::fs::write(
+        fw.agent_source_dir().join("rust-engineer.md"),
+        "agent v2 — catalog moved",
+    )
+    .unwrap();
+
+    let after = stale_assets_for_many(records.clone()).await;
+    assert!(
+        records.iter().all(|r| after[&r.id]),
+        "the NEXT call must observe the change immediately — sharing the \
+         deployed-agent read is scoped to one listing, never retained across \
+         listings, so there is no invalidation window to miss (#4322)"
+    );
+}
+
+/// Issue #4322: the shared read must not let one session's verdict leak into
+/// another's, and the concurrent fan-out must not interleave them.
+///
+/// Why: sharing an input across N concurrently-spawned blocking tasks is the
+/// classic place a per-session answer gets cross-contaminated. Agents are
+/// machine-global (#4409) so they cannot differ per session, but SKILLS still
+/// deploy per workspace — so a mixed fleet where some workspaces are drifted
+/// and others are not is the discriminating case: every session shares one
+/// `Arc<DeployedAgentHashes>` and one `Arc<CatalogHashes>` while reaching
+/// different, correct conclusions from its own skill tree.
+/// What: 6 sessions, alternating drifted/fresh skill deployments, run through
+/// the real concurrent fan-out; each id must map to its own correct verdict.
+#[tokio::test]
+#[serial_test::serial]
+async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurrency() {
+    let (home, _guard) = fake_home();
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let bundled_skills = fw.skill_source_dir();
+    std::fs::create_dir_all(&bundled_skills).unwrap();
+
+    let mut expected: Vec<(ManagedSessionId, bool)> = Vec::new();
+    let mut records = Vec::new();
+    for i in 0..6 {
+        let drifted = i % 2 == 0;
+        // Deploy every workspace from the CURRENT catalog, then move the
+        // catalog on only for the ones that must end up stale.
+        std::fs::write(bundled_skills.join("tm-doctor.md"), format!("skill v{i}")).unwrap();
+        let ws = home.path().join(format!("mixed-ws-{i}"));
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+        crate::core::skill_tiers::deploy_all_skill_tiers(
+            &bundled_skills,
+            &fw.user_skill_source_dir(),
+            &ws_fw.claude_skills_dir(),
+            |_| true,
+        )
+        .unwrap();
+        if drifted {
+            std::fs::write(
+                bundled_skills.join("tm-doctor.md"),
+                format!("skill v{i} — moved after deploy"),
+            )
+            .unwrap();
+        }
+        let mut r = make_record(None);
+        r.state = ManagedSessionState::Active;
+        r.workspace_path = Some(ws);
+        expected.push((r.id, drifted));
+        records.push(r);
+    }
+
+    // Only the LAST catalog write is live when the probe runs, so recompute
+    // what each session should conclude against that final catalog state: a
+    // session is stale iff its deployed body differs from the final catalog.
+    let final_body = std::fs::read_to_string(bundled_skills.join("tm-doctor.md")).unwrap();
+    let expected: Vec<(ManagedSessionId, bool)> = expected
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| {
+            let ws = home.path().join(format!("mixed-ws-{i}"));
+            let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
+            let deployed =
+                std::fs::read_to_string(ws_fw.claude_skills_dir().join("tm-doctor/SKILL.md"))
+                    .unwrap_or_default();
+            (*id, deployed != final_body)
+        })
+        .collect();
+
+    let got = stale_assets_for_many(records).await;
+
+    assert!(
+        expected.iter().any(|(_, stale)| *stale) && expected.iter().any(|(_, stale)| !*stale),
+        "the fixture must contain BOTH stale and fresh sessions, else a \
+         cross-contamination bug would pass unnoticed"
+    );
+    for (id, want) in expected {
+        assert_eq!(
+            got.get(&id).copied(),
+            Some(want),
+            "session {id} must get its OWN verdict despite sharing one \
+             DeployedAgentHashes and one CatalogHashes across the concurrent \
+             fan-out (#4322)"
+        );
+    }
 }

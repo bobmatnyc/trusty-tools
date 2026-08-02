@@ -20,8 +20,8 @@ use axum::http::StatusCode;
 
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::session_assets::{session_asset_staleness_with_catalog, session_plan};
-use crate::core::update_check::CatalogHashes;
+use crate::core::session_assets::session_plan;
+use crate::core::update_check::{CatalogHashes, DeployedAgentHashes};
 use crate::session_manager::{
     InjectionStatus, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, NumberedSlot,
     SessionRecord,
@@ -385,12 +385,20 @@ fn probe_staleness_in_list(state: &ManagedSessionState) -> bool {
 /// `super::tests`.
 pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInput> {
     let mut cache: HashMap<(PathBuf, PathBuf), Arc<CatalogHashes>> = HashMap::new();
+    // #4322: the second shared half. `fw.agent_deploy_dir()` is ONE
+    // machine-global directory for every session (#4409 exempted it from the
+    // per-workspace rewrite), so its 42 files were being read once per session
+    // for byte-identical answers. Keyed by (deployed agent dir, catalog source
+    // pair) because the snapshot's stem set comes from the catalog — two
+    // different catalogs would need two different snapshots even against the
+    // same directory. In practice both maps collapse to a single entry.
+    let mut agents: HashMap<(PathBuf, PathBuf, PathBuf), Arc<DeployedAgentHashes>> = HashMap::new();
     let mut out = Vec::with_capacity(records.len());
     for record in records {
         let (fw, plan) = session_plan(&record);
         let key = (plan.agent_source.clone(), plan.skill_source.clone());
         let catalog = cache
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| {
                 Arc::new(CatalogHashes::compute(
                     &plan.agent_source,
@@ -398,7 +406,12 @@ pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInpu
                 ))
             })
             .clone();
-        out.push((record.id, fw, plan, catalog));
+        let agents_dir = fw.agent_deploy_dir();
+        let deployed_agents = agents
+            .entry((agents_dir.clone(), key.0, key.1))
+            .or_insert_with(|| Arc::new(DeployedAgentHashes::read(&agents_dir, &catalog)))
+            .clone();
+        out.push((record.id, fw, plan, catalog, deployed_agents));
     }
     out
 }
@@ -411,12 +424,15 @@ pub(super) fn staleness_inputs(records: Vec<SessionRecord>) -> Vec<StalenessInpu
 /// blocking task. `Arc<CatalogHashes>` (rather than a clone of the hashes) is
 /// what lets the expensive catalog compose stay shared across the fan-out
 /// while each task still owns everything it needs — the whole point of the
-/// #2444 split, preserved under parallelism.
+/// #2444 split, preserved under parallelism. `Arc<DeployedAgentHashes>`
+/// (#4322) is the same trick applied to the DEPLOYED agent tree, which is one
+/// machine-global directory every session resolves identically.
 type StalenessInput = (
     ManagedSessionId,
     FrameworkPaths,
     HarnessPlan,
     Arc<CatalogHashes>,
+    Arc<DeployedAgentHashes>,
 );
 
 /// Compute `stale_assets` for every record, sharing the catalog work and
@@ -457,18 +473,26 @@ pub(super) async fn stale_assets_for_many(
         .await
         .unwrap_or_default();
     let mut probes = tokio::task::JoinSet::new();
-    for (id, fw, plan, catalog) in inputs {
+    for (id, fw, plan, catalog, deployed_agents) in inputs {
         // INVARIANT: a spawned task receives an ALREADY-COMPUTED
-        // `Arc<CatalogHashes>` and must never call `CatalogHashes::compute`
-        // itself. Moving the catalog work in here would give every session its
-        // own recompose — the exact N-times recompose #2444's review removed,
-        // traded back for concurrency. Only the cheap deployed-side half (this
-        // session's own manifest + on-disk file reads, which is where the
-        // 35.7 MiB actually goes) belongs in the fan-out.
+        // `Arc<CatalogHashes>` AND an already-read `Arc<DeployedAgentHashes>`,
+        // and must never call `CatalogHashes::compute` or
+        // `DeployedAgentHashes::read` itself. Moving either in here would give
+        // every session its own copy of shared work — the catalog case is the
+        // exact N-times recompose #2444's review removed, and the deployed-agent
+        // case is the N-times re-read of one machine-global directory #4322
+        // removed. Only what is genuinely per-session — this session's own
+        // per-workspace skill manifest and skill files — belongs in the fan-out.
         probes.spawn_blocking(move || {
             (
                 id,
-                session_asset_staleness_with_catalog(&fw, &plan, &catalog).stale,
+                crate::core::session_assets::session_asset_staleness_with_shared(
+                    &fw,
+                    &plan,
+                    &catalog,
+                    &deployed_agents,
+                )
+                .stale,
             )
         });
     }
