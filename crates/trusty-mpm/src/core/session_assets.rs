@@ -37,7 +37,9 @@ use std::path::Path;
 
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::update_check::{CatalogHashes, StalenessReport, detect_for_framework};
+use crate::core::update_check::{
+    CatalogHashes, DeployedAgentHashes, StalenessReport, detect_for_framework,
+};
 use crate::session_manager::SessionRecord;
 
 /// Resolve the on-disk directory a session's deployed assets live under.
@@ -127,14 +129,50 @@ pub fn session_asset_staleness_with_catalog(
 ) -> StalenessReport {
     // #4409: agents are deployed to (and therefore drift in) the tm-managed
     // config-dir tier; skills remain per-workspace.
+    // #4619 review: LAZY, not eager. This is the SINGLE-session path
+    // (`GET …/managed/{id}`, which `tm session resume` reads); it shares its
+    // read with nobody, so pre-hashing every catalog stem would read more than
+    // the old code did whenever the plan selects a subset.
     let agents_dir = fw.agent_deploy_dir();
+    let deployed_agents = DeployedAgentHashes::lazy(
+        crate::core::agent_manifest::AgentManifest::load(&agents_dir),
+        &agents_dir,
+    );
+    session_asset_staleness_with_shared(fw, plan, catalog, &deployed_agents)
+}
+
+/// [`session_asset_staleness_with_catalog`] with the deployed-AGENT read ALSO
+/// supplied by the caller (issue #4322).
+///
+/// Why: `fw.agent_deploy_dir()` is one machine-global directory — #4409
+/// exempted it from `for_managed_project`'s per-workspace rewrite — so every
+/// session in a `tm ls` listing resolves it to the SAME path and was reading
+/// the same 42 files over and over. Hoisting that read to the batch caller
+/// ([`crate::daemon::managed_routes::summary::staleness_inputs`]) mirrors
+/// exactly what #2444's review already did for the CATALOG half: compute the
+/// shared part once, fan out only the part that genuinely differs per session.
+///
+/// Answer-preserving, not merely faster: the deployed-agent bytes are shared
+/// INPUT, and the only thing that varies per session — the plan's selection
+/// and ignore predicates — is applied after the read, inside
+/// [`CatalogHashes::detect`]. Two sessions reading the same directory at
+/// slightly different instants could previously disagree if something wrote to
+/// it mid-listing; one read for the whole listing removes that skew as well.
+/// What: reads only this session's own skill manifest + per-workspace skill
+/// files, then delegates to [`CatalogHashes::detect`].
+/// Test: `session_asset_staleness_with_shared_matches_unshared`,
+/// `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`.
+pub fn session_asset_staleness_with_shared(
+    fw: &FrameworkPaths,
+    plan: &HarnessPlan,
+    catalog: &CatalogHashes,
+    deployed_agents: &DeployedAgentHashes,
+) -> StalenessReport {
     let skills_dir = fw.claude_skills_dir();
-    let deployed_agents = crate::core::agent_manifest::AgentManifest::load(&agents_dir);
     let deployed_skills = crate::core::skill_manifest::SkillManifest::load(&skills_dir);
     catalog.detect(
-        &deployed_agents,
+        deployed_agents,
         &deployed_skills,
-        &agents_dir,
         &skills_dir,
         |name| plan.agent_selected(name),
         |name| plan.skill_selected(name),
@@ -342,6 +380,55 @@ mod tests {
         assert!(
             cached.stale,
             "the catalog drift must be detected either way"
+        );
+    }
+
+    /// Issue #4322: hoisting the DEPLOYED-agent read out of the per-session
+    /// fan-out must not change any answer.
+    ///
+    /// Why: this is the whole correctness claim of the optimization. A faster
+    /// `tm ls` that reports a wrong staleness verdict is strictly worse than
+    /// the slow one, so the shared-read path is pinned against the unshared
+    /// path it replaced — including the change LIST, not just the boolean, so
+    /// a shared read that silently dropped or duplicated an agent would fail
+    /// here rather than pass on a coincidentally-equal `stale` flag.
+    /// What: builds a genuinely drifted workspace, then asserts
+    /// `session_asset_staleness_with_shared` (shared deployed-agent read) and
+    /// `session_asset_staleness_with_catalog` (per-session read) agree
+    /// exactly.
+    #[test]
+    #[serial_test::serial]
+    fn session_asset_staleness_with_shared_matches_unshared() {
+        let (home, _guard) = fake_home();
+        let fw = FrameworkPaths::default();
+        let bundled = fw.agent_source_dir();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("rust-engineer.md"), "v1 body").unwrap();
+
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session_fw = FrameworkPaths::for_managed_workspace(&workspace);
+        deploy_agents_filtered(&bundled, &session_fw.agent_deploy_dir(), |_| true).unwrap();
+        // Drift the catalog so both paths must report a real change.
+        std::fs::write(bundled.join("rust-engineer.md"), "v2 body — catalog moved").unwrap();
+
+        let record = make_record(Some(workspace.clone()), workspace);
+        let (fw_s, plan) = session_plan(&record);
+        let catalog = CatalogHashes::compute(&plan.agent_source, &plan.skill_source);
+
+        let unshared = session_asset_staleness_with_catalog(&fw_s, &plan, &catalog);
+        let shared_agents = DeployedAgentHashes::read(&fw_s.agent_deploy_dir(), &catalog);
+        let shared = session_asset_staleness_with_shared(&fw_s, &plan, &catalog, &shared_agents);
+
+        assert!(unshared.stale, "fixture must be genuinely stale");
+        assert_eq!(
+            unshared.stale, shared.stale,
+            "sharing the deployed-agent read must not change the verdict"
+        );
+        assert_eq!(
+            unshared.changes, shared.changes,
+            "sharing the deployed-agent read must not change WHICH artifacts \
+             are reported as drifted"
         );
     }
 }
