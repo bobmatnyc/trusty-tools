@@ -799,11 +799,10 @@ async fn verify_installed_binary_finds_binary_via_path() {
 /// Verify that `is_launchd_supervised` returns `false` in a normal test env.
 ///
 /// Why: Unit tests run in a developer terminal / CI, neither of which is a
-/// launchd-managed job. This catches regressions where the heuristic fires
-/// too eagerly.
+/// launchd-managed job. This catches regressions where the detector fires too
+/// eagerly.
 /// Test: the test sets `TERM_PROGRAM` to a non-empty value (mimicking an
-/// interactive terminal session) and clears `XPC_SERVICE_NAME` to ensure the
-/// fast path returns false.
+/// interactive terminal session) and clears `XPC_SERVICE_NAME`.
 #[test]
 fn is_launchd_supervised_returns_false_in_test_env() {
     // Env mutations must be serialised with the same lock used by the other
@@ -817,11 +816,47 @@ fn is_launchd_supervised_returns_false_in_test_env() {
     unsafe {
         std::env::remove_var("TERM_PROGRAM");
     }
-    // In a terminal (TERM_PROGRAM set) the function must return false even
-    // if XPC_SERVICE_NAME were somehow present.
     assert!(
         !result,
         "is_launchd_supervised returned true inside a test terminal env"
+    );
+}
+
+/// #4469 regression proof: the ENV SHAPE THAT USED TO RETURN `true`.
+///
+/// Why: the deleted heuristic returned `true` whenever `XPC_SERVICE_NAME` was
+/// set and `TERM_PROGRAM` was absent — a condition every child of a
+/// launchd-managed (or simply non-terminal) parent inherits for free. That is
+/// the whole defect: an unsupervised `tm daemon` child could self-report
+/// `supervised: true` on `/health` and pass the #4230 guard. The test harness
+/// process is NOT a launchd job, so the authoritative detector must answer
+/// `false` no matter what the environment claims.
+/// What: reproduces the exact env shape, then asserts both the boolean adapter
+/// and the three-state answer refuse to call it supervised.
+/// Test: this test.
+#[test]
+fn is_launchd_supervised_is_not_fooled_by_inherited_env() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: env mutation is serialised by ENV_LOCK, held above.
+    unsafe {
+        std::env::set_var("XPC_SERVICE_NAME", "com.trusty.mpm");
+        std::env::remove_var("TERM_PROGRAM");
+    }
+    let boolean = super::is_launchd_supervised();
+    let three_state = crate::supervision::launchd_supervision();
+    unsafe {
+        std::env::remove_var("XPC_SERVICE_NAME");
+    }
+
+    assert!(
+        !boolean,
+        "the pre-#4469 heuristic returned TRUE for this env shape; the \
+         authoritative check must not — got supervised=true for a process \
+         launchd does not run"
+    );
+    assert!(
+        !three_state.is_supervised(),
+        "three-state answer claimed supervision: {three_state:?}"
     );
 }
 

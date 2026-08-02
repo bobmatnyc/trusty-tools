@@ -67,7 +67,23 @@ use doctor_transcript_saving::check_transcript_saving;
 // the skill-staleness and legacy-instruction-source probes).
 #[path = "doctor_staleness.rs"]
 mod doctor_staleness;
-use doctor_staleness::{check_legacy_instruction_sources, check_skill_staleness};
+use doctor_staleness::check_legacy_instruction_sources;
+
+// #4604: deployed-skill drift, compared against the RUNNING BINARY's own
+// embedded assets. It used to live in `doctor_staleness.rs` and compare the
+// `~/.trusty-mpm/framework/skills` extraction cache against the deploy
+// manifest — both sides could be the same stale content, which is how a
+// drifted `tm-workflow` reported clean at three tiers at once.
+#[path = "doctor_skill_drift.rs"]
+mod doctor_skill_drift;
+use doctor_skill_drift::check_skill_staleness;
+
+// #4033: install provenance of the running binary — "is what's running what
+// you think it is?", the observation doctor's liveness+file-state health model
+// never made.
+#[path = "doctor_binary_provenance.rs"]
+mod doctor_binary_provenance;
+use doctor_binary_provenance::check_binary_provenance;
 
 // #4605: the reachability half for SKILLS — `check_skill_staleness` above
 // compares against the deploy MANIFEST, so a bundled skill absent from that
@@ -231,7 +247,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_seven_checks`,
+/// Test: `run_doctor_produces_twenty_eight_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -274,7 +290,7 @@ pub async fn run_doctor(
         check_output_style_staleness(project_dir, &home),
         check_output_style_legacy_ids(project_dir, &home),
         check_deployment_completeness(&paths),
-        check_skill_staleness(&paths),
+        check_skill_staleness(&paths, project_dir),
         // #4605: and this proves the manifest that check consults actually
         // covers the deployed skills — an untracked bundled skill is
         // unreachable by every deploy and invisible to staleness.
@@ -309,6 +325,10 @@ pub async fn run_doctor(
     // clone that predates it is silently unprotected. Warn-only, naming the
     // `tm repair push-guard` retrofit; doctor never writes into a repository.
     checks.push(check_push_guard(project_dir));
+    // Issue #4033: where the RUNNING binary came from, and whether that source
+    // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
+    // determined. Read-only; never installs, moves, or deletes.
+    checks.push(check_binary_provenance());
 
     DoctorReport::from_checks(checks)
 }

@@ -11,7 +11,9 @@
 //!   caller (trusty-installer) that may be driving its own live terminal
 //!   display concurrently (#3830).
 //! - [`verify_installed_binary`] — health-gate via `<bin> --version`.
-//! - [`is_launchd_supervised`] — detect launchd supervision heuristically.
+//! - [`is_launchd_supervised`] — authoritative launchd-supervision check
+//!   (delegates to [`crate::supervision`]; issue #4469 replaced the env-var
+//!   heuristic that let an unsupervised child self-report as supervised).
 //! - [`upgrade_and_restart`] — compose the three above into the full workflow.
 //!
 //! Test: `cargo test -p trusty-common --features update-check`
@@ -396,50 +398,35 @@ pub async fn verify_installed_binary_at_path(bin_path: &std::path::Path) -> anyh
     }
 }
 
-/// Return `true` when the current process was started by launchd.
+/// Return `true` only when launchd AUTHORITATIVELY reports it runs this
+/// process.
 ///
-/// Why: The self-restart strategy (non-zero exit → launchd KeepAlive
-/// respawn) only works when launchd is actually supervising the process.
-/// If the daemon was started manually, a non-zero exit would simply terminate
-/// with no respawn. Detecting the supervisor lets us choose the right
-/// post-upgrade action: supervised → exit(1); unsupervised → print hint.
+/// Why: The self-restart strategy (non-zero exit → launchd KeepAlive respawn)
+/// only works when launchd is actually supervising the process; started
+/// manually, a non-zero exit just terminates with no respawn. Until #4469 this
+/// was an environment-variable heuristic (`XPC_SERVICE_NAME` set and
+/// `TERM_PROGRAM` absent, falling back to `getppid() == 1`) and BOTH prongs were
+/// satisfiable by a process launchd had never heard of — env vars are inherited
+/// by every child, and an orphan whose parent exited is reparented to PID 1. A
+/// `tm daemon` child could therefore self-report supervised, pass the #4230
+/// callee-side guard, and publish `supervised: true` on `/health`, making the
+/// documented `curl /health | jq '.supervised'` verification unsound in exactly
+/// the case it exists to catch.
 ///
-/// What: Heuristic with two prongs on macOS.
+/// What: delegates to [`crate::supervision::launchd_supervision`], which asks
+/// launchd itself. Maps the three-state answer down to a bool by treating
+/// `Unknown` as NOT supervised — the conservative direction here, because the
+/// only consequence is whether [`upgrade_and_restart`] exits expecting a
+/// respawn or prints a manual-restart hint, and printing a hint after a
+/// successful upgrade is harmless while exiting into no respawn is not. Callers
+/// that must DISTINGUISH "not supervised" from "could not tell" (the daemon's
+/// `/health` flag, `tm doctor`) call `launchd_supervision` directly.
 ///
-/// 1. `XPC_SERVICE_NAME` is injected by launchd into every managed job.
-///    We guard against interactive terminals (which may inherit env vars)
-///    by requiring `TERM_PROGRAM` to be absent.
-/// 2. Fallback: PPID == 1 means launchd is the direct parent.
-///
-/// On non-macOS platforms always returns `false` (launchd is macOS-only).
-///
-/// Test: `is_launchd_supervised_returns_false_in_test_env` in `tests.rs` verifies
-/// that the function returns false in a normal test/terminal environment.
+/// Test: `is_launchd_supervised_is_not_fooled_by_inherited_env` in `tests.rs`
+/// (the #4469 regression proof) and the exhaustive parser/state coverage in
+/// `crate::supervision::tests`.
 pub fn is_launchd_supervised() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        let has_xpc = std::env::var("XPC_SERVICE_NAME")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        let in_terminal = std::env::var("TERM_PROGRAM")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-
-        if has_xpc && !in_terminal {
-            return true;
-        }
-
-        // Fallback: PPID == 1 on macOS means launchd is the direct parent.
-        #[cfg(unix)]
-        {
-            let ppid = unsafe { libc::getppid() };
-            if ppid == 1 {
-                return true;
-            }
-        }
-    }
-
-    false
+    crate::supervision::launchd_supervision().is_supervised()
 }
 
 /// Install the new version, health-gate it, then restart or print a hint.

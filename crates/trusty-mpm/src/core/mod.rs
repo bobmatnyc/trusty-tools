@@ -19,6 +19,7 @@ pub mod agent_reset_workspace;
 pub mod agent_skill_codeploy;
 pub mod artifact;
 pub mod auto_resume;
+pub mod binary_provenance;
 pub mod budget;
 pub mod bundle;
 // Epic #4183: the DEFAULT (bundled-fallback) PM prompt, re-sourced through
@@ -110,8 +111,10 @@ pub mod session_launch;
 pub mod session_store;
 pub mod skill_deploy_tiers;
 pub mod skill_deployer;
+pub mod skill_drift;
 pub mod skill_manifest;
 pub mod skill_reconcile;
+pub mod skill_repair;
 pub mod skill_source;
 pub mod skill_staleness;
 pub mod skill_tiers;

@@ -1,0 +1,240 @@
+//! Doctor probe: deployed skills versus the running binary's own assets
+//! (issues #2876, #4604).
+//!
+//! Why: this check used to compare `FrameworkPaths::skill_source_dir()` — the
+//! `~/.trusty-mpm/framework/skills/` EXTRACTION CACHE — against the checksum in
+//! each deploy manifest, so a cache that lagged the installed binary made every
+//! skill it covered report clean regardless of what actually shipped. That is
+//! the #4604 defect: `tm-workflow` drifted in all three deploy tiers and the
+//! check named only two other skills, which reads as an all-clear for the one it
+//! missed. The reference point is now the binary's own embedded asset and the
+//! comparison reads the deployed FILE — see [`crate::core::skill_drift`] for the
+//! full reasoning.
+//!
+//! What: [`check_skill_staleness`] audits every skill deploy tier
+//! ([`skill_deploy_tiers`] — the managed `$CLAUDE_CONFIG_DIR/skills`, the
+//! operator's `~/.claude/skills`, and the project's `.claude/skills`), folds the
+//! per-skill states into one severity, and prescribes the remedy that matches
+//! the state. It distinguishes 'drifted — `tm install` will fix it' from
+//! 'drifted and FROZEN — `tm install` will deliberately skip it', because the
+//! remediation differs and a frozen skill can otherwise stay stale forever with
+//! no signal. Anything it cannot verify reports [`CheckStatus::Unknown`], never
+//! `Ok`. READ-ONLY: the repair lives behind `tm doctor --fix-skills`.
+//!
+//! Test: `doctor_skill_drift_tests.rs`.
+
+use std::path::Path;
+
+use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::paths::FrameworkPaths;
+use crate::core::skill_deploy_tiers::skill_deploy_tiers;
+use crate::core::skill_drift::{
+    SkillDrift, SkillReference, audit_deployed_skills, skill_reference,
+};
+
+/// Name of this check as it appears in `tm doctor` output.
+const CHECK_NAME: &str = "skill_staleness";
+
+/// How many `<tier>/<stem>` pairs each severity bucket names before summarising.
+const MAX_NAMED: usize = 5;
+
+/// Bundled skills whose drift can silently drop a framework-guaranteed rule.
+///
+/// Why: most bundled skills are good-practice guidance where staleness is
+/// low-stakes, so ordinary drift is advisory. But a small subset are the sole
+/// place a *framework convention* — a rule other code or process depends on
+/// being followed exactly, like the commit/PR attribution footer — is spelled
+/// out. Drift in one of THESE reproduces the PR #2825 attribution bypass this
+/// probe exists to catch, so it escalates to `Fail`. A skill belongs here only
+/// if it states a framework-guaranteed rule as executable instruction AND a
+/// stale copy could make that rule lapse with no other signal. Kept
+/// intentionally short: sweeping in ordinary skills would make `Fail` noise that
+/// trains operators to ignore it.
+/// What: the list, with each entry's rule:
+/// - `documentation-style` — the mandatory Why/What/Test doc-comment triple.
+/// - `tm-pr-workflow` — the attribution-footer text, the
+///   `--assignee @me --label trusty-mpm` defaults, and squash-merge-only.
+/// - `tm-git-file-tracking` — CB#4's blocking file-tracking gate, and the other
+///   skill reproducing the attribution footer inline.
+///
+/// Test: `staleness_escalates_when_conventions_skill_drifts`,
+/// `staleness_warns_when_ordinary_skill_drifts`.
+const CONVENTIONS_BEARING_SKILLS: &[&str] = &[
+    "documentation-style",
+    "tm-pr-workflow",
+    "tm-git-file-tracking",
+];
+
+/// Audit every deploy tier's skills against the running binary's assets.
+///
+/// Why: see the module doc. The pre-#4604 version compared a cache against a
+/// manifest and could report clean while both were stale.
+/// What: builds the reference with [`skill_reference`] (the `agents/skills`
+/// submodule when one is checked out, else the compiled-in bundle — NEVER the
+/// extraction cache), audits each [`skill_deploy_tiers`] entry, and folds the
+/// findings:
+/// - `Fail` when a [`CONVENTIONS_BEARING_SKILLS`] entry drifted, is frozen, or
+///   is missing;
+/// - `Unknown` when anything could not be verified;
+/// - `Warn` for ordinary drift, a frozen ordinary skill, or a missing file;
+/// - `Ok` only when every managed skill at every tier matches byte-for-byte.
+///
+/// The message reports the frozen set separately, since `tm install` will not
+/// repair it. An empty reference is itself `Unknown` — with nothing to compare
+/// against, "clean" would be a claim the probe cannot support.
+/// Test: `doctor_skill_drift_tests.rs`.
+pub(super) fn check_skill_staleness(
+    paths: &FrameworkPaths,
+    project_dir: Option<&Path>,
+) -> DoctorCheck {
+    // `skill_source_dir()` returns the git submodule when one is checked out and
+    // `paths.skills` (the extraction cache) otherwise. Only the former is a
+    // legitimate reference; the latter is precisely what #4604 proved untrustworthy.
+    let source = paths.skill_source_dir();
+    let submodule = (source != paths.skills).then_some(source);
+    let reference = skill_reference(submodule.as_deref());
+    report(&reference, paths, project_dir)
+}
+
+/// Pure-ish core of [`check_skill_staleness`]: audit tiers and fold findings.
+///
+/// Why: taking the reference as a parameter lets the tests drive every severity
+/// branch with literal asset content instead of the real embedded bundle.
+/// What: see [`check_skill_staleness`].
+/// Test: `doctor_skill_drift_tests.rs`.
+fn report(
+    reference: &SkillReference,
+    paths: &FrameworkPaths,
+    project_dir: Option<&Path>,
+) -> DoctorCheck {
+    if reference.assets.is_empty() {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Unknown,
+            "no bundled skill assets are available to compare against — deployed skill \
+             content cannot be verified (issue #4604)",
+        );
+    }
+
+    let mut drifted: Vec<String> = Vec::new();
+    let mut frozen: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    let mut unverifiable: Vec<String> = Vec::new();
+    let mut conventions: Vec<String> = Vec::new();
+
+    for tier in skill_deploy_tiers(paths, project_dir) {
+        for finding in audit_deployed_skills(reference, &tier.dir) {
+            let where_ = format!("{}/{}", tier.label, finding.stem);
+            let conventions_bearing = CONVENTIONS_BEARING_SKILLS.contains(&finding.stem.as_str());
+            match finding.state {
+                SkillDrift::Fresh => continue,
+                SkillDrift::Drifted => drifted.push(where_.clone()),
+                SkillDrift::DriftedFrozen => frozen.push(where_.clone()),
+                SkillDrift::Missing => missing.push(where_.clone()),
+                SkillDrift::Unverifiable(why) => {
+                    unverifiable.push(format!("{where_} ({why})"));
+                    // An unverifiable skill is not evidence of a lapsed
+                    // convention — it is an absence of evidence — so it never
+                    // joins the escalation list.
+                    continue;
+                }
+            }
+            if conventions_bearing {
+                conventions.push(where_);
+            }
+        }
+    }
+
+    if drifted.is_empty() && frozen.is_empty() && missing.is_empty() && unverifiable.is_empty() {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            format!(
+                "every deployed skill matches {} at every deploy tier",
+                reference.origin
+            ),
+        );
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if !drifted.is_empty() {
+        parts.push(format!(
+            "{} drifted and REPAIRABLE by `tm install` ({})",
+            drifted.len(),
+            summarise(&drifted)
+        ));
+    }
+    if !frozen.is_empty() {
+        parts.push(format!(
+            "{} drifted and FROZEN — hand-edited after deployment, so `tm install` will \
+             deliberately skip them and they stay stale ({}); re-deploy with \
+             `tm doctor --fix-skills --include-frozen` (backs each file up first)",
+            frozen.len(),
+            summarise(&frozen)
+        ));
+    }
+    if !missing.is_empty() {
+        parts.push(format!(
+            "{} recorded as deployed but ABSENT from disk ({})",
+            missing.len(),
+            summarise(&missing)
+        ));
+    }
+    if !unverifiable.is_empty() {
+        parts.push(format!(
+            "{} could NOT be verified ({})",
+            unverifiable.len(),
+            summarise(&unverifiable)
+        ));
+    }
+
+    let body = format!(
+        "compared against {}: {} (issue #4604)",
+        reference.origin,
+        parts.join("; ")
+    );
+
+    let status = if !conventions.is_empty() {
+        CheckStatus::Fail
+    } else if !unverifiable.is_empty() {
+        CheckStatus::Unknown
+    } else {
+        CheckStatus::Warn
+    };
+
+    let message = if conventions.is_empty() {
+        body
+    } else {
+        format!(
+            "conventions-bearing skill(s) have drifted ({}) — a framework-guaranteed rule \
+             (the commit/PR attribution footer, the Why/What/Test doc pattern) may have \
+             silently lapsed in the deployed copy. {body}",
+            summarise(&conventions)
+        )
+    };
+
+    DoctorCheck::new(CHECK_NAME, status, message)
+}
+
+/// Render up to [`MAX_NAMED`] entries, then a count of the remainder.
+///
+/// Why: the message must stay bounded no matter how many skills drifted, while
+/// still naming enough to act on.
+/// What: comma-joined first entries plus `, … (+N more)`.
+/// Test: `staleness_message_is_bounded`.
+fn summarise(items: &[String]) -> String {
+    let shown: Vec<&str> = items.iter().take(MAX_NAMED).map(String::as_str).collect();
+    if items.len() > shown.len() {
+        format!(
+            "{}, … (+{} more)",
+            shown.join(", "),
+            items.len() - shown.len()
+        )
+    } else {
+        shown.join(", ")
+    }
+}
+
+#[cfg(test)]
+#[path = "doctor_skill_drift_tests.rs"]
+mod tests;

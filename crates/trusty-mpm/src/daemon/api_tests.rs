@@ -1150,7 +1150,8 @@ async fn doctor_endpoint_returns_report() {
     // added the output_style_staleness check; issue #2997 added the tcc_taint
     // check; issue #3453 part 2 added the output_style_legacy_ids check;
     // issue #3427 added the scaffold_tracking check; issue #4442 added the
-    // asset_tier check). #1905's stale-skill
+    // asset_tier check; issue #4033 added the binary_provenance check).
+    // #1905's stale-skill
     // cleanup is a one-time migration, not a `run_doctor` probe, so it does
     // not appear here; the per-check statuses carry the diagnosis, not the
     // HTTP status.
@@ -1185,6 +1186,7 @@ async fn doctor_endpoint_returns_report() {
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
+        "binary_provenance",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:
