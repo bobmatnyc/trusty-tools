@@ -90,9 +90,32 @@ async fn health_response_serializes_supervised_field() {
     );
 }
 
+/// #4469: `/health` must publish the THREE-STATE launchd answer, not only the
+/// bool that collapses it.
+///
+/// Why: without this field a launchctl that could not be asked is indistinguishable
+/// on the wire from launchd positively saying "not mine", and `tm doctor`'s orphan
+/// verdict escalates the latter to a `kill -TERM` recommendation. The fix has to
+/// REACH the surface that motivated it.
+/// Test: this test.
+#[tokio::test]
+async fn health_response_serializes_launchd_supervision_field() {
+    let state = DaemonState::shared();
+    state.set_launchd_supervision("unknown");
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.launchd_supervision, "unknown");
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("launchd_supervision"),
+        Some(&serde_json::Value::String("unknown".into())),
+        "wire shape must carry `launchd_supervision`: {value}"
+    );
+}
+
 #[tokio::test]
 async fn health_response_serializes_pid_field() {
-    // #4230: `supervised` is a heuristic whose fallback prong is `getppid() == 1`,
+    // #4230: `supervised` is a self-report (a `getppid() == 1` heuristic before #4469),
     // so an orphan can self-report `true`. `pid` is what makes `tm doctor`'s check
     // authoritative — it identifies WHICH process answered, for comparison against
     // the PID launchd reports for the registered daemon label.
@@ -1150,7 +1173,8 @@ async fn doctor_endpoint_returns_report() {
     // added the output_style_staleness check; issue #2997 added the tcc_taint
     // check; issue #3453 part 2 added the output_style_legacy_ids check;
     // issue #3427 added the scaffold_tracking check; issue #4442 added the
-    // asset_tier check). #1905's stale-skill
+    // asset_tier check; issue #4033 added the binary_provenance check).
+    // #1905's stale-skill
     // cleanup is a one-time migration, not a `run_doctor` probe, so it does
     // not appear here; the per-check statuses carry the diagnosis, not the
     // HTTP status.
@@ -1185,6 +1209,7 @@ async fn doctor_endpoint_returns_report() {
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
+        "binary_provenance",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

@@ -102,6 +102,18 @@ pub mod bin_resolve;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
+/// Authoritative, three-state launchd supervision detection (issue #4469).
+///
+/// Why: the env-var heuristic this replaces let an unsupervised child
+/// self-report as supervised, defeating the `/health`-based verification
+/// operators are instructed to trust. Kept OUTSIDE the `update-check` feature
+/// gate because supervision is a daemon-lifecycle fact, not an upgrade
+/// concern — `update::upgrade` merely happens to be its oldest caller.
+/// What: [`supervision::launchd_supervision`] and its three-state
+/// [`supervision::LaunchdSupervision`] answer.
+/// Test: `cargo test -p trusty-common supervision`.
+pub mod supervision;
+
 #[cfg(feature = "axum-server")]
 pub mod server;
 

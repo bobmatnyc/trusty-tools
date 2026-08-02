@@ -931,8 +931,9 @@ pub struct HealthSnapshot {
     ///
     /// Why: the authoritative half of the orphan check — compared against the PID
     /// launchd reports for the registered daemon label. `supervised` alone is a
-    /// heuristic self-report whose `getppid() == 1` prong reads `true` for a real
-    /// orphan; a PID comparison against launchd cannot be fooled that way.
+    /// self-report — and on any binary predating #4469, a heuristic whose
+    /// `getppid() == 1` prong reads `true` for a real orphan. A PID comparison
+    /// against launchd cannot be fooled either way.
     /// What: mirrors `daemon::api::types::HealthResponse::pid`; `None` when the
     /// responding daemon predates the field, which yields `Unknown` rather than a
     /// pass.
@@ -951,4 +952,17 @@ pub struct HealthSnapshot {
     /// Test: `health_snapshot_deserializes`.
     #[serde(default)]
     pub unsupervised_forced: bool,
+    /// The daemon's THREE-STATE launchd answer (issue #4469).
+    ///
+    /// Why: `supervised` is a bool and cannot say "launchd could not be asked".
+    /// Reading an unanswerable probe as `Some(false)` makes the orphan check
+    /// escalate to a hard `Fail` prescribing `kill -TERM` against a daemon whose
+    /// state is simply unknown — the round-1 #4230 error inverted.
+    /// What: mirrors `daemon::api::types::HealthResponse::launchd_supervision`;
+    /// `""` when the responding daemon predates the field, which callers treat
+    /// as "no three-state signal" and fall back to `supervised`.
+    /// Test: `health_snapshot_deserializes`,
+    /// `health_snapshot_launchd_supervision_defaults_to_empty`.
+    #[serde(default)]
+    pub launchd_supervision: String,
 }

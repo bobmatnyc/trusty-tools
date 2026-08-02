@@ -429,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
             session(&client, &url, action).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
+        Some(Command::Doctor { flags }) => doctor(&url, &flags).await,
         Some(Command::Validate { path, repair }) => validate(path, repair).await,
         Some(Command::Hooks { action }) => {
             use cli::HooksAction;

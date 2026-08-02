@@ -447,6 +447,9 @@ pub async fn health(State(state): State<Arc<DaemonState>>) -> Json<HealthRespons
         catalog_unknown: report.unknown,
         catalog_changes: report.summary_lines(),
         supervised: state.supervised(),
+        // #4469: the three-state answer the bool above collapses. Published so
+        // `tm doctor` can distinguish "launchd says no" from "could not ask".
+        launchd_supervision: state.launchd_supervision(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         // #4230: identify WHICH process answered, so `tm doctor` can compare it
         // against the PID launchd owns instead of trusting `supervised` alone.

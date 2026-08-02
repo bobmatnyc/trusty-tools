@@ -131,7 +131,7 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// `execute_doctor_against_test_daemon` test; the prune path is covered by
 /// `core::stale_skills`'s own unit tests; the stale-daemon comparison logic
 /// is covered by `core::version_staleness`'s own unit tests.
-pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Result<()> {
+pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow::Result<()> {
     use trusty_mpm::client::{CommandExecutor, CommandResult, DaemonClient, TrustyCommand};
     use trusty_mpm::core::doctor::CheckStatus;
 
@@ -206,8 +206,12 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
         other => eprintln!("doctor: unexpected result {other:?}"),
     }
 
-    if prune_stale_skills {
+    if flags.prune_stale_skills {
         prune_stale_skills_locally();
+    }
+
+    if flags.fix_skills {
+        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen);
     }
 
     Ok(())

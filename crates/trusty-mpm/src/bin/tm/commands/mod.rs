@@ -21,6 +21,7 @@ pub(crate) mod daemon;
 pub(crate) mod delete;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
+pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_orphan;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
