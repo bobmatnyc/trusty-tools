@@ -67,6 +67,12 @@ on:
       - "crates/trusty-common/**"
       - ".github/workflows/al2023-build.yml"
   pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
     paths:
       - "crates/trusty-analyze/**"
@@ -77,10 +83,12 @@ on:
   workflow_dispatch:
     # Allow manual trigger from the Actions UI for ad-hoc validation.
 
-# Cancel superseded runs for the same ref (matches ci.yml convention).
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
 concurrency:
-  group: al2023-build-${{ github.ref }}
-  cancel-in-progress: true
+  group: al2023-build-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   # Suppress ort/fastembed download progress bars in build output.

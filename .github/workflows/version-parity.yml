@@ -1,4 +1,5 @@
-# Version-parity drift gate for the trusty-tools workspace (issue #3366).
+# Version-parity drift gates for the trusty-tools workspace (issues #3366,
+# #4421).
 #
 # Detects "unpublished source drift under an already-published version
 # number": a crate whose Cargo.toml version is already live on crates.io, but
@@ -7,28 +8,76 @@
 # --dry-run` into a release blocker (6 "symbol not found" errors) when
 # trusty-common and trusty-agents-common each drifted this way.
 #
-# Runs on PUSH TO MAIN ONLY (no pull_request trigger), per the issue's own
-# proposed design: this check compares against the LIVE crates.io registry,
-# so its result is only meaningful for what actually landed on main — a
-# feature branch's crate versions haven't been decided yet, and running a
-# registry-dependent check on every PR (including ones from parallel agent
-# worktrees) would be noisy without being actionable. Catching drift right
-# after it merges (a red commit status on main) is the goal: a merge-time
-# finding instead of a release-time surprise.
+# TWO jobs, deliberately different in what they compare and when.
+#
+# 1. `pr-version-bump` (PULL REQUEST) — the merge-time guard #3366 proposed
+#    and never got, which is why the defect kept recurring: TWICE on
+#    2026-07-30 alone (trusty-installer 0.4.10 at 6078b21c, nine consecutive
+#    red runs; trusty-agents-common 0.3.0 at e8f30ef0, hours after the first
+#    fix landed). It asks the one question that is decidable from the PR
+#    itself — did this branch change `crates/<X>/src/**` without bumping
+#    `crates/<X>/Cargo.toml`, under a version crates.io already has? — with
+#    one sparse-index GET per touched crate and no tarball downloads. See
+#    scripts/check-pr-version-bump.sh's header for why this option was chosen
+#    over running the full parity check on PRs.
+#
+# 2. `version-parity` (PUSH TO MAIN) — unchanged, and still the authority. It
+#    diffs the real published tarball against the real merged tree and fails
+#    CLOSED, including when the registry is unreachable. The PR-time guard is
+#    an early warning, not a replacement: it warns rather than fails on a
+#    registry outage precisely because this job is still behind it.
 name: Version parity
 
 on:
   push:
     branches: [main]
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
   workflow_dispatch: {}
 
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179) — this workflow was hit particularly hard by the
+# old `${{ github.ref }}` group, since it is push-to-main only and therefore
+# only ever saw the LAST commit of a merge train. Per-ref group on pull_request
+# so a new push still supersedes the superseded run. Matches ci.yml.
 concurrency:
-  group: version-parity-${{ github.ref }}
-  cancel-in-progress: true
+  group: version-parity-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
+  # Pre-merge guard (#4421). Pure shell + one HTTP GET per touched crate: no
+  # Rust toolchain, no cargo build, so it adds seconds to a PR rather than the
+  # minutes the post-merge job costs.
+  pr-version-bump:
+    name: "PR version bump vs crates.io (issue #4421)"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0 — the guard needs `git merge-base` against the base
+      # branch and `git show <merge-base>:crates/<X>/Cargo.toml`, neither of
+      # which a shallow checkout can resolve.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check PR version bumps against crates.io
+        env:
+          PR_VERSION_BUMP_BASE: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/check-pr-version-bump.sh
+
+  # Post-merge authority (#3366). Quoted `name:` — an unquoted ` #` opens a
+  # YAML comment in a plain scalar, which silently truncated this job's
+  # reported context to "Publish-version parity (issue".
   version-parity:
-    name: Publish-version parity (issue #3366)
+    name: "Publish-version parity (issue #3366)"
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
