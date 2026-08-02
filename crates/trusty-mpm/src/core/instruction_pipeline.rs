@@ -24,7 +24,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::core::delegation_authority::{generate_authority, scan_agents};
+use crate::core::delegation_authority::{generate_authority, resolve_roster};
 use crate::core::instruction_package::SectionId;
 
 /// Separator placed between merged instruction sections.
@@ -440,15 +440,22 @@ pub fn strip_delegation_block(content: &str) -> String {
 ///
 /// Why: bundles the three source locations so callers pass one value instead
 /// of three loosely-related paths.
-/// What: the framework `INSTRUCTIONS.md`, the deployed agents directory, and
-/// the project `CLAUDE.md`.
+/// What: the framework `INSTRUCTIONS.md`, the project the roster is resolved
+/// for, and the project `CLAUDE.md`.
 /// Test: every `pipeline_*` test constructs one of these.
 #[derive(Debug, Clone)]
 pub struct PipelineInput {
     /// Path to the framework `INSTRUCTIONS.md`.
     pub framework_instructions_path: PathBuf,
-    /// Directory of deployed agents (`~/.claude/agents/`).
-    pub agents_dir: PathBuf,
+    /// The project whose agent roster this session will receive.
+    ///
+    /// #4588: this replaced a single `agents_dir`. Callers used to name one
+    /// directory to scan, which is how the printed count came to describe a
+    /// different set of agents than the PM was given. The roster is resolved
+    /// from the project by
+    /// [`crate::core::delegation_authority::resolve_roster`], so there is no
+    /// longer a directory for a caller to get wrong.
+    pub project_dir: PathBuf,
     /// Path to the project `CLAUDE.md`.
     pub claude_md_path: PathBuf,
 }
@@ -520,13 +527,16 @@ impl std::error::Error for PipelineError {
 /// Code loads it natively), so this still seeds the stub as a side effect.
 ///
 /// What: loads INSTRUCTIONS.md (falls back to empty string if missing),
-/// generates delegation authority from agents_dir, concatenates the two in
-/// order 3→4, and returns the merged string. Separately ensures the project
-/// `CLAUDE.md` exists (creating the stub if absent) purely for its side
-/// effect — its content is intentionally NOT folded into `merged` (dead code
-/// removed; see module docs).
+/// generates delegation authority from the roster
+/// [`crate::core::delegation_authority::resolve_roster`] resolves for
+/// `project_dir`, concatenates the two in order 3→4, and returns the merged
+/// string. Separately ensures the project `CLAUDE.md` exists (creating the stub
+/// if absent) purely for its side effect — its content is intentionally NOT
+/// folded into `merged` (dead code removed; see module docs).
 ///
-/// Test: `pipeline_full`, `pipeline_missing_instructions`, `pipeline_creates_claude_md`
+/// Test: `pipeline_full`, `pipeline_missing_instructions`,
+/// `pipeline_creates_claude_md`,
+/// `session_start_count_matches_the_delivered_delegation_roster`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
     // Section 3: framework instructions. A missing file is not fatal — the
     // session can still launch with delegation context.
@@ -543,7 +553,11 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
         };
 
     // Section 4: delegation authority, built fresh from the deployed agents.
-    let agents = scan_agents(&input.agents_dir);
+    // #4588: resolved by `resolve_roster` — the SAME function that renders the
+    // delegation section delivered to the PM — so `agent_count`, which
+    // `tm session start` prints verbatim, cannot describe a different set of
+    // agents than the PM received.
+    let agents = resolve_roster(&input.project_dir);
     let agent_count = agents.len();
     let authority = generate_authority(&agents);
 

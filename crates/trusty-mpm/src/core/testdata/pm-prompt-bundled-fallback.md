@@ -706,10 +706,9 @@ New issues are reserved for genuinely separable work someone would schedule on i
 > `CLAUDE_CONFIG_DIR/agents`, and the framework agents dir, project tier
 > winning on a name collision. The scan reads every `.md` file on disk, so it
 > picks up manifest-declared AND user-installed agents. That roster is
-> required; composition fails without it. Exception: agents whose frontmatter
-> carries `role: base` are filtered out as foundation templates, which
-> currently hides `memory-manager`, `mpm-agent-manager`, and
-> `mpm-skills-manager` (#4589).
+> required; composition fails without it. The ONLY agents filtered out are
+> foundation templates, identified by a `BASE-*` file name (the `base-` prefix
+> is required); frontmatter is never used to hide an agent (#4589).
 >
 > This file: crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md
 

@@ -708,9 +708,11 @@ fn prepare_session_inner(
     );
     let input = PipelineInput {
         framework_instructions_path: fw.framework_instructions_path(),
-        // #4409: the roster is scanned from the tier the agents actually
-        // deploy into, not the workspace's project tier.
-        agents_dir: fw.agent_deploy_dir(),
+        // #4588: the roster is resolved from the project by the one shared
+        // resolver (project tier + the tm-managed `CLAUDE_CONFIG_DIR` tier
+        // #4409 deploys into + the operator's generic `~/.claude/agents`), so
+        // the count printed at session start is the roster the PM receives.
+        project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
     };
     let instructions = build_instructions(&input)?;

@@ -271,7 +271,7 @@ pub async fn run_doctor(
 
     let mut checks = vec![
         check_instructions(project_dir),
-        check_agents(&paths),
+        check_agents(&paths, project_dir),
         // #4451: `check_agents` proves the files exist; this proves the tier
         // they land in is one a managed session's harness actually scans.
         check_agent_reachability(&paths, project_dir),

@@ -125,3 +125,16 @@ second, independent Tauri crate (`crates/trusty-code-gui`, for the
 GUI binary (no `install-trusty-code-signed.sh` script or `CODE_SET` exists);
 the Tauri `bundle.macOS.signingIdentity` config is the only signing path for
 `trusty-code-gui` today.
+
+🔴 **Naming an agent file `base…` without a hyphen** — `scan_agents`
+(`crates/trusty-mpm/src/core/delegation_authority.rs`) treats a case-insensitive
+`base-` file-stem prefix as a foundation template and removes it from the
+delegation roster entirely. That is the ONLY rule that hides a deployed agent,
+and it keys on the FILE NAME, never on frontmatter — an agent's `role:` value is
+irrelevant to it (#4589). The hyphen is the whole convention: `base-anything.md`
+is excluded, while `baseline-analyzer.md`, `base64-decoder.md`, and
+`basecamp-sync.md` are ordinary delegatable agents. If an agent you deployed
+never appears in the PM's `## Delegation Authority` section, check the file name
+first, then run `tm doctor` — its `agents` check reports the deployed file count
+and the delegatable roster size side by side, and a gap between them is the
+symptom. `RUST_LOG=debug` logs every file this rule excludes, with its directory.

@@ -617,8 +617,10 @@ pub(crate) fn compose_session_instructions(
     // and populate the metadata flags (agent_count, claude_md_created, …).
     let input = PipelineInput {
         framework_instructions_path: fw.framework_instructions_path(),
-        // #4409: scan the tier bundled agents actually deploy into.
-        agents_dir: fw.agent_deploy_dir(),
+        // #4588: the roster is resolved from the project by the one shared
+        // resolver, not from a directory named here — naming one tier is what
+        // made the printed count disagree with the delivered roster.
+        project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
     };
     let output = build_instructions(&input)?;
