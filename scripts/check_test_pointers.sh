@@ -461,19 +461,30 @@ is_excluded_path() {
 # unrelated row.
 # ---------------------------------------------------------------------------
 scan() {
-  local viol_out="$1" stale_out="$2" err_out="$3"
+  local viol_out="$1" stale_out="$2" err_out="$3" checked_out="$4"
   : > "$viol_out"
   : > "$stale_out"
   : > "$err_out"
+  : > "$checked_out"
 
   CRATE_FN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpfncache.XXXXXX")"
 
   local allowlist=".test-pointer-allowlist.tsv"
-  local raw
+  local raw rslist
   raw="$(mktemp "${TMPDIR:-/tmp}/tpraw.XXXXXX")"
   : > "$raw"
 
-  git ls-files '*.rs' | while IFS= read -r f; do
+  # #4618: materialise the enumeration so a failing `git ls-files` is observable
+  # instead of arriving as an empty stream that reads as "0 dangling pointers".
+  rslist="$(mktemp "${TMPDIR:-/tmp}/tprslist.XXXXXX")"
+  if ! git ls-files '*.rs' > "$rslist"; then
+    echo "FAIL: TOOL ERROR — 'git ls-files *.rs' exited non-zero; nothing was" >&2
+    echo "      scanned. This is NOT a pass (issue #4618)." >&2
+    rm -f "$raw" "$rslist"
+    exit 1
+  fi
+
+  while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
     is_excluded_path "$f" && continue
@@ -495,6 +506,9 @@ scan() {
         # De-dupe within a single annotation (same name cited twice in one blob).
         if grep -qxF "${kind}:${name}" "$seen_file" 2>/dev/null; then continue; fi
         printf '%s\n' "${kind}:${name}" >> "$seen_file"
+        # #4618: one row per citation this gate actually resolved. "0 dangling
+        # pointers" over 0 resolved citations is a broken scan, not a clean tree.
+        printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$kind" "$name" >> "$checked_out"
         if [ "$kind" = "GLOB" ]; then
           if ! name_glob_exists_in_crate "$crate" "$name"; then
             printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
@@ -507,7 +521,8 @@ scan() {
       done
       rm -f "$seen_file"
     done
-  done
+  done < "$rslist"
+  rm -f "$rslist"
 
   if [ -f "$allowlist" ]; then
     # Build the (path, name) allowlist key set once.
@@ -701,11 +716,20 @@ mod tests {
 EOF
   ( cd "$tmp" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -q -m fixture )
 
-  local viol stale err rc
+  local viol stale err checked rc
   viol="$(mktemp "${TMPDIR:-/tmp}/tpself.viol.XXXXXX")"
   stale="$(mktemp "${TMPDIR:-/tmp}/tpself.stale.XXXXXX")"
   err="$(mktemp "${TMPDIR:-/tmp}/tpself.err.XXXXXX")"
-  ( cd "$tmp" && scan "$viol" "$stale" "$err" )
+  checked="$(mktemp "${TMPDIR:-/tmp}/tpself.checked.XXXXXX")"
+  ( cd "$tmp" && scan "$viol" "$stale" "$err" "$checked" )
+
+  # #4618: the fixture cites real names, so a scan that resolved ZERO citations
+  # means the scanner stopped working — the same vacuous-pass shape this
+  # self-test exists to catch in the gate itself.
+  if [ ! -s "$checked" ]; then
+    echo "self-test FAIL: scan() resolved 0 citations over the fixture crate — the scan is vacuous (issue #4618)." >&2
+    ok=0
+  fi
 
   # Expect exactly six violations: dangling_test_missing (fn citation),
   # nonexistent_module_tests (mod citation), glob_dangling_nothing_matches_*
@@ -780,11 +804,12 @@ EOF
     printf 'crates/fixture/src/lib.rs\tphantom_fixed_pointer\n'
   } > "$allowlist_path"
 
-  local viol2 stale2 err2
+  local viol2 stale2 err2 checked2
   viol2="$(mktemp "${TMPDIR:-/tmp}/tpself.viol2.XXXXXX")"
   stale2="$(mktemp "${TMPDIR:-/tmp}/tpself.stale2.XXXXXX")"
   err2="$(mktemp "${TMPDIR:-/tmp}/tpself.err2.XXXXXX")"
-  ( cd "$tmp" && scan "$viol2" "$stale2" "$err2" )
+  checked2="$(mktemp "${TMPDIR:-/tmp}/tpself.checked2.XXXXXX")"
+  ( cd "$tmp" && scan "$viol2" "$stale2" "$err2" "$checked2" )
 
   if grep -q "dangling_test_missing" "$viol2"; then
     echo "self-test FAIL: dangling_test_missing is allowlisted but was still reported as a violation:" >&2
@@ -857,9 +882,25 @@ ALLOWLIST="$REPO_ROOT/.test-pointer-allowlist.tsv"
 VIOL="$(mktemp "${TMPDIR:-/tmp}/tpviol.XXXXXX")"
 STALE="$(mktemp "${TMPDIR:-/tmp}/tpstale.XXXXXX")"
 ERR="$(mktemp "${TMPDIR:-/tmp}/tperr.XXXXXX")"
-trap 'rm -f "$VIOL" "$STALE" "$ERR"' EXIT
+CHECKED="$(mktemp "${TMPDIR:-/tmp}/tpchecked.XXXXXX")"
+trap 'rm -f "$VIOL" "$STALE" "$ERR" "$CHECKED"' EXIT
 
-scan "$VIOL" "$STALE" "$ERR"
+scan "$VIOL" "$STALE" "$ERR" "$CHECKED"
+
+# #4618: the scan floor. "0 dangling pointers" is the expected steady state, so
+# it cannot distinguish a healthy scan from one that resolved no citations at
+# all — and this gate's true positives are additionally masked by 920
+# grandfathered allowlist rows. CITATIONS_CHECKED is the number that can tell
+# them apart. The floor sits far below the current reality and far above zero.
+MIN_CITATIONS=200
+CITATIONS_CHECKED="$(awk 'END{print NR}' "$CHECKED")"
+if [ "${CITATIONS_CHECKED:-0}" -lt "$MIN_CITATIONS" ]; then
+  echo "FAIL: SCAN FLOOR — only ${CITATIONS_CHECKED} Test: citation(s) were resolved, below the" >&2
+  echo "      declared minimum of ${MIN_CITATIONS} (MIN_CITATIONS in scripts/check_test_pointers.sh)." >&2
+  echo "      A gate that resolves nothing reports '0 dangling pointers' and cannot" >&2
+  echo "      fail; that is a broken scan, not a clean tree (issue #4618)." >&2
+  exit 1
+fi
 
 # Parse errors (unterminated backtick/parenthetical — see candidate_names)
 # are a hard, unconditional, non-allowlistable failure in EVERY mode,
@@ -953,5 +994,5 @@ if [ "$total" -gt 0 ]; then
   exit 1
 fi
 
-echo "test-pointers: 0 dangling pointers — OK."
+echo "test-pointers: resolved ${CITATIONS_CHECKED} Test: citation(s) (floor ${MIN_CITATIONS}) — 0 dangling pointers — OK."
 exit 0

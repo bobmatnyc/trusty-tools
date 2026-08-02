@@ -134,17 +134,55 @@ fi
 CHANGED="$(git diff --name-only --no-renames "$MERGE_BASE" HEAD)"
 PRESENT="$(git diff --name-only --no-renames --diff-filter=d "$MERGE_BASE" HEAD)"
 
-if [[ -z "$CHANGED" ]]; then
-  echo "changelog-fragment gate: no changes against ${BASE} — nothing to check."
-  exit 0
+# #4618: the scan floor. "No changes at all against the base" used to exit 0 as
+# "nothing to check" — indistinguishable from a gate that examined the whole PR
+# and found it recorded. A real PR always changes at least one path, so an empty
+# diff means the base ref is wrong or the checkout is shallow, not that the PR is
+# clean. Report the number examined so a future regression is visible in the log.
+CHANGED_COUNT="$(printf '%s\n' "$CHANGED" | grep -c '[^[:space:]]' || true)"
+if [[ "${CHANGED_COUNT:-0}" -lt 1 ]]; then
+  echo "FAIL: SCAN FLOOR — the diff ${MERGE_BASE}..HEAD lists 0 changed path(s)." >&2
+  echo "      Nothing was examined, so this gate could not have failed. Check that" >&2
+  echo "      '${BASE}' is the right base and that CI checked out with fetch-depth: 0." >&2
+  echo "      A gate that scans nothing is not a passing gate (issue #4618)." >&2
+  exit 1
 fi
+
+# Why: `git cat-file -e <rev>:<path>` exits 128 BOTH when the path is legitimately
+#   absent from that tree AND when git itself failed, so the previous
+#   `git cat-file -e ... || continue` read every git error as "the PR deleted this
+#   crate" — the exemption — and the gate printed OK on a PR with a real
+#   unrecorded source change (#4618 item 3).
+# What: returns 0 when <path> exists at <rev>, 1 when it is definitively absent.
+#   `git ls-tree` separates the two cases that `cat-file -e` conflates: it exits 0
+#   with EMPTY output for an absent path, and non-zero only on a genuine git
+#   failure — which is escalated to a hard gate failure here, never swallowed.
+#   Stderr is captured SEPARATELY, never folded into `out` with `2>&1`: `out`
+#   is the existence signal, so a git warning printed on an otherwise
+#   successful run would make an absent path read as present — turning the
+#   #3732 crate-deletion exemption into a false red.
+path_exists_at_rev() {
+  local rev="$1" path="$2" out err rc=0
+  err="$(mktemp "${TMPDIR:-/tmp}/changelog.lstree.XXXXXX")"
+  out="$(git ls-tree -r --name-only "$rev" -- "$path" 2>"$err")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "FAIL: TOOL ERROR — 'git ls-tree ${rev} -- ${path}' failed:" >&2
+    sed 's/^/       /' "$err" >&2
+    echo "      Whether the path exists is unknown, so no exemption may be granted." >&2
+    echo "      This is NOT a pass (issue #4618)." >&2
+    rm -f "$err"
+    exit 1
+  fi
+  rm -f "$err"
+  [[ -n "$out" ]]
+}
 
 # The TRANSITIONAL CHANGELOG.md branch applies only to branches cut before the
 # fragment mechanism existed. Probing for the assembler at the merge base is a
 # self-expiring test: absent => this branch predates #4476 => be lenient;
 # present => the branch had fragments available => be strict. No date, no
 # follow-up cleanup PR.
-if git cat-file -e "${MERGE_BASE}:scripts/assemble-changelog.sh" 2>/dev/null; then
+if path_exists_at_rev "$MERGE_BASE" "scripts/assemble-changelog.sh"; then
   TRANSITIONAL=0
 else
   TRANSITIONAL=1
@@ -198,8 +236,9 @@ while IFS= read -r path; do
       is_test_path "$path" && continue
       # The crate was dissolved by this PR — there is no changelog.d/ left to
       # put a fragment in, and the assembler cannot run for it. See the
-      # "crate no longer EXISTS at HEAD" exemption above.
-      git cat-file -e "HEAD:crates/${crate}/Cargo.toml" 2>/dev/null || continue
+      # "crate no longer EXISTS at HEAD" exemption above. A git FAILURE here is
+      # not the exemption; path_exists_at_rev hard-fails on one (#4618).
+      path_exists_at_rev HEAD "crates/${crate}/Cargo.toml" || continue
       needs="${needs}${crate}"$'\n'
       ;;
   esac
@@ -233,7 +272,7 @@ done <<<"$PRESENT"
 needs="$(printf '%s' "$needs" | grep -v '^$' | LC_ALL=C sort -u || true)"
 
 if [[ -z "$needs" ]]; then
-  echo "changelog-fragment gate: no crate source changed (docs-only / CI-only / test-only) — OK."
+  echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); no crate source changed (docs-only / CI-only / test-only) — OK."
   exit 0
 fi
 
@@ -284,4 +323,5 @@ EOF
   exit 1
 fi
 
-echo "changelog-fragment gate: all crates with source changes are recorded."
+crate_count="$(printf '%s\n' "$needs" | grep -c '[^[:space:]]' || true)"
+echo "changelog-fragment gate: scanned ${CHANGED_COUNT} changed path(s); all ${crate_count} crate(s) with source changes are recorded."
