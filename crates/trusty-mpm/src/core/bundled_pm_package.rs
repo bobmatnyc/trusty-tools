@@ -141,7 +141,7 @@ pub(crate) fn bundled_fallback_package() -> Result<&'static InstructionPackage, 
 /// What: [`InstructionPackage::authored_run`] over the bundled manifest, or `None`
 /// when the manifest is unreadable so the caller can fall back to its retained
 /// `include_str!` constants.
-/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_three_sections`.
+/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_four_sections`.
 pub(crate) fn authored_run(sections: &[SectionId]) -> Option<String> {
     bundled_fallback_package()
         .ok()

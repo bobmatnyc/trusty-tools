@@ -128,7 +128,7 @@ pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
 /// Why: one lookup point means a path typo in the manifest becomes a named
 /// [`crate::core::instruction_package::ValidationError::UnknownFileSource`]
 /// instead of an empty block.
-/// What: a linear scan of [`SECTION_SOURCES`] — eight entries, called a handful
+/// What: a linear scan of [`SECTION_SOURCES`] — nine entries, called a handful
 /// of times per process, so a map would buy nothing and would reintroduce the
 /// iteration-order hazard the package format exists to avoid.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
@@ -181,7 +181,7 @@ pub(crate) fn pm_instructions() -> &'static str {
 /// as the retained fallback for the case where the manifest itself is unreadable.
 /// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
 /// manifest failed to parse or validate.
-/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_three_sections`.
+/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_four_sections`.
 fn manifest_run(sections: &[SectionId]) -> Option<String> {
     crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
 }
@@ -242,7 +242,7 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// travels with the other non-overridable rules and consequently precedes the
 /// conventions. Position only — not one word of either block changed, and both
 /// remain inside the floor, so nothing about what is overridable moved.
-/// Test: `base_pm_is_its_three_sections`, `floor_carries_the_tool_priority_mandate`.
+/// Test: `base_pm_is_its_four_sections`, `floor_carries_the_tool_priority_mandate`.
 pub(crate) fn base_pm() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let run = manifest_run(&[
