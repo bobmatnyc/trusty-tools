@@ -3,11 +3,11 @@
 # vmtest — the vmtest-harness driver (DOC-1 §3.1).
 #
 # Sequence (DOC-1 §3.1):  preflight -> clone -> size -> boot -> negative probe
-# -> provision -> scenario -> verify -> teardown.  AT PLAN PHASE 2 ONLY THE
-# HOST-SIDE PREFIX IS BUILT: argument parsing, configuration, the run registry,
-# preflight, `clean`, and `run --dry-run`.  Everything from the clone onward
-# lands in Phase 3 and later, and `run` without `--dry-run` says so rather than
-# pretending.
+# -> provision -> scenario -> verify -> teardown.  AT PLAN PHASE 3 EVERY STEP
+# EXISTS EXCEPT `verify`: the scenario delivers source and stops, because a
+# scenario is "a sequence of install steps plus the expectations that follow
+# from them" (DOC-1 §3.6) and there are no install steps yet.  Phases 4-7 add
+# the expectation table, the install steps, N2 and the oracle.
 #
 # THIS FILE MAY NOT CONTAIN THE STRING THAT NAMES THE VIRTUALISATION TOOL.
 # Every such invocation lives in `lib/vm.sh` and nowhere else (DOC-1 §3.2,
@@ -49,6 +49,13 @@ set -euo pipefail
 # (`. vmtest-harness/vmtest --source-only`), where `$0` would be `bash`.
 VMTEST_HARNESS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# The host worktree pattern (c) delivers.  DOC-2 §12.5's skeleton writes `$PWD`;
+# this derives it from the harness's own location instead, so the delivered tree
+# is the checkout the driver belongs to no matter which directory it is invoked
+# from.  `$PWD` would silently stream the wrong worktree — or no worktree — from
+# anywhere but the repository root.  Recorded in MANIFEST Phase 3, Deviations.
+VMTEST_HOST_REPO=$(cd "$VMTEST_HARNESS_DIR/.." && pwd)
+
 # ---------------------------------------------------------------------------
 # Globals (DOC-2 §12.3).  Set by the driver during preflight; read-only after,
 # except VMTEST_GUEST_ENV (two lifetimes, §7.3) and the write-once VMTEST_EXIT.
@@ -76,6 +83,9 @@ VMTEST_VM_RUN_PID=''
 VMTEST_GUEST_ENV=''
 VMTEST_CLEANUP_DONE=0
 VMTEST_TMPDIR=''
+# Read FROM the environment, so the assignment must not clobber it.  See
+# `scenario_dispatch` for what it does and why it is not a flag.
+VMTEST_DIRTY_CHECK="${VMTEST_DIRTY_CHECK:-0}"
 CONF_EFFECTIVE=''
 PIN_OCI_REF=''
 PIN_DIGEST=''
@@ -256,11 +266,17 @@ harness_tmpdir() {
 }
 
 # ---------------------------------------------------------------------------
-# The OS boundary.  Sourced AFTER `set -euo pipefail` and after the
-# infrastructure above, which lib/ functions call.
+# The lib/ modules.  Sourced AFTER `set -euo pipefail` and after the
+# infrastructure above, which lib/ functions call.  Each file defines functions
+# and nothing else (DOC-2 §12.1), so sourcing has no side effects and the order
+# among them does not matter — but they must all be sourced BEFORE the traps are
+# installed, because cleanup calls into two of them.
 # ---------------------------------------------------------------------------
 
 . "$VMTEST_HARNESS_DIR/lib/vm.sh"
+. "$VMTEST_HARNESS_DIR/lib/provision.sh"
+. "$VMTEST_HARNESS_DIR/lib/source.sh"
+. "$VMTEST_HARNESS_DIR/lib/verify.sh"
 
 # ---------------------------------------------------------------------------
 # Teardown (DOC-2 §Shell discipline, the trap rule and its five properties)
@@ -276,14 +292,58 @@ vmtest_cleanup() {
     if [ "${VMTEST_CLEANUP_DONE:-0}" -eq 1 ]; then return 0; fi
     VMTEST_CLEANUP_DONE=1
 
+    # The host worktree comes first: a VM that refuses to stop must not also
+    # cost the host its worktree.  Idempotent and a no-op unless the opt-in
+    # dirty check created fixtures, so the explicit call after the assertions
+    # and this one cannot double-restore.
+    source_dirty_fixture_restore
+
     # Property 3: tolerate a run that never got that far.  A preflight refusal
     # (exit 10) must not produce a teardown error on top of the real message.
-    if [ -n "${VMTEST_VM_CREATED:-}" ]; then
+    # A VM that was never actually created is skipped on the OBSERVABLE
+    # condition, not on the flag alone: without this, a failed clone would send
+    # cleanup into vm_wait_for_stopped against a name that does not exist, which
+    # polls for its full 120 s budget and then dies 70 for the wrong reason.
+    if [ -n "${VMTEST_VM_CREATED:-}" ] && [ -z "$(vm_state "${VMTEST_VM:-}" 2>/dev/null || :)" ]; then
+        log "teardown: no VM named '${VMTEST_VM:-}' is present; nothing to tear down"
+    elif [ -n "${VMTEST_VM_CREATED:-}" ]; then
         if [ "${VMTEST_KEEP:-0}" -eq 1 ]; then
-            # Property 4: under --keep, write the marker, print the VM name and
-            # an inspection hint, SKIP all three of request-stop / wait / delete,
-            # and leave the run directory in place.
+            # Property 4 AS AMENDED 2026-08-02: under --keep, write the marker,
+            # bring the guest to `stopped` exactly as any other path does, SKIP
+            # ONLY `vm_delete`, print the inspection hint, and leave the run
+            # directory in place.
+            #
+            # WHY THE STOP IS NOT SKIPPED, stated here because the previous
+            # reading looked more like "keep" and was wrong. §Shell discipline's
+            # property 4 originally said to skip ALL THREE of request-stop / wait
+            # / delete, which left the VM `running` — and THREE other parts of the
+            # design assume `stopped`:
+            #   - §5.1 condition 2 makes `stopped` a REQUIREMENT of orphanhood, so
+            #     `clean` refuses a running kept VM with exit 10 even under
+            #     `--include-kept`, the one flag that exists to remove it;
+            #   - §5.3 justifies the `keep` marker by saying a kept VM "looks
+            #     exactly like an orphan, because its run exited and its pid is
+            #     dead" — an orphan is `stopped`, so §5.3 describes a VM the
+            #     skip-all-three path never produced;
+            #   - `vm_manual_hint keep` offers `vmtest clean --include-kept` as an
+            #     alternative, i.e. the harness told the operator to run a command
+            #     that would refuse.
+            # The other direction — let `clean --include-kept` accept a `running`
+            # kept VM — was rejected: it requires `clean` to issue a stop, and §5.2
+            # / §5.4 forbid that far more emphatically than property 4 required the
+            # skip. Stopping preserves everything `--keep` is FOR (the disk image,
+            # `~/.vmtest/toolchain.tsv`, the delivered tree) and costs only that
+            # inspection now starts by booting it — which the hint says.
+            #
+            # The stop still goes through request -> POLL -> (no delete): never a
+            # bare stop treated as completion (DOC-1 §8.1).
             : > "${VMTEST_RUNDIR:-.}/keep" || :
+            vm_request_stop "${VMTEST_VM:-}"
+            vm_wait_for_stopped "${VMTEST_VM:-}" "$(conf_get stopped_timeout)"
+            if [ -n "${VMTEST_VM_RUN_PID:-}" ]; then
+                wait "$VMTEST_VM_RUN_PID" 2>/dev/null || :   # reap, never kill
+            fi
+            log "teardown: --keep — '${VMTEST_VM:-}' is stopped and PRESERVED (not deleted)"
             vm_manual_hint keep "${VMTEST_VM:-}"
             VMTEST_RUNDIR_OWNED=0
         else
@@ -529,6 +589,14 @@ preflight() {
 # cannot be compared against DOC-1 §9's cost baseline, and comparing against
 # that baseline is most of what the numbers are for."  The bash version is
 # printed too, so a bug report says which bash produced it.
+#
+# THE MODE IS PASSED AS A WORD, NOT AS A FLAG VALUE.  It was previously the
+# expansion `${VMTEST_DRY_RUN:+dry run}` at the call site, and `:+` tests for a
+# NON-EMPTY string, not for truth — so `VMTEST_DRY_RUN=0` expanded to `dry run`
+# and every real run announced itself as a dry run in the first line of its own
+# log.  Phase 2 could not catch it: every run it made was a dry run, so the
+# banner was accidentally correct.  Found on the Phase 3 checkpoint run,
+# 2026-08-02; see MANIFEST Phase 3, Deviations.
 # ---------------------------------------------------------------------------
 
 print_banner() {
@@ -538,6 +606,7 @@ print_banner() {
     out "runid ${VMTEST_RUNID}${FLAG_RUNID:+ (flag)}"
     out "vm ${VMTEST_VM}"
     out "rundir ${VMTEST_RUNDIR}"
+    out "host repo ${VMTEST_HOST_REPO}"
     out "keep ${VMTEST_KEEP}"
     out "effective configuration (key value (origin)):"
     for key in $CONF_KEYS; do
@@ -569,6 +638,11 @@ cmd_run() {
         esac
     done
 
+    case "$VMTEST_DIRTY_CHECK" in
+        0|1) ;;
+        *)   die 2 "VMTEST_DIRTY_CHECK must be 0 or 1, got '$VMTEST_DIRTY_CHECK'" ;;
+    esac
+
     conf_load
     conf_apply_flags
 
@@ -582,7 +656,7 @@ cmd_run() {
     # replaced with the full form by provision_guest in Phase 3.
     VMTEST_GUEST_ENV='PATH=/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin; export PATH;'
 
-    print_banner "${VMTEST_DRY_RUN:+dry run}"
+    if [ "$VMTEST_DRY_RUN" -eq 1 ]; then print_banner 'dry run'; else print_banner ''; fi
     preflight
 
     if [ "$VMTEST_DRY_RUN" -eq 1 ]; then
@@ -600,7 +674,107 @@ cmd_run() {
         return 0
     fi
 
-    die 2 "the full run lifecycle (clone -> size -> boot -> negative probe -> provision -> scenario -> verify -> teardown) is delivered by plan Phases 3-7. At Phase 2 only \`--dry-run\` is implemented, and this driver refuses rather than pretending. Re-run with --dry-run."
+    run_lifecycle
+}
+
+# ---------------------------------------------------------------------------
+# The run lifecycle (P3-T1 … P3-T5).  DOC-1 §3.1's sequence, with `verify`
+# still empty at this phase.
+#
+#   clone -> size -> boot -> vm_wait_ready -> [N1] -> provision -> scenario
+#
+# Teardown is NOT here.  It is the EXIT trap's job and only the EXIT trap's job,
+# on every path including failure and interrupt (DOC-2 §Shell discipline).
+# ---------------------------------------------------------------------------
+
+run_lifecycle() {
+    local t0 ready_s
+
+    log '--- clone, size, boot (DOC-1 §4.3, §8.5) ---'
+    vm_clone "$PIN_LOCAL_NAME" "$VMTEST_VM"
+    # Set IMMEDIATELY after the clone returns, and never before: from this
+    # instant the EXIT trap owns the VM's removal.  `vm_clone` dies on failure,
+    # so there is no path where a VM exists and this is unset.
+    VMTEST_VM_CREATED="$VMTEST_VM"
+    log "cloned ${PIN_LOCAL_NAME} -> ${VMTEST_VM}"
+
+    vm_size "$VMTEST_VM" "$(conf_get cpu)" "$(conf_get memory_mib)" "$(conf_get disk_gib)"
+    log "sized --cpu $(conf_get cpu) --memory $(conf_get memory_mib) --disk-size $(conf_get disk_gib) (DOC-1 §8.5)"
+
+    vm_boot "$VMTEST_VM"
+    log "booted (backgrounded, no graphics); run pid ${VMTEST_VM_RUN_PID}"
+
+    # Poll the OBSERVABLE condition, never a fixed sleep (DOC-1 §4.3).  The
+    # elapsed time is measured here rather than inside `vm_wait_ready`, because
+    # §12.2 fixes that function's value channel and DOC-1 §9's cost baseline
+    # wants the number.
+    t0=$(date '+%s')
+    vm_wait_ready "$VMTEST_VM" "$(conf_get boot_ready_timeout)"
+    ready_s=$(( $(date '+%s') - t0 ))
+    log "MEASURE boot_to_ready_s ${ready_s} (P1 measured 34.4 s first boot, ~18 s subsequent)"
+    log "state: $(vm_state "$VMTEST_VM")"
+
+    # [N1] — pinned position, DOC-2 §6.3.  The only window in which the guest
+    # genuinely lacks cargo.
+    log '--- N1 precondition probe (DOC-2 §6.2; DOC-1 §4.2) ---'
+    negative_probe_n1 "$VMTEST_VM"
+
+    provision_guest "$VMTEST_VM"
+
+    # The opt-in dirty-worktree check (see the note at scenario_dispatch).  The
+    # fixtures are created BEFORE the scenario runs, because the property under
+    # test is a property of the stream the scenario is about to send.
+    if [ "$VMTEST_DIRTY_CHECK" -eq 1 ]; then
+        log '--- dirty-check: dirtying the host worktree with three sentinel fixtures ---'
+        source_dirty_fixture_create "$(date -u '+%Y%m%dT%H%M%SZ')_$$"
+    fi
+
+    scenario_dispatch
+
+    if [ "$VMTEST_DIRTY_CHECK" -eq 1 ]; then
+        source_assert_dirty_delivery "$VMTEST_VM" "$(conf_get guest_src_dir)"
+        # Earliest safe point.  The cleanup trap still covers every other path.
+        source_dirty_fixture_restore
+    fi
+
+    log "run complete: pattern '${VMTEST_PATTERN}' reached the end of its scenario. Teardown follows."
+}
+
+# ---------------------------------------------------------------------------
+# Scenario dispatch — plan §F-6, resolved by the only mapping consistent with
+# both documents.  DOC-2 §12.5 says the scenario file is "sourced by the driver
+# after provisioning" and names `scenario_install_local()`, but nothing anywhere
+# maps the pattern argument to a file path and a function name.  DOC-1 §3 fixes
+# the file names and DOC-2 §12.5 fixes the function name for `local`, so:
+#
+#     vmtest run <p>  ->  scenarios/install-<p>.sh :: scenario_install_<p>()
+#
+# An unknown pattern is exit 2 and is rejected in `cmd_run` before any VM work.
+#
+# ON THE OPT-IN DIRTY CHECK, recorded here because it is the one place the
+# harness mutates host state.  `VMTEST_DIRTY_CHECK=1` makes the run additionally
+# validate pattern (c)'s DEFINING property — that the delivered file set
+# includes UNCOMMITTED work and still excludes gitignored paths — by dirtying
+# the worktree with three sentinel fixtures before the stream and asserting in
+# the guest which of them arrived.  It is OFF by default, because the default
+# run must not touch the host worktree at all.  It is an environment variable
+# rather than a flag because §8.2's five flags are the whole CLI surface, and it
+# is safe from §8.2's mechanical override mapping because `dirty_check` is not a
+# configuration key.  Recorded in MANIFEST Phase 3, Deviations.
+# ---------------------------------------------------------------------------
+
+scenario_dispatch() {
+    local file="$VMTEST_HARNESS_DIR/scenarios/install-${VMTEST_PATTERN}.sh"
+    [ -f "$file" ] \
+        || die 2 "no scenario file for pattern '${VMTEST_PATTERN}': ${file} does not exist (plan §F-6)"
+    . "$file"
+
+    local fn="scenario_install_${VMTEST_PATTERN}"
+    command -v "$fn" >/dev/null 2>&1 \
+        || die 2 "${file} does not define ${fn}() (plan §F-6)"
+
+    log "--- scenario ${VMTEST_PATTERN} (${fn}) ---"
+    "$fn"
 }
 
 # ---------------------------------------------------------------------------

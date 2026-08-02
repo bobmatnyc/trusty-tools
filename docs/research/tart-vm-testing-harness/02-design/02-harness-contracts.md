@@ -605,10 +605,18 @@ start-time comparisons; the residual is one stale VM and a message.
 
 #### 5.3 `--keep` interacts with this and must not be confused for abandonment
 
-`vmtest run --keep` skips teardown so a failed run can be inspected (DOC-1 §3.1).
-The run then exits, so its PID dies, so condition 3 is satisfied — a kept VM would
-look exactly like an orphan. The `keep` marker (condition 4) is what prevents
+`vmtest run --keep` skips **the deletion** so a failed run can be inspected (DOC-1
+§3.1). The run then exits, so its PID dies, so condition 3 is satisfied — a kept VM
+would look exactly like an orphan. The `keep` marker (condition 4) is what prevents
 `clean` from deleting the very thing `--keep` was asked to preserve.
+
+*(Amended 2026-08-02: "skips teardown" → "skips the deletion".)* This paragraph
+already assumed a **`stopped`** kept VM — condition 3 alone does not make a VM
+"look exactly like an orphan"; condition 2 is the other half. The §Shell discipline
+cleanup property 4 that shipped at Phase 3 skipped the stop as well, producing a
+`running` kept VM that `clean` could never remove. Property 4 is now amended to
+skip **only** `vm_delete`, which is what makes this paragraph, condition 2, and
+`--include-kept` describe the same VM.
 
 `clean` lists kept VMs separately, with their age, and does not remove them.
 `vmtest clean --include-kept` removes them too, and is the intended way to tidy up
@@ -684,7 +692,7 @@ command would be exactly the kind of false precision this doc set avoids.
 *Expected output shape:* **empty stdout.** Any non-empty stdout means a cargo was
 found and the precondition is violated.
 
-*Assertion predicate:*
+*Assertion predicate,* **channel 1** *(see the amendment below for channel 2):*
 
 ```
 N1 PASS  iff  exit != 0  AND  stdout is empty,  for each of cargo, rustc, rustup
@@ -697,6 +705,84 @@ that the base image drifted (§3) — which is a finding, not a nuisance.
 The base PATH literal above is measured, not invented:
 `vm-install-probe-findings.md:213` records the guest's non-interactive PATH as
 `/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin`.
+
+##### N1 asserts REACHABILITY, not base-PATH absence — what the probe now proves
+
+*(Amended 2026-08-02.)*
+
+**The claim above was wider than the predicate above it, and the gap is exactly
+where a real toolchain lands.** This section opens by saying N1 "asserts that the
+guest genuinely lacks a Rust toolchain at that instant", and DOC-1 §4.3 leans on
+that reading when it calls N1 "the assertion a golden image structurally destroys"
+and makes it one of the two reasons not to bake an image. What channel 1 actually
+tests is narrower: `command -v` under **one** PATH.
+
+Phase 3 measured the difference on a real guest. After `mise use -g rust@1.91` —
+**this project's own provisioning command**, the one `provision.sh` runs — the
+guest has `/Users/admin/.cargo/bin/cargo` and a mise shim, **neither directory on
+the base PATH**, and N1 returned **exit 0, PASS**. A golden image baked the way
+this project would bake one therefore would **not** have been caught, which is the
+precise scenario DOC-1 §4.3 cites as a reason not to bake one.
+
+**Owner decision: make the code match the claim.** The alternative — keep the
+narrow predicate and weaken §6.2's and DOC-1 §4.3's prose to match it — was
+rejected, because DOC-1 §4.3's argument *requires* the wide reading to be true. A
+probe that cannot see the toolchain its own harness installs is not evidence about
+a golden image.
+
+**What N1 now proves.** N1 fails if a Rust toolchain is reachable by **any route a
+later build step could use**, not merely by the base PATH. Channel 1 is unchanged
+and still asserted; channel 2 is added:
+
+| Channel | Route probed | Rationale |
+|---|---|---|
+| **1** | `command -v cargo\|rustc\|rustup` under the measured base PATH | unchanged; the original predicate, still asserted verbatim |
+| **2a** | `$guest_home/.cargo/bin/{cargo,rustc,rustup}` on disk | where `rustup` — and therefore `mise use -g rust@…` — actually puts them |
+| **2b** | `$guest_home/.local/share/mise/shims/{…}` and `$guest_home/.local/bin/{…}` on disk | the shims §7.1 puts second on the full PATH; `.local/bin` is where the forbidden `mise.run` installer writes |
+| **2c** | `mise which cargo\|rustc\|rustup` | resolvable by the very tool `provision.sh` uses to install one |
+| **2d** | `zsh -lc`, `zsh -ic`, `bash -lc`, `bash -ic` → `command -v …` | a PATH an rc file would activate |
+
+*Predicate:* **N1 PASS iff channel 1 passes AND channel 2 finds nothing.** Channel 2
+signals by **stdout content, never by exit status** — its guest-side script always
+exits 0, so "the probe could not run" can never be misread as "the guest is clean".
+An unrunnable channel-2 probe **fails closed**, exit 30.
+
+**On channel 2d and DOC-1 §5.3, because it looks like a contradiction and is not.**
+DOC-1 §5.3 forbids the harness from **depending on** guest shell rc files — a golden
+image once shipped with `~/.zshenv` missing and `cargo` returned 127 under both
+`/bin/sh` and `/bin/zsh`. That rule governs **reliance**. Channel 2d probes rc files
+as a **hazard**: the question is not "does an rc file give the harness cargo" but
+"could an rc file give a **later step** a cargo N1 just certified absent". Probing
+something you refuse to rely on is the opposite use and is legitimate. The harness
+still resolves every path it *uses* explicitly, composed in `vm_exec` and nowhere
+else (§7.3). The reasoning is repeated at the probe itself so that nobody deletes it
+in the name of §5.3 compliance.
+
+*Observed, 2026-08-02, one guest, both directions* (MANIFEST Phase 3):
+
+```
+(A) clean tahoe-base clone
+    N1 PASS (base PATH: cargo=1 rustc=1 rustup=1; and no toolchain reachable
+             on disk, through mise, or through a login/interactive shell)
+    negative_probe_n1 exit=0
+
+(B) same guest, after `mise use -g rust@1.91` -> 0
+    command -v cargo under the BASE PATH channel 1 probes: (not found)
+
+(C) strengthened N1 on that provisioned guest
+    | on-disk       /Users/admin/.cargo/bin/cargo
+    | mise-which    cargo -> /Users/admin/.cargo/bin/cargo
+    …
+    FAIL[30]  negative_probe_n1 exit=30
+```
+
+**Honest limit, recorded rather than glossed.** Channel **2d contributed nothing**
+in case (C): `mise use -g` does not write an rc file, and `tahoe-base`'s own rc
+files do not activate mise, so the login/interactive shells found nothing that 2a-2c
+had not already found. 2d is retained because it is the channel that would catch an
+image whose *rc file* is the only thing making a toolchain reachable — a case this
+project has not yet produced and therefore has not yet observed 2d firing on. It is
+an unexercised guard, not a demonstrated one.
 
 **N2 — Guide-and-abort probe. Runs after the scenario's install steps.**
 
@@ -1298,13 +1384,14 @@ them as polling would invite someone to add pointless polling around a synchrono
 
 | Site | Observable condition | Interval | Maximum | Grounding |
 |---|---|---|---|---|
-| **boot-ready** | `tart exec <vm> /bin/sh -c 'exit 0'` returns 0 | 2 s | **150 s** | 34.4 s first boot (`vm-install-probe-findings.md:378`, `BOOT_TO_READY_MS=34414`); 18.0 s subsequent (`:483`, `COLD_BOOT_TO_READY_MS=17993`). ~4.4× the measured first boot. |
+| **boot-ready** | `tart exec <vm> /bin/sh -c 'exit 0'` returns 0 | 2 s | **150 s** | **Two sources, and they disagree.** *Original research:* 34.4 s first boot (`vm-install-probe-findings.md:378`, `BOOT_TO_READY_MS=34414`); 18.0 s subsequent (`:483`, `COLD_BOOT_TO_READY_MS=17993`). *Phase 3, 2026-08-02:* **24 s, 28 s, 33 s, 33 s** on four consecutive cold clones of a `stopped` `tahoe-base` (MANIFEST Phase 3, Measurement 1) — **the 18.0 s "subsequent" figure did not reproduce on that host**; every boot looked like the 34.4 s *first*-boot reading. The 150 s maximum is now sized against **the slowest observed boot, 33 s — ~4.5×** — and no longer against `:483`. *(Amended 2026-08-02.)* |
 | **`wait_for_stopped()`** | `tart list` reports state `stopped` | 1 s | **120 s** | `tart stop` asynchrony measured in K1/K1b/K1c; poll overhead measured negligible (`../01-research/logs/k1d-state-poll-overhead.log`). Maximum is a **judgment call** — worst-case flush duration was never measured. The stop this waits on is issued by `vm_request_stop` (§12.2), whose exit code is discarded. |
 | **daemon health** | `GET /health` returns 200 with parseable JSON (§1.3) | 1 s | **60 s** | **Wholly unmeasured.** `launchctl bootstrap` under `tart exec` is confirmed to work (DOC-1 §8.7) but daemon time-to-ready was never timed. |
 
 `vm_wait_ready` polls at a **fixed** 2 s interval, not with exponential backoff.
 Backoff would be a pessimisation here: the distribution is tight and known
-(~18–35 s), so backoff's only effect is to overshoot a ready guest by however far
+(~24–34 s observed, *(range corrected 2026-08-02 from "~18–35 s")*), so backoff's
+only effect is to overshoot a ready guest by however far
 into a long interval it happens to land, in exchange for saving a handful of
 `tart exec` calls whose cost was measured as negligible (K1d).
 
@@ -2020,9 +2107,36 @@ trap 'vmtest_cleanup; exit 143' TERM
    never created, cleanup does nothing and returns 0. Preflight failures (exit 10)
    must not produce a teardown error on top of the real message.
 4. **Do the right thing under `--keep`.** Write the `keep` marker into the run
-   directory (§4.3, §5.3), print the VM name and an inspection hint, **skip all
-   three of `vm_request_stop`, `vm_wait_for_stopped`, and `vm_delete`**, and leave
-   the run directory in place.
+   directory (§4.3, §5.3), bring the guest to `stopped` via `vm_request_stop` then
+   `vm_wait_for_stopped` exactly as property 5 does, **skip only `vm_delete`**,
+   print the VM name and an inspection hint, and leave the run directory in place.
+
+   *(Amended 2026-08-02. This clause previously read "**skip all three** of
+   `vm_request_stop`, `vm_wait_for_stopped`, and `vm_delete`", which left the VM
+   `running`.)* **The original was wrong, and three other parts of this document
+   are what prove it.** §5.1 condition 2 makes `stopped` a **requirement** of
+   orphanhood, so `clean` classified a kept VM `REFUSED (running, no live registry
+   entry)` and exited **10** — deleting nothing **even under `--include-kept`**,
+   the one flag that exists to remove it. §5.3 justifies the `keep` marker by
+   saying a kept VM "looks exactly like an orphan, because its run exited and its
+   pid is dead"; an orphan is `stopped`, so §5.3 was describing a VM this path
+   never produced. And `vm_manual_hint keep` offered `vmtest clean --include-kept`
+   as an alternative to the manual pair — the harness printing a command that
+   would refuse. Observed with output in MANIFEST Phase 3, Deviations item 2.
+
+   **The other direction was rejected, and by the stronger rule.** Letting
+   `clean --include-kept` accept a `running` kept VM requires `clean` to issue a
+   stop, and §5.2 and §5.4 forbid that far more emphatically than this clause
+   required the skip: *"`clean` never issues `tart stop`, never issues `tart
+   suspend`, and never deletes a VM that is not already `stopped`."* Stopping the
+   guest preserves everything `--keep` exists for — the disk image,
+   `~/.vmtest/toolchain.tsv`, the delivered source tree — and costs only that
+   inspection now begins by booting it. The inspection hint says so, and both
+   commands it prints now work.
+
+   The stop still goes request → **poll** → *(no delete)*. Never a bare `tart stop`
+   treated as completion (DOC-1 §8.1); skipping `vm_delete` is the whole of the
+   difference from property 5.
 5. **Otherwise: `vm_request_stop`, then `vm_wait_for_stopped`, then `vm_delete`, in
    that order, always.** *(Amended 2026-07-31: `vm_request_stop` added. Nothing
    previously issued the shutdown, so the poll had nothing to observe and cleanup
