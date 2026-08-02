@@ -317,6 +317,15 @@ pub struct DaemonState {
     /// `daemon_orphan`'s `warns_not_fails_when_the_operator_forced_it` covers the
     /// verdict that consumes it.
     pub(super) unsupervised_forced: std::sync::atomic::AtomicBool,
+    /// The three-state launchd answer behind [`Self::supervised`] (#4469).
+    ///
+    /// Why: see [`crate::daemon::api::types::HealthResponse::launchd_supervision`]
+    /// — a bool cannot express "launchd could not be asked", and reporting that
+    /// as `false` makes `tm doctor` prescribe killing a healthy daemon.
+    /// What: the discriminant string, written once at startup by `daemon_run`
+    /// via [`Self::set_launchd_supervision`]. Empty until then.
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    pub(super) launchd_supervision: std::sync::RwLock<String>,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
     ///
     /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
@@ -460,6 +469,7 @@ impl DaemonState {
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
             unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
+            launchd_supervision: std::sync::RwLock::new(String::new()),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -532,6 +542,7 @@ impl DaemonState {
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
             unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
+            launchd_supervision: std::sync::RwLock::new(String::new()),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -583,6 +594,34 @@ impl DaemonState {
     pub fn set_supervised(&self, value: bool) {
         self.supervised
             .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record the THREE-STATE launchd answer for `/health` (issue #4469).
+    ///
+    /// Why: the `supervised` bool cannot distinguish "launchd says no" from
+    /// "launchd could not be asked", and the second must never drive the
+    /// destructive orphan remediation.
+    /// What: stores the discriminant string; a poisoned lock is recovered from
+    /// rather than panicking a running daemon over a diagnostic field.
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    pub fn set_launchd_supervision(&self, value: impl Into<String>) {
+        let mut slot = self
+            .launchd_supervision
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = value.into();
+    }
+
+    /// Read the three-state launchd answer recorded at startup (issue #4469).
+    ///
+    /// Why: `/health` publishes it so clients can tell UNKNOWN from a negative.
+    /// What: the stored discriminant, or `""` before startup recorded one.
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    pub fn launchd_supervision(&self) -> String {
+        self.launchd_supervision
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Whether this daemon was started with the `tm daemon --force` opt-in

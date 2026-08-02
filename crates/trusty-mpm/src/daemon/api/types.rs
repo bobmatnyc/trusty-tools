@@ -66,6 +66,24 @@ pub struct HealthResponse {
     /// `compute_supervised_*` in `commands::launchd_probe::tests`.
     #[serde(default = "default_supervised")]
     pub supervised: bool,
+    /// The THREE-STATE launchd answer behind [`Self::supervised`] (issue #4469).
+    ///
+    /// Why: `supervised` is a bool, so it cannot say "launchd could not be
+    /// asked". #4469 replaced the env-var heuristic with an authoritative
+    /// `launchctl` query that legitimately returns UNKNOWN (launchctl missing,
+    /// non-zero exit, timed out, unrecognised output) — and collapsing that into
+    /// `supervised: false` is not merely lossy, it is DANGEROUS: `tm doctor`'s
+    /// orphan verdict escalates `supervised == Some(false)` plus a down launchd
+    /// job to a hard `Fail` recommending `kill -TERM`, so an unanswerable probe
+    /// would prescribe killing a healthy daemon. Publishing the third state lets
+    /// the client fall back to "cannot tell" instead.
+    /// What: `"supervised"`, `"not_supervised"`, or `"unknown"` — the
+    /// [`trusty_common::supervision::LaunchdSupervision`] discriminant observed
+    /// at startup. `#[serde(default)]` yields `""` for a daemon that predates
+    /// the field, which clients treat as "no three-state signal available".
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    #[serde(default)]
+    pub launchd_supervision: String,
     /// This running daemon process's build version (issue #2332).
     ///
     /// Why: the #2332 incident traced a 46.8h-stale daemon only by
@@ -88,8 +106,8 @@ pub struct HealthResponse {
     /// OS process id of the daemon that answered this request (issue #4230).
     ///
     /// Why: `supervised` is computed from
-    /// [`trusty_common::update::is_launchd_supervised`], a heuristic with a
-    /// `getppid() == 1` fallback prong — so an orphan whose spawning parent
+    /// [`trusty_common::update::is_launchd_supervised`], which until #4469 was a
+    /// heuristic with a `getppid() == 1` fallback prong — so an orphan whose parent
     /// exited before the startup probe self-reports `supervised: true`. A
     /// self-report cannot be the only input to an orphan detector. This field is
     /// the identity half of an AUTHORITATIVE check: `tm doctor` compares it

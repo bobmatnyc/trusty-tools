@@ -42,11 +42,10 @@ use std::path::{Path, PathBuf};
 use crate::core::agent_manifest::{atomic_write, checksum};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deploy_tiers::skill_deploy_tiers;
-use crate::core::skill_drift::{SkillDrift, SkillReference, audit_deployed_skills};
+use crate::core::skill_drift::{
+    ManifestState, SkillDrift, SkillReference, audit_deployed_skills, deployed_path,
+};
 use crate::core::skill_manifest::{SkillManifest, SkillManifestEntry};
-
-/// Entry-point filename Claude Code reads inside a deployed skill directory.
-const SKILL_ENTRY_FILE: &str = "SKILL.md";
 
 /// What the repair did — or deliberately did not do — to one skill.
 ///
@@ -116,10 +115,27 @@ pub fn repair_skills(
 ) -> Vec<RepairOutcome> {
     let mut outcomes = Vec::new();
     for tier in skill_deploy_tiers(paths, project_dir) {
+        let audit = audit_deployed_skills(reference, &tier.dir);
+        // #4622 review: never write into a tier whose ownership ledger could not
+        // be read. Saving a rebuilt manifest over an unparseable one would
+        // silently reclassify every file there as tm-owned and make the next
+        // deploy overwrite the operator's work — the frozen-skill protection
+        // depends on that ledger being intact.
+        if let ManifestState::Unreadable(why) = &audit.manifest {
+            outcomes.push(RepairOutcome {
+                tier: tier.label,
+                stem: "<manifest>".to_string(),
+                action: RepairAction::SkippedUnverifiable(format!(
+                    "{why} — refusing to touch this tier; repairing it would rewrite an                      ownership ledger that cannot be read"
+                )),
+            });
+            continue;
+        }
+
         let mut manifest = SkillManifest::load(&tier.dir);
         let mut manifest_dirty = false;
 
-        for finding in audit_deployed_skills(reference, &tier.dir) {
+        for finding in audit.findings {
             let action = match finding.state {
                 SkillDrift::Fresh => continue,
                 SkillDrift::Unverifiable(why) => RepairAction::SkippedUnverifiable(why),
@@ -197,13 +213,16 @@ fn rewrite_and_verify(
     content: &str,
     backup_root: &Path,
 ) -> Result<Option<PathBuf>, String> {
-    let target = tier_dir.join(stem).join(SKILL_ENTRY_FILE);
-
+    // #4622 review HIGH-1: a manifest key is either a bare stem (entry point at
+    // `<stem>/SKILL.md`) or a nested `<stem>/references/<file>.md` that mirrors
+    // the source layout. One shared resolver keeps the repair writing exactly
+    // where the audit looked.
+    let target = deployed_path(tier_dir, stem);
     let backup = if target.exists() {
-        let dest = backup_root
-            .join(tier_label.replace(' ', "-"))
-            .join(stem)
-            .join(SKILL_ENTRY_FILE);
+        let rel = target
+            .strip_prefix(tier_dir)
+            .unwrap_or_else(|_| Path::new(stem));
+        let dest = backup_root.join(tier_label.replace(' ', "-")).join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("could not create backup dir {}: {e}", parent.display()))?;

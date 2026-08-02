@@ -8,7 +8,8 @@
 //! Test: this file.
 
 use super::*;
-use crate::core::skill_drift::skill_reference;
+use crate::core::skill_deployer::deploy_skills;
+use crate::core::skill_drift::{deployed_path, skill_reference};
 use std::collections::BTreeMap;
 use std::fs;
 use tempfile::TempDir;
@@ -24,22 +25,30 @@ fn reference_of(pairs: &[(&str, &str)]) -> SkillReference {
     }
 }
 
-/// Deploy `stem` into `dest` with `file_content` on disk and the checksum of
-/// `manifest_content` recorded.
-fn deploy(dest: &Path, stem: &str, file_content: &str, manifest_content: &str) {
-    let dir = dest.join(stem);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("SKILL.md"), file_content).unwrap();
+/// Deploy `stem` into `dest` THROUGH THE REAL DEPLOYER (#4622 review, HIGH-1).
+///
+/// Why: the previous helper hand-wrote bare-stem manifest keys, a shape
+/// production never produces — `deploy_skills` also records nested
+/// `<stem>/references/<file>.md` keys. A repair fixture that cannot contain one
+/// cannot prove the repair writes them to the right place.
+/// What: writes the source tree, runs the real deploy, returns the source dir.
+/// Test: every test in this file.
+fn deploy_real(dest: &Path, stem: &str, body: &str, reference: Option<(&str, &str)>) -> TempDir {
+    let src = TempDir::new().unwrap();
+    fs::write(src.path().join(format!("{stem}.md")), body).unwrap();
+    if let Some((ref_name, ref_body)) = reference {
+        let refs = src.path().join(stem).join("references");
+        fs::create_dir_all(&refs).unwrap();
+        fs::write(refs.join(ref_name), ref_body).unwrap();
+    }
+    deploy_skills(src.path(), dest).unwrap();
+    src
+}
 
-    let mut manifest = SkillManifest::load(dest);
-    manifest.managed.insert(
-        stem.to_string(),
-        SkillManifestEntry {
-            checksum: checksum(manifest_content),
-            deployed_at: "2026-07-29T00:00:00Z".to_string(),
-        },
-    );
-    manifest.save(dest).unwrap();
+/// Hand-edit a deployed file after a real deploy — the only honest way to
+/// construct the FROZEN state (the manifest still records what tm wrote).
+fn hand_edit(dest: &Path, manifest_key: &str, new_content: &str) {
+    fs::write(deployed_path(dest, manifest_key), new_content).unwrap();
 }
 
 /// A `FrameworkPaths` rooted entirely under one temp dir, with no submodule.
@@ -57,7 +66,7 @@ fn repair_rewrites_drifted_and_verifies() {
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
-    deploy(&dest, "tm-workflow", "v1", "v1");
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
 
     let outcomes = repair_skills(
         &reference_of(&[("tm-workflow", "v2")]),
@@ -79,6 +88,99 @@ fn repair_rewrites_drifted_and_verifies() {
     assert!(SkillManifest::load(&dest).checksum_matches("tm-workflow", "v2"));
 }
 
+/// #4622 review HIGH-1: a drifted REFERENCE FILE must be repaired at its own
+/// nested path, not at `<stem>/SKILL.md`.
+///
+/// Why: manifest keys come in two shapes and the repair used to assume one.
+/// Writing a `<stem>/references/<file>.md` key to `<stem>/SKILL.md` would
+/// destroy the entry point while leaving the drifted reference untouched — a
+/// repair that corrupts what it claims to fix.
+/// Test: this test.
+#[test]
+fn repair_writes_a_nested_reference_key_to_its_own_path() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _src = deploy_real(
+        &dest,
+        "documentation-style",
+        "entry v1",
+        Some(("spec.md", "reference v1")),
+    );
+
+    // Only the reference sibling moved on in the binary.
+    let outcomes = repair_skills(
+        &reference_of(&[
+            ("documentation-style", "entry v1"),
+            ("documentation-style/references/spec.md", "reference v2"),
+        ]),
+        &paths,
+        None,
+        false,
+        backups.path(),
+    );
+
+    let repaired: Vec<&RepairOutcome> = outcomes.iter().filter(|o| o.changed()).collect();
+    assert_eq!(repaired.len(), 1, "outcomes: {outcomes:?}");
+    assert_eq!(repaired[0].stem, "documentation-style/references/spec.md");
+
+    // The reference file was rewritten at its OWN path…
+    assert_eq!(
+        fs::read_to_string(deployed_path(
+            &dest,
+            "documentation-style/references/spec.md"
+        ))
+        .unwrap(),
+        "reference v2"
+    );
+    // …and the entry point was not touched.
+    assert_eq!(
+        fs::read_to_string(deployed_path(&dest, "documentation-style")).unwrap(),
+        "entry v1"
+    );
+}
+
+/// #4622 review: a tier whose ownership ledger cannot be parsed is never
+/// written to.
+///
+/// Why: rebuilding a manifest over an unreadable one would reclassify every file
+/// there as tm-owned, so the next ordinary deploy would overwrite the operator's
+/// hand-edits — defeating the frozen-skill protection this whole mode exists to
+/// respect.
+/// Test: this test.
+#[test]
+fn repair_refuses_a_tier_with_an_unreadable_manifest() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
+    fs::write(
+        dest.join(crate::core::skill_manifest::SKILL_MANIFEST_FILE),
+        "{ not json",
+    )
+    .unwrap();
+
+    let outcomes = repair_skills(
+        &reference_of(&[("tm-workflow", "v2")]),
+        &paths,
+        None,
+        true,
+        backups.path(),
+    );
+
+    assert!(
+        outcomes.iter().all(|o| !o.changed()),
+        "nothing may be written into a tier with an unreadable ledger: {outcomes:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(deployed_path(&dest, "tm-workflow")).unwrap(),
+        "v1",
+        "the deployed file must be untouched"
+    );
+}
+
 /// CONSTRAINT 1: a frozen skill is NEVER silently overwritten.
 #[test]
 fn repair_never_touches_a_frozen_skill_by_default() {
@@ -86,12 +188,8 @@ fn repair_never_touches_a_frozen_skill_by_default() {
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
-    deploy(
-        &dest,
-        "tm-workflow",
-        "hand-edited by the operator",
-        "what tm wrote",
-    );
+    let _src = deploy_real(&dest, "tm-workflow", "what tm wrote", None);
+    hand_edit(&dest, "tm-workflow", "hand-edited by the operator");
 
     let outcomes = repair_skills(
         &reference_of(&[("tm-workflow", "v2")]),
@@ -116,12 +214,8 @@ fn repair_backs_up_before_overwriting() {
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
-    deploy(
-        &dest,
-        "tm-workflow",
-        "hand-edited by the operator",
-        "what tm wrote",
-    );
+    let _src = deploy_real(&dest, "tm-workflow", "what tm wrote", None);
+    hand_edit(&dest, "tm-workflow", "hand-edited by the operator");
 
     let outcomes = repair_skills(
         &reference_of(&[("tm-workflow", "v2")]),
@@ -161,7 +255,7 @@ fn repair_reports_verification_failure() {
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
-    deploy(&dest, "tm-workflow", "v1", "v1");
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
 
     let skill_dir = dest.join("tm-workflow");
     fs::set_permissions(&skill_dir, fs::Permissions::from_mode(0o500)).unwrap();
@@ -205,12 +299,7 @@ fn repair_skips_unverifiable_skills() {
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
-    deploy(
-        &dest,
-        "my-custom-skill",
-        "operator content",
-        "operator content",
-    );
+    let _src = deploy_real(&dest, "my-custom-skill", "operator content", None);
 
     let outcomes = repair_skills(
         &reference_of(&[("tm-workflow", "v2")]),
@@ -236,7 +325,7 @@ fn repair_is_a_noop_when_everything_matches() {
     let tmp = TempDir::new().unwrap();
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
-    deploy(&paths.claude_skills_dir(), "tm-workflow", "v2", "v2");
+    let _src = deploy_real(&paths.claude_skills_dir(), "tm-workflow", "v2", None);
 
     let outcomes = repair_skills(
         &reference_of(&[("tm-workflow", "v2")]),
@@ -264,7 +353,7 @@ fn repair_deletes_nothing() {
     let backups = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
-    deploy(&dest, "tm-workflow", "v1", "v1");
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
     // A bystander file and a bystander directory the repair has no business with.
     fs::write(dest.join("README.md"), "operator note").unwrap();
     fs::create_dir_all(dest.join("unrelated-dir")).unwrap();

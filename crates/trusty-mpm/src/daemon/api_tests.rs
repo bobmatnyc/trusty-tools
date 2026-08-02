@@ -90,9 +90,32 @@ async fn health_response_serializes_supervised_field() {
     );
 }
 
+/// #4469: `/health` must publish the THREE-STATE launchd answer, not only the
+/// bool that collapses it.
+///
+/// Why: without this field a launchctl that could not be asked is indistinguishable
+/// on the wire from launchd positively saying "not mine", and `tm doctor`'s orphan
+/// verdict escalates the latter to a `kill -TERM` recommendation. The fix has to
+/// REACH the surface that motivated it.
+/// Test: this test.
+#[tokio::test]
+async fn health_response_serializes_launchd_supervision_field() {
+    let state = DaemonState::shared();
+    state.set_launchd_supervision("unknown");
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.launchd_supervision, "unknown");
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("launchd_supervision"),
+        Some(&serde_json::Value::String("unknown".into())),
+        "wire shape must carry `launchd_supervision`: {value}"
+    );
+}
+
 #[tokio::test]
 async fn health_response_serializes_pid_field() {
-    // #4230: `supervised` is a heuristic whose fallback prong is `getppid() == 1`,
+    // #4230: `supervised` is a self-report (a `getppid() == 1` heuristic before #4469),
     // so an orphan can self-report `true`. `pid` is what makes `tm doctor`'s check
     // authoritative — it identifies WHICH process answered, for comparison against
     // the PID launchd reports for the registered daemon label.

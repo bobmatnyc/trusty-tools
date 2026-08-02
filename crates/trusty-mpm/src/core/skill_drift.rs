@@ -31,7 +31,15 @@
 //!
 //! UNVERIFIABLE REPORTS UNKNOWN: a managed skill with no embedded counterpart,
 //! or a deployed file that cannot be read, is [`SkillDrift::Unverifiable`] and
-//! never counted as fresh.
+//! never counted as fresh; a tier whose ownership ledger is absent-over-content
+//! or unparseable yields the matching [`ManifestState`] and no findings at all,
+//! because nothing there is attributable (#4622 review).
+//!
+//! Keys are the DEPLOY-MANIFEST keys, which come in two shapes — a bare
+//! `<stem>` and a nested `<stem>/references/<file>.md`. Handling only the first
+//! made 80 of this machine's 132 keys permanently unverifiable (#4622 review,
+//! HIGH-1); [`deployed_path`] is the one resolver both the audit and the repair
+//! use.
 //!
 //! Test: `skill_drift_tests.rs`.
 
@@ -39,7 +47,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::core::bundle;
-use crate::core::skill_manifest::SkillManifest;
+use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
 
 /// Entry-point filename Claude Code reads inside a deployed skill directory.
 const SKILL_ENTRY_FILE: &str = "SKILL.md";
@@ -93,7 +101,9 @@ impl SkillDrift {
 /// Test: `skill_drift_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDriftFinding {
-    /// Skill stem (e.g. `tm-workflow`), the manifest key and directory name.
+    /// The deploy-manifest key: a bare stem (`tm-workflow`) for a skill's entry
+    /// point, or `<stem>/references/<file>.md` for one of its reference
+    /// siblings. Resolve it to a path with [`deployed_path`].
     pub stem: String,
     /// What the deployed copy is, relative to the reference asset.
     pub state: SkillDrift,
@@ -109,7 +119,9 @@ pub struct SkillDriftFinding {
 /// Test: `reference_prefers_the_submodule`, `reference_falls_back_to_embedded`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillReference {
-    /// stem → authoritative content.
+    /// Deploy-manifest key → authoritative content. Keys match
+    /// [`SkillDriftFinding::stem`] exactly, including the nested
+    /// `<stem>/references/<file>.md` form.
     pub assets: BTreeMap<String, String>,
     /// Human-readable description of where `assets` came from.
     pub origin: String,
@@ -125,30 +137,21 @@ pub struct SkillReference {
 /// `agents/skills` checkout — the one source that legitimately outranks the
 /// embedded table, per `core::skill_source`) its top-level `*.md` files are the
 /// reference. Otherwise every `skills/<stem>.md` entry of [`bundle::ALL`] is —
-/// nested `references/*.md` artifacts are excluded because they are not
-/// manifest-keyed skills. A submodule directory that cannot be read falls back
-/// to the embedded table rather than yielding an empty reference, since an empty
-/// reference would make every skill unverifiable.
+/// keyed EXACTLY as the deploy manifest keys them: a bare `<stem>` for an entry
+/// point, and `<stem>/references/<file>.md` for each reference sibling
+/// (#4622 review, HIGH-1 — dropping the nested entries made all 80 of this
+/// machine's 132 manifest keys unverifiable, pinning `skill_staleness` to
+/// Unknown on every real install). A submodule directory that cannot be read, or
+/// yields nothing, falls back to the embedded table rather than producing an
+/// empty reference, since an empty reference would make every skill
+/// unverifiable at once.
 /// Test: `reference_prefers_the_submodule`, `reference_falls_back_to_embedded`,
-/// `reference_excludes_nested_reference_files`.
+/// `reference_includes_nested_reference_keys`,
+/// `a_pristine_bundled_deploy_is_entirely_fresh`.
 pub fn skill_reference(submodule_source: Option<&Path>) -> SkillReference {
-    if let Some(dir) = submodule_source
-        && let Ok(entries) = std::fs::read_dir(dir)
-    {
+    if let Some(dir) = submodule_source {
         let mut assets = BTreeMap::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(stem) = name.strip_suffix(".md") else {
-                continue;
-            };
-            if name.starts_with('.') {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                assets.insert(stem.to_string(), content);
-            }
-        }
+        collect_submodule_assets(dir, dir, &mut assets);
         if !assets.is_empty() {
             return SkillReference {
                 assets,
@@ -164,13 +167,15 @@ pub fn skill_reference(submodule_source: Option<&Path>) -> SkillReference {
         .iter()
         .filter_map(|a| {
             let rel = a.rel_path.strip_prefix("skills/")?;
-            // Only a skill's own entry point is manifest-keyed; a multi-file
-            // skill's `<stem>/references/<file>.md` siblings are not skills.
-            if rel.contains('/') {
-                return None;
-            }
-            let stem = rel.strip_suffix(".md")?;
-            Some((stem.to_string(), a.contents.to_string()))
+            // A bare `<stem>.md` entry point is keyed by its stem; a nested
+            // `<stem>/references/<file>.md` sibling is keyed by that exact
+            // relative path, because that is what `skills::deployer` records.
+            let key = if rel.contains('/') {
+                rel.to_string()
+            } else {
+                rel.strip_suffix(".md")?.to_string()
+            };
+            Some((key, a.contents.to_string()))
         })
         .collect();
     SkillReference {
@@ -179,57 +184,208 @@ pub fn skill_reference(submodule_source: Option<&Path>) -> SkillReference {
     }
 }
 
+/// Walk a checked-out `agents/skills` submodule into manifest-keyed assets.
+///
+/// Why: the submodule mirrors the bundled layout — flat `<stem>.md` entry points
+/// beside `<stem>/references/<file>.md` subtrees — so it must produce the same
+/// key shapes the embedded table does, or the submodule path would reintroduce
+/// the #4622 HIGH-1 defect on dev checkouts only.
+/// What: recurses from `root`, keying each `.md` file by its path relative to
+/// `root` (with `.md` stripped for a top-level entry point). Hidden files and
+/// unreadable entries are skipped, never guessed at.
+/// Test: `reference_prefers_the_submodule`.
+fn collect_submodule_assets(root: &Path, dir: &Path, assets: &mut BTreeMap<String, String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_submodule_assets(root, &path, assets);
+            continue;
+        }
+        if !name.ends_with(".md") {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let key = match rel.contains('/') {
+            true => rel,
+            false => rel.trim_end_matches(".md").to_string(),
+        };
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            assets.insert(key, content);
+        }
+    }
+}
+
+/// Whether a deploy tier's ownership manifest could be read at all.
+///
+/// Why (#4622 review, MEDIUM): [`SkillManifest::load`] returns an EMPTY manifest
+/// for a file that is absent AND for one that fails to parse. Folding both into
+/// "nothing managed here" made a tier with skills on disk but a corrupt ledger
+/// report `Ok — every deployed skill matches`, which is the exact
+/// unverifiable-rendered-as-healthy failure this PR exists to remove.
+/// What: four states. Only [`Present`](Self::Present) and
+/// [`AbsentAndEmpty`](Self::AbsentAndEmpty) are answers; the other two are
+/// admissions that the tier could not be audited.
+/// Test: `nothing_deployed_yields_no_findings`,
+/// `absent_manifest_over_deployed_skills_is_unknown`,
+/// `corrupt_manifest_is_unknown_not_empty`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestState {
+    /// The manifest exists and parsed.
+    Present,
+    /// No manifest and no deployed content — nothing was ever deployed here.
+    AbsentAndEmpty,
+    /// No manifest, but the tier directory holds entries. Those files cannot be
+    /// attributed to tm or to the operator, so nothing about them is verifiable.
+    AbsentButPopulated,
+    /// The manifest exists but could not be parsed; the string says why.
+    Unreadable(String),
+}
+
+/// One deploy tier's audit: the ledger's own state plus the per-skill findings.
+///
+/// Why: the tier verdict depends on BOTH — a tier with zero drifted skills but
+/// an unreadable ledger has not been shown to be clean.
+/// What: [`manifest`](Self::manifest) is the ledger state,
+/// [`findings`](Self::findings) the per-manifest-key results (empty whenever the
+/// ledger could not be read).
+/// Test: `skill_drift_tests.rs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierAudit {
+    /// Whether the ownership manifest could be read.
+    pub manifest: ManifestState,
+    /// Per-skill results, sorted by manifest key.
+    pub findings: Vec<SkillDriftFinding>,
+}
+
+/// Resolve the on-disk path a deploy-manifest key refers to.
+///
+/// Why (#4622 review, HIGH-1): manifest keys come in TWO shapes and they do not
+/// share a layout. `skills::deployer::deploy_skills` writes a bare stem's entry
+/// point to `<dest>/<stem>/SKILL.md`, but records each reference sibling under
+/// `<stem>/references/<file>.md` and writes it to that same relative path. One
+/// resolver keeps the audit, the repair, and the backup from each inventing a
+/// different answer.
+/// What: a key containing `/` mirrors the source layout verbatim; a bare key
+/// resolves to `<dest>/<key>/SKILL.md`.
+/// Test: `deployed_path_matches_the_deployer_layout`.
+pub fn deployed_path(dest_dir: &Path, manifest_key: &str) -> std::path::PathBuf {
+    if manifest_key.contains('/') {
+        dest_dir.join(manifest_key)
+    } else {
+        dest_dir.join(manifest_key).join(SKILL_ENTRY_FILE)
+    }
+}
+
+/// The skill stem a manifest key belongs to.
+///
+/// Why: severity rules (the conventions-bearing escalation) are stated per
+/// SKILL, but a key may name one of that skill's reference files.
+/// What: the first path segment.
+/// Test: `drift_in_a_reference_file_is_caught` (which asserts on the full key)
+/// and `staleness_escalates_when_a_reference_file_of_a_conventions_skill_drifts`.
+pub fn key_stem(manifest_key: &str) -> &str {
+    manifest_key.split('/').next().unwrap_or(manifest_key)
+}
+
 /// Audit every tm-managed skill deployed under `dest_dir`.
 ///
 /// Why: see the module doc. This reads the FILE, so it sees hand-edits the
 /// manifest-only comparison structurally could not, and compares against
 /// `reference`, so a stale extraction cache cannot make a drifted skill report
 /// clean.
-/// What: for each stem the deploy manifest at `dest_dir` manages —
-/// - no reference asset for that stem → [`SkillDrift::Unverifiable`] (a
-///   user-tier or renamed skill this binary does not ship);
-/// - `<dest_dir>/<stem>/SKILL.md` absent → [`SkillDrift::Missing`];
+/// What: probes the ownership manifest first — an unreadable one, or an absent
+/// one over a populated tier, yields the matching [`ManifestState`] and NO
+/// findings, because nothing there is attributable. Otherwise, for each manifest
+/// key —
+/// - no reference asset for that key → [`SkillDrift::Unverifiable`];
+/// - [`deployed_path`] absent → [`SkillDrift::Missing`];
 /// - unreadable → [`SkillDrift::Unverifiable`];
 /// - content equals the reference → [`SkillDrift::Fresh`];
 /// - content still matches the manifest checksum → [`SkillDrift::Drifted`];
 /// - otherwise → [`SkillDrift::DriftedFrozen`].
 ///
-/// Findings are returned sorted by stem for stable output. An empty manifest
-/// (nothing ever deployed here) yields an empty vector — there is nothing to be
-/// stale relative to, which is a real answer rather than an unverifiable one.
+/// Findings are sorted by key for stable output.
 /// Test: `skill_drift_tests.rs`.
-pub fn audit_deployed_skills(
-    reference: &SkillReference,
-    dest_dir: &Path,
-) -> Vec<SkillDriftFinding> {
+pub fn audit_deployed_skills(reference: &SkillReference, dest_dir: &Path) -> TierAudit {
+    let manifest_path = dest_dir.join(SKILL_MANIFEST_FILE);
+    let state = match std::fs::read_to_string(&manifest_path) {
+        Ok(raw) => match serde_json::from_str::<SkillManifest>(&raw) {
+            Ok(_) => ManifestState::Present,
+            Err(e) => ManifestState::Unreadable(format!(
+                "{} is not valid JSON: {e}",
+                manifest_path.display()
+            )),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // A tier directory that does not exist, or exists and is empty, was
+            // simply never deployed to. One that holds entries WITHOUT a ledger
+            // cannot be attributed at all.
+            let populated = std::fs::read_dir(dest_dir)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+            if populated {
+                ManifestState::AbsentButPopulated
+            } else {
+                ManifestState::AbsentAndEmpty
+            }
+        }
+        Err(e) => ManifestState::Unreadable(format!(
+            "{} could not be read: {e}",
+            manifest_path.display()
+        )),
+    };
+
+    if state != ManifestState::Present {
+        return TierAudit {
+            manifest: state,
+            findings: Vec::new(),
+        };
+    }
+
     let manifest = SkillManifest::load(dest_dir);
     let mut findings: Vec<SkillDriftFinding> = manifest
         .managed
         .keys()
-        .map(|stem| SkillDriftFinding {
-            stem: stem.clone(),
-            state: classify(reference, &manifest, dest_dir, stem),
+        .map(|key| SkillDriftFinding {
+            stem: key.clone(),
+            state: classify(reference, &manifest, dest_dir, key),
         })
         .collect();
     findings.sort_by(|a, b| a.stem.cmp(&b.stem));
-    findings
+    TierAudit {
+        manifest: state,
+        findings,
+    }
 }
 
-/// Classify one managed stem. See [`audit_deployed_skills`] for the rules.
+/// Classify one manifest key. See [`audit_deployed_skills`] for the rules.
 fn classify(
     reference: &SkillReference,
     manifest: &SkillManifest,
     dest_dir: &Path,
-    stem: &str,
+    key: &str,
 ) -> SkillDrift {
-    let Some(expected) = reference.assets.get(stem) else {
+    let Some(expected) = reference.assets.get(key) else {
         return SkillDrift::Unverifiable(format!(
-            "`{stem}` is not among {} — this binary ships no copy to compare against",
+            "`{key}` is not among {} — this binary ships no copy to compare against",
             reference.origin
         ));
     };
 
-    let path = dest_dir.join(stem).join(SKILL_ENTRY_FILE);
+    let path = deployed_path(dest_dir, key);
     let deployed = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SkillDrift::Missing,
@@ -244,7 +400,7 @@ fn classify(
     if deployed == *expected {
         return SkillDrift::Fresh;
     }
-    if manifest.checksum_matches(stem, &deployed) {
+    if manifest.checksum_matches(key, &deployed) {
         // tm still owns the file — the next deploy overwrites it.
         SkillDrift::Drifted
     } else {

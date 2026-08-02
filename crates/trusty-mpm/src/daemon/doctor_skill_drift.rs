@@ -29,7 +29,7 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deploy_tiers::skill_deploy_tiers;
 use crate::core::skill_drift::{
-    SkillDrift, SkillReference, audit_deployed_skills, skill_reference,
+    ManifestState, SkillDrift, SkillReference, audit_deployed_skills, key_stem, skill_reference,
 };
 
 /// Name of this check as it appears in `tm doctor` output.
@@ -123,9 +123,30 @@ fn report(
     let mut conventions: Vec<String> = Vec::new();
 
     for tier in skill_deploy_tiers(paths, project_dir) {
-        for finding in audit_deployed_skills(reference, &tier.dir) {
+        let audit = audit_deployed_skills(reference, &tier.dir);
+        // #4622 review (MEDIUM): a tier whose ownership ledger is missing over
+        // deployed content, or present but unparseable, has NOT been shown to be
+        // clean — `SkillManifest::load` returns an empty manifest for both, which
+        // previously rendered as `Ok — every deployed skill matches`.
+        match &audit.manifest {
+            ManifestState::Present | ManifestState::AbsentAndEmpty => {}
+            ManifestState::AbsentButPopulated => unverifiable.push(format!(
+                "{} (skills are deployed at {} but its `{}` ownership ledger is absent —                  nothing there can be attributed to tm or to the operator)",
+                tier.label,
+                tier.dir.display(),
+                crate::core::skill_manifest::SKILL_MANIFEST_FILE,
+            )),
+            ManifestState::Unreadable(why) => {
+                unverifiable.push(format!("{} ({why})", tier.label))
+            }
+        }
+
+        for finding in audit.findings {
             let where_ = format!("{}/{}", tier.label, finding.stem);
-            let conventions_bearing = CONVENTIONS_BEARING_SKILLS.contains(&finding.stem.as_str());
+            // Severity is stated per SKILL, but a manifest key may name one of
+            // that skill's `references/*.md` files — match on the stem so a
+            // drifted reference of a conventions-bearing skill still escalates.
+            let conventions_bearing = CONVENTIONS_BEARING_SKILLS.contains(&key_stem(&finding.stem));
             match finding.state {
                 SkillDrift::Fresh => continue,
                 SkillDrift::Drifted => drifted.push(where_.clone()),

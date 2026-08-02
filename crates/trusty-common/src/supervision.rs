@@ -107,25 +107,82 @@ impl LaunchdSupervision {
 pub fn launchd_supervision() -> LaunchdSupervision {
     #[cfg(target_os = "macos")]
     {
-        let out = match std::process::Command::new("launchctl").arg("list").output() {
-            Ok(out) => out,
-            Err(e) => {
-                return LaunchdSupervision::Unknown(format!("`launchctl list` could not run: {e}"));
-            }
-        };
-        if !out.status.success() {
-            return LaunchdSupervision::Unknown(format!(
-                "`launchctl list` exited with status {}",
-                out.status
-            ));
+        match run_bounded("launchctl", &["list"], LAUNCHCTL_TIMEOUT) {
+            Ok(stdout) => supervision_from_launchctl_list(&stdout, std::process::id()),
+            Err(why) => LaunchdSupervision::Unknown(why),
         }
-        supervision_from_launchctl_list(&String::from_utf8_lossy(&out.stdout), std::process::id())
     }
     #[cfg(not(target_os = "macos"))]
     {
         // launchd is macOS-only. This is a known fact about the platform, not
         // an unanswered question, so it is a positive negative.
         LaunchdSupervision::NotSupervised
+    }
+}
+
+/// How long to wait for `launchctl list` before giving up.
+///
+/// Why (#4622 review): this runs on the DAEMON-START path. `launchctl` normally
+/// answers in milliseconds, but it talks to launchd over IPC and a wedged or
+/// saturated launchd would otherwise hang daemon startup indefinitely — an
+/// availability bug introduced by a diagnostic. Timing out yields `Unknown`,
+/// which is the honest answer and one every consumer already handles.
+#[cfg(target_os = "macos")]
+const LAUNCHCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Spawn `program` with `args`, enforcing `timeout`; return stdout on exit 0.
+///
+/// Why: `std::process::Command::output()` blocks forever — see
+/// [`LAUNCHCTL_TIMEOUT`]. Spawn + poll rather than a detached thread so the
+/// child is actually KILLED on expiry instead of leaked.
+/// What: polls `try_wait` every 20 ms until the deadline, then kills and reaps.
+/// `Err` carries an operator-readable reason for every failure mode — spawn
+/// failure, timeout, or a non-zero exit — which the caller reports verbatim as
+/// the `Unknown` reason. Taking the program and timeout as parameters keeps the
+/// deadline testable without needing a launchd that hangs.
+/// Test: `bounded_run_kills_a_command_that_outlives_its_deadline`,
+/// `bounded_run_returns_stdout_on_success`,
+/// `bounded_run_reports_a_nonzero_exit`.
+#[cfg(target_os = "macos")]
+fn run_bounded(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Read as _;
+
+    let label = format!("`{program} {}`", args.join(" "));
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{label} could not run: {e}"))?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    let _ = pipe.read_to_string(&mut stdout);
+                }
+                return if status.success() {
+                    Ok(stdout)
+                } else {
+                    Err(format!("{label} exited with status {status}"))
+                };
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("{label} did not answer within {timeout:?}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("{label} could not be waited on: {e}")),
+        }
     }
 }
 
@@ -253,31 +310,67 @@ mod tests {
 
     /// #4469 regression proof: the defect the old heuristic had.
     ///
-    /// The old implementation returned `true` whenever `XPC_SERVICE_NAME` was
-    /// set and `TERM_PROGRAM` was not — a condition ANY child inherits. The
-    /// authoritative check consults launchd's PID table instead, so a child
-    /// that inherited those env vars but is not a launchd job answers
-    /// `NotSupervised` regardless of what the environment says.
+    /// Why: the old implementation returned `true` whenever `XPC_SERVICE_NAME`
+    /// was set and `TERM_PROGRAM` was not — a condition ANY child inherits. The
+    /// authoritative answer comes from launchd's PID table, so a PID launchd does
+    /// not run is `NotSupervised` no matter what the environment says.
+    /// What: deliberately takes NO environment input (#4622 review — the
+    /// previous version mutated `XPC_SERVICE_NAME` unguarded, racing the
+    /// `ENV_LOCK`-guarded tests in the same binary). That the environment is
+    /// irrelevant is proven structurally instead: `supervision_from_launchctl_list`
+    /// has no env parameter and reads none. The env-shape proof that DOES need a
+    /// live process lives in `update::tests::is_launchd_supervised_is_not_fooled_by_inherited_env`,
+    /// which holds `ENV_LOCK`.
+    /// Test: this test.
     #[test]
     fn supervision_rejects_a_child_that_inherited_xpc_service_name() {
-        // The exact env shape that made the heuristic return `true`.
-        // SAFETY: values are only read by the (now deleted) heuristic; the
-        // authoritative path never consults them, which is what this proves.
-        unsafe {
-            std::env::set_var("XPC_SERVICE_NAME", "com.trusty.mpm");
-            std::env::remove_var("TERM_PROGRAM");
-        }
-        // PID 424242 is not in the table — i.e. launchd does not run it.
+        // PID 424242 is not in the table — i.e. launchd does not run it. The
+        // heuristic would have said `true` for this process regardless.
         let verdict = supervision_from_launchctl_list(&table(), 424_242);
-        unsafe {
-            std::env::remove_var("XPC_SERVICE_NAME");
-        }
         assert_eq!(
             verdict,
             LaunchdSupervision::NotSupervised,
             "a child that merely INHERITED XPC_SERVICE_NAME must not self-report supervised"
         );
         assert!(!verdict.is_supervised());
+    }
+
+    /// The `launchctl` call must not be able to hang daemon startup.
+    ///
+    /// Why (#4622 review): this runs on the daemon-start path, so an unbounded
+    /// wait turns a diagnostic into an availability bug. Driven against `sleep`
+    /// rather than a wedged launchd, which cannot be constructed on demand.
+    /// Test: this test.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bounded_run_kills_a_command_that_outlives_its_deadline() {
+        let started = std::time::Instant::now();
+        let result = run_bounded("sleep", &["30"], std::time::Duration::from_millis(300));
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("a 30s command must not satisfy a 300ms deadline");
+        assert!(err.contains("did not answer within"), "was: {err}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the deadline was not enforced; waited {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bounded_run_returns_stdout_on_success() {
+        let out = run_bounded("echo", &["hello"], std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(out.trim(), "hello");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bounded_run_reports_a_nonzero_exit() {
+        // `false` exits 1 — a non-zero exit is an absence of an answer, so it
+        // must surface as an error the caller turns into `Unknown`.
+        let err = run_bounded("false", &[], std::time::Duration::from_secs(5))
+            .expect_err("a non-zero exit is not an answer");
+        assert!(err.contains("exited with status"), "was: {err}");
     }
 
     #[test]

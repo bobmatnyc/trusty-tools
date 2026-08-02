@@ -78,7 +78,8 @@ fn authoritative_ok_when_launchd_owns_the_responding_pid() {
 
 /// The core of the review's HIGH-1: the authoritative tier must decide REGARDLESS
 /// of the self-report, in both directions. `supervised: true` from a genuine
-/// orphan (the `getppid() == 1` prong) must not rescue it, and `supervised: false`
+/// orphan (on a pre-#4469 build, via the `getppid() == 1` prong) must not rescue
+/// it, and `supervised: false`
 /// from a launchd-owned daemon must not condemn it.
 #[test]
 fn authoritative_verdict_ignores_a_lying_self_report() {
@@ -145,7 +146,8 @@ fn fallback_fail_when_old_daemon_reports_unsupervised() {
 }
 
 /// FALLBACK tier, the review's central point: `supervised: true` with no pid must
-/// be `Unknown`, never `Ok`. The flag's fallback prong is `getppid() == 1`, which
+/// be `Unknown`, never `Ok`. A daemon old enough to omit `pid` predates #4469, so
+/// its flag still comes from the heuristic whose `getppid() == 1` prong
 /// this same change deletes from the operator runbook as non-evidence — the check
 /// cannot treat it as conclusive either.
 #[test]
@@ -463,4 +465,58 @@ fn unavailable_with_an_old_daemon_reporting_unsupervised_still_fails() {
         "1.0.2",
     );
     assert_eq!(check.status, CheckStatus::Fail);
+}
+
+/// #4469: `None` and `Some(false)` are ALREADY equivalent in the authoritative
+/// tier — which is why the orphan check does not consume the three-state field.
+///
+/// Why: this pins the reasoning recorded at the `verdict` call site, so a future
+/// reader does not "fix" the omission by wiring a signal that changes nothing,
+/// and equally does not weaken the authoritative tier believing the self-report
+/// still matters there. Whenever the daemon reports a pid, THIS process's own
+/// launchd query decides; the daemon's opinion of itself is not consulted except
+/// to refuse escalation on a direct contradiction (`Some(true)`).
+/// What: the same inputs with `None` and with `Some(false)` must agree, and both
+/// must differ from `Some(true)`.
+/// Test: this test.
+#[test]
+fn authoritative_tier_treats_unknown_and_false_identically() {
+    let with_none = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(4242),
+        None,
+        false,
+        "1.3.1",
+    );
+    let with_false = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(4242),
+        Some(false),
+        false,
+        "1.3.1",
+    );
+    let with_true = verdict(
+        Some(LABEL),
+        Ownership::NotRunning,
+        Some(4242),
+        Some(true),
+        false,
+        "1.3.1",
+    );
+
+    assert_eq!(
+        with_none.status, with_false.status,
+        "a collapsed unknown and a positive negative already decide the same way here, \
+         so downgrading one to the other would change no reachable verdict"
+    );
+    assert_eq!(with_none.status, CheckStatus::Fail);
+    assert_ne!(
+        with_true.status,
+        CheckStatus::Fail,
+        "a daemon claiming supervision against a down job is a contradiction, not a \
+         licence to prescribe `kill -TERM`: {}",
+        with_true.message
+    );
 }

@@ -163,6 +163,12 @@ fn classify_source(fragment: &str) -> InstallSource {
 /// - `Unknown` — no ledger, or no ledger record provides `bin_name`. Provenance
 ///   was not determined; saying `Ok` here is the defect class this whole change
 ///   exists to close.
+/// - `Unknown` — the running executable is NOT the file cargo's ledger
+///   describes. Attribution by BASENAME alone is unsound: on the #4033 host
+///   `which -a tm` returns `~/.cargo/bin/tm` (1.3.1) AND `~/.local/bin/tm`
+///   (0.19.29), so a `tm` cargo never installed would otherwise inherit the
+///   cargo record and, if the versions happened to agree, report `Ok —
+///   installed from crates.io` (#4622 review, HIGH-2).
 /// - `Fail` — the same binary is provided by MORE THAN ONE install (the #4033
 ///   trusty-channels case: two worktrees, conflicting binaries), or the ledger's
 ///   recorded version disagrees with the version actually running.
@@ -179,14 +185,12 @@ fn classify_source(fragment: &str) -> InstallSource {
 pub fn provenance_report(
     bin_name: &str,
     running_version: &str,
-    running_exe: Option<&Path>,
+    running_exe: &Path,
+    cargo_bin_dir: &Path,
     ledger: Option<&[CargoInstall]>,
     source_exists: &dyn Fn(&Path) -> bool,
 ) -> (CheckStatus, String) {
-    let where_from = match running_exe {
-        Some(p) => format!(" (running `{}`)", p.display()),
-        None => String::new(),
-    };
+    let where_from = format!(" (running `{}`)", running_exe.display());
 
     let Some(ledger) = ledger else {
         return (
@@ -232,6 +236,26 @@ pub fn provenance_report(
     }
 
     let record = providers[0];
+
+    // #4622 review HIGH-2: the ledger record was matched by BASENAME. Before
+    // believing anything it says about the running process, confirm the running
+    // process IS the file cargo placed. `which -a tm` on the #4033 host returns
+    // two different binaries; without this, the shadowing one inherits the
+    // other's provenance.
+    let installed = cargo_bin_dir.join(bin_name);
+    if !same_file(running_exe, &installed) {
+        return (
+            CheckStatus::Unknown,
+            format!(
+                "the running `{bin_name}` is `{}`, but cargo's ledger describes a DIFFERENT                  file — `{}` ({} {} from {}). The running binary was not installed by cargo,                  so its provenance and upgrade path cannot be verified from here, and                  upgrading the cargo install would not replace it. Check `which -a {bin_name}`                  for a shadowing copy (issue #4033, ADR-0021)",
+                running_exe.display(),
+                installed.display(),
+                record.package,
+                record.version,
+                describe(&record.source),
+            ),
+        );
+    }
 
     if record.version != running_version {
         return (
@@ -294,6 +318,25 @@ pub fn provenance_report(
                  (`{raw}`) — its upgrade path cannot be classified{where_from} (issue #4033)"
             ),
         ),
+    }
+}
+
+/// Do two paths name the same file on disk?
+///
+/// Why (#4622 review, HIGH-2): the running executable and cargo's install
+/// location must be compared as FILES, not as strings — `current_exe()` resolves
+/// symlinks on macOS while the ledger-derived path may not, and `~/.cargo/bin`
+/// is commonly a symlink farm. A string-only comparison would report a false
+/// mismatch on a correctly installed host.
+/// What: compares canonicalised paths when both canonicalise (i.e. both exist),
+/// otherwise falls back to a literal comparison. A path that cannot be
+/// canonicalised is not silently treated as equal.
+/// Test: `unknown_when_running_binary_is_not_the_cargo_install`,
+/// `ok_for_a_matching_registry_install`.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 

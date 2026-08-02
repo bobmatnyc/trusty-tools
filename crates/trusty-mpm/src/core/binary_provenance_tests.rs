@@ -38,6 +38,14 @@ fn always_exists(_: &Path) -> bool {
     true
 }
 
+/// The cargo bin directory the fixtures pretend to install into.
+const CARGO_BIN: &str = "/Users/masa/.cargo/bin";
+
+/// Path of a binary that IS the cargo install.
+fn installed(bin: &str) -> PathBuf {
+    PathBuf::from(CARGO_BIN).join(bin)
+}
+
 fn never_exists(_: &Path) -> bool {
     false
 }
@@ -112,7 +120,14 @@ fn classifies_unknown_source() {
 #[test]
 fn unknown_without_a_ledger() {
     // No ledger = nothing learned. UNKNOWN, never Ok (the whole point of #4033).
-    let (status, msg) = provenance_report("tm", "1.3.1", None, None, &always_exists);
+    let (status, msg) = provenance_report(
+        "tm",
+        "1.3.1",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        None,
+        &always_exists,
+    );
     assert_eq!(status, CheckStatus::Unknown, "message: {msg}");
     assert!(msg.contains("cannot verify"), "message: {msg}");
 }
@@ -125,7 +140,8 @@ fn unknown_when_bin_is_not_in_the_ledger() {
     let (status, msg) = provenance_report(
         "tctl",
         "0.4.3",
-        Some(Path::new("/Users/masa/.local/bin/tctl")),
+        Path::new("/Users/masa/.local/bin/tctl"),
+        Path::new(CARGO_BIN),
         Some(&ledger),
         &always_exists,
     );
@@ -151,8 +167,14 @@ fn fails_on_duplicate_installs() {
             bins: vec!["slack-mcp".into()],
         },
     ];
-    let (status, msg) =
-        provenance_report("slack-mcp", "0.1.0", None, Some(&ledger), &always_exists);
+    let (status, msg) = provenance_report(
+        "slack-mcp",
+        "0.1.0",
+        &installed("slack-mcp"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
     assert_eq!(status, CheckStatus::Fail, "message: {msg}");
     assert!(msg.contains("2 separate installs"), "message: {msg}");
 }
@@ -162,7 +184,14 @@ fn fails_on_version_disagreement() {
     // The running binary is not the one cargo tracks — an upgrade would not
     // replace what is actually running.
     let ledger = parse_cargo_installs(LEDGER).unwrap();
-    let (status, msg) = provenance_report("tm", "1.2.3", None, Some(&ledger), &always_exists);
+    let (status, msg) = provenance_report(
+        "tm",
+        "1.2.3",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
     assert_eq!(status, CheckStatus::Fail, "message: {msg}");
     assert!(msg.contains("1.2.3"), "message: {msg}");
     assert!(msg.contains("1.3.1"), "message: {msg}");
@@ -176,7 +205,8 @@ fn fails_when_path_source_is_gone() {
     let (status, msg) = provenance_report(
         "trusty-search",
         "0.39.0",
-        None,
+        &installed("trusty-search"),
+        Path::new(CARGO_BIN),
         Some(&ledger),
         &never_exists,
     );
@@ -191,7 +221,8 @@ fn warns_for_a_live_path_install() {
     let (status, msg) = provenance_report(
         "trusty-search",
         "0.39.0",
-        None,
+        &installed("trusty-search"),
+        Path::new(CARGO_BIN),
         Some(&ledger),
         &always_exists,
     );
@@ -205,8 +236,14 @@ fn warns_for_a_live_path_install() {
 #[test]
 fn warns_for_a_git_install() {
     let ledger = parse_cargo_installs(LEDGER).unwrap();
-    let (status, msg) =
-        provenance_report("slack-mcp", "0.1.0", None, Some(&ledger), &always_exists);
+    let (status, msg) = provenance_report(
+        "slack-mcp",
+        "0.1.0",
+        &installed("slack-mcp"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
     assert_eq!(status, CheckStatus::Warn, "message: {msg}");
     assert!(msg.contains("git"), "message: {msg}");
 }
@@ -218,10 +255,79 @@ fn ok_for_a_matching_registry_install() {
     let (status, msg) = provenance_report(
         "tm",
         "1.3.1",
-        Some(Path::new("/Users/masa/.cargo/bin/tm")),
+        &installed("tm"),
+        Path::new(CARGO_BIN),
         Some(&ledger),
         &always_exists,
     );
     assert_eq!(status, CheckStatus::Ok, "message: {msg}");
     assert!(msg.contains("crates.io"), "message: {msg}");
+}
+
+/// #4622 review HIGH-2: a foreign binary must NOT inherit cargo's provenance.
+///
+/// Why: attribution was by BASENAME alone — `running_exe` only ever went into
+/// the message string. On the #4033 host `which -a tm` returns
+/// `~/.cargo/bin/tm` (1.3.1, the cargo install) and `~/.local/bin/tm` (0.19.29,
+/// a prebuilt-installer drop). This test pins the harder half of that scenario:
+/// the foreign binary's version COINCIDES with the ledger's, so the version
+/// comparison cannot save the check. Before the fix it reported
+/// `Ok — installed from crates.io; cargo's ledger agrees`.
+/// Test: this test.
+#[test]
+fn unknown_when_running_binary_is_not_the_cargo_install() {
+    let ledger = parse_cargo_installs(LEDGER).unwrap();
+    // Same basename, same version — only the PATH differs.
+    let (status, msg) = provenance_report(
+        "tm",
+        "1.3.1",
+        Path::new("/Users/masa/.local/bin/tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+
+    assert_eq!(
+        status,
+        CheckStatus::Unknown,
+        "a binary cargo did not install must never inherit the cargo record: {msg}"
+    );
+    assert!(msg.contains("/Users/masa/.local/bin/tm"), "message: {msg}");
+    assert!(msg.contains("/Users/masa/.cargo/bin/tm"), "message: {msg}");
+    assert!(
+        msg.contains("which -a"),
+        "message must name the diagnosis: {msg}"
+    );
+}
+
+/// The control for the proof above: identical inputs except the running path,
+/// which now IS the cargo install — the same ledger then reports Ok.
+#[test]
+fn ok_when_running_binary_is_the_cargo_install() {
+    let ledger = parse_cargo_installs(LEDGER).unwrap();
+    let (status, msg) = provenance_report(
+        "tm",
+        "1.3.1",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    assert_eq!(status, CheckStatus::Ok, "message: {msg}");
+}
+
+/// A dev build run straight out of `target/debug` is also not the cargo
+/// install, and must report UNKNOWN rather than borrow the record.
+#[test]
+fn unknown_for_a_build_run_in_place() {
+    let ledger = parse_cargo_installs(LEDGER).unwrap();
+    let (status, _msg) = provenance_report(
+        "tm",
+        "1.3.1",
+        Path::new("/repo/target/debug/tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    assert_eq!(status, CheckStatus::Unknown);
 }

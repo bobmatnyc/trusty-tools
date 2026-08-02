@@ -863,3 +863,23 @@ fn health_snapshot_pid_is_none_when_absent() {
         serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
     assert_eq!(minimal.pid, None);
 }
+
+/// #4469: an older daemon that does not publish `launchd_supervision` must
+/// parse, yielding the empty string rather than a hard error.
+///
+/// Why: the field is new; a newer client talking to an older daemon must fall
+/// back to the `supervised` bool rather than failing to parse `/health` at all.
+/// Test: this test.
+#[test]
+fn health_snapshot_launchd_supervision_defaults_to_empty() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert_eq!(minimal.launchd_supervision, "");
+
+    let full: HealthSnapshot = serde_json::from_value(serde_json::json!({
+        "status": "ok",
+        "launchd_supervision": "unknown",
+    }))
+    .expect("body with the field parses");
+    assert_eq!(full.launchd_supervision, "unknown");
+}

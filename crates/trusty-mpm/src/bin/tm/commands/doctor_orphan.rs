@@ -15,13 +15,14 @@
 //! the check pass.
 //!
 //! The `supervised` self-report is a FALLBACK, not the primary signal (#4230
-//! review). [`trusty_common::update::is_launchd_supervised`] has two prongs: an
-//! `XPC_SERVICE_NAME` env probe AND a `getppid() == 1` fallback. `supervised` is
-//! computed once at daemon startup, so any orphan whose spawning parent had
-//! already exited by then self-reports as launchd-supervised. Resting the
-//! detector on that flag would make it blind to exactly the population it
-//! targets — and would contradict this same change's removal of `PPID == 1` from
-//! the operator runbook, which rests on the identical argument.
+//! review). It was an environment-variable heuristic — an `XPC_SERVICE_NAME`
+//! probe with a `getppid() == 1` fallback, both of which a non-launchd process
+//! satisfies — until #4469 replaced it with an authoritative `launchctl` query.
+//! It is STILL not the primary signal here, for two reasons that outlive that
+//! fix: the flag is computed once at daemon startup, and the responding daemon
+//! may be an older build whose flag is the old heuristic. A detector resting on
+//! a self-report is blind to exactly the population it targets, however that
+//! self-report is derived.
 //!
 //! This lives in the `tm` CLI binary rather than the daemon's server-side
 //! `run_doctor` for the same reason as the #2332 stale-daemon check
@@ -76,6 +77,15 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
         .as_deref()
         .map(launchd_probe::launchd_ownership)
         .unwrap_or(launchd_probe::LaunchdOwnership::Unavailable);
+    // #4469 note: `snapshot.launchd_supervision` carries the daemon's THREE-STATE
+    // answer, but this check deliberately does not consume it — and that is not
+    // an oversight. Whenever the daemon reports a pid (every daemon since #4230),
+    // `verdict`'s authoritative tier decides from THIS process's own launchd
+    // query, where `None` and `Some(false)` are already equivalent
+    // (`supervised != Some(true)`); the client's independent answer is the whole
+    // point of that tier and correctly outranks any self-report. The three-state
+    // signal's real consumer is `/health` itself, which `CLAUDE.md`'s restart
+    // convention tells operators to read directly.
     verdict(
         label.as_deref(),
         ownership,
@@ -103,9 +113,10 @@ pub(crate) fn orphan_daemon_check(snapshot: Option<&HealthSnapshot>) -> DoctorCh
 ///    something answers is the #4230 state verbatim: the job is down, yet the
 ///    port is served.
 /// 3. FALLBACK — the responding daemon predates `pid`. Then and only then does the
-///    `supervised` self-report decide: `Some(false)` → orphan (the heuristic
-///    agrees it is hazardous); `Some(true)` or `None` → `Unknown`, never `Ok`,
-///    because the `getppid() == 1` prong makes `true` non-conclusive.
+///    `supervised` self-report decide: `Some(false)` → orphan (the daemon agrees
+///    it is hazardous); `Some(true)` or `None` → `Unknown`, never `Ok`. A daemon
+///    old enough to omit `pid` also predates #4469, so its `true` came from the
+///    `getppid() == 1` prong that any reparented orphan satisfies.
 ///
 /// Two guards keep the hard `Fail` — whose remediation prescribes `kill -TERM` —
 /// off a healthy daemon (#4230 review round 2):
@@ -203,13 +214,15 @@ pub(crate) fn verdict(
                      `supervised: false` against the registered unit `{label}`"
                 ),
             ),
-            // Never `Ok`: `supervised: true` can come from the `getppid() == 1`
-            // prong, which a reparented orphan satisfies.
+            // Never `Ok`. A daemon old enough to omit `pid` predates #4469, so
+            // its `supervised` flag is still the env-var heuristic whose
+            // `getppid() == 1` prong any reparented orphan satisfies.
             Some(true) => unconfirmable(
                 label,
                 version,
-                "Its own `supervised: true` is NOT conclusive — that flag's fallback prong \
-                 is `getppid() == 1`, which any reparented orphan satisfies",
+                "Its own `supervised: true` is NOT conclusive — a daemon this old computes \
+                 that flag from the pre-#4469 heuristic, whose `getppid() == 1` prong any \
+                 reparented orphan satisfies",
             ),
             None => unconfirmable(label, version, "It reports no supervision flag either"),
         },
@@ -230,7 +243,7 @@ fn ok(message: String) -> DoctorCheck {
 ///
 /// Why: `Unknown` is the correct third state for "this daemon cannot tell me" —
 /// the reason the client models `supervised` as `Option<bool>`. Reporting `Ok`
-/// here is what would inherit the `getppid() == 1` weakness the docs half of this
+/// here is what would inherit the self-report weakness the docs half of this
 /// change argues against. Both fallback branches share the remediation, so they
 /// share one builder.
 /// What: `Unknown` naming the version, the registered label, the branch-specific
@@ -307,8 +320,9 @@ fn contradiction(label: &str, version: &str, serving: u32) -> DoctorCheck {
             "launchd reports NO running process for unit `{label}`, yet pid {serving} \
              (version {}) is answering /health AND reports `supervised: true`. Those two \
              claims contradict, so this is not conclusive and no corrective action is \
-             prescribed (issue #4230) — the daemon's flag has a `getppid() == 1` prong that \
-             a reparented orphan satisfies, but launchd may also be answering from a \
+             prescribed (issue #4230) — the daemon's flag is a self-report computed once \
+             at ITS startup (and on a pre-#4469 build, from an env-var heuristic a \
+             reparented orphan satisfies), but launchd may also be answering from a \
              domain that cannot see the unit. Settle it with `launchctl print \
              gui/$(id -u)/{label}` before acting.",
             display_version(version)

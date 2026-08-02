@@ -35,9 +35,13 @@ const CHECK_NAME: &str = "binary_provenance";
 /// Test: the pure core is covered below; this wrapper is exe + file resolution.
 pub(super) fn check_binary_provenance() -> DoctorCheck {
     let exe = std::env::current_exe().ok();
-    let ledger_raw = cargo_ledger_path().and_then(|p| std::fs::read_to_string(p).ok());
+    let cargo_home = cargo_home_dir();
+    let ledger_raw = cargo_home
+        .as_ref()
+        .and_then(|h| std::fs::read_to_string(h.join(".crates2.json")).ok());
     check_binary_provenance_with(
         exe.as_deref(),
+        cargo_home.as_deref(),
         ledger_raw.as_deref(),
         env!("CARGO_PKG_VERSION"),
     )
@@ -57,14 +61,14 @@ pub(super) fn check_binary_provenance() -> DoctorCheck {
 /// `provenance_reports_the_ledger_verdict`.
 fn check_binary_provenance_with(
     exe: Option<&Path>,
+    cargo_home: Option<&Path>,
     ledger_raw: Option<&str>,
     running_version: &str,
 ) -> DoctorCheck {
-    let Some(bin_name) = exe
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .map(str::to_owned)
-    else {
+    let Some((exe, bin_name)) = exe.and_then(|p| {
+        let name = p.file_name()?.to_str()?.to_owned();
+        Some((p, name))
+    }) else {
         return DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Unknown,
@@ -73,30 +77,48 @@ fn check_binary_provenance_with(
         );
     };
 
+    // #4622 review HIGH-2: the ledger record is matched by BASENAME, so the
+    // check also needs the directory cargo installs into, to confirm the running
+    // binary IS that file rather than a same-named copy shadowing it on PATH.
+    let Some(cargo_home) = cargo_home else {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Unknown,
+            format!(
+                "no `$CARGO_HOME` or home directory resolved — cannot tell whether the \
+                 running `{bin_name}` is a cargo install (issue #4033)"
+            ),
+        );
+    };
+
     let ledger = ledger_raw.and_then(parse_cargo_installs);
-    let (status, message) =
-        provenance_report(&bin_name, running_version, exe, ledger.as_deref(), &|dir| {
-            dir.exists()
-        });
+    let (status, message) = provenance_report(
+        &bin_name,
+        running_version,
+        exe,
+        &cargo_home.join("bin"),
+        ledger.as_deref(),
+        &|dir| dir.exists(),
+    );
     DoctorCheck::new(CHECK_NAME, status, message)
 }
 
-/// Resolve the path to cargo's install ledger.
+/// Resolve `$CARGO_HOME` (the base for both the ledger and `bin/`).
 ///
 /// Why: `CARGO_HOME` is routinely relocated (rustup layouts, CI images, the
 /// prebuilt installer), and reading only `~/.cargo` would report `Unknown` on
 /// every such host — an honest answer, but a needlessly uninformative one when
 /// the real ledger is one env var away.
-/// What: `$CARGO_HOME/.crates2.json` when `CARGO_HOME` is set and non-empty,
-/// else `~/.cargo/.crates2.json`, else `None` when no home resolves.
-/// Test: exercised live by `run_doctor`; the branch it feeds is covered by
-/// `provenance_is_unknown_without_a_ledger`.
-fn cargo_ledger_path() -> Option<PathBuf> {
-    let base = match std::env::var("CARGO_HOME") {
-        Ok(h) if !h.is_empty() => PathBuf::from(h),
-        _ => dirs::home_dir()?.join(".cargo"),
-    };
-    Some(base.join(".crates2.json"))
+/// What: `$CARGO_HOME` when set and non-empty, else `~/.cargo`, else `None`.
+/// The ledger is `<base>/.crates2.json` and the install directory `<base>/bin`.
+/// Test: exercised live by `run_doctor`; the branches it feeds are covered by
+/// `provenance_is_unknown_without_a_ledger` and
+/// `provenance_is_unknown_without_a_cargo_home`.
+fn cargo_home_dir() -> Option<PathBuf> {
+    match std::env::var("CARGO_HOME") {
+        Ok(h) if !h.is_empty() => Some(PathBuf::from(h)),
+        _ => Some(dirs::home_dir()?.join(".cargo")),
+    }
 }
 
 #[cfg(test)]
@@ -110,8 +132,12 @@ mod tests {
     /// Test: this test.
     #[test]
     fn provenance_is_unknown_without_a_ledger() {
-        let check =
-            check_binary_provenance_with(Some(Path::new("/usr/local/bin/tm")), None, "1.3.1");
+        let check = check_binary_provenance_with(
+            Some(Path::new("/usr/local/bin/tm")),
+            Some(Path::new("/home/x/.cargo")),
+            None,
+            "1.3.1",
+        );
         assert_eq!(
             check.status,
             CheckStatus::Unknown,
@@ -121,10 +147,50 @@ mod tests {
         assert_eq!(check.name, CHECK_NAME);
     }
 
+    /// No `$CARGO_HOME` (and no home directory) means the check cannot tell
+    /// whether the running binary is a cargo install — UNKNOWN, not a pass.
+    #[test]
+    fn provenance_is_unknown_without_a_cargo_home() {
+        let check = check_binary_provenance_with(
+            Some(Path::new("/usr/local/bin/tm")),
+            None,
+            Some("{}"),
+            "1.3.1",
+        );
+        assert_eq!(check.status, CheckStatus::Unknown, "{}", check.message);
+    }
+
+    /// #4622 review HIGH-2 at the CHECK level: a binary shadowing the cargo
+    /// install must not inherit its provenance, even when versions agree.
+    #[test]
+    fn provenance_is_unknown_for_a_shadowing_binary() {
+        let ledger = r#"{"installs":{
+            "trusty-mpm 1.3.1 (registry+https://github.com/rust-lang/crates.io-index)":
+            {"bins":["tm"]}}}"#;
+        let check = check_binary_provenance_with(
+            Some(Path::new("/Users/x/.local/bin/tm")),
+            Some(Path::new("/Users/x/.cargo")),
+            Some(ledger),
+            "1.3.1",
+        );
+        assert_eq!(
+            check.status,
+            CheckStatus::Unknown,
+            "message: {}",
+            check.message
+        );
+        assert!(check.message.contains(".local/bin/tm"), "{}", check.message);
+    }
+
     /// An unresolvable executable is also UNKNOWN, not a pass.
     #[test]
     fn provenance_is_unknown_without_an_exe() {
-        let check = check_binary_provenance_with(None, Some("{}"), "1.3.1");
+        let check = check_binary_provenance_with(
+            None,
+            Some(Path::new("/home/x/.cargo")),
+            Some("{}"),
+            "1.3.1",
+        );
         assert_eq!(check.status, CheckStatus::Unknown);
     }
 
@@ -166,6 +232,7 @@ mod tests {
             {"bins":["tm"]}}}"#;
         let check = check_binary_provenance_with(
             Some(Path::new("/Users/x/.cargo/bin/tm")),
+            Some(Path::new("/Users/x/.cargo")),
             Some(ledger),
             "1.3.1",
         );

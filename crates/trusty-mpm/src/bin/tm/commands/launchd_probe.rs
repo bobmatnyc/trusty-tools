@@ -235,10 +235,11 @@ pub(crate) fn compute_supervised(is_launchd_supervised: bool, plist_exists: bool
 /// that actually produced the #4230 orphan — it spawned a detached bare
 /// `tm daemon` with no launchd awareness whatsoever). Keeping it heuristic-free
 /// matters: the child-side #4397 guard folds in
-/// [`trusty_common::update::is_launchd_supervised`], whose `XPC_SERVICE_NAME`
-/// prong can report `true` for a non-launchd child spawned from a context where
-/// `TERM_PROGRAM` is unset, so the callee guard alone is not a reliable last
-/// line of defence.
+/// [`trusty_common::update::is_launchd_supervised`], which until #4469 could
+/// report `true` for a non-launchd child purely from an inherited
+/// `XPC_SERVICE_NAME`. That prong is gone, but a callee-side guard still cannot
+/// be the last line of defence — it runs in the very process whose legitimacy is
+/// in question, and older binaries still carry the heuristic.
 /// What: `no_spawn` is exactly `plist_exists` — spawn is refused if and only
 /// if a trusty-mpm launchd unit is present.
 /// Test: `compute_no_spawn_true_when_plist_exists`,
@@ -311,12 +312,12 @@ pub(crate) enum LaunchdOwnership {
 ///
 /// Why (#4230 review): the `daemon_orphan` doctor check must not rest on the
 /// daemon's own `supervised` self-report.
-/// [`trusty_common::update::is_launchd_supervised`] has TWO prongs — an
-/// `XPC_SERVICE_NAME` env probe AND a `getppid() == 1` fallback — and the second
-/// makes any orphan whose spawning parent exited before the daemon's startup
-/// probe self-report as supervised. That is the same reasoning this change uses
-/// to delete `PPID == 1` from the operator checklist, so the check cannot lean on
-/// it either. launchd's own answer is authoritative; a PID comparison against it
+/// [`trusty_common::update::is_launchd_supervised`] HAD two prongs — an
+/// `XPC_SERVICE_NAME` env probe and a `getppid() == 1` fallback — and the second
+/// made any orphan whose spawning parent exited self-report as supervised. #4469
+/// replaced both with an authoritative launchd query, but the check still must
+/// not lean on the self-report: it is computed once at startup, and the daemon
+/// answering may be an older binary that still carries the heuristic. launchd's own answer is authoritative; a PID comparison against it
 /// is exactly what the revised runbook tells a human to do.
 ///
 /// Round 2 added the third state and a second probe. `launchctl list <label>`
