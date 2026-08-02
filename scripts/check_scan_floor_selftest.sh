@@ -35,7 +35,7 @@
 #   bash scripts/check_scan_floor_selftest.sh line_cap            # one by name
 #   bash scripts/check_scan_floor_selftest.sh a b                 # several
 #   (names: line_cap generation_artifacts generation_artifacts_write_modes
-#    test_pointers doc_numbers claude_md changelog_fragment
+#    test_pointers doc_numbers claude_md changelog_fragment pr_version_bump
 #    agent_assets_tool_error changelog_fragment_tool_error)
 #
 # Exit: 0 when every gate rejects its vacuous scan; 1 (naming the gate) when one
@@ -55,7 +55,7 @@ PASSED=0
 FAILED=0
 
 KNOWN="line_cap generation_artifacts generation_artifacts_write_modes \
-test_pointers doc_numbers claude_md changelog_fragment \
+test_pointers doc_numbers claude_md changelog_fragment pr_version_bump \
 agent_assets_tool_error changelog_fragment_tool_error"
 
 for requested in "$@"; do
@@ -256,6 +256,22 @@ if want changelog_fragment; then
   git -C "$f" add -A && git -C "$f" commit -qm fixture
   expect_rejects "check_changelog_fragment.sh (0 changed paths)" "$f" \
     bash scripts/check_changelog_fragment.sh --base HEAD
+fi
+
+# ===========================================================================
+# 6b. check-pr-version-bump.sh — an empty diff against the base.
+#     This gate has TWO empty-set outcomes and only one is a pass: a diff that
+#     resolved but holds no crate source is a legitimate docs-only PR, while a
+#     diff that resolved to nothing at all means the base ref never resolved.
+#     Pre-floor both printed OK, so an unresolvable base read as "no drift".
+# ===========================================================================
+if want pr_version_bump; then
+  f="$(new_fixture)"
+  install_gate "$f" check-pr-version-bump.sh
+  echo "placeholder" > "$f/README.md"
+  git -C "$f" add -A && git -C "$f" commit -qm fixture
+  expect_rejects "check-pr-version-bump.sh (0 changed paths)" "$f" \
+    env PR_VERSION_BUMP_BASE=HEAD bash scripts/check-pr-version-bump.sh
 fi
 
 # ===========================================================================

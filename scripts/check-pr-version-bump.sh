@@ -48,7 +48,9 @@
 #   PR_VERSION_BUMP_BASE=<ref> bash scripts/check-pr-version-bump.sh
 #
 # Exit: 0 when every touched crate is clear (or only warnings were raised);
-#   1 when at least one crate changed source under an already-published version.
+#   1 when at least one crate changed source under an already-published version,
+#   or when the diff resolved to zero paths at all (the #4618 scan floor — see
+#   the inline note in `main`).
 #
 # Test: scripts/check-ci-helpers-selftest.sh (`check-pr-version-bump:` cases)
 #   exercises the crate-extraction and version-decision logic against synthetic
@@ -123,8 +125,30 @@ main() {
   fi
   echo "Merge base: ${merge_base}"
 
-  local changed touched
+  local changed changed_count touched
   changed="$(git diff --name-only --no-renames "${merge_base}" HEAD)"
+
+  # #4618 scan floor. Two very different situations both leave `touched` empty,
+  # and only ONE of them is a pass:
+  #   - the diff RESOLVED and simply contains no crate source (a docs-only or
+  #     CI-only PR) — nothing can drift, so passing is correct;
+  #   - the diff resolved to NOTHING AT ALL, which no real PR does. That means
+  #     something upstream broke — a wrong base ref, a shallow clone with no
+  #     merge base, a detached HEAD — and the gate would report OK having
+  #     examined zero paths.
+  # Asserting a non-zero overall path count before the legitimate-empty branch
+  # below separates them, so an unresolvable base fails loudly instead of
+  # reading as a clean bill of health. Same floor and wording as
+  # scripts/check_changelog_fragment.sh, which faces the identical hazard.
+  changed_count="$(printf '%s' "${changed}" | grep -c . || true)"
+  if [ "${changed_count:-0}" -eq 0 ]; then
+    echo "FAIL: SCAN FLOOR — the diff ${merge_base}..HEAD lists 0 changed path(s)." >&2
+    echo "      Nothing was examined, so this gate could not have failed. Check that" >&2
+    echo "      '${BASE}' is the right base and that CI checked out with fetch-depth: 0." >&2
+    echo "      A gate that scans nothing is not a passing gate (issue #4618)." >&2
+    return 1
+  fi
+
   touched="$(
     grep -E '^crates/[^/]+/src/' <<<"${changed}" |
       cut -d/ -f2 |
@@ -132,7 +156,7 @@ main() {
   )" || true
 
   if [ -z "${touched}" ]; then
-    echo "[ OK ] no crates/<crate>/src/** paths changed — nothing to check"
+    echo "[ OK ] ${changed_count} changed path(s) examined; none under crates/<crate>/src/**"
     return 0
   fi
 
