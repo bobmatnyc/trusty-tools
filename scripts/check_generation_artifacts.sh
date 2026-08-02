@@ -191,37 +191,74 @@ scan_prose() {
 }
 
 # ---------------------------------------------------------------------------
+# Scan floors (#4618). This gate's finding count is legitimately 0 on a clean
+# tree, so "0 leaked artifacts" can never distinguish "scanned everything, found
+# nothing" from "scanned nothing". The number that CAN tell them apart is how
+# many files were opened, so it is counted per stream and floored: one broken
+# glob no longer hides behind the other stream's healthy count. Both floors sit
+# far below the current reality (20 stylesheets, 1121 prose files) and far above
+# zero — lower them deliberately only if the repo genuinely shrinks.
+# ---------------------------------------------------------------------------
+MIN_CSS_FILES=5
+MIN_PROSE_FILES=200
+
+# ---------------------------------------------------------------------------
 # Build the current violation snapshot: "<path>\t<line>\t<token>" for every
 # tracked, non-excluded file in scope, written to $1 (truncated first).
+# Every file actually opened is recorded as "<stream>\t<path>" in $2, which is
+# what the scan floor is asserted against.
 # ---------------------------------------------------------------------------
 build_snapshot() {
-  local out="$1"
+  local out="$1" scanned_out="$2"
   : > "$out"
+  : > "$scanned_out"
 
-  git ls-files '*.css' '*.scss' '*.less' | while IFS= read -r f; do
+  local css_list prose_list
+  css_list="$(mktemp "${TMPDIR:-/tmp}/genart.csslist.XXXXXX")"
+  prose_list="$(mktemp "${TMPDIR:-/tmp}/genart.proselist.XXXXXX")"
+
+  # The enumeration is materialised first so its exit status is observable; a
+  # `git ls-files | while` pipeline hid a failing git behind an empty stream.
+  if ! git ls-files '*.css' '*.scss' '*.less' > "$css_list" ||
+     ! git ls-files '*.md' '*.mdx' '*.txt' '*.rst' > "$prose_list"; then
+    echo "FAIL: TOOL ERROR — 'git ls-files' exited non-zero; the file set could" >&2
+    echo "      not be enumerated, so nothing was scanned. NOT a pass (#4618)." >&2
+    rm -f "$css_list" "$prose_list"
+    exit 1
+  fi
+
+  while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
     is_excluded_path "$f" && continue
+    printf 'css\t%s\n' "$f" >> "$scanned_out"
     scan_css "$f" | while IFS=$'\t' read -r line token; do
       [ -n "${line:-}" ] || continue
       printf '%s\t%s\t%s\n' "$f" "$line" "$token" >> "$out"
     done
-  done
+  done < "$css_list"
 
-  git ls-files '*.md' '*.mdx' '*.txt' '*.rst' | while IFS= read -r f; do
+  while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
     is_excluded_path "$f" && continue
+    printf 'prose\t%s\n' "$f" >> "$scanned_out"
     scan_prose "$f" | while IFS=$'\t' read -r line token; do
       [ -n "${line:-}" ] || continue
       printf '%s\t%s\t%s\n' "$f" "$line" "$token" >> "$out"
     done
-  done
+  done < "$prose_list"
+
+  rm -f "$css_list" "$prose_list"
 }
 
 RAW="$(mktemp "${TMPDIR:-/tmp}/genart.raw.XXXXXX")"
-trap 'rm -f "$RAW"' EXIT
-build_snapshot "$RAW"
+SCANNED="$(mktemp "${TMPDIR:-/tmp}/genart.scanned.XXXXXX")"
+trap 'rm -f "$RAW" "$SCANNED"' EXIT
+build_snapshot "$RAW" "$SCANNED"
+
+CSS_SCANNED="$(awk -F'\t' '$1 == "css"' "$SCANNED" | wc -l | tr -d ' ')"
+PROSE_SCANNED="$(awk -F'\t' '$1 == "prose"' "$SCANNED" | wc -l | tr -d ' ')"
 
 ALLOWLIST_READ="$ALLOWLIST"
 [ -f "$ALLOWLIST_READ" ] || ALLOWLIST_READ="/dev/null"
@@ -325,11 +362,25 @@ $allow_paths
 EOF
 fi
 
-total=$((violations + stale))
+floor=0
+if [ "$CSS_SCANNED" -lt "$MIN_CSS_FILES" ]; then
+  echo "FAIL: SCAN FLOOR — only ${CSS_SCANNED} stylesheet(s) scanned, below the declared" >&2
+  echo "      minimum of ${MIN_CSS_FILES}. The '*.css'/'*.scss'/'*.less' enumeration is broken;" >&2
+  echo "      a gate that scans nothing cannot fail (issue #4618)." >&2
+  floor=1
+fi
+if [ "$PROSE_SCANNED" -lt "$MIN_PROSE_FILES" ]; then
+  echo "FAIL: SCAN FLOOR — only ${PROSE_SCANNED} prose file(s) scanned, below the declared" >&2
+  echo "      minimum of ${MIN_PROSE_FILES}. The '*.md'/'*.mdx'/'*.txt'/'*.rst' enumeration is" >&2
+  echo "      broken; a gate that scans nothing cannot fail (issue #4618)." >&2
+  floor=1
+fi
+
+total=$((violations + stale + floor))
 if [ "$total" -gt 0 ]; then
-  echo "generation-artifacts: ${violations} leaked artifact(s), ${stale} stale allowlist row(s) — FAILED." >&2
+  echo "generation-artifacts: scanned ${CSS_SCANNED} stylesheet(s) + ${PROSE_SCANNED} prose file(s); ${violations} leaked artifact(s), ${stale} stale allowlist row(s) — FAILED." >&2
   exit 1
 fi
 
-echo "generation-artifacts: 0 leaked artifacts — OK."
+echo "generation-artifacts: scanned ${CSS_SCANNED} stylesheet(s) + ${PROSE_SCANNED} prose file(s) (floors ${MIN_CSS_FILES}/${MIN_PROSE_FILES}) — 0 leaked artifacts — OK."
 exit 0

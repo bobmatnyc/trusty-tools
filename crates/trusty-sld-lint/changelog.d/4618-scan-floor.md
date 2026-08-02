@@ -1,0 +1,3 @@
+Fixed
+
+- `sld-lint` now asserts a non-zero scan floor before mapping a run to an exit code. The exit code depended only on `is_clean()`, so a run that discovered nothing printed `scanned 0 spec doc(s) + 0 code file(s); 0 error(s)` and exited 0 — a required check that could not fail. `spec_docs` and `code_files` are floored independently (20 / 200), so one broken discovery path cannot hide behind the other's healthy count, and the counts are already printed on success so a future regression shows up in the CI log rather than silently ([#4618](https://github.com/bobmatnyc/trusty-tools/issues/4618)).

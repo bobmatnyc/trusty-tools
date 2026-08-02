@@ -162,9 +162,24 @@ collect_claims() {
   local out="$1"
   : > "$out"
 
+  # #4618: both enumerations are materialised first so a failing `git ls-files`
+  # is observable. Piping it straight into `while` hid a git error behind an
+  # empty stream, and an empty claim set produces "0 violations — OK".
+  local doclist adrlist
+  doclist="$(mktemp "${TMPDIR:-/tmp}/docnum.doclist.XXXXXX")"
+  adrlist="$(mktemp "${TMPDIR:-/tmp}/docnum.adrlist.XXXXXX")"
+  if ! git ls-files 'docs/specs/*.md' 'docs/trusty-installer/research/02-design/*.md' > "$doclist" ||
+     ! git ls-files 'docs/adr/*.md' > "$adrlist"; then
+    echo "FAIL: TOOL ERROR — 'git ls-files' exited non-zero; the doc set could not" >&2
+    echo "      be enumerated, so no number claims were collected. NOT a pass (#4618)." >&2
+    rm -f "$doclist" "$adrlist"
+    exit 1
+  fi
+
+  DOCS_SCANNED=0
+
   # ---- DOC namespace -------------------------------------------------------
-  git ls-files 'docs/specs/*.md' 'docs/trusty-installer/research/02-design/*.md' \
-  | while IFS= read -r f; do
+  while IFS= read -r f; do
       [ -f "$f" ] || continue
       local base fnum lnum
       base="${f##*/}"
@@ -175,13 +190,14 @@ collect_claims() {
           ;;
       esac
       lnum="$(doc_label_of "$f")"
+      DOCS_SCANNED=$((DOCS_SCANNED + 1))
       emit_claims DOC "$f" "$fnum" "$lnum" >> "$out"
-    done
+    done < "$doclist"
 
   # ---- ADR namespace -------------------------------------------------------
   # Only `NNNN-slug.md` files; README.md / INDEX.md / template.md carry no
   # number of their own and must not be scanned as claimants.
-  git ls-files 'docs/adr/*.md' | while IFS= read -r f; do
+  while IFS= read -r f; do
       [ -f "$f" ] || continue
       local base fnum lnum
       base="${f##*/}"
@@ -191,8 +207,11 @@ collect_claims() {
       esac
       fnum="$(printf '%s' "$base" | sed -nE 's/^0*([0-9]+)-.*/\1/p')"
       lnum="$(adr_label_of "$f")"
+      DOCS_SCANNED=$((DOCS_SCANNED + 1))
       emit_claims ADR "$f" "$fnum" "$lnum" >> "$out"
-    done
+    done < "$adrlist"
+
+  rm -f "$doclist" "$adrlist"
 }
 
 # ---------------------------------------------------------------------------
@@ -273,6 +292,10 @@ scan() {
   claims="$(mktemp "${TMPDIR:-/tmp}/docnum.claims.XXXXXX")"
   readme="docs/specs/README.md"
   collect_claims "$claims"
+  # #4618: number of (namespace, number, path) claims this run actually
+  # collected — the count that distinguishes "checked every doc, found no
+  # collision" from "checked nothing".
+  CLAIMS_SCANNED="$(awk 'END{print NR}' "$claims")"
 
   # ---- 1. duplicate numbers (per namespace) --------------------------------
   # Group by (ns, num); a group covering more than one DISTINCT path collides.
@@ -561,12 +584,32 @@ REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 ALLOWLIST="$REPO_ROOT/.doc-number-allowlist.tsv"
 
+# #4618: the scan floor. Duplicate/mismatch findings are legitimately 0 on a
+# healthy tree, so the finding count cannot distinguish a real scan from an
+# empty one — and this gate's true positives are additionally masked by only 4
+# grandfathered allowlist rows, one `--update` from vanishing. The counts that
+# CAN distinguish them are how many docs were opened and how many number claims
+# were extracted. Both floors sit far below reality (54 spec docs) and far
+# above zero.
+MIN_DOCS_SCANNED=20
+MIN_CLAIMS=20
+
 RAW="$(mktemp "${TMPDIR:-/tmp}/docnum.raw.XXXXXX")"
 VIOL="$(mktemp "${TMPDIR:-/tmp}/docnum.viol.XXXXXX")"
 STALE="$(mktemp "${TMPDIR:-/tmp}/docnum.stale.XXXXXX")"
 trap 'rm -f "$RAW" "$VIOL" "$STALE"' EXIT
 
+DOCS_SCANNED=0
+CLAIMS_SCANNED=0
 scan "$RAW"
+
+if [ "${DOCS_SCANNED:-0}" -lt "$MIN_DOCS_SCANNED" ] || [ "${CLAIMS_SCANNED:-0}" -lt "$MIN_CLAIMS" ]; then
+  echo "FAIL: SCAN FLOOR — scanned ${DOCS_SCANNED} doc(s) yielding ${CLAIMS_SCANNED} number claim(s)," >&2
+  echo "      below the declared minimums of ${MIN_DOCS_SCANNED}/${MIN_CLAIMS} (MIN_DOCS_SCANNED / MIN_CLAIMS" >&2
+  echo "      in scripts/check_doc_numbers.sh). A gate with no claims to compare" >&2
+  echo "      reports '0 violations' and cannot fail (issue #4618)." >&2
+  exit 1
+fi
 
 if [ "$MODE" = "seed" ]; then
   # One-time bootstrap for a repo that has never been mechanically checked
@@ -648,10 +691,10 @@ fi
 
 total=$((violations + stale))
 if [ "$total" -gt 0 ]; then
-  echo "doc-numbers: $grandfathered grandfathered, ${violations} violation(s), ${stale} stale allowlist entr$([ "$stale" = "1" ] && echo y || echo ies) — FAILED." >&2
+  echo "doc-numbers: scanned ${DOCS_SCANNED} doc(s) / ${CLAIMS_SCANNED} claim(s); $grandfathered grandfathered, ${violations} violation(s), ${stale} stale allowlist entr$([ "$stale" = "1" ] && echo y || echo ies) — FAILED." >&2
   echo "Pick a free number (scan docs/specs/ and docs/adr/ — the catalog's 'next free' note is a hint, not authority; DOC-38 §4.1)." >&2
   exit 1
 fi
 
-echo "doc-numbers: $grandfathered grandfathered, 0 violations — OK."
+echo "doc-numbers: scanned ${DOCS_SCANNED} doc(s) / ${CLAIMS_SCANNED} claim(s) (floors ${MIN_DOCS_SCANNED}/${MIN_CLAIMS}); $grandfathered grandfathered, 0 violations — OK."
 exit 0

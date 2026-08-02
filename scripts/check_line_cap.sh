@@ -155,14 +155,40 @@ cap_for_path() {
 # still exists in the working tree. Computed once, reused by both modes.
 # ---------------------------------------------------------------------------
 CURRENT="$(mktemp "${TMPDIR:-/tmp}/linecap.cur.XXXXXX")"
-trap 'rm -f "$CURRENT"' EXIT
+RSLIST="$(mktemp "${TMPDIR:-/tmp}/linecap.rslist.XXXXXX")"
+trap 'rm -f "$CURRENT" "$RSLIST"' EXIT
 
-git ls-files '*.rs' | while IFS= read -r f; do
+# #4618: the scan floor. This gate's violation count is legitimately 0 once the
+# allowlist ratchets to zero — the stated goal — at which point "0 violations"
+# stops distinguishing "measured 3571 files, all under cap" from "measured
+# nothing". The number that distinguishes them is how many files were measured,
+# so it is floored and reported. 500 sits far below the current 3571 tracked
+# .rs files and far above zero.
+MIN_RS_FILES=500
+
+# The enumeration is materialised before the loop so its exit status is
+# observable; `git ls-files | while` hid a failing git behind an empty stream.
+if ! git ls-files '*.rs' > "$RSLIST"; then
+  echo "FAIL: TOOL ERROR — 'git ls-files *.rs' exited non-zero; the file set could" >&2
+  echo "      not be enumerated, so nothing was measured. NOT a pass (#4618)." >&2
+  exit 1
+fi
+
+while IFS= read -r f; do
   [ -n "$f" ] || continue
   [ -f "$f" ] || continue
   n="$(awk "$SLOC_AWK" "$f")"
   printf '%s\t%s\n' "$n" "$f"
-done > "$CURRENT"
+done < "$RSLIST" > "$CURRENT"
+
+RS_SCANNED="$(awk 'END{print NR}' "$CURRENT")"
+if [ "${RS_SCANNED:-0}" -lt "$MIN_RS_FILES" ]; then
+  echo "FAIL: SCAN FLOOR — only ${RS_SCANNED} tracked .rs file(s) were measured, below" >&2
+  echo "      the declared minimum of ${MIN_RS_FILES} (MIN_RS_FILES in scripts/check_line_cap.sh)." >&2
+  echo "      A gate that measures nothing reports '0 violations' and cannot fail;" >&2
+  echo "      that is a broken scan, not a clean tree (issue #4618)." >&2
+  exit 1
+fi
 
 # Ensure the allowlist file path resolves even when absent (awk -f handles it).
 ALLOWLIST_READ="$ALLOWLIST"
@@ -175,19 +201,19 @@ if [ "$MODE" = "update" ]; then
   NEWLIST="$(mktemp "${TMPDIR:-/tmp}/linecap.new.XXXXXX")"
   ERRFILE="$(mktemp "${TMPDIR:-/tmp}/linecap.err.XXXXXX")"
   # shellcheck disable=SC2064
-  trap 'rm -f "$CURRENT" "$NEWLIST" "$NEWLIST.body" "$ERRFILE"' EXIT
+  trap 'rm -f "$CURRENT" "$RSLIST" "$NEWLIST" "$NEWLIST.body" "$ERRFILE"' EXIT
 
   # Build a per-path cap map: "<path>\t<cap>" for all tracked .rs files.
   # This is written to a temp file so the awk merge step can read it.
   CAPMAP="$(mktemp "${TMPDIR:-/tmp}/linecap.cap.XXXXXX")"
   # shellcheck disable=SC2064
-  trap 'rm -f "$CURRENT" "$NEWLIST" "$NEWLIST.body" "$ERRFILE" "$CAPMAP"' EXIT
+  trap 'rm -f "$CURRENT" "$RSLIST" "$NEWLIST" "$NEWLIST.body" "$ERRFILE" "$CAPMAP"' EXIT
 
-  git ls-files '*.rs' | while IFS= read -r f; do
+  while IFS= read -r f; do
     [ -n "$f" ] || continue
     cap="$(cap_for_path "$f")"
     printf '%s\t%s\n' "$f" "$cap"
-  done > "$CAPMAP"
+  done < "$RSLIST" > "$CAPMAP"
 
   # Tag each input stream so awk distinguishes them even when the allowlist is
   # empty (a plain FNR==NR split breaks on an empty first file):
@@ -273,18 +299,18 @@ fi
 # ===========================================================================
 RESULT="$(mktemp "${TMPDIR:-/tmp}/linecap.res.XXXXXX")"
 # shellcheck disable=SC2064
-trap 'rm -f "$CURRENT" "$RESULT"' EXIT
+trap 'rm -f "$CURRENT" "$RSLIST" "$RESULT"' EXIT
 
 # Build a per-path cap map for check mode too.
 CAPMAP_CHK="$(mktemp "${TMPDIR:-/tmp}/linecap.cap.XXXXXX")"
 # shellcheck disable=SC2064
-trap 'rm -f "$CURRENT" "$RESULT" "$CAPMAP_CHK"' EXIT
+trap 'rm -f "$CURRENT" "$RSLIST" "$RESULT" "$CAPMAP_CHK"' EXIT
 
-git ls-files '*.rs' | while IFS= read -r f; do
+while IFS= read -r f; do
   [ -n "$f" ] || continue
   cap="$(cap_for_path "$f")"
   printf '%s\t%s\n' "$f" "$cap"
-done > "$CAPMAP_CHK"
+done < "$RSLIST" > "$CAPMAP_CHK"
 
 # Tag all three streams:
 #   Allowlist rows -> "A\tpath\tbudget"
@@ -351,11 +377,11 @@ while IFS= read -r line; do
 done < "$RESULT"
 
 if [ "$violations" -gt 0 ]; then
-  echo "line-cap: $allowlisted allowlisted, $violations violation(s) — FAILED." >&2
+  echo "line-cap: measured $RS_SCANNED tracked .rs file(s); $allowlisted allowlisted, $violations violation(s) — FAILED." >&2
   echo "Caps: ${PROD_CAP} SLOC (production) / ${TEST_CAP} SLOC (test/benchmark)." >&2
   echo "To re-freeze after an intentional split, run: scripts/check_line_cap.sh --update" >&2
   exit 1
 fi
 
-echo "line-cap: $allowlisted allowlisted, 0 violations — OK."
+echo "line-cap: measured $RS_SCANNED tracked .rs file(s) (floor $MIN_RS_FILES); $allowlisted allowlisted, 0 violations — OK."
 exit 0

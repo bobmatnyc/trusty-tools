@@ -39,6 +39,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Scan-floor mutation self-test (issue #4618): re-proves in CI that this
+      # gate REFUSES a vacuous scan. Without it the floor is untested code and a
+      # later refactor can silently restore the "0 examined, still green" pass.
+      # Runs before the real gate — a gate that cannot fail makes the real run's
+      # green meaningless. Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Scan-floor selftest (must refuse an empty scan)
+        run: bash scripts/check_scan_floor_selftest.sh changelog_fragment changelog_fragment_tool_error
+
       - name: Enforce per-PR changelog fragment
         env:
           CHANGELOG_GATE_BASE: ${{ github.event.pull_request.base.sha }}

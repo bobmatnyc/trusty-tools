@@ -25,7 +25,44 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-if git ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1; then
+# #4618: the scan floor. This gate's whole verdict came from ONE probe whose
+# failure mode is silence: `git ls-files --error-unmatch CLAUDE.md 2>/dev/null`
+# is non-zero both when the file is untracked (the pass) and when git itself
+# broke (not a pass at all). Two guards close that:
+#   1. a positive control — git must be able to list the index at all, and the
+#      index must hold a plausible number of files. If `git ls-files` returns
+#      nothing, the probe below proves nothing.
+#   2. exit-code discrimination — --error-unmatch returns exactly 1 for "no such
+#      tracked path" and 128 for a git failure, so only 1 is read as untracked.
+MIN_TRACKED_FILES=500
+
+if ! tracked_list="$(git ls-files 2>&1)"; then
+  echo "FAIL: TOOL ERROR — 'git ls-files' failed; the index could not be read:" >&2
+  printf '%s\n' "$tracked_list" | sed 's/^/       /' >&2
+  echo "      The tracked/untracked probe below would prove nothing (issue #4618)." >&2
+  exit 1
+fi
+
+tracked_count="$(printf '%s\n' "$tracked_list" | grep -c '[^[:space:]]' || true)"
+if [ "${tracked_count:-0}" -lt "$MIN_TRACKED_FILES" ]; then
+  echo "FAIL: SCAN FLOOR — git reports only ${tracked_count} tracked file(s), below the" >&2
+  echo "      declared minimum of ${MIN_TRACKED_FILES}. A 'CLAUDE.md is not tracked' verdict drawn" >&2
+  echo "      from an index this empty is meaningless (issue #4618)." >&2
+  exit 1
+fi
+
+probe_rc=0
+probe_err="$(git ls-files --error-unmatch CLAUDE.md 2>&1 >/dev/null)" || probe_rc=$?
+
+if [ "$probe_rc" -ne 0 ] && [ "$probe_rc" -ne 1 ]; then
+  echo "FAIL: TOOL ERROR — 'git ls-files --error-unmatch CLAUDE.md' exited ${probe_rc}" >&2
+  echo "      (expected 0 = tracked, 1 = untracked):" >&2
+  printf '%s\n' "$probe_err" | sed 's/^/       /' >&2
+  echo "      A git failure is not the same as 'untracked' (issue #4618)." >&2
+  exit 1
+fi
+
+if [ "$probe_rc" -eq 0 ]; then
   echo "FAIL: root CLAUDE.md is tracked by git."
   echo
   echo "  Issue #2299 moved the root CLAUDE.md to .trusty-mpm/INSTRUCTIONS.md"
@@ -40,5 +77,5 @@ if git ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "PASS: root CLAUDE.md is not tracked (see #2299)."
+echo "PASS: root CLAUDE.md is not tracked — probed against ${tracked_count} tracked file(s) (see #2299, #4618)."
 exit 0
