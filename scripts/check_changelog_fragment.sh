@@ -157,15 +157,23 @@ fi
 #   `git ls-tree` separates the two cases that `cat-file -e` conflates: it exits 0
 #   with EMPTY output for an absent path, and non-zero only on a genuine git
 #   failure — which is escalated to a hard gate failure here, never swallowed.
+#   Stderr is captured SEPARATELY, never folded into `out` with `2>&1`: `out`
+#   is the existence signal, so a git warning printed on an otherwise
+#   successful run would make an absent path read as present — turning the
+#   #3732 crate-deletion exemption into a false red.
 path_exists_at_rev() {
-  local rev="$1" path="$2" out
-  if ! out="$(git ls-tree -r --name-only "$rev" -- "$path" 2>&1)"; then
+  local rev="$1" path="$2" out err rc=0
+  err="$(mktemp "${TMPDIR:-/tmp}/changelog.lstree.XXXXXX")"
+  out="$(git ls-tree -r --name-only "$rev" -- "$path" 2>"$err")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
     echo "FAIL: TOOL ERROR — 'git ls-tree ${rev} -- ${path}' failed:" >&2
-    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    sed 's/^/       /' "$err" >&2
     echo "      Whether the path exists is unknown, so no exemption may be granted." >&2
     echo "      This is NOT a pass (issue #4618)." >&2
+    rm -f "$err"
     exit 1
   fi
+  rm -f "$err"
   [[ -n "$out" ]]
 }
 

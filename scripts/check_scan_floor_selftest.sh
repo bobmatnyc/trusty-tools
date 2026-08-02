@@ -34,8 +34,9 @@
 #   bash scripts/check_scan_floor_selftest.sh                     # every gate
 #   bash scripts/check_scan_floor_selftest.sh line_cap            # one by name
 #   bash scripts/check_scan_floor_selftest.sh a b                 # several
-#   (names: line_cap generation_artifacts test_pointers doc_numbers claude_md
-#    changelog_fragment agent_assets_tool_error changelog_fragment_tool_error)
+#   (names: line_cap generation_artifacts generation_artifacts_write_modes
+#    test_pointers doc_numbers claude_md changelog_fragment
+#    agent_assets_tool_error changelog_fragment_tool_error)
 #
 # Exit: 0 when every gate rejects its vacuous scan; 1 (naming the gate) when one
 #   of them still reports success over nothing.
@@ -53,8 +54,9 @@ ONLY="$*"
 PASSED=0
 FAILED=0
 
-KNOWN="line_cap generation_artifacts test_pointers doc_numbers claude_md \
-changelog_fragment agent_assets_tool_error changelog_fragment_tool_error"
+KNOWN="line_cap generation_artifacts generation_artifacts_write_modes \
+test_pointers doc_numbers claude_md changelog_fragment \
+agent_assets_tool_error changelog_fragment_tool_error"
 
 for requested in "$@"; do
   case " $KNOWN " in
@@ -185,6 +187,25 @@ if want generation_artifacts; then
   git -C "$f" add -A && git -C "$f" commit -qm fixture
   expect_rejects "check_generation_artifacts.sh (0 scannable files)" "$f" \
     bash scripts/check_generation_artifacts.sh
+fi
+
+# ===========================================================================
+# 2b. check_generation_artifacts.sh --seed / --update — the ALLOWLIST-WRITING
+#     modes must be floored too. Seeding from an empty scan writes an empty
+#     allowlist; pruning from one deletes every row as "no longer a finding".
+#     Both are silent data loss dressed as a clean run, so the floor is
+#     asserted before the mode dispatch.
+# ===========================================================================
+if want generation_artifacts_write_modes; then
+  for mode in --seed --update; do
+    f="$(new_fixture)"
+    install_gate "$f" check_generation_artifacts.sh
+    echo "fn main() {}" > "$f/main.rs"
+    printf '# grandfathered\ndocs/legacy.md\n' > "$f/.generation-artifact-allowlist.tsv"
+    git -C "$f" add -A && git -C "$f" commit -qm fixture
+    expect_rejects "check_generation_artifacts.sh ${mode} (0 scannable files)" "$f" \
+      bash scripts/check_generation_artifacts.sh "$mode"
+  done
 fi
 
 # ===========================================================================
