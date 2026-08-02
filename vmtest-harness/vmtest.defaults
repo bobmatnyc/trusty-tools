@@ -1,0 +1,32 @@
+# vmtest-harness project defaults.
+# Format: key<TAB>value. '#' comments and blank lines ignored. Unknown keys are an error.
+# Override per-host with the matching VMTEST_* environment variable; never edit this
+# file to suit one machine.
+
+# --- guest sizing (DOC-1 §8.5; measured at vm-install-probe-findings.md:841-843) ---
+cpu	8
+memory_mib	16384
+disk_gib	100
+
+# --- guest paths (measured: vm-install-probe-findings.md:139) ---
+guest_home	/Users/admin
+guest_src_dir	/Users/admin/vmtest-src
+guest_target_dir	/Users/admin/vmtest-target
+
+# --- host capacity preflight (DOC-1 §4.1 gap; see §8.4) ---
+host_min_memory_gib	24
+host_warn_physical_cores	8
+
+# --- polling and watchdogs, seconds (see §10) ---
+boot_ready_timeout	150
+boot_ready_interval	2
+stopped_timeout	120
+stopped_interval	1
+provision_timeout	300
+install_timeout	2700
+health_timeout	60
+health_interval	1
+
+# --- source (DOC-1 §6.2) ---
+repo_url	https://github.com/bobmatnyc/trusty-tools.git
+default_branch	main

@@ -1,0 +1,737 @@
+#!/usr/bin/env bash
+#
+# vmtest — the vmtest-harness driver (DOC-1 §3.1).
+#
+# Sequence (DOC-1 §3.1):  preflight -> clone -> size -> boot -> negative probe
+# -> provision -> scenario -> verify -> teardown.  AT PLAN PHASE 2 ONLY THE
+# HOST-SIDE PREFIX IS BUILT: argument parsing, configuration, the run registry,
+# preflight, `clean`, and `run --dry-run`.  Everything from the clone onward
+# lands in Phase 3 and later, and `run` without `--dry-run` says so rather than
+# pretending.
+#
+# THIS FILE MAY NOT CONTAIN THE STRING THAT NAMES THE VIRTUALISATION TOOL.
+# Every such invocation lives in `lib/vm.sh` and nowhere else (DOC-1 §3.2,
+# DOC-2 §12.2).  It is mechanically checked by plan P2-T4.  Where the driver
+# needs to print an OS-level command for a human, it calls `vm_manual_hint`.
+#
+# TARGET: bash 3.2, the version macOS has shipped at /bin/bash since 2007.
+# No `declare -A`, no namerefs, no `mapfile`, no `${var,,}`, no `globstar`, no
+# `wait -n` (DOC-2 §Shell discipline).  The absence of associative arrays is
+# why §3, §8 and §9 all use the same `key<TAB>value` TSV: THE TSV FILES ARE THE
+# SUBSTITUTE FOR A HASH, not a stylistic preference.
+#
+# TWO `set -e` GOTCHAS, stated so they are not rediscovered:
+#   - `set -e` is SUPPRESSED inside a condition (`if f`, `f && g`, `f || g`,
+#     `! f`).  A function whose failure must abort the run is therefore never
+#     called in a conditional context; aborts route through `die`, which is an
+#     explicit `exit`.
+#   - `local x=$(cmd)` SWALLOWS cmd's status, because `local` is itself a
+#     command.  Declare first, assign second.
+#
+# OUTPUT DISCIPLINE: a command's product goes to stdout (the effective-
+# configuration banner, `clean`'s verdicts); every diagnostic goes to stderr.
+#
+# Usage:
+#   vmtest run local|branch|released [--cpu N] [--memory MIB] [--runid ID]
+#                                    [--keep] [--dry-run]
+#   vmtest clean [--dry-run] [--include-kept]
+#   vmtest --check-table
+
+if [ "${BASH_VERSINFO[0]:-0}" -lt 3 ]; then
+    printf 'vmtest: bash >= 3.2 required, found %s\n' "${BASH_VERSION:-unknown}" >&2
+    exit 2
+fi
+
+set -euo pipefail
+
+# `${BASH_SOURCE[0]}` rather than `$0`: it resolves correctly when the driver is
+# EXECUTED and when it is SOURCED, and P2-T2's acceptance check sources it
+# (`. vmtest-harness/vmtest --source-only`), where `$0` would be `bash`.
+VMTEST_HARNESS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# ---------------------------------------------------------------------------
+# Globals (DOC-2 §12.3).  Set by the driver during preflight; read-only after,
+# except VMTEST_GUEST_ENV (two lifetimes, §7.3) and the write-once VMTEST_EXIT.
+#
+# DEVIATION, recorded: §12.3 also names VMTEST_CPU, VMTEST_MEM_MIB,
+# VMTEST_GUEST_HOME etc. as globals holding config values.  Those are EXACTLY
+# the environment-variable override names §8.2 defines (VMTEST_CPU overrides
+# key `cpu`).  A driver that assigned them would make its own override layer
+# read back its own value and report origin `env` for something that came from
+# the defaults file.  Config is therefore read through `conf_get`, whose origin
+# marker cannot lie.  See MANIFEST Phase 2, Deviations.
+# ---------------------------------------------------------------------------
+
+VMTEST_SUBCOMMAND=''
+VMTEST_PATTERN=''
+VMTEST_RUNID=''
+VMTEST_VM=''
+VMTEST_RUNDIR=''
+VMTEST_RUNDIR_OWNED=0
+VMTEST_KEEP=0
+VMTEST_DRY_RUN=0
+VMTEST_INCLUDE_KEPT=0
+VMTEST_VM_CREATED=''
+VMTEST_VM_RUN_PID=''
+VMTEST_GUEST_ENV=''
+VMTEST_CLEANUP_DONE=0
+VMTEST_TMPDIR=''
+CONF_EFFECTIVE=''
+PIN_OCI_REF=''
+PIN_DIGEST=''
+PIN_LOCAL_NAME=''
+
+FLAG_CPU=''
+FLAG_MEMORY=''
+FLAG_RUNID=''
+
+REGISTRY_ROOT="${VMTEST_STATE_DIR:-$HOME/.local/state/vmtest-harness}/runs"
+
+# The complete key set of vmtest.defaults (DOC-2 §8.2).  Unknown keys are an
+# error so a typo cannot silently become "unpinned" (§3.2).
+CONF_KEYS='cpu memory_mib disk_gib guest_home guest_src_dir guest_target_dir
+host_min_memory_gib host_warn_physical_cores boot_ready_timeout
+boot_ready_interval stopped_timeout stopped_interval provision_timeout
+install_timeout health_timeout health_interval repo_url default_branch'
+
+# The complete key set of base-image.pin (DOC-2 §3.2, plus §3.3's
+# by-construction `enforcement` key, which P1-T3 did not need).
+PIN_KEYS='oci_ref digest local_name pinned_on pinned_by note enforcement'
+
+# ---------------------------------------------------------------------------
+# Driver infrastructure — `die`, `log`, the TSV reader, `conf_get`, the
+# watchdog.  §F-5, resolved by NARROWEST READING: DOC-2 §12.2's four module
+# surfaces contain no TSV or config function, and §12.4 already places `die` in
+# the driver by showing it outside every module table.  These are driver
+# infrastructure, not OS-boundary / provisioning / transport / assertion logic,
+# so none of the four modules is their home.  `lib/` files may call them: `set`
+# and function definitions are shell-global by the time `lib/` is sourced.
+# ---------------------------------------------------------------------------
+
+# die <exit-code> <message...>
+# Records the FIRST classified failure and unwinds.  Never overwrites
+# VMTEST_EXIT — that write-once guard is what implements §2's "first classified
+# failure wins": a scenario failure (50) followed by a teardown failure does not
+# become 70, because the operator needs to know what broke, not what broke last.
+# Verbatim from DOC-2 §12.4.
+die() {
+  _code=$1; shift
+  printf 'vmtest: FAIL[%s]: %s\n' "$_code" "$*" >&2
+  if [ -z "${VMTEST_EXIT:-}" ]; then VMTEST_EXIT=$_code; fi
+  exit "$VMTEST_EXIT"
+}
+
+log()  { printf 'vmtest: %s\n' "$*" >&2; }
+warn() { printf 'vmtest: WARN: %s\n' "$*" >&2; }
+out()  { printf '%s\n' "$*"; }
+
+usage() {
+    cat >&2 <<'USAGE'
+usage:
+  vmtest run local|branch|released [--cpu N] [--memory MIB] [--runid ID]
+                                   [--keep] [--dry-run]
+  vmtest clean [--dry-run] [--include-kept]
+  vmtest --check-table
+
+Every other tunable is set in vmtest-harness/vmtest.defaults or overridden with
+the matching VMTEST_* environment variable (uppercase the key, prefix VMTEST_).
+USAGE
+}
+
+# --- the one TSV parser, used by all three TSV files (DOC-2 §3.1) ----------
+
+# tsv_field <file> <key> <field_number>
+# `#` comment lines and blank lines never match an exact key, so they need no
+# special case.  Exit 1 when the key is absent, so callers can `|| die`.
+tsv_field() {
+    awk -F'\t' -v k="$2" -v f="$3" \
+        '$1 == k { print $f; found = 1; exit } END { if (!found) exit 1 }' "$1"
+}
+
+tsv_get() { tsv_field "$1" "$2" 2; }
+
+# tsv_validate_keys <file> <known-key-list>
+# DOC-2 §3.2's two format rules that are actually enforceable: unknown keys are
+# an error, and there is exactly one line per key.
+tsv_validate_keys() {
+    awk -F'\t' -v known=" $2 " '
+        /^#/ { next }
+        NF == 0 { next }
+        index(known, " " $1 " ") == 0 { printf "unknown key %s; ", $1; bad = 1; next }
+        seen[$1]++ { printf "duplicate key %s; ", $1; bad = 1 }
+        END { exit (bad ? 1 : 0) }
+    ' "$1"
+}
+
+# --- configuration: three tiers, defaults -> env -> flag (DOC-2 §8.1/§8.3) --
+
+conf_load() {
+    local defaults="$VMTEST_HARNESS_DIR/vmtest.defaults"
+    [ -f "$defaults" ] || die 10 "defaults file missing: $defaults"
+
+    local problems
+    problems=$(tsv_validate_keys "$defaults" "$(printf '%s ' $CONF_KEYS)") \
+        || die 10 "vmtest.defaults: $problems"
+
+    harness_tmpdir
+    CONF_EFFECTIVE="$VMTEST_TMPDIR/effective.tsv"
+
+    # The effective configuration is itself a `key<TAB>value<TAB>origin` TSV,
+    # read by the same parser.  Under bash 3.2 this IS the data structure; an
+    # associative array is not available and would not be reviewable anyway.
+    local key value origin env_name env_value
+    : > "$CONF_EFFECTIVE"
+    for key in $CONF_KEYS; do
+        value=$(tsv_get "$defaults" "$key") \
+            || die 10 "vmtest.defaults: no value for required key '$key'"
+        origin=default
+        # Override mapping is MECHANICAL: uppercase the key, prefix VMTEST_.
+        # No table to maintain and no key that is overridable-in-principle but
+        # forgotten in practice.
+        env_name="VMTEST_$(printf '%s' "$key" | tr 'a-z' 'A-Z')"
+        eval "env_value=\${$env_name:-}"
+        if [ -n "$env_value" ]; then
+            value="$env_value"
+            origin=env
+        fi
+        printf '%s\t%s\t%s\n' "$key" "$value" "$origin" >> "$CONF_EFFECTIVE"
+    done
+}
+
+conf_get()    { tsv_field "$CONF_EFFECTIVE" "$1" 2; }
+conf_origin() { tsv_field "$CONF_EFFECTIVE" "$1" 3; }
+
+# conf_set <key> <value> <origin> — tier 3, the CLI flags.  Flags exist ONLY
+# for --cpu, --memory, --runid, --keep and --dry-run (§8.2); a flag per tunable
+# would give the driver a surface larger than its behaviour.
+conf_set() {
+    awk -F'\t' -v OFS='\t' -v k="$1" -v v="$2" -v o="$3" \
+        '$1 == k { $2 = v; $3 = o } { print }' "$CONF_EFFECTIVE" > "$CONF_EFFECTIVE.next"
+    mv "$CONF_EFFECTIVE.next" "$CONF_EFFECTIVE"
+}
+
+conf_apply_flags() {
+    [ -z "$FLAG_CPU" ]    || conf_set cpu "$FLAG_CPU" flag
+    [ -z "$FLAG_MEMORY" ] || conf_set memory_mib "$FLAG_MEMORY" flag
+}
+
+# --- watchdog (DOC-2 §10.4) ------------------------------------------------
+#
+# THERE IS NO timeout(1) ON macOS — it is GNU coreutils.  A watchdog is
+# therefore built from shell primitives: background the command, record the
+# pid, poll `kill -0` at the interval until the deadline, then kill and reap.
+# Reaching for `timeout`/`gtimeout` would add a Homebrew dependency to a
+# harness whose host requirements are otherwise the virtualisation CLI, git, jq
+# and cargo, and would fail on a clean machine in a way that looks like a
+# harness bug.
+#
+# run_watchdog <budget_s> <logfile> <cmd...> — returns the command's status, or
+# 124 on timeout.
+run_watchdog() {
+    local budget="$1" logfile="$2"
+    shift 2
+    local pid t0 rc=0
+    "$@" >"$logfile" 2>&1 &
+    pid=$!
+    t0=$(date '+%s')
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ $(( $(date '+%s') - t0 )) -ge "$budget" ]; then
+            log "watchdog: budget ${budget}s exceeded; killing pid $pid"
+            kill -TERM "$pid" 2>/dev/null || :
+            sleep 2
+            kill -KILL "$pid" 2>/dev/null || :
+            wait "$pid" 2>/dev/null || :
+            return 124
+        fi
+        sleep 1
+    done
+    wait "$pid" || rc=$?
+    return "$rc"
+}
+
+harness_tmpdir() {
+    [ -z "$VMTEST_TMPDIR" ] || return 0
+    VMTEST_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/vmtest.XXXXXX") \
+        || die 10 'could not create a temporary directory'
+}
+
+# ---------------------------------------------------------------------------
+# The OS boundary.  Sourced AFTER `set -euo pipefail` and after the
+# infrastructure above, which lib/ functions call.
+# ---------------------------------------------------------------------------
+
+. "$VMTEST_HARNESS_DIR/lib/vm.sh"
+
+# ---------------------------------------------------------------------------
+# Teardown (DOC-2 §Shell discipline, the trap rule and its five properties)
+# ---------------------------------------------------------------------------
+
+vmtest_cleanup() {
+    # Property 1: capture $? on the VERY FIRST LINE, before anything else can
+    # clobber it.
+    _cleanup_rc=$?
+
+    # Property 2: idempotent.  EXIT fires after the INT handler runs, so
+    # cleanup is entered twice on SIGINT.
+    if [ "${VMTEST_CLEANUP_DONE:-0}" -eq 1 ]; then return 0; fi
+    VMTEST_CLEANUP_DONE=1
+
+    # Property 3: tolerate a run that never got that far.  A preflight refusal
+    # (exit 10) must not produce a teardown error on top of the real message.
+    if [ -n "${VMTEST_VM_CREATED:-}" ]; then
+        if [ "${VMTEST_KEEP:-0}" -eq 1 ]; then
+            # Property 4: under --keep, write the marker, print the VM name and
+            # an inspection hint, SKIP all three of request-stop / wait / delete,
+            # and leave the run directory in place.
+            : > "${VMTEST_RUNDIR:-.}/keep" || :
+            vm_manual_hint keep "${VMTEST_VM:-}"
+            VMTEST_RUNDIR_OWNED=0
+        else
+            # Property 5: request stop, THEN poll for the observable stopped
+            # state, THEN delete — in that order, always.  Never a bare stop
+            # treated as completion (DOC-1 §8.1: write loss reproduced 4 of 5
+            # attempts, the confirmed root cause of a golden image shipping
+            # broken).  The poll is the completion signal.
+            vm_request_stop "${VMTEST_VM:-}"
+            vm_wait_for_stopped "${VMTEST_VM:-}" "$(conf_get stopped_timeout)"
+            if [ -n "${VMTEST_VM_RUN_PID:-}" ]; then
+                wait "$VMTEST_VM_RUN_PID" 2>/dev/null || :   # reap, never kill
+            fi
+            vm_delete "${VMTEST_VM:-}"
+            log "teardown: deleted ${VMTEST_VM:-}"
+        fi
+    fi
+
+    registry_release
+    if [ -n "${VMTEST_TMPDIR:-}" ] && [ -d "${VMTEST_TMPDIR:-}" ]; then
+        rm -rf "${VMTEST_TMPDIR:-}" || :
+    fi
+    return 0
+}
+
+# The explicit `exit` in the signal traps is NOT decoration: after a trap
+# handler returns, bash may resume the interrupted command rather than
+# terminating.  The explicit exit is what makes §2's user-abort codes real.
+on_exit() { local rc=$?; vmtest_cleanup; exit "$rc"; }
+on_int()  { log 'SIGINT — tearing down'; vmtest_cleanup; exit 130; }
+on_term() { log 'SIGTERM — tearing down'; vmtest_cleanup; exit 143; }
+
+trap on_exit EXIT
+trap on_int  INT
+trap on_term TERM
+
+# ---------------------------------------------------------------------------
+# --runid and the atomic run registry (DOC-2 §4)
+# ---------------------------------------------------------------------------
+
+# runid_validate <id> — `^[A-Za-z0-9][A-Za-z0-9-]{0,31}$`, applied to
+# user-supplied and generated ids alike.  A violation is exit 2, BEFORE any VM
+# work.  The character class excludes anything meaningful to a shell, a path,
+# or the OS tool's own name parsing; the 32-character cap keeps the full VM
+# name under 40 characters so it stays readable in a VM listing.
+runid_validate() {
+    case "$1" in
+        '')                     die 2 'empty --runid' ;;
+        [!A-Za-z0-9]*)          die 2 "invalid --runid '$1': must begin with an alphanumeric (DOC-2 §4.2)" ;;
+        *[!A-Za-z0-9-]*)        die 2 "invalid --runid '$1': only alphanumerics and hyphens are allowed (DOC-2 §4.2)" ;;
+    esac
+    [ "${#1}" -le 32 ] || die 2 "invalid --runid '$1': ${#1} characters, maximum is 32 (DOC-2 §4.2)"
+}
+
+# The auto-generated form CANNOT collide with a concurrent run: it embeds the
+# driver's pid, and a pid is unique among live processes.  Two invocations at
+# the same instant necessarily have different pids.  The timestamp handles pid
+# reuse across time.  This is an operating-system guarantee, not a race the
+# harness has to win.
+runid_generate() { printf '%s-%s\n' "$(date -u '+%Y%m%dT%H%M%SZ')" "$$"; }
+
+# registry_acquire — the lock IS the registry entry; there is no separate lock
+# file to fall out of sync.  Acquisition is `mkdir`, which either creates or
+# fails and which two concurrent callers cannot both win.  A test-then-create
+# sequence (`[ -d ... ] || mkdir ...`) IS A RACE and must not be used.
+registry_acquire() {
+    mkdir -p "$REGISTRY_ROOT" || die 10 "cannot create the run registry root $REGISTRY_ROOT"
+    if ! mkdir "$VMTEST_RUNDIR" 2>/dev/null; then
+        local owner='(no pid file)'
+        if [ -f "$VMTEST_RUNDIR/pid" ]; then owner="pid $(cat "$VMTEST_RUNDIR/pid")"; fi
+        die 10 "runid '$VMTEST_RUNID' is already held by the run directory $VMTEST_RUNDIR ($owner). Choose another --runid, or run \`vmtest clean\` if that run is over."
+    fi
+    VMTEST_RUNDIR_OWNED=1
+    # DOC-2 §4.3's four immediate files.  NOTE for a reviewer: the fourth
+    # filename contains, as an English substring, the four characters P2-T4's
+    # acceptance grep searches for — that grep is a substring match, not a word
+    # match.  It is mandated by §4.3 and cannot be renamed.  See MANIFEST
+    # Phase 2, Deviations.
+    printf '%s\n' "$$"              > "$VMTEST_RUNDIR/pid"
+    printf '%s\n' "$VMTEST_VM"      > "$VMTEST_RUNDIR/vm"
+    printf '%s\n' "$VMTEST_PATTERN" > "$VMTEST_RUNDIR/pattern"
+    date -u '+%Y-%m-%dT%H:%M:%SZ'   > "$VMTEST_RUNDIR/started"
+}
+
+registry_release() {
+    if [ "${VMTEST_RUNDIR_OWNED:-0}" -eq 1 ] && [ -n "${VMTEST_RUNDIR:-}" ] \
+       && [ -d "${VMTEST_RUNDIR:-}" ]; then
+        rm -rf "${VMTEST_RUNDIR:-}" || :
+        VMTEST_RUNDIR_OWNED=0
+    fi
+}
+
+# WARN — do not fail — when another run directory holds a live pid (§4.3).  The
+# mechanisms above make two simultaneous runs collision-free; they do not make
+# them a good idea, because each guest is sized at 8 vCPU / 16 GB.  Refusing a
+# legitimate second run on a large machine would be worse than a warning
+# ignored on a small one, and the harness cannot know the operator's host.
+registry_warn_live_peers() {
+    local dir peer
+    for dir in "$REGISTRY_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        peer=$(basename "$dir")
+        [ "$peer" != "$VMTEST_RUNID" ] || continue
+        [ -f "$dir/pid" ] || continue
+        if kill -0 "$(cat "$dir/pid")" 2>/dev/null; then
+            warn "another run '$peer' holds a live pid $(cat "$dir/pid"). Concurrency is safe (§4.3) but not advised: each guest is sized at $(conf_get cpu) vCPU / $(conf_get memory_mib) MiB."
+        fi
+    done
+}
+
+# registry_owner_alive <runid> — §5.1 condition 3.  Absent directory or dead
+# pid both mean "no live owner".
+registry_owner_alive() {
+    local dir="$REGISTRY_ROOT/$1"
+    [ -d "$dir" ] || return 1
+    [ -f "$dir/pid" ] || return 1
+    kill -0 "$(cat "$dir/pid")" 2>/dev/null
+}
+
+registry_has_keep() { [ -f "$REGISTRY_ROOT/$1/keep" ]; }
+
+# ---------------------------------------------------------------------------
+# Preflight (DOC-1 §4.1, §8.3; DOC-2 §2 exit 10, §3.3, §8.4, §JSON parsing)
+#
+# REFUSE; DO NOT REPAIR.  DOC-1 §4.1 is exact: do not attempt to stop it, do
+# not attempt to resume it, do not retry.  Both §8 failure modes are
+# unrecoverable-by-retry, and an automated "fix it up and carry on" path is
+# exactly how a broken image shipped once already.
+# ---------------------------------------------------------------------------
+
+preflight_host_deps() {
+    vm_require_cli
+    command -v jq >/dev/null 2>&1 \
+        || die 10 'jq not found on PATH (host dependency; the complete set is the virtualisation CLI checked immediately above, plus git, jq, cargo and bash >= 3.2)'
+    # The FUNCTIONAL smoke test is deliberate: a jq on PATH that is a broken
+    # symlink, a wrapper script, or a differently-named tool passes
+    # `command -v` and fails at the first assertion several minutes into a run.
+    printf '{"a":1}' | jq -e '.a == 1' >/dev/null 2>&1 \
+        || die 10 'jq present but not functional'
+}
+
+preflight_pin() {
+    local pin="$VMTEST_HARNESS_DIR/base-image.pin"
+    [ -f "$pin" ] || die 10 "base image pin missing: $pin"
+
+    local problems
+    problems=$(tsv_validate_keys "$pin" "$(printf '%s ' $PIN_KEYS)") \
+        || die 10 "base-image.pin: $problems"
+
+    PIN_OCI_REF=$(tsv_get "$pin" oci_ref)       || die 10 'base-image.pin: missing oci_ref'
+    PIN_DIGEST=$(tsv_get "$pin" digest)         || die 10 'base-image.pin: missing digest'
+    PIN_LOCAL_NAME=$(tsv_get "$pin" local_name) || die 10 'base-image.pin: missing local_name'
+
+    case "$PIN_DIGEST" in
+        sha256:0000000000000000000000000000000000000000000000000000000000000000)
+            die 10 'base-image.pin carries the DOC-2 §3.2 placeholder digest — that fails closed, which is the right direction, but it is not a pin' ;;
+    esac
+
+    vm_list "$VMTEST_TMPDIR/vm-list.tsv"
+
+    # §3.3 steps 1-3: query the listing for an entry matching <oci_ref>@<digest>.
+    if ! awk -F'\t' -v ref="${PIN_OCI_REF}@${PIN_DIGEST}" \
+            '$1 == ref { found = 1 } END { exit (found ? 0 : 1) }' \
+            "$VMTEST_TMPDIR/vm-list.tsv"; then
+        log "pinned: ${PIN_OCI_REF}@${PIN_DIGEST}"
+        log "found:  $(awk -F'\t' '{ printf "%s ", $1 }' "$VMTEST_TMPDIR/vm-list.tsv")"
+        die 10 'base image digest does not match base-image.pin (DOC-2 §3.3). Rolling the pin is a deliberate act with its own PR (§3.4) and is NEVER a repair step inside a failing run.'
+    fi
+    log "pin OK: ${PIN_OCI_REF}@${PIN_DIGEST}"
+}
+
+preflight_vm_states() {
+    local state
+    state=$(awk -F'\t' -v n="$PIN_LOCAL_NAME" '$1 == n { print $2 }' "$VMTEST_TMPDIR/vm-list.tsv")
+    [ -n "$state" ] || die 10 "local base image '$PIN_LOCAL_NAME' is not present on this host"
+    [ "$state" = 'stopped' ] \
+        || die 10 "base image '$PIN_LOCAL_NAME' is in state '$state', not 'stopped' — refusing (DOC-1 §4.1/§8.3). Do not stop it, do not resume it, do not retry."
+
+    # DOC-1 §4.1: no leftover harness VM with the target runid.  Detection is
+    # not prevention — §4.3's mkdir lock is the prevention — but a name that is
+    # already taken is a refusal either way.
+    if awk -F'\t' -v n="$VMTEST_VM" '$1 == n { found = 1 } END { exit (found ? 0 : 1) }' \
+            "$VMTEST_TMPDIR/vm-list.tsv"; then
+        die 10 "a VM named '$VMTEST_VM' already exists — runid collision (DOC-1 §4.1)"
+    fi
+
+    # Every existing VM the harness would touch must be `stopped`.  The harness
+    # namespace is `vmtest-*` and nothing else is ever a candidate.
+    local wedged
+    wedged=$(awk -F'\t' '$1 ~ /^vmtest-/ && $2 != "stopped" { printf "%s(%s) ", $1, $2 }' \
+        "$VMTEST_TMPDIR/vm-list.tsv")
+    [ -z "$wedged" ] \
+        || die 10 "harness-namespace VM(s) not in state 'stopped': ${wedged}— refusing (DOC-1 §4.1/§8.3). A running VM would make a clone inconsistent; a suspended one is wedged (§8.2). Refuse; do not repair."
+}
+
+# §8.4's four rows.  Total physical memory HARD-FAILS; available memory and
+# core counts WARN.  Total memory is an unambiguous number — a 16 GiB host
+# cannot host a 16 GiB guest plus macOS.  "Available" memory on macOS is not
+# comparably solid: compression and the unified buffer cache make the vm_stat
+# arithmetic an approximation, and hard-failing on a soft number would block
+# legitimate runs.
+preflight_capacity() {
+    local memsize gib cores requested available
+    memsize=$(sysctl -n hw.memsize)
+    gib=$(( memsize / 1073741824 ))
+    [ "$gib" -ge "$(conf_get host_min_memory_gib)" ] \
+        || die 10 "host has ${gib} GiB total physical memory, below host_min_memory_gib=$(conf_get host_min_memory_gib) (DOC-2 §8.4). That threshold is a deliberately conservative judgment call — 16 GiB guest + 8 GiB host — and is tunable precisely because it is a guess."
+
+    available=$(vm_stat | awk '
+        /page size of/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) ps = $i }
+        /Pages free/ || /Pages inactive/ || /Pages speculative/ { v = $NF; gsub(/\./, "", v); p += v }
+        END { printf "%d", (p * ps) / 1048576 }')
+    [ "$available" -ge "$(conf_get memory_mib)" ] \
+        || warn "approx. available host memory ${available} MiB is below the guest's $(conf_get memory_mib) MiB (DOC-2 §8.4). This is an approximation, not a refusal."
+
+    # hw.physicalcpu, NOT hw.ncpu: on Apple silicon hw.ncpu counts efficiency
+    # cores, which do not contribute to a build the way the measured 8-vCPU
+    # guest's cores did.  Counting the wrong cores produces a reassuring
+    # warning-free run on a machine that will be slow.
+    cores=$(sysctl -n hw.physicalcpu)
+    [ "$cores" -gt "$(conf_get host_warn_physical_cores)" ] \
+        || warn "host has ${cores} physical cores (<= host_warn_physical_cores=$(conf_get host_warn_physical_cores)); the measured sizing assumed 18 logical cores"
+    requested=$(conf_get cpu)
+    [ "$requested" -le "$cores" ] \
+        || warn "requested cpu=${requested} exceeds the host's ${cores} physical cores"
+}
+
+preflight() {
+    log '--- preflight (DOC-1 §4.1) ---'
+    preflight_host_deps
+    preflight_pin
+    preflight_vm_states
+    registry_acquire
+    registry_warn_live_peers
+    preflight_capacity
+    log 'preflight OK'
+}
+
+# ---------------------------------------------------------------------------
+# The effective-configuration banner (DOC-2 §8.3)
+#
+# Load-bearing, not decoration: "a run whose log does not state its own sizing
+# cannot be compared against DOC-1 §9's cost baseline, and comparing against
+# that baseline is most of what the numbers are for."  The bash version is
+# printed too, so a bug report says which bash produced it.
+# ---------------------------------------------------------------------------
+
+print_banner() {
+    local key
+    out "vmtest run ${VMTEST_PATTERN}${1:+ ($1)}"
+    out "bash ${BASH_VERSION}"
+    out "runid ${VMTEST_RUNID}${FLAG_RUNID:+ (flag)}"
+    out "vm ${VMTEST_VM}"
+    out "rundir ${VMTEST_RUNDIR}"
+    out "keep ${VMTEST_KEEP}"
+    out "effective configuration (key value (origin)):"
+    for key in $CONF_KEYS; do
+        out "  ${key} $(conf_get "$key") ($(conf_origin "$key"))"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# `vmtest run` (P2-T7; §F-1 for --dry-run)
+# ---------------------------------------------------------------------------
+
+cmd_run() {
+    VMTEST_PATTERN="${1:-}"
+    shift || :
+    case "$VMTEST_PATTERN" in
+        local|branch|released) ;;
+        '') usage; die 2 'vmtest run requires a pattern: local | branch | released' ;;
+        *)  usage; die 2 "unknown scenario name '$VMTEST_PATTERN' (expected local | branch | released)" ;;
+    esac
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cpu)      [ $# -ge 2 ] || die 2 '--cpu requires a value'; FLAG_CPU="$2"; shift 2 ;;
+            --memory)   [ $# -ge 2 ] || die 2 '--memory requires a value'; FLAG_MEMORY="$2"; shift 2 ;;
+            --runid)    [ $# -ge 2 ] || die 2 '--runid requires a value'; FLAG_RUNID="$2"; shift 2 ;;
+            --keep)     VMTEST_KEEP=1; shift ;;
+            --dry-run)  VMTEST_DRY_RUN=1; shift ;;
+            *)          usage; die 2 "unknown option '$1' for \`vmtest run\`" ;;
+        esac
+    done
+
+    conf_load
+    conf_apply_flags
+
+    VMTEST_RUNID="${FLAG_RUNID:-$(runid_generate)}"
+    runid_validate "$VMTEST_RUNID"
+    VMTEST_VM="vmtest-$VMTEST_RUNID"
+    VMTEST_RUNDIR="$REGISTRY_ROOT/$VMTEST_RUNID"
+
+    # VMTEST_GUEST_ENV's BASE lifetime (§7.3): base path only, no cargo, no
+    # mise, no cargo variables.  That is what makes N1 meaningful.  It is
+    # replaced with the full form by provision_guest in Phase 3.
+    VMTEST_GUEST_ENV='PATH=/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin; export PATH;'
+
+    print_banner "${VMTEST_DRY_RUN:+dry run}"
+    preflight
+
+    if [ "$VMTEST_DRY_RUN" -eq 1 ]; then
+        # §F-1, resolved by NARROWEST READING.  DOC-2 §8.2 lists --dry-run
+        # among the five CLI flags and §5.4 defines `clean --dry-run`
+        # precisely, but nothing anywhere defines `run --dry-run`.  It is
+        # implemented as the largest prefix of the run lifecycle that involves
+        # no VM: preflight, the banner, acquire-and-release of the registry
+        # entry, and then STOP BEFORE THE CLONE.  That is the only reading
+        # consistent with `clean --dry-run` ("full classification, no
+        # destruction").  A --dry-run that cloned and booted would not be a dry
+        # run, and this reading is deliberately NOT extended.
+        log 'dry run: preflight passed and the run registry entry was acquired; halting before the clone (plan §F-1). NO VM WAS CREATED.'
+        registry_release
+        return 0
+    fi
+
+    die 2 "the full run lifecycle (clone -> size -> boot -> negative probe -> provision -> scenario -> verify -> teardown) is delivered by plan Phases 3-7. At Phase 2 only \`--dry-run\` is implemented, and this driver refuses rather than pretending. Re-run with --dry-run."
+}
+
+# ---------------------------------------------------------------------------
+# `vmtest clean` (P2-T6; DOC-2 §5)
+#
+# A VM is ORPHANED iff ALL FOUR of §5.1 hold: the name matches `vmtest-*`; the
+# state is `stopped`; the runid has no live owner; and there is no `keep`
+# marker.  A VM failing any one of them is not orphaned and clean does not
+# delete it.
+#
+# `clean` NEVER issues a stop, NEVER issues a suspend, and NEVER deletes a VM
+# that is not already `stopped` — it inherits DOC-1 §8.1/§8.3 wholesale.
+#
+# THE PID-REUSE EDGE IS ACCEPTED DELIBERATELY.  A recycled pid makes `kill -0`
+# succeed, so clean skips a genuine orphan and leaves a VM for a human.  The
+# opposite error — deleting a VM out from under a live run — cannot occur by
+# this mechanism.  Accepting a conservative false negative to make the
+# dangerous false positive impossible is the trade; do not try to eliminate it
+# with process creation-time comparisons.
+# ---------------------------------------------------------------------------
+
+cmd_clean() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run)      VMTEST_DRY_RUN=1; shift ;;
+            --include-kept) VMTEST_INCLUDE_KEPT=1; shift ;;
+            *)              usage; die 2 "unknown option '$1' for \`vmtest clean\`" ;;
+        esac
+    done
+
+    conf_load
+    preflight_host_deps
+    vm_list "$VMTEST_TMPDIR/vm-list.tsv"
+
+    local name state runid refusals=0 candidates=0
+    while IFS='	' read -r name state _source; do
+        case "$name" in vmtest-*) ;; *) continue ;; esac
+        candidates=$(( candidates + 1 ))
+        runid="${name#vmtest-}"
+
+        case "$state" in
+        suspended)
+            # §5.4 row 2 / DOC-1 §8.2 — refuse and flag it as wedged.
+            out "$name  $state  WEDGED (refusing)"
+            vm_manual_hint suspended "$name"
+            refusals=$(( refusals + 1 ))
+            continue
+            ;;
+        stopped) ;;
+        *)
+            if registry_owner_alive "$runid"; then
+                # Protected by §5.1 condition 3: a live run owns it.
+                out "$name  $state  IN-USE (live run, skipped)"
+            else
+                # §5.4 row 1 — clean cannot distinguish "another user's run"
+                # from "crashed run, registry wiped", and both are cases where
+                # deleting is destructive.
+                out "$name  $state  REFUSED (running, no live registry entry)"
+                vm_manual_hint running "$name"
+                refusals=$(( refusals + 1 ))
+            fi
+            continue
+            ;;
+        esac
+
+        # From here the state is `stopped`.
+        if registry_owner_alive "$runid"; then
+            out "$name  $state  IN-USE (live run, skipped)"
+        elif registry_has_keep "$runid" && [ "$VMTEST_INCLUDE_KEPT" -eq 0 ]; then
+            # §5.3 — a kept VM looks exactly like an orphan, because its run
+            # exited and its pid is dead.  The `keep` marker is what stops
+            # clean deleting the very thing --keep was asked to preserve.
+            out "$name  $state  KEPT (would not delete)"
+        elif [ "$VMTEST_DRY_RUN" -eq 1 ]; then
+            out "$name  $state  ORPHANED (would delete)"
+        else
+            vm_assert_stopped "$name"
+            vm_delete "$name"
+            rm -rf "$REGISTRY_ROOT/$runid" || :
+            out "$name  $state  ORPHANED (deleted)"
+        fi
+    done < "$VMTEST_TMPDIR/vm-list.tsv"
+
+    # §5.4 row 3 — a registry directory with no matching VM.  There is nothing
+    # to destroy; a stale registry entry is bookkeeping, not state.
+    local dir
+    for dir in "$REGISTRY_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        runid=$(basename "$dir")
+        if awk -F'\t' -v n="vmtest-$runid" '$1 == n { found = 1 } END { exit (found ? 0 : 1) }' \
+                "$VMTEST_TMPDIR/vm-list.tsv"; then
+            continue
+        fi
+        registry_owner_alive "$runid" && { out "runs/$runid  —  IN-USE (live run, no VM yet)"; continue; }
+        if [ "$VMTEST_DRY_RUN" -eq 1 ]; then
+            out "runs/$runid  —  PRUNE (bookkeeping)"
+        else
+            rm -rf "$dir" || :
+            out "runs/$runid  —  PRUNED (bookkeeping)"
+        fi
+    done
+
+    [ "$candidates" -gt 0 ] || log 'no vmtest-* VM on this host'
+    [ "$refusals" -eq 0 ] \
+        || die 10 "${refusals} VM(s) refused: clean deletes only VMs already in state 'stopped' with no live owner (DOC-2 §5.1). Nothing was deleted for those."
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch.  Unknown -> exit 2 (§2: usage error, no VM was touched).
+# ---------------------------------------------------------------------------
+
+main() {
+    VMTEST_SUBCOMMAND="${1:-}"
+    case "$VMTEST_SUBCOMMAND" in
+        # Sourcing hook for the P2-T2 acceptance check and for unit-testing the
+        # config reader.  Loads configuration and returns; dispatches nothing.
+        --source-only)  conf_load; return 0 ;;
+        run)            shift; cmd_run "$@" ;;
+        clean)          shift; cmd_clean "$@" ;;
+        --check-table)
+            # Recognised here so it is not an unknown subcommand, but it is
+            # delivered by plan P4-T2 together with expected-binaries.tsv.
+            # No exit code is specified for "recognised but not yet built"; 2
+            # is the narrowest fit — the driver cannot act on the argument and
+            # §2 guarantees no VM was touched.  Recorded in MANIFEST Phase 2.
+            die 2 '--check-table is delivered by plan P4-T2, together with expected-binaries.tsv. Not available at Phase 2.' ;;
+        -h|--help)      usage; return 0 ;;
+        '')             usage; die 2 'no subcommand given' ;;
+        *)              usage; die 2 "unknown subcommand '$VMTEST_SUBCOMMAND'" ;;
+    esac
+}
+
+main "$@"

@@ -1310,13 +1310,24 @@ into a long interval it happens to land, in exchange for saving a handful of
 
 #### 10.2 Watchdog sites
 
-| Site | Blocking call | Timeout | Grounding |
-|---|---|---|---|
-| `tart clone` | `vm_clone` | **60 s** | 0.31 s measured, APFS CoW (`vm-install-probe-findings.md:875`). ~190× — deliberately loose because §3.3's by-construction variant may pull an image on the first run, which is unmeasured. |
-| `provision.sh` | one `tart exec` | **300 s** | 30.079 s measured (`vm-install-probe-findings.md:857-858`, `PROVISION_MS=30079`). 10×, because the step is network-bound (rust toolchain download alone is 20.8 s, `:854`) and a slow link is not a defect. |
-| single-crate install | one `tart exec` per crate | **900 s** | 112 s for `trusty-search`, 409 dependency crates compiled, 8 vCPU (`vm-install-probe-findings.md:934-935`); 131 s for `cargo install tga --locked` at 4 vCPU (DOC-1 §9). ~8× the largest measured single-crate build. |
-| full-stack scenario | scenario wall clock | **2700 s** (45 min) | DOC-1 §9 extrapolates 4–8 min **and labels it low-confidence, for six crates when D3 now scopes eight**. ~5.6× the upper bound. |
-| guest `git clone` (pattern b) | one `tart exec` | **300 s** | 50.131 s measured (`vm-install-probe-findings.md:942`, `GIT_CLONE_MS=50131`). ~6×. |
+| Site | Blocking call | Timeout | §8.2 key | Grounding |
+|---|---|---|---|---|
+| `tart clone` | `vm_clone` | **60 s** | **none — built-in** | 0.31 s measured, APFS CoW (`vm-install-probe-findings.md:875`). ~190× — deliberately loose because §3.3's by-construction variant may pull an image on the first run, which is unmeasured. |
+| `provision.sh` | one `tart exec` | **300 s** | `provision_timeout` | 30.079 s measured (`vm-install-probe-findings.md:857-858`, `PROVISION_MS=30079`). 10×, because the step is network-bound (rust toolchain download alone is 20.8 s, `:854`) and a slow link is not a defect. |
+| single-crate install | one `tart exec` per crate | **900 s** | **none — built-in** | 112 s for `trusty-search`, 409 dependency crates compiled, 8 vCPU (`vm-install-probe-findings.md:934-935`); 131 s for `cargo install tga --locked` at 4 vCPU (DOC-1 §9). ~8× the largest measured single-crate build. |
+| full-stack scenario | scenario wall clock | **2700 s** (45 min) | `install_timeout` | DOC-1 §9 extrapolates 4–8 min **and labels it low-confidence, for six crates when D3 now scopes eight**. ~5.6× the upper bound. |
+| guest `git clone` (pattern b) | one `tart exec` | **300 s** | **none — built-in** | 50.131 s measured (`vm-install-probe-findings.md:942`, `GIT_CLONE_MS=50131`). ~6×. |
+
+**The `§8.2 key` column is new.** *(Amended 2026-08-02.)* It records a fact that
+was previously implicit and, once made explicit, resolves a contradiction between
+this section and §10.3 — see §10.3's amendment. **Three of these five budgets have
+no key and were never given one.** All six §10.1 poll parameters do have keys
+(`boot_ready_timeout`/`_interval`, `stopped_timeout`/`_interval`,
+`health_timeout`/`_interval`), which is why the gap reads as an oversight until
+you count it: it is not one site missing a key, it is the entire watchdog tier
+being only 2/5 covered. Note also that `install_timeout` (2700) is the **full-stack
+scenario** budget despite its name; the single-crate 900 s budget is a different
+site and has no key at all.
 
 **Why the full-stack multiple is so loose, stated as reasoning rather than
 precision.** DOC-1 §9 is explicit that 4–8 minutes is an extrapolation, that it was
@@ -1345,9 +1356,72 @@ Uniform across every site:
    boot-ready timeout is **20**, a provisioning timeout **40**, an install timeout
    **50**.
 3. **Report the budget.** The message states the condition waited for, the elapsed
-   time, the configured maximum, and the `vmtest.defaults` key that changes it.
+   time, the configured maximum, and **either** the `vmtest.defaults` key that
+   changes it **or**, for a built-in budget, that no key exists — see the
+   amendment below. It is never silent about which of the two it is.
 4. **Teardown still runs.** The cleanup trap fires as on any other exit path, so a
    timed-out run does not leave a VM behind — unless `--keep` was requested.
+
+**Clause 3 as originally written was unsatisfiable, and built-in budgets are now
+permitted.** *(Amended 2026-08-02.)* The original clause required every timeout
+message to name "the `vmtest.defaults` key that changes it". §10.2 budgets
+`tart clone` at 60 s and §8.2 defines no key for it, so for that site the two
+sections could not both be satisfied — a message could name a key that does not
+exist, or omit the key and violate this clause. Neither is acceptable.
+
+**Resolution: amend this clause, rather than add keys to §8.2.** Stated as
+reasoning, because the other direction was live and is the one a reader will
+expect:
+
+- **The gap is systemic, not a single omission.** §10.2's new key column shows
+  **three** of five watchdog sites with no key — `tart clone` (60 s), single-crate
+  install (900 s), and guest `git clone` (300 s). Adding `clone_timeout` would fix
+  the one site that happened to be noticed and leave the other two producing
+  exactly the same contradiction. Fixing the class by adding keys means adding
+  three now and one for every watchdog site added later.
+- **§8.2 has already argued this, about flags.** "Adding a flag per tunable would
+  give the driver a surface larger than its behaviour." The same reasoning applies
+  a tier down: a config key per internal budget makes the configuration file a
+  catalogue of the harness's internals, and every key is a promise that some
+  operator's tuned value will keep working. §8.1's case for the file is that its
+  contents are *claims worth holding in git and reviewing in a diff* — 8 vCPU,
+  16 GiB, the digest pin. "How long a CoW clone may take before we call it hung"
+  is not that kind of claim.
+- **A tight budget is what needs tuning, and these are not tight.** The keyed
+  budgets bound things that legitimately vary per host and per link — boot,
+  provisioning, a full-stack build. The three built-ins are set at ~190×, ~8× and
+  ~6× their measured values; they exist to catch a genuinely hung call, not to
+  enforce a schedule. A budget nobody should be near is a budget nobody needs to
+  tune, and offering the knob invites raising it in response to a real hang.
+- **§8.2's file is copied verbatim into `vmtest-harness/vmtest.defaults`** (plan
+  P2-T2), so adding a key is not a documentation edit — it changes shipped
+  configuration, the driver's key list, and the site's implementation. That is not
+  a reason on its own, but it means the burden of proof sits with the addition,
+  and the three points above do not meet it.
+
+**How a built-in budget's message reads.** It states the condition, the elapsed
+time, the budget, **the §10.2 citation the budget comes from**, and explicitly
+that **no `vmtest.defaults` key changes it** — it must not name a key that does
+not exist, and it must not go quiet and leave the operator searching §8.2 for one.
+The citation is what replaces the key: it points at the row where the number and
+its grounding live, so a budget that is genuinely wrong is changed **in the
+design, with its measurement**, which is where a 190× multiple should be argued.
+`vm_clone`'s implemented message is the reference form:
+
+```
+tart clone '<src>' -> '<dst>' failed or exceeded its 60 s budget
+(DOC-2 §10.2; no vmtest.defaults key exists for this budget). Output: ...
+```
+
+> **Residual, recorded rather than closed.** `tart clone`'s 60 s is the one
+> built-in with a plausible path to being too tight: §3.3's by-construction
+> variant may **pull an image** on first use, which is unmeasured, and a slow link
+> would blow 60 s while the call is not hung at all. This amendment does not
+> pretend that away. If that path is ever taken and the budget is hit, the answer
+> is to re-ground the number against a measured pull — and *then*, if it turns out
+> to vary by host the way provisioning does, it has earned a key on the same
+> evidence every other key rests on. Revisit with P8-T2, which already revisits
+> the unmeasured daemon-health maximum.
 
 #### 10.4 Implementation note — there is no `timeout(1)` on macOS
 
@@ -1495,6 +1569,8 @@ may contain the string `tart`.
 
 | Signature | Returns / emits |
 |---|---|
+| `vm_require_cli` | 0 if `tart` is on `PATH`, else dies 10 with the host-dependency message |
+| `vm_list <out_tsv_path>` | writes one `name<TAB>state<TAB>source` line per `tart list` entry to `<out_tsv_path>`; 0, or dies 10 |
 | `vm_clone <src_ref> <vm_name>` | 0, or dies 20 |
 | `vm_size <vm_name> <cpu> <mem_mib> <disk_gib>` | 0, or dies 20 |
 | `vm_boot <vm_name>` | backgrounds `tart run --no-graphics`; writes the pid to `$VMTEST_RUNDIR/tart-run.pid`; 0 or dies 20 |
@@ -1507,6 +1583,42 @@ may contain the string `tart`.
 | `vm_wait_for_stopped <vm_name> <timeout_s>` | polls §10.1; 0, or dies 70 on timeout |
 | `vm_assert_stopped <vm_name>` | 0 if state is `stopped`, else dies 10 |
 | `vm_delete <vm_name>` | 0, or dies 70 |
+| `vm_manual_hint <kind> <vm_name>` | **emits on stderr** the concrete manual commands for a human; `<kind>` is `keep` \| `running` \| `suspended`; always 0 |
+
+**Fifteen signatures, not twelve — enumeration and operator guidance were
+missing.** *(Amended 2026-08-02.)* This table carried twelve signatures until
+Phase 2 implemented it, and the twelve turned out to cover the **lifecycle of one
+VM** completely while covering **enumeration** and **operator guidance** not at
+all. Three functions had to exist. Each of them is here to **preserve** DOC-1
+§3.2's sole-`tart`-module invariant, not to bend it — every one was added because
+the alternative was a `tart` call, or a string naming `tart`, somewhere outside
+this file:
+
+- **`vm_require_cli`** — DOC-1 §4.1's first preflight row is "`tart` present on
+  `PATH`". The check names the binary, and the driver **may not contain that
+  string**, so the check cannot live in the driver. It has to sit behind the
+  boundary or the boundary is already broken by the very check that guards it.
+- **`vm_list <out_tsv_path>`** — §5.1's four-condition orphan test and DOC-1
+  §4.1's stopped-state refusal both require enumerating VMs **and their states**,
+  and neither is writable without an enumeration function. It also makes §3.3's
+  digest comparison possible from outside this file, because `tart list --format
+  json` reports an OCI image's `Name` as `<oci_ref>@sha256:<64 hex>`. Per §12.1
+  ("a function that needs to return several values writes a TSV to a path given
+  as an argument") it writes a TSV rather than emitting rows on stdout — §12.1's
+  one-value stdout rule is **honoured, not excepted**.
+- **`vm_manual_hint <kind> <vm_name>`** — three sites must print concrete
+  OS-level commands to an operator: §Shell discipline cleanup property 4's
+  `--keep` inspection hint, §5.4 row 1's manual commands for a refused `running`
+  VM, and §5.4 row 2 / DOC-1 §8.2's `state.vzvmsave` unwedge procedure. All three
+  sites are in the driver. Keeping the *text* with the rest of the OS knowledge
+  is the narrowest fix; the alternative was to weaken the hints until they no
+  longer told a human what to type, which is the same as not having them.
+
+**Anywhere the count "twelve signatures" appears it now reads fifteen** — plan
+P2-T4's *Contract* line is corrected in the same change. Opened by Phase 2
+([MANIFEST](../03-plan/MANIFEST.md) Phase 2, Deviations item 3), which proposed
+writing it back at P8; resolved here instead, at source, because a surface that
+is wrong in the spec is re-derived by every later reader.
 
 **`vm_exec` deliberately does not die on non-zero.** It returns the guest's status
 so a caller can distinguish "the command failed" from "the harness failed" — which
@@ -1692,8 +1804,8 @@ Set by the driver during preflight; **read-only thereafter** unless marked.
 | `VMTEST_RUNDIR` | driver | §4.3 |
 | `VMTEST_PATTERN` | driver | `local` \| `branch` \| `released` |
 | `VMTEST_KEEP` | driver | `0` \| `1` |
-| `VMTEST_CPU`, `VMTEST_MEM_MIB`, `VMTEST_DISK_GIB` | config (§8) | |
-| `VMTEST_GUEST_HOME`, `VMTEST_GUEST_SRC`, `VMTEST_GUEST_TARGET` | config (§8) | |
+| ~~`VMTEST_CPU`, `VMTEST_MEM_MIB`, `VMTEST_DISK_GIB`~~ | ~~config (§8)~~ | **RESERVED — never assigned.** Read `conf_get cpu` etc. See below |
+| ~~`VMTEST_GUEST_HOME`, `VMTEST_GUEST_SRC`, `VMTEST_GUEST_TARGET`~~ | ~~config (§8)~~ | **RESERVED — never assigned.** Read `conf_get guest_home` etc. See below |
 | `VMTEST_GUEST_ENV` | **mutable** — base at preflight, replaced by `provision_guest` | §7.3 |
 | `VMTEST_EXIT` | **write-once** — first `die()` only | §2 |
 | `VMTEST_CLEANUP_DONE` | cleanup trap | idempotency guard |
@@ -1702,6 +1814,52 @@ Env vars **read** from the environment: `VMTEST_*` config overrides (§8.2),
 `VMTEST_STATE_DIR` (§4.3), `TMPDIR`, `HOME`. Env vars **written**: none on the host
 outside the harness's own process. In the guest, `PATH`, `CARGO_TARGET_DIR`, and
 `SKIP_UI_BUILD` are set per-command by §7.3 and never persisted.
+
+**Rule: configuration is read through `conf_get`, and the `VMTEST_<KEY>` names are
+RESERVED for §8.2's env overrides. The harness must never assign one.**
+*(Amended 2026-08-02.)* This table previously listed six config values as globals
+the driver sets. It cannot set them, because **those names are already taken**:
+§8.2's override mapping is *mechanical* — uppercase the key, prefix `VMTEST_` — so
+`VMTEST_CPU` is simultaneously "the global holding the effective cpu" (here) and
+"the environment variable that overrides key `cpu`" (§8.2). One name, two owners,
+and the two definitions are in different sections that never mention each other.
+
+**The failure is not a clash, it is a corrupted origin marker.** A driver that
+assigned `VMTEST_CPU` would be **writing into its own override channel**. The next
+resolution reads the environment, finds the value it just put there, and reports
+origin **`env`** for a value that came from the defaults file — so §8.3's banner,
+whose entire purpose is to record *where each number came from* so a run can be
+compared against DOC-1 §9's cost baseline, would state a falsehood about every
+config value the harness touched. Phase 2's checkpoint clause 2 tests that banner
+directly, which is the only reason this was caught before Phase 3 relied on it.
+
+**The rule, stated so it is checkable:**
+
+1. Every config key is read **only** via `conf_get <key>` (and its origin via
+   `conf_origin <key>`). There is no shell variable holding a config value.
+2. The names `VMTEST_CPU`, `VMTEST_MEMORY_MIB`, `VMTEST_DISK_GIB`,
+   `VMTEST_GUEST_HOME`, `VMTEST_GUEST_SRC_DIR`, `VMTEST_GUEST_TARGET_DIR` — and
+   the `VMTEST_<KEY>` name derived from **any** other key in §8.2 — are **inbound
+   only**. Assigning one is a defect, not a style choice.
+3. The globals this table lists that are **not** config keys are still the
+   driver's to set: `VMTEST_RUNID`, `VMTEST_VM`, `VMTEST_RUNDIR`,
+   `VMTEST_PATTERN`, `VMTEST_KEEP`, `VMTEST_GUEST_ENV`, `VMTEST_EXIT`,
+   `VMTEST_CLEANUP_DONE`.
+
+> **Three of the six struck names were never the right names anyway.** §8.2's
+> mapping is derived from the **key**, and the keys are `memory_mib`,
+> `guest_src_dir`, `guest_target_dir` — which yield `VMTEST_MEMORY_MIB`,
+> `VMTEST_GUEST_SRC_DIR`, `VMTEST_GUEST_TARGET_DIR`, not this table's
+> `VMTEST_MEM_MIB`, `VMTEST_GUEST_SRC`, `VMTEST_GUEST_TARGET`. Had the driver
+> assigned the abbreviated forms it would have silently created three globals that
+> override **nothing**, alongside three real override names it never set — a
+> collision *and* a near-miss in the same row. Recorded because it is evidence for
+> rule 1: with `conf_get` there is exactly one spelling of a key, and it is the one
+> in `vmtest.defaults`.
+
+Opened by Phase 2 ([MANIFEST](../03-plan/MANIFEST.md) Phase 2, Deviations item 5),
+which noted "a one-word note in §12.3 would close this". It needed more than a
+word, because the reason is the part that stops someone re-adding the assignment.
 
 #### 12.4 Error propagation
 

@@ -109,7 +109,7 @@ not been completed is not complete, regardless of what its code does.
 | Phase | State | Updated | Commit |
 |---|---|---|---|
 | **P1** — Transport spike (thin vertical slice) | `complete` | 2026-08-01 | `7df36745`, `c6b18e63` |
-| **P2** — Host-side skeleton | `not-started` | — | — |
+| **P2** — Host-side skeleton | `complete` | 2026-08-01 | `eee03178` |
 | **P3** — Guest bring-up | `not-started` | — | — |
 | **P4** — Expectation table and `--check-table` | `not-started` | — | — |
 | **P5** — Pattern (c) complete: installs, N2, oracle | `not-started` | — | — |
@@ -119,7 +119,11 @@ not been completed is not complete, regardless of what its code does.
 
 **Plan status:** Phase 1 complete, 2026-07-31; **closed out 2026-08-01** with a
 second observed result (the dirty-worktree validation) and two plan corrections.
-`vmtest-harness/` **exists**. Phase 2 is the next phase to start.
+**Phase 2 complete, 2026-08-01** — the host-side contract risk is retired: driver,
+configuration, run registry, `lib/vm.sh`, preflight, `clean` and `run --dry-run`
+all exist and the checkpoint was observed to pass with **no VM created by any
+harness code path**. Phase 3 is the next phase to begin, and it is the first
+phase since P1 that boots a guest.
 
 > **A note on dates.** This file's schema mandates **UTC**. The 2026-08-01 entries
 > below were produced at `2026-08-01 00:08–00:12 UTC`, which is `2026-07-31
@@ -159,6 +163,23 @@ second observed result (the dirty-worktree validation) and two plan corrections.
   invariant is unchanged, only the search path. The exemption **expires at P3-T4**,
   whose acceptance now requires the argument to be deleted in the same commit that
   deletes the directory. See Phase 1 Deviations item 9.
+- ~~**Opened 2026-08-01 by Phase 2 — P2-T4's acceptance grep is a SUBSTRING
+  match, and DOC-2 §4.3 mandates a filename that contains the search string.**~~
+  **CLOSED 2026-08-02 by owner decision, at the plan**, on reading (a): P2-T4's
+  and P3-T4's checks are now `grep -rlnw`, each with a dated correction note
+  recording that `started` is why. The DOC-1 §3.2 invariant was never in
+  question. Original text retained below.
+  `grep -rln 'tart'` matches the four characters wherever they occur, including
+  inside the English word that §4.3 requires as one of the four run-registry
+  filenames (`pid`, `vm`, `pattern`, and the one that records the run's begin
+  time). The driver therefore appears in the literal grep's output on **one**
+  line, and that line is the mandated filename — **not** an invocation of the
+  virtualisation tool. The DOC-1 §3.2 invariant itself is **intact and
+  verified**: the word-boundary form `grep -rlnw 'tart'` lists only
+  `lib/vm.sh`, and the driver contains **zero** invocations. See Phase 2
+  Deviations item 4 for both greps' verbatim output and the recommendation that
+  P3-T4 adopt `-w`. **Not resolved here** — changing a plan acceptance check is
+  an owner decision, per the stop rule.
 - **Opened by Phase 1 — pattern (c)'s defining property is untested.** ~~The
   Phase 1 run streamed a **clean** worktree, so `-o` contributed zero files.~~
   **CLOSED 2026-08-01 — run against a dirty worktree, and the property HOLDS.**
@@ -658,7 +679,7 @@ second observed result (the dirty-worktree validation) and two plan corrections.
 
 ## Phase 2 — Host-side skeleton: driver, config, registry, `lib/vm.sh`, preflight, `clean`
 
-- **State:** `not-started`
+- **State:** `complete`
 - **Pass condition:** all three hold, in one session —
   1. `vmtest run local --dry-run` **exits 0**, prints an effective-configuration
      banner in which every key carries an origin marker (`default` / `env` /
@@ -668,14 +689,481 @@ second observed result (the dirty-worktree validation) and two plan corrections.
   3. `vmtest clean --dry-run` correctly classifies a hand-created stopped
      `vmtest-*` VM as `ORPHANED (would delete)` and a `keep`-marked one as
      `KEPT (would not delete)`, deleting neither.
-- **Observed result:** — not run
-- **Files delivered:** — none
-- **Measurements:** — none
-- **Deviations from plan:** None. *(Expected entries: §F-1 `run --dry-run`
-  definition; §F-5 TSV-reader placement. §F-9's shutdown initiator is **no longer a
-  deviation to record** — `vm_request_stop` is specified in DOC-2 §12.2 as of
-  2026-07-31.)*
-- **Tasks:** — none complete *(P2-T1 … P2-T8)*
+- **Observed result:** **MET, all three conditions, in one session.** (run
+  2026-08-01 UTC, tree `eee03178`, host: Apple M5 Pro, 18 physical cores,
+  64 GiB, macOS 26.5.2 arm64, tart 2.32.1, bash 3.2.57(1)-release.)
+
+  The whole session, verbatim and unedited. `tart list` is captured **before**
+  the first condition and **after** the last, and the two are compared below.
+
+  ```
+  $ tart list                     # BEFORE
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   36 seconds ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+
+  ################ CONDITION 1 ################
+  $ vmtest-harness/vmtest run local --dry-run; echo "exit=$?"
+  vmtest run local (dry run)
+  bash 3.2.57(1)-release
+  runid 20260801T010856Z-72642
+  vm vmtest-20260801T010856Z-72642
+  rundir /Users/mac/.local/state/vmtest-harness/runs/20260801T010856Z-72642
+  keep 0
+  effective configuration (key value (origin)):
+    cpu 8 (default)
+    memory_mib 16384 (default)
+    disk_gib 100 (default)
+    guest_home /Users/admin (default)
+    guest_src_dir /Users/admin/vmtest-src (default)
+    guest_target_dir /Users/admin/vmtest-target (default)
+    host_min_memory_gib 24 (default)
+    host_warn_physical_cores 8 (default)
+    boot_ready_timeout 150 (default)
+    boot_ready_interval 2 (default)
+    stopped_timeout 120 (default)
+    stopped_interval 1 (default)
+    provision_timeout 300 (default)
+    install_timeout 2700 (default)
+    health_timeout 60 (default)
+    health_interval 1 (default)
+    repo_url https://github.com/bobmatnyc/trusty-tools.git (default)
+    default_branch main (default)
+  exit=0
+
+  $ tart list                     # afterwards: no new VM
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   37 seconds ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+  $ ls -A "$HOME/.local/state/vmtest-harness/runs/" | wc -l
+         0
+
+  ################ CONDITION 2 ################
+  $ VMTEST_CPU=4 vmtest-harness/vmtest run local --dry-run 2>/dev/null | grep "^  cpu"
+    cpu 4 (env)
+  $ vmtest-harness/vmtest run local --cpu 2 --dry-run 2>/dev/null | grep "^  cpu"
+    cpu 2 (flag)
+
+  ################ CONDITION 3 ################
+  $ tart clone tahoe-base vmtest-p2fixture   # HAND-CREATED fixture, never booted
+  exit=0
+
+  $ vmtest-harness/vmtest clean --dry-run    # (i) no registry entry
+  vmtest-p2fixture  stopped  ORPHANED (would delete)
+  exit=0
+
+  $ : > "$RUNS/p2fixture/keep"               # (ii) keep-marked
+  $ vmtest-harness/vmtest clean --dry-run
+  vmtest-p2fixture  stopped  KEPT (would not delete)
+  exit=0
+
+  $ tart list --format json | jq -r '.[]|select(.Name=="vmtest-p2fixture")|.Name+" "+.State'   # DELETED NEITHER
+  vmtest-p2fixture stopped
+
+  # teardown of the fixture: vm_request_stop -> vm_wait_for_stopped -> vm_delete
+  vm_request_stop     -> 0
+  vm_wait_for_stopped -> 0 (state now: stopped)
+  vm_delete           -> 0
+
+  $ tart list                     # AFTER
+  Source Name                                                                                                        Disk Size Accessed      State
+  local  tahoe-base                                                                                                  50   33   3 seconds ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago   stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago   stopped
+  $ ls -A "$HOME/.local/state/vmtest-harness/runs/" | wc -l
+         0
+  ```
+
+  **Condition by condition.** (1) exit **0**; every one of the eighteen
+  configuration keys carries an origin marker; `tart list` afterwards is
+  byte-identical to `tart list` before, so **no new VM** — **met**. (2) `cpu 4
+  (env)` and `cpu 2 (flag)` printed literally — **met**. (3) the same
+  hand-created stopped `vmtest-*` VM classified `ORPHANED (would delete)` with
+  no registry entry and `KEPT (would not delete)` with a `keep` marker, and it
+  was still present, still `stopped`, after both — **neither was deleted** —
+  **met**.
+
+  **BEFORE and AFTER `tart list` are identical**: the same three rows, same
+  `Source`, `Name`, `Disk 50`, `Size 33`/`32`/`32`, same `stopped` state. Only
+  `tahoe-base`'s `Accessed` timestamp moved, which is what an APFS CoW clone
+  does to its source. The base image was **not** modified, re-pulled or
+  re-tagged, and `~/.tart` was not otherwise touched.
+
+  **On the one VM that existed during this phase — stated loudly, because the
+  phase is otherwise host-side only.** Checkpoint condition 3 requires, in its
+  own words, *"a hand-created stopped `vmtest-*` VM"*. No harness code path can
+  produce one: `run --dry-run` halts before the clone and `clean` only ever
+  deletes. The fixture was therefore created **by hand**, outside the harness,
+  as an APFS CoW clone that was **never booted** — so it was in state `stopped`
+  for the whole of its ~40-second life — and torn down with the mandated
+  `vm_request_stop` → `vm_wait_for_stopped` → `vm_delete` ordering, using
+  `lib/vm.sh`'s own implementations, never a bare stop trusted as completion.
+  **Nothing the harness itself ran created a VM.** The `run --dry-run`
+  invocations of conditions 1 and 2 are proved VM-free by the `tart list`
+  immediately after condition 1 and by the identical before/after pair.
+
+  **Supporting acceptance checks**, all run 2026-08-01 UTC against the same
+  tree. Task acceptance, not the checkpoint; recorded because several of them
+  are the only evidence that a refusal path works.
+
+  ```
+  # P2-T1
+  $ bash -n vmtest-harness/vmtest                    # (silent)
+  $ vmtest-harness/vmtest                            # no arguments
+  usage: … (on stderr)
+  vmtest: FAIL[2]: no subcommand given
+  exit=2
+  $ vmtest-harness/vmtest bogus ; echo exit=$?
+  exit=2
+
+  # P2-T2
+  $ bash -c '. vmtest-harness/vmtest --source-only 2>/dev/null; conf_get cpu'
+  8
+  $ … conf_get memory_mib -> 16384 ; conf_get install_timeout -> 2700
+  $ printf 'cpuu\t8\n' >> vmtest.defaults ; vmtest run local --dry-run ; echo exit=$?
+  exit=10
+
+  # P2-T3
+  $ vmtest-harness/vmtest run local --runid 'a b' --dry-run
+  vmtest: FAIL[2]: invalid --runid 'a b': only alphanumerics and hyphens are allowed (DOC-2 §4.2)
+  exit=2
+  $ vmtest-harness/vmtest run local --runid xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx --dry-run
+  vmtest: FAIL[2]: invalid --runid 'xxxx…': 40 characters, maximum is 32 (DOC-2 §4.2)
+  exit=2
+  $ mkdir -p runs/dup ; echo $$ > runs/dup/pid ; vmtest run local --runid dup --dry-run
+  vmtest: FAIL[10]: runid 'dup' is already held by the run directory …/runs/dup (pid 66623). Choose another --runid, or run `vmtest clean` if that run is over.
+  exit=10
+  $ auto-generated id: 20260801T010645Z-63323   matches ^[0-9]{8}T[0-9]{6}Z-[0-9]+$  -> RUNID_FORMAT_OK
+  $ live peer in the registry:
+  vmtest: WARN: another run 'peer' holds a live pid 66623. Concurrency is safe (§4.3) but not advised: each guest is sized at 8 vCPU / 16384 MiB.
+  (warns; does NOT fail — §4.3)
+
+  # P2-T4
+  $ grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike
+  vmtest-harness/vmtest
+  vmtest-harness/lib/vm.sh
+  $ grep -rn 'tart' vmtest-harness/vmtest          # the driver's ONLY hit, in full
+  vmtest-harness/vmtest:368:    date -u '+%Y-%m-%dT%H:%M:%SZ'   > "$VMTEST_RUNDIR/started"
+  $ grep -rlnw 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike
+  vmtest-harness/lib/vm.sh
+  $ bash -n vmtest-harness/lib/vm.sh               # (silent)
+
+  # P2-T5
+  $ (pin digest corrupted to sha256:deadbeef…) vmtest run local --dry-run
+  vmtest: pinned: ghcr.io/cirruslabs/macos-tahoe-base@sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  vmtest: found:  tahoe-base ghcr.io/cirruslabs/macos-tahoe-base:latest ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c
+  vmtest: FAIL[10]: base image digest does not match base-image.pin (DOC-2 §3.3). Rolling the pin is a deliberate act with its own PR (§3.4) and is NEVER a repair step inside a failing run.
+  exit=10
+  $ (unknown key 'digset' injected into base-image.pin)            -> exit=10
+  $ (jq removed from PATH via a mirrored bin directory) vmtest run local --dry-run
+  vmtest: FAIL[10]: jq not found on PATH (host dependency; the complete set is the virtualisation CLI checked immediately above, plus git, jq, cargo and bash >= 3.2)
+  exit=10
+  $ (pin and defaults restored)  git status --porcelain -> empty ; vmtest run local --dry-run -> exit=0
+
+  # P2-T6, fixture (iii)
+  $ mkdir -p runs/no-such-vm ; echo 99999999 > runs/no-such-vm/pid
+  $ vmtest-harness/vmtest clean --dry-run
+  runs/no-such-vm  —  PRUNE (bookkeeping)
+  exit=0
+  (the directory was still present afterwards — --dry-run prunes nothing)
+  $ vmtest-harness/vmtest clean --dry-run --include-kept   # against the keep-marked fixture
+  vmtest-p2fixture  stopped  ORPHANED (would delete)
+
+  # dispatch of the not-yet-built paths
+  $ vmtest-harness/vmtest run bogus --dry-run
+  vmtest: FAIL[2]: unknown scenario name 'bogus' (expected local | branch | released)
+  $ vmtest-harness/vmtest run local          # no --dry-run
+  vmtest: FAIL[2]: the full run lifecycle (clone -> size -> boot -> negative probe -> provision -> scenario -> verify -> teardown) is delivered by plan Phases 3-7. At Phase 2 only `--dry-run` is implemented, and this driver refuses rather than pretending. Re-run with --dry-run.
+  exit=2
+  ```
+
+  **P2-T6 fixture (iv) was NOT exercised, and that is recorded rather than
+  glossed.** It requires a `vmtest-*` VM in state **`running`** with no
+  registry entry, which means booting a guest — and Phase 2 is host-side only.
+  The classifier branch exists (`cmd_clean`, the non-`stopped`/non-`suspended`
+  case: it prints the VM and its state, calls `vm_manual_hint running`, and the
+  command exits **10** with nothing deleted), and so does the `suspended`
+  branch of §5.4 row 2, but **neither has been run**. Both should be exercised
+  in Phase 3, which boots a guest anyway. See Deviations item 9.
+- **Files delivered:**
+  - create `vmtest-harness/vmtest` — the driver (P2-T1, T2, T3, T5, T6, T7)
+  - create `vmtest-harness/vmtest.defaults` — DOC-2 §8.2's file, verbatim (P2-T2)
+  - create `vmtest-harness/lib/vm.sh` — the OS boundary (P2-T4)
+  - modify `docs/research/tart-vm-testing-harness/03-plan/MANIFEST.md` (P2-T8)
+- **Measurements:** the phase is entirely host-side, so it produces none of the
+  numbers the design is waiting on. Three small facts were nonetheless observed
+  and are worth carrying, each with the command that produced it.
+
+  | # | Measurement | Value | Command / source | Why it is worth keeping |
+  |---|---|---|---|---|
+  | 1 | **`run --dry-run` wall clock** | **0.67 s** | `time vmtest-harness/vmtest run local --dry-run` (0.08 s user, 0.17 s system) | This is the whole host-side path — config, pin comparison, two `tart list` round-trips, registry acquire/release, capacity checks. It is the floor under every run's fixed cost, and it is small enough that no phase after this one has an excuse to debug argument parsing while a VM boots (the stated reason Phase 2 exists). |
+  | 2 | **`tart exec` against a `stopped` VM** | **exit 2**, stderr `VM "<name>" is not running` | `tart exec tahoe-base /bin/sh -c 'exit 0'; echo $?` | It does **not** hang and it does **not** return 0. `vm_request_stop`'s guest flush therefore fails cleanly and non-fatally on an already-stopped or unreachable guest, which is exactly the path DOC-2 §12.2 says must not be fatal. Observed working: `vm_request_stop tahoe-base` logged `guest flush failed … (logged, not fatal)` and returned **0**. |
+  | 3 | **CoW clone → `stopped`, and `vm_request_stop` → `stopped` on a never-booted VM** | clone `exit=0`, state `stopped` immediately; teardown trio all returned 0 | the checkpoint transcript above | A never-booted clone is `stopped` from birth, so `clean`'s "already stopped" precondition can be fixtured without booting anything. This is what made checkpoint condition 3 reachable in a host-side-only phase. |
+
+  Not measured, and **still** open for Phase 3+: boot-to-ready on a subsequent
+  boot (P1 has one data point, 18 s), and everything in DOC-2 §10.1's daemon
+  row.
+- **Deviations from plan:**
+  1. **§F-1 RESOLVED BY NARROWEST READING.** `run --dry-run` performs preflight,
+     prints the effective-configuration banner with origins (plus the bash
+     version), acquires the run-registry entry and releases it, and **halts
+     before the clone**. It creates no VM and touches no guest. This is the
+     largest prefix of the run lifecycle that involves no VM, which is the only
+     reading consistent with `clean --dry-run`'s "full classification, no
+     destruction". **It was deliberately NOT extended** — §F-1 says a
+     `--dry-run` that clones and boots is not a dry run, and the implementation
+     takes that literally: the code path after the dry-run branch does not
+     exist yet at all. Recorded in the driver at the branch itself, so a future
+     reader finds the rule where the decision lives.
+  2. **§F-5 RESOLVED BY NARROWEST READING; the permitted alternative was NOT
+     taken.** `conf_get`, `conf_origin`, `conf_set`, `tsv_field`, `tsv_get`,
+     `tsv_validate_keys`, `log`, `warn` and `die` are defined in the **`vmtest`
+     driver itself**, above the point where `lib/vm.sh` is sourced. §F-5
+     explicitly permits a fifth `lib/tsv.sh` provided it is recorded; it was
+     considered and rejected, because §F-5's own reasoning already settles it —
+     these are driver infrastructure, not OS-boundary / provisioning /
+     transport / assertion logic, so none of the four modules is their home,
+     and DOC-2 §12.4 already places `die` in the driver by showing it outside
+     every module table. Adding a fifth module would depart from DOC-1 §3's
+     component tree for no gain. `lib/vm.sh` calls all of them, which is sound
+     because function definitions are shell-global by the time `lib/` is
+     sourced.
+
+     One consequence worth stating, because it is the §F-5 argument made
+     concrete: **the effective configuration is itself a
+     `key<TAB>value<TAB>origin` TSV**, read by the same `awk` parser as
+     `vmtest.defaults` and `base-image.pin`. Under bash 3.2 there is no
+     associative array to hold it in, and DOC-2 §Shell discipline says in as
+     many words that the TSV files **are** the substitute for a hash. The
+     effective file lives in the run's temporary directory and is removed by
+     the cleanup trap. "One parser, three files" (§3.1) is therefore literally
+     true in the implementation, and it is now four uses of one parser.
+  3. **`lib/vm.sh` carries THREE functions beyond DOC-2 §12.2's twelve. All
+     three are forced, and each keeps the DOC-1 §3.2 invariant rather than
+     bending it.**
+     - **`vm_list <out_tsv_path>`** — §12.2 has **no VM-enumeration function**,
+       yet §5.1's four-condition orphan test and DOC-1 §4.1's stopped-state
+       refusal both require enumerating VMs *and their states*, and neither can
+       be written without one. It is also what makes §3.3's digest comparison
+       possible from outside `vm.sh`, because `tart list --format json` reports
+       an OCI image's `Name` as `<oci_ref>@sha256:<64 hex>` — the same field
+       P1-T3 used. Per §12.1 ("a function that needs to return several values
+       writes a TSV to a path given as an argument") it writes a TSV rather
+       than emitting rows on stdout, so §12.1's one-value stdout rule is
+       honoured, not excepted.
+     - **`vm_require_cli`** — DOC-1 §4.1's first preflight row is "`tart`
+       present on `PATH`", and **the driver may not contain that string**. The
+       check has to live behind the boundary.
+     - **`vm_manual_hint <kind> <vm_name>`** — three sites must print concrete
+       OS-level commands for a human: cleanup property 4's `--keep` inspection
+       hint, §5.4 row 1's manual commands for a refused running VM, and §5.4
+       row 2 / DOC-1 §8.2's `state.vzvmsave` unwedge procedure. All three sites
+       are in the driver, which may not name the tool. Putting the *text* with
+       the rest of the OS knowledge is the narrowest fix; the alternative was
+       to weaken the hints to uselessness.
+
+       This is a gap in DOC-2 §12.2's surface, not a design disagreement — the
+       twelve signatures cover the *lifecycle* of one VM completely and cover
+       *enumeration* and *operator guidance* not at all. **§12.2 should gain
+       these three**, and P8 is the place to write that back.
+
+       > **RESOLVED AT SOURCE, 2026-08-02.** §12.2 has gained all three, with
+       > the signatures as implemented, and its surface is now **fifteen**
+       > signatures rather than twelve. The amendment states per-function why
+       > each one *preserves* the DOC-1 §3.2 invariant rather than bending it.
+       > Plan P2-T4's *Contract* line and its *Do* list are corrected to match.
+       > Done here rather than deferred to P8, as this item proposed: a module
+       > surface that is wrong in the spec is silently re-derived by every
+       > phase that reads it, and Phase 3 reads it next.
+       > See [DOC-2 §12.2](../02-design/02-harness-contracts.md).
+  4. **CONTRACT DEFECT — P2-T4's acceptance grep is a SUBSTRING match, and
+     DOC-2 §4.3 mandates a registry filename containing the search string.**
+     The driver appears in the literal grep's output. It appears on exactly one
+     line, and that line is §4.3's mandated run-registry filename recording
+     when the run began — **not** an invocation. Both greps, verbatim:
+
+     ```
+     $ grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike
+     vmtest-harness/vmtest
+     vmtest-harness/lib/vm.sh
+
+     $ grep -rn 'tart' vmtest-harness/vmtest        # the driver's ONLY hit, in full
+     vmtest-harness/vmtest:368:    date -u '+%Y-%m-%dT%H:%M:%SZ'   > "$VMTEST_RUNDIR/started"
+
+     $ grep -rlnw 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike
+     vmtest-harness/lib/vm.sh
+     ```
+
+     **The invariant is intact and is verified by the third command.** DOC-1
+     §3.2 says exactly one file in the production tree may name the OS; exactly
+     one does. What fails is the *check*, not the property — and it fails on
+     **correct** work, which is the same category as P1-T6's `-type f` and
+     P2-T4's own `spike/` conflict, both of which were corrected at source.
+
+     **Not resolved here, per the stop rule** — amending a plan acceptance
+     check is an owner decision. The two candidate readings, for whoever owns
+     that decision: (a) change the check to `grep -rlnw`, which is strictly the
+     intended semantics — an invocation is always word-delimited, and `-w`
+     still matches `tart-run.pid` because `-` is not a word character; or (b)
+     leave the check and read its output with the one mandated exception named.
+     **(a) is the narrower fix and does not weaken anything.** Rejected out of
+     hand: renaming the registry file (§4.3 mandates it) or obfuscating the
+     literal in the driver, which would defeat a review rather than pass one.
+     **P3-T4 inherits this**: it must delete `--exclude-dir=spike` and re-run
+     the grep, and it will hit the same line unless the check is amended first.
+
+     > **RESOLVED AT SOURCE, 2026-08-02 — reading (a), by owner decision.**
+     > P2-T4's acceptance grep is now `grep -rlnw`, and **P3-T4's inherited
+     > check is corrected the same way**. Both tasks carry a dated correction
+     > note recording that `started` is why `-w` is there, so that a later
+     > reader does not "simplify" it away and re-break the check on correct
+     > work. The DOC-1 §3.2 invariant was never in question and is unchanged.
+     > The two P3-T4 corrections are **independent**: deleting
+     > `--exclude-dir=spike` removes the first reason the grep could not pass
+     > and does nothing about this one, so `-w` must survive that deletion —
+     > a reviewer of P3-T4 now checks for three things, not two.
+     > See [the plan](./01-implementation-plan.md), P2-T4 and P3-T4.
+  5. **DOC-2 §12.3's config globals collide by name with §8.2's environment
+     overrides, so the driver does not set them.** §12.3 lists `VMTEST_CPU`,
+     `VMTEST_MEM_MIB`, `VMTEST_GUEST_HOME` and friends as globals holding the
+     resolved configuration. §8.2's override mapping is *mechanical* —
+     uppercase the key, prefix `VMTEST_` — so `VMTEST_CPU` is **also** the
+     environment variable that overrides key `cpu`. A driver that assigned the
+     global would be writing into its own override channel: a subsequent
+     resolution would read its own value back and report origin **`env`** for
+     something that came from the defaults file, and §8.3's origin marker —
+     which checkpoint condition 2 tests directly — would be lying. Resolved by
+     reading configuration through `conf_get`/`conf_origin` everywhere and
+     assigning only the §12.3 globals that are *not* config keys
+     (`VMTEST_RUNID`, `VMTEST_VM`, `VMTEST_RUNDIR`, `VMTEST_PATTERN`,
+     `VMTEST_KEEP`, `VMTEST_GUEST_ENV`, `VMTEST_EXIT`, `VMTEST_CLEANUP_DONE`).
+     A one-word note in §12.3 would close this.
+
+     > **RESOLVED AT SOURCE, 2026-08-02.** §12.3 now strikes the six config
+     > names from the globals table, marks them **RESERVED for §8.2's env
+     > overrides**, and states the rule as three checkable clauses: config is
+     > read only via `conf_get`/`conf_origin`; `VMTEST_<KEY>` names are
+     > **inbound only** and assigning one is a defect; the non-config globals
+     > listed above remain the driver's to set. The **origin-marker corruption**
+     > is named as the reason, because that is the part that stops someone
+     > re-adding the assignment as a tidy-up.
+     >
+     > It needed more than the one word this item predicted. The amendment also
+     > records something this item did not catch: **three of the six struck
+     > names were never §8.2's names anyway** — the keys are `memory_mib`,
+     > `guest_src_dir`, `guest_target_dir`, which derive `VMTEST_MEMORY_MIB`,
+     > `VMTEST_GUEST_SRC_DIR`, `VMTEST_GUEST_TARGET_DIR`, not §12.3's
+     > `VMTEST_MEM_MIB`, `VMTEST_GUEST_SRC`, `VMTEST_GUEST_TARGET`. Assigning
+     > the abbreviated forms would have created three globals overriding
+     > **nothing** while three real override names went unset — a collision and
+     > a near-miss in one row, and further evidence for the `conf_get` rule.
+     > See [DOC-2 §12.3](../02-design/02-harness-contracts.md).
+  6. **DOC-2 §10.2 budgets `tart clone` at 60 s, but §8.2 defines no key for
+     that budget — while §10.3 requires a timeout message to name "the
+     `vmtest.defaults` key that changes it".** The two sections cannot both be
+     satisfied for this one site. Implemented as a literal `60` in `vm_clone`
+     with the §10.2 citation inline, and the failure message says explicitly
+     that **no key exists** rather than naming one that does not. Every other
+     watchdog and poll site in `lib/vm.sh` reads its budget from configuration
+     (`boot_ready_interval`, `stopped_interval`, and the timeouts passed in by
+     the caller). Not fixed here: adding a `clone_timeout` key would edit
+     §8.2's file, which P2-T2 requires be copied **verbatim**.
+
+     > **RESOLVED AT SOURCE, 2026-08-02 — §10.3 amended; NO key added.** The
+     > implementation stands exactly as described above, so **no code change
+     > was required**: `vm_clone`'s literal 60 with its §10.2 citation and its
+     > "no key exists" message is now the **reference form** the amended §10.3
+     > prescribes for a built-in budget.
+     >
+     > The direction was chosen on a fact this item did not have: the gap is
+     > **systemic**. §10.2's table has gained an `§8.2 key` column, and it shows
+     > **three of five** watchdog sites with no key — `tart clone` (60 s),
+     > single-crate install (900 s) and guest `git clone` (300 s) — while all
+     > six §10.1 poll parameters are keyed. Adding `clone_timeout` would have
+     > fixed the one site that happened to be noticed and left two identical
+     > contradictions standing. §10.3 clause 3 now permits a built-in budget
+     > provided the message cites the §10.2 row and says explicitly that no key
+     > changes it. Reasoning is stated inline at §10.3, including §8.2's own
+     > "a flag per tunable gives a surface larger than its behaviour" applied a
+     > tier down, and that budgets set at ~190x/~8x/~6x measured are hang
+     > detectors rather than schedules.
+     >
+     > **One residual, deliberately left open:** `tart clone`'s 60 s is the one
+     > built-in with a plausible route to being too tight, because §3.3's
+     > by-construction variant may **pull an image** on first use and that is
+     > unmeasured. Recorded at §10.3 and carried to **P8-T2**; if a measured
+     > pull shows it varies by host, it earns a key on the same evidence every
+     > other key rests on. **Phases 5 and 6 must use the reference message form**
+     > for the other two built-ins when they implement those sites.
+     > See [DOC-2 §10.2/§10.3](../02-design/02-harness-contracts.md).
+  7. **Two "recognised but not yet built" paths exit 2, a code §2 does not
+     assign to that situation.** `vmtest --check-table` is delivered by P4-T2
+     and `vmtest run <pattern>` without `--dry-run` by Phases 3–7. Both are
+     dispatched (so neither is an unknown subcommand) and both refuse with an
+     explicit message naming the plan task that delivers them. **2** is the
+     narrowest fit in §2's table — the driver cannot act on the argument, and
+     §2's guarantee for code 2, "no VM was touched", holds exactly. Both
+     messages are temporary by construction and disappear when the phase that
+     owns them lands.
+  8. **`${BASH_SOURCE[0]}` rather than `$0`** to locate the harness directory.
+     P2-T2's own acceptance check **sources** the driver
+     (`. vmtest-harness/vmtest --source-only`), where `$0` is `bash` and the
+     harness directory resolves to the caller's cwd — the check cannot pass
+     with `$0`. `BASH_SOURCE` is correct under both execution and sourcing and
+     is available in bash 3.2. The `--source-only` hook itself is additive: it
+     loads configuration and dispatches nothing, and it exists because the plan
+     names it in P2-T2's acceptance command.
+  9. **P2-T6 fixture (iv) is NOT exercised**, and neither is §5.4 row 2's
+     `suspended` refusal. Both require a VM in a state that only booting can
+     produce, and Phase 2's checkpoint requires that no VM be created. The code
+     paths are written and syntax-checked; they have not been run. **This is
+     incomplete work, not a passed check** — Phase 3 boots a guest and should
+     take both.
+
+     > **STILL OPEN — reconfirmed 2026-08-02.** Stated explicitly because items
+     > 3, 4, 5 and 6 above were resolved at source on this date and this one was
+     > **not**, and a reader skimming the resolution notes should not carry the
+     > momentum into this item. Nothing about it changed: both paths remain
+     > **written and `bash -n`-clean but UNRUN**, and neither can be exercised
+     > without a VM in a state only booting produces. The 2026-08-02 work was
+     > documentation and plan edits exclusively — **no VM was created, and
+     > `tart list` was identical before and after**. Concretely still unrun:
+     > P2-T6 fixture **(iv)**, the `running`-VM refusal, and **§5.4 row 2's
+     > `suspended` refusal** (`vmtest:648`, `vmtest:661-662`). **Phase 3 takes
+     > both**, and until it does they are incomplete work.
+  10. **Scope of preflight's stopped-state check, stated because DOC-1 §4.1
+      does not enumerate "every existing VM the harness would touch".** Read as
+      three things: the pinned local base image must exist and be `stopped`
+      (it is the clone source); the target VM name must not already exist (§4.1
+      "no leftover `vmtest-*` VM with the target runid"); and **no** VM in the
+      `vmtest-*` namespace may be in any state other than `stopped`. VMs
+      outside that namespace are not the harness's and are never inspected —
+      which is the same rule that keeps `clean` away from `tahoe-base`.
+  11. **Output discipline, recorded because it is a choice.** A command's
+      *product* goes to **stdout** — the effective-configuration banner and
+      `clean`'s per-VM verdicts; every diagnostic, warning and failure goes to
+      **stderr**. §12.1's "diagnostics always to stderr" rule is stated for
+      `lib/` functions because §1's oracle parses their stdout; nothing parses
+      the driver's own stdout. Putting the banner there makes checkpoint
+      conditions 1 and 2 greppable without merging streams, and keeps `clean`'s
+      verdict list pipeable.
+
+  **Not deviations, recorded so the next agent does not re-litigate them:**
+  §F-9 is resolved at source, so `vm_request_stop` was implemented as specified
+  with no decision to make, and the guest-side `shutdown -h now` prohibition is
+  restated at the function; the `--exclude-dir=spike` exemption was **not**
+  removed and **not** broadened — it still names P3-T4 as its expiry in the
+  file header; `vmtest.defaults` is DOC-2 §8.2's file **verbatim**, including
+  the two keys (`health_timeout`, `health_interval`) that nothing reads until
+  Phase 5; and `vm_exec` deliberately does **not** die on non-zero, because N1's
+  expected result in Phase 3 is a non-zero exit.
+- **Tasks:** P2-T1 … P2-T8 complete. **With one exception, named:** P2-T6's
+  acceptance lists four fixtures and **three** were run — (iv), the running-VM
+  refusal, requires booting a guest and is deferred to Phase 3 (Deviations item
+  9). The phase checkpoint, which is the gate, requires only fixtures (i) and
+  (ii) and both were observed.
 
 ## Phase 3 — Guest bring-up: N1, provisioning, toolchain hand-off, source delivery
 
@@ -821,6 +1309,14 @@ A future agent picking this up, in order:
    §F-3, §F-8, §F-9) are resolved and six remain open.** If you hit a decision the plan
    and DOC-2 do not settle and §F does not cover, **stop and record it here**
    rather than inventing a contract.
+   > **2026-08-01 — §F-1 and §F-5 are now DECIDED, in the implementation rather
+   > than in the plan.** Phase 2 took the narrowest reading of each and recorded
+   > both in Phase 2 Deviations items 1 and 2. They are **not** "resolved at
+   > source" the way §F-2 / §F-8 / §F-9 were — the plan's §F text still reads as
+   > it did — so do not re-decide them from §F alone; the record of what was
+   > chosen, and of why the alternative §F-5 explicitly permits was rejected,
+   > is in this file. **Four of the six remain undecided: §F-4, §F-6, §F-7,
+   > §F-10.**
 3. Read this file's summary table. Start at the first phase that is not `complete`.
    If any phase is `blocked`, resolve that first — the plan does not route around a
    blocked phase.
