@@ -111,7 +111,7 @@ not been completed is not complete, regardless of what its code does.
 | **P1** — Transport spike (thin vertical slice) | `complete` | 2026-08-01 | `7df36745`, `c6b18e63` |
 | **P2** — Host-side skeleton | `complete` | 2026-08-01 | `eee03178` |
 | **P3** — Guest bring-up | `complete` | 2026-08-02 | `345e5b12`, `f181a44e`, + the 2026-08-02 defect-fix commits |
-| **P4** — Expectation table and `--check-table` | `not-started` | — | — |
+| **P4** — Expectation table and `--check-table` | `complete` | 2026-08-02 | `0c25d48f`, `12a87f28` |
 | **P5** — Pattern (c) complete: installs, N2, oracle | `not-started` | — | — |
 | **P6** — Pattern (b): branch | `not-started` | — | — |
 | **P7** — Pattern (a): released | `not-started` | — | — |
@@ -126,8 +126,19 @@ harness code path**. **Phase 3 complete, 2026-08-02** — the guest bring-up ris
 is retired: `vmtest run local` boots a guest, proves N1, provisions it, hands
 the toolchain across, streams 96.9 MB of worktree in and tears down, exit 0.
 **Its two contract defects were resolved at source on 2026-08-02**, each verified
-with real VM runs (see the note below). Phase 4 is the next phase to begin, and it
-is host-side only.
+with real VM runs (see the note below). **Phase 4 complete, 2026-08-02** —
+expectation-table drift is retired: `expected-binaries.tsv` carries DOC-2 §9.3's
+seed verbatim and `vmtest --check-table` diffs it against the workspace's actual
+`[[bin]]` targets read from `cargo metadata`. **No VM was created and none was
+required.** **P4-T3 found NO DRIFT** — §9.3's seed is exactly correct as of
+2026-08-02 (28 rows == 28 targets; 13 in scope; 8 crate directories; 8 packages).
+**Phase 4 found one contract defect, and it is in the PLAN rather than in DOC-2:**
+the checkpoint's pass condition asked for a `REMOVED` finding where §9.6's
+set algebra makes a deleted table row `ADDED`. The implementation follows §9.6.
+**RESOLVED AT SOURCE 2026-08-02** — the plan's Phase 4 checkpoint and P4-T5
+acceptance now read `ADDED` and carry a dated correction note on the set
+direction; DOC-2 §9.6 was not amended and no code changed. See Phase 4 Deviations
+item 1. Phase 5 is the next phase to begin, and it needs a VM.
 
 > **BOTH PHASE 3 CONTRACT DEFECTS ARE RESOLVED AT SOURCE, 2026-08-02**, by owner
 > decision, each on the reading Phase 3 identified as the narrower/stronger fix.
@@ -2042,20 +2053,258 @@ is host-side only.
 
 ## Phase 4 — `expected-binaries.tsv` and `--check-table`
 
-- **State:** `not-started`
+- **State:** `complete`
 - **Pass condition:** `vmtest --check-table` **exits 0** against the workspace as it
   stands, printing no ADDED/REMOVED/CHANGED findings. Then, with one row
   deliberately deleted from `expected-binaries.tsv`, it **exits 60** and prints
-  exactly one `REMOVED` finding naming that `(package, binary)` pair. The row is
+  exactly one `ADDED` finding naming that `(package, binary)` pair. The row is
   restored afterwards and the command exits 0 again.
-- **Observed result:** — not run
-- **Files delivered:** — none
-- **Measurements:** — none
-- **Deviations from plan:** None. *(Expected entry: any workspace drift from DOC-2
-  §9.3's seed found by P4-T3. **§F-3 deduplication is no longer a deviation to
-  record** — it was resolved on 2026-07-31: the decision was always right, its
-  rationale was corrected, and P4-T4's and P5-T8's tripwires now enforce it.)*
-- **Tasks:** — none complete *(P4-T1 … P4-T5)*
+  *(Mirrors the plan's Phase 4 checkpoint as amended 2026-08-02. It read `REMOVED`
+  when this phase ran; that wording was the defect in Deviations item 1, now
+  resolved at source. The observed result below is unchanged — it always showed
+  `ADDED`.)*
+- **Observed result:** (run 2026-08-02 UTC, tree `12a87f28`, **no VM created — no
+  VM is required by this phase**)
+
+  **Clause 1 — exits 0 clean.**
+  ```
+  $ ./vmtest-harness/vmtest --check-table; echo "EXIT=$?"
+  vmtest: reading workspace [[bin]] targets: cargo metadata --no-deps --manifest-path /Users/mac/workspace/trusty-tools-fork-worktrees/agent-a00c55deb9c5644ac/Cargo.toml
+  vmtest: declared rows: 28; workspace [[bin]] targets: 28
+  vmtest: in scope: 13 binaries, 8 crate directories, 8 packages
+  vmtest: check-table OK: no ADDED, REMOVED or CHANGED findings
+  EXIT=0
+  ```
+  stdout is empty; the four lines above are stderr diagnostics. **No
+  ADDED/REMOVED/CHANGED finding was printed.**
+
+  **Clause 2 — one row deleted → exit 60, exactly one finding naming the
+  `(package, binary)` pair. THE FINDING CLASS IS `ADDED`, NOT `REMOVED`** — see
+  Deviations item 1; DOC-2 §9.6 requires it to be `ADDED` and the plan's pass
+  condition names the wrong class. The deleted row is
+  `(trusty-memory, trusty-memory-mcp-bridge)`, chosen because its omission from
+  DOC-1 §7.2's original seed (DOC-2 §9.3 correction 1) is the exact failure this
+  differ exists to prevent.
+  ```
+  $ grep -v 'trusty-memory-mcp-bridge' "$BACKUP" > vmtest-harness/expected-binaries.tsv
+  rows before: 30   rows after: 29
+  --- diff of the deletion ---
+  6d5
+  < trusty-memory	trusty-memory	trusty-memory-mcp-bridge	src/bin/mcp_bridge.rs	-	yes	present	present	present
+  $ ./vmtest-harness/vmtest --check-table; echo "EXIT=$?"
+  ADDED    package=trusty-memory binary=trusty-memory-mcp-bridge  trusty-memory	src/bin/mcp_bridge.rs	-  — a [[bin]] target the workspace declares and this table does not. Add the row (in_scope=no unless it belongs to one of DOC-1 D3's eight packages).
+  EXIT=60
+  --- finding counts ---
+  REMOVED=0 ADDED=1 CHANGED=0 TOTAL_LINES=1
+  ```
+
+  **Clause 2b — the `REMOVED` direction, demonstrated separately** so the
+  checkpoint's *intent* is evidenced in both directions. A phantom row the
+  workspace does not have:
+  ```
+  $ printf 'trusty-memory\ttrusty-memory\ttrusty-memory-ghost\tsrc/bin/ghost.rs\t-\tyes\tpresent\tpresent\tpresent\n' >> vmtest-harness/expected-binaries.tsv
+  $ ./vmtest-harness/vmtest --check-table; echo "EXIT=$?"
+  REMOVED  package=trusty-memory binary=trusty-memory-ghost  trusty-memory	src/bin/ghost.rs	-  — this table declares it and the workspace has no such [[bin]] target.
+  EXIT=60
+  REMOVED=1 TOTAL=1
+  ```
+
+  **Clause 3 — restored, exits 0 again.**
+  ```
+  $ # restore via trap: cp from backup, then `git checkout --` as an independent oracle
+  rows restored: 30
+  $ ./vmtest-harness/vmtest --check-table; echo "EXIT=$?"
+  EXIT=0
+  ```
+
+  **P4-T2's additional acceptance — a changed `bin_path` → exactly one `CHANGED`,
+  exit 60.**
+  ```
+  $ sed 's|src/main.rs|src/moved.rs|' (on the trusty-code/tcode row only)
+  8c8
+  < trusty-code	trusty-code	tcode	src/main.rs	-	yes	present	present	present
+  ---
+  > trusty-code	trusty-code	tcode	src/moved.rs	-	yes	present	present	present
+  $ ./vmtest-harness/vmtest --check-table; echo "EXIT=$?"
+  CHANGED  package=trusty-code binary=tcode  declared[trusty-code	src/moved.rs	-]  actual[trusty-code	src/main.rs	-]
+  EXIT=60
+  CHANGED lines: 1  TOTAL lines: 1
+  ```
+
+  **No mutated table was committed.** The mutation script restores via a `trap`
+  on `EXIT INT TERM`, and the worktree was proven clean before and after:
+  ```
+  $ git status --porcelain
+  (empty)
+  $ git diff --stat HEAD -- vmtest-harness/expected-binaries.tsv
+  (empty — identical to HEAD)
+  ```
+
+  **P4-T4 acceptance — order-free and derived.** All 17 assertions PASS:
+  ```
+  tsv_scope_crate_dirs (first-appearance order, as emitted):
+    trusty-search trusty-memory trusty-analyze trusty-code
+    trusty-installer trusty-git-analytics trusty-mpm trusty-review
+  tsv_scope_packages:
+    trusty-search trusty-memory trusty-analyze trusty-code
+    trusty-installer tga trusty-mpm trusty-review
+
+  PASS  crate_dirs count == distinct crate_dir (derived)     8
+  PASS  crate_dirs duplicates (sort|uniq -d) empty
+  PASS  crate_dirs CONTAINS trusty-git-analytics             1
+  PASS  crate_dirs does NOT contain tga                      0
+  PASS  packages count == distinct package (derived)         8
+  PASS  packages duplicates (sort|uniq -d) empty
+  PASS  packages CONTAINS tga / trusty-mpm / trusty-review   1 / 1 / 1
+  PASS  tsv_expect trusty-mpm tm a                           present
+  PASS  tsv_expect trusty-agents tagent a (out of scope)     -
+  PASS  tsv_expect absent row returns non-zero               1
+  PASS  tsv_expect bad pattern is exit 2                     2
+  ```
+
+  **§F-3's dedupe tripwire was proven to fire.** It **cannot** be proven with bad
+  data — the awk `!seen[$2]++` dedupes at emission, so no table content can make
+  the helper emit a duplicate. The postcondition guards the *implementation*,
+  which is exactly what §F-3 says it is for ("a dropped `sort -u`, an awk seen-map
+  that forgets to set its key, a refactor that reorders the pipeline"). Proven by
+  building a mutated driver in `$TMPDIR` with the seen-map removed and symlinks
+  back to `lib/` — **the worktree was never written to**:
+  ```
+  $ (mutated driver, seen-map dropped) tsv_scope_crate_dirs
+  vmtest: FAIL[60]: tsv_scope_crate_dirs emitted duplicates: trusty-installer trusty-memory trusty-mpm trusty-search
+  EXIT=60
+  ```
+  The four names are exactly the four multi-binary in-scope packages' directories.
+
+  **No VM was created.** `tart list` before and after the phase, raw and
+  identical:
+  ```
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   16 minutes ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+  ```
+- **Files delivered:** create `vmtest-harness/expected-binaries.tsv`;
+  modify `vmtest-harness/vmtest` (the `EXPECTED_TSV` global; `_tsv_rows`,
+  `tsv_scope_crate_dirs`, `tsv_scope_packages`, `tsv_expect`; `CHECK_TABLE_JQ`,
+  `CHECK_TABLE_AWK`, `cmd_check_table`; the `--check-table` dispatch arm, which
+  replaced Phase 2's `die 2` placeholder);
+  modify `docs/research/tart-vm-testing-harness/03-plan/MANIFEST.md`
+- **Measurements:** all four counts are **derived**, with today's value as the
+  expected literal (§A.1's warning that the literals have already moved twice):
+  - **28** declared rows == **28** workspace `[[bin]]` targets
+    (`vmtest --check-table` reports both).
+  - **13** in-scope binaries —
+    `awk -F'\t' '$6=="yes"' vmtest-harness/expected-binaries.tsv | wc -l`.
+  - **8** distinct in-scope `crate_dir` == `tsv_scope_crate_dirs | wc -l` == the
+    number of DOC-1 D3 crates.
+  - **8** distinct in-scope `package` == `tsv_scope_packages | wc -l`.
+  - **3** `trusty-memory` rows including `trusty-memory-mcp-bridge` —
+    `grep -c 'trusty-memory' vmtest-harness/expected-binaries.tsv`.
+  - **4** multi-binary in-scope packages needing `verify_single_install` in P5:
+    `trusty-search` (2), `trusty-memory` (3), `trusty-installer` (2),
+    `trusty-mpm` (2) — `trusty-review` is single-binary and needs none (§A.1b).
+  - **§9.3's own derivation independently reconfirmed:**
+    `grep -rc '^\[\[bin\]\]' --include=Cargo.toml crates` yields **27** explicit
+    targets across **20** manifests; plus the one implicit target
+    (`trusty-agents-local`, §9.4) that makes **28**.
+- **Deviations from plan:**
+
+  1. **THE CHECKPOINT'S PASS CONDITION NAMES THE WRONG FINDING CLASS. Contract
+     defect in the plan, not in DOC-2.**
+
+     > **RESOLVED AT SOURCE 2026-08-02**, exactly as recommended below. Pointers:
+     > plan **[01-implementation-plan.md](./01-implementation-plan.md)**, Phase 4
+     > checkpoint — now reads *"prints exactly one `ADDED` finding"* and carries a
+     > dated **Correction, 2026-08-02 (UTC)** note stating the set direction (table
+     > deletion → `ADDED`; workspace `[[bin]]` deletion → `REMOVED`) so it is not
+     > "corrected" back; plan **P4-T5** acceptance, corrected identically; this
+     > file's **Pass condition** above, mirrored. **DOC-2 §9.6 was NOT amended** —
+     > it was right all along and remains authoritative. No code changed: the
+     > implementation already followed §9.6 and is unmodified.
+     > **The text below is the original finding, unedited.**
+
+     The pass condition requires that deleting
+     one row from `expected-binaries.tsv` print *"exactly one `REMOVED` finding"*.
+     **DOC-2 §9.6 defines the opposite**, unambiguously:
+     ```
+     ADDED   := keys in actual  \ declared   -> a new binary nobody declared
+     REMOVED := keys in declared \ actual    -> a binary that vanished
+     ```
+     Deleting a row from the **table** leaves that `(package, binary)` key present
+     in `actual` and absent from `declared` — which is **`ADDED` by definition**.
+     `REMOVED` is produced by the opposite operation: a row the table declares that
+     the workspace does not have.
+
+     **The implementation follows §9.6 and NOT the checkpoint wording, deliberately.**
+     Inverting the labels to satisfy the plan's sentence would make the differ
+     report *"a binary that vanished"* when a binary had in fact been **added**, and
+     the direction is load-bearing: it is what tells an operator which side to fix,
+     and P4-T2's own *Contract* line cites §9.6 as its authority. §9.6 wins.
+
+     Every **operative** clause of the pass condition is met by the deletion:
+     exit **60**, **exactly one** finding, and it **names the `(package, binary)`
+     pair**. Only the class label differs, and it differs because the plan is wrong.
+     Clause 2b above additionally demonstrates the genuine `REMOVED` path, so the
+     checkpoint's intent is evidenced in both directions.
+
+     **Recommended fix at source** (owner decision; not applied here): amend the
+     plan's Phase 4 checkpoint to read *"prints exactly one `ADDED` finding naming
+     that `(package, binary)` pair"*, and mirror it in this file's Pass condition.
+     Deleting a table row is the cheapest way to exercise the differ and is worth
+     keeping as the checkpoint's action — only the expected class is wrong.
+
+  2. **P4-T3 — NO DRIFT.** `--check-table` exits 0 on the unmodified workspace, so
+     DOC-2 §9.3's seed is **exactly correct as of 2026-08-02**: 28 rows, 28
+     `[[bin]]` targets, no ADDED, no REMOVED, no CHANGED, on all five compared
+     columns. §9.3's own derivation was independently reconfirmed (see
+     Measurements). **No edit to the table was required and none was made.** DOC-1
+     D3's scope was not widened.
+
+  3. **Two integrity checks precede the diff, beyond §9.6's six steps.** Each
+     enforces something §9 already states rather than inventing a rule, and each
+     dies **60**:
+     - every data row has **nine fields** (§9.1) — P4-T1's acceptance made
+       permanent instead of one-shot;
+     - **no duplicate `(package, binary)` key** (§9.2 makes it the composite
+       primary key). Without this a duplicated key lets one row shadow another in
+       the diff, so the table could disagree with the workspace and still exit 0 —
+       silent, which is the one outcome worse than a false finding.
+
+  4. **`--check-table` does not call `preflight_host_deps`.** That function begins
+     with `vm_require_cli`, and §9.6 scopes this command's host dependencies to
+     *"only `cargo` and `jq`"* on a host with **no VM**. Requiring the
+     virtualisation CLI would make the expectation table uncheckable on any machine
+     that cannot run guests — most CI. `cargo`, `jq`, and jq's functional smoke
+     test are checked directly instead.
+
+  5. **§F-5 applied unchanged from Phase 2.** `tsv_scope_crate_dirs`,
+     `tsv_scope_packages` and `tsv_expect` are defined in the **driver**, beside
+     the existing TSV reader, not in `lib/verify.sh`. P4-T4 permits either; the
+     driver is where §F-5's narrowest reading already put `conf_get`, `tsv_*`,
+     `log` and `die`, and no fifth `lib/tsv.sh` was created, so no new deviation
+     arises.
+
+  6. **`EXPECTED_TSV` is deliberately not named `VMTEST_EXPECTED_TSV`.** §12.3
+     rule 2 (amended 2026-08-02) reserves every `VMTEST_<KEY>` name for §8.2's
+     mechanical override channel. `expected_tsv` is not a config key today, but an
+     un-prefixed global cannot collide with one added later — the same reasoning
+     that already names `CONF_EFFECTIVE`, `REGISTRY_ROOT` and `PIN_*`.
+
+  7. **§F items:** **§F-3** applied as specified and **not** recorded as a
+     deviation (its decision was always right; the tripwire enforces it, and it was
+     verified to fire — see Observed result). **§F-4, §F-6, §F-7, §F-10** did not
+     arise: Phase 4 touches no probe, no scenario dispatch, no daemon and no
+     install ordering. **§F-1, §F-2, §F-8, §F-9** are resolved and unaffected.
+
+  8. **The `binary` column was kept off the install path, as §12.2 requires.**
+     Nothing in Phase 4 installs anything, but `tsv_scope_crate_dirs` and
+     `tsv_scope_packages` are the only scope helpers delivered — there is
+     deliberately **no** helper that emits `(crate_dir, binary)` pairs, because
+     that is the shape that invites the prohibited `cargo install --path <dir>
+     --bin <binary>`. The `binary` column is reachable only through `tsv_expect`,
+     which is the oracle's accessor.
+- **Tasks:** P4-T1 … P4-T5 complete
 
 ## Phase 5 — Pattern (c) complete: install steps, N2, and the full oracle
 

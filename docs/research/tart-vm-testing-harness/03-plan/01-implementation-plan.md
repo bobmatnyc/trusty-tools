@@ -991,9 +991,43 @@ and its differ before anything asserts against it.
 
 > `vmtest --check-table` **exits 0** against the workspace as it stands, printing
 > no ADDED/REMOVED/CHANGED findings. Then, with one row deliberately deleted from
-> `expected-binaries.tsv`, it **exits 60** and prints exactly one `REMOVED` finding
+> `expected-binaries.tsv`, it **exits 60** and prints exactly one `ADDED` finding
 > naming that `(package, binary)` pair. The row is restored afterwards and the
 > command exits 0 again.
+
+> **Correction, 2026-08-02 (UTC) — the class is `ADDED`, not `REMOVED`. Do not
+> "correct" it back.** As originally written this checkpoint named the finding
+> class produced by the *opposite* operation, and no implementation could satisfy
+> both it and its own cited contract. DOC-2 §9.6 defines the two sets by direction:
+>
+> ```
+> ADDED   := keys in actual  \ declared   -> a new binary nobody declared
+> REMOVED := keys in declared \ actual    -> a binary that vanished
+> ```
+>
+> `actual` is the workspace's `[[bin]]` targets; `declared` is the rows of
+> `expected-binaries.tsv`. **Deleting a row from the TABLE removes the key from
+> `declared` while the workspace still declares that `[[bin]]`** — the key is in
+> `actual \ declared`, which is `ADDED` by definition. `REMOVED` is produced by
+> deleting a `[[bin]]` from the **workspace** (or adding a phantom row the
+> workspace has no target for): the key is then in `declared \ actual`. Table and
+> workspace are the two sides of the diff and the drill touches the table, so the
+> original wording named the wrong side.
+>
+> **The direction is load-bearing, not cosmetic.** It is what tells an operator
+> which side to fix. Inverting the labels to satisfy the original sentence would
+> make the differ announce *"a binary that vanished"* when a binary had in fact
+> been added, and would send whoever reads it to repair a workspace that is
+> correct. **DOC-2 §9.6 is authoritative and is NOT amended** — it was right all
+> along; only this checkpoint was wrong.
+>
+> Deleting a table row remains the checkpoint's action: it is the cheapest way to
+> exercise the differ, and every other clause — exit **60**, **exactly one**
+> finding, naming the `(package, binary)` pair — was already correct and is
+> unchanged. Opened by Phase 4 ([MANIFEST.md](./MANIFEST.md) Phase 4, Deviations
+> item 1, where the implementation is recorded as following §9.6 deliberately) and
+> decided here. **P4-T5's acceptance is corrected in the same way**, and P4-T2's
+> acceptance inherits this checkpoint verbatim.
 
 ### P4-T1 — Seed `expected-binaries.tsv`
 
@@ -1148,7 +1182,9 @@ and its differ before anything asserts against it.
   the checkpoint), files delivered, deviations — including any reconciliation from
   P4-T3.
 - **Acceptance:** Phase 4 `Observed result` shows exit 0, then exit 60 with the
-  `REMOVED` finding, then exit 0 again.
+  `ADDED` finding, then exit 0 again. (`ADDED`, not `REMOVED` — deleting a row
+  from the *table* puts the key in `actual \ declared`; see the phase
+  checkpoint's 2026-08-02 correction.)
 - **Depends:** P4-T3, P4-T4
 
 ---

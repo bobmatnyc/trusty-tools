@@ -97,6 +97,12 @@ FLAG_RUNID=''
 
 REGISTRY_ROOT="${VMTEST_STATE_DIR:-$HOME/.local/state/vmtest-harness}/runs"
 
+# The authoritative expectation table (DOC-2 §9).  NOT named VMTEST_* on
+# purpose: §12.3 rule 2 reserves every `VMTEST_<KEY>` name for §8.2's mechanical
+# override channel, and an un-prefixed global cannot collide with a config key
+# added later.  Same reasoning as CONF_EFFECTIVE and REGISTRY_ROOT above.
+EXPECTED_TSV="$VMTEST_HARNESS_DIR/expected-binaries.tsv"
+
 # The complete key set of vmtest.defaults (DOC-2 §8.2).  Unknown keys are an
 # error so a typo cannot silently become "unpinned" (§3.2).
 CONF_KEYS='cpu memory_mib disk_gib guest_home guest_src_dir guest_target_dir
@@ -171,6 +177,88 @@ tsv_validate_keys() {
         seen[$1]++ { printf "duplicate key %s; ", $1; bad = 1 }
         END { exit (bad ? 1 : 0) }
     ' "$1"
+}
+
+# --- expected-binaries.tsv accessors (P4-T4; DOC-2 §9.1, §9.2, §12.5) ------
+#
+# The nine-column table (§9.1) is read by the SAME awk discipline as the
+# two-column TSVs above: `#` comments and the header row are skipped by
+# predicate, never by line number, because §9.1 permits comments anywhere and
+# nothing fixes the header at line 1.
+#
+# `_tsv_rows <file>` is the one place that decides what a DATA ROW is.  Every
+# accessor below and `--check-table` go through it, so "is this a row?" has
+# exactly one answer in this file.
+_tsv_rows() {
+    awk -F'\t' '$1 !~ /^#/ && $1 != "package" && NF == 9' "$1"
+}
+
+# tsv_scope_crate_dirs — unique `crate_dir` (column 2) over the `in_scope=yes`
+# rows, in FIRST-APPEARANCE order (§F-3's decision rule, unchanged).
+#
+# WHY IT DEDUPLICATES, stated correctly because §F-3's original rationale was
+# false and was corrected on 2026-07-31: NOT because an undeduped loop would
+# invalidate DOC-1 §7.4's Single-Install gate — it would not; repeated
+# `cargo install --path` reinstalls the package's full binary set and the end
+# state is identical — but because P5's checkpoint COUNTS installs (one per
+# value) and thirteen installs of eight crates is waste and noise.
+#
+# The genuine hazard §F-3 does point at is a PER-BINARY install: `cargo install
+# --path <dir> --bin <binary>` defeats the gate silently and with a green
+# result.  That is prohibited at source in DOC-2 §12.2, not here.  The `binary`
+# column is the ORACLE's input; it is never the INSTALLER's.
+#
+# THE POSTCONDITION IS ASSERTED, NOT ASSUMED.  Two lines, and they turn every
+# possible undedupe variant — a dropped `sort -u`, an awk seen-map that forgets
+# to set its key, a refactor that reorders the pipeline — from a silent
+# behaviour change into a classified failure AT THE POINT OF THE DEFECT.  A
+# function whose entire contract is *unique* values must not rely on a caller to
+# notice when it stops delivering them.  It dies 60 (verification, §2) and NAMES
+# the duplicated values, because "a directory appeared twice" is unactionable
+# without knowing which.  This runs on the host with no VM, so the failure
+# arrives seconds into a run rather than minutes.
+tsv_scope_crate_dirs() {
+    local _dirs _dups
+    # Declare first, assign second: `local x=$(cmd)` swallows cmd's status.
+    _dirs=$(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes" && !seen[$2]++ { print $2 }')
+    [ -n "$_dirs" ] || return 0
+    _dups=$(printf '%s\n' "$_dirs" | sort | uniq -d)
+    [ -z "$_dups" ] || die 60 "tsv_scope_crate_dirs emitted duplicates: $(printf '%s' "$_dups" | tr '\n' ' ')"
+    printf '%s\n' "$_dirs"
+}
+
+# tsv_scope_packages — unique `package` (column 1) over the `in_scope=yes` rows,
+# first-appearance order.  Same postcondition, same reasoning: §12.5 calls
+# `verify_single_install` once per multi-binary in-scope package and §F-10(e)
+# scopes `stack doctor`'s assertion to exactly these values, so a repeat is a
+# double assertion and a miscount.
+tsv_scope_packages() {
+    local _pkgs _dups
+    _pkgs=$(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes" && !seen[$1]++ { print $1 }')
+    [ -n "$_pkgs" ] || return 0
+    _dups=$(printf '%s\n' "$_pkgs" | sort | uniq -d)
+    [ -z "$_dups" ] || die 60 "tsv_scope_packages emitted duplicates: $(printf '%s' "$_dups" | tr '\n' ' ')"
+    printf '%s\n' "$_pkgs"
+}
+
+# tsv_expect <package> <binary> <pattern> — emits `present` | `absent` | `-`.
+# The key is (package, binary), which is §9.2's composite primary key; the
+# pattern selects the column.  Returns 1 when no row carries that key, so a
+# caller can `|| die` — the same convention `tsv_field` uses.
+#
+# `package` is the key and `crate_dir` is NOT, which is the whole point of
+# DOC-1 D3's warning: `tga`'s package is `tga` while its directory is
+# `trusty-git-analytics`.
+tsv_expect() {
+    local _col
+    case "$3" in
+        a) _col=7 ;;
+        b) _col=8 ;;
+        c) _col=9 ;;
+        *) die 2 "tsv_expect: unknown pattern '$3' (expected a | b | c)" ;;
+    esac
+    _tsv_rows "$EXPECTED_TSV" | awk -F'\t' -v p="$1" -v b="$2" -v f="$_col" \
+        '$1 == p && $3 == b { print $f; found = 1; exit } END { if (!found) exit 1 }'
 }
 
 # --- configuration: three tiers, defaults -> env -> flag (DOC-2 §8.1/§8.3) --
@@ -884,6 +972,182 @@ cmd_clean() {
 }
 
 # ---------------------------------------------------------------------------
+# `vmtest --check-table` (P4-T2; DOC-2 §9.6)
+#
+# The self-diff that keeps the expectation table honest.  DOC-1 §7.4 is blunt
+# about why it exists: the Single-Install gate "is only ever as good as §7.2's
+# table.  It cannot detect the loss of a binary it has never heard of — an
+# omitted row is not a weaker assertion, it is NO assertion, and it fails
+# silently and permanently."
+#
+# SOURCE OF TRUTH: the `[[bin]]` targets declared across the workspace, read via
+# `cargo metadata --no-deps`, NOT by parsing Cargo.toml files.  Three real
+# defects avoided, each of which this workspace actually contains:
+#   - `crates/trusty-agents-local` has a src/main.rs and NO [[bin]] section, so
+#     cargo infers the target and a manifest parser misses it entirely — it
+#     would report a spurious REMOVED on a binary that exists (§9.4);
+#   - workspace-inherited fields are resolved for free;
+#   - `crates/trusty-agents/ui/src-tauri` is a path member that is not
+#     `crates/*/Cargo.toml`, so a glob would skip it (§9.2, §9.3).
+#
+# IT RUNS ON THE HOST WITH NO VM and needs only `cargo` and `jq` (§9.6).  It
+# therefore does NOT call `preflight_host_deps`, which requires the
+# virtualisation CLI; requiring that here would make the table uncheckable on a
+# machine that cannot run guests, which is most CI.
+#
+# IT DOES NOT AUTO-FIX.  A table that rewrites itself to match reality asserts
+# nothing — the human edit IS the review step, and removing it would turn the
+# authoritative expectation source into a mirror.  RENAMED is a SUGGESTION.
+#
+# IT COMPARES COLUMNS 1-5 ONLY.  `in_scope` and the three `expect_*` columns are
+# human judgments about scope, not facts about the workspace, and nothing can
+# derive them (§9.6).
+# ---------------------------------------------------------------------------
+
+# ltrimstr/rtrimstr, not sub(): these are STRING operations, so a workspace path
+# containing a regex metacharacter cannot silently mangle a crate_dir.
+# `.kind | index("bin")` rather than `.kind[] == "bin"`: a target whose kind
+# array carried "bin" twice would otherwise be emitted twice.
+# `// []` covers both cargo shapes — older cargo omits `required-features`
+# entirely, newer emits an empty array.
+CHECK_TABLE_JQ='
+.workspace_root as $root
+| .packages[]
+| (.manifest_path | rtrimstr("/Cargo.toml")) as $dir
+| .name as $pkg
+| .targets[]
+| select(.kind | index("bin"))
+| [ $pkg,
+    ($dir | ltrimstr($root + "/crates/")),
+    .name,
+    (.src_path | ltrimstr($dir + "/")),
+    (if ((.["required-features"] // []) | length) == 0
+     then "-"
+     else ((.["required-features"] // []) | join(",")) end)
+  ] | @tsv
+'
+
+# §9.6's steps 4 and 5, over two sorted five-column TSVs.  awk HAS associative
+# arrays — the bash 3.2 prohibition is on `declare -A`, and awk is precisely the
+# reason the harness can live without it.
+CHECK_TABLE_AWK='
+FNR == NR {
+    k = $1 SUBSEP $3
+    AK[k] = 1; A[k] = $2 "\t" $4 "\t" $5
+    APKG[k] = $1; ABIN[k] = $3; APATH[k] = $4
+    next
+}
+{
+    k = $1 SUBSEP $3
+    DK[k] = 1; D[k] = $2 "\t" $4 "\t" $5
+    DPKG[k] = $1; DBIN[k] = $3; DPATH[k] = $4
+}
+END {
+    for (k in AK) if (!(k in DK)) ADDED[k] = 1
+    for (k in DK) if (!(k in AK)) REMOVED[k] = 1
+    for (k in DK) if ((k in AK) && D[k] != A[k]) CHANGED[k] = 1
+
+    for (k in ADDED)
+        printf "ADDED    package=%s binary=%s  %s  — a [[bin]] target the workspace declares and this table does not. Add the row (in_scope=no unless it belongs to one of DOC-1 D3'\''s eight packages).\n", \
+               APKG[k], ABIN[k], A[k]
+    for (k in REMOVED)
+        printf "REMOVED  package=%s binary=%s  %s  — this table declares it and the workspace has no such [[bin]] target.\n", \
+               DPKG[k], DBIN[k], D[k]
+    for (k in CHANGED)
+        printf "CHANGED  package=%s binary=%s  declared[%s]  actual[%s]\n", \
+               DPKG[k], DBIN[k], D[k], A[k]
+
+    # §9.6 step 5 — RENAMED is a heuristic over one ADDED and one REMOVED
+    # SHARING package and bin_path.  Grouped by (package, bin_path) and emitted
+    # only where that group holds exactly one of each, which is the narrowest
+    # reading of "one ADDED and one REMOVED": a group with two of either is not
+    # a rename anybody can infer.
+    for (k in ADDED)   { g = APKG[k] SUBSEP APATH[k]; na[g]++; la[g] = k }
+    for (k in REMOVED) { g = DPKG[k] SUBSEP DPATH[k]; nr[g]++; lr[g] = k }
+    for (g in na)
+        if (na[g] == 1 && nr[g] == 1)
+            printf "RENAMED? package=%s  %s -> %s  — SUGGESTION ONLY, never applied automatically (§9.6 step 5).\n", \
+                   DPKG[lr[g]], DBIN[lr[g]], ABIN[la[g]]
+}
+'
+
+cmd_check_table() {
+    while [ $# -gt 0 ]; do
+        usage; die 2 "unknown option '$1' for \`vmtest --check-table\`"
+    done
+
+    command -v cargo >/dev/null 2>&1 \
+        || die 10 'cargo not found on PATH (--check-table needs only cargo and jq; DOC-2 §9.6)'
+    command -v jq >/dev/null 2>&1 \
+        || die 10 'jq not found on PATH (--check-table needs only cargo and jq; DOC-2 §9.6)'
+    printf '{"a":1}' | jq -e '.a == 1' >/dev/null 2>&1 \
+        || die 10 'jq present but not functional'
+    [ -f "$EXPECTED_TSV" ] || die 10 "expectation table missing: $EXPECTED_TSV"
+
+    harness_tmpdir
+    local meta="$VMTEST_TMPDIR/metadata.json"
+    local metaerr="$VMTEST_TMPDIR/metadata.err"
+    local jqprog="$VMTEST_TMPDIR/check-table.jq"
+    local actual="$VMTEST_TMPDIR/actual.tsv"
+    local declared="$VMTEST_TMPDIR/declared.tsv"
+    local findings="$VMTEST_TMPDIR/findings.txt"
+
+    # --- the table's own integrity, before it is diffed against anything -----
+    #
+    # A malformed table makes the diff below report nonsense rather than fail,
+    # which is the one outcome worse than either.  Both checks enforce something
+    # §9 already states; neither invents a rule.
+    local malformed dupkeys
+    malformed=$(awk -F'\t' '$1 !~ /^#/ && $1 != "package" && NF != 9 && NF != 0 { printf "line %d has %d fields; ", NR, NF }' "$EXPECTED_TSV")
+    [ -z "$malformed" ] \
+        || die 60 "expected-binaries.tsv is not nine-column TSV (DOC-2 §9.1): ${malformed}"
+    # §9.2: `package` + `binary` together form the COMPOSITE PRIMARY KEY.  A
+    # duplicated key would make one row shadow the other in the diff, so the
+    # table could disagree with the workspace and still exit 0.
+    dupkeys=$(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '{ print $1 "/" $3 }' | sort | uniq -d | tr '\n' ' ')
+    [ -z "$dupkeys" ] \
+        || die 60 "expected-binaries.tsv has duplicate (package, binary) keys, which DOC-2 §9.2 makes the composite primary key: ${dupkeys}"
+
+    # --- step 1: actual, from cargo metadata --------------------------------
+    printf '%s\n' "$CHECK_TABLE_JQ" > "$jqprog"
+    log "reading workspace [[bin]] targets: cargo metadata --no-deps --manifest-path $VMTEST_HOST_REPO/Cargo.toml"
+    if ! cargo metadata --no-deps --format-version 1 \
+            --manifest-path "$VMTEST_HOST_REPO/Cargo.toml" > "$meta" 2>"$metaerr"; then
+        log "cargo metadata stderr: $(tr '\n' ' ' < "$metaerr")"
+        die 10 'cargo metadata failed; --check-table cannot determine the workspace'\''s actual [[bin]] targets'
+    fi
+    jq -r -f "$jqprog" "$meta" | LC_ALL=C sort > "$actual" \
+        || die 10 'could not extract [[bin]] targets from cargo metadata output'
+    [ -s "$actual" ] \
+        || die 10 'cargo metadata reported no [[bin]] targets at all — refusing to report every declared row as REMOVED'
+
+    # --- step 2: declared, columns 1-5 only ---------------------------------
+    _tsv_rows "$EXPECTED_TSV" \
+        | awk -F'\t' -v OFS='\t' '{ print $1, $2, $3, $4, $5 }' \
+        | LC_ALL=C sort > "$declared"
+
+    # --- steps 3-5: diff on the (package, binary) key -----------------------
+    awk -F'\t' "$CHECK_TABLE_AWK" "$actual" "$declared" | LC_ALL=C sort > "$findings"
+
+    local ndeclared nactual nfindings
+    ndeclared=$(awk 'END { print NR }' "$declared")
+    nactual=$(awk 'END { print NR }' "$actual")
+    nfindings=$(awk 'END { print NR }' "$findings")
+    # Diagnostics to stderr; the FINDINGS are the command's product and are the
+    # only thing on stdout, so "exits 0 printing no findings" is literally true.
+    log "declared rows: ${ndeclared}; workspace [[bin]] targets: ${nactual}"
+    log "in scope: $(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes"' | wc -l | tr -d ' ') binaries, $(tsv_scope_crate_dirs | wc -l | tr -d ' ') crate directories, $(tsv_scope_packages | wc -l | tr -d ' ') packages"
+
+    # --- step 6 -------------------------------------------------------------
+    if [ "$nfindings" -gt 0 ]; then
+        while IFS= read -r _line; do out "$_line"; done < "$findings"
+        die 60 "${nfindings} finding(s) between expected-binaries.tsv and the workspace's actual [[bin]] targets. --check-table DOES NOT AUTO-FIX: edit the table by hand, in a PR, because that edit is the review step (DOC-2 §9.6). Do not widen DOC-1 D3's scope as a side effect — a genuinely new binary is in_scope=no unless it belongs to one of D3's eight packages."
+    fi
+    log 'check-table OK: no ADDED, REMOVED or CHANGED findings'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch.  Unknown -> exit 2 (§2: usage error, no VM was touched).
 # ---------------------------------------------------------------------------
 
@@ -895,13 +1159,7 @@ main() {
         --source-only)  conf_load; return 0 ;;
         run)            shift; cmd_run "$@" ;;
         clean)          shift; cmd_clean "$@" ;;
-        --check-table)
-            # Recognised here so it is not an unknown subcommand, but it is
-            # delivered by plan P4-T2 together with expected-binaries.tsv.
-            # No exit code is specified for "recognised but not yet built"; 2
-            # is the narrowest fit — the driver cannot act on the argument and
-            # §2 guarantees no VM was touched.  Recorded in MANIFEST Phase 2.
-            die 2 '--check-table is delivered by plan P4-T2, together with expected-binaries.tsv. Not available at Phase 2.' ;;
+        --check-table)  shift; cmd_check_table "$@" ;;
         -h|--help)      usage; return 0 ;;
         '')             usage; die 2 'no subcommand given' ;;
         *)              usage; die 2 "unknown subcommand '$VMTEST_SUBCOMMAND'" ;;
