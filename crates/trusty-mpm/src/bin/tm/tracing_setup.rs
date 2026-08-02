@@ -18,9 +18,9 @@
 //! signal was their absence from 28 KB of output.
 //!
 //! What: [`init_cli_diagnostics_if_wanted`] — a stderr-only `fmt` subscriber
-//! registered for exactly those commands, defaulting to `warn`. Lives in its own module rather than inline in `main.rs` because
-//! `main.rs` is already at the 500-SLOC cap `scripts/check_line_cap.sh`
-//! enforces.
+//! registered for exactly those commands, defaulting to `warn`. Lives in its own
+//! module rather than inline in `main.rs` because `main.rs` is already at the
+//! 500-SLOC cap `scripts/check_line_cap.sh` enforces.
 //!
 //! Test: `tests/tm_sessions_instructions_diagnostics.rs`.
 
@@ -63,7 +63,7 @@ fn wants_cli_diagnostics(command: &Option<Command>) -> bool {
 /// against the daemon/supervisor branch rather than running both.
 /// Test: `instructions_emits_override_diagnostics_on_stderr`,
 /// `declined_overrides_are_reported_without_rust_log_set`,
-/// `a_clean_project_produces_no_stderr_noise`.
+/// `a_clean_project_produces_no_override_diagnostics`.
 pub(crate) fn init_cli_diagnostics_if_wanted(command: &Option<Command>) {
     if wants_cli_diagnostics(command) {
         init_stderr_only("warn");
@@ -80,7 +80,7 @@ pub(crate) fn init_cli_diagnostics_if_wanted(command: &Option<Command>) {
 ///
 /// Panics on a second call: `init` registers the global subscriber. Both callers
 /// are mutually exclusive branches of `main`, which is what keeps that true.
-/// Test: `a_clean_project_produces_no_stderr_noise` (the writer choice is
+/// Test: `a_clean_project_produces_no_override_diagnostics` (the writer choice is
 /// asserted by piping the two streams apart).
 pub(crate) fn init_stderr_only(default: &str) {
     tracing_subscriber::fmt()
