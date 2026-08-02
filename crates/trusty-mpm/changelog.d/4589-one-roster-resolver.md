@@ -13,7 +13,11 @@ Fixed
   ([#4588](https://github.com/bobmatnyc/trusty-tools/issues/4588)).
 - Agents are no longer excluded from the delegation roster because their
   frontmatter `role:` begins with `base`. Foundation templates are identified by
-  the `BASE-*` file-name convention alone. The frontmatter rule silently deleted
+  a case-insensitive `base-` file-stem prefix — the hyphen is load-bearing, so
+  `baseline-analyzer`, `base64-decoder` and `basecamp-sync` are ordinary
+  delegatable agents rather than templates, and every excluded file is logged at
+  debug level with its directory instead of vanishing silently. The frontmatter
+  rule silently deleted
   three real, deployed, dispatchable agents — `memory-manager`,
   `mpm-agent-manager`, `mpm-skills-manager` — from every roster the PM ever saw
   (34 advertised where 37 were deployed), and it could not be fixed by editing
@@ -21,8 +25,11 @@ Fixed
   the same rule would eat an operator's own agent with no recourse
   ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
 - `tm doctor`'s `agents` check reports the delegatable roster size alongside the
-  deployed file count, resolved by that same function, and reports it as
-  `unknown` rather than guessing when no project directory scopes the probe. A
+  deployed file count on every status — including the empty-deploy-tier failure,
+  where the roster can still be non-empty because the project and generic
+  `~/.claude/agents` tiers are independent of the deploy tier — resolved by that
+  same function, and reports it as `unknown` rather than guessing when no project
+  directory scopes the probe. A
   file count is a deploy fact, not a routing fact; reporting only the former is
   how a 42-file, 34-agent install read as healthy
   ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).

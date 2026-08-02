@@ -8,10 +8,12 @@
 //! its frontmatter, and returns one [`AgentSummary`] per deployable (non-base)
 //! agent; [`generate_authority`] folds those summaries into a Markdown section
 //! injected into the session launch instructions;
-//! [`deployed_roster_section`] resolves the tiers a launched session actually
-//! loads agents from and renders that live roster for the PM prompt (#4069).
-//! Test: `cargo test -p trusty-mpm-core delegation_authority` covers scanning,
-//! base-agent exclusion, the empty directory, and both render branches.
+//! [`resolve_roster`] is THE roster resolver every consumer shares — the PM
+//! prompt's delegation section, the `tm session start` count, and `tm doctor`
+//! (#4588); [`deployed_roster_section`] renders what it returns (#4069).
+//! Test: `delegation_authority_tests.rs` covers scanning, foundation-file
+//! exclusion and its near misses, the empty directory, and both render
+//! branches.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -102,6 +104,24 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
     fm
 }
 
+/// Whether a file stem names a foundation (non-delegatable) template.
+///
+/// Why (#4589): this is the ONLY rule that removes an agent from the roster, so
+/// it must be narrow and it must exist in exactly one place. The `-` is the
+/// whole point: `starts_with("base")` silently deletes `baseline-analyzer`,
+/// `base64-decoder`, `basecamp-sync` and `based-reviewer` — ordinary names in
+/// the project and `~/.claude/agents` tiers tm does not author, which is
+/// precisely the failure mode the frontmatter `role:` rule was removed for.
+/// Sharing the predicate with the asset-level gate keeps the shipped files and
+/// the scanner from drifting apart the way the roster and its count did.
+/// What: case-insensitive `base-` prefix on the file stem, so every bundled
+/// `BASE-*.md` matches and nothing else plausibly does.
+/// Test: `scan_excludes_base_agents`,
+/// `near_miss_base_names_are_not_treated_as_foundation_files`.
+fn is_foundation_file(stem: &str) -> bool {
+    stem.to_ascii_lowercase().starts_with("base-")
+}
+
 /// Scan `agents_dir` and return summaries for all non-base agents.
 ///
 /// Why: the orchestrating CC instance needs to know which agents exist
@@ -111,8 +131,9 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
 /// role, description, model, extends), excludes BASE-* files and the
 /// manifest file, returns one AgentSummary per deployable agent.
 ///
-/// Foundation templates are identified by the `BASE-*` FILE NAME convention
-/// alone (#4589). An earlier revision also dropped any agent whose frontmatter
+/// Foundation templates are identified by [`is_foundation_file`] — the `BASE-*`
+/// FILE NAME convention alone (#4589). An earlier revision also dropped any
+/// agent whose frontmatter
 /// `role:` began with `base`, which silently deleted three real, dispatchable
 /// agents — `memory-manager`, `mpm-agent-manager`, `mpm-skills-manager` — from
 /// every roster. `role:` is the wrong signal for the job: the roster is a union
@@ -162,7 +183,18 @@ pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
             continue;
         };
         // Exclude BASE-* source/foundation files by file name, before any read.
-        if stem.to_ascii_lowercase().starts_with("base") {
+        // The trailing `-` is load-bearing (#4589 review): a bare `base` prefix
+        // also eats `baseline-analyzer`, `base64-decoder`, `basecamp-sync` and
+        // `based-reviewer` — plausible agent names in tiers tm does not author,
+        // which is the exact failure this rule replaced, not a fix for it.
+        if is_foundation_file(stem) {
+            // A silent deletion is what made #4589 undiagnosable. An operator
+            // whose `base-…` agent vanished has no other thread to pull.
+            tracing::debug!(
+                file = %file_name,
+                dir = %agents_dir.display(),
+                "excluded from the delegation roster as a BASE-* foundation template"
+            );
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -387,379 +419,5 @@ pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// Write `<name>.md` into `dir` with the given raw content.
-    fn write_agent(dir: &Path, name: &str, content: &str) {
-        fs::write(dir.join(format!("{name}.md")), content).expect("write agent");
-    }
-
-    #[test]
-    fn scan_finds_agents() {
-        // A directory with one deployable agent and one base agent must yield
-        // exactly the deployable one, with its frontmatter parsed.
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "engineer",
-            "---\nname: engineer\nrole: engineer\nextends: base-engineer\n\
-             description: Implements features and fixes bugs.\nmodel: sonnet\n---\n\n# Engineer\n",
-        );
-        write_agent(
-            tmp.path(),
-            "BASE-AGENT",
-            "---\nname: base-agent\nrole: base\n---\n\n# Base\n",
-        );
-
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1, "only the engineer is deployable");
-        let engineer = &agents[0];
-        assert_eq!(engineer.name, "engineer");
-        assert_eq!(engineer.role, "engineer");
-        assert_eq!(
-            engineer.description.as_deref(),
-            Some("Implements features and fixes bugs.")
-        );
-        assert_eq!(engineer.model.as_deref(), Some("sonnet"));
-        assert_eq!(
-            engineer.extends_chain,
-            vec!["base-engineer".to_string(), "engineer".to_string()]
-        );
-    }
-
-    #[test]
-    fn scan_excludes_base_agents() {
-        // Foundation templates are excluded by the `BASE-*` FILE NAME
-        // convention, case-insensitively, and never by frontmatter (#4589 —
-        // see `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`
-        // for why the `role:` half was removed).
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "BASE-AGENT",
-            "---\nname: base-agent\nrole: base\n---\n\nfoundation\n",
-        );
-        write_agent(
-            tmp.path(),
-            "base-engineer",
-            "---\nname: base-engineer\nrole: base-engineer\n---\n\nfoundation\n",
-        );
-        write_agent(
-            tmp.path(),
-            "qa",
-            "---\nname: qa\nrole: qa\ndescription: Tests things.\n---\n\n# QA\n",
-        );
-
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].name, "qa");
-    }
-
-    #[test]
-    fn agent_with_a_base_role_but_no_base_filename_stays_in_the_roster() {
-        // #4589 REGRESSION. `memory-manager`, `mpm-agent-manager` and
-        // `mpm-skills-manager` shipped with `role: base` and were therefore
-        // dropped from every tier of the roster — deployed, dispatchable, and
-        // invisible to the PM. The exclusion keys off the `BASE-*` FILE NAME
-        // convention (tm's own, applied to the files tm ships) rather than a
-        // frontmatter value tm does not control in the project and generic
-        // `~/.claude/agents` tiers it also unions.
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "memory-manager",
-            "---\nname: memory-manager\nrole: base\ndescription: Manages memory.\n---\n\n# MM\n",
-        );
-
-        let agents = scan_agents(tmp.path());
-        assert_eq!(
-            agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            vec!["memory-manager"],
-            "a non-`BASE-*` file must never be classified as a foundation \
-             template by its `role:` value alone (#4589)"
-        );
-    }
-
-    #[test]
-    fn scan_empty_dir() {
-        // An empty directory must yield an empty vec with no error.
-        let tmp = TempDir::new().unwrap();
-        let agents = scan_agents(tmp.path());
-        assert!(agents.is_empty());
-    }
-
-    #[test]
-    fn scan_missing_dir_is_empty() {
-        // A non-existent directory must also yield an empty vec, not panic.
-        let agents = scan_agents(Path::new("/no/such/agents/dir/xyz"));
-        assert!(agents.is_empty());
-    }
-
-    #[test]
-    fn scan_ignores_manifest_and_non_md() {
-        // The deploy manifest and non-Markdown files must be skipped.
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("manifest.json"), "{}").unwrap();
-        fs::write(tmp.path().join("notes.txt"), "hello").unwrap();
-        write_agent(
-            tmp.path(),
-            "writer",
-            "---\nname: writer\nrole: writer\n---\n\n# Writer\n",
-        );
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].name, "writer");
-    }
-
-    #[test]
-    fn scan_handles_no_frontmatter() {
-        // An agent file with no frontmatter falls back to the file stem.
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "plain",
-            "# Plain agent\n\nNo frontmatter here.\n",
-        );
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].name, "plain");
-        assert_eq!(agents[0].role, "plain");
-        assert_eq!(agents[0].extends_chain, vec!["plain".to_string()]);
-    }
-
-    #[test]
-    fn generate_authority_nonempty() {
-        // A single agent renders under the heading with its name and details.
-        let agents = vec![AgentSummary {
-            name: "engineer".to_string(),
-            role: "engineer".to_string(),
-            description: Some("Implements features.".to_string()),
-            model: Some("sonnet".to_string()),
-            extends_chain: vec![
-                "base-agent".to_string(),
-                "base-engineer".to_string(),
-                "engineer".to_string(),
-            ],
-        }];
-        let md = generate_authority(&agents);
-        assert!(md.contains("## Delegation Authority"));
-        assert!(md.contains("### engineer"));
-        assert!(md.contains("Implements features."));
-        assert!(md.contains("base-agent → base-engineer → engineer"));
-        assert!(md.contains("**Model:** sonnet"));
-    }
-
-    #[test]
-    fn generate_authority_empty() {
-        // With no agents the heading still renders, plus a "no agents" note.
-        let md = generate_authority(&[]);
-        assert!(md.contains("## Delegation Authority"));
-        assert!(md.to_lowercase().contains("no delegatable agents"));
-    }
-
-    // ── colon-in-value regression tests (issue #389) ─────────────────────────
-
-    #[test]
-    fn scan_preserves_url_in_description() {
-        // A `description:` value that is or contains a URL must not be
-        // silently truncated at the first colon.
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "docs-agent",
-            "---\nname: docs-agent\nrole: docs\ndescription: See https://docs.example.com/guide\n---\n\n# Docs\n",
-        );
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1);
-        assert_eq!(
-            agents[0].description.as_deref(),
-            Some("See https://docs.example.com/guide"),
-            "URL in description must not be truncated"
-        );
-    }
-
-    #[test]
-    fn scan_preserves_bedrock_model_id() {
-        // A `model:` value containing a bedrock model id (with `/` and `.`)
-        // must survive the scan without truncation.
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "ml-agent",
-            "---\nname: ml-agent\nrole: ml\nmodel: bedrock/us.anthropic.claude-sonnet-4-6\n---\n\n# ML\n",
-        );
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1);
-        assert_eq!(
-            agents[0].model.as_deref(),
-            Some("bedrock/us.anthropic.claude-sonnet-4-6"),
-            "bedrock model id must be preserved verbatim"
-        );
-    }
-
-    #[test]
-    fn scan_preserves_timestamp_in_description() {
-        // A description that embeds an ISO-8601 timestamp must keep the full
-        // timestamp including the time component (colons after the first).
-        let tmp = TempDir::new().unwrap();
-        write_agent(
-            tmp.path(),
-            "timed-agent",
-            "---\nname: timed-agent\nrole: timer\ndescription: Deployed at 2026-06-05T14:31:34\n---\n\n# Timed\n",
-        );
-        let agents = scan_agents(tmp.path());
-        assert_eq!(agents.len(), 1);
-        assert_eq!(
-            agents[0].description.as_deref(),
-            Some("Deployed at 2026-06-05T14:31:34"),
-            "timestamp in description must not be truncated"
-        );
-    }
-
-    #[test]
-    fn every_bundled_non_base_agent_reaches_the_roster() {
-        // Issue #4069 / #4589 REGRESSION GATE. The scanner's only exclusion is
-        // the `BASE-*` file-name convention, so this asserts the property that
-        // matters end to end: every bundled `.md` that is not a `BASE-*`
-        // foundation file survives `scan_agents` and can therefore be routed
-        // to. It is the asset-level half of the same invariant
-        // `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`
-        // asserts at the scanner level — one guards the shipped files, the
-        // other guards the rule, and #4589 needed both.
-        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents");
-
-        let mut expected: Vec<String> = fs::read_dir(&assets)
-            .expect("bundled agent assets dir")
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
-            .filter_map(|p| {
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .filter(|stem| !stem.to_ascii_lowercase().starts_with("base"))
-                    .map(str::to_string)
-            })
-            .collect();
-        expected.sort();
-
-        let mut scanned: Vec<String> = scan_agents(&assets).into_iter().map(|a| a.name).collect();
-        scanned.sort();
-
-        let dropped: Vec<&String> = expected.iter().filter(|n| !scanned.contains(n)).collect();
-        assert!(
-            dropped.is_empty(),
-            "bundled agents silently dropped from every roster (check for a stray \
-             `role: base` in their frontmatter): {dropped:?}"
-        );
-        assert_eq!(
-            scanned.len(),
-            expected.len(),
-            "every non-BASE bundled agent must be delegatable"
-        );
-    }
-
-    #[test]
-    fn generate_authority_omits_self_referential_lines() {
-        // Review MEDIUM-3: `Role` that merely repeats the heading and a
-        // single-element `Foundation` chain are pure noise, re-emitted into
-        // every PM session. A real (multi-element) chain still renders.
-        let agents = vec![AgentSummary {
-            name: "ticketing".to_string(),
-            role: "ticketing".to_string(),
-            description: Some("Files tickets.".to_string()),
-            model: None,
-            extends_chain: vec!["ticketing".to_string()],
-        }];
-        let md = generate_authority(&agents);
-
-        assert!(md.contains("### ticketing"));
-        assert!(md.contains("Files tickets."));
-        assert!(
-            !md.contains("**Role:**"),
-            "role duplicating the heading must be omitted"
-        );
-        assert!(
-            !md.contains("**Foundation:**"),
-            "a self-referential single-element chain must be omitted"
-        );
-    }
-
-    #[test]
-    fn roster_from_dirs_dedup_is_case_insensitive() {
-        // Review LOW-1: agent names are case-insensitive to the dispatcher, so
-        // `QA` and `qa` across two tiers are one agent, not two entries.
-        let high = TempDir::new().unwrap();
-        let low = TempDir::new().unwrap();
-        write_agent(
-            high.path(),
-            "QA",
-            "---\nname: QA\nrole: qa\ndescription: PROJECT TIER\n---\n\n# QA\n",
-        );
-        write_agent(
-            low.path(),
-            "qa",
-            "---\nname: qa\nrole: qa\ndescription: USER TIER\n---\n\n# QA\n",
-        );
-
-        let roster = roster_from_dirs(&[high.path().to_path_buf(), low.path().to_path_buf()]);
-
-        assert_eq!(roster.len(), 1, "QA and qa are the same agent");
-        assert_eq!(roster[0].description.as_deref(), Some("PROJECT TIER"));
-    }
-
-    #[test]
-    fn deployed_agent_dirs_puts_project_tier_first() {
-        // Issue #4069: the project tier is the destination the daemon
-        // managed-spawn path deploys into AND the only tier readable under
-        // `--setting-sources project,local`, so it must rank first.
-        let dirs = deployed_agent_dirs(Path::new("/proj"));
-        assert_eq!(dirs[0], PathBuf::from("/proj/.claude/agents"));
-        assert!(
-            dirs.len() >= 2,
-            "the user-level tier(s) must also be consulted"
-        );
-    }
-
-    #[test]
-    fn roster_from_dirs_dedupes_with_first_dir_winning() {
-        // The same agent is normally deployed into more than one tier; the
-        // higher-precedence copy must be the one described, exactly once.
-        let high = TempDir::new().unwrap();
-        let low = TempDir::new().unwrap();
-        write_agent(
-            high.path(),
-            "qa",
-            "---\nname: qa\nrole: qa\ndescription: PROJECT TIER\n---\n\n# QA\n",
-        );
-        write_agent(
-            low.path(),
-            "qa",
-            "---\nname: qa\nrole: qa\ndescription: USER TIER\n---\n\n# QA\n",
-        );
-        write_agent(
-            low.path(),
-            "ops",
-            "---\nname: ops\nrole: ops\ndescription: USER TIER\n---\n\n# Ops\n",
-        );
-
-        let roster = roster_from_dirs(&[high.path().to_path_buf(), low.path().to_path_buf()]);
-
-        assert_eq!(roster.len(), 2, "qa must appear once, plus ops");
-        assert_eq!(roster[0].name, "ops", "roster is name-sorted");
-        assert_eq!(roster[1].name, "qa");
-        assert_eq!(roster[1].description.as_deref(), Some("PROJECT TIER"));
-    }
-
-    #[test]
-    fn roster_from_dirs_ignores_missing_dirs() {
-        // A tier that does not exist is an empty tier, never a failure — this is
-        // the input that makes `deployed_roster_section` return `None`, leaving
-        // an unprovisioned environment with the bundled asset alone.
-        let roster = roster_from_dirs(&[PathBuf::from("/nonexistent/agents")]);
-        assert!(roster.is_empty());
-        assert!(roster_from_dirs(&[]).is_empty());
-    }
-}
+#[path = "delegation_authority_tests.rs"]
+mod tests;
