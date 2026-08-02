@@ -424,13 +424,13 @@ fn with_overrides_of_nothing_is_the_identity() {
 #[test]
 fn floor_sections_refuse_every_named_section_override() {
     // The structural guarantee: the package's `customization_tier` is the only
-    // authority, and it says `fixed` for all three floor sections. No list in
-    // the reader is consulted, so none can drift out of sync with this.
+    // authority, and it says `fixed` for every floor section. No list in the
+    // reader is consulted, so none can drift out of sync with this.
     let package = bundled_fallback_package().expect("manifest parses");
-    // Derived from `is_floor()`, never hand-listed: #4573 added a fourth floor
-    // section and a hand-listed set would have kept passing while the new one
-    // went untested — which is the exact drift shape that let the Prohibitions
-    // table ship at tier `project`.
+    // The loop set is derived from `is_floor()`, never hand-listed: #4573 added
+    // a fourth floor section, and a hand-listed set would have kept passing
+    // while the new one went untested — the exact drift shape that let the
+    // Prohibitions table ship at tier `project`.
     for section in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
         let (result, rejected) = package.with_overrides(&[over(section, "SUBVERTED")]);
         assert_eq!(&result, package, "{section:?} must be untouched");
