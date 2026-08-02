@@ -5,7 +5,7 @@
 # A deliberate floor change is a two-part commit: the floor edit AND the
 # regenerated digests below. Regenerating these without a reviewed floor change
 # defeats the guard (issues #3374, #4183).
-92ba79819608f0516cde30e5a6e5a66c68a4000e2deaaeccb7996995efe800f7  .github/workflows/instruction-floor-guard.yml
+19a7810e48df249e27e5c281312d9e2dbef8d02057d09f7da538080c9e12dcce  .github/workflows/instruction-floor-guard.yml
 12c76aaf485d4ffa9d7cd1d73a0c73f4b6e6cd7519e690b22700d5c38f1a7763  crates/trusty-mpm/src/assets/instructions/sections/enforcement.md
 25fe05ed4853590324bd5fdce8a147baf52bd959f269ccf99f9adff7c6fc98e8  crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md
 255e4b1eb2d3b425d3fcdaf785d7685b5c8c6755492666ca82325703744a65f0  crates/trusty-mpm/src/assets/instructions/sections/identity.md
