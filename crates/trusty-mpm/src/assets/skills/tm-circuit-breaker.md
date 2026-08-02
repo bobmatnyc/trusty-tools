@@ -12,9 +12,10 @@ effort: high
 
 Circuit breakers detect and enforce PM delegation requirements. Every breaker
 uses the same 3-strike model. This is the full reference for the canonical
-table in `PM_INSTRUCTIONS.md` (`## Circuit Breakers`) — that table is the
-source of truth for the CB numbers; this skill expands each one with
-detection patterns, violation examples, and correct alternatives.
+table in the framework floor's Delegation Enforcement section (`## Circuit
+Breakers`) — that table is the source of truth for the CB numbers; this skill
+expands each one with detection patterns, violation examples, and correct
+alternatives.
 
 Note: trusty-mpm's canonical numbering is **1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14**
 — not a dense 1-12 run. Numbers 11-13 are retired (they belonged to breakers
@@ -27,35 +28,60 @@ be reused.
 - **Violation #2**: ESCALATION — session flagged for review
 - **Violation #3**: FAILURE — session non-compliant
 
-No exceptions for "trivial", "documented", or cost-saving arguments — except the
-mechanical `pm_guard` PreToolUse hook's per-turn file-change budget on CB#1/CB#14
-(issue #2918): up to 3 combined Edit/Write-of-source and shell-based file edits
-are allowed per turn before the hook hard-blocks. This is hook-level headroom
-for a trivial one-line fix, not a license to plan around delegation — the
-3-strike escalation model above still applies to the PM's own behavior.
+CB#1 and CB#14 are BUDGETED, not absolute (issue #4594). The governing rule,
+stated in the framework floor:
 
-## CB#1: Large Implementation
+> The user can always override. The PM delegates when it believes a task will
+> take more than 3 direct actions, or when it is unable to complete the task in
+> 3.
 
-**Trigger**: PM uses Edit or Write for more than ~5 lines (any file, any type)
+Both halves bind. **Up-front:** anything you judge to need more than 3 direct
+actions is delegated, never begun. **Mid-flight:** if you started believing the
+task fit in 3 direct actions and it does not, delegate the remainder at that
+point — a fourth direct action on work you misjudged trips CB#1/CB#14. One
+direct action = one `Edit`, one `Write`, or one code-modifying Bash command.
 
-**Detection**: Edit/Write tool calls on source, config, or docs; implementation
-keywords ("fix", "update", "change", "implement") in PM's own turn.
+`pm_guard`'s PreToolUse hook enforces the file-change floor of this budget (up
+to 3 combined Edit/Write-of-source and shell-based file edits per turn before it
+hard-blocks). The hook sees files, not actions, so staying under it is not
+evidence you stayed inside the budget. The budget is not routine headroom —
+delegation stays the default, and the 3-strike escalation model above still
+applies.
 
-**Action**: BLOCK — delegate to the language-appropriate Engineer agent
-(`engineer`, `rust-engineer`, `python-engineer`, `typescript-engineer`, ...).
+Every OTHER breaker (CB#2-CB#10) is absolute: no budget, and no "trivial",
+"documented", or cost-saving exception.
 
-**Allowed exception**: `.git/COMMIT_EDITMSG` for commit messages — the only
-Edit target the PM may touch directly.
+## CB#1: Implementation Past the Budget
+
+**Trigger**: PM takes a 4th direct action (Edit/Write of source) on one task —
+either because it began work it should have estimated at more than 3 direct
+actions, or because a 3-action estimate stopped holding and it kept going
+instead of handing off.
+
+**Detection**: a 4th Edit/Write in one task; implementation keywords ("fix",
+"update", "change", "implement") in PM's own turn on work already past 3
+actions.
+
+**Action**: BLOCK — delegate the REMAINDER to the language-appropriate Engineer
+agent (`engineer`, `rust-engineer`, `python-engineer`, `typescript-engineer`,
+...). Work already done stands; it is the continuation that trips the breaker.
+
+**Not a violation**: an Edit or Write inside the budget, `.git/COMMIT_EDITMSG`
+for commit messages, or any non-source write on the PM allowlist
+(`.trusty-mpm/**`, docs, config, `TASK.md`) — those are unbudgeted.
 
 **Violation:**
 ```
-PM: Edit(src/<file>, ...)                             # implementation
-PM: Write(docs/README.md, ...)                        # writing docs directly
+PM: Edit(src/a.rs) Edit(src/b.rs) Edit(src/c.rs)      # 3 direct actions — inside budget
+PM: Edit(src/d.rs, ...)                               # 4th — BLOCK, hand off instead
+PM: *starts a 12-file refactor itself*                # should never have begun
 ```
 
 **Correct:**
 ```
-PM: Edit(.git/COMMIT_EDITMSG, ...)                    # ALLOWED
+PM: Edit(.git/COMMIT_EDITMSG, ...)                    # unbudgeted
+PM: Edit(src/a.rs)                                    # 1 of 3 — a genuine one-liner
+PM: *estimate broke at action 3 → delegates the rest* # MID-FLIGHT HANDOFF
 PM: *delegates to the language-appropriate engineer*  # rust-engineer for a Cargo
                                                        # project, nextjs-/typescript-
                                                        # engineer for Node, python-
@@ -247,8 +273,9 @@ before deciding whether to retry.
 **Detection**: any of the above tokens in a PM-issued Bash command with a
 file target.
 
-**Action**: BLOCK — delegate to the Engineer agent, or use Edit/Write
-directly ONLY for the CB#1 exception (commit messages).
+**Action**: BLOCK — delegate to the Engineer agent. Use `Edit`/`Write` instead,
+which counts against the same direct-action budget as CB#1; a code-modifying
+Bash command is never the right tool regardless of budget.
 
 **Violation:** `PM: Bash(sed -i 's/old/new/' <any-file>)`
 

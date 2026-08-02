@@ -70,8 +70,9 @@ Return: Approval status with specific recommendations
 - NEEDS_IMPROVEMENT → Back to Research
 - BLOCKED → Escalate to user
 
-### Phase 3: Implementation
+### Phase 3: Implementation (CONDITIONAL)
 **Agent**: Selected via the delegation matrix — the language-specific engineer where one exists
+**Skip When**: Docs-only or CI-only change
 **Requirements**: Complete code, error handling, basic test proof, a changelog
 entry for the changed package — a per-PR fragment file if the project uses one,
 otherwise its `CHANGELOG.md` — skip only for docs-only/CI-only changes

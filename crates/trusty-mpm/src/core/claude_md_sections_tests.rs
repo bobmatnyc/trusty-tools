@@ -1067,7 +1067,7 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
         "the CORE override must still apply; core stays project-customizable"
     );
     assert!(
-        !prompt.contains("## PM Allowlist (strict -- nothing else)"),
+        !prompt.contains("## PM Allowlist"),
         "the override really did replace the bundled core section"
     );
 
@@ -1111,7 +1111,7 @@ fn the_authority_tables_survive_every_override_configuration() {
     let (prompt, _) = resolve(deployed.path());
     assert!(prompt.contains("DO_EXACTLY_THIS"));
     assert!(
-        !prompt.contains("## PM Allowlist (strict -- nothing else)"),
+        !prompt.contains("## PM Allowlist"),
         "the deployed body really did replace every bundled section"
     );
     assert_authority_intact(&prompt, "PM_INSTRUCTIONS_DEPLOYED.md full replacement");
@@ -1289,6 +1289,41 @@ fn the_direct_action_budget_states_both_halves_in_the_floor() {
     assert!(
         flat.contains("All OTHER prohibitions (P2–P4, P6–P11) are routing rules"),
         "P2-P4 and P6-P11 must remain absolute, no budget (#4594)"
+    );
+}
+
+#[test]
+fn the_pm_allowlist_does_not_contradict_the_action_budget() {
+    // The FIFTH incompatible statement, caught in review of the #4594 fix and
+    // the same defect class the issue was filed on. The allowlist sat near the
+    // TOP of the compiled prompt — read first — and its only write row said
+    // "NOT source code", while the floor ~1000 lines later said P1/P5 are
+    // budgeted at 3 direct actions "including one Edit, one Write". A prompt
+    // asserting both lets the PM cite whichever suits it.
+    //
+    // Asserted on the BUNDLED DEFAULT prompt, not the floor projection: the
+    // allowlist is project-tier by design, so a project may legitimately
+    // replace it. What must never ship is a DEFAULT that contradicts the floor.
+    let tmp = TempDir::new().unwrap();
+    let flat = unwrapped(&resolve(tmp.path()).0);
+
+    assert!(
+        !flat.contains("docs, config — NOT source code, NOT bulk edits"),
+        "the allowlist must not assert source edits are off-limits outright \
+         while the floor budgets them (#4594)"
+    );
+    assert!(
+        flat.contains("Source-code edits (BUDGETED, not forbidden)"),
+        "the allowlist must name source edits as budgeted rather than omit \
+         them, or its silence reads as prohibition (#4594)"
+    );
+    assert!(
+        flat.contains(
+            "delegate once the task will take more than 3 direct actions, or the moment a \
+             3-action estimate stops holding mid-flight"
+        ),
+        "the allowlist's budget row must carry BOTH halves, including the \
+         mid-flight handoff (#4594)"
     );
 }
 
