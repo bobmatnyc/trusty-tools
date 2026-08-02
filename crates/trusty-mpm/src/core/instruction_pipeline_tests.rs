@@ -7,6 +7,7 @@
 
 use super::*;
 use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
 
 /// Write `<name>.md` into `dir` with the given raw content.
@@ -17,15 +18,114 @@ fn write_file(path: &PathBuf, content: &str) {
     fs::write(path, content).expect("write file");
 }
 
-/// Build a `PipelineInput` rooted at `tmp` with optional INSTRUCTIONS.md.
-fn input_in(tmp: &TempDir) -> PipelineInput {
-    PipelineInput {
-        framework_instructions_path: tmp.path().join("INSTRUCTIONS.md"),
-        agents_dir: tmp.path().join("agents"),
-        claude_md_path: tmp.path().join("project").join("CLAUDE.md"),
+// ── #4588 / #4589: one resolution path, two operator-visible numbers ────────
+
+/// RAII override of every environment input
+/// [`crate::core::delegation_authority::deployed_agent_dirs`] consults, so a
+/// roster assertion is a property of the TEST rather than of the developer's
+/// machine.
+///
+/// Why: the roster is a three-tier union and two of those tiers are
+/// machine-global (`$CLAUDE_CONFIG_DIR/agents` and `$HOME/.claude/agents`).
+/// Without this, the exact-count assertions below would read whatever the
+/// developer happens to have deployed — and live `tm` sessions rewrite those
+/// directories mid-run, which is a documented 1-in-4 flake in
+/// `bundled_pm_package_tests`.
+/// What: points `$HOME` and `$CLAUDE_CONFIG_DIR` at a fresh temp root and
+/// restores both on drop (including on a panic-driven unwind).
+/// Test: used by `session_start_count_matches_the_delivered_delegation_roster`.
+struct RosterTiers {
+    tmp: TempDir,
+    prev_home: Option<std::ffi::OsString>,
+    prev_config: Option<std::ffi::OsString>,
+}
+
+impl RosterTiers {
+    /// Callers MUST be tagged `#[serial_test::serial]` — this mutates
+    /// process-global environment state.
+    fn new() -> Self {
+        let tmp = TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        let prev_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+        // SAFETY: every caller is `#[serial]`, so no other test thread races
+        // this set/restore.
+        unsafe {
+            std::env::set_var("HOME", tmp.path().join("home"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path().join("claude-config"));
+        }
+        Self {
+            tmp,
+            prev_home,
+            prev_config,
+        }
+    }
+
+    /// The project whose roster is under test.
+    fn project(&self) -> PathBuf {
+        self.tmp.path().join("project")
+    }
+
+    /// Tier 1 — `<project>/.claude/agents`, the operator's hand-placed agents.
+    fn project_tier(&self) -> PathBuf {
+        self.project().join(".claude").join("agents")
+    }
+
+    /// Tier 2 — the tm-managed `$CLAUDE_CONFIG_DIR/agents` bundled agents
+    /// deploy into since #4409. This is the ONE directory the pre-#4588
+    /// session-start count was derived from.
+    fn managed_tier(&self) -> PathBuf {
+        self.tmp.path().join("claude-config").join("agents")
+    }
+
+    /// Tier 3 — the operator's own generic `~/.claude/agents`, which tm never
+    /// writes to but a launched session still resolves agents from. This tier
+    /// held the five agents behind #4588's observed 34-vs-39 delta.
+    fn generic_tier(&self) -> PathBuf {
+        self.tmp.path().join("home").join(".claude").join("agents")
     }
 }
 
+impl Drop for RosterTiers {
+    fn drop(&mut self) {
+        // SAFETY: caller is `#[serial]`.
+        unsafe {
+            match self.prev_home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.prev_config.take() {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+    }
+}
+
+/// Write a minimal composed agent named `name` into `dir`.
+fn write_roster_agent(dir: &Path, name: &str) {
+    fs::create_dir_all(dir).expect("create tier");
+    fs::write(
+        dir.join(format!("{name}.md")),
+        format!("---\nname: {name}\nrole: {name}\ndescription: Handles {name} work.\n---\n"),
+    )
+    .expect("write agent");
+}
+
+/// Build a `PipelineInput` for the isolated project `tiers` describes.
+///
+/// #4588: the pipeline resolves the roster from the PROJECT, not from a
+/// caller-named directory, so every test that asserts an exact `agent_count`
+/// must pin all three tiers — hence [`RosterTiers`] rather than a bare
+/// `TempDir`.
+fn input_in(tiers: &RosterTiers) -> PipelineInput {
+    PipelineInput {
+        framework_instructions_path: tiers.tmp.path().join("INSTRUCTIONS.md"),
+        project_dir: tiers.project(),
+        claude_md_path: tiers.project().join("CLAUDE.md"),
+    }
+}
+
+#[serial_test::serial]
 #[test]
 fn pipeline_full() {
     // All inputs present → merged output contains the two framework
@@ -33,18 +133,14 @@ fn pipeline_full() {
     // deliberately NOT folded into `merged` (dead code removed — Claude
     // Code loads CLAUDE.md natively and the real launch prompt never
     // read this field for that content).
-    let tmp = TempDir::new().unwrap();
-    let input = input_in(&tmp);
+    let tiers = RosterTiers::new();
+    let input = input_in(&tiers);
 
     write_file(
         &input.framework_instructions_path,
         "# Framework\n\nFRAMEWORK SECTION\n",
     );
-    fs::create_dir_all(&input.agents_dir).unwrap();
-    write_file(
-        &input.agents_dir.join("engineer.md"),
-        "---\nname: engineer\nrole: engineer\ndescription: Builds things.\n---\n\n# Engineer\n",
-    );
+    write_roster_agent(&tiers.project_tier(), "engineer");
     write_file(&input.claude_md_path, "# Project\n\nPROJECT SECTION\n");
 
     let out = build_instructions(&input).unwrap();
@@ -69,18 +165,15 @@ fn pipeline_full() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn pipeline_missing_instructions() {
     // INSTRUCTIONS.md absent → pipeline still succeeds, instructions_loaded
     // is false, and section 4 is still present.
-    let tmp = TempDir::new().unwrap();
-    let input = input_in(&tmp);
+    let tiers = RosterTiers::new();
+    let input = input_in(&tiers);
     // No INSTRUCTIONS.md written.
-    fs::create_dir_all(&input.agents_dir).unwrap();
-    write_file(
-        &input.agents_dir.join("qa.md"),
-        "---\nname: qa\nrole: qa\ndescription: Tests things.\n---\n\n# QA\n",
-    );
+    write_roster_agent(&tiers.project_tier(), "qa");
     write_file(&input.claude_md_path, "# Project\n\nPROJECT NOTES\n");
 
     let out = build_instructions(&input).unwrap();
@@ -91,15 +184,15 @@ fn pipeline_missing_instructions() {
     assert!(!out.merged.starts_with("---"));
 }
 
+#[serial_test::serial]
 #[test]
 fn pipeline_creates_claude_md() {
     // CLAUDE.md absent → it is created as a side effect, claude_md_created
     // is true, and the file on disk contains the stub — but the stub text
     // is NOT folded into `merged` (dead code removed).
-    let tmp = TempDir::new().unwrap();
-    let input = input_in(&tmp);
+    let tiers = RosterTiers::new();
+    let input = input_in(&tiers);
     write_file(&input.framework_instructions_path, "# Framework\n");
-    fs::create_dir_all(&input.agents_dir).unwrap();
 
     assert!(!input.claude_md_path.exists());
     let out = build_instructions(&input).unwrap();
@@ -123,6 +216,7 @@ fn pipeline_creates_claude_md() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn pipeline_claude_md_left_byte_identical() {
     // Why (#2170): trusty-mpm must NEVER modify a target project's
@@ -131,10 +225,9 @@ fn pipeline_claude_md_left_byte_identical() {
     // text — must come back out of `build_instructions` completely
     // untouched on disk, and its content must not leak into `merged`
     // (dead code removed).
-    let tmp = TempDir::new().unwrap();
-    let input = input_in(&tmp);
+    let tiers = RosterTiers::new();
+    let input = input_in(&tiers);
     write_file(&input.framework_instructions_path, "# Framework\n");
-    fs::create_dir_all(&input.agents_dir).unwrap();
     let custom = "# My Project\n\nCUSTOM HAND-WRITTEN CONTENT\n";
     write_file(&input.claude_md_path, custom);
 
@@ -484,16 +577,63 @@ fn primary_directive_mandate_not_duplicated_across_channels() {
     }
 }
 
+#[serial_test::serial]
 #[test]
 fn pipeline_no_agents_still_succeeds() {
-    // An empty agents dir yields a zero agent_count and the "no agents"
+    // Every tier empty yields a zero agent_count and the "no agents"
     // delegation section, but the pipeline still produces merged output.
-    let tmp = TempDir::new().unwrap();
-    let input = input_in(&tmp);
+    let tiers = RosterTiers::new();
+    let input = input_in(&tiers);
     write_file(&input.framework_instructions_path, "# Framework\n");
-    fs::create_dir_all(&input.agents_dir).unwrap();
 
     let out = build_instructions(&input).unwrap();
     assert_eq!(out.agent_count, 0);
     assert!(out.merged.to_lowercase().contains("no delegatable agents"));
+}
+
+#[serial_test::serial]
+#[test]
+fn session_start_count_matches_the_delivered_delegation_roster() {
+    // THE #4588 GATE. `tm session start` prints
+    // `Instructions: {agent_count} agents in delegation authority` straight
+    // from `PipelineOutput::agent_count`, while the roster the PM actually
+    // receives is rendered by `deployed_roster_section`. Those were two
+    // independent resolutions — a single-directory scan versus a three-tier
+    // union — so the printed number understated the delivered roster (34 vs 39
+    // measured live on tm 1.3.1). Both must now come from ONE resolver, which
+    // is what this asserts: not that the number is plausible, but that it is
+    // the SAME number, computed the same way, over a roster spanning all three
+    // tiers with a deliberate cross-tier duplicate.
+    let tiers = RosterTiers::new();
+
+    write_roster_agent(&tiers.managed_tier(), "engineer");
+    write_roster_agent(&tiers.managed_tier(), "qa");
+    write_roster_agent(&tiers.generic_tier(), "writer");
+    write_roster_agent(&tiers.project_tier(), "ticketing");
+    // Deployed in two tiers at once — the union must advertise it exactly once,
+    // so a naive concatenation cannot pass this test either.
+    write_roster_agent(&tiers.generic_tier(), "qa");
+
+    let input = PipelineInput {
+        framework_instructions_path: tiers.tmp.path().join("INSTRUCTIONS.md"),
+        project_dir: tiers.project(),
+        claude_md_path: tiers.project().join("CLAUDE.md"),
+    };
+    write_file(&input.framework_instructions_path, "# Framework\n");
+
+    let out = build_instructions(&input).expect("pipeline");
+    let delivered = crate::core::delegation_authority::deployed_roster_section(&tiers.project())
+        .expect("a roster is deployed in three tiers, so a section must render");
+    let delivered_entries = delivered.matches("\n### ").count();
+
+    assert_eq!(
+        out.agent_count, delivered_entries,
+        "the count `tm session start` prints must equal the number of agents \
+         the PM was actually given (#4588)\nprinted: {}\ndelivered roster:\n{delivered}",
+        out.agent_count
+    );
+    assert_eq!(
+        out.agent_count, 4,
+        "engineer + qa + writer + ticketing, with the cross-tier `qa` counted once"
+    );
 }

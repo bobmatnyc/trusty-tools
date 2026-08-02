@@ -102,16 +102,6 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
     fm
 }
 
-/// Whether a role marks a foundation (non-delegatable) agent.
-///
-/// Why: `base-agent` / `base-engineer` and friends are inheritance foundations,
-/// not work destinations; advertising them would mislead the router.
-/// What: returns true when the role (lower-cased) starts with `base`.
-/// Test: `scan_excludes_base_agents`.
-fn is_base_role(role: &str) -> bool {
-    role.trim().to_ascii_lowercase().starts_with("base")
-}
-
 /// Scan `agents_dir` and return summaries for all non-base agents.
 ///
 /// Why: the orchestrating CC instance needs to know which agents exist
@@ -121,7 +111,20 @@ fn is_base_role(role: &str) -> bool {
 /// role, description, model, extends), excludes BASE-* files and the
 /// manifest file, returns one AgentSummary per deployable agent.
 ///
-/// Test: `scan_finds_agents`, `scan_excludes_base_agents`, `scan_empty_dir`
+/// Foundation templates are identified by the `BASE-*` FILE NAME convention
+/// alone (#4589). An earlier revision also dropped any agent whose frontmatter
+/// `role:` began with `base`, which silently deleted three real, dispatchable
+/// agents — `memory-manager`, `mpm-agent-manager`, `mpm-skills-manager` — from
+/// every roster. `role:` is the wrong signal for the job: the roster is a union
+/// over three tiers (see [`deployed_agent_dirs`]) and tm authors the frontmatter
+/// in exactly one of them, so no asset edit can stop the same rule from eating
+/// an operator's own agent in `<project>/.claude/agents` or `~/.claude/agents`.
+/// The file-name convention is tm's own, applies to the files tm actually
+/// ships, and is checked before the file is even read.
+///
+/// Test: `scan_finds_agents`, `scan_excludes_base_agents`,
+/// `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`,
+/// `scan_empty_dir`
 pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
     // An ABSENT tier is normal (not every launch mode populates every tier) and
     // stays silent. Any OTHER enumeration failure — permissions, a bad mount, an
@@ -172,13 +175,6 @@ pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
         let fm = parse_frontmatter(&raw);
         let name = fm.name.clone().unwrap_or_else(|| stem.to_string());
         let role = fm.role.clone().unwrap_or_else(|| name.clone());
-
-        // Also exclude by declared role, catching base agents whose file name
-        // does not follow the `base-` convention.
-        if is_base_role(&role) {
-            continue;
-        }
-
         let extends_chain = build_extends_chain(fm.extends.as_deref(), &name);
 
         summaries.push(AgentSummary {
@@ -330,6 +326,26 @@ pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
     by_name.into_values().collect()
 }
 
+/// THE agent roster for `project_dir`. Every consumer calls this one function.
+///
+/// Why (#4588): a roster resolved twice is a roster that drifts. The PM prompt
+/// took the three-tier union while `tm session start` printed a count taken
+/// from a single directory, so the operator was told 34 when the PM had been
+/// given 39 — the two numbers were never wrong in the same way at the same
+/// time, because they were never the same computation. There is now exactly one
+/// implementation, and `tm session start`, the delegation section injected into
+/// the PM prompt, and `tm doctor` all read it.
+/// What: unions [`deployed_agent_dirs`] via [`roster_from_dirs`], name-sorted
+/// and deduplicated with the highest-precedence tier winning.
+/// Test: `session_start_count_matches_the_delivered_delegation_roster`
+/// (instruction_pipeline_tests) is the cross-consumer agreement gate; the
+/// tier-union behaviour itself is covered by the `roster_from_dirs_*` tests.
+/// This function consults machine-global tiers, so it has no hermetic direct
+/// test of its own.
+pub fn resolve_roster(project_dir: &Path) -> Vec<AgentSummary> {
+    roster_from_dirs(&deployed_agent_dirs(project_dir))
+}
+
 /// Render the LIVE deployed roster for a project, or `None` when none is found.
 ///
 /// Why (#4069): `build_instructions` already computed this section via
@@ -343,8 +359,8 @@ pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
 /// `tm session instructions`, the tmux connect path, the daemon spawn — receive
 /// a `project_dir` and nothing else, and two of them never run the pipeline at
 /// all, so there is no `PipelineOutput` available to thread.
-/// What: unions [`deployed_agent_dirs`] via [`roster_from_dirs`] and renders it
-/// with [`generate_authority`]. Returns `None` when no agent is deployed
+/// What: resolves the roster via [`resolve_roster`] — the one resolver every
+/// consumer shares — and renders it with [`generate_authority`]. Returns `None` when no agent is deployed
 /// anywhere, so an unprovisioned environment keeps exactly the previous
 /// behaviour (the bundled asset alone) instead of being told it has no agents.
 /// Test: `roster_from_dirs_ignores_missing_dirs` (the `None` branch's input) and
@@ -352,8 +368,7 @@ pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
 /// (the rendered output reaching the delivered prompt). This function itself
 /// consults machine-global tiers, so it has no hermetic direct test.
 pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
-    let dirs = deployed_agent_dirs(project_dir);
-    let agents = roster_from_dirs(&dirs);
+    let agents = resolve_roster(project_dir);
     if agents.is_empty() {
         // Reverting to the bundled asset must be an OBSERVABLE event, not an
         // invisible one — this is the state #4069 describes, and if it recurs
@@ -362,7 +377,7 @@ pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
         // 8-name prompt that looks healthy.
         tracing::info!(
             project = %project_dir.display(),
-            tiers = dirs.len(),
+            tiers = deployed_agent_dirs(project_dir).len(),
             "no deployed agents found in any tier; delegation section falls back to the \
              bundled asset alone"
         );
@@ -417,8 +432,10 @@ mod tests {
 
     #[test]
     fn scan_excludes_base_agents() {
-        // BASE-* files (by name) and base-role agents (by frontmatter) must
-        // never appear in the scan results.
+        // Foundation templates are excluded by the `BASE-*` FILE NAME
+        // convention, case-insensitively, and never by frontmatter (#4589 —
+        // see `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`
+        // for why the `role:` half was removed).
         let tmp = TempDir::new().unwrap();
         write_agent(
             tmp.path(),
@@ -430,12 +447,6 @@ mod tests {
             "base-engineer",
             "---\nname: base-engineer\nrole: base-engineer\n---\n\nfoundation\n",
         );
-        // A file not following the `base-` name convention but with a base role.
-        write_agent(
-            tmp.path(),
-            "foundation",
-            "---\nname: foundation\nrole: base-thing\n---\n\nfoundation\n",
-        );
         write_agent(
             tmp.path(),
             "qa",
@@ -445,9 +456,30 @@ mod tests {
         let agents = scan_agents(tmp.path());
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].name, "qa");
-        assert!(
-            agents.iter().all(|a| !a.role.starts_with("base")),
-            "no base-role agent should survive the scan"
+    }
+
+    #[test]
+    fn agent_with_a_base_role_but_no_base_filename_stays_in_the_roster() {
+        // #4589 REGRESSION. `memory-manager`, `mpm-agent-manager` and
+        // `mpm-skills-manager` shipped with `role: base` and were therefore
+        // dropped from every tier of the roster — deployed, dispatchable, and
+        // invisible to the PM. The exclusion keys off the `BASE-*` FILE NAME
+        // convention (tm's own, applied to the files tm ships) rather than a
+        // frontmatter value tm does not control in the project and generic
+        // `~/.claude/agents` tiers it also unions.
+        let tmp = TempDir::new().unwrap();
+        write_agent(
+            tmp.path(),
+            "memory-manager",
+            "---\nname: memory-manager\nrole: base\ndescription: Manages memory.\n---\n\n# MM\n",
+        );
+
+        let agents = scan_agents(tmp.path());
+        assert_eq!(
+            agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["memory-manager"],
+            "a non-`BASE-*` file must never be classified as a foundation \
+             template by its `role:` value alone (#4589)"
         );
     }
 
@@ -589,18 +621,14 @@ mod tests {
 
     #[test]
     fn every_bundled_non_base_agent_reaches_the_roster() {
-        // Issue #4069 REGRESSION GATE (review HIGH-1). `is_base_role` drops any
-        // agent whose `role:` starts with "base" — a deliberate rule that also
-        // catches base agents whose FILE name does not follow the `BASE-`
-        // convention (see `scan_excludes_base_agents`). Three bundled agents
-        // were misfiled with `role: base` despite being ordinary delegatable
-        // agents (`memory-manager`, `mpm-agent-manager`, `mpm-skills-manager`),
-        // so they were silently dropped from EVERY tier they deploy into — the
-        // exact "advertised roster != real roster" defect #4069 exists to fix.
-        //
-        // This asserts the invariant at the ASSET level rather than weakening
-        // the scanner: every bundled `.md` that is not a `BASE-*` foundation
-        // file must survive `scan_agents`.
+        // Issue #4069 / #4589 REGRESSION GATE. The scanner's only exclusion is
+        // the `BASE-*` file-name convention, so this asserts the property that
+        // matters end to end: every bundled `.md` that is not a `BASE-*`
+        // foundation file survives `scan_agents` and can therefore be routed
+        // to. It is the asset-level half of the same invariant
+        // `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`
+        // asserts at the scanner level — one guards the shipped files, the
+        // other guards the rule, and #4589 needed both.
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents");
 
         let mut expected: Vec<String> = fs::read_dir(&assets)

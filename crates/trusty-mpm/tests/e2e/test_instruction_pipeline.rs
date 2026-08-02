@@ -15,12 +15,22 @@ use trusty_mpm::core::agent_deployer::deploy_agents;
 use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions};
 
 /// Build a `PipelineInput` rooted at `tmp`.
+///
+/// #4588: the pipeline resolves its roster from the PROJECT via the one shared
+/// resolver, so the input names a project directory rather than an agents
+/// directory. Agents for these tests go into that project's own
+/// `.claude/agents` tier — see [`agents_tier`].
 fn input_in(tmp: &TempDir) -> PipelineInput {
     PipelineInput {
         framework_instructions_path: tmp.path().join("INSTRUCTIONS.md"),
-        agents_dir: tmp.path().join("agents"),
+        project_dir: tmp.path().join("project"),
         claude_md_path: tmp.path().join("project").join("CLAUDE.md"),
     }
+}
+
+/// The highest-precedence roster tier for `input`'s project.
+fn agents_tier(input: &PipelineInput) -> PathBuf {
+    input.project_dir.join(".claude").join("agents")
 }
 
 fn write(path: &PathBuf, content: &str) {
@@ -45,9 +55,9 @@ fn pipeline_produces_merged_output() {
         &input.framework_instructions_path,
         "# Framework\n\nFRAMEWORK SECTION\n",
     );
-    std::fs::create_dir_all(&input.agents_dir).unwrap();
+    std::fs::create_dir_all(agents_tier(&input)).unwrap();
     write(
-        &input.agents_dir.join("engineer.md"),
+        &agents_tier(&input).join("engineer.md"),
         "---\nname: engineer\nrole: engineer\ndescription: Builds things.\n---\n\n# Engineer\n",
     );
     // No CLAUDE.md — the pipeline must still seed the stub.
@@ -82,7 +92,7 @@ fn pipeline_preserves_claude_md() {
     let input = input_in(&tmp);
 
     write(&input.framework_instructions_path, "# Framework\n");
-    std::fs::create_dir_all(&input.agents_dir).unwrap();
+    std::fs::create_dir_all(agents_tier(&input)).unwrap();
     let custom = "# My Project\n\nCUSTOM HAND-WRITTEN CONTENT\n";
     write(&input.claude_md_path, custom);
 
@@ -112,7 +122,7 @@ fn pipeline_without_instructions_file() {
     let tmp = TempDir::new().unwrap();
     let input = input_in(&tmp);
     // No INSTRUCTIONS.md written.
-    std::fs::create_dir_all(&input.agents_dir).unwrap();
+    std::fs::create_dir_all(agents_tier(&input)).unwrap();
 
     let out = build_instructions(&input).expect("pipeline succeeds");
     assert!(!out.instructions_loaded);
@@ -130,7 +140,7 @@ fn pipeline_authority_lists_deployed_agents() {
     // Deploy a real composed engineer agent into the pipeline's agents dir.
     let src = TempDir::new().unwrap();
     write_agent_sources(src.path());
-    deploy_agents(src.path(), &input.agents_dir).expect("deploy succeeds");
+    deploy_agents(src.path(), &agents_tier(&input)).expect("deploy succeeds");
 
     let out = build_instructions(&input).expect("pipeline succeeds");
     assert!(out.agent_count >= 1, "deployed agents counted");
