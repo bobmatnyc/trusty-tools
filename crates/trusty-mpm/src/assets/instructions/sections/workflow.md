@@ -35,10 +35,16 @@ Derived rules:
 - Branch = workstream, and it is durable. Worktree = writer, and it is ephemeral
   and short-lived. Keep worktrees short-lived; keep branches workstream-scoped.
 
-## Mandatory 5-Phase Sequence
+## 5-Phase Sequence
+
+Every phase here is CONDITIONAL: it runs unless its skip condition holds. The
+CORE section's phase table is canonical for WHETHER a phase runs and carries the
+skip condition; this section describes HOW each phase is executed. Where a phase
+runs, its gate is blocking — "conditional" governs entry, never rigour (issue
+#4594).
 
 ### Phase 1: Research (CONDITIONAL)
-**Agent**: Research
+**Agent**: `research`
 **When Required**: Ambiguous requirements, multiple approaches possible, unfamiliar codebase
 **Skip When**: User provides explicit command, task is simple operational (start/stop/build/test)
 **Output**: Requirements, constraints, success criteria, risks
@@ -48,8 +54,9 @@ Task: Analyze requirements for [feature]
 Return: Technical requirements, gaps, measurable criteria, approach
 ```
 
-### Phase 2: Code Analysis Review (MANDATORY)
-**Agent**: code-analyzer (sonnet model)
+### Phase 2: Code Analysis Review (CONDITIONAL)
+**Agent**: `code-analyzer` (sonnet model) — not `code-critic`, a separate agent
+**Skip When**: Change is < 100 lines with no architectural impact
 **Output**: APPROVED/NEEDS_IMPROVEMENT/BLOCKED
 **Template**:
 ```
@@ -64,25 +71,29 @@ Return: Approval status with specific recommendations
 - BLOCKED → Escalate to user
 
 ### Phase 3: Implementation
-**Agent**: Selected via delegation matrix
+**Agent**: Selected via the delegation matrix — the language-specific engineer where one exists
 **Requirements**: Complete code, error handling, basic test proof, a changelog
 entry for the changed package — a per-PR fragment file if the project uses one,
 otherwise its `CHANGELOG.md` — skip only for docs-only/CI-only changes
 
-### Phase 4: QA (MANDATORY)
-**Agent**: API QA (APIs), Web QA (UI), qa (general)
+### Phase 4: QA (CONDITIONAL)
+**Agent**: `api-qa` (APIs), `web-qa` (UI), `qa` (general)
+**Skip When**: The engineer self-verified by running the full test suite and
+showed raw output, or the user said "no QA"
 **Requirements**: Real-world testing with evidence
 
 **Routing**:
 ```python
-if "API" in implementation: use "API QA"
-elif "UI" in implementation: use "Web QA"
-else: use qa
+if "API" in implementation: use "api-qa"
+elif "UI" in implementation: use "web-qa"
+else: use "qa"
 ```
 
-### QA Verification Gate (BLOCKING)
+### QA Verification Gate (BLOCKING when phase 4 runs)
 
-**No phase completion without verification evidence.**
+**No phase completion without verification evidence.** Skipping phase 4 moves
+where the evidence comes from — the engineer's raw test output instead of a QA
+agent's — it never removes the evidence requirement.
 
 | Phase | Verification Required | Evidence Format |
 |-------|----------------------|-----------------|
@@ -122,16 +133,17 @@ Evidence:
 Status: PASSED
 ```
 
-### Phase 5: Documentation Agent
-**Agent**: Documentation Agent
+### Phase 5: Documentation (CONDITIONAL)
+**Agent**: `documentation`
 **When**: Code changes made
+**Skip When**: No public API changes — an internal refactor only
 **Output**: Updated docs, API specs, README
 
 ## Git Security Review (Before Push)
 
 **Mandatory before `git push`**:
 1. Run `git diff origin/main HEAD`
-2. Delegate to Security for credential scan
+2. Delegate to `security` for a credential scan
 3. Block push if secrets detected
 
 **Security Check Template**:
@@ -156,11 +168,11 @@ default:
 
 ## Publish and Release Workflow
 
-**CRITICAL**: PM MUST DELEGATE all version bumps and releases to Local Ops. PM never edits version files (pyproject.toml, package.json, VERSION) directly.
+**CRITICAL**: PM MUST DELEGATE all version bumps and releases to `local-ops`. PM never edits version files (pyproject.toml, package.json, VERSION) directly.
 
-**Note**: Release workflows are project-specific and should be customized per project. See the Local Ops agent memory for this project's release workflow, or create one using `/mpm-init` for new projects.
+**Note**: Release workflows are project-specific and should be customized per project. See the `local-ops` agent memory for this project's release workflow, or create one using `/mpm-init` for new projects.
 
-For projects with specific release requirements (PyPI, npm, Homebrew, Docker, etc.), the Local Ops agent should have the complete workflow documented in its memory file.
+For projects with specific release requirements (PyPI, npm, Homebrew, Docker, etc.), the `local-ops` agent should have the complete workflow documented in its memory file.
 
 ## Structural Delegation Format
 

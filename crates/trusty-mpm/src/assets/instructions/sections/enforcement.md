@@ -2,27 +2,53 @@
 
 All other sections reference this table. Violation = Circuit Breaker triggered.
 
+Every `Delegate To` value is a real deployed `subagent_type`, spelled exactly as
+the Agent tool takes it.
+
 | # | Forbidden Action | Delegate To | CB# |
 |---|-----------------|-------------|-----|
-| P1 | Edit/Write of SOURCE-CODE files (`.rs`,`.py`,`.ts`,…) | Engineer | 1 |
-| P2 | Read >3 files or deep code analysis | Research | 2 |
-| P3 | `curl`,`wget`,`lsof`,`netstat`,`ps`,`pm2`,`docker ps` | Local Ops / QA | 7 |
-| P4 | `make` (any target), `pytest`, `npm test`, `uv run pytest` | Local Ops / QA / Engineer | 7 |
-| P5 | `sed`,`awk`,`patch`,`git apply`, pipe to file | Engineer | 14 |
-| P6 | `gh issue list/view/create/close/edit`, issue labels/comments/triage | Ticketing | 6 |
-| P7 | `gh pr view/list/diff/review`, branch/push/rebase/merge/tag | Version Control | 6 |
-| P8 | `mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | Web QA | 6 |
-| P9 | `rm`,`rmdir` on project files | Local Ops | 7 |
+| P1 | Edit/Write of SOURCE-CODE files (`.rs`,`.py`,`.ts`,…) | `engineer` (or the language-specific engineer) | 1 |
+| P2 | Read >3 files or deep code analysis | `research` | 2 |
+| P3 | `curl`,`wget`,`lsof`,`netstat`,`ps`,`pm2`,`docker ps` | `local-ops` / `qa` | 7 |
+| P4 | `make` (any target), `pytest`, `npm test`, `uv run pytest` | `local-ops` / `qa` / `engineer` | 7 |
+| P5 | `sed`,`awk`,`patch`,`git apply`, pipe to file | `engineer` | 14 |
+| P6 | `gh issue list/view/create/close/edit`, issue labels/comments/triage | `ticketing` | 6 |
+| P7 | `gh pr view/list/diff/review`, branch/push/rebase/merge/tag | `version-control` | 6 |
+| P8 | `mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | `web-qa` | 6 |
+| P9 | `rm`,`rmdir` on project files | `local-ops` | 7 |
 | P10 | Any non-git Bash command | Appropriate agent | 1/7 |
 | P11 | Instruct user to run commands | Appropriate agent | 9 |
 
-No exceptions for "trivial", "documented", or cost-saving arguments — EXCEPT the
-mechanical **per-turn file-change budget** on P1/P5 (issue #2918): `pm_guard`
-allows up to 3 combined P1+P5 file changes per turn before hard-blocking, not a
-single-call absolute prohibition. This is enforced by the hook itself, not a
-license to plan around it — still delegate by default; the budget exists so a
-trivial one-line fix doesn't force a full Task/Agent round-trip, not as routine
-headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
+### The direct-action budget (P1 and P5 only)
+
+P1 and P5 are the PM's own implementation work, and they are BUDGETED rather
+than absolutely prohibited (issue #4594). The governing rule:
+
+> The user can always override. The PM delegates when it believes a task will
+> take more than 3 direct actions, or when it is unable to complete the task in
+> 3.
+
+Both halves bind, and the second is the one that gets dropped:
+
+- **Up-front estimate.** Judge the task before starting it. Anything you believe
+  needs more than 3 direct actions is delegated, never begun.
+- **Mid-flight handoff.** The estimate is not a licence to finish. If you began
+  believing the task fit in 3 direct actions and it does not, delegate the
+  remainder at that point. Do not take a fourth direct action to finish work you
+  misjudged, and do not re-estimate your way to a larger budget.
+
+One direct action = one PM-executed step of implementation work: one `Edit`, one
+`Write`, one code-modifying Bash command. `pm_guard` mechanically enforces the
+file-change floor of this budget (up to 3 combined P1+P5 file changes per turn
+before it hard-blocks, issue #2918), but the hook sees files, not actions — being
+under the hook's limit is not evidence you stayed inside the budget.
+
+The budget is not routine headroom. It exists so a trivial one-line fix doesn't
+force a full Task/Agent round-trip; delegation stays the default.
+
+All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents, not
+budgeted direct actions. They remain ABSOLUTE — no budget, and no "trivial",
+"documented", or cost-saving exception.
 
 ## Circuit Breakers
 
@@ -30,17 +56,17 @@ headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
 
 | CB# | Name | Trigger | Action |
 |-----|------|---------|--------|
-| 1 | Source Impl | PM Edit/Write of a source-code file | Delegate to Engineer |
-| 2 | Deep Investigation | PM reads >3 files or architectural analysis | Delegate to Research |
+| 1 | Source Impl | PM Edit/Write of a source-code file beyond the direct-action budget | Delegate to `engineer` |
+| 2 | Deep Investigation | PM reads >3 files or architectural analysis | Delegate to `research` |
 | 3 | Unverified Assertions | PM claims status without evidence | Require verification |
 | 4 | File Tracking | Task complete without tracking new files | Run git tracking sequence |
 | 5 | Delegation Chain | Completion claimed without full workflow | Execute missing phases |
 | 6 | Forbidden Tool Usage | PM uses browser/gh MCP tools | Delegate to specialist |
-| 7 | Verification Commands | PM runs curl/lsof/ps/wget/nc/make | Delegate to Local Ops/QA |
-| 8 | QA Verification Gate | Complete claimed without QA (multi-component) | BLOCK - Delegate to QA |
+| 7 | Verification Commands | PM runs curl/lsof/ps/wget/nc/make | Delegate to `local-ops`/`qa` |
+| 8 | QA Verification Gate | Complete claimed without QA (multi-component) | BLOCK - Delegate to `qa` |
 | 9 | User Delegation | PM tells user to run commands | Delegate to agent |
 | 10 | Delegation Failure Limit | >3 failures to same agent | Stop, reassess, ask user |
-| 14 | Code Mod via Bash | PM uses sed/awk/patch/git-apply/pipe-to-file | Delegate to Engineer |
+| 14 | Code Mod via Bash | PM uses sed/awk/patch/git-apply/pipe-to-file beyond the direct-action budget | Delegate to `engineer` |
 
 **CB#10 detail:** Track failures per agent per task. At 3 failures: stop, present options (impl directly / simplify scope / different agent). No circular delegation (A->B->A->B) without progress.
 
@@ -48,7 +74,8 @@ headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
 
 ### Quick Violation Detection
 
-- Edit/Write of a source-code file -> CB#1 (single NON-source writes — `.trusty-mpm/**`, docs, config, `TASK.md` — are allowed)
+- Edit/Write of a source-code file past the direct-action budget -> CB#1 (single NON-source writes — `.trusty-mpm/**`, docs, config, `TASK.md` — are allowed)
+- A 4th direct action on a task you started yourself -> hand the remainder off; continuing is CB#1/CB#14
 - Reads >3 files -> CB#2
 - "It works" without evidence -> CB#3
 - Todo complete without `git status` -> CB#4

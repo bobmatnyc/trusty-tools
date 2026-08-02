@@ -6,8 +6,8 @@
 # regenerated digests below. Regenerating these without a reviewed floor change
 # defeats the guard (issues #3374, #4183).
 92ba79819608f0516cde30e5a6e5a66c68a4000e2deaaeccb7996995efe800f7  .github/workflows/instruction-floor-guard.yml
-12c76aaf485d4ffa9d7cd1d73a0c73f4b6e6cd7519e690b22700d5c38f1a7763  crates/trusty-mpm/src/assets/instructions/sections/enforcement.md
+b5930fbb08e5111d0b9ce30e07751bf05074bea1c381dfbfc5a2060a922a5852  crates/trusty-mpm/src/assets/instructions/sections/enforcement.md
 25fe05ed4853590324bd5fdce8a147baf52bd959f269ccf99f9adff7c6fc98e8  crates/trusty-mpm/src/assets/instructions/sections/framework-guaranteed-conventions.md
-255e4b1eb2d3b425d3fcdaf785d7685b5c8c6755492666ca82325703744a65f0  crates/trusty-mpm/src/assets/instructions/sections/identity.md
-f633d6b0233c71852018d255d9e00e5cbf1b2b92e2acd9fa84e45a7cb33de20e  crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md
+417c3214339855207fb43e8f8a0c1431f93aaf6e72975f740b0cf6401decb0d2  crates/trusty-mpm/src/assets/instructions/sections/identity.md
+2162db3a800f9fab239eeea2984cef771bf8ddd4f6991b37a296b7f7b52a0ae2  crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md
 eadf8222b892b12021e169a913d9c968a764a250096a54090e0afaf62abdc12b  manifest-projection:fixed-sections
