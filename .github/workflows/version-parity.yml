@@ -48,7 +48,7 @@ on:
 # so a new push still supersedes the superseded run. Matches ci.yml.
 concurrency:
   group: version-parity-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
   # Pre-merge guard (#4421). Pure shell + one HTTP GET per touched crate: no

@@ -63,6 +63,13 @@ assert_eq "success + cancelled"           "inconclusive" "$(verdict_of 'a=succes
 assert_eq "success + skipped"             "inconclusive" "$(verdict_of 'a=success b=skipped')"
 assert_eq "failure outranks cancelled"    "red"          "$(verdict_of 'a=cancelled b=failure')"
 assert_eq "failure outranks skipped"      "red"          "$(verdict_of 'a=skipped b=failure')"
+# Both cases above put `failure` LAST, so they pass even without the
+# red-precedence guard in classify-ci-results.sh. These assert the other
+# direction: once red, nothing downgrades it. Order-independence is the actual
+# contract, and only these cases hold the guard in place.
+assert_eq "cancelled cannot downgrade red" "red"         "$(verdict_of 'a=failure b=cancelled')"
+assert_eq "skipped cannot downgrade red"   "red"         "$(verdict_of 'a=failure b=skipped')"
+assert_eq "success+cancelled after red"    "red"         "$(verdict_of 'a=failure b=success c=cancelled')"
 assert_eq "the #4179 live run shape"      "inconclusive" \
   "$(verdict_of 'fmt=success clippy=cancelled test=cancelled msrv=cancelled smoke=cancelled')"
 

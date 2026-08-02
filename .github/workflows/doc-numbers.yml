@@ -33,7 +33,7 @@ on:
 # still supersedes the superseded run. Matches ci.yml.
 concurrency:
   group: doc-numbers-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
   doc-numbers:
