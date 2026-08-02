@@ -1,6 +1,10 @@
 # CI workflow for the trusty-tools Cargo workspace.
 #
 # Jobs:
+#   changes  – classify the diff as docs-only or not, once, for every job
+#              below to consult (issue #4468: docs-only PRs ran the full Rust
+#              build). The exemption is applied to STEPS, never to the trigger
+#              or to the job, so required checks always report.
 #   fmt      – cargo fmt --all --check (stable)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
 #   test     – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
@@ -79,12 +83,47 @@ on:
   push:
     branches: [main]
   pull_request:
+    # EXPLICIT activity types (#4179). Without a `types:` key GitHub uses the
+    # default set — opened, synchronize, reopened — and RETARGETING a pull
+    # request fires none of them: a base change is delivered as `edited` with
+    # `changes.base`. A stacked PR opened against another feature branch is
+    # therefore filtered out by `branches: [main]` while it is stacked, and
+    # then never re-triggered when it is retargeted to main. PR #3838 merged
+    # with `statusCheckRollup: []` — zero check runs, ever — exactly this way.
+    #
+    # `edited` also fires on title/body edits. Left alone that is worse than a
+    # duplicate run: the PR concurrency group is the same for `edited` and
+    # `synchronize`, so an edit mid-flight would CANCEL the running checks and
+    # restart from zero — up to ~16 min of `Test` discarded, and under repeated
+    # description edits (routine here, agents rewrite PR bodies) the checks
+    # could be kept from ever settling. The `cancel-in-progress` expression
+    # below excludes `edited` for exactly that reason, so an edit-triggered run
+    # leaves the in-flight one alone instead of killing it. `ready_for_review`
+    # (also non-default) covers a draft being marked ready.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
 
-# Cancel superseded runs for the same ref to save CI minutes.
+# PULL REQUESTS: one run per PR ref — a new push supersedes the previous run,
+# which is what saves the CI minutes this key was added for.
+#
+# PUSH TO MAIN: the group is keyed to the COMMIT, not the branch, so it is
+# unique per merge and no run is ever cancelled or queued behind a sibling
+# (#4179). The previous `ci-${{ github.ref }}` + `cancel-in-progress: true`
+# meant every push to main shared the group `ci-refs/heads/main`, so each merge
+# KILLED the previous merge's verification: 19 of 60 sampled push-to-main runs
+# (32%) concluded `cancelled`. A cancelled run is the only signal that commit
+# will ever get — the commit is already on main, so there is nothing to
+# supersede and nothing to save by cancelling.
+#
+# `edited` is excluded from cancel-in-progress: a title/body edit shares the PR
+# group with the real run, so cancelling on it would discard up to ~16 min of
+# in-flight `Test`. Excluded, the edit-triggered run leaves the running one
+# alone and it still reaches a conclusion. Costs an extra run per description
+# edit; throws away no completed work. Observed on this PR: two body edits
+# produced two extra runs and the in-flight run completed `success` regardless.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 # SKIP_UI_BUILD=1 prevents the four build.rs Svelte pipelines from invoking pnpm.
 env:
@@ -95,10 +134,76 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
+  # changes: classify the diff as docs-only or not (issue #4468), once, for
+  # every job below to consult.
+  #
+  # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
+  # are REQUIRED by branch protection (Format check, Clippy, Test, MSRV check
+  # (1.91), trusty-search daemon smoke test). GitHub does not create check runs
+  # for a workflow its path/branch filters skipped, so a required context would
+  # sit pending forever and a docs-only PR would become unmergeable instead of
+  # fast — the trap #4468 calls out and the one
+  # .github/workflows/changelog-fragment.yml already documents. So every job
+  # still RUNS and still REPORTS; the exemption lives inside the jobs, on the
+  # steps that cost money. A docs-only PR therefore gets a green required check
+  # in ~30 s of runner startup instead of 45 minutes of cargo.
+  #
+  # The same reasoning rules out a job-level `if:`. GitHub documents a
+  # conditionally-skipped job as reporting success to branch protection, but
+  # the failure mode if that is wrong is every docs PR blocked forever, so the
+  # jobs are kept unconditional and only their steps are gated.
+  #
+  # PUSH TO MAIN never takes the exemption: main is the branch everything is
+  # cut from, so it is verified in full regardless of what the diff touched.
+  # --------------------------------------------------------------------------
+  changes:
+    name: Detect docs-only change set
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      # fetch-depth: 0 — the detector needs `git merge-base` against the base
+      # branch, which a shallow checkout cannot resolve.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # The detector and the notifier's conclusion mapping are both pure shell
+      # with fixture-backed selftests; run them here so a regression in either
+      # is caught on the PR that introduces it rather than in production.
+      - name: CI helper selftests (#4179, #4468, #4421)
+        run: bash scripts/check-ci-helpers-selftest.sh
+
+      - name: Classify changed paths
+        id: detect
+        env:
+          DOCS_ONLY_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/detect-docs-only.sh > /dev/null
+
+  # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
+  #
+  # The instruction floor guard below is NOT gated on the docs-only detection:
+  # it guards instruction/markdown content, which is exactly what a docs-only
+  # PR changes.
   # --------------------------------------------------------------------------
   fmt:
     name: Format check
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -114,6 +219,7 @@ jobs:
         run: bash scripts/check_instruction_floor.sh
 
       - name: Install stable toolchain with rustfmt
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -122,6 +228,7 @@ jobs:
       # nightly-only; stable rustfmt silently ignores them (emits warnings, exit 0).
       # The format check itself is not affected.
       - name: cargo fmt --all --check
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo fmt --all --check
 
   # --------------------------------------------------------------------------
@@ -130,6 +237,14 @@ jobs:
   # --------------------------------------------------------------------------
   clippy:
     name: Clippy
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -138,6 +253,7 @@ jobs:
       # Free disk space (issue #2091): kept in sync with the more aggressive
       # reclamation in the `test` job (see comment there for rationale).
       - name: Free disk space
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -168,11 +284,13 @@ jobs:
           echo "After:"; df -h /
 
       - name: Install stable toolchain with clippy
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -181,6 +299,7 @@ jobs:
             libssl-dev
 
       - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           # Separate cache key per job so fmt/clippy/test/msrv don't fight
@@ -188,6 +307,7 @@ jobs:
           key: clippy
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 
   # --------------------------------------------------------------------------
@@ -225,6 +345,14 @@ jobs:
   # --------------------------------------------------------------------------
   test:
     name: Test
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -264,6 +392,7 @@ jobs:
       # the Azure CLI (~600 MB), and stale apt package caches/lists — none of
       # which this workspace's build or test steps touch.
       - name: Free disk space
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -298,12 +427,15 @@ jobs:
       # a local branch for the PR head; "main" is only a remote ref unless we
       # explicitly create a local tracking branch for it.
       - name: Create local main branch for git tests
+        if: needs.changes.outputs.docs_only != 'true'
         run: git fetch origin main:main || true
 
       - name: Install stable toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -312,6 +444,7 @@ jobs:
             libssl-dev
 
       - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: test
@@ -325,6 +458,7 @@ jobs:
       # Changing any of these (e.g. upgrading fastembed) rotates the key so
       # the old model blobs are not served to the new version.
       - name: Restore fastembed model cache
+        if: needs.changes.outputs.docs_only != 'true'
         id: fastembed-cache
         uses: actions/cache@v4
         with:
@@ -399,7 +533,7 @@ jobs:
       #       seed_models as a plain statement in a subshell (never as a
       #       conditional's test) and capture its exit status via $?.
       - name: Pre-seed fastembed models (cache miss only)
-        if: steps.fastembed-cache.outputs.cache-hit != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && steps.fastembed-cache.outputs.cache-hit != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -584,6 +718,7 @@ jobs:
       # swept once linking is done and before the (disk-heavier) test
       # execution phase runs. See #3668.
       - name: cargo test --workspace --no-run (build phase)
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
 
       # Sweep intermediate per-codegen-unit object files (#3668): once a
@@ -593,6 +728,7 @@ jobs:
       # a subsequent `cargo test` invocation to relink (cargo's fingerprint
       # tracking does not depend on these surviving).
       - name: Sweep intermediate .rcgu.o codegen objects
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           echo "Before sweep:"; du -sh target/debug 2>/dev/null || true
           find target/debug/deps -name '*.rcgu.o' -delete
@@ -652,6 +788,7 @@ jobs:
       # pipefail at once would change every other step's failure semantics in
       # the same commit.
       - name: cargo test --workspace
+        if: needs.changes.outputs.docs_only != 'true'
         shell: bash
         run: |
           set -uo pipefail
@@ -681,6 +818,7 @@ jobs:
       # and only gets pulled in under `--workspace` via other crates'
       # feature unification, not under a bare `-p trusty-common` build.
       - name: cargo test -p trusty-common (cache-freshness, CI unset)
+        if: needs.changes.outputs.docs_only != 'true'
         env:
           CI: ""
         run: |
@@ -701,6 +839,14 @@ jobs:
   # --------------------------------------------------------------------------
   msrv:
     name: MSRV check (1.91)
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -709,6 +855,7 @@ jobs:
       # Free disk space (issue #2091): kept in sync with the more aggressive
       # reclamation in the `test` job (see comment there for rationale).
       - name: Free disk space
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -739,9 +886,11 @@ jobs:
           echo "After:"; df -h /
 
       - name: Install Rust 1.91 toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@1.91
 
       - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -750,11 +899,13 @@ jobs:
             libssl-dev
 
       - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: msrv-1-91
 
       - name: cargo check --workspace
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo check --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui
 
   # --------------------------------------------------------------------------
@@ -777,12 +928,21 @@ jobs:
   # --------------------------------------------------------------------------
   agents-ui:
     name: trusty-agents-ui clippy
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain with clippy
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -791,6 +951,7 @@ jobs:
       # mirror the Tauri project's documented Linux prerequisites and are the
       # same reason the headless workspace jobs exclude this crate.
       - name: Install Tauri system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -805,18 +966,21 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: agents-ui
 
       # Stub the frontendDist so tauri::generate_context!() can embed it.
       - name: Stub frontend dist for generate_context!
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           mkdir -p crates/trusty-agents/ui/dist
           printf '<!doctype html><html><head><meta charset="utf-8"><title>open-mpm</title></head><body></body></html>\n' \
             > crates/trusty-agents/ui/dist/index.html
 
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
 
   # --------------------------------------------------------------------------
@@ -867,6 +1031,14 @@ jobs:
   # --------------------------------------------------------------------------
   embedder-cuda-check:
     name: embedder-cuda compile check (#3508)
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -875,9 +1047,11 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -888,6 +1062,7 @@ jobs:
       # nvcc ONLY — see the job-level comment above for why the compiler
       # (not a GPU, not a driver) is a genuine, unavoidable requirement here.
       - name: Install nvcc (CUDA 12.8 compiler only; no driver, no GPU)
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -897,14 +1072,17 @@ jobs:
           echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
 
       - name: Verify nvcc is on PATH
+        if: needs.changes.outputs.docs_only != 'true'
         run: nvcc --version
 
       - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: embedder-cuda-check
 
       - name: cargo check -p trusty-common --features embedder-cuda --all-targets
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo check -p trusty-common --features embedder-cuda --all-targets
 
   # --------------------------------------------------------------------------
@@ -961,6 +1139,14 @@ jobs:
   # --------------------------------------------------------------------------
   ui-checks:
     name: UI checks (${{ matrix.name }})
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -992,11 +1178,13 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install pnpm
+        if: needs.changes.outputs.docs_only != 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
       - name: Install Node.js
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -1004,10 +1192,12 @@ jobs:
           cache-dependency-path: ${{ matrix.dir }}/pnpm-lock.yaml
 
       - name: Install dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         working-directory: ${{ matrix.dir }}
         run: pnpm install --frozen-lockfile
 
       - name: Run checks
+        if: needs.changes.outputs.docs_only != 'true'
         working-directory: ${{ matrix.dir }}
         run: ${{ matrix.command }}
 
@@ -1030,17 +1220,24 @@ jobs:
   #   4. --data-dir /tmp/ts-smoke — fully isolated data directory so no
   #      indexes.toml, lockfile, or port-file collides with any other process.
   #
-  # OPTIONAL — this job is marked continue-on-error: true because:
-  #   • It requires a full release build of trusty-search (~15-20 min on cold
-  #     cache), which adds significant wall-clock cost on top of the existing
-  #     four jobs.
-  #   • A timeout/kill race in the ephemeral runner is unlikely but not zero.
-  #   • The functional correctness of the daemon is covered by unit + integration
-  #     tests in the `test` job; this job only checks that the binary starts and
-  #     the HTTP server binds.
+  # REQUIRED, AND ABLE TO FAIL (#4179). This job used to carry
+  # `continue-on-error: true` and describe itself as OPTIONAL while branch
+  # protection listed `trusty-search daemon smoke test` among its seven
+  # required contexts. Both statements could not be true, and the combination
+  # produced signal inversion: job-level `continue-on-error` still publishes
+  # `conclusion: failure` to the CHECK RUN (so it did gate the merge button),
+  # but it keeps the RUN green — so the Actions UI, `gh run view`, and
+  # `needs.<job>.result` all read healthy while a required check was red.
   #
-  # If flakiness is never observed in practice, remove continue-on-error to
-  # make it a hard gate.
+  # Resolved in favour of REQUIRED, because that half is the one enforced by
+  # branch protection and this PR is not permitted to change branch-protection
+  # settings. Dropping `continue-on-error` costs nothing in wall clock (the
+  # ~15-20 min cold release build ran either way) and buys an honest run
+  # conclusion plus a place in `notify-main-failure`'s `needs`, which it could
+  # not have while its result never surfaced as `failure`. If the runner
+  # timeout/kill race it worried about ever materialises, the answer is to fix
+  # the race or drop the check from branch protection — not to make a required
+  # check unable to report the truth.
   #
   # TEARDOWN — the daemon is killed at the end via the stored PID. This is
   # correct CI behaviour: ephemeral runners are discarded after the job
@@ -1049,15 +1246,23 @@ jobs:
   # --------------------------------------------------------------------------
   search-daemon-smoke:
     name: trusty-search daemon smoke test
+    needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
       # Free disk space (issue #2091): kept in sync with the more aggressive
       # reclamation in the `test` job (see comment there for rationale).
       - name: Free disk space
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
@@ -1088,9 +1293,11 @@ jobs:
           echo "After:"; df -h /
 
       - name: Install stable toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -1099,6 +1306,7 @@ jobs:
             libssl-dev
 
       - name: Cache cargo artifacts
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: search-daemon-smoke
@@ -1106,9 +1314,11 @@ jobs:
       # SKIP_UI_BUILD=1 is already set globally via env: at the workflow level.
       # The committed ui-dist/ bundle is used as-is; pnpm is not required.
       - name: Build trusty-search release binary
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo build --release -p trusty-search
 
       - name: Start trusty-search daemon (background)
+        if: needs.changes.outputs.docs_only != 'true'
         env:
           # Skip KG init — no network calls, no model downloads at startup.
           TRUSTY_NO_KG: "1"
@@ -1131,6 +1341,7 @@ jobs:
           echo "Daemon PID: $(cat /tmp/ts-smoke/daemon.pid)"
 
       - name: Wait for /health (poll up to 30 s)
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           PORT=7999
           DEADLINE=$(( $(date +%s) + 30 ))
@@ -1148,6 +1359,7 @@ jobs:
           cat /tmp/ts-smoke/health.json
 
       - name: Assert /health returns status=ok
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           # jq is preinstalled on ubuntu-latest; use it instead of python3 for clarity.
           HEALTH_STATUS=$(jq -r '.status // ""' /tmp/ts-smoke/health.json)
@@ -1160,7 +1372,7 @@ jobs:
           echo "OK: status=ok confirmed"
 
       - name: Tear down daemon
-        if: always()
+        if: always() && needs.changes.outputs.docs_only != 'true'
         run: |
           if [ -f /tmp/ts-smoke/daemon.pid ]; then
             PID=$(cat /tmp/ts-smoke/daemon.pid)
@@ -1193,34 +1405,93 @@ jobs:
   # breakage having been diagnosed and handled, so closing stays a human
   # call.
   #
-  # `needs` lists every hard-gating job so `contains(needs.*.result,
-  # 'failure')` catches a red run from any of them; `search-daemon-smoke` is
-  # deliberately excluded (continue-on-error: true — see its own header
-  # comment — its job `result` never surfaces as `failure`).
+  # NOT-SUCCESS IS NOT SUCCESS (#4179). This job used to ask
+  # `contains(needs.*.result, 'failure')`. `cancelled` is not `failure`, so a
+  # run whose every build and test job was CANCELLED skipped the alarm AND
+  # reported success — the merge commit read verified when nothing had been
+  # verified. Live instance: run 30720348101 (head b4b91af9) — Test, Clippy,
+  # MSRV and the smoke test all cancelled, notifier green. It was not an edge
+  # case either: 19 of 60 sampled push-to-main runs concluded `cancelled`.
+  #
+  # The verdict now comes from scripts/classify-ci-results.sh, which folds
+  # every job conclusion into green / red / inconclusive with red >
+  # inconclusive > green precedence, and only an all-`success` set is green.
+  # The mapping is fixture-tested (scripts/check-ci-helpers-selftest.sh) rather
+  # than buried in a GitHub expression where it cannot be exercised.
+  #
+  # This job also FAILS on any non-green verdict, so the run's own conclusion
+  # stops disagreeing with what the jobs actually did.
+  #
+  # LAYERING, STATED HONESTLY: the concurrency change at the top of this file
+  # is the primary remedy, because a run cancelled mid-flight takes this job
+  # with it and no notifier can report from inside a cancelled run. This
+  # verdict is the second layer, for the cancellations concurrency cannot
+  # prevent — a manual cancel, a runner eviction, a `skipped` job.
+  #
+  # `needs` lists every hard-gating job. `search-daemon-smoke` is now included:
+  # it was excluded only because `continue-on-error: true` meant its result
+  # never surfaced as `failure`, and that flag is gone.
   # --------------------------------------------------------------------------
   notify-main-failure:
     name: Notify on red main
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [fmt, clippy, test, msrv, agents-ui, embedder-cuda-check, ui-checks]
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        msrv,
+        agents-ui,
+        embedder-cuda-check,
+        ui-checks,
+        search-daemon-smoke,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
     steps:
-      - name: File or update tracking issue on failure
-        if: contains(needs.*.result, 'failure')
+      - uses: actions/checkout@v5
+
+      - name: Classify job conclusions
+        id: verdict
+        env:
+          CI_JOB_RESULTS: >-
+            fmt=${{ needs.fmt.result }}
+            clippy=${{ needs.clippy.result }}
+            test=${{ needs.test.result }}
+            msrv=${{ needs.msrv.result }}
+            agents-ui=${{ needs['agents-ui'].result }}
+            embedder-cuda-check=${{ needs['embedder-cuda-check'].result }}
+            ui-checks=${{ needs['ui-checks'].result }}
+            search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}
+        run: bash scripts/classify-ci-results.sh > /dev/null
+
+      - name: File or update tracking issue
+        if: steps.verdict.outputs.verdict != 'green'
         uses: actions/github-script@v7
+        env:
+          CI_VERDICT: ${{ steps.verdict.outputs.verdict }}
+          CI_SUMMARY: ${{ steps.verdict.outputs.summary }}
         with:
           script: |
             const label = 'ci-red-main';
             const title = 'CI red on main';
+            const verdict = process.env.CI_VERDICT;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const headline = verdict === 'red'
+              ? `CI FAILED on a push to \`main\` at ${context.sha}.`
+              : `CI did NOT conclude successfully on a push to \`main\` at ${context.sha} (verdict: ${verdict}).`;
             const body = [
-              `CI failed on a push to \`main\` at ${context.sha}.`,
+              headline,
+              '',
+              `Job conclusions: ${process.env.CI_SUMMARY}`,
               '',
               `Run: ${runUrl}`,
               '',
-              'Anyone branching off `main` right now inherits this breakage.',
+              verdict === 'red'
+                ? 'Anyone branching off `main` right now inherits this breakage.'
+                : 'This commit has NO verification result. Cancelled and skipped jobs prove nothing; re-run this workflow before treating `main` as green.',
             ].join('\n');
 
             const existing = await github.rest.issues.listForRepo({
@@ -1249,3 +1520,12 @@ jobs:
               });
               core.notice(`Filed new tracking issue #${created.data.number}`);
             }
+
+      # The run's own conclusion must match what the jobs actually did. Without
+      # this, a run whose jobs were all cancelled still ends green and `gh run
+      # view` reports a verified commit that was never verified (#4179).
+      - name: Fail the run when main was not verified green
+        if: steps.verdict.outputs.verdict != 'green'
+        run: |
+          echo "::error::main CI verdict is '${{ steps.verdict.outputs.verdict }}', not green — ${{ steps.verdict.outputs.summary }}"
+          exit 1
