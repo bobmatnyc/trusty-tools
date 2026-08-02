@@ -24,6 +24,11 @@ Fixed
   assets: the roster unions two tiers whose frontmatter tm does not author, so
   the same rule would eat an operator's own agent with no recourse
   ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
+- The bundled `agent-delegation` instruction section no longer tells the PM that
+  `memory-manager`, `mpm-agent-manager` and `mpm-skills-manager` are hidden by a
+  `role: base` filter. That paragraph shipped into every PM prompt and, once the
+  filter was removed, contradicted the live roster rendered directly beneath it
+  ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
 - `tm doctor`'s `agents` check reports the delegatable roster size alongside the
   deployed file count on every status — including the empty-deploy-tier failure,
   where the roster can still be non-empty because the project and generic
