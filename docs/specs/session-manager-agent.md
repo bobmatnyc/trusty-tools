@@ -301,25 +301,31 @@ This routing logic is **internal to trusty-review**, not yet shared.
 `crates/trusty-mpm/src/core/instruction_pipeline.rs` +
 `instruction_overrides.rs` + `src/assets/instructions/sections/*.md`:
 
-- Assets embedded via `include_str!`: eight section files (`identity.md`,
+- Assets embedded via `include_str!`: nine section files (`identity.md`,
   `core.md`, `memory.md`, `search.md`, `workflow.md`, `agent-delegation.md`,
-  `non-overridable-rules.md`, `framework-guaranteed-conventions.md`;
-  `instruction_pipeline.rs:59-85`), composed per the JSON manifest above.
+  `enforcement.md`, `non-overridable-rules.md`,
+  `framework-guaranteed-conventions.md`; `instruction_pipeline.rs:59-92`),
+  composed per the JSON manifest above.
 - `resolve_pm_prompt(project_dir)` layers `<project>/.trusty-mpm/` (or
   `CLAUDE.md` named-section) overrides onto the bundled defaults, always
-  appending the `non-overridable-rules` and `framework-guaranteed-conventions`
-  sections last as the non-overridable floor.
+  appending the `enforcement`, `non-overridable-rules` and
+  `framework-guaranteed-conventions` sections last as the non-overridable
+  floor.
 - Delivered to the spawned session via a temp file
   (`core/model_inject.rs:44-46`) →
   `claude --append-system-prompt-file <tmp>`
   (`runtime/claude_code.rs:842`), and stashed for inspection at
   `<project>/.trusty-mpm/last-instructions.md`
   (`core/session_launch/mod.rs:756`).
-- PM content structure: Identity (delegate-only, `fixed` tier) → canonical
-  Prohibitions table (inside `core`, `project` tier) → strict Allowlist →
-  workflow phases → BLOCKING verification gates → forbidden phrases →
-  non-overridable floor (`fixed` tier: `non-overridable-rules`,
-  `framework-guaranteed-conventions`).
+- PM content structure: Identity (delegate-only, `fixed` tier) → strict
+  Allowlist → workflow phases → BLOCKING verification gates → forbidden
+  phrases → non-overridable floor (`fixed` tier: `enforcement` — the canonical
+  Prohibitions and Circuit Breakers tables — then `non-overridable-rules`,
+  `framework-guaranteed-conventions`). The Prohibitions table sat inside `core`
+  at `project` tier until
+  [#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573), where a
+  three-line `CLAUDE.md` CORE block deleted it and the Circuit Breakers table
+  from the delivered prompt.
 
 ### 2.5 Current state — memory & palaces
 

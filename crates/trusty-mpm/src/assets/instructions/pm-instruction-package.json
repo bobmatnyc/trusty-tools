@@ -39,6 +39,12 @@
       "description": "Routing doctrine; the live roster is appended by the `agent-roster` generator."
     },
     {
+      "id": "enforcement",
+      "title": "Delegation Enforcement",
+      "customization_tier": "fixed",
+      "description": "The canonical Prohibitions and Circuit Breakers tables — the PM's entire delegation-enforcement authority. Framework floor. Was tier `project` inside `core` until #4573, where a three-line `CLAUDE.md` CORE override deleted both tables outright and left the floor asserting a table that was no longer in the prompt."
+    },
+    {
       "id": "non-overridable-rules",
       "title": "Non-Overridable Rules",
       "customization_tier": "fixed",
@@ -130,6 +136,11 @@
       "section": "identity",
       "join_before": "rule",
       "body": { "kind": "file", "path": "sections/identity.md" }
+    },
+    {
+      "section": "enforcement",
+      "join_before": "blank",
+      "body": { "kind": "file", "path": "sections/enforcement.md" }
     },
     {
       "section": "non-overridable-rules",

@@ -219,16 +219,23 @@ fn pm_instructions_is_its_three_sections() {
 }
 
 #[test]
-fn base_pm_is_its_three_sections() {
+fn base_pm_is_its_four_sections() {
     // Same no-second-copy property for the non-overridable floor, plus the
     // one reordering #4183 makes: the tool-priority mandate travels with the
     // other non-overridable rules and so now precedes the conventions.
+    //
+    // #4573 added `enforcement` (Prohibitions + Circuit Breakers) as the second
+    // floor section. Asserting it HERE — over `base_pm()`, the string every
+    // legacy branch appends, including the `PM_INSTRUCTIONS_DEPLOYED.md` full
+    // replacement — is what proves the tier change alone did not leave the
+    // legacy paths without the authority tables.
     let floor = base_pm();
     assert_eq!(
         floor,
         format!(
-            "{}\n\n{}\n\n{}\n",
+            "{}\n\n{}\n\n{}\n\n{}\n",
             SECTION_IDENTITY.trim(),
+            SECTION_ENFORCEMENT.trim(),
             SECTION_NON_OVERRIDABLE_RULES.trim(),
             SECTION_FRAMEWORK_CONVENTIONS.trim()
         )
