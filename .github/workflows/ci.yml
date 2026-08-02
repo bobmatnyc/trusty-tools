@@ -91,11 +91,15 @@ on:
     # then never re-triggered when it is retargeted to main. PR #3838 merged
     # with `statusCheckRollup: []` — zero check runs, ever — exactly this way.
     #
-    # `edited` also fires on title/body edits, so a PR description edit costs a
-    # duplicate run. That is the deliberate trade: a wasted run is recoverable,
-    # a zero-check merge is not, and PR runs are still superseded by the
-    # concurrency group below. `ready_for_review` (also non-default) covers a
-    # draft being marked ready.
+    # `edited` also fires on title/body edits. Left alone that is worse than a
+    # duplicate run: the PR concurrency group is the same for `edited` and
+    # `synchronize`, so an edit mid-flight would CANCEL the running checks and
+    # restart from zero — up to ~16 min of `Test` discarded, and under repeated
+    # description edits (routine here, agents rewrite PR bodies) the checks
+    # could be kept from ever settling. The `cancel-in-progress` expression
+    # below excludes `edited` for exactly that reason, so an edit-triggered run
+    # QUEUES behind the in-flight one instead of killing it. `ready_for_review`
+    # (also non-default) covers a draft being marked ready.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
 
@@ -110,9 +114,14 @@ on:
 # (32%) concluded `cancelled`. A cancelled run is the only signal that commit
 # will ever get — the commit is already on main, so there is nothing to
 # supersede and nothing to save by cancelling.
+#
+# `edited` is excluded from cancel-in-progress: a title/body edit shares the PR
+# group with the real run, so cancelling on it would discard up to ~16 min of
+# in-flight `Test`. Excluded, the edit-triggered run queues behind the running
+# one instead. Same total minutes, but no completed work is thrown away.
 concurrency:
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 # SKIP_UI_BUILD=1 prevents the four build.rs Svelte pipelines from invoking pnpm.
 env:
@@ -186,6 +195,13 @@ jobs:
   fmt:
     name: Format check
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -220,6 +236,13 @@ jobs:
   clippy:
     name: Clippy
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -321,6 +344,13 @@ jobs:
   test:
     name: Test
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -808,6 +838,13 @@ jobs:
   msrv:
     name: MSRV check (1.91)
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -890,6 +927,13 @@ jobs:
   agents-ui:
     name: trusty-agents-ui clippy
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -986,6 +1030,13 @@ jobs:
   embedder-cuda-check:
     name: embedder-cuda compile check (#3508)
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1087,6 +1138,13 @@ jobs:
   ui-checks:
     name: UI checks (${{ matrix.name }})
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -1187,6 +1245,13 @@ jobs:
   search-daemon-smoke:
     name: trusty-search daemon smoke test
     needs: [changes]
+    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
+    # GitHub reports a skipped required check as PASSING — reintroducing the
+    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # implicit success() so the job still runs; `docs_only` then resolves to
+    # '' and every gated step runs, i.e. a broken classifier costs a FULL
+    # build, never a silent skip.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

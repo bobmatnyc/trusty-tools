@@ -88,7 +88,7 @@ on:
 # still supersedes the superseded run. Matches ci.yml.
 concurrency:
   group: al2023-build-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 env:
   # Suppress ort/fastembed download progress bars in build output.
