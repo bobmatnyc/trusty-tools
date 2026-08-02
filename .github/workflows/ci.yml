@@ -183,7 +183,11 @@ jobs:
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bash scripts/detect-docs-only.sh > /dev/null
+          # THROWAWAY PROOF COMMIT — NOT FOR MERGE (#4468).
+          # Forces the docs-only verdict so the step-gating + required-check
+          # reporting can be observed end to end. A genuinely docs-only PR
+          # cannot exercise this until the workflow changes are on main.
+          echo "docs_only=true" >> "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
