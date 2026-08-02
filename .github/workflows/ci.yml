@@ -98,7 +98,7 @@ on:
     # description edits (routine here, agents rewrite PR bodies) the checks
     # could be kept from ever settling. The `cancel-in-progress` expression
     # below excludes `edited` for exactly that reason, so an edit-triggered run
-    # QUEUES behind the in-flight one instead of killing it. `ready_for_review`
+    # leaves the in-flight one alone instead of killing it. `ready_for_review`
     # (also non-default) covers a draft being marked ready.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
@@ -117,8 +117,10 @@ on:
 #
 # `edited` is excluded from cancel-in-progress: a title/body edit shares the PR
 # group with the real run, so cancelling on it would discard up to ~16 min of
-# in-flight `Test`. Excluded, the edit-triggered run queues behind the running
-# one instead. Same total minutes, but no completed work is thrown away.
+# in-flight `Test`. Excluded, the edit-triggered run leaves the running one
+# alone and it still reaches a conclusion. Costs an extra run per description
+# edit; throws away no completed work. Observed on this PR: two body edits
+# produced two extra runs and the in-flight run completed `success` regardless.
 concurrency:
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
