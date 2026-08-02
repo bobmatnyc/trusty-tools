@@ -26,7 +26,7 @@
 //! ```
 //!
 //! The section token is the [`SectionId`] kebab-case name uppercased (`CORE`,
-//! `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, and the three floor
+//! `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, and the four floor
 //! tokens), matched case-insensitively. Content is what lies strictly between
 //! the two marker lines, trimmed. Text outside markers is not instruction
 //! content and is ignored.
@@ -106,7 +106,7 @@ pub const REASON_SHADOWED: &str = "section already overridden by a higher-preced
 /// the enum. Deriving it from the serde name by hand here — and pinning that
 /// correspondence in a test — keeps a renamed section from silently orphaning
 /// every project's marker.
-/// What: the eight tokens, matched case-insensitively by [`section_for_token`].
+/// What: the nine tokens, matched case-insensitively by [`section_for_token`].
 /// Test: `every_section_token_is_the_kebab_case_id_uppercased`.
 pub const fn section_token(id: SectionId) -> &'static str {
     match id {
@@ -116,6 +116,7 @@ pub const fn section_token(id: SectionId) -> &'static str {
         SectionId::Search => "SEARCH",
         SectionId::Workflow => "WORKFLOW",
         SectionId::AgentDelegation => "AGENT-DELEGATION",
+        SectionId::Enforcement => "ENFORCEMENT",
         SectionId::NonOverridableRules => "NON-OVERRIDABLE-RULES",
         SectionId::FrameworkGuaranteedConventions => "FRAMEWORK-GUARANTEED-CONVENTIONS",
     }

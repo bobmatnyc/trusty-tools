@@ -15,8 +15,9 @@
 //! (`assets/instructions/instruction-package.schema.json`, embedded as
 //! [`SCHEMA_JSON`]). A package has two arrays:
 //!
-//! * `sections` — the closed eight-member taxonomy (five content sections plus
-//!   the three absorbed BASE_PM floor sections) carrying the
+//! * `sections` — the closed nine-member taxonomy (five content sections plus
+//!   the four floor sections: three absorbed from BASE_PM, plus the
+//!   delegation-enforcement tables split out of `core` by #4573) carrying the
 //!   `customization_tier` axis. Declaration order is fixed and canonical; it
 //!   has **no** effect on composed bytes.
 //! * `blocks` — the ordered composition stream. Output is `blocks` in array
@@ -110,8 +111,9 @@ pub const SCHEMA_JSON: &str =
 /// accounted for" a compile-time-shaped question rather than a grep. Unknown
 /// ids fail deserialization loudly instead of being dropped.
 /// What: the five content sections (Core, Memory, Search, Workflow, Agent
-/// Delegation) plus the three BASE_PM floor sections absorbed by #4183
-/// (Identity, Non-Overridable Rules, Framework-Guaranteed Conventions).
+/// Delegation) plus the four floor sections — the three absorbed from BASE_PM by
+/// #4183 (Identity, Non-Overridable Rules, Framework-Guaranteed Conventions) and
+/// Enforcement, split out of Core by #4573.
 ///
 /// Documented placement of each absorbed BASE_PM block:
 ///
@@ -144,6 +146,18 @@ pub enum SectionId {
     Workflow,
     /// Delegation routing — dynamic, built from the deployed-agent roster.
     AgentDelegation,
+    /// The canonical Prohibitions and Circuit Breakers tables. Floor, tier
+    /// `fixed` (#4573).
+    ///
+    /// These two tables ARE the PM's delegation-enforcement authority, and they
+    /// shipped inside [`SectionId::Core`] at tier `project` — so a three-line
+    /// `CORE` block in any project's `CLAUDE.md` deleted both and left the floor
+    /// asserting that a table no longer in the prompt was binding. Splitting them
+    /// out as their own floor section (rather than making the whole of `core`
+    /// fixed) keeps response format, prose style and project context
+    /// project-customizable while putting the authority model out of reach of
+    /// every override tier.
+    Enforcement,
     /// Absorbed BASE_PM non-overridable rules + customization contract + the
     /// Trusty tool-priority mandate. Floor, tier `fixed`.
     NonOverridableRules,
@@ -158,16 +172,17 @@ impl SectionId {
     /// Why: `sections` must be declared in this order so a package manifest
     /// reads the same way in every project; the order is also the enum's `Ord`,
     /// so the check is a simple sortedness test.
-    /// What: the eight ids, floor-first-and-last around the five content
+    /// What: the nine ids, floor-first-and-last around the five content
     /// sections.
     /// Test: `canonical_order_is_sorted_and_complete`.
-    pub const CANONICAL: [SectionId; 8] = [
+    pub const CANONICAL: [SectionId; 9] = [
         SectionId::Identity,
         SectionId::Core,
         SectionId::Memory,
         SectionId::Search,
         SectionId::Workflow,
         SectionId::AgentDelegation,
+        SectionId::Enforcement,
         SectionId::NonOverridableRules,
         SectionId::FrameworkGuaranteedConventions,
     ];
@@ -178,13 +193,15 @@ impl SectionId {
     /// nothing overridable may follow it — has to be checkable per section, not
     /// per file (#4194: a floor rule shipped a broken directive that every
     /// obeying agent had to follow, with no per-unit handle on it).
-    /// What: true for [`SectionId::Identity`], [`SectionId::NonOverridableRules`]
-    /// and [`SectionId::FrameworkGuaranteedConventions`].
+    /// What: true for [`SectionId::Identity`], [`SectionId::Enforcement`],
+    /// [`SectionId::NonOverridableRules`] and
+    /// [`SectionId::FrameworkGuaranteedConventions`].
     /// Test: `rejects_floor_section_that_is_not_fixed`, `rejects_overridable_block_after_the_floor`.
     pub const fn is_floor(self) -> bool {
         matches!(
             self,
             SectionId::Identity
+                | SectionId::Enforcement
                 | SectionId::NonOverridableRules
                 | SectionId::FrameworkGuaranteedConventions
         )

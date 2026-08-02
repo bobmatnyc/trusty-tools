@@ -13,6 +13,7 @@ mod commands;
 mod formatters;
 mod generate;
 mod gh_identity;
+mod tracing_setup;
 mod types;
 
 use std::io::IsTerminal as _;
@@ -258,6 +259,13 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "daemon")]
     let mut _error_store: Option<trusty_common::error_capture::ErrorStore> = None;
 
+    // #4573: `tm sessions instructions` is where an operator asks "why didn't my
+    // CLAUDE.md override apply?", and every line of the code written to answer
+    // that is `tracing` — which went nowhere, because only the daemon/supervisor
+    // branch below ever registered a subscriber. See `tracing_setup` for the full
+    // rationale and for why the writer is explicitly stderr.
+    tracing_setup::init_cli_diagnostics_if_wanted(&cli.command);
+
     // Long-running modes (daemon, supervisor) get the full file-rotating tracing
     // + bug-capture layer; short-lived CLI invocations skip subscriber init.
     if matches!(
@@ -319,16 +327,10 @@ async fn main() -> anyhow::Result<()> {
                 .with(capture_layer)
                 .init();
         }
+        // #4573: shares `tracing_setup`'s stderr-only builder with the CLI
+        // inspection path — the two were byte-for-byte the same builder.
         #[cfg(not(feature = "daemon"))]
-        {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info".into()),
-                )
-                .with_writer(std::io::stderr)
-                .init();
-        }
+        tracing_setup::init_stderr_only("info");
     }
 
     // #1905: one-time migration removing stale pre-rename `mpm-*` skill

@@ -10,7 +10,7 @@ use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// Build the canonical eight-section taxonomy with correct tiers.
+/// Build the canonical nine-section taxonomy with correct tiers.
 fn sections() -> Vec<InstructionSection> {
     SectionId::CANONICAL
         .iter()
@@ -70,6 +70,7 @@ fn fixture() -> InstructionPackage {
             generated(SectionId::AgentDelegation, Generator::AgentRoster, false),
             generated(SectionId::Core, Generator::ProjectAddendum, true),
             text(SectionId::Identity, "IDENTITY"),
+            text(SectionId::Enforcement, "ENFORCEMENT"),
             text(SectionId::NonOverridableRules, "RULES"),
             text(SectionId::FrameworkGuaranteedConventions, "CONVENTIONS"),
         ],
@@ -492,14 +493,15 @@ fn canonical_order_is_sorted_and_complete() {
     sorted.sort();
     assert_eq!(sorted, SectionId::CANONICAL, "CANONICAL must be sorted");
     let unique: std::collections::BTreeSet<_> = SectionId::CANONICAL.iter().collect();
-    assert_eq!(unique.len(), 8, "eight distinct sections");
+    assert_eq!(unique.len(), 9, "nine distinct sections");
 }
 
 #[test]
 fn floor_membership_is_exactly_the_absorbed_base_pm_blocks() {
-    // Why: #4183 absorbs three BASE_PM blocks as the floor. Anything else being
-    // floor would over-freeze content; anything less would let the floor be
-    // overridden.
+    // Why: #4183 absorbs three BASE_PM blocks as the floor, and #4573 adds
+    // Enforcement (the Prohibitions and Circuit Breakers tables, split out of
+    // the `project`-tier core section). Anything else being floor would
+    // over-freeze content; anything less would let the floor be overridden.
     let floor: Vec<SectionId> = SectionId::CANONICAL
         .into_iter()
         .filter(|s| s.is_floor())
@@ -508,6 +510,7 @@ fn floor_membership_is_exactly_the_absorbed_base_pm_blocks() {
         floor,
         vec![
             SectionId::Identity,
+            SectionId::Enforcement,
             SectionId::NonOverridableRules,
             SectionId::FrameworkGuaranteedConventions,
         ]
@@ -850,6 +853,7 @@ fn composes_blocks_in_array_order_with_declared_joins() {
             "ROSTER",
             "ADDENDUM",
             "IDENTITY",
+            "ENFORCEMENT",
             "RULES",
             "CONVENTIONS",
         ]
@@ -1110,6 +1114,10 @@ fn base_pm_floor_block_order_is_valid() {
     let mut pkg = fixture();
     pkg.blocks.retain(|b| !b.section.is_floor());
     pkg.blocks.extend([
+        // #4573's floor section, which `retain` above stripped with the rest of
+        // the floor. Emitted first so the five-element tail assertion below
+        // still reads BASE_PM.md's own heading order.
+        text(SectionId::Enforcement, "ENFORCEMENT"),
         text(SectionId::Identity, "IDENTITY"),
         text(SectionId::NonOverridableRules, "NON-OVERRIDABLE RULES"),
         text(SectionId::NonOverridableRules, "CUSTOMIZING PM BEHAVIOR"),

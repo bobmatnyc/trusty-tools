@@ -28,9 +28,9 @@ use crate::core::instruction_package::{
     ValidationError,
 };
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_CORE, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
-    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, SECTION_SOURCES, WORKFLOW,
-    section_source, workflow_section,
+    AGENT_DELEGATION, SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS,
+    SECTION_IDENTITY, SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH,
+    SECTION_SOURCES, WORKFLOW, section_source, workflow_section,
 };
 use crate::core::stack_profile::stack_profile_section;
 use std::fs;
@@ -324,8 +324,8 @@ fn floor_blocks_are_the_contiguous_tail() {
     );
     assert_eq!(
         package.blocks.len() - first_floor,
-        3,
-        "the floor is exactly its three authored sections"
+        4,
+        "the floor is exactly its four authored sections (#4573 added enforcement)"
     );
 }
 
@@ -703,6 +703,7 @@ fn every_authored_block_is_exactly_its_section_source() {
         (SectionId::Workflow, WORKFLOW),
         (SectionId::AgentDelegation, AGENT_DELEGATION),
         (SectionId::Identity, SECTION_IDENTITY),
+        (SectionId::Enforcement, SECTION_ENFORCEMENT),
         (
             SectionId::NonOverridableRules,
             SECTION_NON_OVERRIDABLE_RULES,

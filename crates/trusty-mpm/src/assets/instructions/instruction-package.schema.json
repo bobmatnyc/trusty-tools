@@ -25,11 +25,11 @@
       "default": false
     },
     "sections": {
-      "description": "The section taxonomy. Declaration order MUST be the canonical order (identity, core, memory, search, workflow, agent-delegation, non-overridable-rules, framework-guaranteed-conventions) and every canonical section MUST be declared exactly once. Declaration order does not affect composed bytes — `blocks` alone determines output order.",
+      "description": "The section taxonomy. Declaration order MUST be the canonical order (identity, core, memory, search, workflow, agent-delegation, enforcement, non-overridable-rules, framework-guaranteed-conventions) and every canonical section MUST be declared exactly once. Declaration order does not affect composed bytes — `blocks` alone determines output order.",
       "type": "array",
       "items": { "$ref": "#/$defs/section" },
-      "minItems": 8,
-      "maxItems": 8
+      "minItems": 9,
+      "maxItems": 9
     },
     "blocks": {
       "description": "The ordered composition stream. Emitted strictly in array order. A section may own several non-contiguous blocks, which is what lets a section be lifted out of the middle of a legacy asset without moving a single byte.",
@@ -40,7 +40,7 @@
   },
   "$defs": {
     "section-id": {
-      "description": "The closed section taxonomy, in canonical declaration order. `identity`, `non-overridable-rules` and `framework-guaranteed-conventions` are the absorbed BASE_PM floor blocks and are always tier `fixed`.",
+      "description": "The closed section taxonomy, in canonical declaration order. `identity`, `non-overridable-rules` and `framework-guaranteed-conventions` are the absorbed BASE_PM floor blocks; `enforcement` carries the Prohibitions and Circuit Breakers tables split out of `core` by issue #4573. All four are always tier `fixed`.",
       "type": "string",
       "enum": [
         "identity",
@@ -49,6 +49,7 @@
         "search",
         "workflow",
         "agent-delegation",
+        "enforcement",
         "non-overridable-rules",
         "framework-guaranteed-conventions"
       ]
@@ -179,6 +180,12 @@
           "description": "Dynamic: built from the deployed-agent roster at composition time."
         },
         {
+          "id": "enforcement",
+          "title": "Delegation Enforcement",
+          "customization_tier": "fixed",
+          "description": "Prohibitions + Circuit Breakers. Framework floor (#4573)."
+        },
+        {
           "id": "non-overridable-rules",
           "title": "Non-Overridable Rules",
           "customization_tier": "fixed",
@@ -231,6 +238,11 @@
         {
           "section": "identity",
           "body": { "kind": "file", "path": "sections/identity.md" }
+        },
+        {
+          "section": "enforcement",
+          "join_before": "blank",
+          "body": { "kind": "text", "text": "## Prohibitions" }
         },
         {
           "section": "non-overridable-rules",

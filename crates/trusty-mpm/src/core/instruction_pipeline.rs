@@ -76,6 +76,13 @@ pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/sections/
 /// `AGENT_DELEGATION.md` override is present.
 pub(crate) const AGENT_DELEGATION: &str =
     include_str!("../assets/instructions/sections/agent-delegation.md");
+/// The canonical Prohibitions and Circuit Breakers tables. Floor, tier `fixed`.
+///
+/// Split out of `core.md` by #4573: both tables sat inside the `project`-tier
+/// core section, so a three-line `CORE` block in a project's `CLAUDE.md` deleted
+/// the PM's entire delegation-enforcement authority and still validated.
+pub(crate) const SECTION_ENFORCEMENT: &str =
+    include_str!("../assets/instructions/sections/enforcement.md");
 /// Absorbed BASE_PM non-overridable rules, the customization contract, and the
 /// Trusty tool-priority mandate. Floor, tier `fixed`.
 pub(crate) const SECTION_NON_OVERRIDABLE_RULES: &str =
@@ -94,17 +101,18 @@ pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
 /// content drop. Every entry here is an `include_str!` of a constant declared
 /// above, so the build stays hermetic and a missing section file is a compile
 /// error rather than a launch-time surprise.
-/// What: the eight canonical section sources, keyed by the path form the manifest
+/// What: the nine canonical section sources, keyed by the path form the manifest
 /// uses — relative to `assets/instructions/`. Table order is irrelevant; the
 /// manifest's `blocks` array alone decides emission order.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
-pub(crate) const SECTION_SOURCES: [(&str, &str); 8] = [
+pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
     ("sections/identity.md", SECTION_IDENTITY),
     ("sections/core.md", SECTION_CORE),
     ("sections/memory.md", SECTION_MEMORY),
     ("sections/search.md", SECTION_SEARCH),
     ("sections/workflow.md", WORKFLOW),
     ("sections/agent-delegation.md", AGENT_DELEGATION),
+    ("sections/enforcement.md", SECTION_ENFORCEMENT),
     (
         "sections/non-overridable-rules.md",
         SECTION_NON_OVERRIDABLE_RULES,
@@ -218,9 +226,15 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// Why: the floor is appended last under *every* override branch, including full
 /// PM replacement, so the resolver needs it as one opaque string. Same
 /// no-duplicate-copy argument as [`pm_instructions`].
-/// What: Identity, Non-Overridable Rules (which now carries the Trusty
-/// tool-priority mandate) and Framework-Guaranteed Conventions, joined with a
-/// paragraph break.
+/// What: Identity, Enforcement (the Prohibitions and Circuit Breakers tables),
+/// Non-Overridable Rules (which now carries the Trusty tool-priority mandate) and
+/// Framework-Guaranteed Conventions, joined with a paragraph break.
+///
+/// #4573: `Enforcement` joins the floor here so the two authority tables reach
+/// EVERY legacy branch too — including the `PM_INSTRUCTIONS_DEPLOYED.md` full
+/// replacement, which discards every body section and appends only this string.
+/// That is the second of the two wholesale-deletion paths #4573 names, and it is
+/// closed by this list, not by the tier declaration alone.
 ///
 /// ORDER CHANGE, recorded because it is the one floor reordering #4183 makes:
 /// `BASE_PM.md` used to place `## Trusty Tool Priority (Non-Overridable)` *after*
@@ -233,13 +247,15 @@ pub(crate) fn base_pm() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let run = manifest_run(&[
             SectionId::Identity,
+            SectionId::Enforcement,
             SectionId::NonOverridableRules,
             SectionId::FrameworkGuaranteedConventions,
         ])
         .unwrap_or_else(|| {
             format!(
-                "{}\n\n{}\n\n{}",
+                "{}\n\n{}\n\n{}\n\n{}",
                 SECTION_IDENTITY.trim(),
+                SECTION_ENFORCEMENT.trim(),
                 SECTION_NON_OVERRIDABLE_RULES.trim(),
                 SECTION_FRAMEWORK_CONVENTIONS.trim()
             )

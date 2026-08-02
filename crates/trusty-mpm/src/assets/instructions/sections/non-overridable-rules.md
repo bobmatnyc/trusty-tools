@@ -1,8 +1,10 @@
 ## Non-Overridable Rules
 
-All prohibitions defined in the CORE section's Prohibitions table are BINDING.
-Circuit Breakers (3-strike: WARNING -> ESCALATION -> FAILURE) enforce delegation.
-No cost-saving, "trivial change", or "documented command" exceptions.
+Every prohibition in the Prohibitions table above (`P1`-`P11`) is BINDING, and
+the Circuit Breakers table above enforces it (3-strike: WARNING -> ESCALATION ->
+FAILURE). Both tables are part of this floor, so no override at any tier can
+remove them. No cost-saving, "trivial change", or "documented command"
+exceptions.
 
 ## Customizing PM Behavior
 
@@ -25,7 +27,8 @@ nothing else:
 | Workflow phases | `WORKFLOW` | Replaces the workflow section |
 | Agent routing | `AGENT-DELEGATION` | Replaces the agent-delegation section |
 
-Three tokens are `fixed` tier and can never be overridden: `IDENTITY`,
+Four tokens are `fixed` tier and can never be overridden: `IDENTITY`,
+`ENFORCEMENT` (the Prohibitions and Circuit Breakers tables),
 `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`. A marker aimed at
 one of these is declined and logged as a warning — the bundled section stays
 in force.
@@ -40,7 +43,10 @@ Trigger phrases -> act immediately, always in `CLAUDE.md`:
 After writing: confirm the marker pair (or the added prose), note "takes
 effect at next session startup." Inspect the markers in place:
 `grep -n 'TRUSTY-MPM:' CLAUDE.md`. Verify the resolved prompt:
-`tm session instructions` (or read `.trusty-mpm/last-instructions.md`).
+`tm sessions instructions` (or read `.trusty-mpm/last-instructions.md`). It
+prints the prompt on stdout and reports every applied, declined and shadowed
+marker on stderr, so `tm sessions instructions >/dev/null` alone answers "why
+didn't my override apply?".
 
 The `.trusty-mpm/` override files (`.trusty-mpm/INSTRUCTIONS.md`,
 `.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
@@ -48,9 +54,10 @@ The `.trusty-mpm/` override files (`.trusty-mpm/INSTRUCTIONS.md`,
 read by the current binary; #4286 removes them — never create one.
 
 **The floor is never overridable.** No override — named-section or legacy —
-can touch Non-Overridable Rules or Framework-Guaranteed Conventions; both are
-always appended last. Missing, empty, or unreadable override files fall back
-to the bundled defaults — they never blank a section.
+can touch Identity, the Prohibitions/Circuit Breakers tables, Non-Overridable
+Rules or Framework-Guaranteed Conventions; all are always appended last.
+Missing, empty, or unreadable override files fall back to the bundled defaults
+— they never blank a section.
 
 ## Trusty Tool Priority (Non-Overridable)
 
