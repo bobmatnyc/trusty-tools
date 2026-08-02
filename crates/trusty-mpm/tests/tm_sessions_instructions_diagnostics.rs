@@ -48,6 +48,30 @@ fn run_tm(args: &[&str], rust_log: Option<&str>) -> (String, String) {
 /// `fixed` and is declined. One project therefore exercises both the applied
 /// (`info`) and the declined (`warn`) diagnostic paths.
 fn write_project(dir: &std::path::Path) {
+    // A deployed PROJECT-tier agent, so the resolved prompt is composed by
+    // `InstructionPackage` rather than the legacy string assembly.
+    //
+    // This is not decoration. `resolve_pm_prompt_with_roster` only takes the
+    // package branch when the live agent scan finds something, and that scan
+    // unions three tiers — two of them machine-global. On a provisioned
+    // workstation the developer's own `~/.claude/agents` silently satisfies it;
+    // on a clean CI runner nothing does, so the same test exercised a DIFFERENT
+    // composer in each place and asserted on the one composer's diagnostic
+    // wording. Found by CI on this PR: the floor decline arrived as
+    // `warn_unapplied`'s "NOT applied: legacy .trusty-mpm/ override file"
+    // instead of `with_overrides`' "override declined". Deploying into the
+    // project tier — the highest-precedence source, and the one the daemon
+    // managed-spawn actually populates — pins the branch without touching
+    // `$HOME`.
+    let agents = dir.join(".claude").join("agents");
+    std::fs::create_dir_all(&agents).expect("create .claude/agents");
+    std::fs::write(
+        agents.join("ticketing.md"),
+        "---\nname: ticketing\nrole: ticketing\n\
+         description: Handles ticketing work.\nmodel: sonnet\n---\n\n# ticketing\n",
+    )
+    .expect("write agent");
+
     std::fs::write(
         dir.join("CLAUDE.md"),
         "# Project Instructions\n\n\
@@ -140,18 +164,31 @@ fn declined_overrides_are_reported_without_rust_log_set() {
 }
 
 #[test]
-fn a_clean_project_produces_no_stderr_noise() {
-    // The other half of the default-filter choice: a project with no overrides
-    // at all must print the prompt and nothing else, so the diagnostics stay a
-    // signal rather than becoming output every operator learns to ignore.
+fn a_clean_project_produces_no_override_diagnostics() {
+    // The other half of the default-filter choice: with nothing to report, the
+    // override machinery must stay silent, so its diagnostics remain a signal
+    // rather than output every operator learns to scroll past.
+    //
+    // Asserts the absence of OVERRIDE diagnostics specifically, not that stderr
+    // is byte-empty. A byte-empty assertion is a claim about the whole process,
+    // and it fails for reasons that have nothing to do with this fix — CI has no
+    // `claude` binary on PATH, so the output-style probe legitimately warns
+    // there and not on a developer machine. Testing "no unrelated warning was
+    // emitted anywhere" was never the intent and is not this test's business.
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let dir = tmp.path().to_string_lossy().into_owned();
 
     let (stdout, stderr) = run_tm(&["sessions", "instructions", "--dir", &dir], None);
 
     assert!(stdout.contains("# PM Agent -- Trusty MPM"));
-    assert_eq!(
-        stderr, "",
-        "a project with no overrides must produce no diagnostics"
-    );
+    for diagnostic in [
+        "named-section override",
+        "unknown section token",
+        "instruction override",
+    ] {
+        assert!(
+            !stderr.contains(diagnostic),
+            "a project with no overrides must not report {diagnostic:?}, got stderr: {stderr:?}"
+        );
+    }
 }
