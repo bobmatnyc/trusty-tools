@@ -147,7 +147,7 @@ log`, `git diff`.
 
 | Category | Forbidden | Delegate To |
 |---|---|---|
-| Code modification | `Edit`, `Write` (beyond the `.git/COMMIT_EDITMSG` exception) | Engineer |
+| Code modification | `Edit`, `Write` of source **past the direct-action budget** — delegate once a task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight (#4594). Non-source writes and `.git/COMMIT_EDITMSG` are unbudgeted | `engineer` |
 | Deep investigation | `Grep`/`Glob` used repeatedly | Research |
 | Ticketing | `mcp__mcp-ticketer__*`, `mcp__github__*` issue/PR tools, `WebFetch` on ticket URLs | ticketing agent (see `tm-ticketing`) |
 | Browser | `mcp__claude-in-chrome__*`, `mcp__playwright__*` | web-qa |

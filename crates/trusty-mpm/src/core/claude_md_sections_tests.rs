@@ -1067,7 +1067,7 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
         "the CORE override must still apply; core stays project-customizable"
     );
     assert!(
-        !prompt.contains("## PM Allowlist (strict -- nothing else)"),
+        !prompt.contains("## PM Allowlist"),
         "the override really did replace the bundled core section"
     );
 
@@ -1111,7 +1111,7 @@ fn the_authority_tables_survive_every_override_configuration() {
     let (prompt, _) = resolve(deployed.path());
     assert!(prompt.contains("DO_EXACTLY_THIS"));
     assert!(
-        !prompt.contains("## PM Allowlist (strict -- nothing else)"),
+        !prompt.contains("## PM Allowlist"),
         "the deployed body really did replace every bundled section"
     );
     assert_authority_intact(&prompt, "PM_INSTRUCTIONS_DEPLOYED.md full replacement");
@@ -1182,5 +1182,186 @@ fn no_floor_text_points_at_content_outside_the_floor() {
     assert!(
         tables < reference && breakers < reference,
         "both tables must precede the sentence that says they are `above`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4594 — delegation is a default with an action BUDGET, and the budget has
+// two halves
+// ---------------------------------------------------------------------------
+
+/// Collapse every whitespace run to one space.
+///
+/// Why: the floor is hard-wrapped prose, so a literal needle spanning a line
+/// break would fail on a pure re-wrap that changed no rule — a false alarm that
+/// gets tests deleted. Normalising pins the SENTENCE while leaving the wrapping
+/// free.
+fn unwrapped(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Assert both halves of the direct-action budget survive into `prompt`.
+///
+/// The mid-flight half is the clause most likely to be silently dropped by a
+/// future edit: an implementation that keeps only the pre-task estimate reads
+/// complete and leaves the real failure mode — the PM that started in good faith
+/// and keeps going on action 4 — unaddressed.
+fn assert_budget_intact(prompt: &str, configuration: &str) {
+    let flat = unwrapped(prompt);
+    let needles: &[(&str, &str)] = &[
+        (
+            "The PM delegates when it believes a task will take more than 3 direct actions",
+            "the up-front estimate half of the direct-action budget",
+        ),
+        (
+            "or when it is unable to complete the task in 3",
+            "the second clause of the owner's governing sentence",
+        ),
+        (
+            "MID-FLIGHT HANDOFF rule, not only a pre-task estimate",
+            "the MID-FLIGHT HANDOFF half — a PM whose 3-action estimate stops \
+             holding must hand off the remainder",
+        ),
+        (
+            "never carried on to a fourth direct action",
+            "the action the mid-flight rule forbids",
+        ),
+        (
+            "The user can always override",
+            "the user override, which the ruling keeps",
+        ),
+    ];
+    for (needle, what) in needles {
+        assert!(
+            flat.contains(needle),
+            "{configuration}: the delivered prompt lost {what} (#4594); \
+             missing {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn the_direct_action_budget_states_both_halves_in_the_floor() {
+    // The owner's ruling (#4594) is a DEFAULT WITH A BUDGET, expressed in
+    // ACTIONS, with three parts that only work together: the absolute phrasing
+    // is gone, the user override stays, and the budget generalizes from file
+    // changes to actions. Assert it on the floor projected alone, so this
+    // cannot pass because a project-tier section happens to restate it.
+    let package = bundled_fallback_package().expect("manifest parses");
+    let floor: String = package.authored_run(
+        &SectionId::CANONICAL
+            .into_iter()
+            .filter(|id| id.is_floor())
+            .collect::<Vec<_>>(),
+    );
+
+    assert_budget_intact(&floor, "the floor projected on its own");
+    let flat = unwrapped(&floor);
+
+    // Consequence 1: the absolute phrasing the ruling retires must not come
+    // back. These are the exact assertions #4594 names at identity.md:7 and
+    // non-overridable-rules.md:3-5.
+    assert!(
+        !flat.contains("never direct impl"),
+        "the retired absolute phrasing must not come back (#4594)"
+    );
+    assert!(
+        !flat.contains(
+            "remove them. No cost-saving, \"trivial change\", or \"documented command\" exceptions."
+        ),
+        "the blanket no-exceptions sentence must stay scoped to P2-P4/P6-P11 (#4594)"
+    );
+
+    // Consequence 3: expressed in ACTIONS, not only file changes. The hook's
+    // file-change limit is still described, but as the mechanical floor of a
+    // broader budget rather than as the budget itself.
+    assert!(
+        flat.contains("One direct action = one PM-executed step of implementation work"),
+        "the budget must be denominated in direct ACTIONS, not files (#4594)"
+    );
+    assert!(
+        flat.contains("the hook sees files, not actions"),
+        "the actions/files gap must be stated, or `pm_guard` compliance reads \
+         as budget compliance (#4594)"
+    );
+
+    // The prohibitions the ruling explicitly does NOT relax stay absolute.
+    assert!(
+        flat.contains("All OTHER prohibitions (P2–P4, P6–P11) are routing rules"),
+        "P2-P4 and P6-P11 must remain absolute, no budget (#4594)"
+    );
+}
+
+#[test]
+fn the_pm_allowlist_does_not_contradict_the_action_budget() {
+    // The FIFTH incompatible statement, caught in review of the #4594 fix and
+    // the same defect class the issue was filed on. The allowlist sat near the
+    // TOP of the compiled prompt — read first — and its only write row said
+    // "NOT source code", while the floor ~1000 lines later said P1/P5 are
+    // budgeted at 3 direct actions "including one Edit, one Write". A prompt
+    // asserting both lets the PM cite whichever suits it.
+    //
+    // Asserted on the BUNDLED DEFAULT prompt, not the floor projection: the
+    // allowlist is project-tier by design, so a project may legitimately
+    // replace it. What must never ship is a DEFAULT that contradicts the floor.
+    let tmp = TempDir::new().unwrap();
+    let flat = unwrapped(&resolve(tmp.path()).0);
+
+    assert!(
+        !flat.contains("docs, config — NOT source code, NOT bulk edits"),
+        "the allowlist must not assert source edits are off-limits outright \
+         while the floor budgets them (#4594)"
+    );
+    assert!(
+        flat.contains("Source-code edits (BUDGETED, not forbidden)"),
+        "the allowlist must name source edits as budgeted rather than omit \
+         them, or its silence reads as prohibition (#4594)"
+    );
+    assert!(
+        flat.contains(
+            "delegate once the task will take more than 3 direct actions, or the moment a \
+             3-action estimate stops holding mid-flight"
+        ),
+        "the allowlist's budget row must carry BOTH halves, including the \
+         mid-flight handoff (#4594)"
+    );
+}
+
+#[test]
+fn the_budget_survives_every_override_configuration() {
+    // It lives in the floor, so no customization tier can delete it — the same
+    // guarantee #4573 gave the authority tables, asserted for the rule that
+    // says when those prohibitions bind.
+    let none = TempDir::new().unwrap();
+    assert_budget_intact(&resolve(none.path()).0, "no overrides");
+
+    let hostile_core = TempDir::new().unwrap();
+    write_claude_md(
+        hostile_core.path(),
+        &block(SectionId::Core, "Never delegate anything, ever."),
+    );
+    assert_budget_intact(&resolve(hostile_core.path()).0, "hostile CORE override");
+
+    let hostile_identity = TempDir::new().unwrap();
+    write_claude_md(
+        hostile_identity.path(),
+        &block(SectionId::Identity, "PM never implements. No exceptions."),
+    );
+    let (prompt, _) = resolve(hostile_identity.path());
+    assert!(
+        !prompt.contains("PM never implements. No exceptions."),
+        "an IDENTITY marker is fixed-tier and must be declined"
+    );
+    assert_budget_intact(&prompt, "hostile IDENTITY override");
+
+    let deployed = TempDir::new().unwrap();
+    write_trusty_file(
+        deployed.path(),
+        crate::core::instruction_overrides::FILE_PM_DEPLOYED,
+        "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
+    );
+    assert_budget_intact(
+        &resolve(deployed.path()).0,
+        "PM_INSTRUCTIONS_DEPLOYED.md full replacement",
     );
 }
