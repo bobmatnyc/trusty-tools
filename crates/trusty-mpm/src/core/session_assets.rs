@@ -129,7 +129,15 @@ pub fn session_asset_staleness_with_catalog(
 ) -> StalenessReport {
     // #4409: agents are deployed to (and therefore drift in) the tm-managed
     // config-dir tier; skills remain per-workspace.
-    let deployed_agents = DeployedAgentHashes::read(&fw.agent_deploy_dir(), catalog);
+    // #4619 review: LAZY, not eager. This is the SINGLE-session path
+    // (`GET …/managed/{id}`, which `tm session resume` reads); it shares its
+    // read with nobody, so pre-hashing every catalog stem would read more than
+    // the old code did whenever the plan selects a subset.
+    let agents_dir = fw.agent_deploy_dir();
+    let deployed_agents = DeployedAgentHashes::lazy(
+        crate::core::agent_manifest::AgentManifest::load(&agents_dir),
+        &agents_dir,
+    );
     session_asset_staleness_with_shared(fw, plan, catalog, &deployed_agents)
 }
 

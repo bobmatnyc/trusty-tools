@@ -12,9 +12,11 @@
 //! ordinary `cargo test` gate (it takes seconds and its output is a
 //! measurement, not an assertion). Run it with
 //! `cargo test -p trusty-mpm --lib bench_stale_assets_for_many -- --ignored --nocapture`.
-//! [`deployed_read_count`] is the load-independent companion metric: cold `tm ls`
-//! latency is dominated by the NUMBER of files opened, not by CPU, so the read
-//! count predicts the cold win on any machine.
+//! The deployed-read count (via `update_check::deployed_reads_under`, scoped to
+//! this benchmark's own fixture paths so concurrent unrelated tests cannot
+//! inflate it) is the load-independent companion metric: cold `tm ls` latency is
+//! dominated by the NUMBER of files opened, not by CPU, so the read count
+//! predicts the cold win on any machine.
 //! Test: this file is itself the measurement; the INVARIANT it exists to
 //! protect is pinned by
 //! `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet` in
@@ -192,9 +194,14 @@ fn median(mut xs: Vec<Duration>) -> Duration {
 /// printing every repetition rather than a mean keeps a load-induced outlier
 /// visible instead of averaged away.
 /// What: builds the fleet once, then for each repetition times the OLD path and
-/// the NEW path back to back, asserting after every pair that they produced the
-/// IDENTICAL verdict map — so a "speed-up" that changed an answer fails the
-/// benchmark rather than being reported as a win. Prints per-rep timings, both
+/// the NEW path, asserting after every pair that they produced the IDENTICAL
+/// verdict map — so a "speed-up" that changed an answer fails the benchmark
+/// rather than being reported as a win. The two are run in ALTERNATING order
+/// (old-first on even reps, new-first on odd) so that whichever variant runs
+/// second cannot be systematically advantaged by a filesystem the other just
+/// warmed, nor disadvantaged by thermal/scheduling drift within the pair
+/// (#4619 review, LOW). Read counts are scoped to this test's own fixture
+/// paths, never to a process-global total. Prints per-rep timings, both
 /// medians, the ratio, and the deployed-side read count for each variant.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
@@ -202,6 +209,9 @@ fn median(mut xs: Vec<Duration>) -> Duration {
 async fn bench_stale_assets_for_many() {
     let (home, _guard) = super::tests::fake_home();
     let records = build_fleet(home.path(), SESSIONS);
+    // Every deployed read this fixture performs lands under the fake `$HOME`:
+    // agents under `<home>/.trusty-tools/...`, skills under `<home>/bench-ws-*`.
+    let scope = home.path().to_path_buf();
 
     // Untimed warm-up so the measurement reflects steady state rather than
     // first-touch page-cache population of the fixture we just wrote.
@@ -213,17 +223,35 @@ async fn bench_stale_assets_for_many() {
     let (mut old_reads, mut new_reads) = (0usize, 0usize);
 
     for rep in 0..REPS {
-        crate::core::update_check::reset_deployed_read_log();
-        let t0 = Instant::now();
-        let old = stale_assets_per_session_agent_read(records.clone()).await;
-        let old_elapsed = t0.elapsed();
-        old_reads = crate::core::update_check::deployed_read_count();
+        let run_old = || async {
+            crate::core::update_check::reset_deployed_read_log();
+            let t = Instant::now();
+            let out = stale_assets_per_session_agent_read(records.clone()).await;
+            let elapsed = t.elapsed();
+            let reads = crate::core::update_check::deployed_reads_under(&scope);
+            (out, elapsed, reads)
+        };
+        let run_new = || async {
+            crate::core::update_check::reset_deployed_read_log();
+            let t = Instant::now();
+            let out = stale_assets_for_many(records.clone()).await;
+            let elapsed = t.elapsed();
+            let reads = crate::core::update_check::deployed_reads_under(&scope);
+            (out, elapsed, reads)
+        };
 
-        crate::core::update_check::reset_deployed_read_log();
-        let t1 = Instant::now();
-        let new = stale_assets_for_many(records.clone()).await;
-        let new_elapsed = t1.elapsed();
-        new_reads = crate::core::update_check::deployed_read_count();
+        // Alternate which variant goes first (#4619 review, LOW).
+        let ((old, old_elapsed, o_reads), (new, new_elapsed, n_reads)) = if rep % 2 == 0 {
+            let a = run_old().await;
+            let b = run_new().await;
+            (a, b)
+        } else {
+            let b = run_new().await;
+            let a = run_old().await;
+            (a, b)
+        };
+        old_reads = o_reads;
+        new_reads = n_reads;
 
         assert_eq!(old.len(), SESSIONS, "every session must get a verdict");
         assert_eq!(
@@ -234,8 +262,13 @@ async fn bench_stale_assets_for_many() {
         );
 
         println!(
-            "  rep {rep}: per-session {:>9.3} ms ({old_reads} reads) | \
+            "  rep {rep} ({}): per-session {:>9.3} ms ({old_reads} reads) | \
              shared {:>9.3} ms ({new_reads} reads)",
+            if rep % 2 == 0 {
+                "old-first"
+            } else {
+                "new-first"
+            },
             old_elapsed.as_secs_f64() * 1000.0,
             new_elapsed.as_secs_f64() * 1000.0,
         );

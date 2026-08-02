@@ -1148,28 +1148,53 @@ fn fleet_with_deployed_skills(home: &std::path::Path, count: usize) -> Vec<Sessi
 /// page-cache state, so it cannot flake, and it is exactly the quantity cold
 /// `tm ls` latency scales with.
 /// What: builds a 4-session fleet, runs the real `stale_assets_for_many` hot
-/// path, and asserts the deployed-side read count equals
-/// `1 agent + 4 skills`, not `4 agents + 4 skills`. Reverting the hoist (moving
-/// `DeployedAgentHashes::read` back inside the per-session fan-out) makes this
-/// observe 8 reads instead of 5 and fail.
+/// path, and asserts the AGENT deploy directory was read exactly once while
+/// each of the 4 per-workspace skill trees was read exactly once. Reverting the
+/// hoist (moving `DeployedAgentHashes::read` back inside the per-session
+/// fan-out) makes the agent count 4 instead of 1 and fail.
+///
+/// Isolation (#4619 review, HIGH): the read log is PROCESS-GLOBAL and none of
+/// `core::update_check::tests`' 21 tests are `#[serial]`, so an exact count
+/// taken globally attributes concurrent unrelated reads to this test — a
+/// filtered `cargo test -- detect` run reproducibly observed 25 where this
+/// expected 5. Counts are therefore taken with
+/// `deployed_reads_under(<prefix>)`, scoped to directories that exist only
+/// inside THIS test's `fake_home()` temp dir, so no other test's reads can
+/// land under them. `#[serial_test::serial]` remains for the `$HOME` mutation
+/// it has always been required for, but correctness of the count no longer
+/// depends on it.
 #[tokio::test]
 #[serial_test::serial]
 async fn stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet() {
     let (home, _guard) = fake_home();
     let records = fleet_with_deployed_skills(home.path(), 4);
+    let fw = crate::core::paths::FrameworkPaths::default();
+    let agents_dir = fw.agent_deploy_dir();
 
     crate::core::update_check::reset_deployed_read_log();
     let result = stale_assets_for_many(records).await;
-    let reads = crate::core::update_check::deployed_read_count();
+    let agent_reads = crate::core::update_check::deployed_reads_under(&agents_dir);
 
     assert_eq!(result.len(), 4, "every session must still get a verdict");
     assert_eq!(
-        reads, 5,
-        "the ONE catalog agent must be read once for the whole fleet and each \
-         of the 4 per-workspace skills once each (1 + 4 = 5). Observing 8 means \
-         the machine-global agent directory is being re-read per session — the \
-         #4322 fan-out this PR removed"
+        agent_reads, 1,
+        "the ONE catalog agent in the machine-global deploy dir must be read \
+         ONCE for the whole 4-session fleet. Observing 4 means the shared \
+         directory is being re-read per session — the #4322 fan-out this PR \
+         removed"
     );
+    for i in 0..4 {
+        let ws = home.path().join(format!("fleet-ws-{i}"));
+        let skills_dir =
+            crate::core::paths::FrameworkPaths::for_managed_workspace(&ws).claude_skills_dir();
+        assert_eq!(
+            crate::core::update_check::deployed_reads_under(&skills_dir),
+            1,
+            "each session's PER-WORKSPACE skill tree must still be read for \
+             that session — sharing must not have collapsed the genuinely \
+             per-session half too"
+        );
+    }
 }
 
 /// Issue #4322 correctness gate: sharing the deployed-agent read WITHIN one
@@ -1234,7 +1259,11 @@ async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurre
     let bundled_skills = fw.skill_source_dir();
     std::fs::create_dir_all(&bundled_skills).unwrap();
 
-    let mut expected: Vec<(ManagedSessionId, bool)> = Vec::new();
+    // Session ids in fixture order; the expected verdict for each is derived
+    // AFTER the loop, from what is actually on disk once the last catalog write
+    // has landed (deriving it inside the loop would record a guess that the
+    // subsequent iterations can invalidate).
+    let mut ids: Vec<ManagedSessionId> = Vec::new();
     let mut records = Vec::new();
     for i in 0..6 {
         let drifted = i % 2 == 0;
@@ -1261,18 +1290,18 @@ async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurre
         let mut r = make_record(None);
         r.state = ManagedSessionState::Active;
         r.workspace_path = Some(ws);
-        expected.push((r.id, drifted));
+        ids.push(r.id);
         records.push(r);
     }
 
-    // Only the LAST catalog write is live when the probe runs, so recompute
-    // what each session should conclude against that final catalog state: a
-    // session is stale iff its deployed body differs from the final catalog.
+    // Only the LAST catalog write is live when the probe runs, so derive what
+    // each session should conclude against that final catalog state: a session
+    // is stale iff its deployed body differs from the final catalog.
     let final_body = std::fs::read_to_string(bundled_skills.join("tm-doctor.md")).unwrap();
-    let expected: Vec<(ManagedSessionId, bool)> = expected
+    let expected: Vec<(ManagedSessionId, bool)> = ids
         .iter()
         .enumerate()
-        .map(|(i, (id, _))| {
+        .map(|(i, id)| {
             let ws = home.path().join(format!("mixed-ws-{i}"));
             let ws_fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&ws);
             let deployed =
