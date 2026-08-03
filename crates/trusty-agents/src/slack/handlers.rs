@@ -369,6 +369,10 @@ pub(super) async fn handle_message(
         },
     ));
 
+    // #4652: past the pairing and RBAC gates, this is a known human speaking —
+    // record it as attendance for the persona they addressed.
+    crate::attendance::note_human_turn(&active_persona);
+
     let result = ctrl::run_pm_task_with_persona(
         &path,
         &active_persona,

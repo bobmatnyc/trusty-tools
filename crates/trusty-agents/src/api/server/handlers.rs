@@ -320,6 +320,13 @@ pub(super) async fn submit_task(
     let placeholder = PmResponse::running(&id);
     state.upsert(id.clone(), placeholder).await;
 
+    // #4652: this request is a person typing in the GUI/WebUI, which is the
+    // one thing `SessionRecord.last_activity_at` cannot distinguish from the
+    // assistant's own tool calls. Record it as attendance for the instance the
+    // human addressed (no roster selection = the `ctrl` concierge).
+    // Infallible: a failure is logged and swallowed, never surfaced here.
+    crate::attendance::note_human_turn(agent_override(&req).as_deref().unwrap_or("ctrl"));
+
     // #192 Phase B: announce the new session immediately on the event bus so
     // SSE subscribers (Sidebar task list, ChatView session bootstrap) update
     // before the child subprocess has even spawned.

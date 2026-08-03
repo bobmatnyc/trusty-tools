@@ -339,6 +339,9 @@ pub(super) async fn handle_message(
     // mirror that pattern here so Telegram and REPL agree on which agent
     // config wins by default.
     let persona_name = active_persona.as_deref().unwrap_or("ctrl");
+    // #4652: a paired Telegram chat message is a human turn — record it as
+    // attendance for the persona it addressed, before the multi-second LLM call.
+    crate::attendance::note_human_turn(persona_name);
     let result = ctrl::run_pm_task_with_persona(
         &path,
         persona_name,
