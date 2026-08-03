@@ -19,14 +19,14 @@
 //! | golden | configuration | composer |
 //! |---|---|---|
 //! | `pm-prompt-bundled-fallback.md` | no `.trusty-mpm/` override, roster present | `InstructionPackage` |
-//! | `pm-prompt-legacy-delegation-override.md` | `.trusty-mpm/AGENT_DELEGATION.md` present | legacy assembly |
+//! | `pm-prompt-roster-absent.md` | no agent deployed in any tier | legacy assembly |
 //! | `pm-prompt-claude-md-override.md` | `CLAUDE.md` named sections (#4286) | `InstructionPackage` |
 //!
-//! The second is not redundant. It is the check that a project which overrides
-//! one section still receives the *same* Core/Memory/Search/Workflow/floor text
-//! as a project that overrides nothing — the split-brain that authoring sections
-//! would otherwise have introduced, since the legacy path formerly read separate
-//! monolithic assets.
+//! The second is not redundant. It is the check that a project composing through
+//! the string assembly still receives the *same* Core/Memory/Search/Workflow and
+//! floor text as one composing through the package — the split-brain that
+//! authoring sections would otherwise have introduced, since the legacy path
+//! formerly read separate monolithic assets.
 //!
 //! Regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`. Review the
 //! resulting `git diff` before committing it; that diff IS the deliverable.
@@ -34,9 +34,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides;
-use crate::core::instruction_overrides::{
-    FILE_AGENT_DELEGATION, OVERRIDE_DIR_NAME, resolve_pm_prompt_with_roster,
-};
+use crate::core::instruction_overrides::resolve_pm_prompt_with_roster;
 use tempfile::TempDir;
 
 /// A fixed, deterministic roster.
@@ -50,9 +48,6 @@ const FIXED_ROSTER: &str = "## Delegation Authority\n\n\
 /// A fixed stack-profile block, standing in for `stack_profile_section`.
 const FIXED_STACK: &str =
     "## Project Stack Profile\n\nDetected stack: Rust. Route implementation to `rust-engineer`.";
-
-/// A fixed delegation override, standing in for a project's own routing rules.
-const FIXED_DELEGATION_OVERRIDE: &str = "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n";
 
 /// Directory holding the committed snapshots.
 fn golden_dir() -> PathBuf {
@@ -124,19 +119,21 @@ fn golden_bundled_fallback_prompt() {
 }
 
 #[test]
-fn golden_legacy_delegation_override_prompt() {
-    // Configuration 2: the legacy assembly. Its Core/Memory/Search/Workflow and
-    // floor text must track the same section sources — otherwise authoring
-    // sections would have split the product in two, with overriding projects
-    // frozen on the old instructions.
+fn golden_roster_absent_assembly_prompt() {
+    // Configuration 2, REPLACING the retired `.trusty-mpm/AGENT_DELEGATION.md`
+    // snapshot (#4286). That configuration no longer exists — no file can force
+    // the string assembly any more — so the golden that covered it would have
+    // pinned an unreachable code path.
+    //
+    // The string assembly is still reachable by exactly one route: no agent
+    // deployed in any tier, so there is no roster for the packaged composer to
+    // consume. That is the configuration snapshotted here, and it serves the
+    // same purpose the old one did — proving a project on the non-packaged path
+    // receives the same Core/Memory/Search/Workflow and floor text as everyone
+    // else, rather than being frozen on a divergent copy.
     let tmp = TempDir::new().expect("tempdir");
-    let dir = tmp.path().join(OVERRIDE_DIR_NAME);
-    std::fs::create_dir_all(&dir).expect("create .trusty-mpm");
-    std::fs::write(dir.join(FILE_AGENT_DELEGATION), FIXED_DELEGATION_OVERRIDE)
-        .expect("write override");
-
-    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
-    assert_golden("pm-prompt-legacy-delegation-override.md", &prompt);
+    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    assert_golden("pm-prompt-roster-absent.md", &prompt);
 }
 
 #[test]

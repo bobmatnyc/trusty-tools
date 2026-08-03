@@ -342,19 +342,21 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     // Why: the same convergence guarantee must hold when project-level override
     // files are present — the stash and the display must reflect the override,
     // not the bundled defaults.
-    // What: writes a `WORKFLOW.md` override, then asserts the display and the
-    // live prompt both include it (and don't include the bundled heading).
+    // What: writes a `CLAUDE.md` WORKFLOW named section (#4286 — the retired
+    // `.trusty-mpm/WORKFLOW.md` file this used to write is no longer read),
+    // then asserts the display and the live prompt both include it (and don't
+    // include the bundled heading).
     // Test: if `compose_session_instructions` stops reading overrides for the
     // display path, this test fails.
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
 
-    let override_dir = project.join(".trusty-mpm");
-    std::fs::create_dir_all(&override_dir).unwrap();
     std::fs::write(
-        override_dir.join("WORKFLOW.md"),
-        "# Custom Workflow\n\nCOMPOSE_OVERRIDE_MARKER\n",
+        project.join("CLAUDE.md"),
+        "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+         # Custom Workflow\n\nCOMPOSE_OVERRIDE_MARKER\n\
+         <!-- TRUSTY-MPM: WORKFLOW END -->\n",
     )
     .unwrap();
 

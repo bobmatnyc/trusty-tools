@@ -132,6 +132,13 @@ use doctor_push_guard::check_push_guard;
 mod doctor_worktree_disk;
 use doctor_worktree_disk::check_worktree_disk;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #4286 —
+// the retired `.trusty-mpm/` override-file probe, the on-demand half of the
+// signal that stops the hard cut from silently dropping a project's rules).
+#[path = "doctor_legacy_overrides.rs"]
+mod doctor_legacy_overrides;
+use doctor_legacy_overrides::check_legacy_overrides;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -247,7 +254,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_eight_checks`,
+/// Test: `run_doctor_produces_twenty_nine_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -296,6 +303,10 @@ pub async fn run_doctor(
         // unreachable by every deploy and invisible to staleness.
         check_skill_unmanaged(&paths, project_dir),
         check_legacy_instruction_sources(&home),
+        // #4286: the five `.trusty-mpm/` override files are no longer read. A
+        // leftover file means the project's instructions stopped reaching the
+        // PM, so this Fails loudly and names the CLAUDE.md migration.
+        check_legacy_overrides(project_dir),
         agent_skills,
         agent_skills_prose_hints,
     ];

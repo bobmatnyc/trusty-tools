@@ -102,23 +102,34 @@ fn build_system_prompt_includes_trusty_block() {
 
 #[test]
 fn build_system_prompt_for_applies_project_override() {
-    // Why: the live launch prompt must reflect a project-level override file
-    // under `<project>/.trusty-mpm/` (issue #381), while still appending the
-    // non-overridable BASE_PM floor.
+    // Why: the live launch prompt must reflect the project's customization
+    // (issue #381 — an advertised override that no code reads), while still
+    // appending the non-overridable floor.
+    //
+    // #4286: the customization surface is a CLAUDE.md named section. The
+    // `.trusty-mpm/INSTRUCTIONS.md` file this used to write is retired, and the
+    // second half of this test now asserts it has no effect.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let override_dir = project.join(".trusty-mpm");
-    std::fs::create_dir_all(&override_dir).unwrap();
     std::fs::write(
-        override_dir.join("INSTRUCTIONS.md"),
-        "PROJECT_OVERRIDE_MARKER\n",
+        project.join("CLAUDE.md"),
+        "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+         PROJECT_OVERRIDE_MARKER\n\
+         <!-- TRUSTY-MPM: WORKFLOW END -->\n",
     )
     .unwrap();
+    // Present, and required to make no difference.
+    let override_dir = project.join(".trusty-mpm");
+    std::fs::create_dir_all(&override_dir).unwrap();
+    std::fs::write(override_dir.join("INSTRUCTIONS.md"), "RETIRED_MARKER\n").unwrap();
 
     let prompt = build_system_prompt_for(project);
     assert!(prompt.contains("PROJECT_OVERRIDE_MARKER"));
+    assert!(
+        !prompt.contains("RETIRED_MARKER"),
+        "the retired .trusty-mpm/INSTRUCTIONS.md must not reach the launch prompt"
+    );
     assert!(prompt.contains("# BASE_PM Framework Floor"));
-    // Bundled PM body is still present (INSTRUCTIONS.md is additive).
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
 
@@ -168,11 +179,14 @@ fn prepare_session_stash_reflects_override() {
         let project = tmp.path();
         let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-        let override_dir = project.join(".trusty-mpm");
-        std::fs::create_dir_all(&override_dir).unwrap();
+        // #4286: the override arrives as a CLAUDE.md named section. The
+        // retired `.trusty-mpm/WORKFLOW.md` this used to write is no longer
+        // read, so it could not produce an override to observe.
         std::fs::write(
-            override_dir.join("WORKFLOW.md"),
-            "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
+            project.join("CLAUDE.md"),
+            "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+             # Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n\
+             <!-- TRUSTY-MPM: WORKFLOW END -->\n",
         )
         .unwrap();
 
@@ -182,7 +196,7 @@ fn prepare_session_stash_reflects_override() {
 
         assert!(
             stash.contains("STASH_OVERRIDE_MARKER"),
-            "stash must reflect the WORKFLOW.md override (native_supported={native_supported})"
+            "stash must reflect the CLAUDE.md WORKFLOW override (native_supported={native_supported})"
         );
         assert!(
             !stash.contains("# PM Workflow Configuration"),

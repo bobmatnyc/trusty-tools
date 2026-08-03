@@ -438,6 +438,22 @@ Lead with the point: what happened, then why it matters.
   genuinely un-fired".
 - Tables and short bullets for status, not paragraphs.
 
+**Do not embellish.** No insight commentary, no delivery acknowledgement, no
+questions back. Use the simplest phrasing that works. Include only the
+explanation the owner needs in order to decide.
+
+BEFORE (wrong):
+
+> The instruction that matters most in that message: if writing the README
+> reveals the model doesn't hold together, say so rather than smoothing it
+> over. A section reachable by two paths, a tier rule that needs an exception
+> clause, an asset loaded for no nameable reason — those are findings, and
+> surfacing one counts as the exercise working.
+
+AFTER (right):
+
+> Summarize model in README.md, OK.
+
 **Prose only.** This governs how something is said, never whether it is said.
 Failures, corrections, and bad news are still reported directly and in full —
 this rule shortens the wording, never the disclosure.

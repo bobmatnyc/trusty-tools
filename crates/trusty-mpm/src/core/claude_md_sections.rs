@@ -63,13 +63,23 @@ use crate::core::instruction_package::{
 
 /// Project-relative files scanned for marker blocks, highest precedence first.
 ///
-/// Why: `CLAUDE.md` is the surface #4183 moves customization to, and
-/// `.trusty-mpm/INSTRUCTIONS.md` is scanned as well so a project already keeping
-/// its rules there can adopt named sections without moving the file first. Order
-/// is precedence: on a same-section collision the earlier host wins.
-/// What: the two host paths, joined onto the project root.
-/// Test: `claude_md_wins_a_same_section_collision_with_instructions_md`.
-pub const HOST_FILES: [&str; 2] = ["CLAUDE.md", ".trusty-mpm/INSTRUCTIONS.md"];
+/// Why: `CLAUDE.md` is the SOLE project customization surface (#4286).
+/// `.trusty-mpm/INSTRUCTIONS.md` was a second host while that file was still an
+/// additive override; keeping it after the read path retired would leave the
+/// file half-alive — honoured for marked blocks, ignored for everything else —
+/// which is precisely the ambiguous state the retirement removes. Dropping it
+/// costs nothing measurable: a survey of all 52 `.trusty-mpm/INSTRUCTIONS.md`
+/// instances on the development machine found ZERO containing a `TRUSTY-MPM:`
+/// marker, so no project loses a named override by this change.
+///
+/// The list stays an array, and [`scan_project`] keeps its cross-host
+/// precedence handling ([`REASON_SHADOWED`]), because the host set is DATA: that
+/// branch is what makes adding a host back a one-line change rather than a
+/// correctness question.
+/// What: the single host path, joined onto the project root.
+/// Test: `claude_md_is_the_only_marker_host`,
+/// `a_marker_in_the_retired_instructions_file_is_not_read`.
+pub const HOST_FILES: [&str; 1] = ["CLAUDE.md"];
 
 /// The only marker version this build understands.
 const SUPPORTED_VERSION: u32 = 1;
@@ -463,36 +473,11 @@ pub fn scan_project(project_dir: &Path) -> ProjectOverrides {
     result
 }
 
-/// Remove every paired marker block from an additive-addendum body.
-///
-/// Why: `.trusty-mpm/INSTRUCTIONS.md` is both a marker host and the source of
-/// the `project-addendum` generator. Without this, a section marked out there
-/// would be delivered twice — once as the override it is, once as raw addendum
-/// prose complete with the marker comments.
-/// What: drops the `START..=END` line span of every pair; text outside markers
-/// is untouched. A body containing NO pair is returned byte-for-byte unchanged,
-/// which is what makes today's marker-free `INSTRUCTIONS.md` files provably
-/// unaffected.
-/// Test: `strip_is_a_no_op_without_markers`,
-/// `strip_removes_marked_blocks_from_the_addendum`.
-pub fn strip_marker_blocks(text: &str) -> String {
-    let (blocks, _) = parse_blocks(text, Path::new(""));
-    if blocks.is_empty() {
-        return text.to_string();
-    }
-    text.lines()
-        .enumerate()
-        .filter(|(index, _)| {
-            !blocks
-                .iter()
-                .any(|b| *index >= b.start_line && *index <= b.end_line)
-        })
-        .map(|(_, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
-}
+// `strip_marker_blocks` lived here until #4286. It de-duplicated a marked block
+// that appeared in `.trusty-mpm/INSTRUCTIONS.md`, which was simultaneously a
+// marker host and the source of the additive `project-addendum`. Retiring that
+// file removed both roles at once, leaving the function with no caller — it is
+// deleted rather than kept as an unreachable helper.
 
 /// Report overrides that a non-package composition path cannot honour.
 ///
