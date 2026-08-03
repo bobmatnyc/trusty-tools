@@ -42,6 +42,41 @@ const SLACK_LISTENER_ID: &str = "slack";
 /// `listeners::poll::listener_event_summary` documents for Gmail.
 const SLACK_SNIPPET_MAX_CHARS: usize = 140;
 
+/// Record a Slack slash command as a human turn, behind the same two gates
+/// `handle_message` records behind (#4683).
+///
+/// Why: `handle_command` is the second of this transport's two inbound paths,
+/// and it recorded nothing — so a human polling `/slack-status` while a long
+/// task ran read as unattended after the threshold. The gate is composed here
+/// rather than inline because it is a SECURITY decision, not plumbing: pairing
+/// alone is a per-channel check, so an unknown Slack user posting in a paired
+/// channel could otherwise manufacture attendance for someone else's assistant
+/// and mute their notifications. `handle_message` already refuses to record for
+/// an unknown user (it returns the Virtual CTO reply before its own hook); this
+/// keeps the two paths agreeing.
+/// What: records for `persona` at `now` when the channel is paired AND the
+/// sender resolves to a known RBAC identity. Infallible; returns whether the
+/// clock advanced. Deliberately does NOT gate whether the command itself
+/// proceeds — an unknown user's `/slack-status` still answers, exactly as
+/// before.
+/// Test: `paired_slash_command_records_a_human_turn`,
+/// `unpaired_slash_command_records_nothing`,
+/// `unknown_rbac_user_cannot_manufacture_attendance`.
+pub(super) fn note_command_turn(
+    root: Option<&std::path::Path>,
+    persona: &str,
+    is_paired: bool,
+    sender_is_known_to_rbac: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    crate::attendance::note_command_turn_in(
+        root,
+        persona,
+        is_paired && sender_is_known_to_rbac,
+        now,
+    )
+}
+
 /// Slash command dispatch.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_command(
@@ -59,18 +94,32 @@ pub(super) async fn handle_command(
     // Gate every command except /slack-start and /slack-pair behind the
     // pairing check. Unpaired channels get a uniform prompt.
     let is_unauthenticated = matches!(command.as_str(), "/slack-start" | "/slack-pair");
-    if !is_unauthenticated {
-        let is_paired = paired.read().await.contains_key(&channel);
-        if !is_paired {
-            return post_message(
-                bot_token,
-                &channel,
-                ":lock: Not paired. Send `/slack-start` to begin.",
-                None,
-            )
-            .await;
-        }
+    let is_paired = paired.read().await.contains_key(&channel);
+    if !is_unauthenticated && !is_paired {
+        return post_message(
+            bot_token,
+            &channel,
+            ":lock: Not paired. Send `/slack-start` to begin.",
+            None,
+        )
+        .await;
     }
+
+    // #4683: mirrors the Telegram fix — a paired human polling `/slack-status`
+    // is attending, but only `handle_message` recorded it.
+    let persona_for_attendance = {
+        let map = sessions.lock().await;
+        map.get(&channel)
+            .map(|s| s.active_persona.clone())
+            .unwrap_or_else(|| rbac.default_persona.clone())
+    };
+    note_command_turn(
+        crate::attendance::default_attendance_root().ok().as_deref(),
+        &persona_for_attendance,
+        is_paired,
+        rbac.user(&user_id).is_some(),
+        chrono::Utc::now(),
+    );
 
     match command.as_str() {
         "/slack-start" => {
@@ -368,6 +417,10 @@ pub(super) async fn handle_message(
             tier: super::relay::tier_label(&user_identity.tier).to_string(),
         },
     ));
+
+    // #4652: past the pairing and RBAC gates, this is a known human speaking —
+    // record it as attendance for the persona they addressed.
+    crate::attendance::note_human_turn(&active_persona);
 
     let result = ctrl::run_pm_task_with_persona(
         &path,
