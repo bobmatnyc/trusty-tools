@@ -383,7 +383,7 @@ enum Command {
     ///
     /// Reads the address the running daemon persisted to its `http_addr`
     /// discovery file. Useful for shell substitution:
-    ///   curl http://127.0.0.1:$(trusty-memory port)/api/v1/health
+    ///   curl http://127.0.0.1:$(trusty-memory port)/health
     ///
     /// Exits non-zero (with a message on stderr) when no daemon is running
     /// or the address file is missing, so substitution fails cleanly.
