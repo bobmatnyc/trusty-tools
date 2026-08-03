@@ -669,8 +669,9 @@ impl MemoryService {
     /// route actually fast needs a different design (a shared cross-palace
     /// index, or an explicit palace-scoped query), not a cache-only read.
     /// Test: indirectly via `recall_across_palaces_merges_results` and the
-    /// MCP `memory_recall_all` integration paths; `recall_all_opens_every_palace`
-    /// pins that uncached palaces are still searched.
+    /// MCP `memory_recall_all` integration paths;
+    /// `open_palaces_blocking_opens_every_palace` pins that uncached palaces
+    /// are still searched.
     pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
         let palaces = match list_palaces_blocking(&self.state).await {
             Ok(v) => v,

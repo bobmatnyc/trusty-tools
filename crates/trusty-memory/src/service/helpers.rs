@@ -239,8 +239,8 @@ pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace
 /// the 64-slot LRU), and skips failures with a `tracing::warn!` so one bad
 /// palace cannot fail the whole fan-out. `label` names the caller in that
 /// warning.
-/// Test: `recall_all_opens_every_palace` pins that the fan-out still sees
-/// palaces that were never cached.
+/// Test: `open_palaces_blocking_opens_every_palace` pins that the fan-out
+/// still sees palaces that were never cached.
 pub(crate) async fn open_palaces_blocking(
     state: &AppState,
     palaces: &[Palace],
