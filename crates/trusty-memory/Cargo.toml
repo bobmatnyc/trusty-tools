@@ -119,6 +119,12 @@ toml = { workspace = true }
 serde_yaml = { workspace = true }
 dirs = { workspace = true }
 dashmap = { workspace = true }
+# Issue #4639: LRU-bounded cache of per-palace chat_sessions.redb handles.
+# `lru` + `parking_lot` are the exact pair `PalaceRegistry` already uses in
+# trusty-common for the same fd-bounding job, so this reuses the established
+# pattern with zero new lockfile entries.
+lru = { workspace = true }
+parking_lot = { workspace = true }
 async-trait = { workspace = true }
 colored = { workspace = true }
 # Why: `commands::stop` walks the process table to find the running daemon by

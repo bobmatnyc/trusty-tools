@@ -15,6 +15,7 @@
 //! the in-process `handle_message` unit tests and the
 //! `tests/serve_stdio_e2e.rs` end-to-end harness.
 
+use crate::session_store_cache::SessionStoreCache;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -160,6 +161,13 @@ pub mod project_root;
 pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
+/// LRU-bounded cache of per-palace `ChatSessionStore` handles (issue #4639).
+///
+/// Why: the previous unbounded `DashMap` never released a `chat_sessions.redb`
+/// file descriptor, leaking one per palace for the daemon's lifetime.
+/// What: see [`session_store_cache::SessionStoreCache`].
+/// Test: `session_store_cache::tests`.
+pub mod session_store_cache;
 pub mod startup_scan;
 pub mod tools;
 pub mod transport;
@@ -284,7 +292,12 @@ pub struct AppState {
     pub chat_provider: Arc<OnceCell<Option<Arc<dyn ChatProvider>>>>,
     /// Per-palace chat-session stores, opened lazily so cold-start cost is
     /// paid only when chat-history endpoints are hit.
-    pub session_stores: Arc<dashmap::DashMap<String, Arc<ChatSessionStore>>>,
+    ///
+    /// #4639: was an unbounded `DashMap` with no `remove`/TTL/cap, leaking one
+    /// `chat_sessions.redb` fd per palace for the daemon's lifetime (844
+    /// measured live, all pointing at already-unlinked files). Now an
+    /// LRU-bounded cache that evicts cold, unused stores.
+    pub session_stores: Arc<SessionStoreCache>,
     /// Broadcast sender for live `DaemonEvent` pushes to SSE subscribers.
     ///
     /// Why: Lets mutating handlers emit events that any connected dashboard
@@ -610,7 +623,9 @@ impl AppState {
             embedder: Arc::new(OnceCell::new()),
             default_palace: None,
             chat_provider: Arc::new(OnceCell::new()),
-            session_stores: Arc::new(dashmap::DashMap::new()),
+            // #4639: bounded LRU (TRUSTY_MEMORY_MAX_OPEN_SESSION_STORES,
+            // default 32) so chat_sessions.redb handles stop accumulating.
+            session_stores: Arc::new(SessionStoreCache::from_env()),
             events: Arc::new(events_tx),
             started_at: std::time::Instant::now(),
             // Default to an empty buffer — `with_log_buffer` overrides this
@@ -1016,20 +1031,18 @@ impl AppState {
     /// the palace's data dir (`chat_sessions.redb`) so it doesn't intermingle
     /// with the KG's transactional load. The store is cheap to clone via
     /// `Arc` but the underlying connection should be reused, so cache by id.
-    /// What: Creates the palace data dir if missing, opens (or reuses) a
-    /// `ChatSessionStore` and stashes an `Arc` in the DashMap.
-    /// Test: Indirectly via the session HTTP handlers in `web::tests`.
+    /// What: delegates to the LRU-bounded [`SessionStoreCache`], which creates
+    /// the palace data dir if missing, opens (or reuses) a `ChatSessionStore`,
+    /// and evicts cold, *unused* stores once more than the cap are resident.
+    /// Callers keep the returned `Arc` for as long as they need it — eviction
+    /// never closes a store someone still holds.
+    /// Test: `session_store_cache::tests::open_handles_are_bounded_by_cap`,
+    /// `session_store_cache::tests::in_use_store_is_never_evicted`; the call
+    /// path is covered indirectly by the session HTTP handlers in `web::tests`.
     pub fn session_store(&self, palace_id: &str) -> Result<Arc<ChatSessionStore>> {
-        if let Some(entry) = self.session_stores.get(palace_id) {
-            return Ok(entry.clone());
-        }
-        let dir = self.data_root.join(palace_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| anyhow::anyhow!("create palace dir {}: {e}", dir.display()))?;
-        let store = Arc::new(ChatSessionStore::open(&dir.join("chat_sessions.db"))?);
+        // #4639: bounded cache replaces the unbounded, never-evicting DashMap.
         self.session_stores
-            .insert(palace_id.to_string(), store.clone());
-        Ok(store)
+            .get_or_open(palace_id, &self.data_root.join(palace_id))
     }
 
     /// Builder-style setter for the default palace name.
