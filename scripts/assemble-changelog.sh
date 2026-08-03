@@ -28,6 +28,10 @@
 #   line 2+       the bullet(s), verbatim, `- ` at column 0; indented
 #                 continuation/sub-bullet lines are preserved as authored
 #
+# ONE fragment holds ONE category. A bare category word on its own unindented
+# line anywhere after line 1 is rejected, because it would otherwise render as
+# body text under the line-1 heading — see stray_category_lines() below.
+#
 # Fragment naming: crates/<crate>/changelog.d/<issue-or-pr-number>-<slug>.md.
 # The number makes the name collision-free across concurrent PRs (GitHub issue
 # and PR numbers are unique per repo); the slug keeps two fragments for the same
@@ -51,11 +55,13 @@
 # record. What guarantees a real change is recorded is the CI gate
 # (scripts/check_changelog_fragment.sh), at the PR that makes the change.
 #
-# Test: `bash -n scripts/assemble-changelog.sh` for syntax. Functionally,
+# Test: `bash scripts/assemble_changelog_selftest.sh` — fixture-driven coverage of
+# every validation branch (multi-category fragment, unknown category, bodyless,
+# empty, nested, and the bullet-starting-with-a-category-word false-positive
+# guard) against a throwaway workspace copy. `bash -n` for syntax. Functionally,
 # `scripts/assemble-changelog.sh <crate-dir> --stdout` renders the pending
-# fragments without touching any file, and `--check` exercises every validation
-# branch (missing dir, unknown category, bodyless fragment, leftover
-# `## [Unreleased]`, version already released).
+# fragments without touching any file, and `--check` also validates the target
+# CHANGELOG.md state (leftover `## [Unreleased]`, version already released).
 #
 # Usage:
 #   scripts/assemble-changelog.sh <crate-dir> <version> [--check]
@@ -107,6 +113,101 @@ canonical_category() {
   return 1
 }
 
+# Why: line 1 is the ONLY category line; everything after it is copied through
+# verbatim. So a fragment that stacks several categories into one file —
+#   Removed
+#   - …
+#   Changed
+#   - …
+# is not rejected by the category check (line 1 is valid) and not rejected by the
+# bullet check (there are bullets): the bare `Changed` renders as body text and
+# every bullet lands under `### Removed`. That is silent mis-rendering into
+# CHANGELOG.md, permanent once released, and it really happened —
+# `crates/trusty-mpm/changelog.d/4286-retire-trusty-mpm-override-files.md` packed
+# four categories into one file during the 1.3.3 release and only a human diffing
+# the `--stdout` preview caught it. Nothing in the tooling would have.
+# What: prints "<file-line-number>\t<text>" for every line after the category
+# line that reads as a SECOND category heading. Two forms are caught:
+#   - a bare category word standing alone, unindented and un-bulleted
+#   - a category as a markdown heading — `## Changed`, `### Fixed ###`
+# The heading form is the same defect wearing different markup, and structurally
+# worse: a stray `## …` inside a release section splits it for anything that
+# parses on `^## ` boundaries, including this repo's cliff.toml-driven GitHub
+# Release body step.
+#
+# Three things are deliberately NOT flagged, because they are legitimate content:
+#   - anything inside a fenced code block. A fragment may show example output or
+#     document the fragment format itself, and that example may contain a bare
+#     `Fixed`. Fence state is tracked across ``` and ~~~, runs longer than three,
+#     and info strings (```text). Whole-line matching that ignored code fences is
+#     what made the seeded-CLAUDE.md-stub bug in #4286 — the third instance of
+#     that shape in this codebase. A validator that rejects a fragment for
+#     documenting its own format punishes thoroughness.
+#   - a bullet, whatever it says: `- Changed the default timeout` is prose.
+#   - an indented line: `  Changed` is authored continuation text.
+#
+# KNOWN LIMITATION, deliberate: an UNINDENTED hard-wrapped continuation line
+# consisting solely of a category word is still flagged. Suppressing it needs a
+# "preceded by a blank line" rule, and that reopens the very defect this guard
+# closes — a fragment written without blank lines between its categories would
+# sail through. A false positive costs one indent; a false negative ships a
+# mis-rendered CHANGELOG.md permanently. The error text states the remedy.
+stray_category_lines() {
+  local path="$1"
+  awk -v cats="${CATEGORY_ORDER}" '
+    BEGIN {
+      n = split(tolower(cats), list, " ")
+      for (i = 1; i <= n; i++) known[list[i]] = 1
+      fence = ""                                         # open fence marker, "" when closed
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      probe = line
+      sub(/^[[:space:]]+/, "", probe)
+    }
+    !seen && line ~ /[^[:space:]]/ { seen = 1; next }   # the category line
+    !seen { next }                                       # leading blank lines
+    # Fence open/close. Counted char-by-char rather than with a /`{3,}/ interval,
+    # which the classic awks this script must run under do not all support.
+    probe ~ /^```/ || probe ~ /^~~~/ {
+      ch = substr(probe, 1, 1)
+      len = 1
+      while (substr(probe, len + 1, 1) == ch) len++
+      rest = substr(probe, len + 1)
+      if (fence == "") {
+        fence = substr(probe, 1, len)                    # info string may follow
+      } else if (substr(fence, 1, 1) == ch && len >= length(fence) && rest ~ /^[[:space:]]*$/) {
+        fence = ""                                       # closer: same char, no info string
+      }
+      next
+    }
+    fence != "" { next }                                 # inside a fence: content, never a category
+    probe ~ /^[-*+]/ { next }                            # a bullet, whatever it says
+    probe ~ /^#/ {                                       # heading form
+      head = probe
+      hashes = 0
+      while (substr(head, hashes + 1, 1) == "#") hashes++
+      if (hashes > 6) next                               # 7+ hashes is not a heading
+      head = substr(head, hashes + 1)
+      sub(/^[[:space:]]+/, "", head)
+      sub(/[[:space:]]*#*[[:space:]]*$/, "", head)       # closing ATX hashes
+      if (tolower(head) in known) {
+        text = probe
+        sub(/[[:space:]]+$/, "", text)
+        printf "%d\t%s\n", NR, text
+      }
+      next
+    }
+    line ~ /^[[:space:]]/ { next }                       # continuation / sub-bullet
+    {
+      text = line
+      sub(/[[:space:]]+$/, "", text)
+      if (tolower(text) in known) printf "%d\t%s\n", NR, text
+    }
+  ' "${path}"
+}
+
 # Why: fragments must emit in a deterministic order so two people assembling the
 # same set get byte-identical output.
 # What: prints the fragment's leading issue/PR number, or 0 when the name has no
@@ -149,6 +250,24 @@ parse_fragment() {
   if ! grep -qE '^-[[:space:]]' <<<"${body}"; then
     echo "ERROR: ${base} has a category but no bullet — expected at least one" >&2
     echo "       line starting with '- ' after the category line." >&2
+    return 1
+  fi
+
+  local stray
+  stray="$(stray_category_lines "${path}")"
+  if [[ -n "${stray}" ]]; then
+    echo "ERROR: ${base} carries a second category inside its bullet body." >&2
+    echo "       Only line 1 is a category; everything after it is copied through" >&2
+    echo "       VERBATIM, so these lines would render as body text under" >&2
+    echo "       '### ${cat}' instead of headings of their own:" >&2
+    printf '%s\n' "${stray}" \
+      | awk -F'\t' -v b="${base}" '{ printf "         %s:%s: %s\n", b, $1, $2 }' >&2
+    echo "       One fragment holds ONE category. Split it — the filename number" >&2
+    echo "       may repeat, only the whole name must be unique:" >&2
+    echo "         changelog.d/<number>-<slug>-removed.md" >&2
+    echo "         changelog.d/<number>-<slug>-changed.md" >&2
+    echo "       If that line is really wrapped prose and not a heading, indent it" >&2
+    echo "       by two spaces (continuation text) or put it inside a code fence." >&2
     return 1
   fi
 

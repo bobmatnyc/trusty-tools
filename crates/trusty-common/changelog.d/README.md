@@ -12,6 +12,14 @@ PR conflict on the same lines; a per-PR filename cannot collide (issue #4476).
     - one bullet per user-visible change, in this CHANGELOG's existing style
       - indented sub-bullets are preserved verbatim
 
+ONE fragment carries ONE category. Only line 1 is read as a category; everything
+after it is copied through verbatim, so a second one stacked into the same file
+(a bare `Changed` line below a `Removed` line 1) would render as body text under
+the first heading. That shipped once and is now rejected — split it into one
+fragment per category, reusing the same number with a different slug. The
+heading form (`## Changed`) counts too; anything inside a code fence does not,
+so a fragment may show example output freely.
+
 The leading number is what makes the name collision-free (GitHub issue and PR
 numbers are unique per repo); the slug keeps two fragments for one number
 distinct. The file must sit directly in this directory — a nested one is

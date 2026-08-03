@@ -19,20 +19,26 @@
 #     2. a `crates/<crate>/CHANGELOG.md` edit that adds a bullet   (TRANSITIONAL)
 #
 #   (1) is validated, not merely detected. Presence alone is worthless: a 0-byte
-#   file, a body with no bullet, an unknown category, or a fragment one directory
-#   too deep all look like evidence and are all rejected or dropped at release
-#   time. So the gate runs the real assembler in preview mode
+#   file, a body with no bullet, an unknown category, a fragment one directory
+#   too deep, or several categories stacked into one file all look like evidence
+#   and are all rejected, dropped, or MIS-RENDERED at release time. So the gate
+#   runs the real assembler in preview mode
 #   (`assemble-changelog.sh <crate> --stdout`) and fails if it would not accept
 #   the crate's fragment set — the gate and the assembler cannot disagree,
 #   because the gate asks the assembler.
 #
-#   Three narrower traps this closes, all of which passed a presence-only check:
+#   Four narrower traps this closes, all of which passed a presence-only check:
 #     - `git rm`-ing an existing fragment counted as evidence while DESTROYING
 #       the record; deletions are excluded from evidence (`--diff-filter=d`).
 #     - a fragment at `changelog.d/sub/12-x.md` counted, then vanished from the
 #       release (the assembler now rejects nested fragments outright).
 #     - `changelog.d/README.md` counted, and is skipped by the assembler
 #       forever; it is the tracked directory placeholder, never evidence.
+#     - a fragment stacking several categories into one file counted, and then
+#       SILENTLY MIS-RENDERED: only line 1 is a category, so the rest became body
+#       text under it. The 1.3.3 `4286-retire-trusty-mpm-override-files.md`
+#       fragment put all four of its categories under `### Removed` and was
+#       caught only by a human diffing the preview. The assembler now rejects it.
 #
 #   (2) exists only so PRs opened BEFORE #4476 landed — which wrote entries into
 #   the shared `## [Unreleased]` section and are mid-review (#4463, #4464, #4465,
@@ -312,8 +318,11 @@ Add one fragment per crate you changed:
 
 The number keeps the filename collision-free across concurrent PRs; that is the
 whole point (issue #4476). The file must sit DIRECTLY in changelog.d/ — a nested
-one is rejected. Never edit the crate CHANGELOG.md by hand: release time
-assembles the fragments (scripts/assemble-changelog.sh).
+one is rejected — and carries exactly ONE category: everything after line 1 is
+copied through verbatim, so a second category stacked into the same file renders
+as body text under the first. Split it, reusing the number with a different slug.
+Never edit the crate CHANGELOG.md by hand: release time assembles the fragments
+(scripts/assemble-changelog.sh).
 
 Preview what will be released:  bash scripts/assemble-changelog.sh <crate> --stdout
 

@@ -381,6 +381,14 @@ Fixed
   changelogs already use).
 - **Everything after it is the bullet text**, copied through verbatim. Match the
   crate CHANGELOG's existing style.
+- **One fragment carries ONE category.** Stacking several into one file — a bare
+  `Changed` line below a `Removed` line 1 — is rejected by the assembler and the
+  CI gate, because "verbatim" means the second category would render as body
+  text under the first one's heading. That shipped once (the 1.3.3
+  `4286-retire-trusty-mpm-override-files.md` fragment put four categories under
+  `### Removed`). Split it: same number, different slug. The heading form
+  (`## Changed`) counts as a second category too; anything inside a code fence
+  does not, so a fragment may show example output freely.
 - **The file must sit directly in `changelog.d/`.** A nested one (`changelog.d/sub/…`)
   is rejected at release time; `changelog.d/README.md` is the tracked directory
   placeholder and is never treated as a fragment.
