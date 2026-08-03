@@ -271,7 +271,7 @@ fn shipped_sections_build_and_validate() {
     // Floor sections are `fixed`; the five content sections are `project`,
     // matching the override files `BASE_PM.md` advertises.
     for section in &package.sections {
-        let expected = if section.id.is_floor() {
+        let expected = if section.id == SectionId::Core {
             CustomizationTier::Fixed
         } else {
             CustomizationTier::Project
@@ -306,26 +306,30 @@ fn package_round_trips_through_json() {
 }
 
 #[test]
-fn floor_blocks_are_the_contiguous_tail() {
-    // The floor's guarantee is that it has the last word. `validate` enforces
-    // it, but asserting the shape here localises a regression to block ordering
-    // rather than to a validation error message.
+fn the_former_floor_sections_are_still_the_block_tail() {
+    // Was `floor_blocks_are_the_contiguous_tail`. #4286 deleted the rule it
+    // localised (`validate_floor_is_last`) along with the floor concept, so this
+    // is no longer a validated invariant — block order is whatever the manifest
+    // declares. It is kept as a SHAPE assertion because the delivered prompt
+    // still ends with these four sections, and a reordering that moved them
+    // would be a large, silent change to every prompt.
     let package = package_ref();
-    let first_floor = package
+    let tail = [
+        SectionId::Identity,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
+    ];
+    let first = package
         .blocks
-        .iter()
-        .position(|b| b.section.is_floor())
-        .expect("the floor is present");
+        .len()
+        .checked_sub(tail.len())
+        .expect("the package has at least four blocks");
     assert!(
-        package.blocks[first_floor..]
+        package.blocks[first..]
             .iter()
-            .all(|b| b.section.is_floor()),
-        "nothing overridable may follow the framework floor"
-    );
-    assert_eq!(
-        package.blocks.len() - first_floor,
-        4,
-        "the floor is exactly its four authored sections (#4573 added enforcement)"
+            .all(|b| tail.contains(&b.section)),
+        "the four former-floor sections are still the block tail"
     );
 }
 
@@ -624,7 +628,7 @@ fn composed_prompt_carries_the_live_roster_and_the_precedence_note() {
         .expect("doctrine");
     let note = composed.find("trust the roster").expect("note");
     let roster = composed.find("### ticketing").expect("roster");
-    let floor = composed.find("# BASE_PM Framework Floor").expect("floor");
+    let floor = composed.find("# Framework Instructions").expect("floor");
     assert!(doctrine < note && note < roster && roster < floor);
 }
 
@@ -726,7 +730,6 @@ fn floor_carries_the_tool_priority_mandate() {
         .iter()
         .find(|b| b.section == SectionId::NonOverridableRules)
         .expect("the rules section contributes a block");
-    assert!(rules.section.is_floor());
     let text = authored(rules).expect("the rules block must be authored, not generated");
     assert!(text.contains("## Trusty Tool Priority (Non-Overridable)"));
     assert!(text.contains("mcp__trusty-search__search"));
@@ -743,7 +746,10 @@ fn floor_sections_refuse_every_override_tier() {
     // #4247's resolver will consult. Stated over the SHIPPED package so it is a
     // fact about what we deliver, not about a hand-built fixture.
     let package = package_ref();
-    for id in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
+    for id in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id == SectionId::Core)
+    {
         let tier = package.section(id).expect("declared").customization_tier;
         assert_eq!(tier, CustomizationTier::Fixed, "{id:?} must be fixed");
         for from in [OverrideTier::Project, OverrideTier::User] {
@@ -762,7 +768,10 @@ fn content_sections_admit_project_but_not_user_overrides() {
     // must accept a project override and REJECT a user-tier one. Getting this
     // backwards is how one operator's machine config leaks into a shared repo.
     let package = package_ref();
-    for id in SectionId::CANONICAL.into_iter().filter(|id| !id.is_floor()) {
+    for id in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id != SectionId::Core)
+    {
         let tier = package.section(id).expect("declared").customization_tier;
         assert_eq!(tier, CustomizationTier::Project, "{id:?} must be project");
         assert!(tier.permits(OverrideTier::Project), "{id:?}");

@@ -45,25 +45,51 @@ declares metadata, not sequence. Each block names a `join_before` (`rule` for a
 `---` separator, `blank` for a paragraph break), which is what makes the output
 reproducible without any code knowing the running order.
 
-## Customization tiers
+Nothing constrains order by section any more. A rule used to require that the
+four "floor" sections were the contiguous tail; it was deleted with the floor.
+
+## Customization tiers — `core` is the only protected section
 
 Every section declares a `customization_tier`:
 
-- `project` — a project may replace it: `core`, `memory`, `search`, `workflow`,
-  `agent-delegation`.
-- `fixed` — nothing can replace it: `identity`, `enforcement`,
-  `non-overridable-rules`, `framework-guaranteed-conventions`.
+- `fixed` — **`core`, and only `core`.** A `CORE` marker in a project's
+  `CLAUDE.md` is declined and logged; the bundled core section stays in force.
+- `project` — **every other section**: `identity`, `memory`, `search`,
+  `workflow`, `agent-delegation`, `enforcement`, `non-overridable-rules`,
+  `framework-guaranteed-conventions`. A project may replace any of them.
 
-The four `fixed` sections are the framework floor. `enforcement` (the
-Prohibitions and Circuit Breakers tables) is `fixed` because of #4573: it used
-to live inside `core`, and a three-line `CORE` override deleted both tables while
-the floor went on asserting a table that was no longer in the prompt.
+`InstructionPackage::validate` enforces that as an **iff**: `core` must be
+`fixed` and nothing else may be. Both directions are red, because retiering
+`core` to `project` would leave nothing protected at all, and marking any other
+section `fixed` would quietly reinstate the floor described below.
 
-Who decides is worth stating precisely, because it is the property that makes
-the floor safe: `claude_md_sections.rs` holds no list of overridable sections. It
-asks `CustomizationTier::permits` for the tier the shipped manifest declares. A
-second list would be a second source of truth, and the floor would become
-overridable the first time the two disagreed.
+### Why there is no framework floor
+
+There used to be one: four `fixed`-tier sections nothing could override, a
+`SectionId::is_floor()` predicate, a rule that nothing overridable could follow
+them, and a CI guard (`check_instruction_floor.sh`) pinning their bytes with
+sha256 digests. All of it is gone.
+
+The owner's reasoning: **a project owns its own `CLAUDE.md`.** Claude Code
+memory-loads that file natively, and nothing in this system can stop a project
+from writing whatever it likes there. A floor therefore bought the *appearance*
+of a control, not a control — while costing real complexity (a byte-pin, a
+regeneration ritual, a CI job, and a validation rule) and inviting the belief
+that framework text was guaranteed when it was not.
+
+**The accepted consequence, chosen rather than overlooked:** content that used
+to be non-overridable now is not. A project can replace the Prohibitions and
+Circuit Breakers tables (`enforcement`), the commit/PR attribution footer and
+the documentation conventions (`framework-guaranteed-conventions`), the Trusty
+Tool Priority mandate (`non-overridable-rules`), the PM's identity and
+direct-action budget (`identity`), and `never turn red green by deleting
+coverage` (`workflow`). Overriding one section still takes only that section —
+a `WORKFLOW` block does not disturb `enforcement` — but nothing outside `core`
+is protected from a project that explicitly asks to replace it.
+
+Do not "fix" this by promoting content into `core.md`. That was considered and
+rejected: relocating content to preserve protection defeats the point of
+removing the mechanism, and would turn `core.md` into a dumping ground.
 
 ## How a project overrides a section
 
@@ -75,10 +101,8 @@ In the project's root `CLAUDE.md`:
 <!-- TRUSTY-MPM: WORKFLOW END -->
 ```
 
-The token is the section id, uppercased. Accepted: `CORE`, `MEMORY`, `SEARCH`,
-`WORKFLOW`, `AGENT-DELEGATION`. Always declined with a logged warning:
-`IDENTITY`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`,
-`FRAMEWORK-GUARANTEED-CONVENTIONS`.
+The token is the section id, uppercased. Every token is accepted except `CORE`,
+which is always declined with a logged warning.
 
 An override replaces the section's authored blocks. It cannot touch that
 section's **generated** blocks — so an `AGENT-DELEGATION` override rewrites the
@@ -102,6 +126,9 @@ The composer reads `CLAUDE.md` for exactly one purpose: extracting marked
 override blocks. Prose outside the markers is ignored by the composer, because
 Claude Code has already loaded it. Including it would double-load it.
 
+This is also the fact the floor removal rests on: the project's own file reaches
+the model whatever this code does.
+
 ## Dynamic content
 
 Two blocks are computed at launch, not authored:
@@ -119,58 +146,47 @@ With none — no agent deployed in any tier — composition degrades to
 `WORKFLOW`, `MEMORY` and `AGENT-DELEGATION` are independently addressable. Any
 other named override is reported as unapplied there rather than dropped silently.
 
-## The pinned floor
-
-`scripts/check_instruction_floor.sh` pins the floor byte-exactly. Its digests
-live in `scripts/instruction_floor.sha256` and cover:
-
-1. every `.md` sourced by a `fixed`-tier section,
-2. a canonical projection of the manifest's fixed sections and their blocks, so
-   retiering a floor section to `project` or repointing its file is caught even
-   when no prose changed,
-3. the guard's own workflow file.
-
-Any byte difference fails the build — including an inversion, a truncation, or
-wrapping the floor in an HTML comment, all of which a substring check waves
-through. That is why it is a digest and not a `grep`.
-
-Changing the floor is a **two-part commit**: the edit, plus
-`bash scripts/check_instruction_floor.sh --update` and the regenerated digest
-file. Regenerating without a reviewed floor change defeats the guard. Report
-which digests moved.
-
 ## Retired — do not bring these back
 
 | Retired | Why it must not return |
 |---|---|
-| The five `.trusty-mpm/` override files (`PM_INSTRUCTIONS_DEPLOYED.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`, `MEMORY.md`, `INSTRUCTIONS.md`) | Whole-document granularity let a project silently delete owner-required framework content. `CLAUDE.md` named sections replace them at section granularity (#4286). A leftover file now fails `tm doctor`'s `legacy_overrides` check. |
-| `BASE_PM.md` | The monolithic floor asset. Deleted by #4183 and decomposed into the four `fixed` sections. `check_instruction_floor.sh` hard-fails if the file reappears — two sources for the floor is the drift #3374 removed. |
-| `assets/instructions/CLAUDE.md` | A dead stub, registered but never read back. Also hard-failed by the floor guard. |
+| The five `.trusty-mpm/` override files (`PM_INSTRUCTIONS_DEPLOYED.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`, `MEMORY.md`, `INSTRUCTIONS.md`) | Whole-document granularity let a project silently delete framework content while believing it had added to it. `CLAUDE.md` named sections replace them at section granularity (#4286). A leftover file fails `tm doctor`'s `legacy_overrides` check. |
+| The framework floor: `is_floor()`, `FloorNotFixed`, `OverridableAfterFloor`, `validate_floor_is_last`, `check_instruction_floor.sh`, `instruction_floor.sha256`, `.github/workflows/instruction-floor-guard.yml` | It was the appearance of a control (#4286). Reinstating any part means re-adopting a guarantee the system cannot actually make. |
+| `BASE_PM.md` | The monolithic floor asset, deleted by #4183 and decomposed into the sections here. There is nothing left to fold in and nothing to restore. |
+| `assets/instructions/CLAUDE.md` | A dead stub, registered but never read back. Removed by #3374. |
 
-`base_pm()` in `instruction_pipeline.rs` and the `# BASE_PM Framework Floor`
-heading in `identity.md` are surviving **labels**, not a surviving file. The
-function reconstitutes the four `fixed` sections into one string.
+`base_pm()` in `instruction_pipeline.rs` and the former
+`# BASE_PM Framework Floor` heading are historical labels. The heading now reads
+`# Framework Instructions`; the function name survives and is misleading — see
+the findings below.
 
-## Findings this README surfaced
+## Findings
 
-Writing this against the actual code turned up three things that do not explain
-cleanly. They are recorded rather than smoothed over.
+Written against the actual code, these do not explain cleanly. Recorded rather
+than smoothed over.
 
 1. **Two writers target one path.** `bundle_all.rs` writes a 4-line stub to
    `instructions/INSTRUCTIONS.md`, and `instruction_pipeline.rs`'s
    `install_system_prompt` writes the *full composed prompt* to the same
    `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`. Whichever runs last
-   wins. Neither is read by the launch path, which composes in memory. This is
-   the bundled `assets/instructions/INSTRUCTIONS.md` retirement, still open.
+   wins. Neither is read by the launch path, which composes in memory. The
+   bundled-asset retirement is still open.
 
-2. **`base_pm()` has no single honest name.** It is called "the BASE_PM floor"
-   but BASE_PM does not exist; it is "the fixed-tier sections" but it hardcodes
-   four ids in one order rather than deriving them from the manifest's tier
-   declaration. A section retiered to `fixed` would be pinned by the digest guard
-   and still not appear in `base_pm()`'s output.
+2. **`base_pm()` is now a misnomer twice over.** It refers to a file that does
+   not exist, and it hardcodes four section ids in one order to reconstitute a
+   "floor" that no longer exists as a concept. It is still live — the
+   roster-absent string assembly appends it — so it is a real function whose
+   name describes nothing true. Renaming it is mechanical and was left out of
+   #4286 to keep that change reviewable.
 
 3. **The `project-addendum` generator is declared but unfeedable.** Its only
    production input was the retired `.trusty-mpm/INSTRUCTIONS.md`. The block
    stays declared in the manifest (marked `optional`, so it emits nothing) and
-   the composer now always passes `None`. It is a loaded asset whose purpose
-   cannot currently be named — exactly the smell this README was meant to catch.
+   the composer always passes `None`.
+
+### Retired findings
+
+- *"`never turn red green by deleting coverage` is not floor-protected."*
+  Resolved by the ruling, not by a fix: **nothing** outside `core` is protected
+  now, so this stopped being an anomaly and became the documented model. See
+  "Why there is no framework floor" above.

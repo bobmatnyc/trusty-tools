@@ -23,7 +23,7 @@
 //! [`warn_legacy_overrides`] logs them on every resolution, and the
 //! `legacy_overrides` `tm doctor` check fails on them.
 //!
-//! Naming note: `base_pm()` and the `# BASE_PM Framework Floor` heading are
+//! Naming note: `base_pm()` and the `# Framework Instructions` heading are
 //! historical labels. `BASE_PM.md` the FILE was deleted by #4183 and
 //! `scripts/check_instruction_floor.sh` fails the build if it returns; the floor
 //! is authored as four `fixed`-tier sections and reconstituted by that function.
@@ -636,7 +636,7 @@ mod tests {
         let doctrine = prompt.find("# Agent Delegation Routing").expect("doctrine");
         let note = prompt.find("trust the roster").expect("note");
         let roster = prompt.find("## Delegation Authority").expect("roster");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+        let base = prompt.find("# Framework Instructions").expect("base");
         assert!(doctrine < note, "doctrine precedes the note");
         assert!(note < roster, "the note precedes the roster it governs");
         assert!(roster < base, "BASE_PM floor stays last");
@@ -652,9 +652,9 @@ mod tests {
         assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# PM Workflow Configuration"));
         assert!(prompt.contains("# Agent Delegation Routing"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        assert!(prompt.contains("# Framework Instructions"));
 
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+        let base = prompt.find("# Framework Instructions").expect("base");
         let delegation = prompt.find("# Agent Delegation Routing").expect("deleg");
         assert!(base > delegation, "BASE_PM floor must be last");
     }
@@ -684,7 +684,7 @@ mod tests {
         // The bundled sections are unaffected.
         assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# Agent Delegation Routing"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        assert!(prompt.contains("# Framework Instructions"));
     }
 
     #[test]
@@ -761,7 +761,7 @@ mod tests {
         assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# PM Workflow Configuration"));
         assert!(prompt.contains("# Agent Delegation Routing"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        assert!(prompt.contains("# Framework Instructions"));
         assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
     }
 
@@ -853,7 +853,7 @@ mod tests {
         assert!(!tmp.path().join(OVERRIDE_DIR_NAME).exists());
         let prompt = resolve_pm_prompt(tmp.path());
         assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        assert!(prompt.contains("# Framework Instructions"));
     }
 
     #[test]
@@ -870,7 +870,7 @@ mod tests {
         assert!(detect_legacy_overrides(tmp.path()).is_empty());
         let prompt = resolve_pm_prompt(tmp.path());
         assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        assert!(prompt.contains("# Framework Instructions"));
     }
 
     #[test]
@@ -886,7 +886,7 @@ mod tests {
         assert_eq!(detect_legacy_overrides(tmp.path()).len(), 1);
         let prompt = resolve_pm_prompt(tmp.path());
         assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        assert!(prompt.contains("# Framework Instructions"));
     }
 
     #[test]
@@ -913,7 +913,7 @@ mod tests {
 
         let pm = prompt.find("# PM Agent -- Trusty MPM").expect("pm");
         let stack = prompt.find(STACK_PROFILE_HEADING).expect("stack");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+        let base = prompt.find("# Framework Instructions").expect("base");
         assert!(pm < stack, "stack profile follows PM_INSTRUCTIONS");
         assert!(stack < base, "stack profile precedes the BASE_PM floor");
     }

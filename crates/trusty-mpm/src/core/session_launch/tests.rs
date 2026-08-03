@@ -129,7 +129,7 @@ fn build_system_prompt_for_applies_project_override() {
         !prompt.contains("RETIRED_MARKER"),
         "the retired .trusty-mpm/INSTRUCTIONS.md must not reach the launch prompt"
     );
-    assert!(prompt.contains("# BASE_PM Framework Floor"));
+    assert!(prompt.contains("# Framework Instructions"));
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
 
@@ -141,7 +141,7 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     let prompt = build_system_prompt_for(tmp.path());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));
-    let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+    let base = prompt.find("# Framework Instructions").expect("base");
     let deleg = prompt.find("# Agent Delegation Routing").expect("deleg");
     assert!(base > deleg, "BASE_PM floor must be last");
 }
@@ -203,7 +203,7 @@ fn prepare_session_stash_reflects_override() {
             "bundled workflow heading must be replaced in the stash (native_supported={native_supported})"
         );
         assert!(
-            stash.contains("# BASE_PM Framework Floor"),
+            stash.contains("# Framework Instructions"),
             "stash must still carry the BASE_PM floor (native_supported={native_supported})"
         );
         // The CORE INVARIANT: the persisted stash must equal the exact prompt the

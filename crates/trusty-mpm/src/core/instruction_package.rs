@@ -187,25 +187,11 @@ impl SectionId {
         SectionId::FrameworkGuaranteedConventions,
     ];
 
-    /// Whether this section is part of the absorbed BASE_PM framework floor.
-    ///
-    /// Why: the floor's defining property — nothing may override it, and
-    /// nothing overridable may follow it — has to be checkable per section, not
-    /// per file (#4194: a floor rule shipped a broken directive that every
-    /// obeying agent had to follow, with no per-unit handle on it).
-    /// What: true for [`SectionId::Identity`], [`SectionId::Enforcement`],
-    /// [`SectionId::NonOverridableRules`] and
-    /// [`SectionId::FrameworkGuaranteedConventions`].
-    /// Test: `rejects_floor_section_that_is_not_fixed`, `rejects_overridable_block_after_the_floor`.
-    pub const fn is_floor(self) -> bool {
-        matches!(
-            self,
-            SectionId::Identity
-                | SectionId::Enforcement
-                | SectionId::NonOverridableRules
-                | SectionId::FrameworkGuaranteedConventions
-        )
-    }
+    // `is_floor()` was deleted by #4286. It named the four sections nothing could
+    // override. The owner ruling removed that concept: a project owns its own
+    // `CLAUDE.md`, so a framework floor was the appearance of a control rather
+    // than a control. `CORE` is now the single protected section, expressed by
+    // its `customization_tier` alone — see `validate` and `CustomizationTier`.
 }
 
 /// Who may override a section, by increasing permissiveness.
@@ -521,9 +507,13 @@ pub enum ValidationError {
         /// The ids as declared.
         found: Vec<SectionId>,
     },
-    /// A floor section declared a tier other than `fixed`.
-    #[error("floor section {section:?} must be tier `fixed`, got {tier:?}")]
-    FloorNotFixed {
+    /// Tier `fixed` was declared for a section other than `core`, or withheld
+    /// from `core` (#4286).
+    #[error(
+        "section {section:?} declares tier {tier:?}; `core` is the only `fixed` \
+         section and every other section must be `project`"
+    )]
+    TierNotCoreOnly {
         /// The offending section.
         section: SectionId,
         /// The tier it declared.
@@ -593,19 +583,6 @@ pub enum ValidationError {
     SectionOnlyOptionalBlocks {
         /// The section that is not guaranteed to emit.
         section: SectionId,
-    },
-    /// A non-floor block follows the first floor block.
-    #[error(
-        "block {index} ({section:?}) is overridable but follows the framework floor \
-         (first floor block at {floor_index}); nothing overridable may follow the floor"
-    )]
-    OverridableAfterFloor {
-        /// Index of the offending block.
-        index: usize,
-        /// The offending block's section.
-        section: SectionId,
-        /// Index of the first floor block.
-        floor_index: usize,
     },
 }
 
@@ -743,9 +720,15 @@ impl InstructionPackage {
             return Err(ValidationError::SectionsNotCanonical { found: declared });
         }
 
+        // #4286: `core` is protected, everything else is a project's to replace.
+        // Stated as an iff so BOTH failure directions are caught — retiering
+        // `core` to `project` (losing the one protection) and retiering any
+        // other section to `fixed` (quietly reinstating a floor).
         for section in &self.sections {
-            if section.id.is_floor() && section.customization_tier != CustomizationTier::Fixed {
-                return Err(ValidationError::FloorNotFixed {
+            let should_be_fixed = section.id == SectionId::Core;
+            let is_fixed = section.customization_tier == CustomizationTier::Fixed;
+            if should_be_fixed != is_fixed {
+                return Err(ValidationError::TierNotCoreOnly {
                     section: section.id,
                     tier: section.customization_tier,
                 });
@@ -812,7 +795,7 @@ impl InstructionPackage {
             }
         }
 
-        self.validate_floor_is_last()
+        Ok(())
     }
 
     /// The roster must reach the output, and must not be droppable (#4196).
@@ -865,54 +848,9 @@ impl InstructionPackage {
         }
     }
 
-    /// Once the floor starts, only floor blocks may follow.
-    ///
-    /// Why: the floor's guarantee is that it has the last word. Enforcing
-    /// "nothing overridable after the floor" preserves that without dictating a
-    /// single global order — which the byte-identical lift in #4186 needs to
-    /// stay free to choose.
-    ///
-    /// Deliberately NOT enforced: that floor blocks run in [`SectionId`]
-    /// canonical order relative to each other. That constraint looks free — the
-    /// floor is the contiguous tail — but it would make a byte-identical lift of
-    /// `assets/instructions/BASE_PM.md` impossible. That file's headings run:
-    ///
-    /// | `BASE_PM.md` heading | section | canonical index |
-    /// |---|---|---|
-    /// | `## Identity` | `Identity` | 0 |
-    /// | `## Non-Overridable Rules` | `NonOverridableRules` | 6 |
-    /// | `## Customizing PM Behavior` | `NonOverridableRules` | 6 |
-    /// | `## Framework-Guaranteed Conventions (Non-Overridable)` | `FrameworkGuaranteedConventions` | 7 |
-    /// | `## Trusty Tool Priority (Non-Overridable)` | `NonOverridableRules` | 6 |
-    ///
-    /// The tool-priority block sits *after* framework-guaranteed-conventions in
-    /// the real asset, so the faithful block stream is `0, 6, 6, 7, 6` — a
-    /// canonical-order inversion. Requiring non-decreasing floor order would
-    /// reject the only lift this schema exists to enable, and would do it by
-    /// forcing #4186 to move bytes. The floor is in fact the sharpest example of
-    /// why `sections` and `blocks` are separate arrays: one section owning
-    /// non-contiguous positions is the normal case, not the exotic one.
-    ///
-    /// The residual risk — a semantically incoherent floor order that still
-    /// validates — is the same trade-off already accepted for the five content
-    /// sections, and is caught by #4186's byte comparison against today's
-    /// output rather than by structural validation.
-    /// Test: `base_pm_floor_block_order_is_valid`.
-    fn validate_floor_is_last(&self) -> Result<(), ValidationError> {
-        let Some(floor_index) = self.blocks.iter().position(|b| b.section.is_floor()) else {
-            return Ok(());
-        };
-        for (index, block) in self.blocks.iter().enumerate().skip(floor_index + 1) {
-            if !block.section.is_floor() {
-                return Err(ValidationError::OverridableAfterFloor {
-                    index,
-                    section: block.section,
-                    floor_index,
-                });
-            }
-        }
-        Ok(())
-    }
+    // `validate_floor_is_last` was deleted by #4286 along with the floor it
+    // enforced. Block order is declared by the manifest's `blocks` array and is
+    // no longer constrained by which section a block belongs to.
 
     /// Compose the package into the final prompt text.
     ///

@@ -18,7 +18,7 @@ use crate::core::instruction_overrides::{
     FILE_INSTRUCTIONS, FILE_WORKFLOW, OVERRIDE_DIR_NAME, PromptSource,
     resolve_pm_prompt_with_roster,
 };
-use crate::core::instruction_package::{Generator, InstructionBlock, Join};
+use crate::core::instruction_package::Generator;
 use tempfile::TempDir;
 
 /// A fixed roster, so composed output never depends on the machine's agents.
@@ -390,7 +390,10 @@ fn floor_sections_refuse_every_named_section_override() {
     // a fourth floor section, and a hand-listed set would have kept passing
     // while the new one went untested — the exact drift shape that let the
     // Prohibitions table ship at tier `project`.
-    for section in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
+    for section in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id == SectionId::Core)
+    {
         let (result, rejected) = package.with_overrides(&[over(section, "SUBVERTED")]);
         assert_eq!(&result, package, "{section:?} must be untouched");
         assert_eq!(
@@ -405,13 +408,18 @@ fn floor_sections_refuse_every_named_section_override() {
 
 #[test]
 fn content_sections_accept_a_project_override() {
+    // #4286 flipped which sections these are: `core` became the one protected
+    // section and the four former floor sections joined the overridable set.
     let package = bundled_fallback_package().expect("manifest parses");
     for section in [
-        SectionId::Core,
+        SectionId::Identity,
         SectionId::Memory,
         SectionId::Search,
         SectionId::Workflow,
         SectionId::AgentDelegation,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
     ] {
         let (result, rejected) = package.with_overrides(&[over(section, "REPLACED_BODY")]);
         assert_eq!(rejected, vec![], "{section:?} is tier project");
@@ -471,13 +479,13 @@ fn agent_delegation_override_keeps_the_generated_roster() {
 fn one_bad_override_does_not_discard_a_good_one() {
     let package = bundled_fallback_package().expect("manifest parses");
     let (result, rejected) = package.with_overrides(&[
-        over(SectionId::Identity, "SUBVERTED"),
+        over(SectionId::Core, "SUBVERTED"),
         over(SectionId::Workflow, "CUSTOM_WORKFLOW"),
     ]);
     assert_eq!(
         rejected,
         vec![Rejection::NotOverridable {
-            section: SectionId::Identity,
+            section: SectionId::Core,
             tier: CustomizationTier::Fixed,
         }]
     );
@@ -590,21 +598,21 @@ fn an_undeclared_section_is_rejected_and_the_package_is_reverted() {
 
 #[test]
 fn an_override_that_cannot_validate_is_discarded_and_the_package_reverts() {
-    // Contrived package carrying an overridable Memory block AFTER the floor,
-    // so anything derived from it fails `OverridableAfterFloor`. Overriding
-    // Workflow cannot fix that, so the override is discarded on its own
-    // diagnosis, the final validation then refuses the whole, and the package as
-    // supplied comes back. Applying an override must never make things worse
+    // Contrived package that cannot validate for a reason no override can fix:
+    // a second `fixed` section, which #4286's core-only tier invariant rejects.
+    // Overriding Workflow does not repair it, so the override is discarded on
+    // its own diagnosis, the final validation refuses the whole, and the package
+    // as supplied comes back. Applying an override must never make things worse
     // than not applying it.
+    //
+    // Before #4286 this used a Memory block placed after the floor, tripping
+    // `OverridableAfterFloor`; that rule died with the floor.
     let mut package = bundled_fallback_package().expect("manifest parses").clone();
-    package.blocks.push(InstructionBlock {
-        section: SectionId::Memory,
-        body: BlockBody::Text {
-            text: "TRAILING".to_string(),
-        },
-        join_before: Join::Rule,
-        optional: false,
-    });
+    for section in &mut package.sections {
+        if section.id == SectionId::NonOverridableRules {
+            section.customization_tier = CustomizationTier::Fixed;
+        }
+    }
 
     let (result, rejected) = package.with_overrides(&[over(SectionId::Workflow, "X")]);
     assert_eq!(
@@ -617,9 +625,9 @@ fn an_override_that_cannot_validate_is_discarded_and_the_package_reverts() {
             [
                 Rejection::Invalidates {
                     section: SectionId::Workflow,
-                    error: ValidationError::OverridableAfterFloor { .. },
+                    error: ValidationError::TierNotCoreOnly { .. },
                 },
-                Rejection::PackageInvalid(ValidationError::OverridableAfterFloor { .. }),
+                Rejection::PackageInvalid(ValidationError::TierNotCoreOnly { .. }),
             ]
         ),
         "unexpected rejections: {rejected:?}"
@@ -666,7 +674,10 @@ fn a_floor_marker_composes_byte_identically_to_no_claude_md() {
     let baseline = TempDir::new().unwrap();
     let (expected, _) = resolve(baseline.path());
 
-    for section in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
+    for section in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id == SectionId::Core)
+    {
         let tmp = TempDir::new().unwrap();
         write_claude_md(tmp.path(), &block(section, "SUBVERTED_FLOOR"));
         let (prompt, source) = resolve(tmp.path());
@@ -866,17 +877,19 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 
     let (prompt, source) = resolve(tmp.path());
 
-    // The override DID land — this is not passing because the whole CLAUDE.md
-    // was ignored. That distinction is the difference between a fix and a
-    // regression in the override reader.
+    // #4286 INVERTS how this is defended. #4573 kept `core` overridable and
+    // moved the tables OUT of it into a fixed-tier `enforcement` section. The
+    // owner ruling reversed the tiers: `core` is now the one section a named
+    // section cannot replace, so the exact attack in #4573 — a three-line CORE
+    // block — is refused outright rather than survived.
     assert_eq!(source, PromptSource::Package);
     assert!(
-        prompt.contains("No prohibitions. No circuit breakers."),
-        "the CORE override must still apply; core stays project-customizable"
+        !prompt.contains("No prohibitions. No circuit breakers."),
+        "a CORE override must be declined — core is the one protected section"
     );
     assert!(
-        !prompt.contains("## PM Allowlist"),
-        "the override really did replace the bundled core section"
+        prompt.contains("## PM Allowlist"),
+        "the bundled core section stays in force when a CORE override is declined"
     );
 
     assert_authority_intact(&prompt, "hostile CORE named-section override");
@@ -884,15 +897,20 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 
 #[test]
 fn the_authority_tables_survive_every_override_configuration() {
-    // The tier declaration alone is not the fix: the legacy string assembly and
-    // the `PM_INSTRUCTIONS_DEPLOYED.md` full replacement never consult a
-    // `customization_tier`. They append `base_pm()`, so the tables reach them
-    // only because `Enforcement` was added to the floor that function projects.
-    // #4573 names the deployed-body path as the SECOND wholesale-deletion path;
-    // this covers it.
+    // SCOPE CHANGE (#4286). This no longer claims the tables survive EVERY
+    // configuration, because they do not: `enforcement` is now an ordinary
+    // overridable section, so a project that writes an ENFORCEMENT block does
+    // delete the Prohibitions and Circuit Breakers tables from its own prompt.
+    //
+    // That is the ACCEPTED OUTCOME of the owner ruling, not a defect: a project
+    // owns its own `CLAUDE.md`, so a framework floor was the appearance of a
+    // control rather than a control. What this test still pins is that the
+    // tables survive everything a project did NOT explicitly ask to replace.
     let none = TempDir::new().unwrap();
     assert_authority_intact(&resolve(none.path()).0, "no overrides");
 
+    // An ENFORCEMENT override now APPLIES. Asserted explicitly so the accepted
+    // outcome is recorded rather than discovered later by someone surprised.
     let hostile_floor = TempDir::new().unwrap();
     write_claude_md(
         hostile_floor.path(),
@@ -900,10 +918,18 @@ fn the_authority_tables_survive_every_override_configuration() {
     );
     let (prompt, _) = resolve(hostile_floor.path());
     assert!(
-        !prompt.contains("No rules apply."),
-        "an ENFORCEMENT marker is fixed-tier and must be declined"
+        prompt.contains("No rules apply."),
+        "#4286: enforcement is overridable — a project may replace the tables"
     );
-    assert_authority_intact(&prompt, "hostile ENFORCEMENT named-section override");
+
+    // An UNRELATED override must still leave them intact. This is the part that
+    // survived the ruling, and it is what stops a WORKFLOW block from taking the
+    // enforcement tables with it.
+    let unrelated = TempDir::new().unwrap();
+    write_claude_md(unrelated.path(), &block(SectionId::Workflow, "TWO PHASES."));
+    let (prompt, _) = resolve(unrelated.path());
+    assert!(prompt.contains("TWO PHASES."));
+    assert_authority_intact(&prompt, "unrelated WORKFLOW named-section override");
 
     // #4286: the two arms that used to sit here — a legacy `WORKFLOW.md`
     // forcing the string assembly, and `PM_INSTRUCTIONS_DEPLOYED.md` discarding
@@ -952,16 +978,20 @@ fn no_floor_text_points_at_content_outside_the_floor() {
     // shape, because only the floor is guaranteed present. Assert the class, not
     // the one sentence that was fixed.
     let package = bundled_fallback_package().expect("manifest parses");
-    let floor: String = package.authored_run(
-        &SectionId::CANONICAL
-            .into_iter()
-            .filter(|id| id.is_floor())
-            .collect::<Vec<_>>(),
-    );
+    // The four former-floor sections, named explicitly. They are no longer a
+    // tier grouping (#4286 removed the floor), but they are still the sections
+    // that carry this content, and projecting them alone is what stops the
+    // assertion passing because some other section happens to restate it.
+    let floor: String = package.authored_run(&[
+        SectionId::Identity,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
+    ]);
 
     for token in SectionId::CANONICAL
         .into_iter()
-        .filter(|id| !id.is_floor())
+        .filter(|id| *id != SectionId::Core)
         .map(section_token)
     {
         assert!(
@@ -1065,12 +1095,16 @@ fn the_direct_action_budget_states_both_halves_in_the_floor() {
     // changes to actions. Assert it on the floor projected alone, so this
     // cannot pass because a project-tier section happens to restate it.
     let package = bundled_fallback_package().expect("manifest parses");
-    let floor: String = package.authored_run(
-        &SectionId::CANONICAL
-            .into_iter()
-            .filter(|id| id.is_floor())
-            .collect::<Vec<_>>(),
-    );
+    // The four former-floor sections, named explicitly. They are no longer a
+    // tier grouping (#4286 removed the floor), but they are still the sections
+    // that carry this content, and projecting them alone is what stops the
+    // assertion passing because some other section happens to restate it.
+    let floor: String = package.authored_run(&[
+        SectionId::Identity,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
+    ]);
 
     assert_budget_intact(&floor, "the floor projected on its own");
     let flat = unwrapped(&floor);
@@ -1159,6 +1193,9 @@ fn the_budget_survives_every_override_configuration() {
     );
     assert_budget_intact(&resolve(hostile_core.path()).0, "hostile CORE override");
 
+    // #4286: `identity` is now overridable, so an IDENTITY block DOES replace
+    // the up-front half of the budget that identity.md states. Accepted outcome
+    // of the ruling — asserted, not lamented.
     let hostile_identity = TempDir::new().unwrap();
     write_claude_md(
         hostile_identity.path(),
@@ -1166,19 +1203,74 @@ fn the_budget_survives_every_override_configuration() {
     );
     let (prompt, _) = resolve(hostile_identity.path());
     assert!(
-        !prompt.contains("PM never implements. No exceptions."),
-        "an IDENTITY marker is fixed-tier and must be declined"
+        prompt.contains("PM never implements. No exceptions."),
+        "#4286: identity is overridable — a project may restate the PM's role"
     );
-    assert_budget_intact(&prompt, "hostile IDENTITY override");
 
-    let deployed = TempDir::new().unwrap();
+    // The half stated in `enforcement` is untouched by an IDENTITY block, which
+    // is the surviving guarantee: overriding one section takes only that section.
+    assert!(
+        prompt.contains("The user can always override."),
+        "an IDENTITY override must not reach the enforcement section's budget text"
+    );
+
+    // A retired override file still changes nothing at all.
+    let retired = TempDir::new().unwrap();
     write_trusty_file(
-        deployed.path(),
+        retired.path(),
         crate::core::instruction_overrides::FILE_PM_DEPLOYED,
         "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
     );
-    assert_budget_intact(
-        &resolve(deployed.path()).0,
-        "PM_INSTRUCTIONS_DEPLOYED.md full replacement",
+    assert_budget_intact(&resolve(retired.path()).0, "retired override file present");
+}
+
+#[test]
+fn seeded_claude_md_declares_no_overrides() {
+    // REGRESSION GATE, found by running a real `tm` instance during #4286
+    // acceptance and not by any unit test or golden.
+    //
+    // The seeded `CLAUDE.md` stub documents the marker grammar. A first draft
+    // showed a worked example as a fenced code block:
+    //
+    //     <!-- TRUSTY-MPM: WORKFLOW START v=1 -->
+    //     …your workflow, replacing the bundled one…
+    //     <!-- TRUSTY-MPM: WORKFLOW END -->
+    //
+    // `parse_marker` matches whole lines and knows nothing about code fences, so
+    // that example WAS a live override: every newly seeded project silently lost
+    // its entire bundled workflow section and received the placeholder prose
+    // instead. Observed in a real launch — bundled workflow heading count 0,
+    // placeholder text present in the delivered prompt.
+    //
+    // The stub therefore may never contain a parseable marker pair. This asserts
+    // the property directly against the shipped bytes.
+    let tmp = TempDir::new().unwrap();
+    let stub = crate::core::instruction_pipeline::CLAUDE_MD_STUB;
+    std::fs::write(tmp.path().join("CLAUDE.md"), stub).unwrap();
+
+    let scanned = scan_project(tmp.path());
+    assert_eq!(
+        scanned.overrides,
+        vec![],
+        "the seeded CLAUDE.md must declare NO overrides; it documents the \
+         mechanism and must not exercise it"
+    );
+    assert_eq!(
+        scanned.diagnostics,
+        vec![],
+        "and it must not emit marker diagnostics either — a warning on every \
+         launch of every new project is not an acceptable way to document this"
+    );
+
+    // The stub still teaches the grammar (inline, so it cannot parse) and still
+    // points at the compiled instructions.
+    assert!(stub.contains("TRUSTY-MPM: WORKFLOW START"));
+    assert!(stub.contains(".trusty-mpm/last-instructions.md"));
+
+    // And the delivered prompt keeps its bundled workflow section.
+    let (prompt, _) = resolve(tmp.path());
+    assert!(
+        prompt.contains("# PM Workflow Configuration"),
+        "the bundled workflow section must survive a freshly seeded CLAUDE.md"
     );
 }

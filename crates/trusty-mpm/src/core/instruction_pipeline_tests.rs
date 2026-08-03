@@ -403,14 +403,14 @@ fn assemble_system_prompt_contains_all_sections() {
     // bundled section must be present and joined with the `---` rule.
     let prompt = assemble_system_prompt();
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-    assert!(prompt.contains("# BASE_PM Framework Floor"));
+    assert!(prompt.contains("# Framework Instructions"));
     assert!(prompt.contains("# PM Workflow Configuration"));
     assert!(prompt.contains("# Agent Delegation Routing"));
     // The Trusty tool-priority block now lives inside the BASE_PM floor.
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
     assert!(prompt.contains("\n\n---\n\n"));
     // BASE_PM is the non-overridable floor: it must come last.
-    let base = prompt.find("# BASE_PM Framework Floor").expect("base_pm");
+    let base = prompt.find("# Framework Instructions").expect("base_pm");
     let delegation = prompt
         .find("# Agent Delegation Routing")
         .expect("delegation");
@@ -494,7 +494,7 @@ fn install_system_prompt_to_writes_assembled() {
         "PM_INSTRUCTIONS section must be present"
     );
     assert!(
-        on_disk.contains("# BASE_PM Framework Floor"),
+        on_disk.contains("# Framework Instructions"),
         "BASE_PM floor must be present"
     );
 }
