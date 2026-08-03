@@ -15,7 +15,8 @@ spec_refs:
 
 # DOC-62 — Style Modes for Coding Delegation: `hack` / `vibe` / `engineer`
 
-**Status:** Draft
+**Status:** Accepted — all six §9 open questions resolved by owner decision
+2026-08-03 (see §9); landed 2026-08-01 (#4529).
 **Spec ID:** `SPEC-STYLE-01~draft` … `SPEC-STYLE-10~draft`
 **Subsystem:** cross-crate — trusty-agents (delegation surface, `HandoffContext`, preamble carriage); trusty-code (style parameter, internal pipeline selection); trusty-mpm/GUI (style selector, downstream)
 **Owner:** Architecture / Technical Leadership
@@ -710,7 +711,8 @@ Testable, and mapped to the implementing issues.
 ## 9. Open Questions for the Owner {#SPEC-STYLE-09~draft}
 
 **ID:** SPEC-STYLE-09~draft
-**Status:** Draft
+**Status:** Draft — all six questions below RESOLVED by owner decision
+2026-08-03; recorded inline, not deleted, so the reasoning trail survives.
 
 Only genuine remaining forks are listed. Epic #4345's questions 4 and 5 are
 **not** here: they are decided in §6 and §3 with evidence. Questions 1–3 are
@@ -722,6 +724,8 @@ consumes them.
   pane. Recommendation: **both, per-assistant wins**, because the style that
   suits `izzie` is not the style that suits a CTO assistant. Low reversibility
   cost either way.
+  **RESOLVED (owner decision, 2026-08-03):** both, with per-assistant winning
+  over global — the recommendation is adopted as-is. Unblocks #4353.
 
 - **OQ-2 — Does `hack` belong on the delegation surface at all?** §4.1 argues
   `hack` is the absence of a code change; a coding delegation that resolves to
@@ -732,6 +736,8 @@ consumes them.
   across the three surfaces (config, delegation, GUI) for no safety gain —
   §4.1's escalation rule already closes the hole. Flagged because it is a
   product-vocabulary call, not a technical one.
+  **RESOLVED (owner decision, 2026-08-03):** yes — `hack` stays on the
+  delegation surface; accept and escalate per §4.1's existing position.
 
 - **OQ-3 — The `engineer` name collides with the tcode `engineer` sub-agent
   role** (`crates/trusty-code/src/assets/agents/engineer.md`), noted in
@@ -741,6 +747,8 @@ consumes them.
   `engineer` (decision 1 fixed it) and disambiguate in the **GUI label and
   preamble wording** rather than the wire value. Owner confirmation wanted
   because the mitigation is presentational and therefore easy to lose.
+  **RESOLVED (owner decision, 2026-08-03):** keep the wire value `engineer`;
+  disambiguate in the GUI label and preamble only, per the recommendation.
 
 - **OQ-4 — Should the gate ledger (§3.4) be structured or prose?** Structured
   is enforceable by AC-7 and consumable by the GUI; prose is cheaper and
@@ -748,6 +756,8 @@ consumes them.
   prints only the final `Session` snapshot). Recommendation: **structured**,
   because SM-4 is the rule most likely to erode silently, and a prose summary
   is exactly where "not run" quietly becomes "fine".
+  **RESOLVED (owner decision, 2026-08-03):** structured, enforceable by AC-7
+  and GUI-consumable, per the recommendation.
 
 - **OQ-5 — Which product's circuit breakers does #2596's question 2 refer
   to?** The audit (§3.3, §7.1) found trusty-code has **no circuit breaker**;
@@ -757,6 +767,9 @@ consumes them.
   VIBE get them". No recommendation offered — this is #2596's call, and it is
   flagged here only because #4345 inherited the question in a form that
   presumes a construct that does not exist.
+  **RESOLVED (owner decision, 2026-08-03) on fact, not preference:**
+  trusty-mpm's circuit breakers — trusty-code has none at all, per the code
+  audit already recorded in DOC-62 §3.3.
 
 - **OQ-6 — Should a per-delegation style override be exposed in the GUI at
   all, given §5.4?** #4353 lists a delegation-level override as a "product
@@ -766,6 +779,9 @@ consumes them.
   effective style and its resolution path (§3.4) in the result**, so the
   override is honest rather than decorative. Owner call because it is a
   product-trust decision, not a technical one.
+  **RESOLVED (owner decision, 2026-08-03):** expose it, and always render the
+  effective style plus its resolution path so an overruled request is
+  visible rather than silently ignored, per the recommendation.
 
 ---
 
