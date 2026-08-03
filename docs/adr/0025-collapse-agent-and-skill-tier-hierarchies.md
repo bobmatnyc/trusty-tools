@@ -84,6 +84,232 @@ Implementation follows the manifest-first re-stack. Two ordering facts govern th
 
 The full 21-slice sequencing (slices 1–3, 5–10, 13–21) is tracked in the implementation plan rather than reproduced here; this ADR records the two ordering constraints that are load-bearing for review, not the complete task breakdown.
 
+## 2026-08-03 Addendum: Manifest-Based Project Configuration and the Four-Category Agent Model
+
+**Status of this addendum:** the parent ADR stays **Proposed** — nothing here
+is self-promoted to Accepted. These are owner decisions recorded 2026-08-03,
+targeting the 1.3.4 release ("firm up agents and skills"). This addendum adds
+detail; it does not silently reword clauses 1–16 above. Two places below
+name a direct tension with clause 1 rather than resolving it — see
+§Open Questions.
+
+### B1. The manifest is `manifest.toml` — confirms clause 1, no schema change
+
+Re-affirms the 2026-08-01 ruling verbatim ("agreed on manifest.toml"). No new
+file format, and **no schema change is required**: `HarnessManifest`
+(`crates/trusty-mpm/src/core/manifest/schema.rs`) already carries both
+`[agents]` and `[skills]` sections in one document, resolved project > user >
+catalog > compiled-default (`resolve.rs::resolve_manifest`). The owner's
+2026-08-03 decision that "ONE manifest covers BOTH agents and skills" is
+**already true of shipped code** — recorded here as a confirmed non-requirement,
+not new work.
+
+New requirements this addendum adds on top of the existing schema:
+
+- **B1.1.** Every project gets its own committed `<project>/.trusty-mpm/manifest.toml`. Audience: developers working on that project, not an end-user-facing artifact. Confirmed not committed anywhere in this repo today (`git ls-tree -r origin/main --name-only | grep manifest\.toml$` → no hits).
+- **B1.2.** The file is written by a scaffolding path — `tm-agent-manager`, on request — never hand-authored as the primary path (clause 2, unchanged). **This scaffolding path does not exist in code today** (`grep -rln "tm-agent-manager" crates/ --include='*.rs'` → zero hits; the name exists only as the bundled subagent persona `crates/trusty-mpm/src/assets/agents/mpm-agent-manager.md`). Tracked as issue #4528 (open, **no milestone assigned** as of this writing) with #4545 (collision refusal) folded in per clause 2/13.
+
+### B2. tm-agent-manager's purpose: composition, not mere file creation
+
+Claude Code's own `/agents` already lets an operator create a custom agent —
+that path is legitimate and trusty-mpm neither owns nor blocks it.
+`tm-agent-manager`'s distinct value is that it **builds** a custom agent by
+**composing** from the `BASE_*` inheritance fragments, which `/agents` does not
+do: a `/agents`-authored file is a bare agent with none of the framework's
+shared behavior; a `tm-agent-manager`-authored one inherits it (git workflow,
+memory routing, output format, handoff protocol, proactive-quality — whatever
+the relevant `BASE_*` fragment carries).
+
+**Verified against code, live today:**
+
+- The five base fragments, exactly: `BASE-AGENT.md`, `BASE-ENGINEER.md`,
+  `BASE-OPS.md`, `BASE-QA.md`, `BASE-RESEARCH.md`
+  (`crates/trusty-mpm/src/assets/agents/BASE-*.md`; corrects this
+  investigation's own earlier miscount of "4").
+- Composition is a **real, live Rust mechanism**, not prose: `compose_agent`
+  (`crates/trusty-agents-common/src/agents/builder.rs`) loads a source `.md`,
+  walks its `extends:` chain base-first (e.g. `engineer.md` declares
+  `extends: base-engineer`), strips intermediate frontmatter, and flattens the
+  chain into one self-contained document with cycle/depth protection
+  (`MAX_DEPTH`). Every bundled agent already goes through this at deploy time
+  (`deployer.rs` calls `compose_agent`/`source_chain`).
+- What is **not** built: a code path that lets `tm-agent-manager` invoke this
+  same composer to author a *new* custom agent on an operator's request. The
+  composer exists; the on-request authoring workflow around it does not.
+
+### B3. The four-category agent model
+
+| # | Category | Scope | Deploy target | Selected/created via | Code status today |
+|---|---|---|---|---|---|
+| 1 | Universal bundled (`research`, `qa`, `version-control`, `documentation`, `code-critic`, `engineer`, `local-ops`, `security`, …) | User | `FrameworkPaths::agent_deploy_dir()` = `<base>/.trusty-tools/trusty-mpm/claude-config/agents` (the relocated `$CLAUDE_CONFIG_DIR`) | Always selected — absent from `LANGUAGE_ENGINEERS` | **LIVE** |
+| 2 | Stack-specific bundled (`rust-engineer`, `python-engineer`, `typescript-engineer`, `nextjs-engineer`, …) | Project, **expressed as selection** | Same `agent_deploy_dir()` as category 1 — **not** a separate directory | `[agents] include/exclude` in `manifest.toml`, auto-derived per project by `language_agent_scope` (`core/manifest/project_lang.rs::LANGUAGE_ENGINEERS`) | **LIVE** (selection only; see §Open Questions for the literal-reading tension) |
+| 3 | User-installed custom, **project** level | Project | `<project>/.claude/agents/` | `tm-agent-manager`, on request (composing per B2), or Claude Code `/agents` directly | Directory + roster-inclusion **LIVE** (see B4); on-request *creation* via `tm-agent-manager` **NOT built** |
+| 4 | User-installed custom, **user** level | User | Managed session: `agent_deploy_dir()` (same dir as category 1). Standalone/non-managed session: real `~/.claude/agents`, which trusty-mpm "never writes to" today | Same as category 3 | Directory + roster-inclusion **LIVE for the managed case** (same dir already scanned); **standalone case is an open question**, see §Open Questions |
+
+Categories 3 and 4 both cover a `/agents`-created agent as well as a
+`tm-agent-manager`-built one — trusty-mpm's delegation map must index both, it
+does not get to see only its own (§B4). The in-flight PR that deletes tracked
+`*/.claude/agents/*.md` and gitignores the directory is **consistent** with
+categories 3/4: the directory holds deployed/managed or hand-placed
+**artifacts**, never git-tracked **source** — a `/agents`-created project
+agent landing there and being covered by that gitignore rule is correct
+(it is user-local content, not repository content), not trusty-mpm
+suppressing user agents. State this explicitly so a future reader does not
+read the gitignore rule backwards.
+
+### B4. Selection vs. deployment — the load-bearing distinction, and the delegation map
+
+`ContentSource` (`schema.rs`) has exactly two variants, `Bundled | Catalog` —
+no `Project` variant exists, so `manifest.toml` **cannot** name a project as
+the *content source* of a bundled/stack-specific agent; it can only select,
+by name, which already-composed bundled agents deploy. Deployment for
+categories 1–2 is unconditionally the single `agent_deploy_dir()`
+(`session_launch/mod.rs`: `deploy_agents_filtered(&plan.agent_source,
+&fw.agent_deploy_dir(), |name| plan.agent_selected(name))`), and any stale
+project-local copy is actively retracted every launch
+(`retract_framework_agents(&project_dir.join(".claude").join("agents"))`,
+issue #4409) — but retraction **only removes framework-owned entries**
+("Only manifest-tracked, framework-owned files are removed; hand-placed and
+user-owned files are untouched"), which is exactly the seam categories 3/4
+rely on.
+
+**The delegation map already unions all relevant tiers today.** THE roster
+resolver (`crates/trusty-mpm/src/core/delegation_authority.rs::resolve_roster`,
+issue #4588 — "every consumer calls this one function") calls
+`deployed_agent_dirs(project_dir)`, which returns, **highest precedence
+first**:
+
+1. `<project>/.claude/agents` — its own doc comment: "holds only agents the
+   operator hand-placed (and, in future, project-custom trusty-built agents)"
+2. the active `CLAUDE_CONFIG_DIR/agents` (env var when set, else
+   `managed_claude_config_dir()`) — categories 1/2, and category 4 for a
+   managed session
+3. `FrameworkPaths::default().claude_agents_dir()` = real `~/.claude/agents`
+   — "tm never writes to" this one
+
+`roster_from_dirs` scans every `.md` file in each directory via `scan_agents`
+and keeps the first (highest-precedence) summary per name. **This means
+categories 3 and 4 (managed case) already reach the delegation map today,
+mechanically, for any well-formed `.md` file — regardless of who authored it
+or whether it came from `tm-agent-manager` or `/agents`.** The gap is not
+roster-inclusion; it is that nothing yet *authors* such a file on request
+(B1.2, B2).
+
+### B5. Ownership-ledger and frontmatter reconciliation
+
+Two independent mechanisms exist and answer different questions; a third,
+provenance-in-frontmatter, was named in the owner's 2026-08-03 direction and
+does **not exist in code today**:
+
+- **The JSON ownership ledger** (`.trusty-mpm-manifest.json` /
+  `.trusty-mpm-skills-manifest.json`, `agents::manifest::AgentManifest`)
+  answers *"did trusty-mpm write this file, and does it still match what it
+  wrote"* — `checksum` + `deployed_at` per managed filename. `Origin` has
+  three variants, `Bundled | Registry | User`, and
+  `Origin::is_framework_owned()` is `true` only for `Bundled`. **Only
+  `Origin::Bundled` entries are ever written by code today** — the deployer
+  that populates this ledger is the bundled-agent deployer; nothing writes a
+  `Registry` or `User` entry. A file **absent** from the manifest is already
+  treated identically to an explicit `User`-origin entry ("not in manifest →
+  user-owned → skip silently") — so **absence is already the working signal
+  for "not ours, never touch,"** which is exactly the signal PR #4526's
+  `is_movable` predicate (issue #4448) needs and currently lacks by name.
+- **Frontmatter** (`crates/trusty-agents-common/src/agents/frontmatter.rs`,
+  parsed by the generic `parse_kv_line`) answers *"what IS this file."*
+  Enumerated exhaustively across every bundled agent and every `BASE-*`
+  fragment (`crates/trusty-mpm/src/assets/agents/*.md`), the complete set of
+  frontmatter keys in use today is: `name`, `role`, `extends`, `description`,
+  `model`, `skills`. **No `origin`/`provenance` field exists in any bundled
+  agent today, and the parser defines no such key.** The owner's 2026-08-03
+  statement ("We use frontmatter to track this") is therefore a **target
+  design, not a description of shipped code** — flagged here rather than
+  written up as though it already works.
+- These two mechanisms overlap in *what they could* express (both could say
+  "trusty-mpm made this") but today only the ledger says anything at all, and
+  only for the one category (`Bundled`) it already handles. Whether a
+  frontmatter provenance field, once added, would need to agree with the
+  ledger, and which wins if they disagree, is unwritten in code and is
+  recorded as an open question below rather than invented here.
+
+### B6. What happens when the manifest names something absent from the roster
+
+- **A `[agents] include` entry naming a bundled/stack-specific agent stem not
+  present in the compiled roster:** whether this fails loudly today is
+  **UNVERIFIED** — ADR-0025's own text above states plainly that no such
+  check was found in the delegation path (clause 12 exists to close this gap
+  and has not shipped). Not independently re-verified in this pass; carried
+  forward as-is.
+- **A manifest referencing a category-3/4 custom agent file that was never
+  created:** `resolve_roster` simply will not find it; no error is surfaced
+  anywhere today. This is a plain consequence of B4, not a new finding.
+
+## Open Questions (2026-08-03 addendum — named, not resolved)
+
+1. **Clause 1 vs. categories 3/4.** Clause 1 states "A project cannot ship
+   its own agent FILE — it can only select, by name, from the catalog…
+   Per-project canonical agent directories… are explicitly deferred to a
+   follow-on ADR if they prove necessary." Category 3 (and the managed case
+   of category 4) is precisely a project-level agent FILE, and `resolve_roster`
+   already gives it the HIGHEST precedence tier. Read charitably, `deployed_agent_dirs`'s
+   own "(and, in future, project-custom trusty-built agents)" comment is the
+   same deferred work clause 1 names — but ADR-0025 has not been amended to
+   say this addendum IS that follow-on trigger. Flagged, not resolved.
+2. **Clause 14 vs. the in-flight tracked-file deletion.** Clause 14 requires
+   migration to be report-first, copy-then-quarantine, never deletion. The
+   in-flight PR deleting the ~34 tracked `*/.claude/agents/*.md` files (stale,
+   superseded pre-#4409 per-crate artifacts) plus a gitignore rule may or may
+   not count as "migration" under clause 14's definition — if it does, it
+   needs the quarantine treatment; if it is ordinary dead-file cleanup of
+   already-superseded tracked content, it does not. Not resolved here.
+3. **Unresolvable delegation target.** Whether an unresolvable agent name
+   fails loudly today is UNVERIFIED (see B6 and ADR-0025's own Consequences
+   section above).
+4. **Category 4, standalone/non-managed session.** A user-level custom agent
+   must land in whichever directory the ACTIVE harness resolves as its user
+   tier for that session type. For a managed session that is the relocated
+   `$CLAUDE_CONFIG_DIR` (`agent_deploy_dir()`), already scanned. For a
+   standalone `tm` session (no daemon orchestration), `deployed_agent_dirs`'s
+   third tier is the real `~/.claude/agents`, which trusty-mpm's own code
+   comment says it "never writes to." Whether that is a defect for category 4
+   (the harness would not see a user-level custom agent created for a
+   standalone session) or is out of scope for a session type this addendum
+   does not otherwise address is not resolved here.
+5. **Ledger vs. frontmatter precedence.** If a future frontmatter provenance
+   field and the JSON ownership ledger ever disagree about a file's origin,
+   which wins is unwritten in code today (B5) and is not invented here.
+6. **Relationship to issue #4443** ("custom deployment mechanism for
+   trusty-built project agents," open, milestone 1.3.4). #4443 was scoped
+   before the 2026-08-01 tier-collapse ruling under a frontmatter-declared-tier
+   framing that ruling superseded. The owner's 2026-08-03 "we use frontmatter
+   to track this" may be about PROVENANCE (this addendum's B5), not the
+   superseded TIER-declaration approach — these may not be the same claim.
+   Not resolved here; #4443 should be read against this addendum before
+   further scoping.
+
+## Deliberately Out of Scope (this addendum)
+
+Carried forward from the loose-spec instruction — named so the omissions are
+visible rather than silent:
+
+- A numeric multi-source priority list (`agents-sources.toml`, clause 3).
+- An `Origin::Project` (or any fourth `Origin`) variant, or a `ContentSource::Project`
+  variant — categories 3/4 are expressed as directories the roster already
+  scans, not as a manifest content-source change.
+- Startup reconciliation (clause 9) and the loud-failure check (clause 12) —
+  both explicitly gated behind their own critic passes in the Slices section
+  above; untouched by this addendum.
+- A skill-side equivalent of `language_agent_scope`/`LANGUAGE_ENGINEERS` — no
+  such auto-detection exists for skills today (confirmed: `grep` across
+  `trusty-agents-common/src/skills/tiers.rs` for language/stack/marker logic
+  returns nothing); `[skills] include/exclude` stays manual-only selection in
+  this pass. The 33-of-103 `vercel:*`-skills-in-a-non-Vercel-repo case
+  (issue #4528's own motivating measurement) is not solved here.
+- A new frontmatter provenance field, or code that writes one — B5 names the
+  gap, it does not close it.
+- `docs/adr/INDEX.md`'s one-line summary for ADR-0025 — left unedited to keep
+  this addendum's diff minimal; its content is still accurate as a summary of
+  the original clauses, and this addendum is additive.
+
 ## Related Decisions
 
 Vetted against prior ADRs on 2026-08-01:
