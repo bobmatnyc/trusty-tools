@@ -35,6 +35,8 @@ pub use helpers::{
 };
 pub use types::{
     CreateDrawerBody, CreatePalaceBody, DreamStatusPayload, KgAssertBody, KgGraphPayload,
-    ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult, StatusPayload,
+    // #4670: progressive graph-exploration payloads.
+    KgNeighborsPayload, KgNodeView, KgSeedPayload, ListDrawersQuery, PalaceInfo, ServiceError,
+    ServiceResult, StatusPayload,
 };
 pub use user_config::{dream_config_from_user_config, load_user_config, LoadedUserConfig};

@@ -11,12 +11,16 @@ use crate::{ActivityFilter, ActivitySource, DaemonEvent};
 use std::sync::Arc;
 use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStats};
 use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::kg::Triple;
+// #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
+use trusty_common::memory_core::store::kg::{ExpandDirection, Triple};
 use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
 
 use super::core::KG_GRAPH_MAX_TRIPLES;
 use super::helpers::{list_palaces_blocking, refresh_gaps_cache};
-use super::types::{DreamStatusPayload, KgAssertBody, KgGraphPayload, ServiceError, ServiceResult};
+use super::types::{
+    DreamStatusPayload, KgAssertBody, KgGraphPayload, KgNeighborsPayload, KgNodeView,
+    KgSeedPayload, ServiceError, ServiceResult,
+};
 use super::MemoryService;
 
 impl MemoryService {
@@ -121,18 +125,122 @@ impl MemoryService {
     }
 
     /// Build the per-palace visual graph payload.
+    ///
+    /// Why (issue #4670): the `node_count` / `edge_count` / `community_count`
+    /// here are computed over the FULL adjacency while `triples` is capped at
+    /// [`KG_GRAPH_MAX_TRIPLES`]. That mismatch used to be invisible — the UI
+    /// rendered 5,000 triples under a "9,311 nodes" badge — and because
+    /// `list_active` orders by `valid_from` DESC the dropped triples were
+    /// silently the oldest. The payload now reports what it actually returned
+    /// alongside what exists, so truncation is machine-detectable.
+    /// What: unchanged query; adds `returned_triple_count`,
+    /// `active_triple_count`, and the derived `truncated` flag.
+    /// Test: `kg_graph_signals_truncation`, `kg_graph_returns_active_triples`.
     pub async fn kg_graph(&self, id: &str) -> ServiceResult<KgGraphPayload> {
+        self.kg_graph_with_cap(id, KG_GRAPH_MAX_TRIPLES).await
+    }
+
+    /// [`Self::kg_graph`] with an explicit triple cap.
+    ///
+    /// Why (issue #4670): the truncation-signalling branch is only reachable
+    /// above `KG_GRAPH_MAX_TRIPLES` (5,000), and seeding 5,001 triples costs
+    /// ~90 s of test time — expensive enough that the branch would in practice
+    /// go untested. Taking the cap as a parameter makes it provable with five
+    /// triples and a cap of three, at no cost to the production call path.
+    /// What: the real implementation; `kg_graph` is a thin wrapper that passes
+    /// the production constant.
+    /// Test: `kg_graph_signals_truncation`.
+    pub async fn kg_graph_with_cap(
+        &self,
+        id: &str,
+        max_triples: usize,
+    ) -> ServiceResult<KgGraphPayload> {
         let handle = self.open_handle(id)?;
         let triples = handle
             .kg
-            .list_active(KG_GRAPH_MAX_TRIPLES, 0)
+            .list_active(max_triples, 0)
             .await
             .map_err(|e| ServiceError::internal(format!("kg list_active: {e:#}")))?;
+        // #4670: compare against the true active count, not the cap, so a
+        // palace sitting exactly on the cap is not falsely flagged.
+        let active_triple_count = handle.kg.count_active_triples() as u64;
+        let returned_triple_count = triples.len() as u64;
         Ok(KgGraphPayload {
             triples,
             node_count: handle.kg.node_count() as u64,
             edge_count: handle.kg.edge_count() as u64,
             community_count: handle.kg.community_count() as u64,
+            returned_triple_count,
+            active_triple_count,
+            truncated: returned_triple_count < active_triple_count,
+        })
+    }
+
+    /// Top-`limit` nodes by degree plus the edges among them (issue #4670).
+    ///
+    /// Why: first paint must show the graph's skeleton, not 9,311 nodes in an
+    /// O(n²) layout. 91.8% of a real palace's nodes are degree-1 leaves, so a
+    /// top-degree slice carries essentially all of the visible structure and
+    /// everything else stays one click away.
+    /// What: runs [`KnowledgeGraph::top_degree_subgraph`] over the resident
+    /// adjacency (O(V log V + E), no disk I/O) and pairs the result with the
+    /// palace-wide totals the header needs to report honestly.
+    /// Test: `kg_graph_seed_ranks_by_degree`, `kg_graph_seed_clamps_limit`.
+    pub async fn kg_graph_seed(&self, id: &str, limit: usize) -> ServiceResult<KgSeedPayload> {
+        let handle = self.open_handle(id)?;
+        let (nodes, triples) = handle
+            .kg
+            .top_degree_subgraph(limit)
+            .map_err(|e| ServiceError::internal(format!("kg top_degree_subgraph: {e:#}")))?;
+        let node_count = handle.kg.node_count() as u64;
+        let returned_node_count = nodes.len() as u64;
+        Ok(KgSeedPayload {
+            nodes: nodes.into_iter().map(KgNodeView::from).collect(),
+            returned_triple_count: triples.len() as u64,
+            triples,
+            node_count,
+            edge_count: handle.kg.edge_count() as u64,
+            community_count: handle.kg.community_count() as u64,
+            returned_node_count,
+            limit: limit as u64,
+            truncated: returned_node_count < node_count,
+        })
+    }
+
+    /// Direction-aware, hop-bounded expansion around one node (issue #4670).
+    ///
+    /// Why: click-to-expand needs "what points AT this node", which no HTTP
+    /// endpoint could answer — `kg_query` is a subject prefix scan. Bounding
+    /// the hops keeps one click on a hub from pulling the whole palace.
+    /// What: delegates to [`KnowledgeGraph::expand_neighbors`]. `direction`
+    /// and `max_hops` are already validated/clamped by the HTTP layer; they
+    /// are echoed back so the client can see what actually ran.
+    /// Test: `kg_neighbors_returns_incoming_edges`, `kg_neighbors_clamps_max_hops`.
+    pub async fn kg_neighbors(
+        &self,
+        id: &str,
+        node: &str,
+        direction: ExpandDirection,
+        max_hops: usize,
+    ) -> ServiceResult<KgNeighborsPayload> {
+        let handle = self.open_handle(id)?;
+        let (nodes, triples) = handle
+            .kg
+            .expand_neighbors(node, direction, max_hops)
+            .map_err(|e| ServiceError::internal(format!("kg expand_neighbors: {e:#}")))?;
+        Ok(KgNeighborsPayload {
+            origin: node.to_string(),
+            returned_node_count: nodes.len() as u64,
+            returned_triple_count: triples.len() as u64,
+            nodes: nodes.into_iter().map(KgNodeView::from).collect(),
+            triples,
+            direction: match direction {
+                ExpandDirection::In => "in",
+                ExpandDirection::Out => "out",
+                ExpandDirection::Both => "both",
+            }
+            .to_string(),
+            max_hops: max_hops as u64,
         })
     }
 

@@ -14,6 +14,8 @@
 //! the public API; storage-engine tests live in `kg_redb.rs`.
 
 mod adjacency;
+// #4670: progressive (seed + expand) exploration over the resident adjacency.
+mod explore;
 mod graph;
 mod ops;
 mod types;
@@ -21,5 +23,6 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use explore::{ExpandDirection, SeedNode};
 pub use graph::KnowledgeGraph;
 pub use types::{KgEdge, Triple};

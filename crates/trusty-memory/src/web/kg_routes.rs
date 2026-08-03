@@ -15,7 +15,8 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::kg::Triple;
+// #4670: ExpandDirection backs the `direction` param on `kg/graph/neighbors`.
+use trusty_common::memory_core::store::kg::{ExpandDirection, Triple};
 
 use crate::AppState;
 
@@ -313,11 +314,14 @@ pub(crate) use crate::service::KgGraphPayload;
 
 /// `GET /api/v1/palaces/{id}/kg/graph` — full graph for visualisation.
 ///
-/// Why: The KG Explorer graph-view needs the full active triple set to
-/// render the force-directed graph. The service layer handles the
-/// data-structure assembly.
-/// What: Delegates to `MemoryService::kg_graph`; returns `KgGraphPayload`.
-/// Test: `kg_graph_returns_active_triples`, `kg_graph_meets_perf_budget_for_500_triples`.
+/// Why: The KG Explorer graph-view's explicit "load everything" mode needs the
+/// full active triple set. As of issue #4670 this is no longer the view's
+/// default load — see [`kg_graph_seed`] — because the payload is capped at
+/// `KG_GRAPH_MAX_TRIPLES` and the response now says so.
+/// What: Delegates to `MemoryService::kg_graph`; returns `KgGraphPayload`,
+/// which carries `returned_triple_count` / `active_triple_count` / `truncated`.
+/// Test: `kg_graph_returns_active_triples`, `kg_graph_signals_truncation`,
+/// `kg_graph_meets_perf_budget_for_500_triples`.
 pub(super) async fn kg_graph(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -325,6 +329,129 @@ pub(super) async fn kg_graph(
     Ok(Json(
         crate::service::MemoryService::new(state)
             .kg_graph(&id)
+            .await?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Progressive graph exploration (issue #4670)
+// ---------------------------------------------------------------------------
+
+pub(crate) use crate::service::{KgNeighborsPayload, KgSeedPayload};
+
+/// Default seed size for `GET /kg/graph/seed` when the caller omits `limit`.
+///
+/// Why (issue #4670): the graph view's layout is an O(n²) force simulation run
+/// for ~200 ticks. At 75 nodes that is ~2,775 pair computations per tick
+/// (~555K total) — imperceptible; at the palace's full 9,311 nodes it is ~43M
+/// per tick (~8.7B total), which is the freeze this endpoint exists to avoid.
+/// 75 sits deliberately above the sibling list endpoints' 50: measured degree
+/// distribution on a real palace is 91.8% degree-1 leaves with top degrees of
+/// 48/46/45/44/32, so a 50-node seed stops right where the mid-tier hubs
+/// (degree 5–10, ~7% of nodes) begin. 75 reaches into that tier while leaving
+/// ~2.5× headroom under the max before layout cost becomes noticeable, so a
+/// few click-expansions do not need a page reload to stay smooth.
+const DEFAULT_KG_SEED_LIMIT: usize = 75;
+
+/// Hard ceiling on the seed size.
+///
+/// Why: mirrors `MAX_KG_LIST_LIMIT` so every bounded KG read in this file
+/// shares one ceiling. 200 nodes is ~4M layout operations — still interactive,
+/// and past it the hairball is unreadable regardless of performance.
+const MAX_KG_SEED_LIMIT: usize = 200;
+
+fn default_kg_seed_limit() -> usize {
+    DEFAULT_KG_SEED_LIMIT
+}
+
+/// Query parameters for `GET /api/v1/palaces/{id}/kg/graph/seed`.
+#[derive(Deserialize)]
+pub(super) struct KgSeedParams {
+    #[serde(default = "default_kg_seed_limit")]
+    limit: usize,
+}
+
+/// `GET /api/v1/palaces/{id}/kg/graph/seed?limit=N` — top-N nodes by degree.
+///
+/// Why (issue #4670): first paint of the graph view. Returns the structurally
+/// important slice of the graph plus the palace-wide totals, so the header can
+/// state "75 of 9,311 nodes shown" instead of implying it rendered everything.
+/// What: clamps `limit` to `[1, MAX_KG_SEED_LIMIT]` and delegates to
+/// `MemoryService::kg_graph_seed`. The returned `triples` use the same wire
+/// shape as `/kg/graph`, so the client merges seed and expansion results with
+/// one code path.
+/// Test: `kg_graph_seed_ranks_by_degree`, `kg_graph_seed_clamps_limit`.
+pub(super) async fn kg_graph_seed(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<KgSeedParams>,
+) -> Result<Json<KgSeedPayload>, ApiError> {
+    let limit = q.limit.clamp(1, MAX_KG_SEED_LIMIT);
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .kg_graph_seed(&id, limit)
+            .await?,
+    ))
+}
+
+/// Maximum BFS depth for `GET /kg/graph/neighbors`.
+///
+/// Why: matches `trusty-search`'s `graph_neighbors_handler`, which clamps
+/// `max_hops` to `1..=4` — keeping the two crates' traversal contracts
+/// identical means an operator who learned one already knows the other.
+const MAX_KG_NEIGHBOR_HOPS: usize = 4;
+
+fn default_kg_neighbor_hops() -> usize {
+    1
+}
+
+/// Query parameters for `GET /api/v1/palaces/{id}/kg/graph/neighbors`.
+///
+/// Why: parameter names (`node`, `direction`, `max_hops`) deliberately mirror
+/// `trusty-search`'s contributed-graph neighbors endpoint.
+/// What: `node` is required; `direction` defaults to `both`; `max_hops`
+/// defaults to 1 and is clamped to `[1, MAX_KG_NEIGHBOR_HOPS]`.
+/// Test: `kg_neighbors_returns_incoming_edges`, `kg_neighbors_clamps_max_hops`,
+/// `kg_neighbors_rejects_bad_direction`.
+#[derive(Deserialize)]
+pub(super) struct KgNeighborsParams {
+    node: String,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default = "default_kg_neighbor_hops")]
+    max_hops: usize,
+}
+
+/// `GET /api/v1/palaces/{id}/kg/graph/neighbors?node=X&direction=…&max_hops=N`
+///
+/// Why (issue #4670): click-to-expand. Crucially this is the first endpoint
+/// that can answer "what points AT this node" — `kg_query` is a subject prefix
+/// scan (`store/kg_redb/read_ops.rs:29-67`) and never reads the object side,
+/// so the incoming half of every palace graph was unreachable over HTTP.
+/// What: parses `direction` (`in` | `out` | `both`, 400 on anything else),
+/// clamps `max_hops`, and delegates to `MemoryService::kg_neighbors`, which
+/// BFSes the resident adjacency — no disk I/O.
+/// Test: `kg_neighbors_returns_incoming_edges`, `kg_neighbors_clamps_max_hops`,
+/// `kg_neighbors_rejects_bad_direction`.
+pub(super) async fn kg_graph_neighbors(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(q): Query<KgNeighborsParams>,
+) -> Result<Json<KgNeighborsPayload>, ApiError> {
+    let direction = match q.direction.as_deref().unwrap_or("both") {
+        "in" | "inbound" => ExpandDirection::In,
+        "out" | "outbound" => ExpandDirection::Out,
+        "both" => ExpandDirection::Both,
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "direction must be in|out|both, got {other:?}"
+            )))
+        }
+    };
+    let max_hops = q.max_hops.clamp(1, MAX_KG_NEIGHBOR_HOPS);
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .kg_neighbors(&id, &q.node, direction, max_hops)
             .await?,
     ))
 }

@@ -399,3 +399,219 @@ async fn community_count_returns_partition_size() {
     }
     assert!(kg.community_count() >= 1);
 }
+
+// ---------------------------------------------------------------------------
+// #4670 — progressive exploration (seed + expand)
+// ---------------------------------------------------------------------------
+
+/// Build a small graph with a deliberate degree spread and a bidirectional hub.
+///
+/// Shape (predicate in parentheses; each edge needs a distinct predicate per
+/// subject because the adjacency enforces one active edge per
+/// `(subject, predicate)`):
+///
+/// ```text
+///   s1 --(pa)--> hub --(p1)--> a --(q1)--> b
+///   s2 --(pb)--> hub --(p2)--> b
+///                hub --(p3)--> c
+/// ```
+///
+/// Degrees: hub 5 (out 3 / in 2), a 2, b 2, c 1, s1 1, s2 1.
+async fn explore_fixture() -> (tempfile::TempDir, KnowledgeGraph) {
+    let dir = tempdir().unwrap();
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
+    for (s, p, o) in [
+        ("hub", "p1", "a"),
+        ("hub", "p2", "b"),
+        ("hub", "p3", "c"),
+        ("s1", "pa", "hub"),
+        ("s2", "pb", "hub"),
+        ("a", "q1", "b"),
+    ] {
+        kg.assert(Triple {
+            subject: s.into(),
+            predicate: p.into(),
+            object: o.into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await
+        .unwrap();
+    }
+    (dir, kg)
+}
+
+/// Why: the seed endpoint's whole value is that it returns the *structurally
+/// important* nodes, not an arbitrary slice. If ranking is not by degree the
+/// seed is no better than the truncated full graph it replaces.
+/// What: asks for the top 3 of a 6-node fixture and asserts the exact ordering
+/// (`hub` at degree 5, then the two degree-2 nodes in name order) plus the
+/// in/out degree split reported for the hub.
+/// Test: this test.
+#[tokio::test]
+async fn top_degree_subgraph_ranks_by_degree() {
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, _) = kg.top_degree_subgraph(3).unwrap();
+    let names: Vec<&str> = nodes.iter().map(|n| n.entity.as_str()).collect();
+    assert_eq!(names, vec!["hub", "a", "b"], "seed must rank by degree desc");
+    assert_eq!(nodes[0].degree, 5);
+    assert_eq!(nodes[0].out_degree, 3);
+    assert_eq!(nodes[0].in_degree, 2);
+    // Ties are broken by name so repeated calls are byte-identical.
+    assert_eq!(nodes[1].degree, 2);
+    assert_eq!(nodes[2].degree, 2);
+}
+
+/// Why: the client renders the returned edges directly; an edge pointing at a
+/// node that was not returned would render as a dangling line.
+/// What: takes the top 3 and asserts the returned triples are exactly the
+/// induced subgraph over `{hub, a, b}` — `hub→c`, `s1→hub`, `s2→hub` must all
+/// be excluded.
+/// Test: this test.
+#[tokio::test]
+async fn top_degree_subgraph_returns_only_induced_edges() {
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg.top_degree_subgraph(3).unwrap();
+    let seed: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.entity.as_str()).collect();
+    assert_eq!(triples.len(), 3, "expected the 3 induced edges");
+    for t in &triples {
+        assert!(seed.contains(t.subject.as_str()), "dangling subject {t:?}");
+        assert!(seed.contains(t.object.as_str()), "dangling object {t:?}");
+    }
+    let mut preds: Vec<&str> = triples.iter().map(|t| t.predicate.as_str()).collect();
+    preds.sort_unstable();
+    assert_eq!(preds, vec!["p1", "p2", "q1"]);
+}
+
+/// Why: a clamped-to-zero limit must not be read as "unbounded".
+/// What: asserts `limit == 0` returns empty vecs rather than the whole graph.
+/// Test: this test.
+#[tokio::test]
+async fn top_degree_subgraph_zero_limit_is_empty() {
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg.top_degree_subgraph(0).unwrap();
+    assert!(nodes.is_empty());
+    assert!(triples.is_empty());
+}
+
+/// Why: a limit larger than the graph must return the graph, not panic on the
+/// truncate.
+/// What: asks for 1000 nodes from a 6-node fixture.
+/// Test: this test.
+#[tokio::test]
+async fn top_degree_subgraph_limit_above_graph_size_returns_all() {
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg.top_degree_subgraph(1000).unwrap();
+    assert_eq!(nodes.len(), 6);
+    assert_eq!(triples.len(), 6);
+}
+
+/// Why (issue #4670): incoming expansion is the half of the graph that was
+/// previously impossible over HTTP — `kg_query` is a subject prefix scan and
+/// never reads the object side. This is the regression guard for that gap.
+/// What: expands `hub` with `direction=In`; only `s1→hub` and `s2→hub` may
+/// come back, and the outgoing targets `a`/`b`/`c` must be absent.
+/// Test: this test.
+#[tokio::test]
+async fn expand_neighbors_in_returns_incoming_only() {
+    use super::explore::ExpandDirection;
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg
+        .expand_neighbors("hub", ExpandDirection::In, 1)
+        .unwrap();
+    let names: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.entity.as_str()).collect();
+    assert_eq!(names, ["hub", "s1", "s2"].into_iter().collect());
+    assert_eq!(triples.len(), 2);
+    for t in &triples {
+        assert_eq!(t.object, "hub", "In direction must yield edges INTO hub");
+    }
+}
+
+/// Why: `direction=out` must not silently include the new incoming half.
+/// What: expands `hub` outbound one hop; expects exactly `a`, `b`, `c`.
+/// Test: this test.
+#[tokio::test]
+async fn expand_neighbors_out_returns_outgoing_only() {
+    use super::explore::ExpandDirection;
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg
+        .expand_neighbors("hub", ExpandDirection::Out, 1)
+        .unwrap();
+    let names: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.entity.as_str()).collect();
+    assert_eq!(names, ["hub", "a", "b", "c"].into_iter().collect());
+    assert_eq!(triples.len(), 3);
+    for t in &triples {
+        assert_eq!(t.subject, "hub");
+    }
+}
+
+/// Why: `both` is the UI default for click-to-expand; it must be the union of
+/// the two single-direction results with no duplicated edges.
+/// What: expands `hub` in both directions one hop and asserts 6 nodes / 5
+/// distinct edges, plus that the reported degree is the FULL-graph degree
+/// (5 for hub) rather than the fragment's.
+/// Test: this test.
+#[tokio::test]
+async fn expand_neighbors_both_returns_union() {
+    use super::explore::ExpandDirection;
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg
+        .expand_neighbors("hub", ExpandDirection::Both, 1)
+        .unwrap();
+    let names: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.entity.as_str()).collect();
+    assert_eq!(
+        names,
+        ["hub", "a", "b", "c", "s1", "s2"].into_iter().collect()
+    );
+    assert_eq!(triples.len(), 5);
+    let hub = nodes.iter().find(|n| n.entity == "hub").unwrap();
+    assert_eq!(hub.degree, 5, "degree must be graph-wide, not fragment-wide");
+    // The origin is always first so the client can anchor new nodes on it.
+    assert_eq!(nodes[0].entity, "hub");
+}
+
+/// Why: `max_hops` is what stops one click on a hub from pulling the palace.
+/// What: outbound from `hub` at 1 hop reaches `a`,`b`,`c`; at 2 hops the
+/// `a→b` edge is additionally discovered but no new node is (b is already in).
+/// Test: this test.
+#[tokio::test]
+async fn expand_neighbors_respects_max_hops() {
+    use super::explore::ExpandDirection;
+    let (_dir, kg) = explore_fixture().await;
+    let (n1, t1) = kg
+        .expand_neighbors("hub", ExpandDirection::Out, 1)
+        .unwrap();
+    let (n2, t2) = kg
+        .expand_neighbors("hub", ExpandDirection::Out, 2)
+        .unwrap();
+    assert_eq!(t1.len(), 3);
+    assert_eq!(t2.len(), 4, "2 hops must additionally discover a→b");
+    assert_eq!(n1.len(), 4);
+    assert_eq!(n2.len(), 4);
+
+    let (n0, t0) = kg
+        .expand_neighbors("hub", ExpandDirection::Out, 0)
+        .unwrap();
+    assert!(n0.is_empty() && t0.is_empty(), "0 hops must expand nothing");
+}
+
+/// Why: an unknown node must be an empty result, not an error the UI has to
+/// render as a failure banner.
+/// What: expands a name that was never asserted.
+/// Test: this test.
+#[tokio::test]
+async fn expand_neighbors_unknown_entity_is_empty() {
+    use super::explore::ExpandDirection;
+    let (_dir, kg) = explore_fixture().await;
+    let (nodes, triples) = kg
+        .expand_neighbors("no-such-node", ExpandDirection::Both, 2)
+        .unwrap();
+    assert!(nodes.is_empty());
+    assert!(triples.is_empty());
+}
