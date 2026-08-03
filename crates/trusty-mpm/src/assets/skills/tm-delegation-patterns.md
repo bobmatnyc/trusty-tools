@@ -83,9 +83,9 @@ tell the user no dedicated ops agent exists yet.
 Language-specific Engineer selection follows `Cargo.toml` (rust-engineer),
 `tsconfig.json` (typescript-engineer), `pyproject.toml`/`setup.py`
 (python-engineer), `go.mod` (golang-engineer), `pom.xml`/`build.gradle`
-(java-engineer), `.csproj` — see `AGENT_DELEGATION.md`'s Language Detection
-section for the full table; when unknown, Research is mandatory (never
-default to a guess).
+(java-engineer), `.csproj` — see the bundled agent-delegation section
+(`assets/instructions/sections/agent-delegation.md`) for the full table; when
+unknown, Research is mandatory (never default to a guess).
 
 ## Long-Wait Delegation (chunked-repoll — issue #2833)
 
