@@ -144,9 +144,42 @@ export const api = {
 
   /**
    * Full graph payload for a palace: triples + node/edge/community counts.
-   * Why: Issue #97 — the visual graph view fetches every active triple in
-   * one call so d3-force can lay out the graph without paging.
+   * Why: Issue #97 — one call, every active triple. As of issue #4670 this is
+   * the graph view's explicit "load everything" mode, NOT its default: the
+   * server caps `triples` at 5,000 and the response now reports
+   * `returned_triple_count` / `active_triple_count` / `truncated` so callers
+   * cannot mistake a capped payload for the whole graph.
    */
   kgGraph: (id) =>
-    request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/graph`)
+    request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/graph`),
+
+  /**
+   * Top-`limit` nodes by degree plus the edges among them.
+   * Why: Issue #4670 — first paint of the graph view. Returns the graph's
+   * high-degree skeleton (server default 75, max 200) alongside the
+   * palace-wide totals so the header can state "N of M nodes shown".
+   */
+  kgGraphSeed: (id, limit) => {
+    const qs = limit == null ? '' : `?limit=${encodeURIComponent(limit)}`;
+    return request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/graph/seed${qs}`);
+  },
+
+  /**
+   * Bounded expansion around one node, for click-to-expand.
+   * Why: Issue #4670 — `direction=in` is the only way to reach a node's
+   * incoming edges; `kg?subject=` is a subject prefix scan and never reads
+   * the object side.
+   * @param direction 'in' | 'out' | 'both' (default 'both')
+   * @param maxHops clamped server-side to [1, 4]
+   */
+  kgNeighbors: (id, node, { direction = 'both', maxHops = 1 } = {}) => {
+    const params = new URLSearchParams({
+      node,
+      direction,
+      max_hops: String(maxHops)
+    });
+    return request(
+      `/api/v1/palaces/${encodeURIComponent(id)}/kg/graph/neighbors?${params}`
+    );
+  }
 };
