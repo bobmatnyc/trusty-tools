@@ -18,13 +18,74 @@ branch protection, the trusty-review gate, and the squash-merge requirement.
 ## The Full Delivery Chain (this repo's convention)
 
 ```
-spec -> issue -> worktree branch -> PR (linked to issue)
-     -> trusty-review gate -> squash-merge -> worktree cleanup
+accepted outcome -> optional issue -> worktree branch -> one cohesive PR
+                 -> applicable gates -> trusty-review gate
+                 -> squash-merge -> worktree cleanup
 ```
 
-Every step matters. Skipping the worktree step or the review gate is not a
+The chain starts at an **accepted outcome**, not at a ticket. The issue step is
+**optional** for docs/CI/chore work and for a small fix the user explicitly
+asked for and that completes in one PR. It stays **required** for features,
+reproduced defects, security work, cross-release dependencies, and any work that
+must survive the current session. Whether a finding earns an issue at all is the
+promotion gate in `tm-ticketing`.
+
+Every other step matters. Skipping the worktree step or the review gate is not a
 shortcut — it's a protocol violation the PM must not take on the user's
 behalf without being asked.
+
+## One Outcome, One PR
+
+A PR contains one primary outcome and everything required to make that outcome
+safely shippable: implementation, regression tests, necessary refactoring,
+documentation/API updates, the changelog fragment, and in-scope review fixes.
+
+- Do not split those artifacts into separate PRs because different agents
+  produced them. The engineer's code, the QA agent's test, and the doc update
+  for one outcome are one PR.
+- **One PR may close several tickets** when one coherent change satisfies them
+  (`Closes #A`, `Closes #B`). Prefer that over several coupled PRs with an
+  artificial merge order.
+- Split only when the outcomes can be reviewed, deployed, or reverted
+  independently, or when risk or size makes a stack materially safer to review.
+
+## Minimal PR Body (seven fields)
+
+1. Primary outcome and linked issue(s).
+2. What changed, and what is intentionally out of scope.
+3. Risk / blast radius.
+4. Test evidence at the applicable levels.
+5. Baseline/pre-existing failures and their canonical issue (see below).
+6. Documentation/changelog status.
+7. Review-finding disposition: fixed here, kept on the parent, or separately
+   ticketed.
+
+## Baseline-Failure Protocol (Red That Isn't Yours)
+
+When a required gate goes red, establish whose red it is before doing anything
+else.
+
+1. Never turn red green by removing coverage. That hard line is stated in the
+   instruction package ("Sprint, then Harden") and is not re-specified here —
+   it is the entry condition for the rest of this protocol.
+2. Determine whether the branch caused the failure: run the same gate on the
+   base branch, check the failing test's recent history, or reproduce it in
+   isolation.
+3. **Branch-caused** → fix it in this PR.
+4. **Pre-existing and already tracked** → append the run URL, SHA, command, and
+   failure signature to the canonical issue. Do not open another issue.
+5. **Pre-existing and untracked** → open ONE canonical issue, and only after a
+   reproduction or sufficient CI evidence. A single unrelated red run is an
+   observation, not a ticket (`tm-ticketing`, promotion gate).
+6. Report the gate result in exactly this shape:
+
+   ```
+   change-specific gates pass; <gate name> blocked by canonical issue #N
+   ```
+
+   Never report "all tests pass" while a gate is red, whoever caused it. Merge
+   disposition then follows branch protection and the risk tier; a red required
+   check is never merged around.
 
 ## Worktree Discipline (Mandatory Before Any Edit)
 
