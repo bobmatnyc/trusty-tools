@@ -6,6 +6,294 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.28.0] — 2026-08-03
+
+### Added
+
+- **`inference::streaming::StreamAssembly` — rebuild a `ChatResponse` from
+  streamed events (issue #4425).** The inverse of the existing
+  `buffered_stream`: push `ChatStreamEvent`s in arrival order, then
+  `into_response()` yields the same response the buffered `chat()` path would
+  have returned for that turn — text concatenated, tool-call fragments merged
+  by `index`, finish reason and usage carried from the terminal `Done`. It is a
+  pure synchronous accumulator taking no callback, so the caller keeps its poll
+  loop and may `await` arbitrary work (rendering a delta to a UI) between
+  pushes. Without it, every consumer adopting `chat_stream` had to hand-roll
+  the same three-part bookkeeping — the reason trusty-code's streaming
+  migration looked like an agent-loop rewrite rather than one swapped call.
+- **`InferenceError::MissingConfig(String)` (issue #4425).**
+  `MissingCredential` can only name a `ProviderId` — it carries no
+  operator-actionable message and cannot describe a missing NON-credential
+  setting (an unset region, an unconfigured model slug). trusty-code's
+  migration onto this enum would otherwise have had to flatten those messages
+  into `Unsupported`, whose display text ("unsupported inference capability:
+  OPENROUTER_API_KEY not set") actively misleads. Classifies as an alarm and
+  never as retryable, matching `MissingCredential`. **Breaking for exhaustive
+  matches** over `InferenceError` (the enum is not `#[non_exhaustive]`);
+  in-tree consumers were verified to build.
+- **`PromptTokensDetails` and `UsageBlock` are re-exported at the `inference`
+  root.** A consumer that owns a `ChatResponse` owns its wire usage block;
+  reading it previously meant reaching into `inference::types::usage`.
+- **`InferenceAdapter::capabilities_for(model)` — the model-aware capability
+  accessor (issue #4425).** `capabilities()` assumes one adapter serves one
+  provider, but a ROUTING adapter picks its backend per request from the model
+  slug (trusty-code's `OpenAiCompatClient` spans OpenRouter / Fireworks /
+  Together / AtlasCloud; its `DispatchingLlmClient` adds Bedrock). Such an
+  adapter could only answer with one hard-wired provider's profile, which is
+  silently wrong for every other backend it serves — the OpenRouter-only usage
+  directive, `cache_control` support, the tool dialect, and the context-window
+  fallback tier all differ. `capabilities_for` defaults to `capabilities()`, so
+  every single-provider adapter is unaffected; a routing adapter overrides it to
+  resolve through the same gate its `chat`/`chat_stream` use.
+  **`context_window`'s default now derives its provider tier from
+  `capabilities_for(model)`** rather than `capabilities()` — a behaviour change
+  only for adapters that override `capabilities_for` (none did before this
+  release). Not a breaking change: both are defaulted trait methods.
+- **`trusty_common::supervision::launchd_supervision()` answers in THREE states**, because "launchd does not run this PID" and "launchd could not be asked" have opposite consequences and must never be conflated. An unspawnable `launchctl`, a non-zero exit, or a table with no parseable rows reports `Unknown` — never a confident `Supervised`. `is_launchd_supervised()` is kept as the boolean adapter for the post-upgrade self-restart decision and maps `Unknown` to `false`, the conservative direction there ([#4469](https://github.com/bobmatnyc/trusty-tools/issues/4469)).
+
+- **The `launchctl` query is bounded by a 5-second timeout.** It runs on the daemon-start path, so an unbounded wait would let a wedged or saturated launchd hang startup indefinitely — an availability bug introduced by a diagnostic. The child is killed and reaped on expiry, and the timeout surfaces as `Unknown`, which every consumer already handles ([#4469](https://github.com/bobmatnyc/trusty-tools/issues/4469)).
+- **`claude_config::quarantine_path`** — computes a unique, timestamped
+  quarantine name (`<path>.corrupt-<UTC stamp>`) for a corrupt config file
+  ([#4206](https://github.com/bobmatnyc/trusty-tools/issues/4206)). Two
+  independent trusty-mpm writers previously renamed a malformed `.claude.json`
+  to the same fixed `.claude.json.corrupt`, so a second quarantine silently
+  destroyed the first one's bytes. Purely additive: no existing behaviour
+  changes.
+
+- `json_rmw`: cross-process locked read-modify-write for whole-file JSON
+  documents — the single implementation of the load → mutate → save critical
+  section that `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s
+  `tokens.json` (#3502) and the epic #4207 worktree registry all need.
+  `json_rmw::update` takes an exclusive advisory lock on a `<path>.lock`
+  sidecar, re-reads the document under that lock (never trusting a caller's
+  stale copy), applies the mutation, and publishes atomically via a
+  per-writer-unique temp file + `fsync` + `rename` + directory `fsync`. Never
+  fails open: a failed lock, read, parse or write returns `Err` with the
+  document byte-for-byte unchanged, and only a genuinely absent file starts
+  from `Default`. Adds `fd-lock` as an unconditional dependency.
+
+- **`project_index_id` — project-derived trusty-search index identity (#4207).**
+  New `ProjectIdentity` (origin + root + operator) with a pure, deterministic
+  `index_id()`, plus `derive_project_index_id()` and
+  `resolve_operator_identity()`. Unlike
+  the basename rule in `index_id` (which collides for unrelated checkouts sharing
+  a directory name) and the session-worktree UUID (which binds service identity to
+  ephemeral writer isolation), this id *partitions*: the canonical content-tree
+  root is a hashed component, so sibling clones, linked worktrees, and differing
+  accounts derive distinct ids by construction. Derivation only — nothing is wired
+  into `ensure_project_indexed`, `trusty-search serve`, or the daemon's resolution
+  path; registry reconciliation and migration of existing indexes are separate
+  slices of #4207. No behaviour change for any existing caller.
+
+  Derivation reads no environment variable of its own, but it is NOT fully
+  hermetic (corrected, #4269): `resolve_operator_identity` shells out to `git
+  config`, so two callers on one tree CAN derive different ids when `HOME` or
+  `GIT_CONFIG_GLOBAL` differ and the repo sets no local `user.email` — see
+  `project_index_id.rs`'s own note. The launchd daemon and a shell CLI are
+  precisely that pair, since the daemon runs under a plist environment while CLI
+  invocations inherit the shell's. Set a repo-local `user.email` to pin it. The
+  `index_id()` docs enumerate exactly which inputs are mutable — `origin` moves on
+  the first commit, on `git remote add origin`, and on a new root commit — each
+  pinned by a test, so the migration slice inherits a true guarantee rather than an
+  assumption of permanence.
+
+---
+- **`inference::bedrock` streams natively via `ConverseStream` (issue #4426).**
+  `BedrockAdapter` now overrides `InferenceAdapter::chat_stream` with AWS's
+  real streaming operation instead of inheriting the trait's buffered fallback,
+  so a `bedrock/*` turn arrives token-by-token rather than as one delta emitted
+  after the model already finished. The event handling is ported from the
+  implementation proven in production on `chat::bedrock_impl` (#3767) and
+  extended: `ContentBlockDelta::Text` → `ChatStreamEvent::Delta`, tool-use
+  block starts and partial-JSON argument fragments → `ChatStreamEvent::ToolCall`
+  (which the `chat::ChatProvider` path never supported), `MessageStop` +
+  `Metadata` folded into the single terminal `Done` carrying the finish reason
+  and token tally, and a mid-stream failure surfacing as a terminal `Err` and
+  never as a `Done`. Both transports build their request from ONE shared
+  conversion (`build_converse_parts`), so streamed and buffered turns cannot
+  disagree about messages, sampling, tool config, or the reported
+  `finish_reason`. Consumers that delegate `chat_stream` to the shared adapter —
+  trusty-code's `BedrockChatClient` — get this with no change of their own.
+- 13 credential environment variables that a census of production source found
+  in use but that the registry could not name, so no consumer could route them
+  through the env → `.env.local` → store precedence even if it wanted to:
+  `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`,
+  `JIRA_TOKEN`, `JIRA_API_TOKEN`, `LINEAR_API_KEY`, `BITBUCKET_TOKEN`,
+  `BITBUCKET_APP_PASSWORD`, `BRAVE_API_KEY`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+  `SLACK_APP_TOKEN`, `TAGENT_API_TOKEN`. `SLACK_APP_TOKEN` was the sharpest gap
+  — it sat unmapped between its two mapped siblings `SLACK_BOT_TOKEN` and
+  `SLACK_USER_TOKEN`. The registry now covers all 23 censused names, pinned by
+  `registry_covers_the_full_census`, which fails in both directions so neither
+  the table nor the census can drift alone. Registering a name grants nothing
+  and migrates no call site: authorization is
+  [#4566](https://github.com/bobmatnyc/trusty-tools/issues/4566) and the
+  consumer migration is
+  [#4571](https://github.com/bobmatnyc/trusty-tools/issues/4571). Three of the
+  new entries (`JIRA_TOKEN`, `JIRA_API_TOKEN`, `LINEAR_API_KEY`) are what makes
+  [#4478](https://github.com/bobmatnyc/trusty-tools/issues/4478) question (b)
+  answerable.
+- `credentials::CredentialRef` — the opaque, durable, **non-secret** handle that
+  names a credential without carrying it (closes
+  [#4565](https://github.com/bobmatnyc/trusty-tools/issues/4565), epic
+  [#4040](https://github.com/bobmatnyc/trusty-tools/issues/4040), DOC-45
+  `C-2.1`–`C-2.7`). `credential_ref` had zero hits under `crates/*/src/**`
+  despite being an acceptance bullet of the closed-as-completed #2808, so
+  anything that needed to *refer* to a credential had to *hold* one — which is
+  why `McpService.env` is a map of literal API keys in a hand-editable TOML. A
+  ref is safe in a git-tracked file, a config row, a log line, an audit record,
+  and a model-visible tool result: its grammar is lowercase-kebab segments,
+  ≤ 64 bytes, at most one `/`, which no realistic API key, JWT, OAuth token, or
+  PEM body can satisfy. Pinned by
+  `realistic_credentials_are_rejected_by_the_grammar` against specimens shaped
+  like every credential format the registry names. Stable across rotation, and
+  shape-agnostic: one type, one entry point, and no code path that exists only
+  for OAuth or only for a plain API key.
+- `credentials::Secret<T>` — the wrapper a resolved credential comes back in.
+  Its `Debug`/`Display` render a constant that is not merely redacted but
+  *independent of the value* (the impls carry no `T: Debug` bound, so they
+  cannot read it), and it implements neither `Serialize`, `Deserialize`,
+  `Clone`, `Deref`, nor `PartialEq`. Each omission is a closed leak path; the
+  absent `Serialize` is the load-bearing one, because every config struct in the
+  workspace derives it, so a `Secret` cannot compile inside one. Three
+  compile-time assertions (the `assert_not_impl` coherence trick, inlined rather
+  than adding a dependency) fail the build if any of the three traits is ever
+  added.
+- `credentials::resolve(&CredentialRef, &Principal, &Scope) -> Result<Secret<String>, CredentialError>`
+  — the single resolution entry point, called where the credential is consumed
+  rather than at config load (`C-3.3`, `C-8.4`). `resolve_client` is the same
+  entry point with the value consumed in place, handing back an
+  already-authenticated handle so the caller never sees the string (`C-3.4`,
+  DOC-63 `S-5.1`). A ref naming a provider absent from the registry fails with
+  `Missing` carrying a remediation that names the registry (`C-2.7`).
+- `credentials::CredentialError` — `Missing` / `Denied` / `Expired` /
+  `ZeroScope` / `ScopeUnavailable`. Every variant is recoverable, carries the
+  `CredentialRef` and the `Principal`, renders an actionable remediation, and
+  can hold no secret material by construction. The fifth variant is DOC-45
+  `C-5.5`'s deliberate addition to #4040's stated four, kept distinct from
+  `ZeroScope` by `C-5.6` because "widen the grant" is advice that cannot be
+  followed for a provider that has no such scope.
+- `credentials::Principal`, `ServiceId`, `Scope`, `Access` — the vocabulary
+  `resolve`'s final signature is written in. `Principal` is a closed,
+  `#[non_exhaustive]` enumeration carrying `Operator` and `Service` only:
+  DOC-45 `C-1.3` is PROVISIONAL pending owner question Q-B and says in terms
+  not to implement the `Assistant` variant until it is answered, so #4566 adds
+  `Assistant` and `SubAgent` without a breaking change.
+- `SecretString::into_secret` — the one-line migration from the older inference
+  wrapper to the canonical `Secret<String>`.
+- **`KnowledgeGraph::top_degree_subgraph` and `KnowledgeGraph::expand_neighbors`
+  (issue #4670).** Two progressive-exploration primitives over the already-
+  resident `petgraph::StableGraph`, backing the palace graph view's bounded
+  first paint and click-to-expand. `top_degree_subgraph(limit)` returns the
+  highest-degree entities (ties broken by name, so repeated calls are
+  byte-identical) plus the induced edges among them, in O(V log V + E).
+  `expand_neighbors(entity, direction, max_hops)` runs a direction-aware
+  (`ExpandDirection::{In, Out, Both}`), hop-bounded BFS and returns the reached
+  nodes — origin first, each carrying its graph-wide degree rather than its
+  degree within the fragment — plus every traversed edge. Both emit edges as
+  `Triple`s so callers need no second wire format. Neither touches disk.
+
+### Fixed
+
+- `semantic_consolidation::inference_available_false_without_key` no longer
+  fails on any machine that exports a real `OPENROUTER_API_KEY` (refs [#4407](https://github.com/bobmatnyc/trusty-tools/issues/4407), [#3451](https://github.com/bobmatnyc/trusty-tools/issues/3451)).
+  The test asserts the inference gate stays closed with no key configured, but
+  `inference_available("", false)` falls back to reading that variable from the
+  process environment — so "absent from the ambient shell" was an unstated
+  precondition, and its `#[serial]` group excluded concurrent test writers while
+  doing nothing about the environment the suite inherits. It now CLEARS the
+  variable for its body via an `EnvVarGuard::clear` (restored on drop), which is
+  what it always claimed to test.
+- **`is_launchd_supervised()` was an environment-variable heuristic an unsupervised child could satisfy, so it self-reported as supervised** ([#4469](https://github.com/bobmatnyc/trusty-tools/issues/4469)). It returned `true` whenever `XPC_SERVICE_NAME` was set and `TERM_PROGRAM` was not — a condition every child inherits for free — with a `getppid() == 1` fallback that any orphan whose parent exited also satisfies. A `tm daemon` child could therefore pass the [#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230) callee-side guard and publish `supervised: true` on `/health`, making the documented `curl /health | jq '.supervised'` restart verification unsound in exactly the case it exists to catch. The answer now comes from launchd itself: the new `trusty_common::supervision` module matches `std::process::id()` against the PID column of `launchctl list`. It is an EXACT PID match, never an ancestor walk — `Terminal.app` is itself a launchd job, so walking the tree would reintroduce the same false positive.
+- **The `memory_remember` secret scanner no longer false-positives on
+  slash-separated issue/PR-number lists (issue #2800).** A checkpoint
+  enumerating tickets as `#2763/#2774/#2780/#2782/#2790` was rejected as a
+  "likely secret/credential token": the `/` separators set the base64-symbol
+  flag and the digits set the digit flag, so the base64-blob branch of
+  `looks_like_secret` fired on a token containing no letters at all. Observed
+  live twice; agents worked around it by rewording or dropping detail, silently
+  degrading session-checkpoint fidelity. `looks_like_secret` now allowlists
+  tokens built only from `#`, `/`, and ASCII digits, alongside the existing
+  git-SHA carve-out. The exemption is charset-scoped and strictly narrower than
+  the SHA allowlist — a single alphabetic character, or a `+`, takes a token
+  back onto the normal heuristic path, so every credential shape the module
+  already blocked stays blocked.
+
+- **`project_index_id` documentation corrected**
+  ([#4269](https://github.com/bobmatnyc/trusty-tools/issues/4269), amended under
+  [#4288](https://github.com/bobmatnyc/trusty-tools/issues/4288)). The module
+  stated without qualification that `root` is immutable and recommended that the
+  wiring/migration slice "reconcile on `root`". Four routine actions move it —
+  `mv proj`, a GitHub repo rename, a repo transfer, and `git remote remove
+  origin` — and reconciling on it would reintroduce the silent-orphan class the
+  identity work exists to remove. The immutability claims are now qualified
+  ("under ordinary git operations"), the four movers are documented, and the
+  recommendation points at a git-maintained anchor instead. The CHANGELOG's
+  hermeticity claim is likewise corrected: two callers CAN derive different ids
+  when `HOME`/`GIT_CONFIG_GLOBAL` differ and the repo sets no local
+  `user.email`. Documentation only — no code change.
+- `bin_resolve::is_ephemeral_build_path` now also rejects any path under a system temp root (`/tmp`, `/private/tmp`, `/var/tmp`, macOS `/var/folders`, and the live `std::env::temp_dir()`), matched as component-wise path prefixes rather than substrings. Previously the guard enumerated only `target/debug`, `target/release` and the two worktree layouts, so a scratch binary under an agent harness's temp scratchpad read as an ordinary installed path and was accepted as stable (#4485).
+- A model slug's provider prefix no longer reaches a direct provider on the wire
+  (closes [#4493](https://github.com/bobmatnyc/trusty-tools/issues/4493)).
+  `provider_for` CONSUMES the `<prefix>/` marker to route — so with an
+  `OPENAI_API_KEY` present, `openai/gpt-4o-mini` routed to OpenAI-direct — but the
+  slug then travelled into the request body unchanged, and `api.openai.com` 400s
+  on a model id it does not publish. The new `ProviderId::wire_model_id` removes
+  exactly one leading marker, and only when it names that provider, so a slash
+  inside a real model id survives (`accounts/fireworks/models/…`,
+  `meta-llama/…`) and a nested vendor segment does too
+  (`atlascloud/openai/gpt-5.6-sol` → `openai/gpt-5.6-sol`). OpenRouter is exempt
+  and still transmits the full `vendor/model` slug verbatim — it routes by that
+  slug and serves first-party models under a genuine `openrouter/` vendor. The
+  two adapters that had each hand-rolled this strip for one provider
+  (Bedrock, Anthropic-direct) now delegate to the shared rule.
+- `PalaceRow` now distinguishes an unknown count from a zero one ([#4682](https://github.com/bobmatnyc/trusty-tools/issues/4682))
+  - `GET /api/v1/palaces` returns `cached: false` with all counts zeroed for any palace whose handle is not resident (2,180 of 2,183 on a live daemon); those zeros mean *unknown*, not *empty*
+  - rows parsed from an uncached entry are flagged `counts_unknown`, and the new `vectors()` / `drawers()` / `kg_triples()` / `nodes()` / `edges()` accessors return `Option<u64>` so a renderer cannot print a placeholder as a measurement
+  - the dashboard memory panel, the `trusty-memory monitor palaces` CLI, and the `/ui` web dashboard render `—` for those counts and sum only measured ones
+  - a daemon that omits `cached` entirely (pre-#4640) is still trusted, so counts do not regress to `—` against an older daemon
+  - `MemoryClient::fetch_palace()` hits `GET /api/v1/palaces/{id}` to fetch live counts for a single palace, alongside the new `parse_palace_detail()` and `format_opt_count()` helpers
+
+### Changed
+
+- `credentials` is now a top-level module, `trusty_common::credentials`, rather
+  than a submodule of `inference` (closes
+  [#4564](https://github.com/bobmatnyc/trusty-tools/issues/4564), epic
+  [#4040](https://github.com/bobmatnyc/trusty-tools/issues/4040), DOC-45). The
+  resolver was never inference-specific — four of its ten registry entries were
+  Slack, Slack-user, Telegram and `claude-code` tokens, and its own doc comment
+  already said *"Not limited to inference providers"* — so the path was actively
+  misleading consumers into adding a raw `std::env::var` read instead of finding
+  it. `trusty_common::inference::credentials` remains as a `#[deprecated]`
+  re-export for one release; every in-tree consumer moved to the new path in the
+  same change. The `credentials` cargo feature is unchanged and still builds
+  without `inference-client`.
+- The provider registry moved to `credentials::registry` and is now a
+  `REGISTRY` table rather than a `match`, so it can be enumerated and asserted
+  complete. `env_var_for` keeps its signature and its case-insensitive lookup;
+  `registered_providers()` is new.
+- `inference::types::SecretString` is documented as superseded by
+  `credentials::Secret`. Its behaviour is unchanged; note that its
+  four-character head preview does **not** meet DOC-45 `C-8.2`, and collapsing
+  the two types is left to a follow-up because it requires changing the existing
+  test that pins that preview's shape.
+
+Note: this change adds **no authorization**. `resolve` accepts a `Principal` and
+checks no grant against it — grants, the ACL, default-deny and the code-owned
+floor are [#4566](https://github.com/bobmatnyc/trusty-tools/issues/4566). The
+signature is final so no consumer is migrated twice.
+- **`bin_resolve::is_under_system_temp` is now public (issue #4638).** Promoted
+  from a private helper of `is_ephemeral_build_path` so trusty-code's turn
+  recorder can ask the one question it needs — "is this project root under a
+  system temp root?" — without duplicating the #4485 temp-root prefix,
+  `TMPDIR`, and macOS symlink-alias logic. Behavior is unchanged; this is a
+  visibility change only.
+  - Callers deciding whether a PROJECT root is durable must use this rather
+    than `is_ephemeral_build_path`, whose `EPHEMERAL_PATH_SEGMENTS` half also
+    flags `.claude/worktrees/` — an ephemeral BINARY location but a durable
+    project checkout that carries the repo's git remote. A new test
+    (`is_under_system_temp_is_true_for_temp_and_false_for_worktrees`) pins that
+    distinction so the two predicates cannot quietly converge.
+
 ## [0.27.0] — 2026-07-27
 
 MINOR, not patch — deliberately. `ChatEvent::Usage` (added below) is a new
