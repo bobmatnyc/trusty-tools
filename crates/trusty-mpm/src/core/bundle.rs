@@ -1,13 +1,19 @@
 //! Compile-time embedded framework artifacts.
 //!
 //! Why: `trusty-mpm install` must deploy a working set of default artifacts
-//! (optimizer policy, framework instructions, placeholder agent/skill)
+//! (optimizer/overseer policy, agent/skill catalog)
 //! without depending on files shipped alongside the binary — embedding them
 //! at compile time keeps the installer a single self-contained executable.
 //! (Issue #3374: the former `CLAUDE_STUB` user-instruction-stub artifact was
 //! removed — it was never read back by any consumer; the project `CLAUDE.md`
 //! actually delivered to users is [`crate::core::instruction_pipeline`]'s
-//! `CLAUDE_MD_STUB`.)
+//! `CLAUDE_MD_STUB`. #4286 split A likewise removed the bundled
+//! `FRAMEWORK_INSTRUCTIONS`/`instructions/INSTRUCTIONS.md` artifact — its
+//! content never reached the compiled prompt: `tm install`/`tm launch` always
+//! overwrite that same on-disk path with
+//! [`crate::core::instruction_pipeline::assemble_system_prompt`]'s output in
+//! the same call, and [`crate::core::instruction_pipeline::build_instructions`]
+//! already treats the file as optional.)
 //! What: exposes each default artifact under `crates/trusty-mpm-core/assets/`
 //! as a `pub const &str` via `include_str!`, plus a [`BundledArtifact`] table
 //! describing the relative install path of each one.
@@ -22,12 +28,6 @@ pub const OPTIMIZER_TOML: &str = include_str!("../assets/hooks/optimizer.toml");
 /// Overseer oversight is opt-in: the shipped policy has `enabled = false`, so
 /// installing it is inert until an operator flips the flag.
 pub const OVERSEER_TOML: &str = include_str!("../assets/hooks/overseer.toml");
-
-/// Framework launch instructions installed to `instructions/INSTRUCTIONS.md`.
-///
-/// This is the framework-owned artifact: `trusty-mpm install` overwrites it on
-/// every run so framework upgrades take effect.
-pub const FRAMEWORK_INSTRUCTIONS: &str = include_str!("../assets/instructions/INSTRUCTIONS.md");
 
 /// Base agent — the root of every trusty-mpm inheritance chain.
 pub const BASE_AGENT: &str = include_str!("../assets/agents/BASE-AGENT.md");
