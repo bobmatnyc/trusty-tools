@@ -39,10 +39,13 @@ Five acts, each an audited event: view a set (§5), move a credential (§6),
 approve or deny a copy request (§7), see provenance and last-use (§8), revoke
 (§9).
 
-**One question still blocks building it** (§13 OQ-1): whether DOC-57's
-read-only rule exempts this write path. Whether a "credential set" is a store
-or a grant set is **resolved** (§13 OQ-2, 2026-08-03): both — a store *is* a
-grant set, viewed two ways. Everything else here is decided.
+Both questions that stood between this document and building are now
+**resolved** (§13, 2026-08-03). Whether DOC-57's read-only rule exempts this
+write path (OQ-1): no — the rationale generalizes beyond DOC-57, so the panel
+requires its own authorization, discharged by a per-write operator
+confirmation gate. Whether a "credential set" is a store or a grant set
+(OQ-2): both — a store *is* a grant set, viewed two ways. Nothing here still
+blocks building the panel.
 
 ### 1.1 Verified current state — `origin/main` (`99f085a3`)
 
@@ -51,7 +54,7 @@ grant set, viewed two ways. Everything else here is decided.
 | `CredentialRef` and `Secret<T>` exist and are clean | `crates/trusty-common/src/credentials/{handle.rs:114,secret.rs:72}` (#4565, `0c0de180`). `Secret<T>`'s `Debug` (`secret.rs:106`) and `Display` (`:118`) are `impl<T>` with **no `T: Debug` bound** — the formatter structurally cannot read the value. Pinned by `debug_and_display_are_value_independent`. |
 | `Principal::Assistant` does **not** exist | `credentials/principal.rs` carries `Operator` and `Service` only; the panel's whole subject arrives with #4566. `credentials/mod.rs:36` — *"This module holds no authorization."* |
 | The config surface has six tabs, none for credentials | `crates/trusty-agents/ui/src/components/AgentConfigPanel.svelte:110` — `personality`, `knowledge`, `skills`, `subagents`, `listeners`, `permissions`. DOC-57 §8.2 specifies five; `subagents` came from #4029. No CLI surface is per-assistant: `tm agent` is list/show, and `tm`/`tagent config keys` is provider-global. |
-| That surface has never had a credential write path | `AgentConfigPermissions.svelte:14` restates DOC-57 **PM-4** — granting from a GUI is a security-relevant write path, out of scope there. §13 OQ-1. |
+| That surface has never had a credential write path | `AgentConfigPermissions.svelte:14` restates DOC-57 **PM-4** — granting from a GUI is a security-relevant write path, out of scope there. Owner ruled PM-4's rationale generalizes to this panel; discharged by a per-write confirmation gate (§13 OQ-1, RESOLVED 2026-08-03). |
 | `SecretString` discloses four characters of the live value | `inference/types/secret.rs:80` via `redact_secret` (`credentials/redact.rs:43`). #4632, open, pinned by three tests. |
 
 ---
@@ -380,11 +383,15 @@ since the panel never touches storage (`P-4.5`).
 
 ## 13. Open Questions for the Owner
 
-One question genuinely blocks building the panel (OQ-1). OQ-2 is resolved
-below. What was unresolved but non-blocking is now a stated assumption in §3
-and §7 — a wrong guess there costs rework, not a rebuild.
+Both questions raised against this document are now resolved (OQ-1
+2026-08-03, OQ-2 2026-08-03). Nothing here still blocks building the panel.
+What was unresolved but non-blocking is a stated assumption in §3 and §7 — a
+wrong guess there costs rework, not a rebuild.
 
-### OQ-1 — Does DOC-57's PM-4 read-only rule exempt this panel?
+### OQ-1 — Does DOC-57's PM-4 read-only rule exempt this panel? — RESOLVED
+2026-08-03 (owner): NO — the rationale generalizes beyond DOC-57; the panel
+requires its own authorization, discharged by **Option B**, a per-write
+operator confirmation gate.
 
 DOC-57 **PM-4** states Permissions is read-only in every phase because *"granting
 capability from a GUI is a security-relevant write path; it requires its own
@@ -392,11 +399,55 @@ review"*, and **C-06.4** is *"no route in this spec grants or widens a
 permission"*. This panel is exactly that write path: the owner placed the copy
 approval in it, so it cannot be read-only and still discharge #4663.
 
-| Option | Cost |
-|---|---|
-| This spec plus its PR review **is** the review PM-4 anticipated | Nothing further; build proceeds. |
-| A per-write operator confirmation gate around the panel | One extra dialog and its record. Composes with DOC-45 `C-10.6`, which already requires confirmation on first use of a credential. |
-| A `user_authority` check (DOC-41 §5.5 / #3074) | Blocks the panel indefinitely — #3074 is unimplemented. |
+**Resolution.** The owner's ruling has two parts.
+
+1. **Scope.** PM-4's rationale reaches any grant path, not only DOC-57's.
+   PM-4's text self-scopes twice — "read-only in every phase of **this
+   spec**," and `C-06.4`'s "no route in **this spec** grants or widens a
+   permission" — but the owner ruled that the underlying rationale, "granting
+   capability from a GUI is a security-relevant write path; it requires its
+   own review," generalizes past those two "this spec" boundaries. The
+   credentials panel is therefore in scope of PM-4's rationale and does
+   require its own authorization; DOC-57's non-goal 4 (§11) deferred exactly
+   this review rather than exempting it, and this is that review landing.
+2. **Mechanism.** Of the three options below, the owner chose **Option B — a
+   per-write operator confirmation gate**. Not Option A (this spec plus its
+   PR review standing in as the review PM-4 anticipated), and not Option C (a
+   `user_authority` check per DOC-41 §5.5 / #3074 — rejected because #3074 is
+   unimplemented and would block the panel indefinitely).
+
+| Option | Cost | Status |
+|---|---|---|
+| A — this spec plus its PR review **is** the review PM-4 anticipated | Nothing further; build proceeds. | Rejected |
+| B — a per-write operator confirmation gate around the panel | One extra dialog and its record. Composes with DOC-45 `C-10.6`, which already requires confirmation on first use of a credential. | **Chosen** |
+| C — a `user_authority` check (DOC-41 §5.5 / #3074) | Blocks the panel indefinitely — #3074 is unimplemented. | Rejected |
+
+**Composition with DOC-45 `C-10.6`.** `C-10.6`(2) already requires interactive
+operator confirmation on "first use of a credential by a principal that has
+never resolved it before," firing once per `(Principal, CredentialRef)` at the
+moment a principal actually **resolves** a credential at dispatch time. Option
+B's gate fires at a different point in the lifecycle: the moment an
+**operator** takes a write action on this panel itself — approve a copy
+request, move a credential, revoke — an administrative grant-management event,
+not a principal's runtime resolution of one. DOC-45's text describes only the
+resolution-time trigger and says nothing about the panel's administrative
+actions, so **Option B's gate is additional to `C-10.6`(2), not the same
+confirmation**: a single grant-then-use flow can surface two distinct dialogs
+and two distinct audit entries — one when the operator approves the
+grant/move via this panel, a second later when the receiving principal first
+actually resolves the credential. Whether that second, first-use dialog
+should be *skipped* when the operator's panel confirmation already named the
+specific principal is a design choice DOC-45's text does not settle; flagged
+here as a follow-up question rather than assumed.
+
+**Reading DOC-57 against this ruling.** PM-4 and `C-06.4`'s "this spec"
+wording is narrower than the owner's ruling above — that wording predates this
+question and correctly describes DOC-57's own scope, but a future reader
+comparing the two documents should not read it as DOC-57 contradicting this
+spec's write path. The owner's ruling governs: DOC-57's read-only posture
+stands for DOC-57's own routes; it does not mean no GUI anywhere may ever
+write a permission-adjacent grant, and this panel's Option B gate is how it
+discharges the review PM-4 called for but deferred (§11 non-goal 4).
 
 ### OQ-2 — Is a "credential set" a store, or a grant set? — RESOLVED
 2026-08-03 (owner): BOTH — A STORE IS A GRANT SET.
@@ -453,7 +504,7 @@ assumption.
 | Target | Amendment | Tracked by |
 |---|---|---|
 | DOC-45 §9.1 / §9.3 / §9.5, `C-1.3`, §14 Q-A/Q-B | The audit record shape, and the PROVISIONAL markers the 2026-08-03 answers discharge | **#4667** — authoritative; read it rather than a summary |
-| DOC-57 §8.2 / PM-4 | Reconcile the tab table with the shipped six tabs, and record OQ-1's outcome | filed with OQ-1's answer |
+| DOC-57 §8.2 / PM-4 | Reconcile the tab table with the shipped six tabs, and add a pointer noting PM-4's rationale was ruled (§13 OQ-1, 2026-08-03) to generalize beyond DOC-57 | **not done in this PR** — DOC-57 is a separate, already-merged spec; amending it belongs to its own follow-up issue rather than this document's diff. Follow-up recommended. |
 | #4567 | Restate acceptance criteria against the amended record shape | **#4667** blocks it |
 
 ---
@@ -477,3 +528,4 @@ credential state without a credential); epic **#4040**'s owner comment of
 | 2026-08-03 | Initial draft (#4663). Specifies the five panel acts, the never-display-a-value constraint, and the audited-event shapes. Found that DOC-45's landed audit record cannot carry those events; filed as **#4667**. |
 | 2026-08-03 | Simplified on owner feedback (*"too complicated"*). Cut 53% (944 → 439 lines): extended rationale, restatements of decisions already recorded in DOC-45 / ADR-0026 / #4040, and the DOC-45 amendment analysis (now #4667's, cited in one clause). §§5, 6, 8 and 9.1 became clause tables; prose was kept only where the security reasoning is load-bearing. Reduced five open questions to the two that block building — PM-4 exemption (was OQ-3) and store-vs-grant-set (was OQ-4); the other three became stated assumptions in §3 and §7. Section numbers, spec IDs, and clause ids are unchanged where the clause survived; `P-8.12`–`P-8.15` were removed with their content living in #4667, and `P-8.11` / `P-8.16` retained. |
 | 2026-08-03 | **OQ-2 RESOLVED (owner):** a "credential set" is both a store and a grant set — holding a grant against a store is what it means to have access to what's in it. Grant granularity is the store; there is no per-credential grant inside a store, so scoping an assistant to a single credential means giving that credential its own store. Verified DOC-45 `C-2.2`/`C-6.7` remain true under this model (§13 OQ-2). Rotation-is-a-single-write stated as an explicit, owner-confirmable assumption (single store per credential, shared by reference), not settled fact. §1, the §2 Terms note, §6's status line and `P-4.5`, and §13's intro updated for consistency. OQ-1 unchanged, still open. |
+| 2026-08-03 | **OQ-1 RESOLVED (owner):** PM-4's rationale generalizes beyond DOC-57 — the credentials panel is in scope and requires its own authorization. Mechanism is **Option B**, a per-write operator confirmation gate (not Option A: this spec/review standing in; not Option C: the unimplemented `user_authority` check). Recorded that Option B composes with, but is not the same confirmation as, DOC-45 `C-10.6`(2) — the panel's gate fires at operator-write time on an administrative grant action, `C-10.6`(2) fires at a principal's first runtime resolution of a credential; whether the latter can be skipped once the former has fired is flagged as an open follow-up, not settled by DOC-45's text. Noted that PM-4/`C-06.4`'s literal "this spec" wording is narrower than the ruling and must not be read as a contradiction. §1, §1.1, and §13's intro updated for consistency; zero open questions remain. DOC-57 itself is not amended by this PR — a pointer there is recommended as a separate follow-up (§14). |
