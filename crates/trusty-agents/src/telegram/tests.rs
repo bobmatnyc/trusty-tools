@@ -627,6 +627,58 @@ fn switch_command_still_records_a_human_turn() {
     );
 }
 
+/// #4683 regression: `handle_command` — the dispatch path for `/start`,
+/// `/pair`, `/help`, `/connect`, `/clear`, `/status` — recorded no attendance.
+/// A paired human polling `/status` every few minutes while a long task ran was
+/// invisible to the clock and read as unattended after fifteen minutes, which
+/// is the exact false positive this feature exists to prevent.
+#[test]
+fn paired_slash_command_records_a_human_turn() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = crate::attendance::attendance_root(dir.path());
+    let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, 3, 12, 0, 0).unwrap();
+
+    assert!(
+        crate::attendance::note_command_turn_in(Some(&root), "izzie", true, now),
+        "a paired chat's slash command is a human turn"
+    );
+
+    let tracker = crate::attendance::AttendanceTracker::new(
+        &root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new("izzie").expect("valid id");
+    assert_eq!(tracker.last_human_turn(&id).expect("read"), Some(now));
+}
+
+/// `/start` and `/pair` are reachable by ANY chat, so the record has to stay
+/// behind the pairing gate — otherwise a stranger could attend someone else's
+/// assistant and mute their notifications.
+#[test]
+fn unpaired_slash_command_records_nothing() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = crate::attendance::attendance_root(dir.path());
+    let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, 3, 12, 0, 0).unwrap();
+
+    assert!(!crate::attendance::note_command_turn_in(
+        Some(&root),
+        "izzie",
+        false,
+        now
+    ));
+
+    let tracker = crate::attendance::AttendanceTracker::new(
+        &root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new("izzie").expect("valid id");
+    assert_eq!(
+        tracker.last_human_turn(&id).expect("read"),
+        None,
+        "an unpaired sender must not manufacture attendance"
+    );
+}
+
 /// The ordinary path still records, and is not misread as a switch.
 #[test]
 fn plain_message_records_a_human_turn_and_is_not_a_switch() {

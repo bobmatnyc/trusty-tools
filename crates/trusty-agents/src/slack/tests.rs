@@ -290,6 +290,83 @@ fn default_rbac_users_includes_kartik_parity() {
 }
 
 // ---------------------------------------------------------------------------
+// #4683: `handle_command` — the dispatch path for `/slack-status`,
+// `/slack-switch`, `/slack-connect`, `/slack-clear` — recorded no attendance,
+// so a human polling `/slack-status` while a long task ran read as unattended
+// after the threshold. These pin the gate `handlers::note_command_turn` now
+// applies on that path.
+// ---------------------------------------------------------------------------
+
+/// A temp attendance root plus a fixed instant, so nothing here reads `$HOME`
+/// or the wall clock.
+fn attendance_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    chrono::DateTime<chrono::Utc>,
+) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = crate::attendance::attendance_root(dir.path());
+    let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, 3, 12, 0, 0).unwrap();
+    (dir, root, now)
+}
+
+/// The last human turn recorded for `persona` under `root`.
+fn recorded_turn(root: &std::path::Path, persona: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let tracker = crate::attendance::AttendanceTracker::new(
+        root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new(persona).expect("valid id");
+    tracker.last_human_turn(&id).expect("read")
+}
+
+#[test]
+fn paired_slash_command_records_a_human_turn() {
+    let (_dir, root, now) = attendance_fixture();
+
+    assert!(
+        super::handlers::note_command_turn(Some(&root), "cto-assistant", true, true, now),
+        "a known user's slash command in a paired channel is a human turn"
+    );
+    assert_eq!(recorded_turn(&root, "cto-assistant"), Some(now));
+}
+
+#[test]
+fn unpaired_slash_command_records_nothing() {
+    let (_dir, root, now) = attendance_fixture();
+
+    assert!(!super::handlers::note_command_turn(
+        Some(&root),
+        "cto-assistant",
+        false,
+        true,
+        now
+    ));
+    assert_eq!(
+        recorded_turn(&root, "cto-assistant"),
+        None,
+        "an unpaired sender must not manufacture attendance"
+    );
+}
+
+/// Pairing is per-CHANNEL, so it alone is not proof of who typed. An unknown
+/// Slack user posting in a paired channel gets the Virtual CTO reply from
+/// `handle_message` and records nothing there; the command path must agree.
+#[test]
+fn unknown_rbac_user_cannot_manufacture_attendance() {
+    let (_dir, root, now) = attendance_fixture();
+
+    assert!(!super::handlers::note_command_turn(
+        Some(&root),
+        "cto-assistant",
+        true,
+        false,
+        now
+    ));
+    assert_eq!(recorded_turn(&root, "cto-assistant"), None);
+}
+
+// ---------------------------------------------------------------------------
 // #3852 hybrid architecture: `handlers::record_listener_event` mirrors
 // inbound Slack messages onto the harness eventstream. These tests exercise
 // it directly against a temp `$HOME` (same `HOME_LOCK` pattern as

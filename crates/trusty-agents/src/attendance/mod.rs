@@ -63,8 +63,8 @@ mod tracker;
 mod tests;
 
 pub use tracker::{
-    AttendanceTracker, attendance_root, default_attendance_root, note_human_turn,
-    note_human_turn_in,
+    AttendanceTracker, attendance_root, default_attendance_root, note_command_turn_in,
+    note_human_turn, note_human_turn_in,
 };
 
 /// How long after the last human turn an instance counts as unattended.

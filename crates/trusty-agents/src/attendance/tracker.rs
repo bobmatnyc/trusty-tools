@@ -129,13 +129,20 @@ impl AttendanceTracker {
     /// would make an absent owner look present. For [`TurnOrigin::Assistant`]
     /// it touches no file and returns `Ok(false)`.
     ///
+    /// The compare and the write happen under ONE held lock
+    /// ([`state_writer::atomic_update`], #4683). Reading the stored value
+    /// outside the lock and writing after would let two processes both observe
+    /// the old timestamp and let the loser's older write land last — silently
+    /// rewinding the clock the guard exists to protect.
+    ///
     /// Errors are I/O only. A caller should log and continue: failing to record
     /// attendance degrades the signal (the instance looks less attended than it
     /// is, which biases toward silence), it does not break the turn.
     /// Test: `fresh_human_turn_is_attended`,
     /// `assistant_turns_never_advance_the_clock`,
     /// `assistant_only_activity_leaves_no_record_at_all`,
-    /// `an_older_human_turn_never_rewinds_the_clock`.
+    /// `an_older_human_turn_never_rewinds_the_clock`,
+    /// `concurrent_writers_never_rewind_the_clock`.
     pub fn record_turn(
         &self,
         instance: &AssistantInstanceId,
@@ -145,21 +152,25 @@ impl AttendanceTracker {
         if !origin.is_human() {
             return Ok(false);
         }
-        if self
-            .last_human_turn(instance)?
-            .is_some_and(|stored| stored >= at)
-        {
-            return Ok(false);
-        }
-        let record = AttendanceRecord {
-            instance: instance.as_str().to_string(),
-            last_human_turn_at: at,
-        };
-        let body = serde_json::to_vec_pretty(&record).context("serializing attendance record")?;
         let path = self.record_path(instance);
-        state_writer::atomic_write(&path, &body)
-            .with_context(|| format!("writing attendance record {}", path.display()))?;
-        Ok(true)
+        state_writer::atomic_update(&path, |existing| {
+            if let Some(raw) = existing {
+                let stored: AttendanceRecord = serde_json::from_slice(raw).with_context(|| {
+                    format!("attendance record {} is not valid JSON", path.display())
+                })?;
+                if stored.last_human_turn_at >= at {
+                    return Ok(None);
+                }
+            }
+            let record = AttendanceRecord {
+                instance: instance.as_str().to_string(),
+                last_human_turn_at: at,
+            };
+            Ok(Some(
+                serde_json::to_vec_pretty(&record).context("serializing attendance record")?,
+            ))
+        })
+        .with_context(|| format!("writing attendance record {}", path.display()))
     }
 
     /// When a human last addressed `instance`, if ever.
@@ -274,6 +285,40 @@ pub fn note_human_turn(instance: &str) -> bool {
         return false;
     };
     note_human_turn_in(root, instance, Utc::now())
+}
+
+/// Record an inbound SLASH COMMAND as a human turn, but only from an
+/// authenticated sender (#4683).
+///
+/// Why: a paired human who drives a chat bot purely through slash commands —
+/// polling `/status` every few minutes while a long task runs, clearing
+/// history, reconnecting a project — is demonstrably present, yet the first cut
+/// of this feature only hooked the free-text handler. That reads as unattended
+/// after the threshold while the owner is sitting right there, which is exactly
+/// the false positive #4652 exists to prevent. Both transports' `handle_command`
+/// route through this ONE helper rather than each re-deriving the gate, because
+/// the previous shape of this bug was two sibling dispatch functions drifting
+/// apart.
+/// What: records a [`TurnOrigin::Human`] turn for `instance` at `now` when
+/// `sender_is_paired`, and does nothing otherwise. The `authenticated` gate is
+/// not decoration: `/start` and `/pair` are reachable by ANY sender, so
+/// recording unconditionally would let an unpaired stranger manufacture
+/// attendance for someone else's assistant and mute their notifications. A
+/// `None` root (no home directory) is likewise a no-op. Returns whether the
+/// clock advanced; infallible, like [`note_human_turn_in`].
+/// Test: `a_command_only_session_stays_attended`,
+/// `paired_slash_command_records_a_human_turn`,
+/// `unpaired_slash_command_records_nothing`.
+pub fn note_command_turn_in(
+    root: Option<&Path>,
+    instance: &str,
+    sender_is_paired: bool,
+    now: DateTime<Utc>,
+) -> bool {
+    match (root, sender_is_paired) {
+        (Some(root), true) => note_human_turn_in(root, instance, now),
+        _ => false,
+    }
 }
 
 /// The fallible body of [`note_human_turn_in`], split out so the error can be

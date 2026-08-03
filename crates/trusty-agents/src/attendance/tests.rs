@@ -346,6 +346,99 @@ fn note_human_turn_swallows_an_unusable_instance_name() {
     assert!(!root.exists(), "a rejected name created state anyway");
 }
 
+/// #4683 regression: the outcome the two `handle_command` gaps produced. A
+/// human who drives a chat bot with NOTHING but slash commands is present, so
+/// the instance must read attended — before the fix `handle_command` recorded
+/// nothing, and the same traffic aged past the threshold into `Unattended`.
+#[test]
+fn a_command_only_session_stays_attended() {
+    let (dir, recorded, instance) = tracker();
+    let root = attendance_root(dir.path());
+
+    // Four slash commands, five minutes apart — e.g. `/status` polled while a
+    // long task runs. Every one of them is a person typing.
+    for step in 0..4 {
+        note_command_turn_in(
+            Some(&root),
+            "izzie",
+            true,
+            t0() + chrono::Duration::minutes(5 * step),
+        );
+    }
+
+    // Twenty minutes after the FIRST command — well past the 15-minute
+    // threshold — but only five after the last one.
+    let now = t0() + chrono::Duration::minutes(20);
+    assert_eq!(
+        recorded.attendance(&instance, now).expect("query"),
+        Attendance::Attended {
+            idle_for: Duration::from_secs(5 * 60)
+        },
+        "slash commands are human turns; a command-only session is attended"
+    );
+
+    // The contrast that makes the assertion mean something: with the commands
+    // NOT recorded (the pre-fix behaviour), the same twenty minutes reads as
+    // never-attended, which `is_unattended` answers true to.
+    let (_dir2, silent, silent_instance) = tracker();
+    assert!(
+        silent.is_unattended(&silent_instance, now).expect("query"),
+        "the same window with no recorded turn is unattended"
+    );
+}
+
+/// #4683 regression for the monotonic guard. Two processes recording human
+/// turns for one instance interleave; the guard must be evaluated under the
+/// same held lock as the write, or a stale reader's older timestamp lands last
+/// and REWINDS the clock.
+///
+/// Fails against a read-then-write guard: the newest turn is written first and
+/// every later writer carries an older instant, so any writer that read before
+/// that write and published after it clobbers the newest value.
+#[test]
+fn concurrent_writers_never_rewind_the_clock() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = attendance_root(dir.path());
+    let instance = AssistantInstanceId::new("izzie").expect("valid id");
+    let newest = t0() + chrono::Duration::hours(1);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for worker in 0..8 {
+        let root = root.clone();
+        let instance = instance.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let tracker = AttendanceTracker::new(root, AttendanceConfig::default());
+            barrier.wait();
+            for round in 0..25 {
+                // Worker 0 publishes the newest instant immediately; everyone
+                // else only ever offers strictly older ones, which the guard
+                // must reject for the rest of the run.
+                let at = if worker == 0 && round == 0 {
+                    newest
+                } else {
+                    t0() + chrono::Duration::seconds(worker * 25 + round)
+                };
+                tracker
+                    .record_turn(&instance, TurnOrigin::Human, at)
+                    .expect("record");
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("worker panicked");
+    }
+
+    let tracker = AttendanceTracker::new(root, AttendanceConfig::default());
+    assert_eq!(
+        tracker.last_human_turn(&instance).expect("read"),
+        Some(newest),
+        "a concurrent older turn rewound the clock — the monotonic guard is not \
+         atomic with the write"
+    );
+}
+
 #[test]
 fn default_root_is_under_the_app_state_tree() {
     let root = default_attendance_root().expect("home dir");

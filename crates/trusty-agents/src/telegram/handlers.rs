@@ -74,15 +74,28 @@ pub(super) async fn handle_command(
     // check. Unpaired chats get a uniform "send /start" prompt instead of
     // partial information about the bot.
     let is_unauthenticated_cmd = matches!(cmd, Command::Start | Command::Pair(_));
-    if !is_unauthenticated_cmd {
-        let is_paired = paired.read().await.contains_key(&chat_id);
-        if !is_paired {
-            bot.send_message(chat_id, "🔒 Not paired. Send /start to begin.")
-                .parse_mode(ParseMode::Html)
-                .await?;
-            return Ok(());
-        }
+    let is_paired = paired.read().await.contains_key(&chat_id);
+    if !is_unauthenticated_cmd && !is_paired {
+        bot.send_message(chat_id, "🔒 Not paired. Send /start to begin.")
+            .parse_mode(ParseMode::Html)
+            .await?;
+        return Ok(());
     }
+
+    // #4683: a paired human polling `/status` (or running any other slash
+    // command) is attending exactly as much as one typing a task. Only
+    // `handle_message` recorded attendance, so a command-only session read as
+    // unattended after the threshold while the owner was right there.
+    let persona_for_attendance = {
+        let map = sessions.lock().await;
+        map.get(&chat_id).and_then(|s| s.active_persona.clone())
+    };
+    crate::attendance::note_command_turn_in(
+        crate::attendance::default_attendance_root().ok().as_deref(),
+        persona_for_attendance.as_deref().unwrap_or("ctrl"),
+        is_paired,
+        chrono::Utc::now(),
+    );
 
     match cmd {
         Command::Start => {

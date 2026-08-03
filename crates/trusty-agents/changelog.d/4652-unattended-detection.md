@@ -37,12 +37,17 @@ Added
   `~/.trusty-agents/attendance/`, written through the existing lock+tmp+rename
   `state_writer` so a GUI, an `--api` sidecar and a REPL sharing that tree
   cannot tear each other's records. Recording is monotonic — an out-of-order
-  turn never rewinds the clock.
+  turn never rewinds the clock — and the guard is evaluated under the SAME held
+  lock as the write (`state_writer::atomic_update`, new in this change), so two
+  processes recording near-simultaneous turns cannot both read the old value and
+  let the loser's older write land last. Pinned by
+  `concurrent_writers_never_rewind_the_clock`, which fails against a
+  read-then-write guard.
 
-  Recorded at the four surfaces a person can actually address an assistant
-  through, each against the persona the message named: `POST /api/task`, the
-  REPL's `attempt_forward` (one call covering all six of its dispatch arms),
-  Telegram past the pairing gate, and Slack past the pairing and RBAC gates. The
+  Recorded at every surface a person can actually address an assistant through,
+  each against the persona the message named: `POST /api/task`, the REPL's
+  `attempt_forward` (one call covering all six of its dispatch arms), and BOTH
+  inbound paths on Telegram and Slack — free text and slash commands alike. The
   hook is infallible by construction — an unusable instance name, a missing home
   directory or an I/O error is logged at debug and swallowed, because attendance
   is a hint for #4653 and never a reason to fail a turn a user is waiting on.
@@ -50,9 +55,27 @@ Added
   Signal only: nothing here sends or queues, and `trusty-agents` gains no
   dependency on `trusty-mpm`.
 
-  Telegram's `/switch <persona>` intercept returns early from `handle_message`,
-  so a paired human switching persona was never recorded as a turn (caught in
-  review of [#4683](https://github.com/bobmatnyc/trusty-tools/pull/4683)). The
-  hook now runs before the intercept, fused with the routing decision so the two
-  cannot drift apart again — pinned by
-  `switch_command_still_records_a_human_turn`.
+  Three attendance gaps were caught in review of
+  [#4683](https://github.com/bobmatnyc/trusty-tools/pull/4683), all the same
+  shape — a live entry point that never advanced the clock, so a human who was
+  demonstrably present read as unattended after fifteen minutes:
+
+  - Telegram's `/switch <persona>` intercept returns early from
+    `handle_message`, so a paired human switching persona was never recorded.
+    The hook now runs before the intercept, fused with the routing decision so
+    the two cannot drift apart again — pinned by
+    `switch_command_still_records_a_human_turn`.
+  - Telegram's `handle_command` (`/start`, `/pair`, `/help`, `/connect`,
+    `/clear`, `/status`) and Slack's (`/slack-start`, `/slack-pair`,
+    `/slack-connect`, `/slack-clear`, `/slack-switch`, `/slack-status`)
+    recorded nothing at all, so a human polling `/status` every few minutes
+    while a long task ran was invisible. Both now record through one shared
+    `attendance::note_command_turn_in`, behind the same authentication each
+    transport's message path already records behind: paired on Telegram, paired
+    AND a known RBAC identity on Slack — so an unpaired chat, or an unknown
+    Slack user posting in a paired channel, still cannot manufacture attendance
+    for someone else's assistant. Pinned by
+    `paired_slash_command_records_a_human_turn`,
+    `unpaired_slash_command_records_nothing`,
+    `unknown_rbac_user_cannot_manufacture_attendance` and, end to end,
+    `a_command_only_session_stays_attended`.
