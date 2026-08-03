@@ -434,7 +434,7 @@ fn is_false(b: &bool) -> bool {
 /// override machinery; keeping them out of the block stream means a section's
 /// permission cannot vary by position.
 /// What: id, human title, tier, optional prose description.
-/// Test: `schema_example_deserializes_validates_and_round_trips`, `rejects_floor_section_that_is_not_fixed`.
+/// Test: `schema_example_deserializes_validates_and_round_trips`, `rejects_core_declared_overridable`, `rejects_a_second_fixed_section`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstructionSection {

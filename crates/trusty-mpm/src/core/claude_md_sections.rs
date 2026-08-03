@@ -418,8 +418,8 @@ fn read_host(path: &Path) -> Option<String> {
 /// it and any later claim is reported as [`REASON_SHADOWED`] (across hosts) or
 /// [`REASON_DUPLICATE`] (within one host). The result is sorted into
 /// [`SectionId`] canonical order so downstream application is deterministic.
-/// Test: `scans_claude_md_for_named_sections`,
-/// `claude_md_wins_a_same_section_collision_with_instructions_md`,
+/// Test: `scans_claude_md_for_named_sections`, `claude_md_is_the_only_marker_host`,
+/// `a_marker_in_the_retired_instructions_file_is_not_read`,
 /// `duplicate_section_in_one_host_keeps_the_first`.
 pub fn scan_project(project_dir: &Path) -> ProjectOverrides {
     let mut result = ProjectOverrides::default();
@@ -499,9 +499,8 @@ pub fn scan_project(project_dir: &Path) -> ProjectOverrides {
 /// about every override in the slice it is given.
 ///
 /// What: one `warn!` per accepted override, naming the file and the section.
-/// Test: `an_unrelated_legacy_file_does_not_shadow_a_named_section_override`,
-/// `a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported`,
-/// `identity_core_and_search_stay_reported_unapplied_on_the_legacy_path`.
+/// Test: `unaddressable_sections_are_reported_unapplied_on_the_roster_absent_path`,
+/// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`.
 pub fn warn_unapplied(scanned: &ProjectOverrides) {
     for applied in &scanned.overrides {
         tracing::warn!(
