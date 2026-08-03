@@ -15,7 +15,7 @@ use trusty_common::memory_core::store::kg::Triple;
 use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
 
 use super::core::KG_GRAPH_MAX_TRIPLES;
-use super::helpers::refresh_gaps_cache;
+use super::helpers::{list_palaces_blocking, refresh_gaps_cache};
 use super::types::{DreamStatusPayload, KgAssertBody, KgGraphPayload, ServiceError, ServiceResult};
 use super::MemoryService;
 
@@ -181,20 +181,41 @@ impl MemoryService {
     }
 
     /// Run a dream cycle across every palace.
+    ///
+    /// Why (issue #4637): like `recall_all`, this route is deliberately NOT
+    /// converted to `PalaceRegistry::peek`. Dreaming is a maintenance pass —
+    /// consolidating only the 64 palaces that happen to be cache-resident
+    /// would silently stop maintaining the other ~5,730, which is a worse
+    /// failure than a slow run because nothing reports it. Opening every
+    /// palace stays correct; what changes is that the blocking open no longer
+    /// runs inline on a tokio worker thread. A long dream run is expected —
+    /// this is an explicitly-triggered `POST`, not a page load.
+    /// What: lists palaces on the blocking pool, then per palace hops to
+    /// `spawn_blocking` for the open before awaiting the async dream cycle.
+    /// Test: `dream_run_aggregates_stats`.
     pub async fn dream_run(&self) -> ServiceResult<DreamStatusPayload> {
-        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
-            .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
+        let palaces = list_palaces_blocking(&self.state)
+            .await
+            .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
         let dreamer = Dreamer::new(DreamConfig::default());
         let mut out = DreamStatusPayload::default();
         for p in palaces {
-            let handle = match self
-                .state
-                .registry
-                .open_palace(&self.state.data_root, &p.id)
-            {
-                Ok(h) => h,
-                Err(e) => {
+            // #4637: open_palace (not peek) is deliberate — a dream cycle must
+            // maintain every palace; the spawn_blocking hop keeps the cold open
+            // off the async executor.
+            let registry = std::sync::Arc::clone(&self.state.registry);
+            let root = self.state.data_root.clone();
+            let pid = p.id.clone();
+            let opened =
+                tokio::task::spawn_blocking(move || registry.open_palace(&root, &pid)).await;
+            let handle = match opened {
+                Ok(Ok(h)) => h,
+                Ok(Err(e)) => {
                     tracing::warn!(palace = %p.id, "dream_run: open failed: {e:#}");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(palace = %p.id, "dream_run: join open failed: {e}");
                     continue;
                 }
             };
