@@ -271,6 +271,33 @@ pub(super) async fn handle_command(
     Ok(())
 }
 
+/// Record a paired inbound message as a human turn, then report whether it is
+/// the `/switch` intercept (#4652).
+///
+/// Why: `/switch` returns early from [`handle_message`], so the attendance hook
+/// has to run BEFORE the routing decision. Wiring it after the intercept
+/// silently dropped every persona-switch turn — a paired human typing
+/// `/switch` is attending exactly as much as one typing a task, and dropping
+/// those turns biases an active chat toward looking unattended. Fusing the
+/// record and the decision into one call is what keeps the two from drifting
+/// apart again: there is no order left for a caller to get wrong.
+/// What: records a human turn for `persona` at `now` under `root` — always,
+/// and first — then returns `true` for a `/switch` command. A `None` root
+/// (no home directory) skips the record and still routes correctly.
+/// Test: `switch_command_still_records_a_human_turn`,
+/// `plain_message_records_a_human_turn_and_is_not_a_switch`.
+pub(super) fn note_turn_and_is_switch(
+    root: Option<&std::path::Path>,
+    persona: &str,
+    text: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if let Some(root) = root {
+        crate::attendance::note_human_turn_in(root, persona, now);
+    }
+    text.starts_with("/switch")
+}
+
 /// Forward a plain-text message to ctrl and reply with the result.
 pub(super) async fn handle_message(
     bot: Bot,
@@ -295,12 +322,25 @@ pub(super) async fn handle_message(
         return Ok(());
     }
 
+    // #4652: record attendance BEFORE the `/switch` intercept below, which
+    // returns early. Hooking after it dropped every persona-switch turn.
+    let persona_for_attendance = {
+        let map = sessions.lock().await;
+        map.get(&chat_id).and_then(|s| s.active_persona.clone())
+    };
+    let is_switch = note_turn_and_is_switch(
+        crate::attendance::default_attendance_root().ok().as_deref(),
+        persona_for_attendance.as_deref().unwrap_or("ctrl"),
+        &text,
+        chrono::Utc::now(),
+    );
+
     // #457: Intercept `/switch <persona>` BEFORE ctrl dispatch. ctrl's
     // text path passes the message verbatim to the LLM — it has no slash
     // command awareness. We must handle persona switching ourselves and
     // store the choice on the session so subsequent turns route through
     // `run_pm_task_with_persona`.
-    if text.starts_with("/switch") {
+    if is_switch {
         return handle_switch(&bot, chat_id, &sessions, &project_path, &text).await;
     }
 
@@ -339,9 +379,6 @@ pub(super) async fn handle_message(
     // mirror that pattern here so Telegram and REPL agree on which agent
     // config wins by default.
     let persona_name = active_persona.as_deref().unwrap_or("ctrl");
-    // #4652: a paired Telegram chat message is a human turn — record it as
-    // attendance for the persona it addressed, before the multi-second LLM call.
-    crate::attendance::note_human_turn(persona_name);
     let result = ctrl::run_pm_task_with_persona(
         &path,
         persona_name,

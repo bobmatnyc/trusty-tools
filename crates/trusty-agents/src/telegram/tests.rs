@@ -595,3 +595,56 @@ fn project_persona_exists_rejects_unknown_name() {
     let project = tempdir_for_test();
     assert!(!super::project_persona_exists(&project, "nope"));
 }
+
+/// #4652 regression: the `/switch` intercept returns early from
+/// `handle_message`, so a persona switch used to be dropped from the
+/// last-human-turn clock. A paired human typing `/switch` is attending.
+#[test]
+fn switch_command_still_records_a_human_turn() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = crate::attendance::attendance_root(dir.path());
+    let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, 3, 12, 0, 0).unwrap();
+
+    assert!(
+        super::handlers::note_turn_and_is_switch(
+            Some(&root),
+            "izzie",
+            "/switch cto-assistant",
+            now
+        ),
+        "`/switch` must still route to the switch handler"
+    );
+
+    let tracker = crate::attendance::AttendanceTracker::new(
+        &root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new("izzie").expect("valid id");
+    assert_eq!(
+        tracker.last_human_turn(&id).expect("read"),
+        Some(now),
+        "a human typing `/switch` is attending; the turn must be recorded"
+    );
+}
+
+/// The ordinary path still records, and is not misread as a switch.
+#[test]
+fn plain_message_records_a_human_turn_and_is_not_a_switch() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = crate::attendance::attendance_root(dir.path());
+    let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, 3, 12, 0, 0).unwrap();
+
+    assert!(!super::handlers::note_turn_and_is_switch(
+        Some(&root),
+        "izzie",
+        "what is the status of #4652?",
+        now
+    ));
+
+    let tracker = crate::attendance::AttendanceTracker::new(
+        &root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new("izzie").expect("valid id");
+    assert_eq!(tracker.last_human_turn(&id).expect("read"), Some(now));
+}

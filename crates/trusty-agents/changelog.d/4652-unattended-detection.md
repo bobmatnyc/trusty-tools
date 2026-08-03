@@ -49,3 +49,10 @@ Added
 
   Signal only: nothing here sends or queues, and `trusty-agents` gains no
   dependency on `trusty-mpm`.
+
+  Telegram's `/switch <persona>` intercept returns early from `handle_message`,
+  so a paired human switching persona was never recorded as a turn (caught in
+  review of [#4683](https://github.com/bobmatnyc/trusty-tools/pull/4683)). The
+  hook now runs before the intercept, fused with the routing decision so the two
+  cannot drift apart again — pinned by
+  `switch_command_still_records_a_human_turn`.
