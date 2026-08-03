@@ -25,6 +25,9 @@ pub mod contrib;
 mod corpus_ops;
 mod kg_ops;
 mod meta_ops;
+// #4333: typed classification of *why* a corpus open failed, so a transient
+// timeout is never reported as a corrupted on-disk format.
+pub mod open_failure;
 pub(crate) mod open_guard;
 mod store_impl;
 mod tables;
@@ -33,5 +36,6 @@ mod tests;
 mod types;
 
 pub(crate) use self::open_guard::open_serialized;
+pub use self::open_failure::CorpusOpenFailure;
 pub use self::store_impl::CorpusStore;
 pub use self::types::PersistedKgNode;

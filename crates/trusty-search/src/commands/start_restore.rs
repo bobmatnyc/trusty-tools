@@ -114,6 +114,10 @@ pub(crate) fn try_locate_moved_root(
                     entry.id
                 );
             }
+            // #4095: the entry resolved, so stop any ambiguity grace clock that
+            // an earlier boot started — otherwise a transient ambiguity would
+            // eventually reap a registration that has been healthy since.
+            crate::service::orphan_reaper::clear_ambiguous_root_stamp(entry);
             Some(new_root)
         }
         0 => {
@@ -126,13 +130,12 @@ pub(crate) fn try_locate_moved_root(
             None
         }
         n => {
-            tracing::warn!(
-                "warm-boot: skipping index '{}' — root_path {} no longer exists and {} \
-                 ambiguous candidates found (manual `trusty-search index <path>` required)",
-                entry.id,
-                entry.root_path.display(),
-                n,
-            );
+            // #4095: hand the deferral to the reaper instead of logging a WARN
+            // that reaches no diagnostic surface and returning. The reaper
+            // stamps a start time, escalates the log to ERROR so the debris is
+            // actually visible, and — past an explicit grace period — removes
+            // the registration (never the on-disk index data).
+            crate::service::orphan_reaper::handle_ambiguous_root(entry, n);
             None
         }
     }
@@ -323,7 +326,9 @@ pub(crate) async fn restore_one_index(
     // Issue #1158: also read `corpus_open_failed` so the classifier emits
     // `StageStatus::Failed` instead of the silent `InProgress` when the
     // corpus file existed but could not be opened (incompatible format etc.).
-    let corpus_open_failed = indexer.corpus_open_failed;
+    // #4333: carry the CLASSIFIED failure kind, not a bare bool, so the
+    // stage reason distinguishes a transient open timeout from real corruption.
+    let corpus_open_failure = indexer.corpus_open_failure;
     let chunk_count = indexer
         .corpus_store()
         .and_then(|c| c.chunk_count().ok())
@@ -346,11 +351,11 @@ pub(crate) async fn restore_one_index(
         lexical_only,
         skip_kg,
         skip_vector,
-        corpus_open_failed,
+        corpus_open_failure,
     });
     tracing::info!(
         "warm-boot: index '{}' restored (colocated={}) — chunks={} hnsw_snapshot={} \
-         graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failed={} → \
+         graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failure={:?} → \
          stages(lexical={:?}, semantic={:?}, graph={:?})",
         entry.id,
         entry.colocated,
@@ -360,7 +365,7 @@ pub(crate) async fn restore_one_index(
         lexical_only,
         skip_kg,
         skip_vector,
-        corpus_open_failed,
+        corpus_open_failure,
         stages.lexical.status,
         stages.semantic.status,
         stages.graph.status,

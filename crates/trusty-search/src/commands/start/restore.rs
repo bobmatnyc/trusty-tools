@@ -235,6 +235,9 @@ pub(super) async fn restore_indexes(
             }
             let s = state.clone();
             let e = Arc::clone(embedder);
+            // #4087: keep a copy so a timed-out restore can be PARKED COLD
+            // rather than dropped — see `ColdIndexStore::park_timed_out`.
+            let parked = entry.clone();
             if restore_one_index_bounded(entry, move |en| async move {
                 restore_one_index(&s, &e, en).await;
             })
@@ -243,6 +246,7 @@ pub(super) async fn restore_indexes(
                 legacy_ok += 1;
             } else {
                 legacy_skipped_other += 1;
+                state.cold_store.park_timed_out(parked);
             }
         }
         total_skipped_tcc += legacy_skipped_tcc;
@@ -269,6 +273,8 @@ pub(super) async fn restore_indexes(
             }
             let s = state.clone();
             let e = Arc::clone(embedder);
+            // #4087: see the legacy branch — park, don't drop.
+            let parked = entry.clone();
             if restore_one_index_bounded(entry, move |en| async move {
                 restore_one_index(&s, &e, en).await;
             })
@@ -277,6 +283,7 @@ pub(super) async fn restore_indexes(
                 colocated_ok += 1;
             } else {
                 colocated_skipped_other += 1;
+                state.cold_store.park_timed_out(parked);
             }
         }
         total_skipped_tcc += colocated_skipped_tcc;
@@ -289,6 +296,12 @@ pub(super) async fn restore_indexes(
     }
 
     let total = state.registry.list().len();
+    // #4087: read the LIVE cold-store size rather than the pre-loop split
+    // count, so indexes parked by `ColdIndexStore::park_timed_out` are reported as
+    // lazy/recoverable instead of vanishing from every counter (the old
+    // `indexes_lazy: 0` alongside `indexes_skipped_timeout: 11` that made the
+    // drop invisible on `/health`).
+    let indexes_lazy = state.cold_store.len();
     tracing::info!(
         "warm-boot: complete — {total} loaded, {indexes_lazy} cold (lazy), \
          {total_ok} eager successful (legacy + colocated)"

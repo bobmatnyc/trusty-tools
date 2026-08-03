@@ -172,10 +172,30 @@ pub(super) async fn index_status_handler(
     // Issue #681: prefer durable corpus count; in-memory map returns 0 after
     // idle eviction (TRUSTY_CHUNKS_IDLE_EVICT_SECS default 60s). Falls back to
     // in-memory for BM25-only / test indexers that have no corpus wired.
-    let chunk_count = indexer
-        .corpus_arc()
-        .and_then(|c| c.chunk_count().ok())
-        .unwrap_or_else(|| indexer.chunk_count());
+    // #4333: when the corpus failed to open, the in-memory fallback below is
+    // NOT a measurement of the on-disk corpus — the quarantine invariant
+    // guarantees `corpus_arc()` is `None`, so this reported 122 for an index
+    // holding 201,206 chunks on disk, reading as catastrophic data loss.
+    // Report `null` (unknown) rather than a partial-looking number.
+    let chunk_count: Option<usize> = if indexer.corpus_open_failed {
+        None
+    } else {
+        Some(
+            indexer
+                .corpus_arc()
+                .and_then(|c| c.chunk_count().ok())
+                .unwrap_or_else(|| indexer.chunk_count()),
+        )
+    };
+    // #4333: name the classified failure so a consumer can tell a transient
+    // open timeout (retry) from a genuine format mismatch (rebuild).
+    let corpus_open_failure = indexer.corpus_open_failure.map(|k| {
+        serde_json::json!({
+            "kind": k.label(),
+            "transient": k.is_transient(),
+            "reason": k.stage_reason(),
+        })
+    });
     // Issue #3408: surface the watcher's live/degraded state per-index. A
     // network-mounted root never gets a live watcher (inotify/FSEvents can't
     // observe another host's writes there); `network_mount_degraded` plus
@@ -191,6 +211,7 @@ pub(super) async fn index_status_handler(
         "index_id": index_id.0,
         "root_path": handle.root_path,
         "chunk_count": chunk_count,
+        "corpus_open_failure": corpus_open_failure,
         "status": legacy_status,
         "stages": stages_snapshot,
         "search_capabilities": search_capabilities,

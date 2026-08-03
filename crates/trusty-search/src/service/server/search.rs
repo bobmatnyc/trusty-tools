@@ -263,6 +263,16 @@ pub(super) async fn search_handler(
             }
         }
     };
+    // #4087: a registered index whose durable corpus failed to open holds no
+    // chunks at all, so every search against it returned HTTP 200 with
+    // `results: []` — a total outage presented as "no matches". Fail loudly
+    // instead, carrying the #4333 classification so the caller knows whether
+    // to retry (transient) or escalate (permanent). Placed before the watcher
+    // wake and the `last_queried` write so a broken index neither spawns a
+    // watcher (which #4122 quarantines anyway) nor records a phantom query.
+    if let Some(resp) = super::degraded::corpus_failure_response(&index_id.0, &handle).await {
+        return Err(resp);
+    }
     // Idle-watcher wake: an index served without a live watcher was either
     // idle-suspended (`server::tickers::spawn_watcher_idle_suspend_ticker`) or
     // lazily restored from the cold store (which never spawns a watcher). Resume

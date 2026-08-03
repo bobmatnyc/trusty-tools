@@ -163,6 +163,42 @@ impl ColdIndexStore {
             .collect()
     }
 
+    /// Park an index whose eager warm-boot restore timed out (#4087).
+    ///
+    /// Why: a warm-boot restore timeout previously tallied a counter and did
+    /// NOTHING else. The entry reached neither the registry nor this store, so
+    /// for the remainder of that boot the index simply did not exist:
+    /// `list_indexes` omitted it, `search` 404'd it, and `search_all` could not
+    /// even count it as skipped. A live daemon lost 11 indexes this way,
+    /// recoverable only by a restart. A timeout is the *most* transient failure
+    /// the daemon has — the restore was slow, not wrong — so dropping it is the
+    /// least appropriate response available. Parking makes it recoverable
+    /// through the machinery that already exists for deferred indexes:
+    /// `get_or_load_index` lazy-loads it on first query, and [`Self::len`]
+    /// folds it into `search_all`'s `cold_indexes_skipped` so an incomplete
+    /// fan-out stays visible.
+    ///
+    /// What: [`Self::register_cold_entries`] for one entry, plus a WARN naming
+    /// the state change. Idempotent by replacement, so a second timeout for the
+    /// same id simply re-parks it. Deliberately does NOT retry the restore
+    /// inline — the abandoned blocking thread from the timeout may still hold
+    /// the redb file, and the lazy-load path already handles that via the
+    /// `DatabaseAlreadyOpen` retry and the #3659 open gate.
+    /// Test: `timed_out_entry_is_parked_in_cold_store` in
+    /// `service::server::tests_4087`.
+    pub fn park_timed_out(&self, entry: PersistedIndex) {
+        let id = entry.id.clone();
+        self.register_cold_entries(vec![entry]);
+        tracing::warn!(
+            index_id = %id,
+            "warm-boot: index '{id}' timed out during eager restore — PARKED in the cold \
+             store for lazy load on first query instead of being dropped for the rest of \
+             this boot (issue #4087). It stays absent from `list_indexes` until loaded, but \
+             a query against it now restores it on demand rather than 404-ing until a \
+             daemon restart."
+        );
+    }
+
     /// True when `id` is in the cold store (registered but not yet loaded).
     ///
     /// Why: `get_or_load_index` uses this to decide whether a 404 is a genuine

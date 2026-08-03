@@ -40,17 +40,24 @@ pub struct WarmBootInputs {
     /// `skip_vector` flag (issue #2984 Phase 1): forces semantic stage to
     /// `Skipped`, independently of `skip_kg`.
     pub skip_vector: bool,
-    /// Issue #1158: `true` when the redb corpus file existed but could not be
-    /// opened (e.g. incompatible redb page-format, corrupted file).
+    /// Issue #1158: `Some(kind)` when the redb corpus file existed but could
+    /// not be opened; `None` when the open succeeded.
     ///
-    /// Why: before this flag, a failed corpus open caused `chunk_count = 0`
+    /// Why: before this signal, a failed corpus open caused `chunk_count = 0`
     /// (no corpus store → `unwrap_or(0)`), which the classifier treated as
     /// `InProgress` — indistinguishable from a freshly-created, never-indexed
     /// handle. Operators saw `chunks=0` in the warm-boot log and the index
-    /// looked healthy-ish when it was silently broken. This flag lets the
+    /// looked healthy-ish when it was silently broken. This lets the
     /// classifier emit `StageStatus::Failed` with an actionable reason
     /// instead of the misleading `InProgress` state.
-    pub corpus_open_failed: bool,
+    ///
+    /// #4333: widened from a bare `bool` to the classified failure kind. The
+    /// bool could only produce ONE reason string, so a transient open timeout
+    /// under warm-boot contention was reported as "incompatible or corrupted
+    /// format; run `--force` to rebuild" — the destructive remedy for a
+    /// corpus that was never even read. Carrying the kind lets each state
+    /// report its own remedy.
+    pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 }
 
 /// Pure classifier: given on-disk signals, derive the [`IndexStages`] for a
@@ -87,10 +94,14 @@ pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
     // on the same durable corpus for chunk text, so both must fail together
     // with it — this is the `search_capabilities`/corpus-resolvability
     // consistency guard.
-    if inputs.corpus_open_failed {
-        let reason = "redb corpus could not be opened (incompatible or corrupted format); \
-             run `trusty-search index <path> --force` to rebuild from source \
-             (issues #1158, #1870, #2203)";
+    if let Some(kind) = inputs.corpus_open_failure {
+        // #4333: the reason is now derived from the CLASSIFIED failure kind
+        // instead of one hardcoded string. The old string named the only
+        // permanent cause ("incompatible or corrupted format") and prescribed
+        // the only destructive remedy (`--force`) for every case, including a
+        // 30 s open timeout under warm-boot contention where the corpus was
+        // never read and was verifiably intact (201,206 chunks, 2026-07-29).
+        let reason = kind.stage_reason();
         return IndexStages {
             lexical: StageState::failed(reason),
             semantic: StageState::failed(reason),
