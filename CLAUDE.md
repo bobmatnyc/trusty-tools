@@ -231,11 +231,6 @@ above, applied to change attribution instead of design rationale: the ticket
 reference is the pointer, never a narrative — one line, not a changelog
 embedded in comments. The full reasoning stays in the ticket.
 
-🟡 **Source-tree links, not bare paths** — source citations in docs and reports
-link to a GitHub blob permalink pinned to a commit SHA, never `blob/main` (a
-branch link silently retargets as lines shift). Link text is `path:line`, and
-the line number is verified before linking.
-
 🔴 **No `unwrap()` in library code** — use `?` with `anyhow::Result` for
 application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
