@@ -691,6 +691,13 @@ default:
   trusty-mpm` (create the label if missing), so a trusty-mpm session can
   identify the issues/PRs it owns in a multi-harness repo.
 
+## Source Citations
+
+Source citations in docs and reports link to a GitHub blob permalink pinned
+to a commit SHA, never `blob/main` — a branch link silently retargets as
+lines shift. Link text is `path:line`, and the line number is verified
+before linking.
+
 ## Publish and Release Workflow
 
 **CRITICAL**: PM MUST DELEGATE all version bumps and releases to `local-ops`. PM never edits version files (pyproject.toml, package.json, VERSION) directly.
