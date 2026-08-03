@@ -214,7 +214,7 @@ unconditionally mandatory.
 | Phase | `subagent_type` | Gate | Skip When |
 |-------|-------|------|-----------|
 | 1. Research | `research` | Findings documented | User provides explicit instructions, simple task, language/approach known |
-| 2. Code Analysis | `code-analyzer` | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact |
+| 2. Code Analysis | `code-analyzer` | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact, and not High risk (security, destructive or irreversible paths, persisted state, release/SemVer, cross-package contract) |
 | 3. Implementation | `engineer` (per lang detect) | Tests pass, files tracked, changelog entry added | Docs-only/CI-only change |
 | 4. QA | `web-qa` / `api-qa` / `qa` | All criteria verified with evidence | Engineer self-verified (ran full test suite, raw output shown), user says "no QA" |
 | 5. Documentation | `documentation` | Docs updated | No public API changes, internal refactor only |
@@ -535,6 +535,22 @@ skip condition; this section describes HOW each phase is executed. Where a phase
 runs, its gate is blocking — "conditional" governs entry, never rigour (issue
 #4594).
 
+**Risk is the second input to that skip condition.** Label the change:
+
+- **Low** — docs, comments, mechanical metadata.
+- **Normal** — a localized behaviour change inside one package.
+- **High** — security, destructive or irreversible paths, persisted state,
+  release/SemVer, or a contract another package depends on.
+
+Where a skip condition is a size or simplicity heuristic, High risk means it
+does not hold. A 30-line change to a credential path is small and still earns
+its review. This is the "spend the budget where blast radius is real" rule
+above, applied at the point of entry.
+
+The labels say nothing about how much testing a change needs. The project's
+test ladder in `.trusty-mpm/INSTRUCTIONS.md` answers that, and it is
+authoritative where the project defines one.
+
 ### Phase 1: Research (CONDITIONAL)
 **Agent**: `research`
 **When Required**: Ambiguous requirements, multiple approaches possible, unfamiliar codebase
@@ -548,7 +564,7 @@ Return: Technical requirements, gaps, measurable criteria, approach
 
 ### Phase 2: Code Analysis Review (CONDITIONAL)
 **Agent**: `code-analyzer` (sonnet model) — not `code-critic`, a separate agent
-**Skip When**: Change is < 100 lines with no architectural impact
+**Skip When**: Change is < 100 lines with no architectural impact and not High risk
 **Output**: APPROVED/NEEDS_IMPROVEMENT/BLOCKED
 **Template**:
 ```
