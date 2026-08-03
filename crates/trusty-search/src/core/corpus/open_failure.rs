@@ -19,7 +19,9 @@
 //! ([`CorpusOpenFailure::stage_reason`]) that replaces the single hardcoded
 //! string. Transient kinds explicitly tell the operator NOT to reindex.
 //!
-//! Test: `classify_*` and `stage_reason_*` unit tests below.
+//! Test: `classify_*` plus `transient_kinds_never_recommend_rebuild`,
+//! `unclassified_kind_does_not_claim_corruption`, and
+//! `format_incompatible_keeps_the_rebuild_instruction` below.
 
 use std::time::Duration;
 

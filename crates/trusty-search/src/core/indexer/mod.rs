@@ -347,7 +347,7 @@ pub struct CodeIndexer {
     /// [`Self::clear_corpus_open_failure`] in the same call that clears the
     /// bool, so the two can never drift.
     /// Test: `corpus_open_failure_kind_tracks_the_flag` in
-    /// `service::persistence_loader::tests_4333`.
+    /// `service::server::tests_4087`.
     pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 
     /// Issue #4122: monotonic count of incremental writes refused because

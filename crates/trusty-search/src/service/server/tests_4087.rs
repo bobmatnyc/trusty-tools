@@ -196,6 +196,56 @@ async fn global_search_excludes_and_counts_corpus_failed_indexes() {
     );
 }
 
+/// Why (#4333): `corpus_open_failed` (the load-bearing #4122 write-quarantine
+/// predicate) and `corpus_open_failure` (the classification) are two fields
+/// describing one state. If they ever drift, `/health` and the query-time guard
+/// disagree about the same index — and the guard's fallback would report an
+/// unclassified failure for a state that IS classified. The lockstep is
+/// maintained by construction (one producer sets both, `clear_corpus_open_failure`
+/// clears both); this pins it.
+/// What: drives a real open failure through `build_indexer_from_entry` (a
+/// DIRECTORY where redb expects a file — portable across OSes), asserts both
+/// fields are set together, then wires a corpus and asserts both clear together.
+/// Test: this test.
+#[tokio::test]
+async fn corpus_open_failure_kind_tracks_the_flag() {
+    use crate::core::corpus::CorpusStore;
+    use crate::service::persistence::PersistedIndex;
+    use crate::service::persistence_loader::build_indexer_from_entry;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let colocated_dir = root.join(".trusty-search");
+    std::fs::create_dir_all(&colocated_dir).unwrap();
+    // A directory at the `index.redb` path forces `CorpusStore::open` to Err.
+    std::fs::create_dir_all(colocated_dir.join("index.redb")).unwrap();
+
+    let entry = PersistedIndex {
+        id: "kind-tracks-flag".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
+    let mut indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+
+    assert!(indexer.corpus_open_failed, "precondition: open must fail");
+    assert!(
+        indexer.corpus_open_failure.is_some(),
+        "the classification must be set in lockstep with the flag (issue #4333)"
+    );
+
+    // Recovery: a successful open lifts both, so a transient failure never
+    // leaves a stale classification behind on a healthy index.
+    let good = CorpusStore::open(&root.join("recovered.redb")).expect("open corpus");
+    indexer.set_corpus_store(Arc::new(good));
+    assert!(!indexer.corpus_open_failed);
+    assert!(
+        indexer.corpus_open_failure.is_none(),
+        "clearing the flag must clear the classification too (issue #4333)"
+    );
+}
+
 /// Why (issue #4087, finding 1): a warm-boot restore timeout tallied a counter
 /// and did nothing else — the entry reached neither the registry nor the cold
 /// store, so the index simply ceased to exist for the rest of that boot (11
