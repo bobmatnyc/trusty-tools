@@ -18,9 +18,9 @@ use std::io::Cursor;
 use clap::Parser;
 use serial_test::serial;
 
+use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::config::ops::{KeyTier, ProbeOutcome};
 use trusty_common::inference::config::{ConfigCommand, ops};
-use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::providers::openrouter;
 use trusty_common::inference::test_support::MockInferenceServer;
 use trusty_common::inference::{Configurator, ProviderId, ResolvedProvider};

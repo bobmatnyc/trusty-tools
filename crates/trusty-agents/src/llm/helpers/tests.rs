@@ -287,8 +287,8 @@ fn create_client_resolves_key_from_store_when_env_absent() {
         std::env::set_var("HOME", tmp.path());
     }
 
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "openrouter",
         "sk-or-FAKE-store-value", // pragma: allowlist secret
@@ -353,8 +353,8 @@ fn create_client_env_beats_store() {
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "openrouter",
         "sk-or-FAKE-store-value", // pragma: allowlist secret

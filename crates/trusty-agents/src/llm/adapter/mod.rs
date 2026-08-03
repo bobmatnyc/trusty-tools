@@ -186,7 +186,7 @@ pub trait ModelAdapter: Send + Sync + std::fmt::Debug {
 /// place so tests and adapters agree on the fallback shape.
 /// What: Reads `OPENROUTER_BASE_URL` (override for tests) and resolves the
 /// OpenRouter credential via the shared 3-tier resolver
-/// (`trusty_common::inference::credentials::resolve_key` — process env >
+/// (`trusty_common::credentials::resolve_key` — process env >
 /// `.env.local` > secure store, #3248/#3431); builds
 /// `Authorization: Bearer <key>`. Before this fix (issue #3443) the key was
 /// read via a raw `std::env::var`, so a credential configured ONLY in the
@@ -198,7 +198,7 @@ pub trait ModelAdapter: Send + Sync + std::fmt::Debug {
 pub fn openrouter_endpoint() -> ApiEndpoint {
     let base_url = std::env::var("OPENROUTER_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-    let key = trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default();
+    let key = trusty_common::credentials::resolve_key("openrouter").unwrap_or_default();
     ApiEndpoint {
         base_url,
         auth_header_name: "Authorization".to_string(),

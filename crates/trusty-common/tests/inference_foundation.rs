@@ -12,7 +12,7 @@
 //! Test: this file (run with `--features inference-client`).
 
 use serial_test::serial;
-use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
+use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::test_support::ScriptedAdapter;
 use trusty_common::inference::{
     ChatMessage, ChatRequest, ChatResponse, Configurator, InferenceAdapter, InferenceError,

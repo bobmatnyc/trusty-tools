@@ -1195,7 +1195,7 @@ async fn run() -> Result<()> {
     // reporting is driven by a single controlled load order. Semantics are
     // preserved: dotenvy never overrides an already-set process env var, so
     // `env > .env.local > store` precedence is unchanged.
-    trusty_common::inference::credentials::load_env_local_once();
+    trusty_common::credentials::load_env_local_once();
 
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion to clap's standard error rendering before

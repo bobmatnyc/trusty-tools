@@ -8,7 +8,7 @@
 //! leak-safe behaviour the default rather than something each call site must
 //! remember.
 //! What: [`SecretString`] holds a `String` whose `Debug`/`Display` render the
-//! redacted preview from [`crate::inference::credentials::redact_secret`]. It
+//! redacted preview from [`crate::credentials::redact_secret`]. It
 //! does NOT derive `Serialize`, so it can never be written to the wire. The raw
 //! value is reachable only via the explicit [`SecretString::expose`] method.
 //! Test: inline `tests` — `secret_debug_is_redacted`, `secret_display_is_redacted`,
@@ -16,7 +16,7 @@
 
 use std::fmt;
 
-use crate::inference::credentials::redact_secret;
+use crate::credentials::redact_secret;
 
 /// A string credential that redacts itself in `Debug`/`Display`.
 ///

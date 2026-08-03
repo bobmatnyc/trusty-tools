@@ -203,12 +203,12 @@ rpassword = "7"
 toml = "0.8"
 libc = "0.2"
 unicode-width = "0.2"
-# `.env.local` loader for the trusty-common `inference::credentials` resolver
+# `.env.local` loader for the trusty-common `credentials` resolver
 # (issue #2401). Already used ad hoc by trusty-agents and trusty-search; the
 # workspace-shared pin lets those crates adopt the canonical loader later
 # without a version bump.
 dotenvy = "0.15"
-# OS-keychain credential storage for the `inference::credentials::KeyringStore`
+# OS-keychain credential storage for the `credentials::KeyringStore`
 # backend (issue #2401), gated behind trusty-common's `keyring-store` feature.
 # `apple-native`/`windows-native`/`sync-secret-service` select the per-OS
 # backend transparently; async D-Bus support is not needed here.

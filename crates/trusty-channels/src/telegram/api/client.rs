@@ -60,14 +60,14 @@ impl BaseClient {
     /// server boots for `tools/list` without credentials; the `MissingToken`
     /// error is deferred to the first call that actually needs auth.
     /// What: Builds the `reqwest::Client` and resolves the bot token through
-    /// `trusty_common::inference::credentials::resolve_key(TELEGRAM_PROVIDER)` —
+    /// `trusty_common::credentials::resolve_key(TELEGRAM_PROVIDER)` —
     /// process env (`TELEGRAM_BOT_TOKEN`) → `.env.local` → secure store, in that
     /// order. Returns `Err` only if the HTTP client fails to build.
     /// Test: `new_succeeds_without_token`; env-tier pickup in
     /// `tests/telegram_client_http.rs`.
     pub fn new() -> Result<Self> {
         let http = build_http_client()?;
-        let token = trusty_common::inference::credentials::resolve_key(TELEGRAM_PROVIDER);
+        let token = trusty_common::credentials::resolve_key(TELEGRAM_PROVIDER);
         Ok(Self {
             http,
             token,

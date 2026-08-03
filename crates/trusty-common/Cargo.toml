@@ -178,10 +178,10 @@ base64 = { workspace = true, optional = true }
 toml = { version = "0.8", optional = true }
 
 # Optional: enabled by the `credentials` feature (issue #2401). Shared
-# `.env.local` loader for the `inference::credentials` resolver's env tier.
+# `.env.local` loader for the `credentials` resolver's env tier.
 dotenvy = { workspace = true, optional = true }
 # Optional: enabled by the `keyring-store` feature (issue #2401). OS-keychain
-# backend for `inference::credentials::KeyringStore`.
+# backend for `credentials::KeyringStore`.
 keyring = { workspace = true, optional = true }
 # Optional: enabled by the `config-cli` feature (issue #2404). `clap` provides
 # the derive surface for the universal `config` command; `rpassword` reads a key
@@ -408,7 +408,7 @@ symgraph-server = ["symgraph-parser", "axum-server"]
 # (issue #989) — all production palaces are confirmed migrated to redb.
 #
 # Issue #2401: implies `credentials` so `memory_core::filter::redact_token`
-# can delegate to the single canonical `inference::credentials::redact_secret`
+# can delegate to the single canonical `credentials::redact_secret`
 # implementation without every `memory-core` consumer needing to opt in to
 # `credentials` separately — the two extra deps it pulls (`toml`, `dotenvy`)
 # are negligible next to memory-core's existing footprint.
@@ -544,18 +544,23 @@ stdio-mcp-client = []
 # client without a separate feature declaration.
 console-metrics = ["stdio-mcp-client"]
 
-# Enables the `inference::credentials` module (issue #2401, epic #2400 Wave
-# 1): the `KeyStore` trait, `MemoryKeyStore`, the `0600`-permission
-# `FileKeyStore` (`~/.trusty-tools/credentials.toml`), the `resolve_key`
+# Enables the top-level `credentials` module (issue #2401, epic #2400 Wave 1;
+# promoted out of `inference::` by #4564): the `KeyStore` trait,
+# `MemoryKeyStore`, the `0600`-permission
+# `FileKeyStore` (`~/.trusty-tools/credentials.toml`), the provider
+# `registry`, the `resolve_key`
 # 3-tier precedence resolver (process env > `.env.local` > secure store),
-# and the shared `redact_secret` helper. Pulls in `thiserror` (error type),
+# and the shared `redact_secret` helper. Independent of `inference-client`:
+# nothing here needs the provider stack, and #4564 keeps it that way so a
+# credential consumer does not compile an LLM client to read a Slack token.
+# Pulls in `thiserror` (error type),
 # `toml` (`FileKeyStore`'s on-disk format), and `dotenvy` (the `.env.local`
 # loader) — all already optional workspace deps. Does NOT pull in the OS
 # keychain backend; see `keyring-store` for that.
 credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
-# Enables `inference::credentials::KeyringStore`, the OS-keychain backend
+# Enables `credentials::KeyringStore`, the OS-keychain backend
 # (macOS Keychain / Windows Credential Manager / Secret Service on Linux)
-# selected by `inference::credentials::default_store` when available, with
+# selected by `credentials::default_store` when available, with
 # `FileKeyStore` as the runtime-probed fallback (issue #2401). Pulls in the
 # `keyring` crate in addition to everything `credentials` already requires.
 keyring-store = ["credentials", "dep:keyring"]

@@ -2,7 +2,7 @@
 //!
 //! Why: the clap layer ([`super::keys`]) is a thin shell around these functions
 //! so the whole `config keys` surface is exercisable non-interactively (a merge
-//! gate): tests inject a [`crate::inference::credentials::MemoryKeyStore`], a
+//! gate): tests inject a [`crate::credentials::MemoryKeyStore`], a
 //! [`Configurator`] pointed at a mock server, and an in-memory output buffer,
 //! then assert behaviour AND that no key value ever appears. Every function here
 //! takes its store / configurator / output sink as parameters — none reaches for
@@ -16,8 +16,8 @@
 
 use std::io::{BufRead, Write};
 
+use crate::credentials::{KeyStore, env_local_value, redact_secret, resolve_key_with};
 use crate::inference::configurator::Configurator;
-use crate::inference::credentials::{KeyStore, env_local_value, redact_secret, resolve_key_with};
 use crate::inference::error::InferenceError;
 use crate::inference::registry::{ProviderCapabilities, all, capabilities_for};
 use crate::inference::types::{ChatMessage, ChatRequest};

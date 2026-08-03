@@ -275,8 +275,7 @@ pub async fn stream_reply(
         return stream_reply_bedrock(model, messages, session_id, agent, cadence, sampling).await;
     }
 
-    let api_key =
-        trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default();
+    let api_key = trusty_common::credentials::resolve_key("openrouter").unwrap_or_default();
     if api_key.is_empty() {
         return Err(anyhow!(
             "streaming requires an OpenRouter API key; none resolved"

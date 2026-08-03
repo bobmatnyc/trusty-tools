@@ -1,26 +1,33 @@
-//! Credential resolver + secure `KeyStore` (issue #2401, epic #2400 Wave 1).
+//! Credential resolver + secure `KeyStore` — the storage and naming half of
+//! the credential authority (issue #2401; promoted to a top-level module by
+//! #4564, DOC-45).
 //!
-//! Why: every inference-adapter consumer needs the same answer to "where is
-//! the API key for provider X" — checked in the same order, with the same
+//! Why: every consumer needs the same answer to "where is the secret for
+//! provider X" — checked in the same order, with the same
 //! never-print-the-value discipline. Before this module, each crate either
 //! read `std::env::var` directly (no `.env.local` fallback, no secure-store
-//! fallback) or embedded its own ad hoc dotenv call. Centralising the trait,
-//! the three backends, and the precedence chain here means every future
-//! `inference-client` consumer (and, eventually, the migrated
-//! trusty-agents / trusty-search dotenvy call sites) gets identical
-//! behaviour for free.
+//! fallback) or embedded its own ad hoc dotenv call. It lived under
+//! `inference::` while its only consumers were LLM providers; by #4564 four of
+//! its ten registry entries were Slack/Telegram/`claude-code` tokens and the
+//! path had become actively misleading, which is why consumers kept adding a
+//! raw `std::env::var` read instead of finding it.
 //!
 //! What: [`KeyStore`] is the storage trait ([`memory_store::MemoryKeyStore`],
 //! [`file_store::FileKeyStore`], and — behind the `keyring-store` feature —
-//! `keyring_store::KeyringStore`). [`resolver::resolve_key`] applies the
-//! 3-tier precedence (process env var via [`resolver::env_var_for`] >
+//! `keyring_store::KeyringStore`). [`registry`] is the
+//! provider→environment-variable table. [`resolver::resolve_key`] applies the
+//! 3-tier precedence (process env var via [`registry::env_var_for`] >
 //! `.env.local` via [`dotenv`] > [`resolver::default_store`]).
 //! [`redact::redact_secret`] is the one credential-masking implementation,
 //! also reused by `memory_core::filter`.
 //!
-//! Test: `cargo test -p trusty-common --features credentials -- inference::credentials::`
+//! This module holds **no** authorization. Which principal may resolve which
+//! credential is DOC-45 §5 and lands with #4566; the storage tiers here
+//! determine *where a value lives*, never *who may read it* (`C-9.8`).
+//!
+//! Test: `cargo test -p trusty-common --features credentials -- credentials::`
 //! and (KeyringStore compile/probe-failure-path only, never a real keychain)
-//! `cargo test -p trusty-common --features keyring-store -- inference::credentials::`.
+//! `cargo test -p trusty-common --features keyring-store -- credentials::`.
 
 mod dotenv;
 mod file_store;
@@ -28,6 +35,7 @@ mod file_store;
 mod keyring_store;
 mod memory_store;
 mod redact;
+pub mod registry;
 mod resolver;
 
 pub use dotenv::{
@@ -39,7 +47,8 @@ pub use file_store::FileKeyStore;
 pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryKeyStore;
 pub use redact::redact_secret;
-pub use resolver::{default_store, env_var_for, resolve_key, resolve_key_with};
+pub use registry::{REGISTRY, env_var_for, registered_providers};
+pub use resolver::{default_store, resolve_key, resolve_key_with};
 
 use std::path::PathBuf;
 
