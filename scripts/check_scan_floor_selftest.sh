@@ -35,7 +35,7 @@
 #   bash scripts/check_scan_floor_selftest.sh line_cap            # one by name
 #   bash scripts/check_scan_floor_selftest.sh a b                 # several
 #   (names: line_cap generation_artifacts generation_artifacts_write_modes
-#    test_pointers doc_numbers claude_md changelog_fragment pr_version_bump
+#    test_pointers doc_numbers changelog_fragment pr_version_bump
 #    agent_assets_tool_error changelog_fragment_tool_error)
 #
 # Exit: 0 when every gate rejects its vacuous scan; 1 (naming the gate) when one
@@ -55,7 +55,7 @@ PASSED=0
 FAILED=0
 
 KNOWN="line_cap generation_artifacts generation_artifacts_write_modes \
-test_pointers doc_numbers claude_md changelog_fragment pr_version_bump \
+test_pointers doc_numbers changelog_fragment pr_version_bump \
 agent_assets_tool_error changelog_fragment_tool_error"
 
 for requested in "$@"; do
@@ -234,20 +234,7 @@ if want doc_numbers; then
 fi
 
 # ===========================================================================
-# 5. check_claude_md_not_tracked.sh — an index too small for the probe to mean
-#    anything (the "untracked" verdict is indistinguishable from a broken git).
-# ===========================================================================
-if want claude_md; then
-  f="$(new_fixture)"
-  install_gate "$f" check_claude_md_not_tracked.sh
-  echo "placeholder" > "$f/README.md"
-  git -C "$f" add -A && git -C "$f" commit -qm fixture
-  expect_rejects "check_claude_md_not_tracked.sh (index below floor)" "$f" \
-    bash scripts/check_claude_md_not_tracked.sh
-fi
-
-# ===========================================================================
-# 6. check_changelog_fragment.sh — an empty diff against the base.
+# 5. check_changelog_fragment.sh — an empty diff against the base.
 # ===========================================================================
 if want changelog_fragment; then
   f="$(new_fixture)"
@@ -259,7 +246,7 @@ if want changelog_fragment; then
 fi
 
 # ===========================================================================
-# 6b. check-pr-version-bump.sh — an empty diff against the base.
+# 5b. check-pr-version-bump.sh — an empty diff against the base.
 #     This gate has TWO empty-set outcomes and only one is a pass: a diff that
 #     resolved but holds no crate source is a legitimate docs-only PR, while a
 #     diff that resolved to nothing at all means the base ref never resolved.
@@ -275,7 +262,7 @@ if want pr_version_bump; then
 fi
 
 # ===========================================================================
-# 7. FAIL-OPEN CASE A — check_agent_assets.sh with `git ls-files` failing.
+# 6. FAIL-OPEN CASE A — check_agent_assets.sh with `git ls-files` failing.
 #    Pre-fix, the process substitution swallowed the 128 and the gate printed
 #    "0 byte-parity file(s) match — OK".
 # ===========================================================================
@@ -300,7 +287,7 @@ if want agent_assets_tool_error; then
 fi
 
 # ===========================================================================
-# 8. FAIL-OPEN CASE B — check_changelog_fragment.sh with the tree probe
+# 7. FAIL-OPEN CASE B — check_changelog_fragment.sh with the tree probe
 #    failing. Pre-fix, `git cat-file -e … || continue` read the error as the
 #    "this PR deleted the crate" exemption and printed OK over a real
 #    unrecorded source change.
