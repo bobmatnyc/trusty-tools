@@ -525,7 +525,10 @@ mod tests {
     fn classify_ambiguous_root_keeps_waiting_inside_grace() {
         let first = 1_000_000;
         let action = classify_ambiguous_root(Some(first), first + 6 * DAY, Some(7 * DAY));
-        assert_eq!(action, AmbiguousRootAction::KeepWaiting { age_secs: 6 * DAY });
+        assert_eq!(
+            action,
+            AmbiguousRootAction::KeepWaiting { age_secs: 6 * DAY }
+        );
     }
 
     /// Why (issue #4095, the terminal path): past the threshold the entry must
@@ -542,9 +545,7 @@ mod tests {
         );
         assert_eq!(
             classify_ambiguous_root(Some(first), first + 30 * DAY, Some(7 * DAY)),
-            AmbiguousRootAction::ReapRegistration {
-                age_secs: 30 * DAY
-            }
+            AmbiguousRootAction::ReapRegistration { age_secs: 30 * DAY }
         );
     }
 

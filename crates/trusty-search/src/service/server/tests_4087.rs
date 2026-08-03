@@ -20,7 +20,9 @@ use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::store::{UsearchStore, VectorStore};
 
 /// Build a registered index handle, optionally flagged corpus-open-failed.
-fn build_state_with(indexes: &[(&str, Option<CorpusOpenFailure>)]) -> (Arc<SearchAppState>, Arc<dyn Embedder>) {
+fn build_state_with(
+    indexes: &[(&str, Option<CorpusOpenFailure>)],
+) -> (Arc<SearchAppState>, Arc<dyn Embedder>) {
     let dim = 16;
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
     let registry = IndexRegistry::new();
@@ -82,9 +84,8 @@ async fn search_against_corpus_failed_index_returns_503_not_empty_200() {
     )
     .await;
 
-    let (status, Json(body)) = resp.expect_err(
-        "a corpus-failed index must NOT answer 200-with-empty-results (issue #4087)",
-    );
+    let (status, Json(body)) = resp
+        .expect_err("a corpus-failed index must NOT answer 200-with-empty-results (issue #4087)");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "index_corpus_unavailable");
     assert_eq!(body["index_id"], "broken");
@@ -122,7 +123,10 @@ async fn corpus_failure_response_distinguishes_permanent_from_transient() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["failure_kind"], "format_incompatible");
     assert_eq!(body["transient"], false);
-    assert!(body["message"].as_str().unwrap_or_default().contains("--force"));
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--force"));
 }
 
 /// Why: the guard must not fire for healthy indexes — a false positive would

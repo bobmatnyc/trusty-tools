@@ -35,7 +35,7 @@ mod tables;
 mod tests;
 mod types;
 
-pub(crate) use self::open_guard::open_serialized;
 pub use self::open_failure::CorpusOpenFailure;
+pub(crate) use self::open_guard::open_serialized;
 pub use self::store_impl::CorpusStore;
 pub use self::types::PersistedKgNode;

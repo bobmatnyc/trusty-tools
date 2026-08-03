@@ -287,7 +287,10 @@ mod tests {
     /// Test: this test.
     #[test]
     fn transient_kinds_never_recommend_rebuild() {
-        for kind in [CorpusOpenFailure::OpenTimeout, CorpusOpenFailure::Contention] {
+        for kind in [
+            CorpusOpenFailure::OpenTimeout,
+            CorpusOpenFailure::Contention,
+        ] {
             let reason = kind.stage_reason();
             assert!(
                 reason.contains("DO NOT reindex"),

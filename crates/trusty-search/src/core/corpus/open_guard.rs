@@ -318,9 +318,7 @@ where
         // #4333: return the TYPED wedge marker, not a bare string, so
         // `CorpusOpenFailure::classify` can recognise contention by downcast
         // and never mislabel it as a corrupted on-disk format.
-        return Err(anyhow::Error::new(CorpusOpenWedged {
-            path: path_display,
-        }));
+        return Err(anyhow::Error::new(CorpusOpenWedged { path: path_display }));
     }
 
     let timeout_dur = corpus_open_timeout();

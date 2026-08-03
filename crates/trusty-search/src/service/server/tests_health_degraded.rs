@@ -65,9 +65,7 @@ async fn health_reports_degraded_when_corpus_open_failed() {
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failure: Some(
-                crate::core::corpus::CorpusOpenFailure::FormatIncompatible,
-            ),
+            corpus_open_failure: Some(crate::core::corpus::CorpusOpenFailure::FormatIncompatible),
         });
         assert!(
             stages.any_failed(),
