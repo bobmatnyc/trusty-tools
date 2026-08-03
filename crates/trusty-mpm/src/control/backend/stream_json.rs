@@ -69,7 +69,15 @@ pub const ANTHROPIC_API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
 /// --workdir <dir>` with `ANTHROPIC_API_KEY` removed from the child env,
 /// stdin/stdout piped, stderr captured, and the working directory set. The
 /// caller converts it to a `tokio::process::Command` to spawn.
-/// Test: `build_command_removes_api_key`, `build_command_has_stream_json_args`.
+///
+/// Issue #4467: the same `env_remove` seam also strips Claude Code's inherited
+/// process-local session markers via
+/// [`crate::core::claude_env_scrub::scrub_command`]. This backend inherits the
+/// daemon's environment, so when the daemon was itself started from inside a
+/// Claude Code session the leaked `CLAUDE_CODE_CHILD_SESSION` reached every
+/// headless `claude` it spawned and disabled transcript saving.
+/// Test: `build_command_removes_api_key`, `build_command_has_stream_json_args`,
+/// `build_command_scrubs_inherited_session_markers`.
 pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::process::Command {
     // Invoke `claude` directly (not via the `env -u` shell wrapper). Using
     // Command::env_remove makes the key-removal an explicit, inspectable part
@@ -79,6 +87,8 @@ pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::
     let mut cmd = std::process::Command::new("claude");
     // §9.1 LOCKED: strip the metered key so claude uses ~/.claude Max OAuth.
     cmd.env_remove(ANTHROPIC_API_KEY_VAR);
+    // #4467: strip the inherited Claude Code session markers for the same reason.
+    crate::core::claude_env_scrub::scrub_command(&mut cmd);
     cmd.arg("-p");
     cmd.arg("--output-format").arg("stream-json");
     if let Some(pf) = prompt_file {
@@ -306,6 +316,29 @@ mod tests {
         assert_eq!(
             removed.1, None,
             "ANTHROPIC_API_KEY must be REMOVED (None), never set, in the child env"
+        );
+    }
+
+    #[test]
+    fn build_command_scrubs_inherited_session_markers() {
+        // #4467: the daemon may itself have been started from inside a Claude
+        // Code session, in which case every headless `claude` it spawned
+        // inherited CLAUDE_CODE_CHILD_SESSION and saved no transcript. The
+        // marker name is hard-coded so the assertion cannot go vacuous if the
+        // shared constant is emptied.
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let muts = env_mutations(&cmd);
+        let removed = muts
+            .iter()
+            .find(|(k, _)| k == "CLAUDE_CODE_CHILD_SESSION")
+            .expect("CLAUDE_CODE_CHILD_SESSION must appear as an explicit env mutation");
+        assert_eq!(
+            removed.1, None,
+            "CLAUDE_CODE_CHILD_SESSION must be REMOVED (None) from the child env"
+        );
+        assert!(
+            !muts.iter().any(|(k, _)| k == "CLAUDE_CONFIG_DIR"),
+            "CLAUDE_CONFIG_DIR must not be touched by the scrub (#4455): {muts:?}"
         );
     }
 

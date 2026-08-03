@@ -19,6 +19,7 @@ pub mod agent_reset_workspace;
 pub mod agent_skill_codeploy;
 pub mod artifact;
 pub mod auto_resume;
+pub mod binary_provenance;
 pub mod budget;
 pub mod bundle;
 // Epic #4183: the DEFAULT (bundled-fallback) PM prompt, re-sourced through
@@ -29,6 +30,11 @@ pub mod bundled_pm_package;
 pub mod catchup;
 pub mod circuit;
 pub mod claude_config;
+// Issue #4467: the shared set of Claude Code process-local session markers every
+// managed spawn must scrub. An inherited `CLAUDE_CODE_CHILD_SESSION` makes
+// Claude Code disable transcript saving, costing the session native
+// `--resume`/`--continue`/`/rewind` recovery.
+pub mod claude_env_scrub;
 // Epic #4183 / #4286: the READER for `CLAUDE.md` named-section instruction
 // overrides. Ships before the floor text that advertises the mechanism —
 // advertising an override no code reads is issue #381 verbatim.
@@ -103,11 +109,16 @@ pub mod session;
 pub mod session_assets;
 pub mod session_launch;
 pub mod session_store;
+pub mod skill_deploy_tiers;
 pub mod skill_deployer;
+pub mod skill_drift;
 pub mod skill_manifest;
+pub mod skill_reconcile;
+pub mod skill_repair;
 pub mod skill_source;
 pub mod skill_staleness;
 pub mod skill_tiers;
+pub mod skill_unmanaged;
 pub mod sm;
 pub mod spawn_disclaim;
 pub mod stack_profile;

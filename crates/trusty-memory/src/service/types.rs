@@ -41,6 +41,18 @@ pub struct PalaceInfo {
     pub community_count: u64,
     #[serde(default)]
     pub is_compacting: bool,
+    /// Whether the palace's handle was resident in the registry's open-handle
+    /// cache when this row was built (issue #4637).
+    ///
+    /// The full-registry list route no longer force-opens every palace — at
+    /// 5,794 palaces that was ~90 minutes of cold disk I/O per request. When
+    /// this is `false`, `drawer_count` / `vector_count` / `kg_triple_count` /
+    /// `wing_count` / `node_count` / `edge_count` / `community_count` are `0`
+    /// because they are **unknown**, not because they are empty; fetch
+    /// `GET /api/v1/palaces/{id}` for live counts on a specific palace.
+    /// `#[serde(default)]` keeps the field omissible for older clients.
+    #[serde(default)]
+    pub cached: bool,
 }
 
 /// Dream statistics wire shape used by both per-palace and aggregate endpoints.
@@ -189,24 +201,132 @@ pub struct KgAssertBody {
 }
 
 /// Knowledge-graph "graph payload" used by `GET /api/v1/palaces/{id}/kg/graph`.
+///
+/// Why: the count fields are computed over the FULL in-memory adjacency while
+/// `triples` is capped at `KG_GRAPH_MAX_TRIPLES`. Before issue #4670 nothing
+/// in the payload said so, so a client rendering 5,000 triples while the badge
+/// read "9,311 nodes" had no way to know it was looking at a partial graph —
+/// and because `list_active` orders by `valid_from` DESC, the dropped triples
+/// were silently the oldest ones. `returned_triple_count` / `active_triple_count`
+/// / `truncated` make the gap explicit and machine-checkable.
+/// What: the triple window plus both the true totals and what was actually
+/// returned.
+/// Test: `kg_graph_signals_truncation`, `kg_graph_returns_active_triples`.
 #[derive(Serialize, Clone, Debug)]
 pub struct KgGraphPayload {
+    pub triples: Vec<Triple>,
+    /// Distinct entities in the whole palace — NOT the node count of `triples`.
+    pub node_count: u64,
+    /// Directed edges in the whole palace — NOT `triples.len()`.
+    pub edge_count: u64,
+    pub community_count: u64,
+    // #4670: the three fields below exist so no client can mistake a truncated
+    // graph for a complete one.
+    /// How many triples this response actually carries.
+    pub returned_triple_count: u64,
+    /// How many active triples exist in the palace.
+    pub active_triple_count: u64,
+    /// `returned_triple_count < active_triple_count`.
+    pub truncated: bool,
+}
+
+/// One node in a progressive-exploration response.
+///
+/// Why (issue #4670): the client must be able to say "48 edges, 3 shown" —
+/// that requires the node's degree in the WHOLE graph, not in the fragment it
+/// was handed.
+/// What: entity name plus its graph-wide in/out/total degree.
+/// Test: `kg_graph_seed_ranks_by_degree`.
+#[derive(Serialize, Clone, Debug)]
+pub struct KgNodeView {
+    pub id: String,
+    pub degree: u64,
+    pub in_degree: u64,
+    pub out_degree: u64,
+}
+
+impl From<trusty_common::memory_core::store::kg::SeedNode> for KgNodeView {
+    fn from(n: trusty_common::memory_core::store::kg::SeedNode) -> Self {
+        Self {
+            id: n.entity,
+            degree: n.degree as u64,
+            in_degree: n.in_degree as u64,
+            out_degree: n.out_degree as u64,
+        }
+    }
+}
+
+/// Payload for `GET /api/v1/palaces/{id}/kg/graph/seed`.
+///
+/// Why (issue #4670): first paint should show the graph's skeleton (the
+/// highest-degree nodes and the edges among them), never the whole hairball.
+/// Carrying the palace-wide totals alongside the returned slice is what lets
+/// the header read "75 of 9,311 nodes shown" instead of implying completeness.
+/// What: the seed nodes, the induced edges as `Triple`s (same wire shape as
+/// `/kg/graph`'s `triples`, so the client merges without a second parser), the
+/// palace-wide totals, and the `limit` actually applied after clamping.
+/// Test: `kg_graph_seed_ranks_by_degree`, `kg_graph_seed_clamps_limit`.
+#[derive(Serialize, Clone, Debug)]
+pub struct KgSeedPayload {
+    pub nodes: Vec<KgNodeView>,
     pub triples: Vec<Triple>,
     pub node_count: u64,
     pub edge_count: u64,
     pub community_count: u64,
+    pub returned_node_count: u64,
+    pub returned_triple_count: u64,
+    /// The clamped limit this response was built with.
+    pub limit: u64,
+    /// `returned_node_count < node_count`.
+    pub truncated: bool,
+}
+
+/// Payload for `GET /api/v1/palaces/{id}/kg/graph/neighbors`.
+///
+/// Why (issue #4670): click-to-expand merges this into the rendered set, so it
+/// needs the same node/triple shape as the seed. `community_count` is
+/// deliberately absent — Louvain is the expensive part of the full-graph call
+/// and the client already has the palace's community count from the seed load.
+/// What: the reached nodes (origin first, so the client can anchor new nodes
+/// on it), the traversed edges, and the echoed traversal parameters.
+/// Test: `kg_neighbors_returns_incoming_edges`, `kg_neighbors_clamps_max_hops`.
+#[derive(Serialize, Clone, Debug)]
+pub struct KgNeighborsPayload {
+    pub origin: String,
+    pub nodes: Vec<KgNodeView>,
+    pub triples: Vec<Triple>,
+    pub returned_node_count: u64,
+    pub returned_triple_count: u64,
+    /// Echoed back after clamping so the client can see what actually ran.
+    pub direction: String,
+    pub max_hops: u64,
 }
 
 /// Status payload returned by `GET /api/v1/status`.
+///
+/// Issue #4637 changed the meaning of the three `total_*` fields: they are now
+/// summed over the palaces resident in the registry's open-handle cache, not
+/// over every palace on disk, because summing over disk meant force-opening
+/// ~5,730 cold palaces per request. `palace_count` still reports the true
+/// on-disk total; `cached_palace_count` reports how many of those the totals
+/// actually cover.
 #[derive(Serialize, Clone, Debug)]
 pub struct StatusPayload {
     pub version: String,
+    /// Every palace on disk.
     pub palace_count: usize,
     pub default_palace: Option<String>,
     pub data_root: String,
+    /// Summed over cache-resident palaces only — see the type docs (#4637).
     pub total_drawers: usize,
+    /// Summed over cache-resident palaces only — see the type docs (#4637).
     pub total_vectors: usize,
+    /// Summed over cache-resident palaces only — see the type docs (#4637).
     pub total_kg_triples: usize,
+    /// How many of `palace_count` palaces the three totals above cover
+    /// (issue #4637). `#[serde(default)]` keeps it omissible for older clients.
+    #[serde(default)]
+    pub cached_palace_count: usize,
 }
 
 /// Service-level error type that maps cleanly onto HTTP status codes.

@@ -24,7 +24,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::core::delegation_authority::{generate_authority, scan_agents};
+use crate::core::delegation_authority::{generate_authority, resolve_roster};
 use crate::core::instruction_package::SectionId;
 
 /// Separator placed between merged instruction sections.
@@ -76,6 +76,13 @@ pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/sections/
 /// `AGENT_DELEGATION.md` override is present.
 pub(crate) const AGENT_DELEGATION: &str =
     include_str!("../assets/instructions/sections/agent-delegation.md");
+/// The canonical Prohibitions and Circuit Breakers tables. Floor, tier `fixed`.
+///
+/// Split out of `core.md` by #4573: both tables sat inside the `project`-tier
+/// core section, so a three-line `CORE` block in a project's `CLAUDE.md` deleted
+/// the PM's entire delegation-enforcement authority and still validated.
+pub(crate) const SECTION_ENFORCEMENT: &str =
+    include_str!("../assets/instructions/sections/enforcement.md");
 /// Absorbed BASE_PM non-overridable rules, the customization contract, and the
 /// Trusty tool-priority mandate. Floor, tier `fixed`.
 pub(crate) const SECTION_NON_OVERRIDABLE_RULES: &str =
@@ -94,17 +101,18 @@ pub(crate) const SECTION_FRAMEWORK_CONVENTIONS: &str =
 /// content drop. Every entry here is an `include_str!` of a constant declared
 /// above, so the build stays hermetic and a missing section file is a compile
 /// error rather than a launch-time surprise.
-/// What: the eight canonical section sources, keyed by the path form the manifest
+/// What: the nine canonical section sources, keyed by the path form the manifest
 /// uses — relative to `assets/instructions/`. Table order is irrelevant; the
 /// manifest's `blocks` array alone decides emission order.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
-pub(crate) const SECTION_SOURCES: [(&str, &str); 8] = [
+pub(crate) const SECTION_SOURCES: [(&str, &str); 9] = [
     ("sections/identity.md", SECTION_IDENTITY),
     ("sections/core.md", SECTION_CORE),
     ("sections/memory.md", SECTION_MEMORY),
     ("sections/search.md", SECTION_SEARCH),
     ("sections/workflow.md", WORKFLOW),
     ("sections/agent-delegation.md", AGENT_DELEGATION),
+    ("sections/enforcement.md", SECTION_ENFORCEMENT),
     (
         "sections/non-overridable-rules.md",
         SECTION_NON_OVERRIDABLE_RULES,
@@ -120,7 +128,7 @@ pub(crate) const SECTION_SOURCES: [(&str, &str); 8] = [
 /// Why: one lookup point means a path typo in the manifest becomes a named
 /// [`crate::core::instruction_package::ValidationError::UnknownFileSource`]
 /// instead of an empty block.
-/// What: a linear scan of [`SECTION_SOURCES`] — eight entries, called a handful
+/// What: a linear scan of [`SECTION_SOURCES`] — nine entries, called a handful
 /// of times per process, so a map would buy nothing and would reintroduce the
 /// iteration-order hazard the package format exists to avoid.
 /// Test: `every_section_source_resolves`, `unknown_file_source_is_rejected`.
@@ -173,7 +181,7 @@ pub(crate) fn pm_instructions() -> &'static str {
 /// as the retained fallback for the case where the manifest itself is unreadable.
 /// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
 /// manifest failed to parse or validate.
-/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_three_sections`.
+/// Test: `pm_instructions_is_its_three_sections`, `base_pm_is_its_four_sections`.
 fn manifest_run(sections: &[SectionId]) -> Option<String> {
     crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
 }
@@ -218,9 +226,15 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// Why: the floor is appended last under *every* override branch, including full
 /// PM replacement, so the resolver needs it as one opaque string. Same
 /// no-duplicate-copy argument as [`pm_instructions`].
-/// What: Identity, Non-Overridable Rules (which now carries the Trusty
-/// tool-priority mandate) and Framework-Guaranteed Conventions, joined with a
-/// paragraph break.
+/// What: Identity, Enforcement (the Prohibitions and Circuit Breakers tables),
+/// Non-Overridable Rules (which now carries the Trusty tool-priority mandate) and
+/// Framework-Guaranteed Conventions, joined with a paragraph break.
+///
+/// #4573: `Enforcement` joins the floor here so the two authority tables reach
+/// EVERY legacy branch too — including the `PM_INSTRUCTIONS_DEPLOYED.md` full
+/// replacement, which discards every body section and appends only this string.
+/// That is the second of the two wholesale-deletion paths #4573 names, and it is
+/// closed by this list, not by the tier declaration alone.
 ///
 /// ORDER CHANGE, recorded because it is the one floor reordering #4183 makes:
 /// `BASE_PM.md` used to place `## Trusty Tool Priority (Non-Overridable)` *after*
@@ -228,18 +242,20 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// travels with the other non-overridable rules and consequently precedes the
 /// conventions. Position only — not one word of either block changed, and both
 /// remain inside the floor, so nothing about what is overridable moved.
-/// Test: `base_pm_is_its_three_sections`, `floor_carries_the_tool_priority_mandate`.
+/// Test: `base_pm_is_its_four_sections`, `floor_carries_the_tool_priority_mandate`.
 pub(crate) fn base_pm() -> &'static str {
     static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let run = manifest_run(&[
             SectionId::Identity,
+            SectionId::Enforcement,
             SectionId::NonOverridableRules,
             SectionId::FrameworkGuaranteedConventions,
         ])
         .unwrap_or_else(|| {
             format!(
-                "{}\n\n{}\n\n{}",
+                "{}\n\n{}\n\n{}\n\n{}",
                 SECTION_IDENTITY.trim(),
+                SECTION_ENFORCEMENT.trim(),
                 SECTION_NON_OVERRIDABLE_RULES.trim(),
                 SECTION_FRAMEWORK_CONVENTIONS.trim()
             )
@@ -309,7 +325,7 @@ pub fn install_system_prompt() -> std::io::Result<std::path::PathBuf> {
 /// creates it exactly once and then never touches it again, so the operator
 /// can edit freely (issue #2170 — trusty-mpm must never modify a target
 /// project's `CLAUDE.md`).
-const CLAUDE_MD_STUB: &str = "# Project Instructions
+pub(crate) const CLAUDE_MD_STUB: &str = "# Project Instructions
 
 <!-- trusty-mpm: created by `trusty-mpm session start` — customize for your project -->
 <!-- trusty-mpm will never modify this file again after creating it. -->
@@ -318,13 +334,36 @@ const CLAUDE_MD_STUB: &str = "# Project Instructions
 
 <!-- Describe your project, tech stack, and any conventions the agent should know. -->
 
+## Framework Instructions
+
+This file is the ONLY surface for customizing the PM's instructions. To replace
+a section of the framework prompt, put the replacement between a marker pair —
+`<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` on its own line, your text, then
+`<!-- TRUSTY-MPM: WORKFLOW END -->` on its own line.
+
+(Those markers are shown inline deliberately. A marker alone on a line IS the
+mechanism, so a worked example here would take effect as a real override — see
+`seeded_claude_md_declares_no_overrides`.)
+
+Tokens: `IDENTITY`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
+`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`.
+`CORE` is the one token that is always declined. Prose outside the markers is
+project context — Claude Code loads it natively, so it is never copied into the
+composed prompt.
+
+The instructions actually delivered to this session are written to
+`.trusty-mpm/last-instructions.md` on every launch. Read that file to see what
+the PM received, including which of your overrides applied:
+
+```
+tm session instructions          # print it, with applied/declined markers on stderr
+cat .trusty-mpm/last-instructions.md
+```
+
 ## Commit & PR Attribution
 
-The non-overridable framework instructions (`BASE_PM.md` \"Framework-Guaranteed
-Conventions\") are the source of truth for this convention and apply
-regardless of what this file says. This restatement exists so a `claude`
-session launched directly in this project (outside `tm` orchestration) still
-sees it, since only `tm`-orchestrated launches receive the BASE_PM floor.
+This restatement exists so a `claude` session launched directly in this project
+(outside `tm` orchestration) still sees the convention.
 
 Every commit message and PR body in this project ends with exactly this footer:
 
@@ -424,15 +463,22 @@ pub fn strip_delegation_block(content: &str) -> String {
 ///
 /// Why: bundles the three source locations so callers pass one value instead
 /// of three loosely-related paths.
-/// What: the framework `INSTRUCTIONS.md`, the deployed agents directory, and
-/// the project `CLAUDE.md`.
+/// What: the framework `INSTRUCTIONS.md`, the project the roster is resolved
+/// for, and the project `CLAUDE.md`.
 /// Test: every `pipeline_*` test constructs one of these.
 #[derive(Debug, Clone)]
 pub struct PipelineInput {
     /// Path to the framework `INSTRUCTIONS.md`.
     pub framework_instructions_path: PathBuf,
-    /// Directory of deployed agents (`~/.claude/agents/`).
-    pub agents_dir: PathBuf,
+    /// The project whose agent roster this session will receive.
+    ///
+    /// #4588: this replaced a single `agents_dir`. Callers used to name one
+    /// directory to scan, which is how the printed count came to describe a
+    /// different set of agents than the PM was given. The roster is resolved
+    /// from the project by
+    /// [`crate::core::delegation_authority::resolve_roster`], so there is no
+    /// longer a directory for a caller to get wrong.
+    pub project_dir: PathBuf,
     /// Path to the project `CLAUDE.md`.
     pub claude_md_path: PathBuf,
 }
@@ -504,13 +550,16 @@ impl std::error::Error for PipelineError {
 /// Code loads it natively), so this still seeds the stub as a side effect.
 ///
 /// What: loads INSTRUCTIONS.md (falls back to empty string if missing),
-/// generates delegation authority from agents_dir, concatenates the two in
-/// order 3→4, and returns the merged string. Separately ensures the project
-/// `CLAUDE.md` exists (creating the stub if absent) purely for its side
-/// effect — its content is intentionally NOT folded into `merged` (dead code
-/// removed; see module docs).
+/// generates delegation authority from the roster
+/// [`crate::core::delegation_authority::resolve_roster`] resolves for
+/// `project_dir`, concatenates the two in order 3→4, and returns the merged
+/// string. Separately ensures the project `CLAUDE.md` exists (creating the stub
+/// if absent) purely for its side effect — its content is intentionally NOT
+/// folded into `merged` (dead code removed; see module docs).
 ///
-/// Test: `pipeline_full`, `pipeline_missing_instructions`, `pipeline_creates_claude_md`
+/// Test: `pipeline_full`, `pipeline_missing_instructions`,
+/// `pipeline_creates_claude_md`,
+/// `session_start_count_matches_the_delivered_delegation_roster`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
     // Section 3: framework instructions. A missing file is not fatal — the
     // session can still launch with delegation context.
@@ -527,7 +576,11 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
         };
 
     // Section 4: delegation authority, built fresh from the deployed agents.
-    let agents = scan_agents(&input.agents_dir);
+    // #4588: resolved by `resolve_roster` — the SAME function that renders the
+    // delegation section delivered to the PM — so `agent_count`, which
+    // `tm session start` prints verbatim, cannot describe a different set of
+    // agents than the PM received.
+    let agents = resolve_roster(&input.project_dir);
     let agent_count = agents.len();
     let authority = generate_authority(&agents);
 

@@ -22,7 +22,12 @@
 //! interactive TUI REPL, which talks to a long-lived `tcode serve --http`
 //! daemon instead. It lives here anyway because it is the same KIND of thing
 //! — argument-shaped setup plus a handoff, with every decision made
-//! elsewhere (see its module docs). (#4434) [`legacy_run_task::run`] is the
+//! elsewhere (see its module docs) — with the one exception of
+//! [`daemon_autospawn`] (#4512), the policy module `tui::run` delegates to
+//! for "attach to a running daemon, or start one and own it". That is a
+//! genuine decision rather than glue, which is exactly why it is a separate,
+//! separately-tested file instead of more code inside `tui.rs`.
+//! (#4434) [`legacy_run_task::run`] is the
 //! other: it is `run-task --legacy-in-process`, the pre-#2060 path that runs
 //! the `AgentLoop` in THIS process rather than driving a daemon, so it alone
 //! carries CLI-shaped setup no thin client needs (agent-name validation,
@@ -37,6 +42,7 @@
 
 pub mod attach;
 pub mod cancel;
+pub mod daemon_autospawn;
 pub mod legacy_run_task;
 pub mod run_task;
 pub mod session;

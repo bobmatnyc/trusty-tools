@@ -306,7 +306,7 @@ pub(super) async fn send_raw_completion(
         // Fall back to the resolved OpenRouter credential (env > .env.local >
         // secure store) when the adapter doesn't supply one (legacy callers
         // that rely on this fallback rather than a populated `ApiEndpoint`).
-        trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default()
+        trusty_common::credentials::resolve_key("openrouter").unwrap_or_default()
     } else {
         endpoint
             .auth_header_value

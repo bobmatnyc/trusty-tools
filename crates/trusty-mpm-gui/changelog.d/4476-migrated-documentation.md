@@ -1,0 +1,3 @@
+Documentation
+
+- Documented the cert-less build escape hatch for `cargo tauri build` (#2957 review follow-up): `bundle.macOS.signingIdentity` in `tauri.conf.json` is hardcoded to Bob's Developer ID cert, so building the bundle on any other machine requires either that exact certificate in the keychain or an `APPLE_SIGNING_IDENTITY` environment variable override (`APPLE_SIGNING_IDENTITY=-` for a local ad-hoc build, or a different Developer ID string) — Tauri's bundler honors the env var in place of the config value. See the README's "Release Build" section and `docs/reference/common-pitfalls.md`.

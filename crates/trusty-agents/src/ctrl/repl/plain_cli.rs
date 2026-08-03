@@ -68,7 +68,14 @@ pub async fn run_plain_cli() -> Result<()> {
     // matches exactly. Missing/broken `assistant/agent.toml` degrades
     // gracefully: the error is surfaced and the session stays on `ctrl`.
     match repl
-        .try_handle_slash(&format!("/switch {DEFAULT_PERSONA}"))
+        .try_handle_slash(
+            &format!("/switch {DEFAULT_PERSONA}"),
+            // #4685: THIS PROGRAM issued the command, not the operator — the
+            // REPL has not read a single byte of stdin yet. Recording it as
+            // human would make every launch forge attendance for an owner who
+            // may have started `tagent` over SSH and walked away.
+            crate::attendance::TurnOrigin::Assistant,
+        )
         .await
     {
         Some(Ok((_, output))) => {
@@ -143,7 +150,12 @@ pub async fn run_plain_cli() -> Result<()> {
             continue;
         }
 
-        match repl.try_handle_slash(trimmed).await {
+        // #4685: this line came off the interactive stdin prompt above, so a
+        // person typed it — the one call site in this file that can say so.
+        match repl
+            .try_handle_slash(trimmed, crate::attendance::TurnOrigin::Human)
+            .await
+        {
             Some(Ok((cont, output))) => {
                 if !output.is_empty() {
                     print!("{output}");
@@ -173,7 +185,12 @@ pub async fn run_plain_cli() -> Result<()> {
 /// context keeps flowing exactly like the TUI.
 async fn dispatch_free_text(repl: &mut crate::repl::TrustyAgentsRepl, trimmed: &str) {
     let start = std::time::Instant::now();
-    match repl.attempt_forward(trimmed).await {
+    // #4685: `trimmed` came off the interactive stdin prompt in
+    // `run_plain_cli`'s loop — the only caller — so a person typed it.
+    match repl
+        .attempt_forward(trimmed, crate::attendance::TurnOrigin::Human)
+        .await
+    {
         Ok((response, _usage)) => {
             let elapsed = start.elapsed();
             println!("{response}");

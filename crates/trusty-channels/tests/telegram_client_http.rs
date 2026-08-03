@@ -18,9 +18,7 @@ use serial_test::serial;
 use trusty_channels::telegram::api::client::BaseClient;
 use trusty_channels::telegram::api::constants::{TELEGRAM_PROVIDER, TELEGRAM_TOKEN_ENV};
 use trusty_channels::telegram::api::error::TelegramError;
-use trusty_common::inference::credentials::{
-    env_var_for, resolve_key_with, KeyStore, MemoryKeyStore,
-};
+use trusty_common::credentials::{env_var_for, resolve_key_with, KeyStore, MemoryKeyStore};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

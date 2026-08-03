@@ -32,7 +32,7 @@ pub mod registry;
 pub mod transcript;
 
 pub use connector::TcodeConnector;
-pub use memory_sink::TurnMemorySink;
+pub use memory_sink::{PalaceCreation, TurnMemorySink};
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;
 pub use transcript::{GoalSlotRecord, TranscriptRecord};

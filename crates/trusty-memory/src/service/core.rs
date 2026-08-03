@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use super::helpers::{
     collect_palace_stats, drawer_content_preview, drawer_snippet, is_reserved_system_palace,
-    palace_info_from, recall_entry_json,
+    list_palaces_blocking, open_palaces_blocking, palace_info_from, recall_entry_json,
 };
 use super::types::{
     CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult,
@@ -80,16 +80,25 @@ impl MemoryService {
     ///
     /// Why: dashboard widgets and the MCP `get_status` tool need the same
     /// roll-up; centralising avoids drift between the two surfaces.
-    /// What: walks every persisted palace, sums drawer/vector/triple counts,
-    /// and returns the [`StatusPayload`].
-    /// Test: `status_endpoint_returns_payload`.
+    /// What: walks every persisted palace for `palace_count`, then sums
+    /// drawer/vector/triple counts across the cache-resident subset and
+    /// returns the [`StatusPayload`].
+    /// Why (issue #4637): this used to open every persisted palace to sum
+    /// those three counts. With 5,794 palaces on disk against a 64-slot LRU
+    /// that is ~5,730 cold opens of ~1s each — the endpoint measurably never
+    /// responded. `palace_count` still reflects the true on-disk total (the
+    /// directory walk is cheap and now runs on the blocking pool); the totals
+    /// cover only cache-resident palaces and say so via `cached_palace_count`.
+    /// Test: `status_endpoint_returns_payload`,
+    /// `status_does_not_open_uncached_palaces`.
     pub async fn status(&self) -> StatusPayload {
         // The `/status` endpoint is the one place we still want a disk view —
         // an operator hitting this endpoint right after restart (before
         // `load_palaces_from_disk` finishes) should still see every persisted
         // palace counted, even if it isn't in the in-memory registry yet.
-        let palaces = PalaceRegistry::list_palaces(&self.state.data_root).unwrap_or_default();
+        let palaces = list_palaces_blocking(&self.state).await.unwrap_or_default();
         let palace_count = palaces.len();
+        // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
         let stats = collect_palace_stats(&self.state, palaces.iter().map(|p| &p.id));
         StatusPayload {
             version: self.state.version.clone(),
@@ -99,6 +108,7 @@ impl MemoryService {
             total_drawers: stats.total_drawers,
             total_vectors: stats.total_vectors,
             total_kg_triples: stats.total_kg_triples,
+            cached_palace_count: stats.cached_palace_count,
         }
     }
 
@@ -146,21 +156,28 @@ impl MemoryService {
     /// admin UI, TUI, or any user-facing roster.
     /// What: walks the registry, drops any palace whose id starts with the
     /// reserved `__` prefix, and builds a `PalaceInfo` per remaining row.
+    /// Why (issue #4637): this used to call `open_palace` per row purely to
+    /// enrich it with counts. At 5,794 palaces against a 64-slot LRU that is
+    /// ~90 minutes of cold, blocking disk I/O inline on the async executor —
+    /// and it evicted the entire working set on every call. Rows now come
+    /// from `PalaceRegistry::peek` (zero I/O, no LRU promotion, mirroring the
+    /// #1924 fix in `console_metrics.rs`). Uncached rows carry `cached: false`
+    /// and zero counts; a client that needs live counts for one palace should
+    /// fetch `GET /api/v1/palaces/{id}`, which still opens it.
     /// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`,
-    /// `health_probe_palace_is_invisible` (in `web::tests`).
+    /// `health_probe_palace_is_invisible` (in `web::tests`),
+    /// `list_palaces_does_not_open_uncached_palaces`.
     pub async fn list_palaces(&self) -> ServiceResult<Vec<PalaceInfo>> {
-        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
-            .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
+        let palaces = list_palaces_blocking(&self.state)
+            .await
+            .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
         let mut out = Vec::with_capacity(palaces.len());
         for p in palaces {
             if is_reserved_system_palace(&p.id) {
                 continue;
             }
-            let handle = self
-                .state
-                .registry
-                .open_palace(&self.state.data_root, &p.id)
-                .ok();
+            // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
+            let handle = self.state.registry.peek(&p.id);
             out.push(palace_info_from(&p, handle.as_ref()));
         }
         Ok(out)
@@ -290,6 +307,9 @@ impl MemoryService {
         // in-memory state. The registry's `remove` is a no-op when the entry
         // is absent (lazy-open palaces that no caller has touched yet).
         self.state.registry.remove(&PalaceId::new(palace_id));
+        // #4639: drop the cached chat_sessions.redb handle too — otherwise the
+        // fd survives `remove_dir_all` and pins the deleted inode forever.
+        self.state.session_stores.remove(palace_id);
         // Issue #228: drop the palace-name cache entry so future writes never
         // resolve to a stale label.
         self.state.palace_names.remove(palace_id);
@@ -643,26 +663,26 @@ impl MemoryService {
     /// What: lists every palace, opens handles (skipping failures with a
     /// `tracing::warn!`), delegates to
     /// `recall_across_palaces_with_default_embedder`. Returns a JSON array.
+    /// Why (issue #4637): unlike `list_palaces`/`status`, this route is NOT
+    /// converted to `peek()`. A cross-palace recall that answered from
+    /// cache-resident palaces only would silently omit ~98.9% of the corpus —
+    /// a wrong answer that looks like a right one, which is strictly worse
+    /// than a slow correct one. The open loop keeps opening every palace; it
+    /// just no longer does so inline on a tokio worker thread. Making this
+    /// route actually fast needs a different design (a shared cross-palace
+    /// index, or an explicit palace-scoped query), not a cache-only read.
     /// Test: indirectly via `recall_across_palaces_merges_results` and the
-    /// MCP `memory_recall_all` integration paths.
+    /// MCP `memory_recall_all` integration paths;
+    /// `open_palaces_blocking_opens_every_palace` pins that uncached palaces
+    /// are still searched.
     pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
-        let palaces = match PalaceRegistry::list_palaces(&self.state.data_root) {
+        let palaces = match list_palaces_blocking(&self.state).await {
             Ok(v) => v,
-            Err(e) => return json!({ "error": format!("list palaces: {e:#}") }),
+            Err(e) => return json!({ "error": format!("{e:#}") }),
         };
-        let mut handles = Vec::with_capacity(palaces.len());
-        for p in &palaces {
-            match self
-                .state
-                .registry
-                .open_palace(&self.state.data_root, &p.id)
-            {
-                Ok(h) => handles.push(h),
-                Err(e) => {
-                    tracing::warn!(palace = %p.id, "recall_all: open failed: {e:#}");
-                }
-            }
-        }
+        // #4637: open_palace (not peek) is deliberate — recall must see every
+        // palace; the spawn_blocking hop keeps it off the async executor.
+        let handles = open_palaces_blocking(&self.state, &palaces, "recall_all").await;
         if handles.is_empty() {
             return json!([]);
         }

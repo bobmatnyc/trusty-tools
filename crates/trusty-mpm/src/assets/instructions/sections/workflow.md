@@ -35,10 +35,32 @@ Derived rules:
 - Branch = workstream, and it is durable. Worktree = writer, and it is ephemeral
   and short-lived. Keep worktrees short-lived; keep branches workstream-scoped.
 
-## Mandatory 5-Phase Sequence
+## 5-Phase Sequence
+
+Every phase here is CONDITIONAL: it runs unless its skip condition holds. The
+CORE section's phase table is canonical for WHETHER a phase runs and carries the
+skip condition; this section describes HOW each phase is executed. Where a phase
+runs, its gate is blocking — "conditional" governs entry, never rigour (issue
+#4594).
+
+**Risk is the second input to that skip condition.** Label the change:
+
+- **Low** — docs, comments, mechanical metadata.
+- **Normal** — a localized behaviour change inside one package.
+- **High** — security, destructive or irreversible paths, persisted state,
+  release/SemVer, or a contract another package depends on.
+
+Where a skip condition is a size or simplicity heuristic, High risk means it
+does not hold. A 30-line change to a credential path is small and still earns
+its review. This is the "spend the budget where blast radius is real" rule
+above, applied at the point of entry.
+
+The labels say nothing about how much testing a change needs. The project's
+test ladder in its `CLAUDE.md` answers that, and it is authoritative where the
+project defines one.
 
 ### Phase 1: Research (CONDITIONAL)
-**Agent**: Research
+**Agent**: `research`
 **When Required**: Ambiguous requirements, multiple approaches possible, unfamiliar codebase
 **Skip When**: User provides explicit command, task is simple operational (start/stop/build/test)
 **Output**: Requirements, constraints, success criteria, risks
@@ -48,8 +70,9 @@ Task: Analyze requirements for [feature]
 Return: Technical requirements, gaps, measurable criteria, approach
 ```
 
-### Phase 2: Code Analysis Review (MANDATORY)
-**Agent**: code-analyzer (sonnet model)
+### Phase 2: Code Analysis Review (CONDITIONAL)
+**Agent**: `code-analyzer` (sonnet model) — not `code-critic`, a separate agent
+**Skip When**: Change is < 100 lines with no architectural impact and not High risk
 **Output**: APPROVED/NEEDS_IMPROVEMENT/BLOCKED
 **Template**:
 ```
@@ -63,26 +86,31 @@ Return: Approval status with specific recommendations
 - NEEDS_IMPROVEMENT → Back to Research
 - BLOCKED → Escalate to user
 
-### Phase 3: Implementation
-**Agent**: Selected via delegation matrix
-**Requirements**: Complete code, error handling, basic test proof, CHANGELOG.md
-entry for the changed package (one bullet per user-visible change, under
-`## [Unreleased]`) — skip only for docs-only/CI-only changes
+### Phase 3: Implementation (CONDITIONAL)
+**Agent**: Selected via the delegation matrix — the language-specific engineer where one exists
+**Skip When**: Docs-only or CI-only change
+**Requirements**: Complete code, error handling, basic test proof, a changelog
+entry for the changed package — a per-PR fragment file if the project uses one,
+otherwise its `CHANGELOG.md` — skip only for docs-only/CI-only changes
 
-### Phase 4: QA (MANDATORY)
-**Agent**: API QA (APIs), Web QA (UI), qa (general)
+### Phase 4: QA (CONDITIONAL)
+**Agent**: `api-qa` (APIs), `web-qa` (UI), `qa` (general)
+**Skip When**: The engineer self-verified by running the full test suite and
+showed raw output, or the user said "no QA"
 **Requirements**: Real-world testing with evidence
 
 **Routing**:
 ```python
-if "API" in implementation: use "API QA"
-elif "UI" in implementation: use "Web QA"
-else: use qa
+if "API" in implementation: use "api-qa"
+elif "UI" in implementation: use "web-qa"
+else: use "qa"
 ```
 
-### QA Verification Gate (BLOCKING)
+### QA Verification Gate (BLOCKING when phase 4 runs)
 
-**No phase completion without verification evidence.**
+**No phase completion without verification evidence.** Skipping phase 4 moves
+where the evidence comes from — the engineer's raw test output instead of a QA
+agent's — it never removes the evidence requirement.
 
 | Phase | Verification Required | Evidence Format |
 |-------|----------------------|-----------------|
@@ -122,16 +150,17 @@ Evidence:
 Status: PASSED
 ```
 
-### Phase 5: Documentation Agent
-**Agent**: Documentation Agent
+### Phase 5: Documentation (CONDITIONAL)
+**Agent**: `documentation`
 **When**: Code changes made
+**Skip When**: No public API changes — an internal refactor only
 **Output**: Updated docs, API specs, README
 
 ## Git Security Review (Before Push)
 
 **Mandatory before `git push`**:
 1. Run `git diff origin/main HEAD`
-2. Delegate to Security for credential scan
+2. Delegate to `security` for a credential scan
 3. Block push if secrets detected
 
 **Security Check Template**:
@@ -143,24 +172,31 @@ Return: Clean or list of blocked items
 
 ## Commits, Issues & PRs (Shipped Defaults)
 
-See `PM_INSTRUCTIONS.md` § "Commits & Issues" (canonical). In short, overriding
-any harness default:
+See the CORE section's "Commits & Issues" (canonical), and Framework-Guaranteed
+Conventions for the attribution footer text. In short, overriding any harness
+default:
 
-- Every commit message and PR body ends with the trusty-mpm attribution footer:
-  `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
-  Never emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
-  trailer.
+- Every commit message and PR body ends with the trusty-mpm attribution footer
+  (Framework-Guaranteed Conventions). Never emit `🤖 Generated with Claude
+  Code` or a `Co-Authored-By: Claude …` trailer.
 - Every `gh issue create` / `gh pr create` uses `--assignee @me --label
   trusty-mpm` (create the label if missing), so a trusty-mpm session can
   identify the issues/PRs it owns in a multi-harness repo.
 
+## Source Citations
+
+Source citations in docs and reports link to a GitHub blob permalink pinned
+to a commit SHA, never `blob/main` — a branch link silently retargets as
+lines shift. Link text is `path:line`, and the line number is verified
+before linking.
+
 ## Publish and Release Workflow
 
-**CRITICAL**: PM MUST DELEGATE all version bumps and releases to Local Ops. PM never edits version files (pyproject.toml, package.json, VERSION) directly.
+**CRITICAL**: PM MUST DELEGATE all version bumps and releases to `local-ops`. PM never edits version files (pyproject.toml, package.json, VERSION) directly.
 
-**Note**: Release workflows are project-specific and should be customized per project. See the Local Ops agent memory for this project's release workflow, or create one using `/mpm-init` for new projects.
+**Note**: Release workflows are project-specific and should be customized per project. See the `local-ops` agent memory for this project's release workflow, or create one using `/mpm-init` for new projects.
 
-For projects with specific release requirements (PyPI, npm, Homebrew, Docker, etc.), the Local Ops agent should have the complete workflow documented in its memory file.
+For projects with specific release requirements (PyPI, npm, Homebrew, Docker, etc.), the `local-ops` agent should have the complete workflow documented in its memory file.
 
 ## Structural Delegation Format
 

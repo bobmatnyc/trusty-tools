@@ -102,6 +102,18 @@ pub mod bin_resolve;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
+/// Authoritative, three-state launchd supervision detection (issue #4469).
+///
+/// Why: the env-var heuristic this replaces let an unsupervised child
+/// self-report as supervised, defeating the `/health`-based verification
+/// operators are instructed to trust. Kept OUTSIDE the `update-check` feature
+/// gate because supervision is a daemon-lifecycle fact, not an upgrade
+/// concern — `update::upgrade` merely happens to be its oldest caller.
+/// What: [`supervision::launchd_supervision`] and its three-state
+/// [`supervision::LaunchdSupervision`] answer.
+/// Test: `cargo test -p trusty-common supervision`.
+pub mod supervision;
+
 #[cfg(feature = "axum-server")]
 pub mod server;
 
@@ -392,16 +404,39 @@ pub mod error_capture;
 #[cfg(feature = "crate-config")]
 pub mod crate_config;
 
+/// The credential authority's storage and resolution layer (DOC-45).
+///
+/// Why: credentials are not an inference concern. The resolver was filed under
+/// `inference::` when its only consumers were LLM providers, but four of its
+/// ten registry entries were already non-inference (Slack, Telegram,
+/// `claude-code`) and consumers kept not finding it there. #4564 promotes it to
+/// the top level so `trusty_common::credentials` is the one place a credential
+/// is named, stored, and resolved — the module DOC-45 §2.3 calls "the
+/// authority".
+/// What: Gated behind the `credentials` feature. Exposes the [`KeyStore`]
+/// trait and its three backends ([`credentials::MemoryKeyStore`],
+/// [`credentials::FileKeyStore`], and — behind `keyring-store` —
+/// `KeyringStore`), the provider [`credentials::env_var_for`] registry, the
+/// 3-tier [`credentials::resolve_key`] precedence chain, the `.env.local`
+/// loader, and [`credentials::redact_secret`].
+/// Test: `cargo test -p trusty-common --features credentials -- credentials::`
+/// and `cargo test -p trusty-common --features keyring-store -- credentials::`.
+///
+/// [`KeyStore`]: credentials::KeyStore
+#[cfg(feature = "credentials")]
+pub mod credentials;
+
 /// Unified inference provider adapter layer (epic #2400).
 ///
 /// Why: six trusty-* crates each hand-rolled their own LLM client, key
 /// lookup, and `.env.local` loading. Epic #2400 centralises the adapter,
 /// credential resolution, and capability registry here so every consumer
 /// shares one implementation.
-/// What: Gated behind the `credentials` feature. Wave 1 ticket #2401 ships
-/// the [`inference::credentials`] submodule (`KeyStore` trait + 3 backends +
-/// `resolve_key` precedence + `redact_secret`); later Wave 1/2 tickets add
-/// sibling modules (adapter trait, capability registry, provider clients).
+/// What: Gated behind the `credentials` feature (the gate predates #4564 and
+/// is kept so the deprecated `inference::credentials` compatibility shim still
+/// resolves for a consumer that enables only `credentials`). The inference
+/// surface proper — adapter trait, capability registry, provider clients — is
+/// gated behind `inference-client`.
 /// Test: `cargo test -p trusty-common --features credentials -- inference::`
 /// and `cargo test -p trusty-common --features keyring-store -- inference::`.
 #[cfg(feature = "credentials")]

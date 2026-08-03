@@ -37,10 +37,31 @@ impl tui::ReplHandler for ReplBridge {
     ) -> Result<bool> {
         let trimmed = line.trim();
 
-        // Persist to on-disk history before dispatch.
+        // Persist to on-disk history before dispatch, and record the turn.
+        //
+        // #4685: hooking `try_handle_slash` alone would miss six commands —
+        // `/exit`, `/clear`, `/switch`, `/model`, `/provider` (no-arg) and
+        // `/update` — which this method intercepts inline and returns from
+        // below. That is the same "two dispatch tables drift apart" shape
+        // #4685 exists to fix, so the hook goes at the ONE point every
+        // submitted line passes through. `handle_input` is called by the
+        // ratatui driver on a Submit keystroke, so this is a person typing by
+        // construction; the later `try_handle_slash` call is idempotent under
+        // the monotonic guard.
         {
             let repl = self.repl.lock().await;
             append_history_line(&repl.history_path, trimmed);
+            crate::attendance::note_command_turn_in(
+                repl.attendance_root.as_deref(),
+                repl.active_persona.as_deref().unwrap_or("ctrl"),
+                crate::attendance::TurnOrigin::Human,
+                // Deliberately `true`, mirroring `commands/dispatch.rs`: the
+                // "sender is entitled to assert presence" gate has no REPL
+                // analogue — the local operator owns this process — so the
+                // only question left is the one `origin` answers.
+                true,
+                chrono::Utc::now(),
+            );
         }
 
         // Natural-language agent switching for short phrases.
@@ -228,7 +249,10 @@ impl tui::ReplHandler for ReplBridge {
             }
 
             let mut repl = self.repl.lock().await;
-            match repl.try_handle_slash(trimmed).await {
+            match repl
+                .try_handle_slash(trimmed, crate::attendance::TurnOrigin::Human)
+                .await
+            {
                 Some(Ok((cont, output))) => {
                     let trimmed_out = output.trim_end_matches('\n').to_string();
                     if !trimmed_out.is_empty() {
@@ -284,7 +308,8 @@ impl tui::ReplHandler for ReplBridge {
 
         // Forward to LLM.
         let mut repl = self.repl.lock().await;
-        repl.forward_task_to_channel(&line, tx.clone()).await?;
+        repl.forward_task_to_channel(&line, crate::attendance::TurnOrigin::Human, tx.clone())
+            .await?;
         let _ = tx.send(tui::ReplEvent::LabelChanged(repl.project_name.clone()));
         Ok(true)
     }

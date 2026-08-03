@@ -80,7 +80,7 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// Entry point for `trusty-memory port [--json | --addr]`.
 ///
 /// Why: exposes the daemon's listening port as a first-class CLI command so
-/// shell substitutions like `curl http://127.0.0.1:$(trusty-memory port)/api/v1/health`
+/// shell substitutions like `curl http://127.0.0.1:$(trusty-memory port)/health`
 /// work without guessing. Issue #526.
 /// What: reads the address from the `http_addr` discovery file via
 /// `trusty_common::read_daemon_addr("trusty-memory")`, formats it per the
@@ -141,7 +141,7 @@ mod tests {
 
     /// `--addr` format emits the full `host:port` string unchanged.
     ///
-    /// Why: callers using `curl http://$(trusty-memory port --addr)/api/v1/health`
+    /// Why: callers using `curl http://$(trusty-memory port --addr)/health`
     /// need the host included.
     #[test]
     fn format_port_output_addr() {

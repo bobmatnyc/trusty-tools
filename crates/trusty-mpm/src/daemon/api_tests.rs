@@ -90,6 +90,71 @@ async fn health_response_serializes_supervised_field() {
     );
 }
 
+/// #4469: `/health` must publish the THREE-STATE launchd answer, not only the
+/// bool that collapses it.
+///
+/// Why: without this field a launchctl that could not be asked is indistinguishable
+/// on the wire from launchd positively saying "not mine", and `tm doctor`'s orphan
+/// verdict escalates the latter to a `kill -TERM` recommendation. The fix has to
+/// REACH the surface that motivated it.
+/// Test: this test.
+#[tokio::test]
+async fn health_response_serializes_launchd_supervision_field() {
+    let state = DaemonState::shared();
+    state.set_launchd_supervision("unknown");
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.launchd_supervision, "unknown");
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("launchd_supervision"),
+        Some(&serde_json::Value::String("unknown".into())),
+        "wire shape must carry `launchd_supervision`: {value}"
+    );
+}
+
+#[tokio::test]
+async fn health_response_serializes_pid_field() {
+    // #4230: `supervised` is a self-report (a `getppid() == 1` heuristic before #4469),
+    // so an orphan can self-report `true`. `pid` is what makes `tm doctor`'s check
+    // authoritative — it identifies WHICH process answered, for comparison against
+    // the PID launchd reports for the registered daemon label.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert_eq!(
+        body.pid,
+        std::process::id(),
+        "pid must identify the responding process"
+    );
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("pid").and_then(serde_json::Value::as_u64),
+        Some(u64::from(std::process::id())),
+        "wire shape must carry `pid`: {value}"
+    );
+}
+
+#[tokio::test]
+async fn health_response_serializes_forced_field() {
+    // #4230: distinguishes a deliberate `tm daemon --force` run from an unwanted
+    // orphan, so `tm doctor` does not hard-Fail on the escape hatch its own
+    // remediation recommends. Defaults `false` until `daemon_run` sets it.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert!(
+        !body.unsupervised_forced,
+        "force flag defaults false before daemon_run sets it"
+    );
+
+    let value = serde_json::to_value(&body).expect("HealthResponse must serialize");
+    assert_eq!(
+        value.get("unsupervised_forced"),
+        Some(&serde_json::Value::Bool(false)),
+        "wire shape must carry `unsupervised_forced`: {value}"
+    );
+}
+
 #[tokio::test]
 async fn health_response_serializes_version_field() {
     // Issue #2332: `/health` must carry this process's build version so a
@@ -1107,7 +1172,9 @@ async fn doctor_endpoint_returns_report() {
     // hooks_contamination and hooks_foreign_conflict checks; issue #2333
     // added the output_style_staleness check; issue #2997 added the tcc_taint
     // check; issue #3453 part 2 added the output_style_legacy_ids check;
-    // issue #3427 added the scaffold_tracking check). #1905's stale-skill
+    // issue #3427 added the scaffold_tracking check; issue #4442 added the
+    // asset_tier check; issue #4033 added the binary_provenance check).
+    // #1905's stale-skill
     // cleanup is a one-time migration, not a `run_doctor` probe, so it does
     // not appear here; the per-check statuses carry the diagnosis, not the
     // HTTP status.
@@ -1118,6 +1185,8 @@ async fn doctor_endpoint_returns_report() {
         "instructions",
         "agents",
         "agent_reachability",
+        "asset_tier",
+        "transcript_saving",
         "skills",
         "skill_source",
         "output_style",
@@ -1125,12 +1194,15 @@ async fn doctor_endpoint_returns_report() {
         "output_style_legacy_ids",
         "deployment",
         "skill_staleness",
+        "skill_unmanaged",
         "legacy_sources",
+        "legacy_overrides",
         "agent_skills",
         "agent_skills_prose_hints",
         "memory",
         "search",
         "worktrees",
+        "worktree_disk",
         "gh_account",
         "oauth_token",
         "hooks_contamination",
@@ -1138,6 +1210,7 @@ async fn doctor_endpoint_returns_report() {
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
+        "binary_provenance",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

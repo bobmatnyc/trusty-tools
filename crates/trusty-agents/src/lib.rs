@@ -1,20 +1,22 @@
 //! trusty-agents library surface.
 //!
-//! Why: trusty-agents was originally a binary-only crate. External agent crates
-//!      (e.g. `crates/cto-assistant`) need to implement `ToolExecutor` and
-//!      return an `AgentPlugin` so the ctrl loop can register their tools
-//!      via dependency injection rather than hard-coded `if persona ==`
-//!      branches. Exposing the existing module tree through a library
-//!      target enables that without duplicating code.
+//! Why: trusty-agents was originally a binary-only crate. An out-of-workspace
+//!      launcher needs to implement `ToolExecutor` and return an `AgentPlugin`
+//!      so the ctrl loop can register its tools via dependency injection
+//!      rather than hard-coded `if persona ==` branches. Exposing the existing
+//!      module tree through a library target enables that without duplicating
+//!      code. No in-workspace crate uses this seam any more — the last one,
+//!      `cto-assistant`, was dissolved in #3732 in favour of a declared
+//!      Python skill.
 //! What: Declares every top-level module of the crate as `pub mod` so both
 //!       the `tagent` binary (which now consumes this lib via
-//!       `use trusty_agents::...`) and downstream agent crates can reach the
+//!       `use trusty_agents::...`) and downstream launchers can reach the
 //!       internals. Also publishes a curated `agent_api` facade that pins
 //!       the minimal stable surface external agents should depend on
 //!       (`ToolExecutor`, `ToolResult`, `ToolExecutionTier`, `AgentPlugin`,
 //!       `ServiceTier`).
-//! Test: Compile-tested via `crates/cto-assistant` which depends on
-//!       `trusty-agents` as a library and constructs an `AgentPlugin`.
+//! Test: Compile-tested by the workspace build; the facade's plugin seam is
+//!       covered by `agent_plugin_lookup_returns_matching_plugin`.
 
 /// Re-export the harness adapter framework from trusty-agents-common.
 ///
@@ -66,7 +68,13 @@ pub mod adapters {
 
 pub mod agents;
 pub mod api;
+// #4325: per-assistant home directory + OKG store model — "Assistant" is a
+// TYPE, `izzie`/`cto-assistant` are INSTANCES of it, each with its own home.
+pub mod assistants;
 pub mod ast;
+// #4652: last-human-turn timeout — the only signal that can tell a human
+// attending an instance from the assistant's own activity (owner decision D3).
+pub mod attendance;
 pub mod build_info;
 pub mod bus;
 pub mod cli;
@@ -131,6 +139,7 @@ pub mod ticketing;
 pub mod tm;
 pub mod tmux;
 pub mod tools;
+pub mod untrusted;
 pub mod update;
 pub mod usage;
 pub mod workflow;
@@ -243,15 +252,16 @@ fn default_bundled_config_dir_checking(search_root: &std::path::Path) -> std::pa
 
 /// Curated, stable surface for external agent crates.
 ///
-/// Why: External agent crates (e.g. `cto-assistant`) should depend on a
-///      tiny, well-defined slice of `trusty-agents` — not the whole internal
-///      module tree. Pinning the surface here lets us refactor internals
-///      without breaking downstream agent crates.
+/// Why: An out-of-workspace launcher should depend on a tiny, well-defined
+///      slice of `trusty-agents` — not the whole internal module tree.
+///      Pinning the surface here lets us refactor internals without breaking
+///      downstream launchers.
 /// What: Re-exports `ToolExecutor`, `ToolResult`, `ToolExecutionTier`,
 ///       `AgentPlugin`, and `ServiceTier`. Adding to this list is a
 ///       conscious choice; nothing else should be considered "API" for
 ///       external agents.
-/// Test: Used by `crates/cto-assistant/src/lib.rs`.
+/// Test: Compile-tested by the workspace build; the re-exported plugin type
+///       is covered by `agent_plugin_lookup_returns_matching_plugin`.
 pub mod agent_api {
     pub use crate::rbac::ServiceTier;
     pub use crate::tools::agent_plugin::AgentPlugin;

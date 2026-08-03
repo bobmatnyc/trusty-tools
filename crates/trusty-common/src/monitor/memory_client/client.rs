@@ -13,8 +13,8 @@ use std::time::Duration;
 use crate::monitor::dashboard::{MemoryData, PalaceRow};
 
 use super::parsers::{
-    parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event, parse_palaces,
-    parse_recall_hits,
+    parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event,
+    parse_palace_detail, parse_palaces, parse_recall_hits,
 };
 use super::types::{DrawerInfo, DreamStats, MemoryDetail, MemoryEvent, REQUEST_TIMEOUT, RecallHit};
 
@@ -139,6 +139,43 @@ impl MemoryClient {
             .json()
             .await?;
         Ok(parse_palaces(&raw))
+    }
+
+    /// Fetch one palace's live counts from `GET /api/v1/palaces/{id}`.
+    ///
+    /// Why (issue #4682): the bulk list route builds rows from
+    /// `PalaceRegistry::peek` since #4640, so an unresident palace comes back
+    /// with `cached: false` and placeholder zeros. Any caller that wants real
+    /// counts for ONE palace must ask this route, which opens it (~0.15 s
+    /// measured against a live daemon); filtering the bulk list instead makes
+    /// the answer depend on LRU residency.
+    /// What: GETs the single-palace route and projects the response with
+    /// [`parse_palace_detail`]. A 404 or any other non-2xx yields an error; a
+    /// 2xx body that is not a palace object yields an error rather than a row
+    /// of silent zeros.
+    /// Test: `fetch_palace_url_is_the_single_palace_route`; live behaviour is
+    /// covered by the trusty-memory daemon suite.
+    pub async fn fetch_palace(&self, palace_id: &str) -> anyhow::Result<PalaceRow> {
+        let raw: serde_json::Value = self
+            .http
+            .get(self.palace_url(palace_id))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        parse_palace_detail(&raw)
+            .ok_or_else(|| anyhow::anyhow!("unexpected palace payload for '{palace_id}'"))
+    }
+
+    /// Build the `GET /api/v1/palaces/{id}` URL for `palace_id`.
+    ///
+    /// Why: keeps the percent-encoding decision in one place and lets the URL
+    /// be asserted without a daemon.
+    /// What: joins the base URL with the single-palace route.
+    /// Test: `fetch_palace_url_is_the_single_palace_route`.
+    pub(super) fn palace_url(&self, palace_id: &str) -> String {
+        format!("{}/api/v1/palaces/{}", self.base, palace_id)
     }
 
     /// Recall memories matching `query` from `GET /api/v1/recall`.

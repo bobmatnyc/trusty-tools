@@ -68,17 +68,44 @@ pub(super) fn check_instructions(project_dir: Option<&Path>) -> DoctorCheck {
 /// checking the old location would report a healthy install as broken.
 /// What: `Fail` when the directory is absent or holds no `.md` files; `Warn`
 /// when agents are present but the manifest JSON is missing; `Ok` when both
-/// agent files and the manifest are present.
-/// Test: `agents_missing_dir_is_fail`, `agents_without_manifest_is_warn`.
-pub(super) fn check_agents(paths: &FrameworkPaths) -> DoctorCheck {
+/// agent files and the manifest are present. EVERY message — including the
+/// empty-deploy-tier `Fail`, whose roster can still be non-empty because the
+/// project and generic tiers are independent of the deploy tier — carries the
+/// DELEGATABLE roster size, resolved by
+/// [`crate::core::delegation_authority::resolve_roster`] — the same function
+/// that builds the PM's delegation section and the count `tm session start`
+/// prints (#4588/#4589). A file count is a deploy fact, not a routing fact: the
+/// two diverged by three agents in #4589 and by five in #4588, and reporting
+/// only the file count made both invisible here. When no `project_dir` is
+/// supplied the roster is genuinely undetermined (its highest-precedence tier
+/// is a project directory), and it is reported as `unknown` rather than as a
+/// plausible-looking number.
+/// Test: `agents_missing_dir_is_fail`, `agents_fail_path_still_reports_the_roster`,
+/// `agents_without_manifest_is_warn`, `agents_with_manifest_is_ok`,
+/// `agents_message_reports_the_delegatable_roster`,
+/// `agents_roster_is_unknown_without_a_project_dir`.
+pub(super) fn check_agents(paths: &FrameworkPaths, project_dir: Option<&Path>) -> DoctorCheck {
     let dir = paths.agent_deploy_dir();
     let md_count = count_files_with_extension(&dir, "md");
+    // Resolved BEFORE the empty-deploy-tier branch (#4589 review, MEDIUM): an
+    // empty deploy tier does NOT mean an empty roster — the project and generic
+    // `~/.claude/agents` tiers are independent of it, and a probe measured 42
+    // delegatable agents while this branch reported only "no agent files".
+    // Returning early with a deploy fact and no routing fact is the same
+    // conflation this check exists to remove.
+    let roster = match project_dir {
+        Some(project) => format!(
+            "{} delegatable",
+            crate::core::delegation_authority::resolve_roster(project).len()
+        ),
+        None => "delegatable roster unknown (no project directory)".to_string(),
+    };
     if md_count == 0 {
         return DoctorCheck::new(
             "agents",
             CheckStatus::Fail,
             format!(
-                "no agent files in {} — run `tm install` to deploy agents",
+                "no agent files in {} — run `tm install` to deploy agents; {roster}",
                 dir.display()
             ),
         );
@@ -89,7 +116,7 @@ pub(super) fn check_agents(paths: &FrameworkPaths) -> DoctorCheck {
             "agents",
             CheckStatus::Ok,
             format!(
-                "{md_count} agent(s) deployed in {} with manifest",
+                "{md_count} agent file(s) deployed in {} with manifest; {roster}",
                 dir.display()
             ),
         )
@@ -98,7 +125,7 @@ pub(super) fn check_agents(paths: &FrameworkPaths) -> DoctorCheck {
             "agents",
             CheckStatus::Warn,
             format!(
-                "{md_count} agent(s) in {} but {MANIFEST_FILE} is missing",
+                "{md_count} agent file(s) in {} but {MANIFEST_FILE} is missing; {roster}",
                 dir.display()
             ),
         )
@@ -300,8 +327,45 @@ mod tests {
         // `FrameworkPaths::under` derives the managed config-dir agents tier
         // (#4409), which does not exist under a fresh temp dir.
         let paths = FrameworkPaths::under(tmp.path());
-        let check = check_agents(&paths);
+        let check = check_agents(&paths, None);
         assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn agents_fail_path_still_reports_the_roster() {
+        // #4589 review (MEDIUM): the empty-deploy-tier `Fail` returned before
+        // the roster was resolved, so it reported a deploy fact and no routing
+        // fact — while the project and generic tiers could still be serving a
+        // full roster. An empty deploy tier is not an empty roster.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let project_tier = project.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&project_tier).unwrap();
+        std::fs::write(
+            project_tier.join("ticketing.md"),
+            "---\nname: ticketing\nrole: ticketing\n---\n",
+        )
+        .unwrap();
+
+        let check = check_agents(&paths, Some(project.path()));
+        assert_eq!(check.status, CheckStatus::Fail, "no deployed agent files");
+        assert!(
+            check.message.contains("delegatable"),
+            "the Fail path must still report the routing fact: {}",
+            check.message
+        );
+
+        // And with no project to scope it, it must say unknown on this path too
+        // rather than fall silent.
+        let bare = check_agents(&paths, None);
+        assert_eq!(bare.status, CheckStatus::Fail);
+        assert!(
+            bare.message.contains("delegatable roster unknown"),
+            "an undetermined roster must be named, not omitted: {}",
+            bare.message
+        );
     }
 
     #[test]
@@ -311,7 +375,7 @@ mod tests {
         let agents = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents).unwrap();
         std::fs::write(agents.join("engineer.md"), "agent").unwrap();
-        let check = check_agents(&paths);
+        let check = check_agents(&paths, None);
         assert_eq!(check.status, CheckStatus::Warn);
     }
 
@@ -323,8 +387,70 @@ mod tests {
         std::fs::create_dir_all(&agents).unwrap();
         std::fs::write(agents.join("engineer.md"), "agent").unwrap();
         std::fs::write(agents.join(MANIFEST_FILE), "{}").unwrap();
-        let check = check_agents(&paths);
+        let check = check_agents(&paths, None);
         assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn agents_message_reports_the_delegatable_roster() {
+        // #4588/#4589: the file count is a deploy fact, the roster is the
+        // routing fact, and they diverged by three agents (#4589) and by five
+        // (#4588) while this probe reported only the former. The roster figure
+        // comes from `resolve_roster` — the same function the PM prompt and
+        // `tm session start` use — so a divergence is legible here instead of
+        // being discovered from a live PM that never heard of an agent.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let agents = paths.agent_deploy_dir();
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("engineer.md"), "agent").unwrap();
+        std::fs::write(agents.join(MANIFEST_FILE), "{}").unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let project_tier = project.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&project_tier).unwrap();
+        std::fs::write(
+            project_tier.join("ticketing.md"),
+            "---\nname: ticketing\nrole: ticketing\n---\n",
+        )
+        .unwrap();
+
+        let check = check_agents(&paths, Some(project.path()));
+        assert!(
+            check.message.contains("1 agent file(s) deployed"),
+            "the deploy-tier file count must still be reported: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("delegatable"),
+            "the delegatable roster size must be reported: {}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("unknown"),
+            "a project was supplied, so the roster is knowable: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn agents_roster_is_unknown_without_a_project_dir() {
+        // The roster's highest-precedence tier IS a project directory, so with
+        // no project there is no roster to report. It must say so rather than
+        // print a plausible-looking number derived from the other tiers.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let agents = paths.agent_deploy_dir();
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("engineer.md"), "agent").unwrap();
+        std::fs::write(agents.join(MANIFEST_FILE), "{}").unwrap();
+
+        let check = check_agents(&paths, None);
+        assert!(
+            check.message.contains("delegatable roster unknown"),
+            "an undetermined roster must be reported as unknown: {}",
+            check.message
+        );
     }
 
     #[test]

@@ -147,6 +147,81 @@ fn md_stems(dir: &Path) -> Vec<String> {
     stems
 }
 
+/// Test-only counter of DEPLOYED-side file reads (issue #4322).
+///
+/// Why: cold `tm ls` latency is governed by how many files the probe opens,
+/// not by CPU — the issue measured a constant 0.128 s of daemon CPU against a
+/// 5–9 s wall time, and proved causality by warming exactly the probe's file
+/// set from an unrelated process. That makes the read COUNT the honest,
+/// machine-independent metric for this optimization: it does not move with
+/// machine load, page-cache state, or how busy the laptop was when the
+/// benchmark ran. It is also the enforcement handle for the sharing invariant
+/// — a fleet of N sessions must read the ONE machine-global deployed-agent
+/// directory once, not N times.
+/// What: a LOG of the exact path of every deployed-file read attempt (hit or
+/// miss), appended by [`read_deployed`]. A log, not a bare counter, for the
+/// same reason [`COMPUTE_CALL_LOG`] is one (#4326 review): the counter is
+/// process-global and `cargo test` runs many unrelated tests concurrently in
+/// the same binary — NONE of the 21 tests in this module's `tests.rs` are
+/// `#[serial]`, and every one of them reaches `read_deployed`. A global count
+/// therefore attributes their reads to whichever test happens to be asserting
+/// at that moment: a filtered `cargo test -- detect` run reproducibly observed
+/// 25 where the fleet pin expected 5. Recording paths lets each test count
+/// ONLY the reads made under its own `fake_home()`-scoped temp directory, so
+/// concurrent unrelated reads through unrelated paths cannot pollute it.
+/// [`reset_deployed_read_log`] clears it; [`deployed_reads_under`] counts one
+/// prefix.
+/// Test: `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`
+/// in `daemon::managed_routes::tests`; reported by
+/// `daemon::managed_routes::staleness_bench_tests::bench_stale_assets_for_many`.
+#[cfg(test)]
+pub(crate) static DEPLOYED_READ_LOG: std::sync::LazyLock<
+    std::sync::Mutex<Vec<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Clear [`DEPLOYED_READ_LOG`] before the code under measurement runs.
+///
+/// Note this does NOT provide isolation on its own — concurrent unrelated
+/// tests keep appending. Isolation comes from counting with
+/// [`deployed_reads_under`], which filters to the caller's own path prefix.
+#[cfg(test)]
+pub(crate) fn reset_deployed_read_log() {
+    DEPLOYED_READ_LOG.lock().unwrap().clear();
+}
+
+/// Count logged deployed-file reads whose path lies under `prefix`.
+///
+/// Why: the isolation primitive. A test passes a prefix unique to its own
+/// fixture (its `fake_home()` temp dir, or a specific deploy directory under
+/// it), so reads performed concurrently by unrelated tests — which live under
+/// their own distinct temp dirs — are excluded by construction rather than by
+/// hoping no other test runs at the same time.
+#[cfg(test)]
+pub(crate) fn deployed_reads_under(prefix: &Path) -> usize {
+    DEPLOYED_READ_LOG
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.starts_with(prefix))
+        .count()
+}
+
+/// Read one deployed artifact file, logging the attempt under `cfg(test)`.
+///
+/// Why: routing every deployed-side read through one helper is what makes the
+/// read log above meaningful — a read added later that bypassed it would be
+/// invisible to both the benchmark and the sharing invariant test.
+/// What: `std::fs::read_to_string(path).ok()`, plus a log append in test
+/// builds. Identical behavior to the direct call it replaces (a missing or
+/// unreadable file yields `None`).
+/// Test: exercised by every `detect_*` test; counted by
+/// `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`.
+fn read_deployed(path: &Path) -> Option<String> {
+    #[cfg(test)]
+    DEPLOYED_READ_LOG.lock().unwrap().push(path.to_path_buf());
+    std::fs::read_to_string(path).ok()
+}
+
 /// Classify one artifact's drift against what the next `apply` would actually do.
 ///
 /// Why (#1940): the old rule keyed drift on the checksum MANIFEST alone — an
@@ -172,20 +247,27 @@ fn md_stems(dir: &Path) -> Vec<String> {
 /// - `Some(New)` when nothing is deployed on disk and the manifest has no entry —
 ///   `apply` would deploy it.
 ///
+/// Takes the on-disk CHECKSUM rather than the on-disk CONTENT (issue #4322):
+/// the deployed AGENT tree is one machine-global directory shared by every
+/// managed session, so a fleet-wide caller hashes it once and reuses the
+/// digests across sessions ([`DeployedAgentHashes`]) instead of re-reading and
+/// re-hashing the same bytes per session. Hashing at the call site is exactly
+/// what this function used to do internally, so the classification is
+/// unchanged.
+///
 /// Test: `classify_drift_reconciles_on_disk`, `classify_drift_new_when_absent`,
 /// and `detect_reconciles_deployed_but_unmanifested`.
 fn classify_drift(
     catalog_hash: &str,
     manifest_checksum: Option<&str>,
-    on_disk: Option<&str>,
+    on_disk_hash: Option<&str>,
 ) -> Option<ChangeKind> {
-    let on_disk_hash = on_disk.map(checksum);
     // Deployed & current — the manifest records this exact content, or the file
     // already on disk holds it (reconcile: deployed-but-unmanifested). Not drift.
-    if manifest_checksum == Some(catalog_hash) || on_disk_hash.as_deref() == Some(catalog_hash) {
+    if manifest_checksum == Some(catalog_hash) || on_disk_hash == Some(catalog_hash) {
         return None;
     }
-    match (manifest_checksum, on_disk_hash.as_deref()) {
+    match (manifest_checksum, on_disk_hash) {
         // Managed, catalog changed since deploy. `apply` refreshes it only if the
         // on-disk copy is still what tm wrote (unmodified); a user-edited copy is
         // skipped, so it is not actionable drift.
@@ -270,13 +352,19 @@ pub fn compute_skill_catalog_hashes(catalog_skills: &Path) -> HashMap<String, St
 /// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the
 /// agent as `new`/`changed`. Agents the predicate rejects are skipped (not
 /// part of this harness's set).
+/// Issue #4322: the deployed side is supplied PRE-READ as a
+/// [`DeployedAgentHashes`] rather than as a directory this function walks
+/// itself. The selection and ignore predicates are applied here, AFTER the
+/// read — they are pure string matching over the stem, so they cannot affect
+/// which bytes the disk yields, which is exactly what makes the pre-read
+/// snapshot shareable across callers with different predicates.
+///
 /// Test: `detect_flags_changed_agent`, `detect_not_stale_when_identical`,
 /// `detect_respects_selection`, `detect_reconciles_deployed_but_unmanifested`,
 /// `detect_respects_ignore_staleness`.
 fn agent_changes(
     catalog_hashes: &HashMap<String, String>,
-    deployed: &AgentManifest,
-    deployed_dir: &Path,
+    deployed: &DeployedAgentHashes,
     select: &impl Fn(&str) -> bool,
     ignore_staleness: &impl Fn(&str) -> bool,
     out: &mut Vec<CatalogChange>,
@@ -286,17 +374,144 @@ fn agent_changes(
             continue;
         }
         let filename = format!("{stem}.md");
-        let on_disk = std::fs::read_to_string(deployed_dir.join(&filename)).ok();
+        let on_disk_hash = deployed.on_disk_hash(stem);
         if let Some(kind) = classify_drift(
             catalog_hash,
-            deployed.managed.get(&filename).map(|e| e.checksum.as_str()),
-            on_disk.as_deref(),
+            deployed
+                .manifest
+                .managed
+                .get(&filename)
+                .map(|e| e.checksum.as_str()),
+            on_disk_hash.as_deref(),
         ) {
             out.push(CatalogChange {
                 artifact: "agent",
                 name: stem.clone(),
                 kind,
             });
+        }
+    }
+}
+
+/// The deployed AGENT tree, read and hashed ONCE for one directory + catalog
+/// pair (issue #4322).
+///
+/// Why: bundled agents deploy into a single machine-global directory —
+/// `FrameworkPaths::agent_deploy_dir()`, which #4409 deliberately exempted
+/// from `for_managed_project`'s per-workspace rewrite — so EVERY managed
+/// session's staleness probe reads the very same files. `tm ls` was opening
+/// and hashing that one directory once per session: on the reported 32-session
+/// fleet, 42 agent files re-read 32 times, 30.2 MiB of the 41.9 MiB the listing
+/// moved, for 32 byte-identical answers. Reading it once per LISTING instead
+/// of once per SESSION removes that fan-out without touching what is actually
+/// per-session (skills, which still deploy per workspace).
+///
+/// This is deduplication WITHIN one request, NOT a cache across requests:
+/// nothing is retained after the listing returns, so the next `tm ls` re-reads
+/// the tree from disk and observes any change immediately. There is no
+/// invalidation window to get wrong.
+/// What: the deployed [`AgentManifest`] plus, in the EAGER form, `stem ->
+/// checksum(on-disk body)` for every stem in the catalog. The eager map is
+/// deliberately keyed on the CATALOG's stems (not on a selected subset) so the
+/// snapshot is predicate-independent and one snapshot serves sessions selecting
+/// different agent sets. A stem with no readable file is simply absent, which
+/// [`classify_drift`] reads as `None` — exactly what the per-call
+/// `read_to_string(...).ok()` produced before.
+///
+/// Two forms, because eagerness is only a win when the result is SHARED
+/// (#4619 review, MEDIUM):
+/// - [`Self::read`] — EAGER. Hashes every catalog stem up front. Correct for
+///   the fleet path, where one snapshot serves N sessions.
+/// - [`Self::lazy`] — LAZY. Hashes a stem only when [`agent_changes`] actually
+///   asks for it, i.e. only for stems the caller's predicates select. Correct
+///   for every SINGLE-target caller (`/health`, `tm catalog apply`, the
+///   single-session `GET …/managed/{id}`), which has nothing to share the work
+///   with. Using the eager form there would read every catalog stem where the
+///   old code read only the selected ones — a real read INCREASE for a
+///   manifest-filtered harness. The lazy form makes single-target read
+///   behavior byte-for-byte identical to before this change.
+///
+/// Test: `session_asset_staleness_with_shared_matches_unshared`,
+/// `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`,
+/// `single_target_detect_reads_only_selected_agents`.
+#[derive(Debug, Clone, Default)]
+pub struct DeployedAgentHashes {
+    manifest: AgentManifest,
+    /// Directory the deployed agent files live in — needed by the lazy form,
+    /// and retained by the eager form so both share one lookup path.
+    dir: std::path::PathBuf,
+    /// `Some` = eager, pre-hashed snapshot. `None` = hash on demand.
+    on_disk: Option<HashMap<String, String>>,
+}
+
+impl DeployedAgentHashes {
+    /// EAGER: load the manifest and hash every catalog-named agent under
+    /// `deployed_dir`.
+    ///
+    /// Why: the fleet-wide entry point — one call per distinct deployed
+    /// directory per listing, shared across every session in that listing.
+    /// What: [`AgentManifest::load`] plus one [`read_deployed`] per catalog
+    /// agent stem, hashed with [`checksum`].
+    /// Test: `session_asset_staleness_with_shared_matches_unshared`.
+    pub fn read(deployed_dir: &Path, catalog: &CatalogHashes) -> Self {
+        Self::with_manifest(AgentManifest::load(deployed_dir), deployed_dir, catalog)
+    }
+
+    /// [`Self::read`] with an ALREADY-LOADED manifest.
+    ///
+    /// Why: callers that load the manifest themselves must not have it
+    /// silently re-loaded — that would change behavior when the on-disk
+    /// manifest differs from what they hold.
+    /// What: hashes the on-disk bodies and pairs them with `manifest`.
+    /// Test: `session_asset_staleness_with_shared_matches_unshared`.
+    pub fn with_manifest(
+        manifest: AgentManifest,
+        deployed_dir: &Path,
+        catalog: &CatalogHashes,
+    ) -> Self {
+        let on_disk = catalog
+            .agent_hashes
+            .keys()
+            .filter_map(|stem| {
+                let body = read_deployed(&deployed_dir.join(format!("{stem}.md")))?;
+                Some((stem.clone(), checksum(&body)))
+            })
+            .collect();
+        Self {
+            manifest,
+            dir: deployed_dir.to_path_buf(),
+            on_disk: Some(on_disk),
+        }
+    }
+
+    /// LAZY: hash a deployed agent only when the comparison actually asks for
+    /// it (#4619 review, MEDIUM).
+    ///
+    /// Why: a single-target caller shares its read with nobody, so paying to
+    /// hash every catalog stem up front is pure loss when its manifest selects
+    /// only a subset — the pre-#4322 code read exactly the selected stems.
+    /// This form restores that exactly, so no call shape regresses.
+    /// What: records the manifest and directory; [`Self::on_disk_hash`] reads
+    /// and hashes per stem on demand.
+    /// Test: `single_target_detect_reads_only_selected_agents`.
+    pub fn lazy(manifest: AgentManifest, deployed_dir: &Path) -> Self {
+        Self {
+            manifest,
+            dir: deployed_dir.to_path_buf(),
+            on_disk: None,
+        }
+    }
+
+    /// The on-disk checksum for one stem — from the eager snapshot when present,
+    /// otherwise read and hashed now.
+    ///
+    /// Both branches yield the identical value for identical on-disk bytes; the
+    /// only difference is WHEN the read happens, and therefore how many reads a
+    /// caller that inspects a subset of stems performs.
+    fn on_disk_hash(&self, stem: &str) -> Option<String> {
+        match &self.on_disk {
+            Some(map) => map.get(stem).cloned(),
+            None => read_deployed(&self.dir.join(format!("{stem}.md"))).map(|b| checksum(&b)),
         }
     }
 }
@@ -327,11 +542,14 @@ fn skill_changes(
         }
         // Deployed skills land as `<deployed_dir>/<stem>/SKILL.md` (per the
         // skill deployer); the SkillManifest is keyed by stem (no `.md`).
-        let on_disk = std::fs::read_to_string(deployed_dir.join(stem).join("SKILL.md")).ok();
+        // Skills stay a per-session read: unlike agents (#4409), they deploy
+        // into `<workspace>/.claude/skills`, so two sessions genuinely can
+        // disagree and there is nothing to share.
+        let on_disk = read_deployed(&deployed_dir.join(stem).join("SKILL.md"));
         if let Some(kind) = classify_drift(
             catalog_hash,
             deployed.managed.get(stem).map(|e| e.checksum.as_str()),
-            on_disk.as_deref(),
+            on_disk.as_deref().map(checksum).as_deref(),
         ) {
             out.push(CatalogChange {
                 artifact: "skill",
@@ -464,13 +682,17 @@ impl CatalogHashes {
     /// deployed manifests + on-disk files via [`classify_drift`], caps the
     /// change list at [`MAX_CHANGES`]. When `self.unknown`, returns the same
     /// `unknown` report [`detect_staleness`] would.
+    ///
+    /// Issue #4322: the deployed AGENT side arrives pre-read as a
+    /// [`DeployedAgentHashes`] so a fleet-wide caller can share ONE read of the
+    /// machine-global agent deploy directory across every session. The deployed
+    /// SKILL side is still read here, per call — skills deploy per workspace, so
+    /// there is nothing to share.
     /// Test: `catalog_hashes_shared_across_two_deployed_targets`.
-    #[allow(clippy::too_many_arguments)]
     pub fn detect(
         &self,
-        deployed_agents: &AgentManifest,
+        deployed_agents: &DeployedAgentHashes,
         deployed_skills: &SkillManifest,
-        deployed_agents_dir: &Path,
         deployed_skills_dir: &Path,
         agent_select: impl Fn(&str) -> bool,
         skill_select: impl Fn(&str) -> bool,
@@ -488,7 +710,6 @@ impl CatalogHashes {
         agent_changes(
             &self.agent_hashes,
             deployed_agents,
-            deployed_agents_dir,
             &agent_select,
             &agent_ignore_staleness,
             &mut changes,
@@ -552,10 +773,15 @@ pub fn detect_staleness(
     skill_select: impl Fn(&str) -> bool,
     agent_ignore_staleness: impl Fn(&str) -> bool,
 ) -> StalenessReport {
-    CatalogHashes::compute(catalog_agents, catalog_skills).detect(
-        deployed_agents,
+    let catalog = CatalogHashes::compute(catalog_agents, catalog_skills);
+    // #4322 + #4619 review: single-target callers use the LAZY form, so they
+    // read exactly the stems their predicates select — byte-for-byte the same
+    // reads as before this change. Only the fleet-wide caller pre-hashes, and
+    // only because it shares the result across every session in the listing.
+    let deployed_agents = DeployedAgentHashes::lazy(deployed_agents.clone(), deployed_agents_dir);
+    catalog.detect(
+        &deployed_agents,
         deployed_skills,
-        deployed_agents_dir,
         deployed_skills_dir,
         agent_select,
         skill_select,

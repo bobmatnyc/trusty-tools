@@ -8,6 +8,9 @@
   // in `ChatPane` — see that component's doc comment for why the takeover
   // has to be a sibling of the group rather than nested in the chat column.
   import ChatPane from './components/ChatPane.svelte';
+  // #4404: the landing view — a card per assistant instance + Concierge +
+  // create. Selection writes `activeAgentId`, which persists itself (#4281).
+  import AssistantPicker from './components/AssistantPicker.svelte';
   import EventsView from './components/EventsView.svelte';
   // #4098 (COST-09): the Costs tab — spend by agent/model/day from
   // `GET /api/costs`. Owns its own fetch; see the component's doc comment.
@@ -58,9 +61,16 @@
   // on its own explicit Save button, so there is no cross-tab discard risk
   // to guard against here anymore.
   // #4098: 'costs' added for the Costs tab (COST-09).
-  let activeView: 'chat' | 'events' | 'costs' = 'chat';
+  // #4404: 'assistants' added AND made the DEFAULT — the app opens on "who am
+  // I working with" rather than dropping the user into a conversation whose
+  // participant they never chose. Picking a card selects the assistant and
+  // moves to Chat; the tab stays available so the picker is re-reachable
+  // without a relaunch. (`ProjectsView` deliberately gains no entry: #3819
+  // dropped it from the nav and epic #4355 rebuilds that surface.)
+  type View = 'assistants' | 'chat' | 'events' | 'costs';
+  let activeView: View = 'assistants';
 
-  function switchView(view: 'chat' | 'events' | 'costs') {
+  function switchView(view: View) {
     // #3894: leaving Chat abandons any open configuration takeover, so the
     // top-level tabs always mean what they say — coming back to Chat shows
     // chat, never a config surface the user left behind minutes ago.
@@ -414,7 +424,13 @@
            active-agent title + inline selector + gear config button — since
            that state (which agent) is scoped to the chat view, not the
            whole app. -->
-      {#if activeView === 'chat'}
+      {#if activeView === 'assistants'}
+        <!-- #4404: the landing picker. `select` carries the decoded dispatch
+             id (null = Concierge) purely for symmetry — the component has
+             already written it to `activeAgentId`, so App only has to move on
+             to the conversation. -->
+        <AssistantPicker on:select={() => switchView('chat')} />
+      {:else if activeView === 'chat'}
         <ChatPane />
       {:else if activeView === 'costs'}
         <!-- #4098 (COST-09): Costs tab. -->

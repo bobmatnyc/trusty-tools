@@ -605,8 +605,18 @@ pub(crate) async fn run_inplace_relaunch(
 /// the tmux-pane spawn/resume paths so an in-place relaunch does not silently
 /// drop back into the `CLAUDE_CONFIG_DIR`-keyed Keychain login loop the token
 /// exists to bypass. Pure — builds and returns, never spawns.
+///
+/// Issue #4467: the inherited Claude Code session markers are scrubbed here too,
+/// via [`trusty_mpm::core::claude_env_scrub::scrub_command`]. This path execs
+/// `claude` through a `Command` with no shell in between, so the `env -u` prefix
+/// the tmux-pane paths use does not apply to it — but a bare `tm` relaunch run
+/// from inside a Claude Code session leaks exactly the same
+/// `CLAUDE_CODE_CHILD_SESSION` marker and would silently lose its transcript.
+/// The scrub runs BEFORE the deliberate assignments below so it can never
+/// clobber `CLAUDE_CONFIG_DIR` (#4455) even if the marker list grew wrongly.
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
+/// `inplace_exec_command_scrubs_inherited_session_markers`,
 /// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,
@@ -616,6 +626,9 @@ pub(crate) fn build_inplace_exec_command(
     cmd.args(&resume.args)
         .current_dir(cwd)
         .env_remove("ANTHROPIC_API_KEY");
+    // #4467: strip Claude Code's inherited process-local session markers so the
+    // relaunched session keeps native --resume/--continue/rewind recovery.
+    trusty_mpm::core::claude_env_scrub::scrub_command(&mut cmd);
     if let Some(dir) = &resume.config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }

@@ -798,7 +798,7 @@ fn is_plausible_credential_charset(token: &str) -> bool {
 /// Why (issue #1481): the rejection message must name *which* token tripped the
 /// gate (so the caller can find and remove it) without echoing the full secret
 /// back into logs or responses. Issue #2401 consolidated the masking logic
-/// itself into `inference::credentials::redact_secret` — the `config` clap
+/// itself into `credentials::redact_secret` — the `config` clap
 /// module (epic #2400) needs the identical shape, and duplicating it here
 /// would violate the "one implementation per behaviour" rule. This function
 /// is now a thin delegating wrapper kept for call-site stability and doc
@@ -808,9 +808,9 @@ fn is_plausible_credential_charset(token: &str) -> bool {
 /// because the secret heuristic requires length) are returned verbatim.
 /// Test: `redact_token_masks_tail` (format stability); the masking
 /// implementation itself is tested in
-/// `inference::credentials::redact::tests`.
+/// `credentials::redact::tests`.
 fn redact_token(token: &str) -> String {
-    crate::inference::credentials::redact_secret(token)
+    crate::credentials::redact_secret(token)
 }
 
 /// Classify drawer content into a `DrawerType` using cheap heuristics.

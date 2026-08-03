@@ -34,9 +34,9 @@
 //! silently drop that session's auth/roster isolation and unattended-permission
 //! mode. Adding registry-aware validation is out of scope for this
 //! consolidation (#2010) and is tracked separately in #2020.
-//! What: [`relaunch_command`] returns the literal shell command sent to the
-//! pane.
-//! Test: `relaunch_command_returns_bare_claude`.
+//! What: [`relaunch_command`] returns the shell command sent to the pane —
+//! `claude` behind the #4467 inherited-session-marker `env` scrub.
+//! Test: `relaunch_command_scrubs_inherited_session_markers`.
 
 /// The shell command used to (re)launch `claude` inside an already-running,
 /// already-configured tmux pane.
@@ -49,26 +49,67 @@
 /// (#2010). Named distinctly from `runtime::claude_code::spawn_command` (which
 /// builds the full env/flags managed-session command) so the two are never
 /// confused for one another.
-/// What: returns the literal `"claude"` command. This intentionally carries
-/// none of the managed-session isolation in
+/// What: returns `env <-u marker…> claude`. This still intentionally carries
+/// none of the managed-session AUTH isolation in
 /// [`crate::runtime::claude_code`] (no absolute-path resolution, no
 /// `ANTHROPIC_API_KEY` scrub, no `CLAUDE_CONFIG_DIR`) — see the module doc's
 /// KNOWN LIMITATION note for why that is currently unverified rather than
-/// deliberately safe for every caller of `restart_in_session`.
-/// Test: `relaunch_command_returns_bare_claude`.
-pub(crate) fn relaunch_command() -> &'static str {
-    "claude"
+/// deliberately safe for every caller of `restart_in_session`. That half remains
+/// #2020's.
+///
+/// Issue #4467 adds ONLY the inherited-session-marker scrub, which is orthogonal
+/// to #2020's auth question: a relaunch into an already-configured pane still
+/// inherits `CLAUDE_CODE_CHILD_SESSION` from the pane's environment and would
+/// silently save no transcript. Scrubbing it here is what lets the
+/// `transcript_saving` doctor check cover this launch line instead of returning
+/// `Ok` while it leaks.
+/// Test: `relaunch_command_scrubs_inherited_session_markers`.
+pub(crate) fn relaunch_command() -> String {
+    // #4467: strip the inherited Claude Code session markers. No `NAME=VALUE`
+    // assignments follow, so the POSIX "-u before assignments" rule is trivially
+    // satisfied.
+    format!(
+        "env{} claude",
+        crate::core::claude_env_scrub::env_unset_flags()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::relaunch_command;
 
-    /// The shared builder must keep returning the bare `claude` literal that
-    /// both call sites relied on before this consolidation (#2010) — this
-    /// change removes the drift risk, not the behavior.
+    /// #4467: the relaunch line must scrub the inherited session markers, or a
+    /// config-restart silently loses the pane's transcript. Marker names are
+    /// hard-coded so this cannot go vacuous if the shared list is emptied. The
+    /// `claude` program itself must still terminate the line (#2010 — no
+    /// absolute-path resolution here; that stays #2020's).
     #[test]
-    fn relaunch_command_returns_bare_claude() {
-        assert_eq!(relaunch_command(), "claude");
+    fn relaunch_command_scrubs_inherited_session_markers() {
+        let cmd = relaunch_command();
+        assert!(
+            cmd.starts_with("env -u "),
+            "the relaunch line must carry an env scrub prefix: {cmd}"
+        );
+        for marker in [
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDECODE",
+            "CLAUDE_PID",
+            "CLAUDE_EFFORT",
+            "CLAUDE_CODE_EXECPATH",
+        ] {
+            assert!(
+                cmd.contains(&format!("-u {marker}")),
+                "relaunch must unset {marker}: {cmd}"
+            );
+        }
+        assert!(
+            cmd.ends_with(" claude"),
+            "the line must still invoke `claude` (#2010): {cmd}"
+        );
+        assert!(
+            !cmd.contains("-u CLAUDE_CONFIG_DIR"),
+            "must never unset CLAUDE_CONFIG_DIR (#4455): {cmd}"
+        );
     }
 }

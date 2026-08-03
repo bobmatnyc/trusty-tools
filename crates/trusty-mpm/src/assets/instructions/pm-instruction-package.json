@@ -7,13 +7,13 @@
     {
       "id": "identity",
       "title": "Identity",
-      "customization_tier": "fixed",
+      "customization_tier": "project",
       "description": "Who the PM is. Framework floor."
     },
     {
       "id": "core",
       "title": "Core PM Instructions",
-      "customization_tier": "project",
+      "customization_tier": "fixed",
       "description": "Core operating instructions, including response format and prose rules."
     },
     {
@@ -39,15 +39,21 @@
       "description": "Routing doctrine; the live roster is appended by the `agent-roster` generator."
     },
     {
+      "id": "enforcement",
+      "title": "Delegation Enforcement",
+      "customization_tier": "project",
+      "description": "The canonical Prohibitions and Circuit Breakers tables — the PM's entire delegation-enforcement authority. Framework floor. Was tier `project` inside `core` until #4573, where a three-line `CLAUDE.md` CORE override deleted both tables outright and left the floor asserting a table that was no longer in the prompt."
+    },
+    {
       "id": "non-overridable-rules",
       "title": "Non-Overridable Rules",
-      "customization_tier": "fixed",
+      "customization_tier": "project",
       "description": "Non-overridable rules, the customization contract, and the Trusty tool-priority mandate. Framework floor."
     },
     {
       "id": "framework-guaranteed-conventions",
       "title": "Framework-Guaranteed Conventions",
-      "customization_tier": "fixed",
+      "customization_tier": "project",
       "description": "Attribution footer, documentation proportionality, ticket attribution. Framework floor."
     }
   ],
@@ -55,7 +61,10 @@
     {
       "section": "core",
       "join_before": "rule",
-      "body": { "kind": "file", "path": "sections/core.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/core.md"
+      }
     },
     {
       "section": "core",
@@ -76,23 +85,35 @@
     {
       "section": "memory",
       "join_before": "blank",
-      "body": { "kind": "file", "path": "sections/memory.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/memory.md"
+      }
     },
     {
       "section": "search",
       "join_before": "blank",
-      "body": { "kind": "file", "path": "sections/search.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/search.md"
+      }
     },
     {
       "section": "core",
       "join_before": "rule",
-      "body": { "kind": "generated", "generator": "stack-profile" },
+      "body": {
+        "kind": "generated",
+        "generator": "stack-profile"
+      },
       "optional": true
     },
     {
       "section": "workflow",
       "join_before": "rule",
-      "body": { "kind": "file", "path": "sections/workflow.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/workflow.md"
+      }
     },
     {
       "section": "workflow",
@@ -105,7 +126,10 @@
     {
       "section": "agent-delegation",
       "join_before": "rule",
-      "body": { "kind": "file", "path": "sections/agent-delegation.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/agent-delegation.md"
+      }
     },
     {
       "section": "agent-delegation",
@@ -118,23 +142,43 @@
     {
       "section": "agent-delegation",
       "join_before": "blank",
-      "body": { "kind": "generated", "generator": "agent-roster" }
+      "body": {
+        "kind": "generated",
+        "generator": "agent-roster"
+      }
     },
     {
       "section": "core",
       "join_before": "rule",
-      "body": { "kind": "generated", "generator": "project-addendum" },
+      "body": {
+        "kind": "generated",
+        "generator": "project-addendum"
+      },
       "optional": true
     },
     {
       "section": "identity",
       "join_before": "rule",
-      "body": { "kind": "file", "path": "sections/identity.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/identity.md"
+      }
+    },
+    {
+      "section": "enforcement",
+      "join_before": "blank",
+      "body": {
+        "kind": "file",
+        "path": "sections/enforcement.md"
+      }
     },
     {
       "section": "non-overridable-rules",
       "join_before": "blank",
-      "body": { "kind": "file", "path": "sections/non-overridable-rules.md" }
+      "body": {
+        "kind": "file",
+        "path": "sections/non-overridable-rules.md"
+      }
     },
     {
       "section": "framework-guaranteed-conventions",

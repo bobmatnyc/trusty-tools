@@ -14,7 +14,12 @@
 //! error type), [`deployer`] (writes skill `.md` sources into
 //! `<dest>/<name>/SKILL.md`, consulting the manifest to avoid clobbering user
 //! edits), and [`tiers`] (the project-custom / user-custom / bundled
-//! precedence resolver and multi-tier deploy orchestrator). `trusty-mpm`
+//! precedence resolver and multi-tier deploy orchestrator), plus two halves of
+//! the #4605 unreachable-bundled-skill fix — [`unmanaged`] (READ-ONLY
+//! detection of a bundled-named skill a deploy target does not manage, which
+//! [`tiers`] silently excludes from every deploy) and [`reconcile`] (the
+//! explicit, human-initiated adoption that backs each one up and records it in
+//! the manifest so the ordinary deploy reaches it again). `trusty-mpm`
 //! re-exports every public item from `crate::core::{skill_deployer,
 //! skill_manifest,skill_tiers}` for source compatibility with its existing
 //! call sites.
@@ -24,4 +29,6 @@
 
 pub mod deployer;
 pub mod manifest;
+pub mod reconcile;
 pub mod tiers;
+pub mod unmanaged;

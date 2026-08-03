@@ -221,7 +221,7 @@ pub fn home_lock_held_by_this_thread() -> bool {
 /// concurrent credential-routing tests would race.
 pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Force `trusty_common::inference::credentials::load_env_local_once` to
+/// Force `trusty_common::credentials::load_env_local_once` to
 /// have already run in this process, before any test-local `remove_var`.
 ///
 /// Why (#3464): that loader is a process-global `OnceLock` — it fires at
@@ -255,7 +255,7 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// independently unit tested since it depends on real process/filesystem
 /// state, exactly like `load_env_local_once` itself.
 pub fn force_env_local_loaded() {
-    trusty_common::inference::credentials::load_env_local_once();
+    trusty_common::credentials::load_env_local_once();
 }
 
 /// Clear the process env var for every provider the shared inference
@@ -278,7 +278,7 @@ pub fn force_env_local_loaded() {
 /// Test: `llm::credentials::tests::other_configured_providers_empty_when_nothing_else_configured`.
 pub fn clear_all_credential_env_vars() {
     for caps in trusty_common::inference::registry::all() {
-        if let Some(var) = trusty_common::inference::credentials::env_var_for(caps.id.as_str()) {
+        if let Some(var) = trusty_common::credentials::env_var_for(caps.id.as_str()) {
             // SAFETY: caller holds `ENV_LOCK` for the whole body (documented
             // requirement, same convention as every other env mutation in
             // this module).

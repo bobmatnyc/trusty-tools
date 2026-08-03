@@ -9,8 +9,8 @@
 
 use super::*;
 use serial_test::serial;
+use trusty_common::credentials::MemoryKeyStore;
 use trusty_common::inference::ChatMessage;
-use trusty_common::inference::credentials::MemoryKeyStore;
 use trusty_common::inference::test_support::MockInferenceServer;
 
 /// Why: `dispatch_turn` and any future call site must agree on the exact

@@ -19,7 +19,7 @@ mod types;
 pub use client::MemoryClient;
 pub use parsers::{
     creator_label, parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event,
-    parse_palaces, parse_recall_hits,
+    parse_palace_detail, parse_palaces, parse_recall_hits,
 };
 pub use types::{
     DEFAULT_MEMORY_URL, DrawerInfo, DreamStats, MemoryDetail, MemoryEvent, NO_CREATOR_LABEL,

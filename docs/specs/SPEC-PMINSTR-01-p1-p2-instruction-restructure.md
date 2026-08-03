@@ -16,10 +16,56 @@ spec_refs:
 **Status:** Draft (design proposal only — see §8)
 **Subsystem:** trusty-mpm — PM instruction pipeline (`crates/trusty-mpm/src/core/instruction_pipeline.rs`, `instruction_overrides.rs`, `stack_profile.rs`); session-manager (workstream/session persistence)
 **Owner:** Engineering (trusty-mpm) / Bob Matsuoka
-**Last-updated:** 2026-07-27
-**Spec ID:** `SPEC-PMINSTR-01~draft` … `SPEC-PMINSTR-07~draft` (DOC-59)
+**Last-updated:** 2026-08-03
+**Spec ID:** `SPEC-PMINSTR-01~draft` … `SPEC-PMINSTR-09~draft` (DOC-59)
 **Motivating incident:** issue #4071 (contradiction between `PM_INSTRUCTIONS.md:70` and `stack_profile.rs`'s generated rule, ~400 resolved lines apart)
 **Builds on:** DOC-38 [Spec-Linked Documentation](./spec-linked-documentation.md) (numbering/anchor convention); DOC-31 [SYSTEM vs PROJECT Agents & Skills](./system-project-agents-skills.md) (the project-custom > user-custom > bundled precedence this design's tier ordering mirrors); DOC-52 [Shared Workstream Definition](./DOC-52-shared-workstream-definition.md) (the workstream/session binding §7 makes the resolved corpus immutable against); issue #2299 / PR #2300 (root-`CLAUDE.md` removal — directly informs §6)
+
+---
+
+> **Supersession note (2026-08-01).** §5.5 recommendation 1 ("do not make
+> `CLAUDE.md` the core project-override mechanism, in either its current
+> Markdown form or a hypothetical restructured JSON form") is **superseded by
+> [#4324](https://github.com/bobmatnyc/trusty-tools/pull/4324)**, merged
+> 2026-07-29 — a *third* form neither this section nor the JSON-in-Markdown
+> alternative it argues against anticipated: named-section markers
+> (`<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `END`) inside a project's own
+> `CLAUDE.md`, read by
+> [`claude_md_sections.rs`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72).
+> `CLAUDE.md` is `HOST_FILES[0]` and wins a same-section collision over
+> `.trusty-mpm/INSTRUCTIONS.md` (`HOST_FILES[1]`) — see
+> [`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
+> [`:34`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L34).
+> Recommendation 2 (do not loosen `claude-md-guard.yml` /
+> `check_claude_md_not_tracked.sh`) held **until a further owner ruling on
+> 2026-08-03 retired it outright — see §9.6.** The guard was never loosened
+> for a "small disciplined format" (the risk this recommendation actually
+> argued against); instead the owner ruled the underlying ban itself
+> obsolete, and [#4660](https://github.com/bobmatnyc/trusty-tools/pull/4660)
+> deletes both the workflow and the script. Do not read this recommendation
+> as still standing — §9.6 has the current position and the retirement
+> rationale.
+>
+> Beyond the mechanism, the **direction** is also settled, not just added
+> alongside the old one: project customization is named sections in the
+> root `CLAUDE.md`. The `.trusty-mpm/` per-file override surface remains in
+> the current binary's read paths — it has not been removed and nothing
+> here should be read as claiming otherwise — but
+> [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks its
+> removal, not its indefinite parallel existence. See §5.5 inline for the
+> per-item detail. This note records the reversal; §5 below is left as
+> originally written.
+>
+> **Sharpened by a further owner ruling (2026-08-03) — see §9.** The
+> direction above is no longer merely "settled, not yet removed": the
+> owner has now ruled that `.trusty-mpm/INSTRUCTIONS.md`'s current
+> unconditional, additive read is itself a **defect**, not a tolerated
+> transitional state, and that the `#2299` tracked-root-`CLAUDE.md` ban
+> is **retired**. §9 records both rulings verbatim, the canonical
+> section-token list, the deprecated-file inventory, the code/spec gap,
+> and the migration path. §5's argument that a tracked `CLAUDE.md` risks
+> reintroducing the #2299 double-load is superseded by §9.6, not by this
+> note — read §9 for the current position.
 
 ---
 
@@ -183,6 +229,26 @@ that the *footer/docs/ticket conventions* survive full replacement (they
 live in `BASE_PM.md`'s own body) — but nothing verifies that the
 Prohibitions table itself survives, because it doesn't; it isn't in
 `BASE_PM.md` at all.
+
+> **Accuracy note (2026-08-01).** `PM_INSTRUCTIONS.md` and `BASE_PM.md` as
+> monolithic files are gone (#4183); the current bundled manifest is
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> (schema v2), whose `sections[]` each carry an explicit
+> `customization_tier`. The Prohibitions table now lives under the heading
+> `## Prohibitions (CANONICAL -- single source of truth)` inside
+> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L11)
+> — and the `core` section is tagged
+> [`"customization_tier": "project"`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L14-L16),
+> not `fixed`. This finding's recommendation — promote Prohibitions to
+> `fixed` — was **not** adopted; only three sections ship `fixed`:
+> `identity`, `non-overridable-rules`, `framework-guaranteed-conventions`
+> ([`pm-instruction-package.json:8-10,42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L8-L10)).
+> The gap this finding describes is real and current, not merely historical
+> — tracked by
+> [#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573)
+> ("Prohibitions and Circuit Breakers tables are tier 'project' — deletable,
+> unguarded at merge", milestone 1.3.2, open). Promoting the tier is a code
+> change tracked there, not made by this doc.
 
 ### Finding: Mis-tiering #2 (inverse) — safety-critical project rules sit in the least-protected tier
 
@@ -594,10 +660,43 @@ Code's own ancestor-directory `CLAUDE.md` semantics.
    reads.** Do not make `CLAUDE.md` the core project-override mechanism, in
    either its current Markdown form or a hypothetical restructured JSON
    form.
+
+   > **Superseded (2026-08-01) by [#4324](https://github.com/bobmatnyc/trusty-tools/pull/4324).**
+   > This did not happen. #4324 added named-section markers
+   > (`<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `END`) read directly out of
+   > a project's `CLAUDE.md` by
+   > [`claude_md_sections.rs`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
+   > and `CLAUDE.md` is scanned *first* —
+   > `HOST_FILES = ["CLAUDE.md", ".trusty-mpm/INSTRUCTIONS.md"]`
+   > ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72)),
+   > with `CLAUDE.md` winning a same-section collision
+   > ([`:34`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L34)).
+   > **The direction is also settled, not merely added alongside the old
+   > one.** Project customization is named sections in the root `CLAUDE.md`.
+   > The five `.trusty-mpm/` per-file overrides (`INSTRUCTIONS.md`,
+   > `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`,
+   > `PM_INSTRUCTIONS_DEPLOYED.md`; constants at
+   > [`instruction_overrides.rs:52-60`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60))
+   > remain in the current binary's read paths — nothing has removed them,
+   > and this note does not claim otherwise — but
+   > [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
+   > their removal, not their standing as a co-equal, indefinitely-supported
+   > alternative to `CLAUDE.md`.
 2. **Do not loosen `claude-md-guard.yml` / `check_claude_md_not_tracked.sh`.**
    The guard's condition is correct and orthogonal to file format or size;
    loosening it for "a small disciplined JSON file" doesn't address the
    actual failure mode and reopens a path to the #2647-class regression.
+
+   > **Superseded (2026-08-03) — see §9.6.** This recommendation was
+   > accurate through #4324 (a target project's `CLAUDE.md` override
+   > markers never needed the guard loosened). It no longer holds: the
+   > owner separately ruled the guard's underlying ban obsolete —
+   > "The ban is obsolete. CLAUDE.md can be tracked, it's up to the
+   > user." —
+   > [#4660](https://github.com/bobmatnyc/trusty-tools/pull/4660) deletes
+   > both `.github/workflows/claude-md-guard.yml` and
+   > `scripts/check_claude_md_not_tracked.sh`. §9.6 has the full ruling,
+   > rationale, and citations.
 3. **Preserve the existing untracked-stub division of labor explicitly** as
    a named design principle in the new system, not an incidental side
    effect: `CLAUDE.md` remains the harness-native, untracked, per-workspace
@@ -698,3 +797,335 @@ the goals, the audit findings, and a proposed shape; it does not sequence
 migration, does not specify backward-compatibility handling for existing
 `.trusty-mpm/*.md` override files, and does not estimate implementation
 cost.
+
+---
+
+## 9. Owner Ruling (2026-08-03): CLAUDE.md Named Sections Are Canonical; the Legacy `.trusty-mpm/` Overrides Are Deprecated {#SPEC-PMINSTR-09~draft}
+
+**ID:** SPEC-PMINSTR-09~draft
+**Status:** Ruling — owner-decided, binding (not a design proposal; §8 does not gate this section)
+**Ruling date:** 2026-08-03
+**Owner:** Bob Matsuoka
+
+Unlike §1-§8, this section is not a design proposal awaiting a go-ahead — it
+records a decision the owner has already made, in the same way the
+2026-08-01 supersession note at the top of this document records #4324's
+shipped reversal of §5.5 recommendation 1. Do not re-litigate it by
+re-deriving intent from source comments; the ruling is the authority.
+
+### 9.1 The ruling, verbatim
+
+> "User overrides should now be in CLAUDE.md in named sections.
+> [`.trusty-mpm/INSTRUCTIONS.md` being read additively] is a bug. This
+> should be in the spec." — Bob, 2026-08-03
+
+This sharpens, rather than merely repeats, the 2026-08-01 supersession note
+on §5.5: that note recorded that #4324 shipped named-section markers and
+that the *direction* was project customization moving to `CLAUDE.md`, while
+explicitly leaving the `.trusty-mpm/` five-file surface as "remains in the
+current binary's read paths ... nothing here should be read as claiming
+[removal]." This ruling goes further: `.trusty-mpm/INSTRUCTIONS.md`'s
+current unconditional, additive read is itself a **defect**, not a
+tolerated transitional state. It also supersedes the framing PR #4597 used
+("No doc in this PR uses 'deprecated'/'obsolete' language about
+[the `.trusty-mpm/` surface]") — this section uses that language
+deliberately, on this specific point, per the ruling above.
+
+### 9.2 Canonical surface: named sections in `CLAUDE.md`
+
+The grammar, matched whole-line (`claude_md_sections.rs:22-26`):
+
+```text
+<!-- TRUSTY-MPM: <TOKEN> START v=1 -->
+…override content, verbatim…
+<!-- TRUSTY-MPM: <TOKEN> END -->
+```
+
+The nine accepted section tokens, quoted exactly as
+`section_token()` spells them (`claude_md_sections.rs:111-121`):
+
+```rust
+SectionId::Identity => "IDENTITY",
+SectionId::Core => "CORE",
+SectionId::Memory => "MEMORY",
+SectionId::Search => "SEARCH",
+SectionId::Workflow => "WORKFLOW",
+SectionId::AgentDelegation => "AGENT-DELEGATION",
+SectionId::Enforcement => "ENFORCEMENT",
+SectionId::NonOverridableRules => "NON-OVERRIDABLE-RULES",
+SectionId::FrameworkGuaranteedConventions => "FRAMEWORK-GUARANTEED-CONVENTIONS",
+```
+
+Four of the nine are `fixed` tier (`pm-instruction-package.json:8-56`) and a
+marker aimed at one is **always declined and logged**, never applied
+(`claude_md_sections.rs::apply_one`, `Rejection::NotOverridable`); the
+bundled floor asset states this identically to the PM
+(`sections/non-overridable-rules.md:36-40`, quoted verbatim):
+
+> "Four tokens are `fixed` tier and can never be overridden: `IDENTITY`,
+> `ENFORCEMENT` (the Prohibitions and Circuit Breakers tables),
+> `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`. A marker
+> aimed at one of these is declined and logged as a warning — the bundled
+> section stays in force."
+
+The remaining five are `project` tier and may be overridden by a marker
+block: `CORE`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`.
+
+**Markers are REPLACE, not merge.** `apply_one` (`claude_md_sections.rs`)
+replaces the section's first authored block with the override body
+wholesale and drops the section's other authored blocks — it does not
+append to or blend with the bundled section. Only three of the five
+project-tier tokens are addressable at all on the legacy,
+`.trusty-mpm/`-forced composition path — `WORKFLOW`, `MEMORY`,
+`AGENT-DELEGATION` (`instruction_overrides.rs:327-336`,
+`named_workflow`/`named_memory`/`named_delegation`); `CORE` and `SEARCH`
+have no slot there and are reported unapplied unless the packaged composer
+(the no-legacy-file path) runs.
+
+**Plain, unmarked prose in `CLAUDE.md` is not a section override at all** —
+it is read as ordinary project context every session by Claude Code's own
+native per-directory memory loader, independent of any marker mechanism.
+The bundled floor asset's own table names this as the home for "Project
+facts/preferences": *"(none — plain `CLAUDE.md` prose) | Read as project
+context every session"* (`sections/non-overridable-rules.md:29`). This is
+the relevant row for §9.5's migration path — bulk project content is
+unmarked prose, not a marker block.
+
+### 9.3 Deprecated: the five `.trusty-mpm/` override files
+
+| File | Current behavior | Source | Ruling implication |
+|---|---|---|---|
+| `PM_INSTRUCTIONS_DEPLOYED.md` | Full-body replacement short-circuit: replaces PM body + WORKFLOW + AGENT_DELEGATION + MEMORY; `BASE_PM` floor still appended | `instruction_overrides.rs:52` (constant), `:286-294` (branch) | Deprecated — tracked by #4286 |
+| `AGENT_DELEGATION.md` | Replaces the whole delegation section AND suppresses the live agent roster | `:54`, `:338-345` | Deprecated — tracked by #4286 |
+| `WORKFLOW.md` | Replaces the whole bundled workflow section | `:56`, `:297`, `:412-414` | Deprecated — tracked by #4286 |
+| `MEMORY.md` | Slotted as a delimited addendum block immediately after `PM_INSTRUCTIONS`, not a section replacement | `:58`, `:299`, `:465-467` | Deprecated — tracked by #4286 |
+| `INSTRUCTIONS.md` | Dual role: (a) unconditional additive addendum, appended after every other section (`:60`, `:304-306`, `:471-474`); (b) a marker host in its own right (`HOST_FILES[1]`, `claude_md_sections.rs:72`), lower precedence than `CLAUDE.md` on a same-section collision | see §9.4 | Role (a) is the specific defect named in the 2026-08-03 ruling (§9.1) — deprecated, tracked by #4286 |
+
+None of the five has been removed from the current binary's read paths —
+#4286 ("Retire the project-level `.trusty-mpm/` PM instruction override
+mechanism," open, milestone 1.3.2) tracks that removal. The bundled floor
+asset already tells every PM never to create a new one
+(`sections/non-overridable-rules.md:57-60`, quoted verbatim):
+
+> "The `.trusty-mpm/` override files (`.trusty-mpm/INSTRUCTIONS.md`,
+> `.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
+> `.trusty-mpm/MEMORY.md`, `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md`) are
+> still read by the current binary; #4286 removes them — never create
+> one."
+
+So the PM-facing floor asset already states this ruling's direction
+correctly — the gap is in the override-resolution code, not in what the
+PM is told (§9.4).
+
+### 9.4 The gap between spec/floor-asset and implementation
+
+The override-resolution code still, unconditionally:
+
+- Reads `.trusty-mpm/INSTRUCTIONS.md` — `instruction_overrides.rs:60`
+  (`pub const FILE_INSTRUCTIONS: &str = "INSTRUCTIONS.md";`)
+- Strips marker blocks from it and treats the remainder as an addendum —
+  `instruction_overrides.rs:304-306`:
+  ```rust
+  let addendum = read_override(&dir, FILE_INSTRUCTIONS)
+      .map(|body| crate::core::claude_md_sections::strip_marker_blocks(&body))
+      .filter(|body| !body.is_empty());
+  ```
+- Appends that addendum into every resolved prompt, unconditionally, with
+  no gate, no warning, and no `tm doctor` check —
+  `instruction_overrides.rs:471-474`:
+  ```rust
+  // Additive project rules.
+  if let Some(extra) = addendum {
+      sections.push(extra);
+  }
+  ```
+- Emits **no deprecation signal anywhere** in the read path. Verified:
+  `grep -rni "deprecat" crates/trusty-mpm/src | grep -i instructions`
+  returns zero hits against this file or its call sites (the only two
+  matches in the crate are unrelated — the deprecated generic `ops` agent,
+  and a CLI alias note in `tracing_setup.rs`).
+
+**Measured cost** (verified against this worktree, which is `origin/main`
+at the time of this ruling): `.trusty-mpm/INSTRUCTIONS.md` in this repo is
+**49,699 bytes** (~12,425 estimated tokens at bytes/4) — the largest single
+sub-piece of a 1.3.2 launch's compiled prompt — appended in full, every
+session, with no opt-out.
+
+**Tracked by:** #4286 (open, milestone 1.3.2), which now carries this owner
+ruling and its supporting evidence directly, posted 2026-08-03. A duplicate
+issue (#4659) covering the same defect was filed and same-day closed as a
+duplicate of #4286 with the comment "Duplicate of #4286. Posting owner
+ruling and evidence there instead." — reference **#4286 only**; #4659 is
+closed and superseded.
+
+### 9.5 Migration path for a project currently using `INSTRUCTIONS.md`
+
+**This is not a token-reduction migration — only the delivery channel
+changes.** Content volume is unchanged: a measured overlap audit found only
+~4.7% duplication (2,350 of 49,699 bytes) between `INSTRUCTIONS.md` and the
+bundled sections, and zero contradictions between the two. A project
+migrating should not expect to shrink its per-session context by doing so,
+and should not treat the migration as license to drop content as
+"already covered" — nearly all of it is genuinely project-specific and
+must move, not be deleted.
+
+The move is **whole-content, as plain prose — not marker-wrapped**:
+
+1. Copy `.trusty-mpm/INSTRUCTIONS.md`'s content into the project's
+   `CLAUDE.md` as ordinary, **unmarked** prose (§9.2's "Project
+   facts/preferences" row). Do **not** wrap bulk project content (build
+   commands, conventions, pitfalls, environment setup) in a marker block:
+   markers are REPLACE semantics against exactly one of the five
+   project-tier sections (§9.2), so wrapping, say, the whole file in a
+   `WORKFLOW` marker would **delete** the entire bundled workflow section
+   (the 5-phase templates, QA gate table, security review, and publish
+   workflow) rather than merge with it. Reserve a marker block for the
+   narrow case of genuinely wanting to replace one of the five addressable
+   sections wholesale (e.g., a materially different phase sequence) — that
+   is what markers are for, not the bulk-content vehicle.
+2. Once in `CLAUDE.md`, the content is read every session by Claude Code's
+   own native per-directory memory loader — independently of `tm`'s
+   `.trusty-mpm/` resolver, which is exactly what
+   `instruction_pipeline.rs:474-478` and `:564-569` already state (quoted
+   in §9.6).
+3. Verify with `tm sessions instructions` (or read
+   `.trusty-mpm/last-instructions.md`), which reports every applied,
+   declined, and shadowed marker on stderr — this answers "did my move
+   land" and "did a marker I did add get accepted."
+4. Delete `.trusty-mpm/INSTRUCTIONS.md` once satisfied. The framework's
+   own floor asset already instructs the PM never to re-create it (§9.3,
+   `non-overridable-rules.md:57-60`).
+
+### 9.6 The `#2299` tracked-root-`CLAUDE.md` ban is retired
+
+**Ruling, verbatim:** "The ban is obsolete. CLAUDE.md can be tracked, it's
+up to the user." — Bob, 2026-08-03
+
+Whether a project tracks its own `CLAUDE.md` is now the project's/user's
+choice. The framework takes no position on it and must not enforce one.
+
+**Stated rationale:** issue #2299 (closed 2026-07-10) existed to eliminate
+a measured ~11k-tokens/session double-load traced to a tracked root
+`CLAUDE.md` (Claude Code's own native ancestor-directory loader reading it
+twice — once from a nested session worktree, once from the ancestor main
+checkout). The rationale given for retiring the ban is that `tm`'s own
+prompt composer has, since, deliberately excluded the project `CLAUDE.md`
+body from the prompt it builds:
+
+> "Deliberately excludes the project `CLAUDE.md` body (removed as dead
+> code — see the module docs): Claude Code loads `CLAUDE.md` natively, and
+> the actual launch prompt is built by
+> [`crate::core::instruction_overrides::resolve_pm_prompt`], not this
+> field." — `instruction_pipeline.rs:474-478`
+
+> "Side effect only: ensure the project CLAUDE.md stub exists so a fresh
+> workspace always has a place for project notes. The content is
+> deliberately discarded here rather than folded into `merged` — Claude
+> Code already memory-loads `CLAUDE.md` natively, and the real launch
+> prompt is built by `resolve_pm_prompt`/`build_system_prompt_for`, not
+> this pipeline's `merged` output." — `instruction_pipeline.rs:564-569`
+
+> **Citation-drift note.** An earlier draft of this ruling (and the
+> parallel bug-issue thread) cited this exclusion at
+> `instruction_pipeline.rs:264-265`. That line span was checked against
+> the current `origin/main` build of this file and does **not** contain
+> this content at the time of this ruling (it falls inside the unrelated
+> `base_pm()` function). The two citations quoted above were verified
+> directly against this file in this worktree and are the accurate current
+> locations; this note exists so the drift is recorded rather than
+> silently re-cited.
+
+**Consequence:**
+
+- `scripts/check_claude_md_not_tracked.sh` and
+  `.github/workflows/claude-md-guard.yml` — the CI gate enforcing the now
+  retired ban — are **obsolete**. Their removal is not this docs-only
+  PR's own change: [#4660](https://github.com/bobmatnyc/trusty-tools/pull/4660)
+  ("chore(trusty-mpm): retire the root CLAUDE.md tracked-guard", open at
+  the time of this writing, checks green/in-progress) deletes both files
+  plus the now-dangling `claude_md` case in
+  `scripts/check_scan_floor_selftest.sh`'s mutation self-test.
+- Issue #2299's state as of this writing: **CLOSED** (closed 2026-07-10,
+  for its original fix — removing the tracked root `CLAUDE.md`). Neither
+  this ruling nor #4660 changes that state; #4660 deliberately does not
+  use an auto-closing keyword against it (verified:
+  `closingIssuesReferences` for #4660 is empty), because the issue
+  documents a fix that was real and remains historically accurate — only
+  the *enforcement* built on top of it is what's retiring. Do not write
+  or imply that #2299 is open, or that it was (re-)closed by this
+  ruling or by #4660; the recommended follow-up is an owner-authored
+  comment annotating it as superseded, not a state change.
+- Do not reference #4659 — it was filed in error as a duplicate of #4286
+  and is closed.
+
+### 9.7 Obsolete: the "BASE_PM" framing — there is no separate floor tier
+
+**Ruling, verbatim:** "we don't use BASE_PM any more. All instructions
+begin in instructions/sections, any overrides are in named sections in
+CLAUDE.md" — Bob, 2026-08-03.
+
+**Verified current state (checked directly, not taken from the ruling's
+description):**
+
+- No standalone `BASE_PM.md` file exists anywhere in the tree
+  (`find . -iname "BASE_PM*"` returns nothing). This matches this
+  document's own §3 accuracy note: monolithic `PM_INSTRUCTIONS.md` /
+  `BASE_PM.md` files were removed by #4183.
+- The compiled prompt **still literally renders** a "BASE_PM" heading and
+  framing, sourced from `sections/identity.md:1-3` (the `identity`
+  section, `fixed` tier, `pm-instruction-package.json:8-10`):
+  ```markdown
+  # BASE_PM Framework Floor
+
+  > Always appended to PM prompt. Cannot be overridden.
+  ```
+- The code still names the function that concatenates the four `fixed`
+  sections (`Identity`, `Enforcement`, `NonOverridableRules`,
+  `FrameworkGuaranteedConventions`) `base_pm()`
+  (`instruction_pipeline.rs:246-266`), and roughly thirty test assertions
+  across `instruction_overrides.rs`, `instruction_pipeline_tests.rs`,
+  `bundled_pm_package_tests.rs`, `claude_md_sections_tests.rs`, and
+  `session_launch/tests.rs` assert on the literal string
+  `"# BASE_PM Framework Floor"`.
+- **Correction to an earlier characterization of this issue.** It was
+  claimed that the "Customizing PM Behavior" table inside
+  `non-overridable-rules.md` (rendered as part of the same `base_pm()`
+  concatenation) still instructs the PM to CREATE the five legacy
+  `.trusty-mpm/*.md` files on trigger phrases like
+  "remember/always/never/for this project." Checked directly against this
+  worktree's `origin/main`: that is **not currently true**. Commit
+  `0aec8866` ("floor docs point at CLAUDE.md named sections, dedupe
+  attribution footer", #4592) already rewrote that trigger-phrase table —
+  every trigger now maps to `CLAUDE.md` (plain prose or a marker block,
+  §9.2), and the section explicitly instructs "never create one"
+  regarding the five legacy files (quoted in full at §9.3). The remaining
+  obsolete element is the **"BASE_PM" branding and floor framing itself**
+  (the heading, the "Always appended ... Cannot be overridden" tagline,
+  and the `base_pm()` name), not the customization table's content, which
+  is already correct.
+
+**The canonical model this ruling states:**
+
+- All instructions originate in
+  `crates/trusty-mpm/src/assets/instructions/sections/` — there is no
+  separate "BASE_PM" tier alongside it.
+- Project overrides are named sections in `CLAUDE.md` (§9.2).
+- Non-overridable rules are **not retired** by this ruling — only the
+  "BASE_PM" label/framing is. The Prohibitions and Circuit Breakers
+  tables (`sections/enforcement.md`) and the Framework-Guaranteed
+  Conventions (`sections/framework-guaranteed-conventions.md` — the
+  commit/PR attribution footer, proportional-documentation policy, and
+  ticket-attribution convention) remain fully binding, exactly as
+  `CustomizationTier::Fixed` already enforces them (§9.2): a marker aimed
+  at `IDENTITY`, `ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, or
+  `FRAMEWORK-GUARANTEED-CONVENTIONS` is still always declined. The
+  mechanism that makes these rules non-overridable does not need a
+  separate "floor" concept layered on top of `fixed` tier — `fixed` tier
+  already is that guarantee.
+
+**Deviation, tracked as follow-up, not fixed here:** removing the
+"BASE_PM Framework Floor" heading and tagline from `sections/identity.md`,
+renaming `base_pm()`, and updating the ~30 test assertions that pin the
+literal string is a **code change**. Per this ruling's own scope note, it
+lands in the #4286 core PR, not this docs-only one. This section records
+the target model and the current gap; it does not perform the rename.

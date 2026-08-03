@@ -16,7 +16,10 @@ mod render;
 mod tests;
 mod types;
 
-pub use format::{format_count, format_uptime, help_text, panel_layout, status_badge, truncate};
+pub use format::{
+    UNKNOWN_COUNT, format_count, format_opt_count, format_uptime, help_text, panel_layout,
+    status_badge, truncate,
+};
 pub use render::{memory_panel_lines, render, search_panel_lines};
 pub use types::{
     DaemonPanel, DashboardState, Focus, IndexRow, KEY_HINT, MemoryData, PalaceRow, PanelStatus,

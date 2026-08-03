@@ -4,18 +4,20 @@
 //!      (`if persona_name == "cto-assistant" { register(cto_db_tools()) }`).
 //!      That coupled `trusty-agents` directly to every agent's tool surface and
 //!      forced sensitive agent logic (HR/budget queries) to live inside the
-//!      host binary. `AgentPlugin` decouples this: external agent crates
-//!      construct their tool list and hand it to `trusty-agents` as a plugin,
-//!      and the ctrl loop matches `plugin.persona_name` against the active
-//!      persona at session start.
+//!      host binary. `AgentPlugin` decouples this: a plugin source constructs
+//!      a tool list and hands it to `trusty-agents`, and the ctrl loop matches
+//!      `plugin.persona_name` against the active persona at session start.
+//!      The live producer is now `crate::tools::python_skill`, which turns a
+//!      DECLARED Python skill directory into plugins — so no agent's tools
+//!      require Rust any more (the last such crate, `cto-assistant`, was
+//!      dissolved in #3732). An out-of-workspace private launcher can still
+//!      inject its own plugins via `trusty_agents::install_plugins(...)`.
 //! What: A named bundle of `ToolExecutor`s associated with a specific
 //!       persona name. The ctrl loop iterates over the injected plugin list
 //!       and, for the active persona, registers each plugin's tools into
-//!       the session's `ToolRegistry`. Plugins are constructed once at
-//!       process start (in `main.rs`) and threaded through to ctrl.
-//! Test: Exercised via `crates/cto-assistant` integration — the cto-assistant
-//!       crate constructs an `AgentPlugin` and `main.rs` injects it; the
-//!       cto-assistant persona then sees its four CTO DB tools registered.
+//!       the session's `ToolRegistry`. Plugins are installed once per process
+//!       into a `OnceLock` before any ctrl task runs.
+//! Test: `agent_plugin_lookup_returns_matching_plugin`.
 
 use std::sync::OnceLock;
 

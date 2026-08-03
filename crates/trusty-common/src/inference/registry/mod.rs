@@ -6,7 +6,9 @@
 //! adapters, the configurator, and consumers all agree instead of scattering
 //! `slug.starts_with(...)` checks. This is the seam that drives later per-model
 //! decisions (compaction thresholds, cost estimates, tool-format fallback).
-//! What: [`ProviderId`] (the five epic-#2400 providers), [`ToolDialect`],
+//! What: [`ProviderId`] (the five epic-#2400 providers, plus its
+//! [`ProviderId::wire_model_id`] routing-prefix normaliser — #4493),
+//! [`ToolDialect`],
 //! [`ProviderCapabilities`], the static seed table with
 //! [`capabilities`]/[`capabilities_for`]/[`all`] queries, and — from the
 //! `context` and `pricing` submodules — [`context_window`] (incl. the #2330
@@ -80,7 +82,7 @@ impl ProviderId {
     /// The provider name to hand the credential resolver, or `None` when the
     /// provider does not use an API key.
     ///
-    /// Why: [`crate::inference::credentials::resolve_key_with`] keys off a
+    /// Why: [`crate::credentials::resolve_key_with`] keys off a
     /// provider name; Bedrock has no key (AWS chain) and Local has no key
     /// (unauthenticated `localhost` endpoint), so their resolution is skipped
     /// entirely by the configurator — both resolve immediately in stage 1 of
@@ -121,6 +123,42 @@ impl ProviderId {
             "atlascloud" => Some(Self::AtlasCloud),
             "local" | "ollama" => Some(Self::Local),
             _ => None,
+        }
+    }
+
+    /// The model id to put on THIS provider's wire, given a dispatch slug.
+    ///
+    /// Why: [`Self::from_slug_prefix`] CONSUMES a `<prefix>/…` marker to pick a
+    /// provider, but the slug itself is carried on unchanged into the request
+    /// body — so a direct provider was being asked for a model id that includes
+    /// the routing marker (issue #4493: `openai/gpt-4o-mini` reached
+    /// `api.openai.com`, which knows only `gpt-4o-mini`, and answered 400). Two
+    /// adapters had already hand-rolled the same one-provider strip
+    /// (`bedrock::bedrock_model_id`, `providers::anthropic::request::strip_prefix`);
+    /// this is that rule, generalised once, so every direct provider — present
+    /// and future — gets it instead of rediscovering the bug.
+    /// What: returns `slug` with ONE leading routing marker removed, and only
+    /// when that marker names `self` — so a slash that is part of the model id
+    /// survives (`accounts/fireworks/models/…` on Fireworks,
+    /// `meta-llama/…` on Together), and a nested vendor segment survives too
+    /// (`atlascloud/openai/gpt-5.6-sol` → `openai/gpt-5.6-sol`, which is
+    /// AtlasCloud's real catalog id). [`Self::OpenRouter`] is exempt and always
+    /// returns `slug` verbatim: it is an AGGREGATOR whose wire id IS the full
+    /// `vendor/model` slug, and it additionally publishes first-party models
+    /// under a genuine `openrouter/` vendor (`openrouter/auto`) that a strip
+    /// would corrupt.
+    /// Test: `wire_model_id_strips_own_routing_prefix`,
+    /// `wire_model_id_never_strips_for_openrouter`,
+    /// `wire_model_id_leaves_foreign_and_bare_slugs_alone`.
+    pub fn wire_model_id(self, slug: &str) -> &str {
+        // #4493: OpenRouter routes BY the full slug — never normalise it.
+        if matches!(self, Self::OpenRouter) {
+            return slug;
+        }
+        match slug.split_once('/') {
+            // Strip only a marker that names THIS provider, and only once.
+            Some((head, rest)) if Self::from_slug_prefix(head) == Some(self) => rest,
+            _ => slug,
         }
     }
 }
@@ -424,6 +462,107 @@ mod tests {
     fn from_slug_prefix_unknown_is_none() {
         assert_eq!(ProviderId::from_slug_prefix("claude-sonnet-4-5"), None);
         assert_eq!(ProviderId::from_slug_prefix("cohere/command"), None);
+    }
+
+    /// Why: #4493 — a routing prefix consumed by `provider_for` must not survive
+    /// into a DIRECT provider's wire payload; `openai/gpt-4o-mini` is not a model
+    /// id `api.openai.com` knows. Every keyed direct provider (not just OpenAI)
+    /// and both `Local` spellings must normalise.
+    /// Test: itself.
+    #[test]
+    fn wire_model_id_strips_own_routing_prefix() {
+        assert_eq!(
+            ProviderId::OpenAI.wire_model_id("openai/gpt-4o-mini"),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            ProviderId::Anthropic.wire_model_id("anthropic/claude-sonnet-4-5"),
+            "claude-sonnet-4-5"
+        );
+        assert_eq!(
+            ProviderId::Bedrock.wire_model_id("bedrock/us.anthropic.claude-sonnet-4-5"),
+            "us.anthropic.claude-sonnet-4-5"
+        );
+        assert_eq!(
+            ProviderId::Together.wire_model_id("together/meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        );
+        assert_eq!(
+            ProviderId::Fireworks
+                .wire_model_id("fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct"),
+            "accounts/fireworks/models/llama-v3p1-70b-instruct"
+        );
+        assert_eq!(
+            ProviderId::Local.wire_model_id("local/llama3.1"),
+            "llama3.1"
+        );
+        assert_eq!(
+            ProviderId::Local.wire_model_id("ollama/qwen3:30b"),
+            "qwen3:30b"
+        );
+        // Case-insensitive, matching `from_slug_prefix`.
+        assert_eq!(
+            ProviderId::OpenAI.wire_model_id("OpenAI/gpt-4o-mini"),
+            "gpt-4o-mini"
+        );
+        // Exactly ONE marker comes off — a nested vendor segment is part of the
+        // provider's own catalog id (AtlasCloud's `openai/gpt-5.6-sol`).
+        assert_eq!(
+            ProviderId::AtlasCloud.wire_model_id("atlascloud/openai/gpt-5.6-sol"),
+            "openai/gpt-5.6-sol"
+        );
+    }
+
+    /// Why: #4493 regression guard — OpenRouter is an AGGREGATOR: the full
+    /// `vendor/model` slug IS its wire id, and it publishes first-party models
+    /// under a genuine `openrouter/` vendor. Stripping for it would break the
+    /// workspace's primary provider, so it must be exempt in BOTH directions.
+    /// Test: itself.
+    #[test]
+    fn wire_model_id_never_strips_for_openrouter() {
+        for slug in [
+            "openai/gpt-4o-mini",
+            "anthropic/claude-sonnet-4-5",
+            "openrouter/auto",
+            "openrouter/horizon-beta",
+            "meta-llama/llama-3.3-70b-instruct",
+        ] {
+            assert_eq!(
+                ProviderId::OpenRouter.wire_model_id(slug),
+                slug,
+                "OpenRouter must transmit {slug} verbatim"
+            );
+        }
+    }
+
+    /// Why: the strip must be surgical — a slash that belongs to the MODEL ID
+    /// (Fireworks' `accounts/…`, Together's `meta-llama/…`), a foreign vendor
+    /// prefix, and a bare slug must all pass through untouched.
+    /// Test: itself.
+    #[test]
+    fn wire_model_id_leaves_foreign_and_bare_slugs_alone() {
+        assert_eq!(
+            ProviderId::OpenAI.wire_model_id("gpt-4o-mini"),
+            "gpt-4o-mini"
+        );
+        assert_eq!(
+            ProviderId::Fireworks
+                .wire_model_id("accounts/fireworks/models/llama-v3p1-70b-instruct"),
+            "accounts/fireworks/models/llama-v3p1-70b-instruct"
+        );
+        assert_eq!(
+            ProviderId::Together.wire_model_id("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        );
+        assert_eq!(
+            ProviderId::AtlasCloud.wire_model_id("openai/gpt-5.6-sol"),
+            "openai/gpt-5.6-sol"
+        );
+        // A marker naming a DIFFERENT provider is not ours to remove.
+        assert_eq!(
+            ProviderId::OpenAI.wire_model_id("anthropic/claude-sonnet-4-5"),
+            "anthropic/claude-sonnet-4-5"
+        );
     }
 
     /// Why: Bedrock (AWS chain) and Local (unauthenticated localhost) are the

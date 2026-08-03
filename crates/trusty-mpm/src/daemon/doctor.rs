@@ -49,11 +49,49 @@ use doctor_deploy_validate::check_deployment_completeness;
 mod doctor_agent_reachability;
 use doctor_agent_reachability::check_agent_reachability;
 
+// #4442: the shadowing half — every probe above looks only at the canonical
+// deploy tier, so a stale copy of the same agent in a project's
+// `.claude/agents/` outranks it and wins resolution with all checks green.
+#[path = "doctor_asset_tier.rs"]
+mod doctor_asset_tier;
+use doctor_asset_tier::check_asset_tier;
+
+// #4467: the same silent-failure shape as #4451, one layer down — a managed
+// spawn that inherits `CLAUDE_CODE_CHILD_SESSION` has transcript saving turned
+// off, so the session is unrecoverable and nothing reported it.
+#[path = "doctor_transcript_saving.rs"]
+mod doctor_transcript_saving;
+use doctor_transcript_saving::check_transcript_saving;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #2876 —
 // the skill-staleness and legacy-instruction-source probes).
 #[path = "doctor_staleness.rs"]
 mod doctor_staleness;
-use doctor_staleness::{check_legacy_instruction_sources, check_skill_staleness};
+use doctor_staleness::check_legacy_instruction_sources;
+
+// #4604: deployed-skill drift, compared against the RUNNING BINARY's own
+// embedded assets. It used to live in `doctor_staleness.rs` and compare the
+// `~/.trusty-mpm/framework/skills` extraction cache against the deploy
+// manifest — both sides could be the same stale content, which is how a
+// drifted `tm-workflow` reported clean at three tiers at once.
+#[path = "doctor_skill_drift.rs"]
+mod doctor_skill_drift;
+use doctor_skill_drift::check_skill_staleness;
+
+// #4033: install provenance of the running binary — "is what's running what
+// you think it is?", the observation doctor's liveness+file-state health model
+// never made.
+#[path = "doctor_binary_provenance.rs"]
+mod doctor_binary_provenance;
+use doctor_binary_provenance::check_binary_provenance;
+
+// #4605: the reachability half for SKILLS — `check_skill_staleness` above
+// compares against the deploy MANIFEST, so a bundled skill absent from that
+// manifest is outside everything it can see and reports a clean `Ok` while the
+// file on disk serves text the current binary removed.
+#[path = "doctor_skill_unmanaged.rs"]
+mod doctor_skill_unmanaged;
+use doctor_skill_unmanaged::check_skill_unmanaged;
 
 // Split out to keep this file under the 500-SLOC production cap (DOC-42,
 // issue #2889 — the agent-bundled-skills dangling-reference / prose-mention
@@ -87,6 +125,20 @@ use doctor_scaffold_tracking::check_scaffold_tracking;
 mod doctor_push_guard;
 use doctor_push_guard::check_push_guard;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #2919 —
+// the worktree disk-consumption / merged-PR reclaimability probe, the
+// early-warning half of the 1.1 TiB leak post-mortem).
+#[path = "doctor_worktree_disk.rs"]
+mod doctor_worktree_disk;
+use doctor_worktree_disk::check_worktree_disk;
+
+// Split out to keep this file under the 500-SLOC production cap (issue #4286 —
+// the retired `.trusty-mpm/` override-file probe, the on-demand half of the
+// signal that stops the hard cut from silently dropping a project's rules).
+#[path = "doctor_legacy_overrides.rs"]
+mod doctor_legacy_overrides;
+use doctor_legacy_overrides::check_legacy_overrides;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -119,8 +171,12 @@ const PROBE_ATTEMPTS: usize = 3;
 /// attempts stay well inside an interactive `tm doctor` run.
 const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// The trusty-search index `tm doctor` expects to exist for this repo.
-const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
+// #4003: the search-index doctor probe used to hardcode a literal expected
+// index id ("trusty-mpm" — the crate name, not this repo's registered index
+// id "trusty-tools"), so it permanently warned "index missing" against a
+// healthy, fully-indexed project. `expected_search_index_id` below resolves
+// the id the same way every other launch path does, via
+// `trusty_common::derive_index_id`.
 
 /// Run every diagnostic probe and assemble the report.
 ///
@@ -198,7 +254,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_three_checks`,
+/// Test: `run_doctor_produces_twenty_nine_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -222,24 +278,45 @@ pub async fn run_doctor(
 
     let mut checks = vec![
         check_instructions(project_dir),
-        check_agents(&paths),
+        check_agents(&paths, project_dir),
         // #4451: `check_agents` proves the files exist; this proves the tier
         // they land in is one a managed session's harness actually scans.
         check_agent_reachability(&paths, project_dir),
+        // #4442: and this proves nothing OUTSIDE that tier outranks it — a
+        // project-tier copy of a bundled agent shadows the canonical deploy
+        // while every presence-only probe above stays green.
+        check_asset_tier(&paths, project_dir, &home),
+        // #4467: and this proves the spawn does not silently lose the session's
+        // own transcript, which costs it all native --resume/--continue/rewind
+        // recovery. No `project_dir`/`paths` input — the invariant is a property
+        // of the spawn command itself, identical for every project.
+        check_transcript_saving(),
         check_skills(skills_root),
         check_skill_source(&paths),
         check_output_style(project_dir, &home),
         check_output_style_staleness(project_dir, &home),
         check_output_style_legacy_ids(project_dir, &home),
         check_deployment_completeness(&paths),
-        check_skill_staleness(&paths),
+        check_skill_staleness(&paths, project_dir),
+        // #4605: and this proves the manifest that check consults actually
+        // covers the deployed skills — an untracked bundled skill is
+        // unreachable by every deploy and invisible to staleness.
+        check_skill_unmanaged(&paths, project_dir),
         check_legacy_instruction_sources(&home),
+        // #4286: the five `.trusty-mpm/` override files are no longer read. A
+        // leftover file means the project's instructions stopped reaching the
+        // PM, so this Fails loudly and names the CLAUDE.md migration.
+        check_legacy_overrides(project_dir),
         agent_skills,
         agent_skills_prose_hints,
     ];
     checks.push(check_memory(&home).await);
-    checks.push(check_search(&home).await);
+    checks.push(check_search(&home, project_dir).await);
     checks.push(check_worktrees(repos_root, active_workspace_paths).await);
+    // #2919: `check_worktrees` above counts ORPHANS and has never reported a
+    // byte, so it read identically whether the worktree store held 4 GiB or the
+    // 1.1 TiB measured on 2026-07-21. This is the disk half.
+    checks.push(check_worktree_disk(repos_root, active_workspace_paths).await);
     checks.push(check_gh_account().await);
     checks.push(check_oauth_token_config());
     let (hooks_contamination, hooks_foreign_conflict) =
@@ -259,6 +336,10 @@ pub async fn run_doctor(
     // clone that predates it is silently unprotected. Warn-only, naming the
     // `tm repair push-guard` retrofit; doctor never writes into a repository.
     checks.push(check_push_guard(project_dir));
+    // Issue #4033: where the RUNNING binary came from, and whether that source
+    // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
+    // determined. Read-only; never installs, moves, or deletes.
+    checks.push(check_binary_provenance());
 
     DoctorReport::from_checks(checks)
 }
@@ -727,15 +808,16 @@ fn interpret_health(
     )
 }
 
-/// Probe the trusty-search sidecar's health and the `trusty-mpm` index.
+/// Probe the trusty-search sidecar's health and this project's index.
 ///
 /// Why: code search backs the PM's "search before grep" rule; both the service
-/// being up *and* the `trusty-mpm` index existing are required for it to work.
+/// being up *and* this project's index existing are required for it to work.
 /// What: resolves the service address, checks `GET /health` (a non-2xx or
-/// transport error is `Fail`), then checks `GET /indexes` for an index named
-/// [`EXPECTED_SEARCH_INDEX`] — a healthy service missing that index is `Warn`.
+/// transport error is `Fail`), then checks `GET /indexes` for the index id
+/// [`expected_search_index_id`] resolves for `project_dir` — a healthy
+/// service missing that index is `Warn`.
 /// Test: `search_unreachable_is_fail`.
-async fn check_search(home: &Path) -> DoctorCheck {
+async fn check_search(home: &Path, project_dir: Option<&Path>) -> DoctorCheck {
     let dir = home.join(".trusty-search");
     let default = TRUSTY_SEARCH_DEFAULT_ADDR
         .parse()
@@ -761,19 +843,21 @@ async fn check_search(home: &Path) -> DoctorCheck {
         }
     }
 
-    // Service is up — confirm the expected index exists.
+    // Service is up — confirm the expected index exists. #4003: the expected
+    // id is DERIVED from the project (same rule `session_launch` and
+    // `trusty-search`'s own `detect_project` use), not a hardcoded literal —
+    // see `expected_search_index_id`.
+    let expected_index = expected_search_index_id(project_dir);
     match http_get_json(&format!("http://{addr}/indexes")).await {
-        Ok(body) if index_present(&body, EXPECTED_SEARCH_INDEX) => DoctorCheck::new(
+        Ok(body) if index_present(&body, &expected_index) => DoctorCheck::new(
             "search",
             CheckStatus::Ok,
-            format!("trusty-search healthy at {addr}, `{EXPECTED_SEARCH_INDEX}` index present"),
+            format!("trusty-search healthy at {addr}, `{expected_index}` index present"),
         ),
         Ok(_) => DoctorCheck::new(
             "search",
             CheckStatus::Warn,
-            format!(
-                "trusty-search healthy at {addr} but the `{EXPECTED_SEARCH_INDEX}` index is missing"
-            ),
+            format!("trusty-search healthy at {addr} but the `{expected_index}` index is missing"),
         ),
         Err(e) => DoctorCheck::new(
             "search",
@@ -781,6 +865,30 @@ async fn check_search(home: &Path) -> DoctorCheck {
             format!("trusty-search healthy at {addr} but listing indexes failed: {e}"),
         ),
     }
+}
+
+/// Resolve the trusty-search index id `tm doctor` should expect for
+/// `project_dir` (#4003).
+///
+/// Why: the probe previously hardcoded a literal expected index name
+/// (`"trusty-mpm"` — the crate name), which diverges from a repo's actual
+/// registered index id (e.g. this repo registers as `"trusty-tools"`), so a
+/// healthy, fully-indexed project permanently reported "index missing".
+/// What: walks up from `project_dir` (falling back to the process cwd when
+/// `None`, matching the daemon's own `run_doctor` default) to the nearest
+/// git root via [`trusty_common::resolve_project_root`], then derives the id
+/// via [`trusty_common::derive_index_id`] — the exact same rule
+/// `core::session_launch` uses to register-and-pin a session's index and
+/// trusty-search's own `detect_project` uses to resolve a bare `search`
+/// call, so all three agree on one id per project (#1373).
+/// Test: `expected_search_index_id_derives_from_project_dir_not_hardcoded`.
+fn expected_search_index_id(project_dir: Option<&Path>) -> String {
+    let start = match project_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    let root = trusty_common::resolve_project_root(&start);
+    trusty_common::derive_index_id(&root)
 }
 
 /// True when `body` mentions an index named `name`.

@@ -76,6 +76,12 @@ pub(crate) async fn run_daemon(
     // restart-race rationale and the pure decision table.
     let supervised = apply_supervision_signal(&state);
 
+    // #4230: record the opt-in so `/health` can distinguish a deliberate
+    // unsupervised run from an unwanted orphan. Without it `tm doctor` would call
+    // a `--force` daemon an orphan — the very escape hatch #4397's refusal
+    // recommends.
+    state.set_unsupervised_forced(force);
+
     // #4397: the #2486 guard previously existed only on the MCP-bridge's
     // `no_spawn` path (`serve_stdio.rs`) — a bare `tm daemon` invocation
     // walked straight past the same hazard. Refuse here too unless the
@@ -219,8 +225,30 @@ async fn wait_for_shutdown_signal() {
 /// (env/filesystem probes + a state mutation) and is exercised via the daemon
 /// e2e suite's boot path.
 fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
+    use trusty_common::supervision::{LaunchdSupervision, launchd_supervision};
+
     let plist_exists = crate::commands::launchd_probe::mpm_launchd_plist_exists();
-    let is_launchd = trusty_common::update::is_launchd_supervised();
+    // #4469: ONE authoritative query, whose three-state answer is published on
+    // `/health` alongside the bool it collapses into. Without the third state a
+    // launchctl that could not be asked reads as `supervised: false`, and
+    // `tm doctor`'s orphan verdict escalates that to a `kill -TERM`
+    // recommendation against a daemon whose state is merely unknown.
+    let answer = launchd_supervision();
+    let discriminant = match &answer {
+        LaunchdSupervision::Supervised(_) => "supervised",
+        LaunchdSupervision::NotSupervised => "not_supervised",
+        LaunchdSupervision::Unknown(_) => "unknown",
+    };
+    state.set_launchd_supervision(discriminant);
+    if let LaunchdSupervision::Unknown(why) = &answer {
+        tracing::warn!(
+            reason = %why,
+            "could not determine launchd supervision authoritatively — /health will \
+             report launchd_supervision=unknown (issue #4469)"
+        );
+    }
+
+    let is_launchd = answer.is_supervised();
     let supervised = crate::commands::launchd_probe::compute_supervised(is_launchd, plist_exists);
     state.set_supervised(supervised);
     if !supervised {

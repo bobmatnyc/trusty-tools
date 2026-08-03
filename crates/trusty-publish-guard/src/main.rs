@@ -36,6 +36,37 @@ struct CrateManifest {
     publish: bool,
 }
 
+/// Minimum number of publishable crates a real run must have checked.
+///
+/// Why: the exit code depends only on `drifted == 0 && unverifiable == 0`, so a
+/// run that discovered no crates prints `checked 0 publishable crate(s) — 0
+/// drifted, 0 unverifiable.` and exits 0 — a version-parity gate that cannot
+/// fail (issue #4618). `checked` is the number that separates "compared every
+/// crate against crates.io" from "compared nothing", so it is floored.
+/// Deliberately far below the current publishable set and far above zero.
+/// What: compared against `checked` via [`scan_floor_violation`].
+/// Test: `tests::floor_rejects_empty_scan`.
+const MIN_CHECKED_CRATES: usize = 10;
+
+/// Reports why a run's crate coverage is too low to be trusted, if it is.
+///
+/// Why: keeps the floor a pure, unit-testable predicate instead of an inline
+/// `if` in `main` that only CI can exercise (issue #4618).
+/// What: `Some(message)` when fewer than [`MIN_CHECKED_CRATES`] crates were
+/// checked, `None` otherwise.
+/// Test: `tests::floor_rejects_empty_scan`, `tests::floor_accepts_real_scan`.
+fn scan_floor_violation(checked: usize) -> Option<String> {
+    if checked >= MIN_CHECKED_CRATES {
+        return None;
+    }
+    Some(format!(
+        "publish-guard: SCAN FLOOR — checked {checked} publishable crate(s), below the declared \
+         minimum of {MIN_CHECKED_CRATES}. A run that discovered no crates reports 0 drifted and \
+         exits 0; that is a broken scan, not a clean workspace (issue #4618). Check --root, or \
+         lower the floor in main.rs on purpose."
+    ))
+}
+
 /// Parses `publish = ...` from a `[package]` toml table. Cargo accepts either
 /// a bool or an array of allowed registries; anything other than the literal
 /// `false` means the crate CAN reach crates.io and is in scope for this
@@ -145,8 +176,13 @@ fn main() -> Result<()> {
 
     println!();
     println!(
-        "publish-guard: checked {checked} publishable crate(s) — {drifted} drifted, {unverifiable} unverifiable."
+        "publish-guard: checked {checked} publishable crate(s) (floor {MIN_CHECKED_CRATES}) — {drifted} drifted, {unverifiable} unverifiable."
     );
+
+    if let Some(msg) = scan_floor_violation(checked) {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
 
     if drifted > 0 || unverifiable > 0 {
         eprintln!(
@@ -158,4 +194,30 @@ fn main() -> Result<()> {
 
     println!("publish-guard: OK — no version-parity drift detected.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIN_CHECKED_CRATES, scan_floor_violation};
+
+    /// A run that compared no crates must fail, not report OK (issue #4618).
+    #[test]
+    fn floor_rejects_empty_scan() {
+        let msg = scan_floor_violation(0).expect("an empty scan violates the floor");
+        assert!(
+            msg.contains("SCAN FLOOR"),
+            "message names the failure: {msg}"
+        );
+        assert!(
+            scan_floor_violation(MIN_CHECKED_CRATES - 1).is_some(),
+            "one below the floor still violates it"
+        );
+    }
+
+    /// A run at or above the declared minimum passes the floor.
+    #[test]
+    fn floor_accepts_real_scan() {
+        assert!(scan_floor_violation(MIN_CHECKED_CRATES).is_none());
+        assert!(scan_floor_violation(1_000).is_none());
+    }
 }

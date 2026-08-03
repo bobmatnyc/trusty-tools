@@ -115,8 +115,8 @@ fn send_raw_completion_resolves_key_from_store_when_env_absent() {
         std::env::set_var("HOME", tmp.path());
     }
 
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "openrouter",
         "sk-or-FAKE-store-value", // pragma: allowlist secret
@@ -265,8 +265,8 @@ fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "openrouter",
         "sk-or-FAKE-store-value", // pragma: allowlist secret
@@ -379,8 +379,8 @@ fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent() {
         std::env::set_var("HOME", tmp.path());
     }
 
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "fireworks",
         "fw-FAKE-store-value", // pragma: allowlist secret
@@ -442,7 +442,7 @@ fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent() {
 #[tokio::test]
 #[ignore = "requires a Fireworks credential; skipped in CI"]
 async fn live_fireworks_call_through_agent_adapter() {
-    if trusty_common::inference::credentials::resolve_key("fireworks").is_none() {
+    if trusty_common::credentials::resolve_key("fireworks").is_none() {
         eprintln!("no fireworks credential resolves anywhere — skipping live test");
         return;
     }

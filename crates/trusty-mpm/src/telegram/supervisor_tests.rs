@@ -4,10 +4,14 @@
 //! under the 500-SLOC production cap while sharing its private items via
 //! `use super::*`. The tests inject a counting factory so restart, backoff, and
 //! give-up behaviour are verified deterministically with no real Telegram
-//! network. Backoff delays use a millisecond-scale `fast_policy` so the real
-//! sleeps complete near-instantly (no `tokio` `test-util` paused-time feature
-//! is required), and the cancellation test fires shutdown before its long
-//! backoff can elapse.
+//! network. Most backoff delays use a millisecond-scale `fast_policy` so the
+//! real sleeps complete near-instantly, and the cancellation test fires shutdown
+//! before its long backoff can elapse.
+//!
+//! `healthy_run_resets_transient_backoff` is the exception: it asserts an exact
+//! backoff *duration*, which no wall-clock bound can do reliably under load, so
+//! it runs on tokio's paused clock via `start_paused = true`. That is why this
+//! crate's `tokio` dev-dependency enables the `test-util` feature (#4306).
 //! Test: this *is* the test module.
 
 use super::*;
@@ -104,14 +108,35 @@ fn healthy_run_resets_transient_count() {
     );
 }
 
-#[tokio::test]
+/// End-to-end proof through `supervise`: the bot flaps transiently several
+/// times with near-instant runs (escalating backoff), then runs "healthily"
+/// (longer than `healthy_run`) before exiting transiently once more, then stops
+/// gracefully. We assert on the gap between the start of the post-healthy
+/// restart and its predecessor: after the reset it must be EXACTLY `base`, not
+/// the escalated delay the prior flaps had built up to.
+///
+/// #4306: runs on tokio's PAUSED clock (`start_paused = true`). Previously this
+/// ran on the real clock and asserted `backoff_component < 20ms` against a
+/// policy `base` of 2ms — an 18ms margin that existed purely to absorb
+/// scheduler jitter, so what the assertion actually measured under a loaded
+/// machine was wakeup latency, not backoff state. It reddened the shared gate
+/// three times in one session at 34.4ms and 21.79ms observed, in PRs touching
+/// zero files under `telegram/`.
+///
+/// A paused clock removes the measurement rather than widening the bound (a
+/// wider wall-clock bound is the same defect with a longer fuse). `supervise`
+/// takes every timing decision through `tokio::time` — `Instant::now()` /
+/// `elapsed()` for the run duration and `tokio::time::sleep` for the backoff —
+/// so under `start_paused` the runtime auto-advances virtual time to each
+/// timer deadline while idle and every gap below is exact and reproducible.
+///
+/// That exactness lets the assertions get STRICTER, not looser: they now pin the
+/// precise delays against literals (2ms, 8ms, 32ms, and a post-reset 2ms)
+/// instead of bounding them. The old `< 20ms` upper bound would have accepted a
+/// regression that reset the counter to 8ms rather than to base = 2ms; the
+/// equality will not.
+#[tokio::test(start_paused = true)]
 async fn healthy_run_resets_transient_backoff() {
-    // End-to-end proof through `supervise`: the bot flaps transiently several
-    // times with near-instant runs (escalating backoff), then runs "healthily"
-    // (longer than `healthy_run`) before exiting transiently once more, then
-    // stops gracefully. We assert on the OBSERVED gap between the start of the
-    // post-healthy restart and its predecessor: after the reset it must be ~base,
-    // not the escalated/capped delay the prior flaps had built up to.
     let policy = BackoffPolicy {
         base: Duration::from_millis(2),
         factor: 4,
@@ -129,7 +154,12 @@ async fn healthy_run_resets_transient_backoff() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let a = Arc::clone(&attempts);
     let s = Arc::clone(&starts);
-    let healthy_for = policy.healthy_run;
+    // How long attempt 3 runs before exiting transiently: over `healthy_run`, so
+    // it trips the reset. Named (rather than reconstructed at the assertion) so
+    // the exact-equality assertion below subtracts the duration the run ACTUALLY
+    // had. The old code subtracted `policy.healthy_run` instead — 5ms short of
+    // the real run — which the loose `< 20ms` bound hid.
+    let healthy_run_duration = policy.healthy_run + Duration::from_millis(5);
     let factory = move || {
         let a = Arc::clone(&a);
         let s = Arc::clone(&s);
@@ -138,7 +168,7 @@ async fn healthy_run_resets_transient_backoff() {
             s.lock().unwrap().push(tokio::time::Instant::now());
             if n == 3 {
                 // Run long enough to count as healthy, then exit transiently.
-                tokio::time::sleep(healthy_for + Duration::from_millis(5)).await;
+                tokio::time::sleep(healthy_run_duration).await;
                 BotExit::Transient
             } else if n < 3 {
                 BotExit::Transient
@@ -154,24 +184,44 @@ async fn healthy_run_resets_transient_backoff() {
     let starts = starts.lock().unwrap();
     assert_eq!(starts.len(), 5);
 
-    // Gap before attempt 3 (the healthy run's restart) reflects the ESCALATED
-    // backoff after three flaps: delay_for(3) = base*factor^2 = 2ms*16 = 32ms.
+    // Attempts 0-2 exit without awaiting anything, so on the paused clock they
+    // consume zero virtual time and each gap is purely the backoff that preceded
+    // it. The expected delays are LITERALS, not `policy.delay_for(n)` calls: this
+    // test's job is to pin what the supervisor actually waited, and comparing
+    // against the same function that computed the wait would make the assertion
+    // self-referential — a change to `delay_for`'s curve would move the expected
+    // value in lockstep and survive. With base=2ms and factor=4 the schedule is
+    // 2ms, 8ms, 32ms. (`backoff_grows_and_caps` covers the curve itself.)
+    assert_eq!(
+        starts[1].duration_since(starts[0]),
+        Duration::from_millis(2),
+        "first restart must wait exactly base = 2ms"
+    );
+    assert_eq!(
+        starts[2].duration_since(starts[1]),
+        Duration::from_millis(8),
+        "second restart must wait exactly base*factor = 8ms"
+    );
     let escalated_gap = starts[3].duration_since(starts[2]);
-    assert!(
-        escalated_gap >= Duration::from_millis(25),
-        "pre-reset backoff should be escalated (>=~32ms), saw {escalated_gap:?}"
+    assert_eq!(
+        escalated_gap,
+        Duration::from_millis(32),
+        "pre-reset backoff must be fully escalated to base*factor^2 = 32ms"
     );
 
-    // Gap before attempt 4 = (healthy run duration ~25ms) + (post-reset backoff).
-    // The backoff component must be back at base (~2ms), NOT the prior escalated
-    // delay_for(4)=128ms. We subtract the known healthy run to isolate the backoff
-    // and assert it is small — proving the counter reset to the floor.
+    // THE assertion this test exists for. Gap before attempt 4 = the healthy run
+    // itself + the post-reset backoff. Subtracting the run duration isolates the
+    // backoff, which must be back at EXACTLY `base` — not the escalated
+    // delay_for(4) = 128ms the counter would have reached without a reset, and
+    // not delay_for(2) = 8ms a partial reset would give.
     let post_healthy_total = starts[4].duration_since(starts[3]);
-    let backoff_component = post_healthy_total.saturating_sub(healthy_for);
-    assert!(
-        backoff_component < Duration::from_millis(20),
-        "post-healthy backoff must reset to ~base, isolated backoff was {backoff_component:?} \
-         (total {post_healthy_total:?})"
+    let backoff_component = post_healthy_total.saturating_sub(healthy_run_duration);
+    assert_eq!(
+        backoff_component,
+        Duration::from_millis(2),
+        "post-healthy backoff must reset to exactly base = 2ms; isolated backoff was \
+         {backoff_component:?} (total {post_healthy_total:?}, healthy run \
+         {healthy_run_duration:?})"
     );
 }
 

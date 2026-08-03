@@ -25,6 +25,12 @@ on:
       - "scripts/agent-asset-pins.tsv"
       - ".github/workflows/agent-assets.yml"
   pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
     paths:
       - "crates/trusty-code/src/assets/agents/**"
@@ -33,10 +39,12 @@ on:
       - "scripts/agent-asset-pins.tsv"
       - ".github/workflows/agent-assets.yml"
 
-# Cancel superseded runs for the same ref to save CI minutes (matches ci.yml).
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
 concurrency:
-  group: agent-assets-${{ github.ref }}
-  cancel-in-progress: true
+  group: agent-assets-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
   agent-assets:
@@ -45,6 +53,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
+
+      # Scan-floor mutation self-test (issue #4618): re-proves in CI that this
+      # gate REFUSES a vacuous scan. Without it the floor is untested code and a
+      # later refactor can silently restore the "0 examined, still green" pass.
+      # Runs before the real gate — a gate that cannot fail makes the real run's
+      # green meaningless. Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Scan-floor selftest (must refuse an empty scan)
+        run: bash scripts/check_scan_floor_selftest.sh agent_assets_tool_error
 
       - name: Enforce agent-asset parity + pinned-deviation checks
         run: bash scripts/check_agent_assets.sh

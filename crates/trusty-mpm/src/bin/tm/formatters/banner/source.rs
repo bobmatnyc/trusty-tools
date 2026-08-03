@@ -189,11 +189,36 @@ pub(crate) fn load_banner_art() -> String {
 mod tests {
     use super::*;
 
-    // Serialise every test that mutates $HOME or $TRUSTY_MPM_BANNER_FILE.
-    // Cargo runs unit tests in parallel by default; env-var mutations are global
-    // and can race. A static Mutex is the idiomatic solution without adding the
-    // `serial_test` crate.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // #4407: these tests mutate `$HOME`, so they must serialise against every
+    // other `$HOME` mutator IN THIS TEST BINARY — the `tm` bin target. That is
+    // 19 HOME-mutating statements in 8 fns across 4 files: these four banner
+    // tests, `commands::pm_guard_bash::tests`'s TMPDIR/HOME expansion test, and
+    // the `set_home` / `with_fake_home` helpers in `commands::session::
+    // start_tests` and `tests_project_trust_tests` (whose single callers are
+    // each `#[serial]`). All are now in `serial_test`'s unnamed default group.
+    //
+    // The scope that matters is the TEST TARGET, not the crate. `#[serial]`
+    // coordinates threads within one test binary and process-global `$HOME` is
+    // per process, so neither can span targets: the trusty-mpm LIB test binary
+    // has its own, larger population of HOME mutators that these tests never
+    // raced, because it is a different process. An env-isolation audit scoped
+    // per crate over-counts by exactly that much.
+    //
+    // These tests previously used a FILE-LOCAL `static ENV_LOCK: Mutex<()>`,
+    // whose comment justified it as "the idiomatic solution without adding the
+    // `serial_test` crate". That premise was stale (serial_test is already a
+    // dev-dependency, used elsewhere in this very bin target) and the mutex was
+    // ineffective for the job: a file-local lock coordinates these tests with
+    // each other and with NOTHING ELSE, so they raced the same-target writers
+    // above in both directions — a banner test could repoint `$HOME` mid-flight
+    // under another test, and another test could repoint it under a banner
+    // test's `load_banner_art()`. That is the shared-global-state shape #4407
+    // describes: unrelated plain-mode tests reddening together and clearing on
+    // the next run with no code change.
+    //
+    // Joining the default `#[serial]` group is what actually excludes the other
+    // writers. Verified by reproducing the race against `pm_guard_bash`'s test
+    // with a widened window and confirming it no longer reproduces.
 
     fn temp_dir() -> std::path::PathBuf {
         let base = std::env::temp_dir().join(format!(
@@ -219,14 +244,14 @@ mod tests {
 
     /// When the override file is present and non-empty, it is used.
     #[test]
+    #[serial_test::serial]
     fn banner_source_override_file_used() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("banner.txt");
         std::fs::write(&file, "CUSTOM ART\n").unwrap();
 
         let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
         let art = load_banner_art();
         unsafe {
@@ -241,38 +266,66 @@ mod tests {
     }
 
     /// When the override file is missing, the embedded default is returned.
+    ///
+    /// #4407: this test must sandbox `$HOME` even though it only cares about
+    /// `TRUSTY_MPM_BANNER_FILE`. `load_banner_art()`'s `NotFound` arm — the one
+    /// this test exists to exercise — calls `write_default_if_absent()`, which
+    /// resolves `$HOME/.trusty-mpm/banner.txt` and WRITES to it. With the
+    /// ambient `$HOME`, running this test seeded a real file in the developer's
+    /// own home directory (confirmed present locally); worse, under the previous
+    /// file-local lock it could land inside a concurrent `#[serial]` test's
+    /// `$HOME` tempdir and corrupt that test's fixture. Pointing `$HOME` at this
+    /// test's own tempdir contains the write and additionally asserts it — so
+    /// the seeding side effect is now covered rather than merely tolerated.
     #[test]
+    #[serial_test::serial]
     fn banner_source_missing_falls_back() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("no-such.txt");
+        let fake_home = dir.join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
 
         let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
-        unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
+        let old_home = std::env::var_os("HOME");
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
+        unsafe {
+            std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file);
+            std::env::set_var("HOME", &fake_home);
+        }
         let art = load_banner_art();
+        let seeded = std::fs::read_to_string(fake_home.join(".trusty-mpm").join("banner.txt")).ok();
         unsafe {
             match old {
                 Some(v) => std::env::set_var("TRUSTY_MPM_BANNER_FILE", v),
                 None => std::env::remove_var("TRUSTY_MPM_BANNER_FILE"),
             }
+            match old_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(art, DEFAULT_BANNER_ART);
+        assert_eq!(
+            seeded.as_deref(),
+            Some(DEFAULT_BANNER_ART),
+            "the NotFound arm seeds $HOME/.trusty-mpm/banner.txt — it must land in \
+             THIS test's sandbox, never the ambient home (#4407)"
+        );
     }
 
     /// When the override file exists but is whitespace-only, the embedded
     /// default is returned.
     #[test]
+    #[serial_test::serial]
     fn banner_source_empty_falls_back() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("empty.txt");
         std::fs::write(&file, "   \n   \n").unwrap();
 
         let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
         let art = load_banner_art();
         unsafe {
@@ -288,8 +341,8 @@ mod tests {
 
     /// Env-var path takes precedence over the home-dir path.
     #[test]
+    #[serial_test::serial]
     fn banner_source_env_override_takes_precedence() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let env_file = dir.join("env-banner.txt");
         std::fs::write(&env_file, "ENV ART\n").unwrap();
@@ -302,7 +355,7 @@ mod tests {
 
         let old_env = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
         let old_home = std::env::var_os("HOME");
-        // SAFETY: single-threaded test; env mutations are restored before return.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe {
             std::env::set_var("TRUSTY_MPM_BANNER_FILE", &env_file);
             std::env::set_var("HOME", &fake_home);
@@ -327,14 +380,14 @@ mod tests {
 
     /// First run: default art is written to ~/.trusty-mpm/banner.txt.
     #[test]
+    #[serial_test::serial]
     fn banner_source_first_run_writes_default() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fake_home = temp_dir().join("fresh-home");
         std::fs::create_dir_all(&fake_home).unwrap();
 
         let old_home = std::env::var_os("HOME");
         let old_env = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: single-threaded test; env mutations are restored before return.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe {
             std::env::set_var("HOME", &fake_home);
             std::env::remove_var("TRUSTY_MPM_BANNER_FILE");
@@ -365,8 +418,8 @@ mod tests {
 
     /// First run does not overwrite an existing file.
     #[test]
+    #[serial_test::serial]
     fn banner_source_first_run_no_overwrite() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fake_home = temp_dir().join("existing-home");
         let banner_dir = fake_home.join(".trusty-mpm");
         std::fs::create_dir_all(&banner_dir).unwrap();
@@ -375,7 +428,7 @@ mod tests {
 
         let old_home = std::env::var_os("HOME");
         let old_env = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: single-threaded test; env mutations are restored before return.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe {
             std::env::set_var("HOME", &fake_home);
             std::env::remove_var("TRUSTY_MPM_BANNER_FILE");
@@ -405,14 +458,14 @@ mod tests {
     /// who installed months ago and never edited their seed file must still
     /// see shipped art updates.
     #[test]
+    #[serial_test::serial]
     fn banner_source_refresh_on_legacy_match() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("banner.txt");
         std::fs::write(&file, super::super::legacy::LEGACY_PRE_1907).unwrap();
 
         let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
         let art = load_banner_art();
         let on_disk_after = std::fs::read_to_string(&file).unwrap();
@@ -437,14 +490,14 @@ mod tests {
     /// A banner file whose content does not match any known legacy default
     /// (i.e. the user customised it) must never be touched.
     #[test]
+    #[serial_test::serial]
     fn banner_source_refresh_does_not_touch_custom_content() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("banner.txt");
         std::fs::write(&file, "MY CUSTOM ROBOT ART\n").unwrap();
 
         let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
         let art = load_banner_art();
         let on_disk_after = std::fs::read_to_string(&file).unwrap();
@@ -471,14 +524,14 @@ mod tests {
     /// (not a known *previous* legacy default, so no rewrite happens — and
     /// none is needed since it already matches).
     #[test]
+    #[serial_test::serial]
     fn banner_source_refresh_is_noop_on_current_default() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("banner.txt");
         std::fs::write(&file, DEFAULT_BANNER_ART).unwrap();
 
         let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
-        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        // SAFETY: serialised by `#[serial_test::serial]`; restored before return.
         unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
         let art = load_banner_art();
         unsafe {

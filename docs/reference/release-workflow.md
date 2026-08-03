@@ -28,8 +28,11 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 > from the crates/ directory name — see the `tga` note below; this closes
 > issue #3199, where every release PR previously failed CI's `--locked` build
 > until a human pushed a manual lock-sync follow-up commit), calls
-> `scripts/generate-changelog.sh <crate-dir> <tag-prefix>` to prepend the
-> unreleased `CHANGELOG.md` section, then **prints — but does not run —** the
+> `scripts/assemble-changelog.sh <crate-dir> <next-version>` to fold the crate's
+> per-PR `changelog.d/` fragments into a `## [<next-version>]` `CHANGELOG.md`
+> section and delete the consumed fragments (issue #4476 — it pre-flights that
+> assembly with `--check` BEFORE touching `Cargo.toml`, so a changelog problem
+> never leaves the repo half-bumped), then **prints — but does not run —** the
 > `git tag <prefix>-v<version>` and `git push origin <prefix>-v<version>`
 > commands. This preserves the manual-tag convention (the human reviews and
 > tags). The tag prefix defaults to the crate-dir name, with the one documented
@@ -164,6 +167,26 @@ manually, follow it with `codesign --force --sign - ~/.cargo/bin/<binary>`
 to regenerate the ad-hoc signature against the final file.
 
 ## Developer ID Signing for Persistent macOS TCC Grants (fixes #873, #2558)
+
+### TCC Scope Summary — read this before re-granting anything
+
+🟢 **Full Disk Access scope: `trusty-search` and external-volume daemons
+only.** `trusty-mpm` / `tm` does **NOT** require FDA re-granting — the daemon
+manages tmux sessions and git worktrees under `$HOME` only and never reads
+TCC-protected or external (`/Volumes/…`) paths. `trusty-memory` and
+`trusty-analyze` read `$HOME` locations only and also do NOT require FDA.
+
+🟢 **App Data TCC scope: `trusty-mpm` IS in scope — a *different* category
+than FDA above** (owner-authorized extension, #2558, 2026-07-14). `tm` reads
+other apps' `$HOME` containers (Claude config dirs, tmux state), so macOS
+re-prompts `'trusty-mpm' would like to access data from other apps` after
+every ad-hoc-signed rebuild, for the same cdhash-identity reason FDA does.
+
+**Do not cross the two:** granting `trusty-search` Full Disk Access does
+nothing for the `trusty-mpm` App-Data prompt, and `trusty-mpm` never needs —
+and should never be granted — Full Disk Access. Re-signing with a stable
+Developer-ID identity (below) fixes both categories permanently, each for
+the binary that actually needs it.
 
 ### The Problem
 
@@ -378,6 +401,20 @@ After the first signed install, grant Full Disk Access once:
 After this one-time grant, future `scripts/install-trusty-search-signed.sh`
 reinstalls keep the FDA grant — no re-granting needed.
 
+🔴 **Check for an orphan listener BEFORE `bootout`** (issue #4230). `bootout` is
+a silent no-op against a process launchd does not own, and the following
+`bootstrap` then crash-loops every ~10 s failing to bind the already-held port
+while the orphan keeps serving — so the restart reads as successful and ships
+nothing. Run this first:
+
+```bash
+launchctl print gui/$(id -u)/<label> | grep -E 'state|pid'   # does launchd own a live PID?
+lsof -nP -iTCP:<port> -sTCP:LISTEN                           # who actually holds the port?
+```
+
+If the listener's PID is not the one `launchctl print` reports, `kill -TERM` it
+before restarting, then use `launchctl kickstart -k gui/$(id -u)/<label>`.
+
 🔴 **A 200 `GET /health` right after `bootstrap` is NOT sufficient evidence the
 restart succeeded** (issue #2486) — a client racing the restart window (e.g. an
 MCP stdio bridge's auto-reconnect) can spawn an orphan daemon that answers
@@ -385,10 +422,38 @@ MCP stdio bridge's auto-reconnect) can spawn an orphan daemon that answers
 the wrong `cwd`. Verify launchd actually owns the new process with one of:
 
 ```bash
-launchctl print gui/$(id -u)/<label>                       # launchd's own view
-ps -o ppid= -p "$(pgrep -fx '<daemon process>' | head -1)"  # must print "1"
+launchctl print gui/$(id -u)/<label>                        # launchd's own view
 curl -s http://127.0.0.1:<port>/health | jq '.supervised'   # trusty-mpm only; must print true
+tm doctor                                                   # trusty-mpm only; `daemon_orphan` must be OK
 ```
+
+⚠️ **`PPID == 1` is NOT evidence of launchd supervision** (issue #4230). Any
+daemon whose spawning parent has exited reparents to PID 1, so the #4230 orphan
+reported `PPID 1` while launchd's `com.trusty.mpm` was `not running`. Compare the
+listening PID against `launchctl print`'s PID instead — that is the only check
+that distinguishes the two.
+
+The same caveat applies to `.supervised` when it reads **true**: that flag's
+fallback prong is the identical PPID test, so a reparented orphan can report
+`supervised: true`. It is conclusive only when it reads `false`. `tm doctor`'s
+`daemon_orphan` check therefore treats it as a fallback and prefers the PID
+comparison above.
+
+When that comparison cannot be made, `daemon_orphan` reports `Unknown` — never a
+pass, and never a failure that would have you kill the listener. There are two
+such states, and neither is evidence of an orphan:
+
+- the responding daemon predates the `pid` field on `/health`, so there is nothing
+  to compare; or
+- `launchctl` could not be asked — missing from `PATH`, sandboxed, or the unit is
+  not visible in the caller's bootstrap domain. `launchctl list <label>` resolves
+  against the caller's domain, and a `LimitLoadToSessionType = Aqua` agent is not
+  visible from every context, where the lookup exits 113 with the same message it
+  gives for a unit that was never loaded.
+
+A hard `Fail` requires a POSITIVE answer from launchd: either a different PID than
+the one serving, or launchd confirming the job is down while something still
+answers the port.
 
 ### Notarization Appendix (Optional — for distributing to OTHER machines)
 
@@ -425,6 +490,33 @@ xcrun stapler staple ~/.cargo/bin/trusty-search
 > Gatekeeper when the binary first runs on the target machine. For local use
 > (your own machine), notarization adds no benefit; Developer ID signing alone
 > is sufficient for FDA persistence.
+
+## Connection-Safe Daemon Restart (issue #534)
+
+As of trusty-common 0.10.0, all four HTTP daemons (trusty-memory, trusty-search,
+trusty-analyze, trusty-mpm) implement graceful shutdown: they drain in-flight
+requests before exiting when they receive SIGTERM. The `serve --stdio` proxy
+reconnects automatically with exponential backoff when the daemon restarts (the
+`trusty-memory-mcp-bridge` binary is a deprecated shim that forwards to
+`serve --stdio`; update your `.mcp.json` to `"command": "trusty-memory", "args":
+["serve", "--stdio"]`).
+
+**Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
+
+```bash
+# Graceful stop → install → restart
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+cargo install --path crates/<dir> --locked
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+# Re-grant Full Disk Access only for trusty-search (and other external-volume
+# daemons) — see the TCC Scope Summary above. trusty-mpm never needs FDA.
+```
+
+For verifying the restart actually took (a 200 `GET /health` is not sufficient
+evidence, `PPID == 1` is not evidence of supervision, and the orphan-listener
+check to run before `bootout`), see the FDA-grant restart playbook above under
+[One-Time FDA Grant](#one-time-fda-grant-after-first-signed-install) — the
+same verification steps apply regardless of which daemon you restarted.
 
 ## Version Management
 

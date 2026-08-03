@@ -111,7 +111,7 @@ impl UserProfile {
     /// the user-global `$HOME/.env.local` tier). By the time
     /// `load_or_create_user_profile` calls this, `runtime::startup::
     /// run_startup_init` has already merged BOTH `.env.local` tiers into the
-    /// process env via `trusty_common::inference::credentials::
+    /// process env via `trusty_common::credentials::
     /// load_env_local_once` (precedence: process env > project `.env.local`
     /// > user `$HOME/.env.local`) — so a plain `std::env::var` read here
     /// transparently sees whichever tier supplied the value, with no

@@ -28,9 +28,9 @@ use crate::core::instruction_package::{
     ValidationError,
 };
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_CORE, SECTION_FRAMEWORK_CONVENTIONS, SECTION_IDENTITY,
-    SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH, SECTION_SOURCES, WORKFLOW,
-    section_source, workflow_section,
+    AGENT_DELEGATION, SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS,
+    SECTION_IDENTITY, SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH,
+    SECTION_SOURCES, WORKFLOW, section_source, workflow_section,
 };
 use crate::core::stack_profile::stack_profile_section;
 use std::fs;
@@ -189,7 +189,7 @@ fn bundled_manifest_parses_and_validates() {
 fn manifest_prose_lives_in_markdown_not_in_the_json() {
     // The point of the v2 `file` body kind. Inlining the sections would turn
     // `core.md` into a single 23 KB JSON line and move the floor text out of the
-    // files `scripts/check_instruction_floor.sh` greps, so the manifest must stay
+    // files `scripts/check_instruction_floor.sh` pins, so the manifest must stay
     // small and must reference its bulk prose by path. The inline `text` blocks it
     // DOES carry are short authored rules, not lifted section bodies.
     assert!(
@@ -271,7 +271,7 @@ fn shipped_sections_build_and_validate() {
     // Floor sections are `fixed`; the five content sections are `project`,
     // matching the override files `BASE_PM.md` advertises.
     for section in &package.sections {
-        let expected = if section.id.is_floor() {
+        let expected = if section.id == SectionId::Core {
             CustomizationTier::Fixed
         } else {
             CustomizationTier::Project
@@ -306,26 +306,30 @@ fn package_round_trips_through_json() {
 }
 
 #[test]
-fn floor_blocks_are_the_contiguous_tail() {
-    // The floor's guarantee is that it has the last word. `validate` enforces
-    // it, but asserting the shape here localises a regression to block ordering
-    // rather than to a validation error message.
+fn the_former_floor_sections_are_still_the_block_tail() {
+    // Was `floor_blocks_are_the_contiguous_tail`. #4286 deleted the rule it
+    // localised (`validate_floor_is_last`) along with the floor concept, so this
+    // is no longer a validated invariant — block order is whatever the manifest
+    // declares. It is kept as a SHAPE assertion because the delivered prompt
+    // still ends with these four sections, and a reordering that moved them
+    // would be a large, silent change to every prompt.
     let package = package_ref();
-    let first_floor = package
+    let tail = [
+        SectionId::Identity,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
+    ];
+    let first = package
         .blocks
-        .iter()
-        .position(|b| b.section.is_floor())
-        .expect("the floor is present");
+        .len()
+        .checked_sub(tail.len())
+        .expect("the package has at least four blocks");
     assert!(
-        package.blocks[first_floor..]
+        package.blocks[first..]
             .iter()
-            .all(|b| b.section.is_floor()),
-        "nothing overridable may follow the framework floor"
-    );
-    assert_eq!(
-        package.blocks.len() - first_floor,
-        3,
-        "the floor is exactly its three authored sections"
+            .all(|b| tail.contains(&b.section)),
+        "the four former-floor sections are still the block tail"
     );
 }
 
@@ -433,9 +437,14 @@ fn resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly() {
 }
 
 #[test]
-fn resolve_pm_prompt_is_byte_identical_with_a_project_addendum() {
-    // Kills the `addendum.as_deref()` → `None` mutation: the legacy oracle takes
-    // the addendum, so dropping it at the call site diverges the two.
+fn a_retired_instructions_file_cannot_feed_the_project_addendum() {
+    // Was `resolve_pm_prompt_is_byte_identical_with_a_project_addendum`, which
+    // killed the `addendum.as_deref()` -> `None` mutation. #4286 makes `None`
+    // the CORRECT and only value: `.trusty-mpm/INSTRUCTIONS.md` was the sole
+    // production source for the optional `project-addendum` block, so the block
+    // is now never fed and never emits. The mutation the old test guarded is no
+    // longer a mutation — it is the specification — so the test is inverted to
+    // pin that instead of deleted.
     let tmp = TempDir::new().expect("tempdir");
     write_override(
         tmp.path(),
@@ -446,11 +455,12 @@ fn resolve_pm_prompt_is_byte_identical_with_a_project_addendum() {
     let (composed, _) =
         resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert!(
-        composed.contains("ALWAYS_RUN_MAKE_CHECK"),
-        "the project addendum must reach the delivered prompt on the composed path"
+        !composed.contains("ALWAYS_RUN_MAKE_CHECK"),
+        "a retired INSTRUCTIONS.md must not feed the project addendum"
     );
 
-    assert_entry_point_gate(tmp.path(), Some("# Project Rules\n\nALWAYS_RUN_MAKE_CHECK"));
+    // And the composed prompt is exactly the no-addendum oracle.
+    assert_entry_point_gate(tmp.path(), None);
 }
 
 #[test]
@@ -468,43 +478,66 @@ fn gate_is_deterministic_across_repeated_runs() {
     }
 }
 
-#[test]
-fn injected_roster_does_not_change_which_path_runs() {
-    // The seam must not become a back door that alters routing: injecting a
-    // roster changes only WHICH roster, never whether the composed branch is
-    // eligible. With a delegation override the roster is irrelevant and the
-    // legacy path must still win.
-    let tmp = TempDir::new().expect("tempdir");
-    write_override(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
-    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
-    assert_eq!(source, PromptSource::Legacy);
+// ---------------------------------------------------------------------------
+// PATH SELECTION AFTER #4286
+// ---------------------------------------------------------------------------
+//
+// `workflow_override_forces_the_legacy_path_even_with_a_roster` and its memory,
+// delegation and deployed-prompt siblings were deleted here. All four asserted
+// that a `.trusty-mpm/` file forces the legacy string assembly even when a
+// roster is available. No file can force anything now, so the precondition is
+// unconstructible — the same reason the #4399 gates went in
+// `claude_md_sections_tests.rs`.
+//
+// What replaces them is stronger and simpler: the roster, and only the roster,
+// selects the path.
 
-    // And a `None` roster is not composable, injected or scanned.
-    let bare = TempDir::new().expect("tempdir");
-    let (_, source) = resolve_pm_prompt_with_roster(bare.path(), || None);
+#[test]
+fn the_roster_alone_selects_the_composer() {
+    // With a roster the packaged composer runs; without one the string assembly
+    // does. Nothing else participates in the decision.
+    let tmp = TempDir::new().expect("tempdir");
+    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    assert_eq!(source, PromptSource::Package);
+
+    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || None);
     assert_eq!(source, PromptSource::Legacy);
 }
 
 #[test]
-fn injected_roster_is_lazy_for_the_override_configurations() {
-    // The roster source stays a closure so an `AGENT_DELEGATION.md` override
-    // short-circuits before any tier scan — the pre-PR behaviour, which a plain
-    // `Option<String>` parameter would have silently regressed into an
-    // unconditional scan on every launch.
+fn no_retired_file_can_divert_the_composer() {
+    // The inversion of the four deleted tests, folded into one: each retired
+    // file, alone, and then all five together, must leave the packaged path
+    // selected. Against the pre-#4286 code every iteration of this loop fails.
+    for name in crate::core::instruction_overrides::LEGACY_OVERRIDE_FILES {
+        let tmp = TempDir::new().expect("tempdir");
+        write_override(tmp.path(), name, "# Retired\n\nX\n");
+        let (_, source) =
+            resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+        assert_eq!(
+            source,
+            PromptSource::Package,
+            "{name} must not divert the composer"
+        );
+    }
+
+    let all = TempDir::new().expect("tempdir");
+    for name in crate::core::instruction_overrides::LEGACY_OVERRIDE_FILES {
+        write_override(all.path(), name, "# Retired\n\nX\n");
+    }
+    let (_, source) = resolve_pm_prompt_with_roster(all.path(), || Some(FIXED_ROSTER.to_string()));
+    assert_eq!(source, PromptSource::Package);
+}
+
+#[test]
+fn the_roster_source_is_consulted_exactly_once() {
+    // The seam stays a closure, and the resolver calls it once per resolution —
+    // never zero times (which would drop the roster) and never twice (which is
+    // the race `resolve_pm_prompt_with_roster` exists to remove). Before #4286 a
+    // delegation override short-circuited to zero scans; that branch is gone, so
+    // the count is now unconditionally one.
     use std::cell::Cell;
     let scans = Cell::new(0usize);
-
-    let tmp = TempDir::new().expect("tempdir");
-    write_override(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
-    let _ = resolve_pm_prompt_with_roster(tmp.path(), || {
-        scans.set(scans.get() + 1);
-        Some(FIXED_ROSTER.to_string())
-    });
-    assert_eq!(
-        scans.get(),
-        0,
-        "a delegation override must not scan the tiers"
-    );
 
     let plain = TempDir::new().expect("tempdir");
     let _ = resolve_pm_prompt_with_roster(plain.path(), || {
@@ -512,86 +545,19 @@ fn injected_roster_is_lazy_for_the_override_configurations() {
         Some(FIXED_ROSTER.to_string())
     });
     assert_eq!(scans.get(), 1, "the bundled fallback scans exactly once");
-}
 
-#[test]
-fn workflow_override_forces_the_legacy_path_even_with_a_roster() {
-    // Kills half the "delete the override filter" mutation. With the filter gone
-    // the composed branch would run and silently substitute the BUNDLED
-    // workflow, discarding the project's override.
-    let tmp = project_with_roster();
+    // A retired file present changes nothing about that.
+    let retired = TempDir::new().expect("tempdir");
     write_override(
-        tmp.path(),
-        FILE_WORKFLOW,
-        "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
-    );
-
-    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(
-        source,
-        PromptSource::Legacy,
-        "a WORKFLOW.md override is not expressible in the package; it must stay legacy"
-    );
-    assert!(prompt.contains("TWO_PHASE_ONLY"));
-    assert!(
-        !prompt.contains("# PM Workflow Configuration"),
-        "the bundled workflow must not survive a WORKFLOW.md override"
-    );
-}
-
-#[test]
-fn memory_override_forces_the_legacy_path_even_with_a_roster() {
-    // The other half. A MEMORY.md override slots a delimited block after
-    // PM_INSTRUCTIONS, which the package model has no generator for.
-    let tmp = project_with_roster();
-    write_override(
-        tmp.path(),
-        FILE_MEMORY,
-        "Recall from the `team` palace first.\n",
-    );
-
-    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(prompt.contains("## Memory Behavior (project override)"));
-    assert!(prompt.contains("Recall from the `team` palace first."));
-}
-
-#[test]
-fn delegation_override_forces_the_legacy_path_even_with_a_roster() {
-    // Configuration 2 (#4247): the override replaces the whole section, so the
-    // roster is deliberately NOT re-appended and the package — which requires
-    // the roster to be consumed — cannot express it.
-    let tmp = project_with_roster();
-    write_override(
-        tmp.path(),
+        retired.path(),
         FILE_AGENT_DELEGATION,
-        "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n",
+        "# Custom Routing\n\nX\n",
     );
-
-    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(prompt.contains("ROUTE_ALL_TO_ENGINEER"));
-    assert!(
-        !prompt.contains("### ticketing"),
-        "an override replaces the section outright — the roster is not re-appended"
-    );
-}
-
-#[test]
-fn deployed_prompt_override_forces_the_legacy_path_even_with_a_roster() {
-    // Configuration 3 (#4247): a full body replacement contributes no delegation
-    // section at all.
-    let tmp = project_with_roster();
-    write_override(
-        tmp.path(),
-        crate::core::instruction_overrides::FILE_PM_DEPLOYED,
-        "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
-    );
-
-    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(prompt.contains("DO_EXACTLY_THIS"));
-    assert!(prompt.contains("# BASE_PM Framework Floor"));
+    let _ = resolve_pm_prompt_with_roster(retired.path(), || {
+        scans.set(scans.get() + 1);
+        Some(FIXED_ROSTER.to_string())
+    });
+    assert_eq!(scans.get(), 2, "a retired file must not suppress the scan");
 }
 
 #[test]
@@ -599,19 +565,16 @@ fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
     // The public entry point must return exactly what the seam returns — the
     // logging wrapper may not alter the prompt.
     //
-    // Uses a delegation override deliberately: both calls below scan the ambient
-    // agent tiers independently, and on this configuration the override replaces
-    // the whole delegation section, so no roster byte reaches either output and
-    // the comparison cannot race a concurrent agent redeploy.
+    // Deliberately asserts NOTHING about which source ran. Both calls scan the
+    // ambient agent tiers independently, so the source is a property of the
+    // machine (populated `~/.claude/agents` -> Package; a bare CI runner ->
+    // Legacy), not of the wiring under test. Pinning it here would pass on a
+    // provisioned workstation and fail in CI — the environment-dependence that
+    // `resolve_pm_prompt_with_roster` was introduced to keep out of the gates.
+    // The contract under test is byte-equality of the two entry points.
     let tmp = TempDir::new().expect("tempdir");
-    write_override(
-        tmp.path(),
-        FILE_AGENT_DELEGATION,
-        "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n",
-    );
 
-    let (with_source, source) = resolve_pm_prompt_with_source(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
+    let (with_source, _) = resolve_pm_prompt_with_source(tmp.path());
     assert_byte_identical(&resolve_pm_prompt(tmp.path()), &with_source);
 }
 
@@ -665,7 +628,7 @@ fn composed_prompt_carries_the_live_roster_and_the_precedence_note() {
         .expect("doctrine");
     let note = composed.find("trust the roster").expect("note");
     let roster = composed.find("### ticketing").expect("roster");
-    let floor = composed.find("# BASE_PM Framework Floor").expect("floor");
+    let floor = composed.find("# Framework Instructions").expect("floor");
     assert!(doctrine < note && note < roster && roster < floor);
 }
 
@@ -703,6 +666,7 @@ fn every_authored_block_is_exactly_its_section_source() {
         (SectionId::Workflow, WORKFLOW),
         (SectionId::AgentDelegation, AGENT_DELEGATION),
         (SectionId::Identity, SECTION_IDENTITY),
+        (SectionId::Enforcement, SECTION_ENFORCEMENT),
         (
             SectionId::NonOverridableRules,
             SECTION_NON_OVERRIDABLE_RULES,
@@ -766,7 +730,6 @@ fn floor_carries_the_tool_priority_mandate() {
         .iter()
         .find(|b| b.section == SectionId::NonOverridableRules)
         .expect("the rules section contributes a block");
-    assert!(rules.section.is_floor());
     let text = authored(rules).expect("the rules block must be authored, not generated");
     assert!(text.contains("## Trusty Tool Priority (Non-Overridable)"));
     assert!(text.contains("mcp__trusty-search__search"));
@@ -783,7 +746,10 @@ fn floor_sections_refuse_every_override_tier() {
     // #4247's resolver will consult. Stated over the SHIPPED package so it is a
     // fact about what we deliver, not about a hand-built fixture.
     let package = package_ref();
-    for id in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
+    for id in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id == SectionId::Core)
+    {
         let tier = package.section(id).expect("declared").customization_tier;
         assert_eq!(tier, CustomizationTier::Fixed, "{id:?} must be fixed");
         for from in [OverrideTier::Project, OverrideTier::User] {
@@ -802,7 +768,10 @@ fn content_sections_admit_project_but_not_user_overrides() {
     // must accept a project override and REJECT a user-tier one. Getting this
     // backwards is how one operator's machine config leaks into a shared repo.
     let package = package_ref();
-    for id in SectionId::CANONICAL.into_iter().filter(|id| !id.is_floor()) {
+    for id in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id != SectionId::Core)
+    {
         let tier = package.section(id).expect("declared").customization_tier;
         assert_eq!(tier, CustomizationTier::Project, "{id:?} must be project");
         assert!(tier.permits(OverrideTier::Project), "{id:?}");

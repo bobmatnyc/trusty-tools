@@ -19,6 +19,44 @@ use clap::{Parser, Subcommand};
 
 use trusty_sld_lint::{run, LintOptions, ALLOWLIST_FILE};
 
+/// Minimum number of spec documents a real lint run must have scanned.
+///
+/// Why: `is_clean()` depends only on the diagnostic list, so a run that
+/// discovered nothing exits 0 with `scanned 0 spec doc(s) … 0 error(s)` — a
+/// required check that cannot fail (issue #4618). The scan counts are the only
+/// numbers that separate "examined the tree, found it clean" from "examined
+/// nothing", so the CLI floors them. Deliberately far below the current 54
+/// spec docs and far above zero.
+/// What: compared against `LintReport::spec_docs` in [`scan_floor_violation`].
+/// Test: `tests::floor_rejects_empty_scan`.
+const MIN_SPEC_DOCS: usize = 20;
+
+/// Minimum number of `crates/**` code files a real lint run must have scanned.
+///
+/// Why/What: see [`MIN_SPEC_DOCS`]. Floored separately so one broken discovery
+/// path cannot hide behind the other's healthy count.
+/// Test: `tests::floor_rejects_empty_scan`.
+const MIN_CODE_FILES: usize = 200;
+
+/// Reports why a run's scan coverage is too low to be trusted, if it is.
+///
+/// Why: keeps the floor a pure, unit-testable predicate rather than an inline
+/// `if` in `main` that only CI can exercise (issue #4618).
+/// What: returns `Some(message)` when either count is below its declared
+/// minimum, `None` when the run examined enough to be meaningful.
+/// Test: `tests::floor_rejects_empty_scan`, `tests::floor_accepts_real_scan`.
+fn scan_floor_violation(spec_docs: usize, code_files: usize) -> Option<String> {
+    if spec_docs >= MIN_SPEC_DOCS && code_files >= MIN_CODE_FILES {
+        return None;
+    }
+    Some(format!(
+        "sld-lint: SCAN FLOOR — scanned {spec_docs} spec doc(s) and {code_files} code file(s), \
+         below the declared minimums of {MIN_SPEC_DOCS}/{MIN_CODE_FILES}. A run that discovered \
+         nothing reports 0 errors and cannot fail; that is a broken scan, not a clean tree \
+         (issue #4618). Check --root, or lower the floor in main.rs on purpose."
+    ))
+}
+
 /// Lint a repository for Spec-Linked Documentation (DOC-38) conformance.
 #[derive(Parser, Debug)]
 #[command(
@@ -152,6 +190,11 @@ fn main() -> Result<ExitCode> {
         if strict { " [strict]" } else { "" }
     );
 
+    if let Some(msg) = scan_floor_violation(report.spec_docs, report.code_files) {
+        eprintln!("{msg}");
+        return Ok(ExitCode::FAILURE);
+    }
+
     if report.is_clean() {
         Ok(ExitCode::SUCCESS)
     } else {
@@ -183,5 +226,40 @@ fn run_gap_report_cmd(root: &Path, json: bool, strict: bool) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_floor_violation, MIN_CODE_FILES, MIN_SPEC_DOCS};
+
+    /// A scan that examined nothing — or only one of the two trees — must be
+    /// rejected, not reported as clean (issue #4618).
+    #[test]
+    fn floor_rejects_empty_scan() {
+        let msg = scan_floor_violation(0, 0).expect("an empty scan violates the floor");
+        assert!(
+            msg.contains("SCAN FLOOR"),
+            "message names the failure: {msg}"
+        );
+        assert!(
+            scan_floor_violation(0, MIN_CODE_FILES).is_some(),
+            "a healthy code-file count must not excuse zero spec docs"
+        );
+        assert!(
+            scan_floor_violation(MIN_SPEC_DOCS, 0).is_some(),
+            "a healthy spec-doc count must not excuse zero code files"
+        );
+        assert!(
+            scan_floor_violation(MIN_SPEC_DOCS - 1, MIN_CODE_FILES).is_some(),
+            "one below the spec-doc floor still violates it"
+        );
+    }
+
+    /// A run at or above both declared minimums passes the floor.
+    #[test]
+    fn floor_accepts_real_scan() {
+        assert!(scan_floor_violation(MIN_SPEC_DOCS, MIN_CODE_FILES).is_none());
+        assert!(scan_floor_violation(10_000, 10_000).is_none());
     }
 }

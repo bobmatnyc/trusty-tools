@@ -80,6 +80,90 @@ assignee + `trusty-mpm` label mark which issues a trusty-mpm session owns;
 `ws/<session-name>` tracks which workstream is driving it (a label, never a
 milestone — see `PM_INSTRUCTIONS.md`).
 
+## Ticket-Promotion Gate
+
+**A finding is not automatically a ticket.** Most findings belong to the work
+already in flight; only some are worth a durable artifact that someone else has
+to triage, prioritize, and eventually close. Run this gate before every
+`gh issue create`.
+
+### 1. Search before filing
+
+Search open and recently closed issues by test name, error/panic text, affected
+symbol, and package. If a canonical issue already exists, append the new
+reproduction and evidence to it — do not file a second one.
+
+### 2. Promote only an independently prioritizable outcome
+
+File a standalone issue only when at least one of these holds:
+
+| # | Promotion criterion |
+|---|---|
+| a | A reproduced, user-visible defect |
+| b | Accepted feature work |
+| c | A different owner, release, dependency, or security disposition from the current outcome |
+| d | It cannot fit the current PR without changing that PR's outcome or risk |
+| e | The user explicitly asked for it to be tracked |
+
+Otherwise it stays a session task (`mcp__trusty-memory__task_add`), a PR review
+comment, or a checklist item on the parent issue. **"Follow-up" is not a
+category that bypasses this gate.**
+
+An easy fix spotted while working on a file does not enter this gate at all: it
+is noted on the CURRENT issue and made in the same work — see **Opportunistic
+Fixes** in the instruction package, which this gate extends rather than
+restates.
+
+A code-review or QA finding reaches this gate by exactly one route: the
+`Promote` disposition in `code-review-standards`. A reviewer marking `Promote`
+has recommended, not filed — the finding still has to clear the criteria above,
+and an APPROVE verdict never files a ticket on its own. `Fix here` and `Parent`
+findings never reach this gate.
+
+### 3. Label the confidence state
+
+Every filed issue states which of these it is, in the body:
+
+| State | Meaning | Default disposition |
+|---|---|---|
+| Observed | User-visible behaviour directly seen | Ticket if independently actionable |
+| Reproduced | Repeatable with recorded steps or a test | Ticket if independently actionable |
+| Inferred | Code evidence supports the risk; no reproduction | Note on the parent issue/PR unless high-severity |
+| Speculative | Plausible concern or analogy only | Session note; no ticket |
+
+If your own draft says "not confirmed", "possible", or "same risk class", the
+state is Inferred or Speculative — keep it on the parent unless severity
+justifies escalation. Nothing reads this label mechanically; it is a drafting
+rule, and the check is whether a reader of the filed issue can tell which state
+was claimed.
+
+### 4. Size issues by outcome, not by finding
+
+- One issue may hold several symptoms that share one root cause, owner, and
+  acceptance test.
+- Never file separate issues for the implementation, tests, documentation,
+  changelog, or review cleanup needed to finish the same outcome — those are one
+  PR (`tm-pr-workflow`, "One Outcome, One PR").
+- Split only when the parts can be prioritized, shipped, reverted, or accepted
+  independently.
+- Experiments stay session-local until the project accepts the result.
+- A recurring flaky test or failure family gets **one canonical issue**. Append
+  each new occurrence (run URL, SHA, command, failure signature) to it; a new
+  issue per occurrence is a duplicate.
+
+### 5. Minimal issue schema (six fields)
+
+1. Outcome/problem and impact.
+2. Confidence: Observed | Reproduced | Inferred | Speculative.
+3. Evidence/reproduction.
+4. Acceptance criteria.
+5. Relationship to parent work, and the duplicate-search result.
+6. Test level expected for closure.
+
+Field 3 governs issue bodies only. It does **not** relax the evidence rule for
+claiming a gate passed: raw test output stays mandatory there
+(`BASE-AGENT.md` — never summarise test results in your own words).
+
 ## Ticket-Driven Development Protocol (TkDD)
 
 When a ticket/issue reference is detected (an ID pattern, a URL, "work on

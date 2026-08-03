@@ -5,10 +5,358 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+
+## [1.3.3] — 2026-08-03
+
+### Added
+
+- `tm doctor` check `legacy_overrides`: FAILS when a project still carries any
+  retired override file, naming every file found and the migration. The prompt
+  resolver logs the same signal on every session launch, so a leftover file can
+  never drop a project's rules silently (#4286).
+- `crates/trusty-mpm/src/assets/instructions/sections/README.md` documenting how
+  framework instructions compose, the customization tiers, why there is no
+  floor, and what must not be reintroduced (#4286).
 
 ### Fixed
 
+- The seeded `CLAUDE.md` stub could declare a live override. A worked marker
+  example in the stub was parsed as a real `WORKFLOW` block — marker recognition
+  is whole-line and knows nothing about code fences — so every newly seeded
+  project silently lost its entire bundled workflow section and received the
+  placeholder prose instead. Found by running a real `tm` instance during
+  acceptance; guarded by `seeded_claude_md_declares_no_overrides` (#4286).
+- Swept shipped asset text that still advertised the five retired
+  `.trusty-mpm/` per-file PM instruction overrides (#4286): the `tm-workflow`
+  skill described them as the live customization mechanism and told the PM to
+  write to them; three output styles (`trusty-mpm`, `trusty-mpm-research`,
+  `trusty-mpm-teacher`) described the compiled prompt as four monolithic files
+  (`PM_INSTRUCTIONS.md` + `WORKFLOW.md` + `AGENT_DELEGATION.md` +
+  `BASE_PM.md`) that haven't existed since #4183; `tm-delegation-patterns`,
+  `tm-circuit-breaker`, and `tm-pr-workflow` pointed at `AGENT_DELEGATION.md`
+  / `.trusty-mpm/INSTRUCTIONS.md` as if still reachable. All now describe the
+  current model: framework instructions compose from
+  `assets/instructions/sections/*.md`, and the sole project-customization
+  channel is a named-section marker in the project's root `CLAUDE.md` — `core`
+  is the only section such a marker cannot replace.
+- `assets/instructions/sections/workflow.md` pointed the project test-ladder
+  lookup at the retired `.trusty-mpm/INSTRUCTIONS.md`; it now points at
+  `CLAUDE.md`. This is a compiled-prompt change, so the `pm-prompt-bundled-
+  fallback.md` and `pm-prompt-roster-absent.md` golden fixtures were
+  regenerated (`UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`) to match.
+- Verified no scaffolding path (`tm-init`, `tm project init`) creates any of
+  the five retired override files — the only writers found were the
+  `legacy_overrides` doctor check's own fixtures.
+
+### Changed
+
+- `ticketing` agent's default model tier is now `sonnet`, up from `haiku`.
+  Duplicate-detection and scope-boundary judgement (is this issue already
+  filed, is this work in scope for a milestone) are judgement calls, not
+  clerical ones — observed 2026-08-03: a haiku-tier ticketing agent filed a
+  duplicate issue after being told not to, and cleared milestones on a shipped
+  release when asked only to report them.
+- `core` is now the ONLY section a named-section override cannot replace.
+  `identity`, `enforcement`, `non-overridable-rules` and
+  `framework-guaranteed-conventions` become tier `project` and are overridable
+  like every other section; no content moved between sections. `validate`
+  enforces the tier assignment as an iff, so both retiering `core` away from
+  `fixed` and marking a second section `fixed` are hard errors (#4286).
+- The seeded project `CLAUDE.md` stub now documents the marker grammar, lists
+  the accepted tokens, and points at `.trusty-mpm/last-instructions.md` as the
+  record of what the session actually received. It no longer refers to
+  `BASE_PM.md`, which has not existed since #4183 (#4286).
+- Credential resolution now imports from `trusty_common::credentials` instead of
+  `trusty_common::inference::credentials`, which was deprecated in the same
+  change (see [#4564](https://github.com/bobmatnyc/trusty-tools/issues/4564)).
+  Import-path churn only — no behaviour, precedence, or credential surface
+  changes in this crate.
+- The bundled `tm-ticketing` skill now carries a Ticket-Promotion Gate: a finding is not automatically a ticket. Filing requires a duplicate search first (by test name, error text, affected symbol, and package) and then at least one of five promotion criteria — a reproduced user-visible defect, accepted feature work, a different owner/release/dependency/security disposition, work that cannot fit the current PR without changing its outcome or risk, or an explicit user request to track it. Everything else stays a session task, a PR review comment, or a parent-issue checklist item, and "follow-up" is named as a category that does NOT bypass the gate. Four overlapping recommendations are merged into one five-step protocol rather than stacked as near-duplicates: the gate also fixes issue granularity to outcomes instead of findings (one canonical issue per recurring flaky test, occurrences appended; never a separate issue for the tests, docs, changelog, or review cleanup of one outcome) and supplies a six-field issue schema. It cross-references the already-shipped Opportunistic Fixes rule instead of restating it — an easy fix found while working a file never enters the gate at all (#4630).
+- Findings filed as issues now state a confidence level — Observed, Reproduced, Inferred, or Speculative — with a default disposition for each. Inferred and Speculative belong on the parent issue or PR unless severity justifies escalation. The skill says explicitly that nothing reads this label mechanically: it is a drafting rule whose only check is whether a reader of the filed issue can tell which state was claimed (#4630).
+- The bundled `tm-pr-workflow` skill now states the one-outcome-one-PR invariant, which the skill previously lacked entirely. A PR carries one primary outcome plus everything needed to ship it safely — implementation, regression tests, refactoring, docs, the changelog fragment, and in-scope review fixes — and those are never split across PRs merely because different agents produced them. One PR may close several tickets when one coherent change satisfies them, which is preferred over coupled PRs with an artificial merge order. A seven-field minimal PR body accompanies it (#4630).
+- `tm-pr-workflow` gains a six-step baseline-failure protocol for a red gate the branch did not cause: establish causation against the base branch, fix branch-caused red in the PR, append run/SHA/command/failure-signature to the canonical issue when the failure is already tracked, and open exactly one canonical issue when it is not — after reproduction or sufficient CI evidence, never from a single unrelated red run. Step 6 mandates a literal report string, `change-specific gates pass; <gate name> blocked by canonical issue #N`, so the rule is checkable; "all tests pass" is never reportable while a gate is red. Step 1 cross-references the shipped "never turn red green by deleting coverage" line rather than duplicating it (#4630).
+- The `tm-pr-workflow` delivery chain now reads `accepted outcome -> optional issue -> worktree branch -> one cohesive PR -> applicable gates -> trusty-review gate -> squash-merge -> worktree cleanup`. The issue step is optional for docs/CI/chore work and a small explicitly-requested fix that completes in one PR, and required for features, reproduced defects, security work, cross-release dependencies, and work that must survive the current session (#4630).
+- `rust-engineer` agent now scopes its Quality Bar to the crate under change
+  (`cargo test -p <crate>`, not a bare unscoped `cargo test`), matching the
+  crate-scoped-gate guidance the PM already ships in `core.md`. A crate-scoped
+  run finishes well under the 10-minute tool timeout; a workspace run does not.
+  - Adds a change-class table for widening scope deliberately, and an explicit
+    "scope is for speed, never for hiding a failure" rule: narrowing the scope
+    you *run* is fine, shrinking the coverage that *exists* — `#[ignore]`,
+    `cfg`-gating, `--exclude`, dropping to `--lib` — is never allowed.
+- The bundled `code-review-standards` skill now gives every review finding a three-way disposition, extending the shipped "fix it in the surfacing PR or drop it" rule with the third exit it left implicit. A finding ends as `Fix here` (corrected in the surfacing PR — the default for correctness, security, acceptance criteria, and regression coverage), `Parent` (kept with the work in flight as a PR comment or parent-issue checklist item, creating no durable artifact), or `Promote` (recommended for a standalone issue). `Promote` is a recommendation only: the reviewer never files, the Ticket-Promotion Gate in `tm-ticketing` decides, and the PM or user makes the prioritization call. An APPROVE verdict no longer implies tickets for its non-blocking MEDIUM/LOW observations (#4633).
+- The critic verdict template carries the disposition explicitly, so the rule is checkable rather than decorative: the Findings table gains a Disposition column, every row must carry exactly one token, and a blank or missing cell is named an incomplete review — a reader of the posted verdict can tell per finding which of the three was chosen. A zero-finding APPROVE has no rows and so no dispositions to state (#4633).
+- `tm-ticketing` gains the reciprocal pointer: a review or QA finding reaches the Ticket-Promotion Gate by exactly one route, the `Promote` disposition, and `Fix here` / `Parent` findings never reach it. The gate's five criteria stay stated once, in `tm-ticketing` (#4633).
+- Risk is now the second input to phase entry in the PM instruction package. Three labels — Low (docs, comments, mechanical metadata), Normal (a localized behaviour change inside one package), and High (security, destructive or irreversible paths, persisted state, release/SemVer, or a contract another package depends on) — fold into the EXISTING skip conditions rather than forming a competing gate matrix. Where a skip condition is a size or simplicity heuristic, High risk means it does not hold: a 30-line change to a credential path is small and still earns its review. Phase 2's skip condition gains "not High risk" in both the canonical CORE phase table and its WORKFLOW restatement, so the two cannot drift. The labels carry no testing standard — the project's test ladder answers how much testing a change needs (#4633).
+
+### Removed
+
+- The bundled `crates/trusty-mpm/src/assets/instructions/INSTRUCTIONS.md`
+  stub and the `FRAMEWORK_INSTRUCTIONS` constant/bundle-table entry that
+  embedded it. This is the framework-owned launch-artifact stub, distinct
+  from (and unrelated to) the project-level `.trusty-mpm/INSTRUCTIONS.md`
+  override file retired by #4665. Its content never reached a live session:
+  `tm install`/`tm launch` always overwrite the same on-disk path
+  (`instructions/INSTRUCTIONS.md`) with the fully assembled system prompt in
+  the same call, and the one legacy reader that treats it as optional
+  (`build_instructions`) already discards its result for anything but a
+  side-effect (#4286 split A).
+- The five `.trusty-mpm/` PM instruction override files
+  (`PM_INSTRUCTIONS_DEPLOYED.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`,
+  `MEMORY.md`, `INSTRUCTIONS.md`) are retired and no longer read. Project
+  customization is named sections in the project's root `CLAUDE.md`.
+  `.trusty-mpm/INSTRUCTIONS.md` also stops being a marker host; `CLAUDE.md` is
+  the only one (#4286).
+- The non-overridable framework floor, in full: `SectionId::is_floor()`, the
+  `FloorNotFixed` and `OverridableAfterFloor` validation rules,
+  `validate_floor_is_last`, `scripts/check_instruction_floor.sh`,
+  `scripts/instruction_floor.sha256`, and
+  `.github/workflows/instruction-floor-guard.yml` (plus its duplicated step in
+  `ci.yml`). A project owns its own `CLAUDE.md`, so the floor was the appearance
+  of a control rather than a control (#4286).
+
+## [1.3.2] — 2026-08-03
+
+### Added
+
+- `tm doctor` now reports worktree DISK consumption, not just orphan counts. The new `worktree_disk` check totals the bytes held by every git-registered worktree under the managed workspace root and names how much of it sits on branches whose pull request already merged and holds no uncommitted or unpushed work. The existing `worktrees` check has never reported a byte, so it read identically whether the store held 4 GiB or the 1.1 TiB measured on 2026-07-21 (#2919).
+- `tm session prune-worktrees --merged-prs` adds a merged-pull-request reclaim pass, the terminal-state trigger DOC-52 §3.4 specifies. It is off by default and independent of `--force` and `--discard-dirty`; nothing automatic ever runs it. A worktree is reclaimed only when all four gates pass: git's own `worktree list --porcelain` admits it (never the main checkout, a bare record, a locked worktree, or anything outside the managed project — ADR-0023), no session claims the path, its branch has a merged PR, and it holds no uncommitted, untracked, or unpushed work. Every gate fails closed — an indeterminate pull-request state (no `gh`, unauthenticated, or a truncated result page) refuses rather than reclaims — and each approved candidate is re-checked immediately before its own deletion (#2919).
+- The `worktree_disk` probe bounds its own work rather than relying on an outer timeout. `tokio::time::timeout` cannot cancel a `spawn_blocking` task, so an outer bound returns a verdict on schedule while the byte walk keeps running and runtime shutdown waits for it — observed as a >20-minute hang against a real ~1 TiB worktree store. The walk now polls a deadline and stops itself, the budget fits inside the client's 10-second request timeout, and anything left unmeasured is disclosed as an explicit UNDERCOUNT pointing at `tm session prune-worktrees --merged-prs`, whose survey runs with no deadline (#2919).
+- The pre-delete re-checks now re-read state FRESH per candidate instead of consulting the survey's captured slice. The survey byte-walks every registered worktree and does not finish in 600 seconds on this repository, so its liveness snapshot was minutes old by the time the first delete ran — a session attaching mid-sweep was invisible, and a `git worktree lock` applied mid-sweep was ignored (`remove_session_worktree`'s `remove_dir_all` fallback deletes locked worktrees regardless). Liveness, git's own registry, the ownership marker, the pull-request state, and the working tree are all re-read immediately before each individual deletion; an unreadable live session set refuses rather than reading as "nothing claims it" (#2919).
+- Worktrees trusty-mpm did not provision are no longer advertised as reclaimable. The classifier applies the same ownership predicate the remover applies, so the harness-owned `.claude/worktrees/` store (out of scope per ADR-0020) is reported but excluded from `reclaimable_bytes` — previously `tm doctor` counted it and told the operator to run a command that then failed and left every one of them on disk (#2919).
+- Pull requests opened from FORKS no longer authorize deleting local worktrees. `headRefName` is not an identity: a fork's `fix/foo` is a different branch from this repository's `fix/foo`. `gh` is now asked for `isCrossRepository` and cross-repository rows are dropped (#2919).
+- Every `gh` invocation carries a 10-second timeout with its pipes drained on separate threads. `Command::output()` has no timeout, so a wedged network call would hang the uncancellable blocking task — the same failure shape already fixed for the byte walk (#2919).
+- The `worktree_disk` probe reports `Unknown`, never `Ok`, when its walk was incomplete. Computing a healthy verdict from an undercounted figure inverted the check: the fuller the disk, the less of it fit the budget, and the more confidently it read healthy (#2919).
+- The operator-invoked reclaim path resolves branches the bulk PR index could not reach with a targeted per-branch query, and `tm doctor` discloses its window. With 4526 pull requests against a 400-row index, every worktree older than the last 400 PRs previously read "state unknown" and could never be reclaimed (#2919).
+- Fixed: the pull-request lookup passed `gh -C <dir>`, a flag `gh` does not have. Every call died at flag parsing with `unknown shorthand flag: 'C' in -C`, which yielded an unavailable index, which made every branch's state indeterminate, which blocked every candidate — so the merged-PR pass reclaimed zero bytes always, and `tm doctor` misreported an argv bug as a `gh auth status` failure. `gh` resolves its repository from the working directory; the call now sets `current_dir`. Verified end to end against a real 269-worktree store: 5 reclaimable worktrees, 17.8 GiB (#2919).
+- The measurement budget is a duration allotted to the measurement phase rather than an instant fixed at survey start, and reclaimable worktrees are measured before blocked ones. Classification against a real store takes ~90 s, so a start-anchored instant had already expired before measurement began and nothing was measured at all; scan-ordered measurement then spent the budget on blocked worktrees and reported `reclaimable_bytes = 0` alongside 5 reclaimable worktrees (#2919).
+- The pre-delete liveness read now runs after the pull-request lookups rather than before them, so the snapshot is single-digit milliseconds old when judged instead of being aged by a 322 ms-1.2 s network call (#2919).
+- `reclaimable_bytes` is never reported without a measured-of-total qualifier. Ordering the measurement pass reclaimable-first moved the degradation rather than removing it: a single 17.8 GiB worktree consumed a whole 20-second budget, so four of five reclaimable worktrees still came back unmeasured and the byte sum was one worktree's size wearing the set's label — and because every other measurement was starved too it happened to equal `total_bytes`, reading as "all of it is reclaimable". The whole-survey UNDERCOUNT disclosure did not cover that. `tm doctor` and the CLI now print "N of M measured" beside the figure (#2919).
+- `tm doctor` reports a worktree the probe never inspected separately from one whose pull-request lookup failed. Both read as an indeterminate state but need opposite actions — "raise the budget" versus "check `gh`" — and conflating them sent operators to `gh auth status` for a deadline problem (#2919).
+- `tm doctor` gained an `asset_tier` check (25 checks, was 24) that fails when tm-owned agent files sit in a project's `.claude/agents/`. That tier outranks the canonical `$CLAUDE_CONFIG_DIR/agents/` deploy, so a stale or stub copy shadows the real agent while every presence-only check stays green — the [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408) incident, where a 32-byte project stub beat the real 25 KB `rust-engineer`. Leftovers in `~/.claude/agents/` warn instead: a managed session relocates `CLAUDE_CONFIG_DIR` and never reads them. Agents are matched on their declared frontmatter `name:`, the key the harness itself resolves by, so a renamed file declaring a bundled name is caught and a bundled *filename* declaring a custom name is not; a file the ownership ledger records as the operator's is never reported, even on a name collision. Read-only — it never deletes, moves, or rewrites anything ([#4442](https://github.com/bobmatnyc/trusty-tools/issues/4442)).
+- **`tm doctor --fix-skills`** redeploys drifted skills from the running binary's bundled assets and VERIFIES each repair by re-reading the file from disk — reporting success from a write's return value is the exact failure that produced this issue. Three constraints are enforced in code, not review: a FROZEN (hand-edited) skill is never silently overwritten and needs the explicit `--include-frozen` opt-in on top of `--fix-skills`; every overwrite is backed up first under `~/.trusty-mpm/backup-doctor-remediation-<timestamp>/`; and nothing is ever deleted. It has no worktree behaviour at all — `tm doctor`'s `worktrees` and `worktree_disk` checks stay report-only, because a fix mode that deletes what it thinks is orphaned is the 2026-07-21 `rm -rf .base/*` incident with a scheduler ([#4604](https://github.com/bobmatnyc/trusty-tools/issues/4604)).
+- **`tm doctor` gains a `binary_provenance` check (28 checks, was 27)** answering "is what's running what you think it is?" — the observation doctor's liveness-plus-file-state health model never made. It reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. `Fail` when the same binary is provided by more than one install (two worktrees serving conflicting binaries, measured on `trusty-channels`), when the ledger's recorded version disagrees with what is running, or when a `cargo install --path` source directory has been reaped (no provenance and no upgrade path — one 2026-07-26 source lived under `/Users/masa/tmp/`, which macOS reaps). `Warn` for a live path or git install, which is invisible to registry update detection. `Unknown` — never `Ok` — when the ledger is unreadable or does not cover the binary, since a prebuilt-installer or package-manager install is genuinely unverifiable from here. Read-only; it never installs, moves, or deletes ([#4033](https://github.com/bobmatnyc/trusty-tools/issues/4033), ADR-0021).
+
+- **`/health` now publishes the three-state `launchd_supervision` field** alongside the `supervised` bool it collapses. A bool cannot say "launchd could not be asked", and `CLAUDE.md`'s connection-safe restart convention tells operators to verify a restart by reading `/health` directly — so collapsing an unanswerable probe into `supervised: false` left the documented verification lying in exactly the case [#4469](https://github.com/bobmatnyc/trusty-tools/issues/4469) exists to fix. The daemon also logs the reason at WARN. `tm doctor`'s orphan check deliberately does NOT consume the field: whenever the daemon reports a pid, that check decides from the client's own independent launchd query, where `None` and `Some(false)` are already equivalent — pinned by `authoritative_tier_treats_unknown_and_false_identically` so the omission reads as a decision rather than an oversight ([#4469](https://github.com/bobmatnyc/trusty-tools/issues/4469)).
+- **`skill_staleness` resolves the deploy manifest's NESTED keys.** `skills::deployer::deploy_skills` records each multi-file skill's reference sibling under `<stem>/references/<file>.md`, not just a bare stem — 80 of the 132 keys in this machine's `~/.claude/skills` manifest. The first cut of this check compared only bare stems, so every nested key was `Unverifiable` and the check could never report `Ok` on a real install, no matter how clean it was. The reference map and the repair now key on the manifest key, with one shared `deployed_path` resolver so the audit and the repair cannot disagree about where a key lives ([#4604](https://github.com/bobmatnyc/trusty-tools/issues/4604)).
+- **`binary_provenance` compares the running executable's PATH, not just its basename.** Attribution by name alone let a binary cargo never installed inherit the cargo record: on the [#4033](https://github.com/bobmatnyc/trusty-tools/issues/4033) host `which -a tm` returns `~/.cargo/bin/tm` (1.3.1) and `~/.local/bin/tm` (0.19.29), and had those versions coincided the check would have reported `Ok — installed from crates.io`. The running binary must now BE the file at `$CARGO_HOME/bin/<name>` (compared canonicalised, so a symlinked cargo bin dir is not a false mismatch); anything else reports `Unknown` and names both paths ([#4033](https://github.com/bobmatnyc/trusty-tools/issues/4033)).
+- `tm install --reconcile-skills`: the explicit, opt-in adoption path. It prints every tier, skill, and FILE it will touch before touching anything, copies each file under `~/.trusty-mpm/backup-reconcile-skills-<timestamp>/` (the shape of the existing `backup-doctor-remediation-<date>/` convention, `moved-paths.log` included), adopts them into each tier's manifest, then re-runs the ordinary deploy so they pick up current bundled content. It never touches a skill whose stem matches nothing bundled. Nothing adopts automatically: content alone cannot distinguish an orphaned tm deployment from a deliberate customization, and silently overwriting the latter is the harm the tier system exists to prevent ([#4605](https://github.com/bobmatnyc/trusty-tools/issues/4605)).
+- `tm doctor` gains a `skill_unmanaged` check reporting UNKNOWN — never `Ok` — when any deploy tier holds a bundled-named skill its manifest does not track. This is a distinct state from `skill_staleness`, not a variant of it: staleness compares the bundled source against the deploy MANIFEST, so a skill missing from that manifest is outside everything it can see and it reported a clean `Ok` on the exact files that were unreachable. The check reports `Unknown` for an empty bundled roster too, rather than reading a state it cannot classify as healthy ([#4605](https://github.com/bobmatnyc/trusty-tools/issues/4605)).
+
+### Fixed
+
+- The PM instruction floor's "Customizing PM Behavior" table advertised only the legacy `.trusty-mpm/*.md` override files and never mentioned the `CLAUDE.md` named-section channel that outranks them (`HOST_FILES` in `core/claude_md_sections.rs` scans `CLAUDE.md` before `.trusty-mpm/INSTRUCTIONS.md`), so the floor routed every PM session to the lower-precedence surface. `sections/non-overridable-rules.md` now documents named-section markers as the one customization channel, lists all eight recognized tokens and the three `fixed`-tier ones that can never be overridden, and states plainly that the `.trusty-mpm/` override files are still read by the current binary but [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) removes them.
+- Fixed a broken pointer in `sections/non-overridable-rules.md` to the deleted `PM_INSTRUCTIONS.md` (removed by [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)) — repointed at the CORE section's Prohibitions table — and fixed mojibake (`SS` for `§`).
+- `core.md`'s Model Selection Protocol undercounted the model set ("sonnet or haiku", omitting opus — the mandatory choice for coding tasks per its own routing table two lines below), and its PM Allowlist listed `push` as an allowed git op, contradicting P7 ("branch/push/rebase/merge/tag -> Version Control") one section up. Both corrected to match the rest of the floor.
+- `tm doctor`'s `search` check no longer hardcodes a literal expected index id
+  (`"trusty-mpm"`, the crate name) — it now derives the expected id from the
+  project itself, the same rule `core::session_launch` and trusty-search's own
+  `detect_project` use, so a repo registered under a different index id (e.g.
+  this repo's `trusty-tools`) no longer permanently warns "index missing"
+  against a healthy, fully-indexed project
+  ([#4003](https://github.com/bobmatnyc/trusty-tools/issues/4003)).
+- Managed hook commands and `statusLine.command` can no longer be persisted pointing at a binary in a system temp directory. A `cargo test --no-run` artifact in an agent harness's scratchpad (`/private/tmp/claude-<uid>/…/scratchpad/…`) passed the ephemeral-path guard, so `settings.json` was written with hook and statusline commands that ran a dead libtest harness on every hook event (#4485; #4492 is the same root cause reaching `statusLine.command`).
+- `TmConnector::create_session` no longer aborts after 10s on a call that provisions a workspace. The connector built its client from `default_client()` and never overrode the per-request bound, so `POST /api/v1/sessions/managed` — where the daemon runs `WorkspaceProvisioner::provision` synchronously (git clone, worktree add, agent deploy, harness spawn) — inherited `DEFAULT_REQUEST_TIMEOUT`, a bound sized for interactive point reads. The identical route in `DaemonClient::spawn_managed_session` has opted into the 180s `PROVISION_REQUEST_TIMEOUT` since #2471; the connector was never updated to match. Success was therefore contingent on the machine being idle — the hermetic `create_session_full_lifecycle` test measured 9.23–9.54s against the 10s cliff — and past it the client aborted mid-provision, surfacing as `ConnectorError::Transport` while the daemon kept working and orphaned the session it had already started. `create_session` now carries the same override, sharing the constant so the two call sites cannot drift (#4488).
+- `TmConnector::with_client` reuses a caller-supplied `reqwest::Client` instead of silently replacing it, mirroring `DaemonClient::with_client`. It is also the seam the new `create_session_outlives_the_default_request_timeout` regression test uses to pin the bound above in milliseconds rather than minutes, with a `list_sessions_is_bound_by_the_client_level_timeout` negative control proving the override stays scoped to the provisioning route rather than un-bounding the connector and reintroducing #2471 (#4488).
+- The Prohibitions (`P1`-`P11`) and Circuit Breakers tables — the PM's entire delegation-enforcement authority — shipped inside the `project`-tier `core` section, so a three-line `CLAUDE.md` block (`<!-- TRUSTY-MPM: CORE START v=1 -->` … `END`) deleted both from the delivered prompt and validated cleanly, while the framework floor went on asserting that "all prohibitions defined in the CORE section's Prohibitions table are BINDING" — a pointer to content no longer in the prompt. The `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` full-replacement path deleted them the same way. Both tables now live in their own `fixed`-tier `enforcement` section inside the non-overridable floor (`sections/enforcement.md`, byte-pinned in `scripts/instruction_floor.sha256`), so no override at any tier can remove them and `base_pm()` carries them into every legacy composition branch. The rest of `core` — response format, prose style, allowlist, project context — stays project-customizable ([#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573)).
+- `tm sessions instructions` — the command an operator runs to ask "why didn't my override apply?" — registered no tracing subscriber, so `ProjectOverrides::log`, `warn_unapplied` and `read_override` emitted their applied/declined/shadowed diagnostics into a void: `RUST_LOG=trusty_mpm=info tm sessions instructions --dir <project>` produced zero bytes on stderr. In the [#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573) reproduction the operator's only signal that the authority tables had been stripped was their absence from 28 KB of output. The command now registers a stderr-only subscriber (default filter `warn`, so declines are visible without setting `RUST_LOG` and a clean project stays silent); stdout still carries only the resolved prompt, which the daemon and MCP JSON-RPC framing require.
+- The non-overridable PM instruction floor is now pinned byte-exactly in CI. `scripts/check_instruction_floor.sh` verified it with three `grep -qF` substring checks, which passed a floor whose every rule had been inverted ("always emit `Co-Authored-By: Claude`"), a floor reduced to the three bare needles, and a floor wrapped entirely in an HTML comment — all three mutations were run against the old guard and all three passed. The guard now diffs a sha256 per floor artifact against the committed `scripts/instruction_floor.sha256`: every fixed-tier `sections/*.md`, a canonical projection of the manifest's fixed sections and their blocks (so retiering a floor section to `project` or repointing it fails without any section file changing), and the guard's own workflow. A deliberate floor change regenerates the pin with `bash scripts/check_instruction_floor.sh --update` and commits it alongside the edit. The guard also runs inside ci.yml's required `Format check` job, so deleting its own workflow no longer disarms it (#4581).
+- The shipped `tm-workflow` skill described the pre-#4183 four-flat-file instruction bundle (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `BASE_PM.md`), which no longer exists — the source of truth is now `pm-instruction-package.json` (schema v2) plus per-section prose files, composed by `bundled_pm_package.rs`. Rewrote "How the PM Prompt Is Assembled" and swept every other stale reference to describe the current model: the JSON manifest, the `sections/*.md` prose store, the per-launch composed prompt stashed at `.trusty-mpm/last-instructions.md`, and the two live project-override channels — `CLAUDE.md` named-section markers and the still-functional legacy `.trusty-mpm/` per-file overrides ([#4582](https://github.com/bobmatnyc/trusty-tools/issues/4582)).
+- The agent roster is resolved by exactly one function, so the count `tm session
+  start` prints can no longer disagree with the roster the PM receives. The
+  printed number came from a single-directory scan of the tm-managed deploy tier
+  while the delegation section delivered to the PM was a three-tier union
+  (project `.claude/agents` + `$CLAUDE_CONFIG_DIR/agents` + the operator's
+  `~/.claude/agents`) — two independent implementations of the same question,
+  measured live at 37 printed against 42 delivered. `build_instructions` now
+  takes the project rather than an agents directory and resolves the roster
+  through `delegation_authority::resolve_roster`, which the PM prompt and
+  `tm doctor` also call
+  ([#4588](https://github.com/bobmatnyc/trusty-tools/issues/4588)).
+- Agents are no longer excluded from the delegation roster because their
+  frontmatter `role:` begins with `base`. Foundation templates are identified by
+  a case-insensitive `base-` file-stem prefix — the hyphen is load-bearing, so
+  `baseline-analyzer`, `base64-decoder` and `basecamp-sync` are ordinary
+  delegatable agents rather than templates, and every excluded file is logged at
+  debug level with its directory instead of vanishing silently. The frontmatter
+  rule silently deleted
+  three real, deployed, dispatchable agents — `memory-manager`,
+  `mpm-agent-manager`, `mpm-skills-manager` — from every roster the PM ever saw
+  (34 advertised where 37 were deployed), and it could not be fixed by editing
+  assets: the roster unions two tiers whose frontmatter tm does not author, so
+  the same rule would eat an operator's own agent with no recourse
+  ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
+- The bundled `agent-delegation` instruction section no longer tells the PM that
+  `memory-manager`, `mpm-agent-manager` and `mpm-skills-manager` are hidden by a
+  `role: base` filter. That paragraph shipped into every PM prompt and, once the
+  filter was removed, contradicted the live roster rendered directly beneath it
+  ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
+- `tm doctor`'s `agents` check reports the delegatable roster size alongside the
+  deployed file count on every status — including the empty-deploy-tier failure,
+  where the roster can still be non-empty because the project and generic
+  `~/.claude/agents` tiers are independent of the deploy tier — resolved by that
+  same function, and reports it as `unknown` rather than guessing when no project
+  directory scopes the probe. A
+  file count is a deploy fact, not a routing fact; reporting only the former is
+  how a 42-file, 34-agent install read as healthy
+  ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
+- `crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md` opened with a header pointing customization at `.trusty-mpm/AGENT_DELEGATION.md` / `~/.trusty-mpm/AGENT_DELEGATION.md` and self-referencing a `System default` path (`assets/instructions/AGENT_DELEGATION.md`) that no longer exists — the content moved to `sections/agent-delegation.md` when the instruction package was split into named sections. Project customization is named sections in the root `CLAUDE.md`; the `.trusty-mpm/` files are a residual read path tracked for removal by [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286), not the way to customize this section. The header now states the file's actual two-part shape: a STATIC hand-authored routing table for universal system agents, and an ENRICHED roster trusty-mpm appends at composition time by scanning deployed agents on disk (project `.claude/agents`, managed `CLAUDE_CONFIG_DIR/agents`, framework agents dir), which picks up manifest-declared and user-installed agents alike and is required for composition to succeed — noting the one known gap where `role: base` frontmatter hides three real agents ([#4589](https://github.com/bobmatnyc/trusty-tools/issues/4589)).
+- **`tm doctor`'s `skill_staleness` check compared a stale cache against itself and reported a drifted skill as clean** ([#4604](https://github.com/bobmatnyc/trusty-tools/issues/4604)). It called `stale_skills(paths.skill_source_dir(), …)`, which for every binary-only install resolves to `~/.trusty-mpm/framework/skills/` — an EXTRACTION CACHE — and compared it against the checksum recorded in the deploy manifest. Both sides can be the same stale content. Measured 2026-08-01: PR [#4583](https://github.com/bobmatnyc/trusty-tools/issues/4583) rewrote the bundled `tm-workflow` skill and shipped in 1.3.1, but the cache had not refreshed since before the merge, so its sha256 was byte-identical to the manifest's; the check correctly reported "no drift" against the wrong reference point and named only two other skills, which reads as an all-clear for the one it missed. The reference is now the RUNNING BINARY's own embedded asset (`bundle::ALL`) — a compiled-in table cannot lag the binary containing it — with a checked-out, git-tracked `agents/skills` submodule the one legitimate override. The comparison now reads the DEPLOYED FILE rather than the manifest checksum, so a hand-edit is visible, and it covers every deploy tier (`$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, the project's `.claude/skills`) rather than one.
+- **Drift that a redeploy repairs is now reported separately from drift that is FROZEN.** A skill hand-edited after deployment no longer matches the manifest checksum, so `deploy_skills`' "checksum differs → user-modified → skip" rule means `tm install` will never touch it — it can stay stale forever with no signal. The two states carry different messages and different remediation ([#4604](https://github.com/bobmatnyc/trusty-tools/issues/4604)).
+- **Anything the check cannot verify now reports `Unknown`, never `Ok`.** A managed skill with no embedded counterpart (a user-tier or renamed skill this binary does not ship), an unreadable deployed file, or an empty reference set are all indeterminate — and `Unknown` ranks above `Warn`, so one of them can never leave the aggregate report reading healthy ([#4604](https://github.com/bobmatnyc/trusty-tools/issues/4604)).
+- A bundled skill deployed to a location where it is absent from that location's `.trusty-mpm-skills-manifest.json` was classified project-custom by the skill-tier planner and excluded from `plan.bundled_deploy` entirely, before `deploy_skills_filtered` ran — so the deploy loop never executed for that stem, the ownership check never got to distinguish "the operator's" from "orphaned bundled", and no `tm` command could reach the file. Measured 2026-08-01: `tm install`'s deploy step printed only `= tm-slack-canvas-delivery (unchanged)` while `$CLAUDE_CONFIG_DIR/skills/tm-workflow/SKILL.md` (mtime 07-03) and `~/.claude/skills/tm-workflow/SKILL.md` (mtime 07-17) both still carried text [#4583](https://github.com/bobmatnyc/trusty-tools/issues/4583) had removed. `$CLAUDE_CONFIG_DIR/skills` is the roster every managed session reads, so a fix that landed on main, shipped in a signed binary, and passed 24 CI checks reached zero sessions ([#4605](https://github.com/bobmatnyc/trusty-tools/issues/4605)).
+- `tm install` now REPORTS those skills instead of omitting them. Each prints `! <stem> (untracked at <tier> — not managed, not refreshed; see \`tm install --reconcile-skills\`)`. Previously such a skill appeared as neither deployed, skipped, NOR unchanged: it was excluded upstream by the tier planner, not skipped by the ownership check, so nothing in the output referred to it at all ([#4605](https://github.com/bobmatnyc/trusty-tools/issues/4605)).
+- Coverage spans every skill deploy target, not just the one the command happens to write. The new `core::skill_deploy_tiers` enumerates `$CLAUDE_CONFIG_DIR/skills`, `~/.claude/skills`, and the project's `.claude/skills`, deduplicated, and the reporter, the reconcile, and `tm doctor` all consume that one list ([#4605](https://github.com/bobmatnyc/trusty-tools/issues/4605)).
+
+### Changed
+
+- Deduplicated the commit/PR attribution footer text, which appeared three times in the resolved PM prompt (`core.md`, `workflow.md`, `framework-guaranteed-conventions.md`). The two non-canonical copies now point to the single canonical statement in `framework-guaranteed-conventions.md`; the footer text itself is unchanged.
+- `tm ls` no longer re-reads the machine-global deployed-agent directory once per session. Bundled agents deploy into a single `CLAUDE_CONFIG_DIR` tier that #4409 deliberately exempted from the per-workspace path rewrite, so every session in a listing resolved the same 42 files and read them independently — on a 32-session fleet that was 1344 opens and 30.2 MiB of the 41.9 MiB the listing moved, producing 32 byte-identical answers. The listing now reads that tree once and shares it across the fan-out, exactly as #2444's review already did for the catalog side. Measured on a 32-session synthetic fleet, timing both paths alternately in one process: deployed-side file reads drop 3008 → 1706 (-43%), bytes read drop 41.9 MiB → 12.7 MiB (-70%), and the warm fan-out median goes from 230-236 ms to 147-152 ms across three independent runs (1.53-1.57x). Cold `tm ls` latency scales with the file count this removes (#4322).
+- No other call shape pays for the listing's speed-up. Pre-hashing the deployed agent tree is a win only when the result is shared across sessions, so it applies to the fleet listing alone; every single-target caller (`/health`, `tm catalog apply`, and the single-session fetch `tm session resume` reads) hashes on demand and therefore still reads exactly the agents its manifest selects — byte-for-byte the same reads as before. A manifest that selects a subset of the catalog would otherwise have read every catalog agent instead of just its own (#4322).
+- The staleness comparison is unchanged in what it reports: the shared read supplies input bytes only, and each session still applies its own manifest selection and ignore predicates afterwards, so per-session verdicts stay independent. Sharing is scoped to a single listing and nothing is retained between calls, so a change to a deployed asset is visible on the very next `tm ls` — there is no cache-invalidation window (#4322).
+- the activity classifier now issues its LLM call through the unified `trusty_common::inference::InferenceAdapter` instead of the legacy `chat::ChatProvider` SSE pump ([#4427](https://github.com/bobmatnyc/trusty-tools/issues/4427))
+  - One blocking `InferenceAdapter::chat` call replaces the `chat_stream` +
+    mpsc pump. The classifier only ever consumed the finished string, so
+    streaming bought nothing and cost a truncated-mid-stream failure mode
+    (#3757) that had to be detected and re-reported by hand.
+  - Credentials now resolve through the shared ladder (env > `.env.local` >
+    secure store) rather than a direct `OPENROUTER_API_KEY` env read. A daemon
+    whose key lives only in `.env.local` or the secure store — and which
+    previously reported "OPENROUTER_API_KEY is not configured" — now classifies
+    normally. The `MissingApiKey` error variant and its message are unchanged,
+    so every caller's degrade branch behaves as before.
+  - Per-check cost metrics carry real token counts. The SSE path could not see
+    usage and hard-coded `(0, 0)`, which made every activity cost tally read
+    zero.
+  - `OpenRouterClassifier` moved from `activity::monitor` to a new
+    `activity::classifier` module (both files were headed past the 500-SLOC
+    cap); it is re-exported from `crate::activity`, which is now the stable
+    import path.
+- Delegation is now stated as a DEFAULT WITH A BUDGET rather than an absolute prohibition, resolving four contradictions that shipped together in the same PM prompt. The floor asserted "never direct impl" and "no cost-saving, 'trivial change', or 'documented command' exceptions" while `core` granted a user override and `enforcement` granted a 3-file `pm_guard` budget — all four in one prompt. The owner's ruling replaces the absolute phrasing: the user can always override, and the PM delegates when a task will take more than 3 direct ACTIONS, or when it is unable to complete the task in 3. That second clause is a mid-flight handoff rule, stated explicitly — a task begun on a 3-action estimate that stops holding is handed off at that point, never carried to a fourth direct action. The budget is denominated in actions, not files; `pm_guard`'s per-turn file-change limit is described as the mechanical floor of a broader rule rather than as the rule itself, because the hook sees files and the budget counts actions. `P2`-`P4` and `P6`-`P11` are routing rules to specific agents, not budgeted direct actions, and stay absolute (#4594).
+- Workflow phases no longer contradict themselves on whether they are mandatory. `workflow.md` declared Code Analysis and QA MANDATORY while `core.md`'s phase table gave each a skip condition. Every phase is now CONDITIONAL, the CORE phase table is named canonical for whether a phase runs, and `workflow.md` covers how it executes. The QA Verification Gate stays blocking when phase 4 runs; skipping it moves where the evidence comes from (the engineer's raw test output) and never removes the evidence requirement (#4594).
+- Every agent named in a routing rule is now the deployed `subagent_type`, verified against the bundled agent files on disk rather than another document. `API QA`, `Documentation Agent`, `Code Analysis`, `Local Ops`, `Version Control` and the rest were prose titles that fail to dispatch. `ticketing` was required by `P6` but missing from the routing roster, and the keyword table sent "ticket"/"issue" to Version Control in direct contradiction of `P6` — that row now splits bookkeeping (`ticketing`, P6) from PR mechanics (`version-control`, P7). `code-analyzer` and `code-critic` are named as separate, non-interchangeable agents (#4594).
+- The PM Allowlist no longer contradicts the action budget. Its only write row read "NOT source code, NOT bulk edits" and sat near the TOP of the compiled prompt — read first — while the floor ~1000 lines later budgeted P1/P5 at 3 direct actions "including one Edit, one Write". A prompt asserting both let the PM cite whichever suited it. The table is now framed as what is UNBUDGETED, with an explicit budgeted source-edit row carrying both halves of the rule (#4594).
+- The bundled `tm-circuit-breaker` skill no longer restates the retired absolute rule. It said `.git/COMMIT_EDITMSG` was "the only Edit target the PM may touch directly" and BLOCKed any Edit/Write over ~5 lines — and the PM receives that skill alongside the instruction package, so it would have re-introduced the contradiction from a second channel. CB#1 is now "Implementation Past the Budget", triggered by a 4th direct action including the mid-flight case; CB#14 no longer implies an absolute Edit/Write ban. `tm-tool-usage-guide` carried the same stale framing and is corrected. `tm-circuit-breaker` also pointed at `PM_INSTRUCTIONS.md` for the canonical Circuit Breakers table, which #4183 deleted and #4623 moved into the fixed-tier enforcement floor section; repointed (#4594).
+- Version-pinned model identifiers are gone from the shipped prompt. `claude-sonnet-4-5` / `claude-opus-4-5` / `claude-haiku-4-5` and the "5x cheaper … 75x cheaper" ratios were embedded as prose and had gone stale. The prompt now instructs the PM to pass the tier ALIAS and points at `expand_model_alias` and `[models.tiers]` in `~/.trusty-mpm/config.toml` as the source of truth, so a tier move cannot leave a stale id behind (#4594).
+
+## [1.3.1] — 2026-07-31
+
+### Added
+
+- `tm doctor` gained a `transcript_saving` check (24 checks, was 23) that fails
+  when any `tm` launch line would leave transcript saving disabled — the defect
+  it guards was silent until Claude Code began warning about it. It reads the
+  scrub set out of the real launch commands rather than restating a constant,
+  names the offending builder on failure, and fails in both directions:
+  under-scrub costs the session its transcripts, over-scrub costs it the agent
+  roster ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451)) or the
+  OAuth token ([#2246](https://github.com/bobmatnyc/trusty-tools/issues/2246)).
+- `tm doctor` gains an `agent_reachability` check that fails when the bundled roster is unreachable ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
+  - The existing `agents` and `deployment` checks are presence-only — they
+    counted 42 files and diffed them against the canonical roster, and both
+    reported green throughout the outage above. The new check asserts the one
+    thing they cannot: that the settings tier the roster deploys into is a tier
+    the managed spawn's `--setting-sources` flag actually loads. It reads both
+    sides from production code, so moving the deploy destination without
+    updating the flag (what happened here) is a hard `Fail`, not a silent
+    regression.
+- bundled `tm-slack-canvas-delivery` skill — codifies the Slack canvas delivery protocol (resolve destination, create with native `channel_id` binding to survive free-tier restrictions, post the link, verify the send) so canvas creation alone is never mistaken for delivery ([#4447](https://github.com/bobmatnyc/trusty-tools/issues/4447))
+- `tm` CLI accepts unambiguous abbreviated subcommands, e.g. `tm doc` for `tm doctor` ([#4398](https://github.com/bobmatnyc/trusty-tools/issues/4398))
+  - Turns on clap's `infer_subcommands` for the top-level `Cli`, propagating to every nested action enum. Exact matches still win over prefix inference, so ambiguous-prefix pairs (`hook`/`hooks`, `project`/`projects`, `session`/`sessions`, `status`/`statusline`) keep resolving to their own exact command.
+
+### Fixed
+
+- `tm start` / `tm restart` no longer spawn an unsupervised daemon that can seize the port from launchd (closes [#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230))
+  - `commands::daemon::start` was the one client-side daemon-spawn path with no
+    launchd awareness at all — the MCP stdio bridge has refused to auto-spawn
+    since [#2486](https://github.com/bobmatnyc/trusty-tools/issues/2486) and
+    `guided_autostart` has nudged launchd since
+    [#1900](https://github.com/bobmatnyc/trusty-tools/issues/1900), while
+    `start` spawned a detached bare `tm daemon` unconditionally. That is how the
+    #4230 orphan was created: PID 98606, `PPID 1`, `cwd=$HOME`, holding
+    `127.0.0.1:7880` for two days and answering `/health` 200 with a stale 1.0.2
+    image while launchd's `com.trusty.mpm` reported `state = not running`. A
+    fresh signed install and its behavioural verification both passed against
+    the binary the install had just replaced.
+  - Both `start` and `restart` now refuse when a DAEMON launchd unit is
+    registered, naming the unit that actually exists on that host, its
+    `launchctl kickstart` recipe, and the `tm daemon --force` opt-in. The check
+    runs BEFORE `restart`'s `pkill`, so a refusal never tears the supervised
+    daemon down and then declines to bring it back. The decision is keyed on
+    plist presence alone — no supervision heuristic — because the callee-side
+    [#4397](https://github.com/bobmatnyc/trusty-tools/issues/4397) guard folds in
+    `is_launchd_supervised`, whose `XPC_SERVICE_NAME` and `getppid() == 1` prongs
+    can BOTH report `true` for a non-launchd child.
+  - `com.trusty.mpm.supervisor.plist` no longer counts as "launchd owns the
+    daemon". That plist runs `tm supervisor`, a passive fleet observer that never
+    starts a daemon, so counting it made every consumer wrong on a `tctl install`
+    host whose only plist is the supervisor's: the refusal fired with a false
+    claim and prescribed a `com.trusty.mpm` unit that does not exist there. This
+    also removes a latent false refusal in the #4397 child guard and a latent
+    false `no_spawn` in the #2486 bridge guard on those hosts. A drifted daemon
+    label still resolves, matching `install-trusty-mpm-signed.sh`'s existing
+    `resolve_mpm_plist` rules.
+  - `tm stop` is not refused — stopping the daemon is a legitimate request — but
+    now warns that launchd will NOT respawn it
+    (`KeepAlive.SuccessfulExit=false`) and names the command that will. That
+    SIGTERM is how the incident's `com.trusty.mpm` came to report `not running`
+    for four days before anything else went wrong.
+  - Every remediation that prescribed `tm restart` now resolves the verb for the
+    calling host — `tm doctor`'s staleness line (which printed "run `tm restart`"
+    two lines above the new orphan check), the three `tm manager` upgrade hints,
+    the session-picker stale-numbering warning, and the bundled
+    `tm-cli-operations` skill that agents read.
+  - The #2486 bridge guard did NOT regress. The orphan's own
+    `{"supervised":false}` proves a plist was registered when it started
+    (`supervised` is `false` only in that case), which means the bridge's
+    `no_spawn` was necessarily set and it could not have been the spawner.
+- new `tm doctor` check `daemon_orphan` catches a daemon that answers `/health` but is not the one launchd runs ([#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230))
+  - It compares WHO ANSWERED (`/health`'s new `pid`) against WHO LAUNCHD RUNS
+    (`launchctl`), two independent sources, so neither the daemon nor launchd
+    alone can make the check pass. The daemon's own `supervised` flag is a
+    FALLBACK only, used when the responding daemon is too old to report `pid`:
+    its `getppid() == 1` prong reads `true` for a genuine orphan, so a `true`
+    there yields `Unknown`, never a pass.
+  - The launchd probe answers in three states, not two. "launchd has this unit
+    and its job is DOWN" is the #4230 incident and yields a hard `Fail` with a
+    `kill -TERM` remediation; "launchd could not be asked" — `launchctl` missing
+    from `PATH`, sandboxed, or the unit invisible in the caller's bootstrap
+    domain — yields `Unknown` and prescribes nothing. Collapsing the two would
+    make `tm doctor` order the operator to kill a correctly supervised daemon,
+    which `KeepAlive {SuccessfulExit: false}` would then decline to restart. A
+    `launchctl list` that exits 113 is retried against an explicit `gui/<uid>`
+    domain before the probe gives up.
+  - The daemon launchd label is resolved per host rather than hardcoded, and a
+    drifted label must have `ProgramArguments` that actually run `daemon` — so
+    neither the supervisor plist nor a `logrotate` sibling can be mistaken for
+    the daemon unit, and every remediation names a unit that exists on this host.
+- four non-hermetic test fixtures no longer redden the shared gate for reasons unrelated to the change under test (closes [#4306](https://github.com/bobmatnyc/trusty-tools/issues/4306), [#4415](https://github.com/bobmatnyc/trusty-tools/issues/4415); refs [#4407](https://github.com/bobmatnyc/trusty-tools/issues/4407), [#3451](https://github.com/bobmatnyc/trusty-tools/issues/3451))
+  - The dead-daemon address fixture no longer binds an ephemeral port and drops
+    it — a released port returns to the OS pool, so another binder could be
+    handed it and the "nothing is listening here" premise silently expired
+    (measured: reassigned and accepting connections after one wrap of the
+    ephemeral range). All three duplicate copies, across 13 call sites, now
+    share one fixture on `127.0.0.1:1` — privileged, so unbindable, and outside
+    every ephemeral range — matching the convention already used by
+    trusty-review and trusty-analyze.
+  - `telegram::supervisor`'s healthy-run backoff-reset test runs on tokio's
+    paused clock instead of asserting a 20ms wall-clock bound against a 2ms
+    policy base, which measured scheduler jitter rather than backoff state.
+    The assertions are now exact equalities against literal delays (2ms, 8ms,
+    32ms), which also catch a partial reset the old bound accepted.
+  - The plain-mode banner tests, and `pm_guard_bash`'s TMPDIR/HOME expansion
+    test, joined the default `#[serial]` group. The banner tests' file-local
+    mutex serialised them against each other and nothing else, so they raced the
+    other `$HOME` mutators in the same test binary — 19 HOME-mutating statements
+    in 8 fns across 4 files in the `tm` bin target. One banner test also seeded
+    `banner.txt` into the ambient home instead of its own sandbox, and the
+    `pm_guard_bash` test left `HOME` repointed for the rest of the binary; it now
+    restores both `HOME` and `TMPDIR` through an RAII guard, so an assertion
+    panic cannot skip the cleanup.
+  - Env-isolation audits are scoped per TEST TARGET, not per crate: `#[serial]`
+    coordinates threads inside one test binary and process-global `$HOME` is per
+    process, so neither can span targets. The trusty-mpm lib target's own HOME
+    mutators were never in this race.
 - sessions launched via the `trusty-mpm` binary are now auto-discovered, matching `tm`-launched sessions (closes [#4058](https://github.com/bobmatnyc/trusty-tools/issues/4058))
   - `daemon::discovery`'s tmux-pane predicate only recognised `tm`, so an
     identical session launched under the crate's other `[[bin]]` target
@@ -21,18 +369,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     one canonical `core::own_binary_names::OWN_BINARY_NAMES` constant; hooks'
     list keeps its own array (its PATH-lookup order differs) pinned to the
     same set by a test.
-
-- delegation-tracker `agentId` presence-check no longer accepts `null`/`""` (closes [#4163](https://github.com/bobmatnyc/trusty-tools/issues/4163))
-  - `classify_dispatch` decided "we have an agent id" with key-presence alone
-    (`r.get("agentId").is_some()`), while `on_launched`'s consumer rejected a
-    non-string value and `on_subagent_stop`'s consumer rejected an empty
-    string. A `{"agentId": null}` or `{"agentId": ""}` dispatch response took
-    the `Launched` branch and pinned the delegation `Running` with a handle no
-    `SubagentStop` can ever quote back, burning the full 6h staleness window as
-    a phantom in-flight entry. Both call sites now share one extraction,
-    `usable_agent_id` (non-null, non-empty string), so the presence-check and
-    the consumers are structurally incapable of disagreeing again.
-
 - `session_status` MCP tool no longer reports `delegation_count: 0` for a managed session with subagents genuinely in flight (closes [#4141](https://github.com/bobmatnyc/trusty-tools/issues/4141))
   - The handler resolved a `ManagedSessionId` and passed it straight into
     `delegations_for`, but hook-observed delegations are keyed by the Claude
@@ -49,6 +385,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     `delegation_lookup: "unbridged"` rather than a confident-looking
     `0`/`[]` — an unbridgeable lookup must never be indistinguishable from
     "genuinely none in flight".
+- managed sessions no longer silently lose their Claude Code transcripts (closes [#4467](https://github.com/bobmatnyc/trusty-tools/issues/4467))
+  - Every managed spawn now scrubs the process-local session markers Claude Code
+    injects into its child processes. When `tm` was invoked from inside a Claude
+    Code session it inherited `CLAUDE_CODE_CHILD_SESSION` and passed it through,
+    which made the spawned `claude` turn session persistence OFF: no native
+    `--resume`, no `--continue`, no `/rewind`, and the session never appeared in
+    `--resume` listings. Since tm's own pause/resume writes only a condensed
+    summary, a session that died lost everything since its last snapshot.
+  - Scrubbed: `CLAUDE_CODE_CHILD_SESSION` (the sole transcript-saving trigger),
+    `CLAUDE_CODE_SESSION_ID`, `CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_EFFORT`,
+    `CLAUDE_CODE_EXECPATH`. Deliberately NOT scrubbed: `CLAUDE_CONFIG_DIR` (tm
+    relocates it on purpose — [#4455](https://github.com/bobmatnyc/trusty-tools/issues/4455)
+    depends on it to keep the bundled roster in a settings tier managed sessions
+    load), `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (an
+    operator-facing knob) and `CLAUDE_CODE_ENTRYPOINT`.
+  - Applied to every launch line, not just the default one: `spawn_command` and
+    `resume_command` (a spawn-only fix would leave every resumed session broken),
+    the in-place bare-`tm` relaunch, the headless stream-JSON backend, the
+    `tm launch` / `tm connect` launch line, the pane-relaunch line, `tm run`,
+    `tm session start`'s in-place pane, and the `DaemonClient` launch/connect
+    line behind the TUI and bot surfaces.
+  - `tm run` mattered most: it spawns `claude` with no tmux, so Claude Code's
+    `tmux show-environment -g` escape hatch returns false immediately and the
+    suppression fired there every time rather than depending on the tmux
+    server's environment.
+  - Every launch line is now built in one place. Three call sites had each
+    hand-written their own `claude …` string, and all three silently saved no
+    transcript — a hand-built line is invisible to the `transcript_saving`
+    check, which can only read builders. A new test walks the crate's source
+    and fails when a `claude` launch site appears that is not accounted for,
+    so the next one is a build failure rather than a silent gap.
+- delegation-tracker `agentId` presence-check no longer accepts `null`/`""` (closes [#4163](https://github.com/bobmatnyc/trusty-tools/issues/4163))
+  - `classify_dispatch` decided "we have an agent id" with key-presence alone
+    (`r.get("agentId").is_some()`), while `on_launched`'s consumer rejected a
+    non-string value and `on_subagent_stop`'s consumer rejected an empty
+    string. A `{"agentId": null}` or `{"agentId": ""}` dispatch response took
+    the `Launched` branch and pinned the delegation `Running` with a handle no
+    `SubagentStop` can ever quote back, burning the full 6h staleness window as
+    a phantom in-flight entry. Both call sites now share one extraction,
+    `usable_agent_id` (non-null, non-empty string), so the presence-check and
+    the consumers are structurally incapable of disagreeing again.
+
 - managed sessions can reach the bundled agent roster again — every delegation was degrading to `general-purpose` (closes [#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
   - Daemon-managed spawns now launch with `--setting-sources user,project,local`
     instead of `project,local`. Claude Code discovers subagents per settings
@@ -64,98 +442,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     `CLAUDE_CONFIG_DIR` (`tm launch`, `tm connect`) keep `project,local`
     unchanged — the flag is now selected from that one fact rather than
     hard-coded per call site.
-
-### Added
-
-- `tm doctor` gains an `agent_reachability` check that fails when the bundled roster is unreachable ([#4451](https://github.com/bobmatnyc/trusty-tools/issues/4451))
-  - The existing `agents` and `deployment` checks are presence-only — they
-    counted 42 files and diffed them against the canonical roster, and both
-    reported green throughout the outage above. The new check asserts the one
-    thing they cannot: that the settings tier the roster deploys into is a tier
-    the managed spawn's `--setting-sources` flag actually loads. It reads both
-    sides from production code, so moving the deploy destination without
-    updating the flag (what happened here) is a hard `Fail`, not a silent
-    regression.
-
-### Changed
-
-- bundled agents deploy to the tm-managed user tier, never per-workspace and never to `~/.claude` (closes [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409))
-  - `FrameworkPaths::agent_deploy_dir()` is the single destination for every
-    bundled-agent deploy, validate, staleness, reset, and doctor call site:
-    `$CLAUDE_CONFIG_DIR/agents` (`~/.trusty-tools/trusty-mpm/claude-config/agents`).
-    Unlike `claude_agents_dir()` it is never rewritten project-local by
-    `for_managed_project`/`for_managed_workspace`.
-  - `tm install` no longer writes composed agents into the operator's generic
-    `~/.claude/agents/` — the highest-severity breach on the issue, since that
-    directory belongs to a Claude Code install with nothing to do with
-    trusty-mpm.
-  - Session launch, `tm sessions sync-assets`, and `tm catalog apply` no longer
-    deploy bundled agents into a workspace's `.claude/agents/`. That directory
-    is now reserved for hand-placed (and future project-custom) agents, which
-    are still never touched.
-  - Session launch and sync-assets additionally RETRACT the bundled agents an
-    older binary deployed into a workspace. The project tier outranks the
-    config-dir tier in agent resolution, so a stale copy left behind would
-    shadow the canonical roster permanently and would no longer be refreshed by
-    any deploy — the #4408 shadowing incident made permanent. Retraction removes
-    only manifest-tracked, framework-owned files; hand-placed and user-owned
-    files survive byte-identical, and a corrupt manifest aborts the retraction
-    rather than guessing.
-  - `tm doctor`'s `agents` and `agent_skills` probes, `tm agent list`/`tm agent
-    show`, and the deployment-completeness gate follow the roster to the new
-    tier. Probing the workspace tier after the flip would have reported every
-    healthy install as broken and driven the spawn/resume gate into a permanent
-    repair loop; `tm agent list` would have reported an empty roster.
-  - `tm install --reset-agents --reset-agents-workspaces` now RETRACTS a
-    workspace's bundled agents instead of force-recomposing them. Recomposing
-    was correct while workspaces were a deploy destination; after the flip it
-    re-created, inside live sessions' workspaces, exactly the shadow this change
-    removes. The `--reset-agents <names>` scope is still honored, and removals
-    are reported on their own line.
-  - `tm repair deploy` follows the agent ledger to the new tier and actually
-    removes the scratch files it reports. It previously derived a "base" path
-    from each `*.tmp` orphan and re-derived the old fixed `<name>.tmp` from it,
-    which never matches the per-process scratch names below — so it unlinked
-    nothing while still printing every orphan as removed. It now unlinks the
-    path it found and reports only what it actually deleted.
-  - EVERY writer of the shared agent ledger — session launch, sync-assets,
-    retraction, `tm install --reset-agents`, and `tm catalog apply --prune` —
-    now performs its read-modify-write under the lock below. `reset_agents` and
-    `prune_agents` were the two that ran unlocked against the shared directory,
-    which is the highest-traffic race with a concurrent session launch.
-  - The agent deploy ledger's read-modify-write is now serialised across
-    processes by an advisory lock on a `.trusty-mpm-manifest.json.lock` sidecar,
-    and every atomic write stages through a per-process, per-attempt temp name
-    instead of a fixed `.tmp` sibling. Both were survivable while each workspace
-    had its own deploy directory; against ONE machine-global directory shared by
-    every concurrent session launch, sync-assets run, and `tm catalog apply`,
-    the fixed temp name lets two writers publish torn JSON and the unlocked
-    load-modify-write silently drops one writer's entries — after which the
-    files those entries described are treated as untracked and frozen, which is
-    #4408's failure shape reached by a race.
-  - Known consequences of a machine-global agent tier, neither solved here:
-    - A per-project `[agents] exclude` no longer removes an agent from a
-      session's view — it only refrains from writing it, and a sibling project
-      that selects the agent still puts it there.
-    - `tm catalog apply --prune` now deletes from the one directory EVERY live
-      session reads, mid-session, driven by the daemon-wide baseline manifest.
-      Before the flip it pruned `~/.claude/agents`, which no managed session
-      read, so the blast radius was effectively nil. `--prune` remains opt-in
-      and still only removes manifest-tracked managed files, but an operator
-      running it now affects every running session, not one workspace.
-
-### Removed
-
-- `core::agent_reset::reset_project_agents` — force-recomposed the bundled roster into an arbitrary directory, narrowed by a project's harness roster ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). The workspace sweep was its only caller and now retracts instead, leaving it with zero production callers. A public function that writes the bundled roster into a workspace is exactly the shadow-creating footgun this change removes, so it is deleted rather than left callable. `ResetResult::deselected` is retained for the report's shape but is no longer populated by anything.
-
-### Added
-
-- bundled `tm-slack-canvas-delivery` skill — codifies the Slack canvas delivery protocol (resolve destination, create with native `channel_id` binding to survive free-tier restrictions, post the link, verify the send) so canvas creation alone is never mistaken for delivery ([#4447](https://github.com/bobmatnyc/trusty-tools/issues/4447))
-- `tm` CLI accepts unambiguous abbreviated subcommands, e.g. `tm doc` for `tm doctor` ([#4398](https://github.com/bobmatnyc/trusty-tools/issues/4398))
-  - Turns on clap's `infer_subcommands` for the top-level `Cli`, propagating to every nested action enum. Exact matches still win over prefix inference, so ambiguous-prefix pairs (`hook`/`hooks`, `project`/`projects`, `session`/`sessions`, `status`/`statusline`) keep resolving to their own exact command.
-
-### Fixed
-
 - Abbreviated-subcommand inference (#4398) made the hidden `internal-spawn-disclaimed` shim reachable via any unambiguous prefix (`tm int`, `tm inte`, `tm internal`), which would `posix_spawn` an arbitrary program with macOS TCC responsibility disclaimed. `main` now rejects any invocation whose raw first argv token isn't the exact, full subcommand name before the shim ever runs, while the daemon's own literal self-invocation keeps working unchanged.
 - JSON instruction manifest (schema v2) with owner language rules ([#4386](https://github.com/bobmatnyc/trusty-tools/pull/4386)) ([`838d001`](https://github.com/bobmatnyc/trusty-tools/commit/838d00150e4ac1d2f31e5748bf8a85c05b4e78e7))
   - Adds three owner language rules as inline `text` blocks: **Clickable
@@ -236,9 +522,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     passed validation and composed to nothing.
 - observe native subagent dispatches and give delegations a real lifecycle ([#4096](https://github.com/bobmatnyc/trusty-tools/pull/4096)) ([`6f7530e`](https://github.com/bobmatnyc/trusty-tools/commit/6f7530ef650d4b7dfe1acd5b61b01bcf0c7a0136))
 - hard-block git worktree add targeting /tmp, /private/tmp, /var/folders, or the scratchpad ([#3978](https://github.com/bobmatnyc/trusty-tools/pull/3978)) ([`bac23b8`](https://github.com/bobmatnyc/trusty-tools/commit/bac23b8090dfe9d6d5107133dfb7c3dfcdfb8fde))
-
-### Fixed
-
 - **Bare `tm daemon` bypassed the #2486 unsupervised-spawn guard (closes
   [#4397](https://github.com/bobmatnyc/trusty-tools/issues/4397)).** The
   guard against a launchd-managed daemon being duplicated by an unsupervised
@@ -457,6 +740,104 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- per-PR changelog entries are now fragment files, not edits to a shared
+  `## [Unreleased]` section (closes [#4476](https://github.com/bobmatnyc/trusty-tools/issues/4476))
+  - Every PR that changes `crates/<crate>/src/**` adds
+    `crates/<crate>/changelog.d/<issue-or-pr-number>-<slug>.md` — line 1 the
+    category, the rest the bullet. Distinct filenames per PR mean git never sees
+    a conflict; the shared section guaranteed one. Five concurrent trusty-mpm PRs
+    on 2026-07-31 each wrote into `## [Unreleased]` and every merge forced the
+    next to rebase and hand-resolve it.
+  - `scripts/assemble-changelog.sh` folds a crate's fragments into a
+    `## [<version>]` section at release time and deletes them in the same
+    operation; `scripts/bump-version.sh` calls it (with a `--check` pre-flight
+    before `Cargo.toml` is touched, so a changelog problem no longer leaves the
+    repo half-bumped).
+  - New CI gate `scripts/check_changelog_fragment.sh` fails a PR that changes
+    crate source without recording it. The rule was review-gate-only before.
+  - `scripts/generate-changelog.sh` is deleted. Its `git cliff --unreleased
+    --prepend` blindly stacked a second `## [Unreleased]` heading — the defect
+    [#2793](https://github.com/bobmatnyc/trusty-tools/issues/2793) tracks — so
+    the `bump-version.sh` stopgap guard for that is gone too. `cliff.toml`
+    remains, scoped to the GitHub Release body only.
+  - The whole workspace is migrated in the same change: 22 crates' pending
+    `## [Unreleased]` sections became fragments, 4 stale buried `[Unreleased]`
+    headings left by #2793 were removed without moving their text, and
+    `trusty-kb`/`trusty-bm25-daemon` gained the `---` separator the assembler
+    needs. Every crate's `--check` pre-flight passes; word-level conservation
+    confirms nothing was dropped.
+  - An empty `changelog.d/` is explicitly NOT an error — it is the steady state
+    after a release. A tracked `changelog.d/README.md` keeps the directory
+    present so the next PR still sees a fragments project.
+  - The gate asks the real assembler whether it would accept a crate's
+    fragments rather than checking that a file exists, so a 0-byte, bodyless,
+    mis-categorised or nested fragment fails in the PR that wrote it instead of
+    silently vanishing from the release. `Removed` and `Security` join the
+    category set, which the hand-written sections already used.
+- bundled agents deploy to the tm-managed user tier, never per-workspace and never to `~/.claude` (closes [#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409))
+  - `FrameworkPaths::agent_deploy_dir()` is the single destination for every
+    bundled-agent deploy, validate, staleness, reset, and doctor call site:
+    `$CLAUDE_CONFIG_DIR/agents` (`~/.trusty-tools/trusty-mpm/claude-config/agents`).
+    Unlike `claude_agents_dir()` it is never rewritten project-local by
+    `for_managed_project`/`for_managed_workspace`.
+  - `tm install` no longer writes composed agents into the operator's generic
+    `~/.claude/agents/` — the highest-severity breach on the issue, since that
+    directory belongs to a Claude Code install with nothing to do with
+    trusty-mpm.
+  - Session launch, `tm sessions sync-assets`, and `tm catalog apply` no longer
+    deploy bundled agents into a workspace's `.claude/agents/`. That directory
+    is now reserved for hand-placed (and future project-custom) agents, which
+    are still never touched.
+  - Session launch and sync-assets additionally RETRACT the bundled agents an
+    older binary deployed into a workspace. The project tier outranks the
+    config-dir tier in agent resolution, so a stale copy left behind would
+    shadow the canonical roster permanently and would no longer be refreshed by
+    any deploy — the #4408 shadowing incident made permanent. Retraction removes
+    only manifest-tracked, framework-owned files; hand-placed and user-owned
+    files survive byte-identical, and a corrupt manifest aborts the retraction
+    rather than guessing.
+  - `tm doctor`'s `agents` and `agent_skills` probes, `tm agent list`/`tm agent
+    show`, and the deployment-completeness gate follow the roster to the new
+    tier. Probing the workspace tier after the flip would have reported every
+    healthy install as broken and driven the spawn/resume gate into a permanent
+    repair loop; `tm agent list` would have reported an empty roster.
+  - `tm install --reset-agents --reset-agents-workspaces` now RETRACTS a
+    workspace's bundled agents instead of force-recomposing them. Recomposing
+    was correct while workspaces were a deploy destination; after the flip it
+    re-created, inside live sessions' workspaces, exactly the shadow this change
+    removes. The `--reset-agents <names>` scope is still honored, and removals
+    are reported on their own line.
+  - `tm repair deploy` follows the agent ledger to the new tier and actually
+    removes the scratch files it reports. It previously derived a "base" path
+    from each `*.tmp` orphan and re-derived the old fixed `<name>.tmp` from it,
+    which never matches the per-process scratch names below — so it unlinked
+    nothing while still printing every orphan as removed. It now unlinks the
+    path it found and reports only what it actually deleted.
+  - EVERY writer of the shared agent ledger — session launch, sync-assets,
+    retraction, `tm install --reset-agents`, and `tm catalog apply --prune` —
+    now performs its read-modify-write under the lock below. `reset_agents` and
+    `prune_agents` were the two that ran unlocked against the shared directory,
+    which is the highest-traffic race with a concurrent session launch.
+  - The agent deploy ledger's read-modify-write is now serialised across
+    processes by an advisory lock on a `.trusty-mpm-manifest.json.lock` sidecar,
+    and every atomic write stages through a per-process, per-attempt temp name
+    instead of a fixed `.tmp` sibling. Both were survivable while each workspace
+    had its own deploy directory; against ONE machine-global directory shared by
+    every concurrent session launch, sync-assets run, and `tm catalog apply`,
+    the fixed temp name lets two writers publish torn JSON and the unlocked
+    load-modify-write silently drops one writer's entries — after which the
+    files those entries described are treated as untracked and frozen, which is
+    #4408's failure shape reached by a race.
+  - Known consequences of a machine-global agent tier, neither solved here:
+    - A per-project `[agents] exclude` no longer removes an agent from a
+      session's view — it only refrains from writing it, and a sibling project
+      that selects the agent still puts it there.
+    - `tm catalog apply --prune` now deletes from the one directory EVERY live
+      session reads, mid-session, driven by the daemon-wide baseline manifest.
+      Before the flip it pruned `~/.claude/agents`, which no managed session
+      read, so the blast radius was effectively nil. `--prune` remains opt-in
+      and still only removes manifest-tracked managed files, but an operator
+      running it now affects every running session, not one workspace.
 - **`core::doctor::CheckStatus` gained an `Unknown` variant (issues #4005,
   #4001).** This is a BREAKING change for any downstream exhaustive `match`
   over the enum (E0004) and needs a MINOR bump, not a patch — the same trap
@@ -466,10 +847,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   check can never leave the aggregate report reading healthy.
 - bump to 1.2.3 ([#4229](https://github.com/bobmatnyc/trusty-tools/pull/4229)) ([`7c4f056`](https://github.com/bobmatnyc/trusty-tools/commit/7c4f05643508bd9ad04b9cf5ba77dead3cb4cfcb))
 
+### Removed
+
+- `core::agent_reset::reset_project_agents` — force-recomposed the bundled roster into an arbitrary directory, narrowed by a project's harness roster ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). The workspace sweep was its only caller and now retracts instead, leaving it with zero production callers. A public function that writes the bundled roster into a workspace is exactly the shadow-creating footgun this change removes, so it is deleted rather than left callable. `ResetResult::deselected` is retained for the report's shape but is no longer populated by anything.
+
 ### Documentation
 
 - add a plain-speaking prose rule to the PM instructions ([#4316](https://github.com/bobmatnyc/trusty-tools/pull/4316)) ([`899a949`](https://github.com/bobmatnyc/trusty-tools/commit/899a949aaee9776010ecfb7acfa3c087d195ce3a))
 - fix stale `.invalid` fixture-convention pointer ([#4308](https://github.com/bobmatnyc/trusty-tools/pull/4308)) ([`098ab27`](https://github.com/bobmatnyc/trusty-tools/commit/098ab270a0580f0849a53f64e44b958878475ede))
+
 ## [1.2.3] — 2026-07-28
 
 PATCH: merge-and-local-install only, no crates.io publish.

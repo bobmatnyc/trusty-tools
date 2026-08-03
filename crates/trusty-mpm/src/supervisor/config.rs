@@ -42,7 +42,9 @@ pub const ENV_INTERVAL_SECS: &str = "TRUSTY_MPM_SUPERVISOR_INTERVAL";
 /// What: the variable an operator sets to override the classification model;
 /// when absent the supervisor falls back to [`DEFAULT_LLM_MODEL`].
 /// Test: `default_llm_model_is_documented` asserts the constant + default pair.
-pub const ENV_LLM_MODEL: &str = "TRUSTY_LLM_MODEL";
+/// #4427: aliased to the classifier's own key so the supervisor and the daemon
+/// can never disagree about which variable configures the model.
+pub const ENV_LLM_MODEL: &str = crate::activity::classifier::CLASSIFIER_MODEL_ENV;
 
 /// Default LLM model used for idle classification when [`ENV_LLM_MODEL`] is unset.
 ///
@@ -50,7 +52,9 @@ pub const ENV_LLM_MODEL: &str = "TRUSTY_LLM_MODEL";
 /// still letting operators opt into a stronger model via [`ENV_LLM_MODEL`].
 /// What: the fallback model id passed to the classifier when the env var is absent.
 /// Test: `default_llm_model_is_documented`.
-pub const DEFAULT_LLM_MODEL: &str = "openai/gpt-4o-mini";
+/// #4427: aliased to the classifier's own default so the supervisor cannot label
+/// its metrics with a model the classifier never requests.
+pub const DEFAULT_LLM_MODEL: &str = crate::activity::classifier::DEFAULT_CLASSIFIER_MODEL;
 
 /// Environment variable that toggles idle-session activity classification.
 ///

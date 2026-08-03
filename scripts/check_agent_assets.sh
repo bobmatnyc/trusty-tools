@@ -93,6 +93,12 @@ PINS="scripts/agent-asset-pins.tsv"
 # tcode's own defaults — never sourced from trusty-mpm.
 TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md pm.md"
 
+# #4618: the scan floor. The parity set is currently 30 files (38 tracked tcode
+# .md minus 4 tcode-only minus 4 pinned deviations); anything at or below this
+# means the enumeration broke, not that the roster shrank. A gate that examined
+# nothing must never report OK.
+MIN_PARITY_FILES=20
+
 # The 4 files with a Bob-approved deliberate deviation from byte-parity
 # (Slice E3, PR #3041). Pinned by trusty-mpm SOURCE hash, not byte-compared.
 DEVIATED_FILES="code-analyzer.md code-critic.md qa.md web-qa.md"
@@ -269,6 +275,23 @@ done
 # the roster grows (ticketing was added for epic #4021's cross-product bridge)
 # and a stale literal in a PASSING message is the kind of quiet lie this gate
 # exists to prevent.
+#
+# #4618: the enumeration is materialised into a temp file rather than consumed
+# from a `< <(git ls-files ...)` process substitution. A process substitution
+# runs in a subshell that is exempt from BOTH `set -e` and `pipefail`, so a
+# `git ls-files` that exited 128 fed the loop an empty stream and this gate
+# printed "0 byte-parity file(s) match — OK" over a genuinely drifted copy.
+# Redirecting from a file makes the exit status observable AND still runs the
+# loop body in the current shell (so PARITY_COUNT/FAIL survive it).
+TCODE_LIST="$(mktemp "${TMPDIR:-/tmp}/agentassets.list.XXXXXX")"
+trap 'rm -f "$TCODE_LIST"' EXIT
+if ! git ls-files "$TCODE_DIR/*.md" > "$TCODE_LIST"; then
+  echo "FAIL: TOOL ERROR — 'git ls-files $TCODE_DIR/*.md' exited non-zero." >&2
+  echo "      The file set could not be enumerated, so nothing was compared." >&2
+  echo "      This is NOT a pass (issue #4618)." >&2
+  exit 1
+fi
+
 PARITY_COUNT=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
@@ -302,12 +325,22 @@ while IFS= read -r f; do
     echo "      crates/trusty-code/src/assets/mod.rs." >&2
     FAIL=1
   fi
-done < <(git ls-files "$TCODE_DIR/*.md")
+done < "$TCODE_LIST"
+
+# --- 3. Scan floor (#4618). Assert we actually examined something. ---
+if [ "$PARITY_COUNT" -lt "$MIN_PARITY_FILES" ]; then
+  echo "FAIL: SCAN FLOOR — only ${PARITY_COUNT} byte-parity file(s) were examined," >&2
+  echo "      below the declared minimum of ${MIN_PARITY_FILES}. Either the roster genuinely" >&2
+  echo "      shrank (lower MIN_PARITY_FILES in scripts/check_agent_assets.sh on" >&2
+  echo "      purpose) or the enumeration broke. A gate that scans nothing cannot" >&2
+  echo "      fail, so this is a failure, not an OK (issue #4618)." >&2
+  FAIL=1
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "agent-assets: FAILED — see FAIL lines above." >&2
   exit 1
 fi
 
-echo "agent-assets: ${PARITY_COUNT} byte-parity file(s) match, ${#DEVIATED_ARR[@]} pinned deviation(s) match upstream — OK."
+echo "agent-assets: scanned ${PARITY_COUNT} byte-parity file(s) (floor ${MIN_PARITY_FILES}), all match; ${#DEVIATED_ARR[@]} pinned deviation(s) match upstream — OK."
 exit 0

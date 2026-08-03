@@ -15,9 +15,7 @@ use serial_test::serial;
 use trusty_channels::slack::api::client::BaseClient;
 use trusty_channels::slack::api::constants::{MAX_DOWNLOAD_BYTES, SLACK_PROVIDER, SLACK_TOKEN_ENV};
 use trusty_channels::slack::api::error::SlackError;
-use trusty_common::inference::credentials::{
-    env_var_for, resolve_key_with, KeyStore, MemoryKeyStore,
-};
+use trusty_common::credentials::{env_var_for, resolve_key_with, KeyStore, MemoryKeyStore};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

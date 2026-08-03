@@ -1331,3 +1331,30 @@ fn no_max_tokens_no_tools_agent_composes_unchanged() {
     assert!(!composed.contains("max_tokens:"));
     assert!(!composed.contains("tools:"));
 }
+
+/// #4511: parsing `agent_type:` must NOT change what compose emits.
+///
+/// Why: the field was added so a READER can see the claude-mpm-format
+/// spelling of an agent's declared domain. This composer canonicalises on
+/// `role:` — emitting a second domain key would change the bytes of every
+/// deployed artifact for a value nothing in the compose path consumes. Before
+/// the field existed the key was parsed into the discard bucket and dropped;
+/// it must still be dropped.
+#[test]
+fn agent_type_is_parsed_but_never_emitted() {
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "aws-ops",
+        "---\nname: aws-ops\nagent_type: ops\n---\n\n# AWS Ops\n\nBODY\n",
+    );
+
+    // The reader sees it...
+    let (fm, _body) =
+        split_frontmatter(&fs::read_to_string(tmp.path().join("aws-ops.md")).unwrap()).unwrap();
+    assert_eq!(fm.agent_type.as_deref(), Some("ops"));
+
+    // ...and compose still drops it, byte-identically to pre-#4511 output.
+    let composed = compose_agent("aws-ops", tmp.path()).unwrap();
+    assert_eq!(composed, "---\nname: aws-ops\n---\n\n# AWS Ops\n\nBODY\n");
+}

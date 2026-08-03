@@ -10,14 +10,14 @@ use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// Build the canonical eight-section taxonomy with correct tiers.
+/// Build the canonical nine-section taxonomy with correct tiers.
 fn sections() -> Vec<InstructionSection> {
     SectionId::CANONICAL
         .iter()
         .map(|id| InstructionSection {
             id: *id,
             title: format!("{id:?}"),
-            customization_tier: if id.is_floor() {
+            customization_tier: if *id == SectionId::Core {
                 CustomizationTier::Fixed
             } else {
                 CustomizationTier::Project
@@ -70,6 +70,7 @@ fn fixture() -> InstructionPackage {
             generated(SectionId::AgentDelegation, Generator::AgentRoster, false),
             generated(SectionId::Core, Generator::ProjectAddendum, true),
             text(SectionId::Identity, "IDENTITY"),
+            text(SectionId::Enforcement, "ENFORCEMENT"),
             text(SectionId::NonOverridableRules, "RULES"),
             text(SectionId::FrameworkGuaranteedConventions, "CONVENTIONS"),
         ],
@@ -492,26 +493,24 @@ fn canonical_order_is_sorted_and_complete() {
     sorted.sort();
     assert_eq!(sorted, SectionId::CANONICAL, "CANONICAL must be sorted");
     let unique: std::collections::BTreeSet<_> = SectionId::CANONICAL.iter().collect();
-    assert_eq!(unique.len(), 8, "eight distinct sections");
+    assert_eq!(unique.len(), 9, "nine distinct sections");
 }
 
 #[test]
-fn floor_membership_is_exactly_the_absorbed_base_pm_blocks() {
-    // Why: #4183 absorbs three BASE_PM blocks as the floor. Anything else being
-    // floor would over-freeze content; anything less would let the floor be
-    // overridden.
-    let floor: Vec<SectionId> = SectionId::CANONICAL
-        .into_iter()
-        .filter(|s| s.is_floor())
+fn core_is_the_only_protected_section() {
+    // #4286 replaces `floor_membership_is_exactly_the_absorbed_base_pm_blocks`.
+    // The owner ruling removed the framework floor: a project owns its own
+    // `CLAUDE.md`, so the floor was the appearance of a control. `CORE` is the
+    // single section a named section cannot replace, and this pins that set at
+    // exactly one member — adding a second would be reinstating the floor.
+    let pkg = fixture();
+    let protected: Vec<SectionId> = pkg
+        .sections
+        .iter()
+        .filter(|s| s.customization_tier == CustomizationTier::Fixed)
+        .map(|s| s.id)
         .collect();
-    assert_eq!(
-        floor,
-        vec![
-            SectionId::Identity,
-            SectionId::NonOverridableRules,
-            SectionId::FrameworkGuaranteedConventions,
-        ]
-    );
+    assert_eq!(protected, vec![SectionId::Core]);
 }
 
 #[test]
@@ -539,12 +538,12 @@ fn tier_permits_matrix() {
 fn section_lookup_reports_declared_tier() {
     let pkg = fixture();
     assert_eq!(
-        pkg.section(SectionId::Identity)
-            .map(|s| s.customization_tier),
+        pkg.section(SectionId::Core).map(|s| s.customization_tier),
         Some(CustomizationTier::Fixed)
     );
     assert_eq!(
-        pkg.section(SectionId::Core).map(|s| s.customization_tier),
+        pkg.section(SectionId::Identity)
+            .map(|s| s.customization_tier),
         Some(CustomizationTier::Project)
     );
 }
@@ -628,20 +627,41 @@ fn rejects_missing_section_declaration() {
 }
 
 #[test]
-fn rejects_floor_section_that_is_not_fixed() {
-    // Why (#4194): the floor's non-overridable semantics must be representable
-    // AND enforced, not merely conventional.
+fn rejects_core_declared_overridable() {
+    // #4286: `core` is the ONE protected section, and that has to be enforced
+    // rather than conventional — retiering it to `project` would silently make
+    // every section overridable and leave nothing protected at all.
     let mut pkg = fixture();
     for section in &mut pkg.sections {
-        if section.id == SectionId::NonOverridableRules {
+        if section.id == SectionId::Core {
             section.customization_tier = CustomizationTier::Project;
         }
     }
     assert_eq!(
         pkg.validate().unwrap_err(),
-        ValidationError::FloorNotFixed {
-            section: SectionId::NonOverridableRules,
+        ValidationError::TierNotCoreOnly {
+            section: SectionId::Core,
             tier: CustomizationTier::Project,
+        }
+    );
+}
+
+#[test]
+fn rejects_a_second_fixed_section() {
+    // The other direction of the same iff, and the one that matters for #4286:
+    // marking any non-`core` section `fixed` quietly reinstates the framework
+    // floor the owner ruling removed. Both directions must be red.
+    let mut pkg = fixture();
+    for section in &mut pkg.sections {
+        if section.id == SectionId::NonOverridableRules {
+            section.customization_tier = CustomizationTier::Fixed;
+        }
+    }
+    assert_eq!(
+        pkg.validate().unwrap_err(),
+        ValidationError::TierNotCoreOnly {
+            section: SectionId::NonOverridableRules,
+            tier: CustomizationTier::Fixed,
         }
     );
 }
@@ -798,23 +818,16 @@ fn rejects_optional_roster_block() {
 }
 
 #[test]
-fn rejects_overridable_block_after_the_floor() {
-    // Why: the floor's guarantee is that it has the last word. Enforcing this
-    // per-block preserves it without dictating one global order — which the
-    // byte-identical lift in #4186 needs to stay free to choose.
+fn block_order_is_no_longer_constrained_by_section() {
+    // Was `rejects_overridable_block_after_the_floor`. The rule it pinned —
+    // nothing overridable may follow the floor — died with the floor (#4286).
+    // Order is now purely what the manifest's `blocks` array declares, so a
+    // trailing `core` block is legal. Inverted rather than deleted so
+    // reintroducing the constraint shows up as a failure here.
     let mut pkg = fixture();
-    pkg.blocks.push(text(SectionId::Core, "SNEAKY"));
-    let err = pkg.validate().unwrap_err();
-    assert!(
-        matches!(
-            err,
-            ValidationError::OverridableAfterFloor {
-                section: SectionId::Core,
-                ..
-            }
-        ),
-        "got {err}"
-    );
+    pkg.blocks
+        .push(text(SectionId::Core, "TRAILING_CORE_BLOCK"));
+    assert_eq!(pkg.validate(), Ok(()));
 }
 
 #[test]
@@ -850,6 +863,7 @@ fn composes_blocks_in_array_order_with_declared_joins() {
             "ROSTER",
             "ADDENDUM",
             "IDENTITY",
+            "ENFORCEMENT",
             "RULES",
             "CONVENTIONS",
         ]
@@ -1108,8 +1122,20 @@ fn base_pm_floor_block_order_is_valid() {
     // and force #4186 to move bytes. If someone adds that constraint later, this
     // test fails and says why.
     let mut pkg = fixture();
-    pkg.blocks.retain(|b| !b.section.is_floor());
+    pkg.blocks.retain(|b| {
+        !matches!(
+            b.section,
+            SectionId::Identity
+                | SectionId::Enforcement
+                | SectionId::NonOverridableRules
+                | SectionId::FrameworkGuaranteedConventions
+        )
+    });
     pkg.blocks.extend([
+        // #4573's floor section, which `retain` above stripped with the rest of
+        // the floor. Emitted first so the five-element tail assertion below
+        // still reads BASE_PM.md's own heading order.
+        text(SectionId::Enforcement, "ENFORCEMENT"),
         text(SectionId::Identity, "IDENTITY"),
         text(SectionId::NonOverridableRules, "NON-OVERRIDABLE RULES"),
         text(SectionId::NonOverridableRules, "CUSTOMIZING PM BEHAVIOR"),

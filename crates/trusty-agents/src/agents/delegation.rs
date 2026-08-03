@@ -99,6 +99,47 @@ pub(crate) fn is_assistant_kind(role: &str) -> bool {
     role == ASSISTANT_TIER_ROLE
 }
 
+/// The roles that name the ORCHESTRATOR kind — `pm` and a `ctrl` configured
+/// as a controller rather than as a persona.
+///
+/// Why: these two spellings were previously scattered across prose ("`pm`/
+/// `ctrl`-as-orchestrator") and encoded at dispatch as a hardcoded
+/// `role != "assistant"` fallthrough, never as a named value. Naming them
+/// makes the L0 population a reviewable list instead of the complement of a
+/// single equality test. `controller` is included because `ctrl.toml` may
+/// declare either spelling (`ctrl::config`'s loader accepts `"controller" |
+/// "ctrl"`), and a rule that recognized only one would derive a different
+/// tier for the same agent depending on which word its TOML happened to use.
+/// What: exactly two values, matched case-sensitively and exactly, mirroring
+/// [`is_assistant_kind`]'s discipline — a near-miss like `Orchestrator` is
+/// NOT the orchestrator kind and fails closed to
+/// [`crate::agents::AgentTier::L1Standard`].
+/// Test: `orchestrator_kind_is_exactly_the_two_declared_roles`.
+pub(crate) const ORCHESTRATOR_TIER_ROLES: &[&str] = &["orchestrator", "controller"];
+
+/// Is `role` the orchestrator KIND?
+///
+/// Why: `pm` reached [`crate::agents::AgentTier::L0Orchestration`] by a
+/// hardcoded special case at ONE dispatch call site
+/// (`ctrl::pm_task::dispatch::history::ctrl_delegate_posture`) while every
+/// assistant reached the same tier through the role-derived rule
+/// ([`crate::agents::AgentTier::for_kind`]) — two mechanisms for one fact, so
+/// "is this agent L0?" answered differently depending on which one a reader
+/// or a new call site consulted. This predicate is the orchestrator half of
+/// the ONE rule, living beside [`is_assistant_kind`] so both halves of the L0
+/// population are defined in the same module.
+/// What: membership in [`ORCHESTRATOR_TIER_ROLES`]. Being the orchestrator
+/// kind means only that the agent sits OUTSIDE the L0/L1 persona tier model
+/// and is not narrowed by it — it does NOT make an orchestrator an assistant:
+/// [`kind_refuses_delegation`] still ignores it as a source (predicate 1's
+/// scope caveat), and `ASSISTANT_ALLOWED_DELEGATE_ROLES` still excludes it as
+/// a target.
+/// Test: `orchestrator_kind_is_exactly_the_two_declared_roles`,
+/// `assistant_and_orchestrator_kinds_are_disjoint`.
+pub(crate) fn is_orchestrator_kind(role: &str) -> bool {
+    ORCHESTRATOR_TIER_ROLES.contains(&role)
+}
+
 /// Does the KIND rule refuse a delegation edge from `source_role` to
 /// `target_role`? (ADR-0024 predicates 1 + 2.)
 ///
@@ -184,5 +225,49 @@ mod tests {
             assert!(!kind_refuses_delegation(source, "assistant"));
             assert!(!kind_refuses_delegation(source, "engineer"));
         }
+    }
+
+    /// The orchestrator kind is a NAMED list, not "everything that is not an
+    /// assistant" — a sub-agent role must never fall into it, because that is
+    /// the exact widening the L0 derivation must not acquire.
+    #[test]
+    fn orchestrator_kind_is_exactly_the_two_declared_roles() {
+        for orchestrator in ORCHESTRATOR_TIER_ROLES {
+            assert!(is_orchestrator_kind(orchestrator));
+        }
+        for other in [
+            "",
+            "assistant",
+            "engineer",
+            "qa",
+            "researcher",
+            "documentation",
+            "ops",
+            "planner",
+            "ticketing",
+            "analysis",
+            "observer",
+            // Near-misses fail closed, exactly as the assistant predicate does.
+            "Orchestrator",
+            "orchestrator-tier",
+            "ctrl",
+        ] {
+            assert!(
+                !is_orchestrator_kind(other),
+                "role {other:?} must NOT be the orchestrator kind"
+            );
+        }
+    }
+
+    /// The two L0 kinds are disjoint: an orchestrator is L0 because it sits
+    /// outside the persona tier model, NOT because it is an assistant — so it
+    /// must never pick up the assistant-only peer prohibition or the
+    /// assistant-only role allowlist by way of the shared tier value.
+    #[test]
+    fn assistant_and_orchestrator_kinds_are_disjoint() {
+        for orchestrator in ORCHESTRATOR_TIER_ROLES {
+            assert!(!is_assistant_kind(orchestrator));
+        }
+        assert!(!is_orchestrator_kind(ASSISTANT_TIER_ROLE));
     }
 }

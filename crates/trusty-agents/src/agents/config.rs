@@ -274,6 +274,25 @@ pub struct SubagentsConfig {
     /// `bundled_assistant_personas_seed_the_reachable_subagent_whitelist`.
     #[serde(default)]
     pub delegate_allowed: Option<Vec<String>>,
+
+    /// The CONFIGURED default execution style for this agent's coding
+    /// delegations (#4350; spec DOC-62 §5.2/§5.3, middle precedence level).
+    ///
+    /// Why: DOC-62 §5.2 records that no style/rigor field exists anywhere today
+    /// and that #4350 introduces one. It lives beside the other cross-product
+    /// keys because it configures the SAME surface — what `dispatch_task` hands
+    /// to an external target — and an additive key avoids reinterpreting either
+    /// existing list. Absent is the safe posture: it falls through to the
+    /// built-in `engineer`, which is exactly today's behaviour, so no agent
+    /// silently loses ceremony by not being updated.
+    /// What: `hack` / `vibe` / `engineer`; anything else is a config parse
+    /// error, never a silent default. A per-delegation value from the caller
+    /// outranks this, and the target lane's own floor outranks both — this key
+    /// can lower ceremony no more than a caller can.
+    /// Test: `subagents_config_parses_default_style`,
+    /// `subagents_config_rejects_an_unknown_default_style`.
+    #[serde(default)]
+    pub default_style: Option<crate::tools::execution_style::ExecutionStyle>,
 }
 
 /// Optional `[skills]` section in agent TOML (#3933).
@@ -816,18 +835,40 @@ impl AgentTier {
     /// the one branch that registers `delegate_to_agent` and the git tool
     /// surface at all), so deriving L0 from it restates a trust decision the
     /// codebase already makes rather than creating a new escalation path.
+    /// #4497: the ORCHESTRATOR kind (`pm`, and a `ctrl` declaring
+    /// `role = "controller"`) derives `L0Orchestration` here too, so it is
+    /// the same ONE rule that answers "is this agent L0?" for both
+    /// populations. It previously reached that tier by a hardcoded literal at
+    /// a single dispatch call site (`ctrl_delegate_posture`) while assistants
+    /// reached it by this derivation — two mechanisms for one fact, which
+    /// meant `AgentInfo::tier()` and the dispatch posture disagreed about
+    /// `pm` and a new call site could pick up either answer. The two kinds
+    /// stay DISJOINT (`delegation::is_orchestrator_kind` is a named
+    /// two-element list, not "not an assistant"), so an orchestrator gains
+    /// only the tier — never the assistant-only peer prohibition, never the
+    /// assistant-only role allowlist. Nor is it a capability grant: the L0
+    /// surfaces (`l0_shell_exec`, the `gh_*` tools, the session-state tools,
+    /// cross-project git scoping) are all registered behind a persona's own
+    /// `[tools].allow`, and `pm.toml` declares none — see
+    /// `bundled_agent_tier_table_is_pinned` and
+    /// `bundled_assistant_personas_resolve_l0_and_gain_nothing`, which assert
+    /// exactly that.
+    ///
     /// What: [`AgentTier::L0Orchestration`] for the assistant kind (via
     /// `delegation::is_assistant_kind`, the ONE definition of that predicate —
     /// the same function `DelegateToAgentTool::execute` and the `/subagents`
-    /// route call), [`AgentTier::L1Standard`] for every other role, including
-    /// the empty string and `orchestrator`/`controller` (`pm`, which sits
-    /// outside this model and receives `L0Orchestration` explicitly from
-    /// `ctrl_delegate_posture` at dispatch time instead).
-    /// Test: `agent_tier_for_kind_is_l0_only_for_the_assistant_role`,
+    /// route call) and for the orchestrator kind (via
+    /// `delegation::is_orchestrator_kind`); [`AgentTier::L1Standard`] for
+    /// every other role, including the empty string and every specialist
+    /// (sub-agent) role.
+    /// Test: `agent_tier_for_kind_is_l0_for_the_assistant_and_orchestrator_kinds`,
     /// `agent_tier_derives_l0_for_the_assistant_kind`,
-    /// `agent_tier_derives_l1_for_every_sub_agent_kind`.
+    /// `agent_tier_derives_l1_for_every_sub_agent_kind`,
+    /// `bundled_agent_tier_table_is_pinned`.
     pub fn for_kind(role: &str) -> Self {
-        if crate::agents::delegation::is_assistant_kind(role) {
+        if crate::agents::delegation::is_assistant_kind(role)
+            || crate::agents::delegation::is_orchestrator_kind(role)
+        {
             AgentTier::L0Orchestration
         } else {
             AgentTier::L1Standard
@@ -874,10 +915,10 @@ impl AgentInfo {
     /// fail-closed (an unrecognized value resolves to
     /// [`AgentTier::L1Standard`], so a typo can only narrow, never elevate).
     /// An ABSENT or blank declaration derives from `role` via
-    /// [`AgentTier::for_kind`]: the assistant kind resolves
-    /// [`AgentTier::L0Orchestration`], every other role
-    /// [`AgentTier::L1Standard`]. The explicit branch is retained so an
-    /// operator can still pin a genuinely-L0 non-assistant persona, or
+    /// [`AgentTier::for_kind`]: the assistant kind and (#4497) the
+    /// orchestrator kind resolve [`AgentTier::L0Orchestration`], every other
+    /// role [`AgentTier::L1Standard`]. The explicit branch is retained so an
+    /// operator can still pin a genuinely-L0 persona of some other kind, or
     /// deliberately narrow one assistant back to L1 — both are declared
     /// intent, never an accident of omission.
     /// Test: `agent_tier_defaults_to_l1_when_absent`,
@@ -888,7 +929,8 @@ impl AgentInfo {
     /// `agent_tier_derives_l0_for_the_assistant_kind`,
     /// `agent_tier_derives_l1_for_every_sub_agent_kind`,
     /// `agent_tier_explicit_declaration_overrides_the_derived_kind`,
-    /// `bundled_assistant_personas_resolve_l0_and_gain_nothing`.
+    /// `bundled_assistant_personas_resolve_l0_and_gain_nothing`,
+    /// `bundled_agent_tier_table_is_pinned`.
     ///
     /// #4029: the DECLARED-string match lives in [`AgentTier::from_declared`]
     /// so a consumer holding only a raw tier string shares one parser instead

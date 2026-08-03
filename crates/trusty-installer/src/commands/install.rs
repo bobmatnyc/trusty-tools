@@ -46,9 +46,7 @@ use super::dependency_graph::describe_added;
 use super::install_gate::{decide_install_gate, GateInputs, InstallGate};
 use super::progress_ui::{narrator, prompt_yes_no};
 use super::runtime::block_on;
-use super::service_bootstrap::{
-    bootstrap_enabled, bootstrap_member_service, BootstrapAction, NO_SERVICE_ENV,
-};
+use super::service_bootstrap::{bootstrap_enabled, bootstrap_member_service, NO_SERVICE_ENV};
 use super::shadow_check;
 use super::stable_set::{select_members_transitive, StableMember};
 use crate::output::render_json;
@@ -528,7 +526,12 @@ async fn install_all(
                 let (service_ok, service_detail) = if plans_service_bootstrap(m, service_enabled) {
                     let action = bootstrap_member_service(&m.binary);
                     let note = action.note(&m.binary);
-                    let is_failure = matches!(action, BootstrapAction::Failed(_));
+                    // #4470: classified by the enum itself, never re-derived
+                    // here. An inline `matches!` at this call site is exactly
+                    // how `RefusedForeignPort` came to report `service_ok:
+                    // true` — the guard refusing, the daemon not running, and
+                    // `tctl install` exiting 0 with `all_ok: true`.
+                    let is_failure = action.is_failure();
                     if live {
                         let prefix = if is_failure { "error" } else { "info" };
                         checklist.note(&format!("{prefix}: {note}"));

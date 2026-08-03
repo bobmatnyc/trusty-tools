@@ -18,6 +18,8 @@
 //!   - [`index_journal`] — `_sources/<id>.index.jsonl`, the record of what
 //!     reached the bound SEARCH index, and the reconcile that diffs it against
 //!     the ledger (#3892).
+//!   - [`trust`]    — the per-entity trust label the engine stamps at ingest
+//!     and the retrieval fence reads back (#4532, DOC-63 §6.3).
 //!
 //! Gmail and Drive fetchers deliberately live in `trusty-agents`, where the
 //! authenticated `trusty-gworkspace` client already is — this crate stays pure,
@@ -39,6 +41,7 @@ mod jsonl;
 pub mod ledger;
 pub mod policy;
 pub mod registry;
+pub mod trust;
 
 use serde::Serialize;
 use serde_json::Value as Json;

@@ -38,7 +38,14 @@ const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4-6";
 struct ClaudeMpmFrontmatter {
     name: Option<String>,
     description: Option<String>,
-    #[allow(dead_code)]
+    /// The agent's declared domain in trusty-mpm's SOURCE assets and in
+    /// hand-authored agent files (#4502). Normalized, never used verbatim —
+    /// see [`super::claude_mpm_role::normalize_role`].
+    role: Option<String>,
+    /// The agent's declared domain in the DEPLOYED artifacts (#4502): this is
+    /// the key trusty-mpm's composer actually emits into `.claude/agents/*.md`
+    /// — it does not emit `role` — so this is the one that carries the domain
+    /// in practice. Parsed since the loader was written; consumed as of #4502.
     agent_type: Option<String>,
     #[allow(dead_code)]
     version: Option<String>,
@@ -68,6 +75,13 @@ pub struct ClaudeMpmAgent {
     pub system_prompt: String,
     pub skills: Vec<String>,
     pub source_path: PathBuf,
+    /// The NORMALIZED coarse role (#4502) — already translated by
+    /// [`super::claude_mpm_role::normalize_role`] at parse time, so nothing
+    /// downstream can accidentally read a raw frontmatter value. Fail-closed:
+    /// [`super::claude_mpm_role::UNMAPPED_ROLE`] when the file declares no
+    /// recognizable domain, which is byte-identical to the value this loader
+    /// hardcoded before #4502.
+    pub role: String,
 }
 
 impl ClaudeMpmAgent {
@@ -78,16 +92,25 @@ impl ClaudeMpmAgent {
     /// need to know claude-mpm exists.
     /// What: Fills every required field with sensible defaults (temperature
     /// 0.3, 8k tokens, tool_choice Auto, Subprocess runner) and selects the
-    /// provider adapter from the agent's resolved model string.
+    /// provider adapter from the agent's resolved model string. `role` is the
+    /// value [`super::claude_mpm_role::normalize_role`] already resolved at
+    /// parse time (#4502) — it was a hardcoded `"agent"` before that.
     /// Test: `test_to_agent_config_name_preserved`,
-    /// `test_to_agent_config_system_prompt_is_body`.
+    /// `test_to_agent_config_system_prompt_is_body`,
+    /// `to_agent_config_carries_the_normalized_role`,
+    /// `to_agent_config_role_fails_closed_for_an_unmappable_declaration`.
     pub fn to_agent_config(&self) -> AgentConfig {
         let adapter: Arc<dyn crate::llm::adapter::ModelAdapter> =
             Arc::from(adapter_for_model(&self.model));
         AgentConfig {
             agent: AgentInfo {
                 name: self.name.clone(),
-                role: "agent".to_string(),
+                // #4502: the normalized coarse role, resolved at parse time.
+                // NEVER a verbatim frontmatter value — `role` selects the
+                // tool-registry branch in `build_registry_for_agent` and is
+                // checked against `ASSISTANT_ALLOWED_DELEGATE_ROLES` at every
+                // delegation, so it must come from a reviewed table.
+                role: self.role.clone(),
                 model: self.model.clone(),
                 description: self.description.clone(),
                 persistent_session: false,
@@ -158,7 +181,7 @@ impl ClaudeMpmAgent {
 /// the system prompt body. Falls back to the filename stem when `name` is
 /// missing, and to `DEFAULT_MODEL` when `model` is absent.
 /// Test: `test_parse_valid_agent`, `test_parse_no_frontmatter_returns_none`,
-/// `test_default_model_applied`.
+/// `test_default_model_applied`, `parse_normalizes_the_declared_domain`.
 pub fn parse_agent_file(path: &Path, content: &str) -> Option<ClaudeMpmAgent> {
     let trimmed = content.trim_start_matches('\u{feff}'); // strip BOM if present
     let trimmed = trimmed.trim_start_matches(['\n', '\r']);
@@ -189,6 +212,10 @@ pub fn parse_agent_file(path: &Path, content: &str) -> Option<ClaudeMpmAgent> {
     let description = fm.description.unwrap_or_default();
     let model = fm.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
+    // #4502: normalize the declared domain HERE, at the single parse point,
+    // so no downstream consumer can reach a raw frontmatter value.
+    let role = super::claude_mpm_role::normalize_role(fm.role.as_deref(), fm.agent_type.as_deref());
+
     Some(ClaudeMpmAgent {
         name,
         description,
@@ -196,6 +223,7 @@ pub fn parse_agent_file(path: &Path, content: &str) -> Option<ClaudeMpmAgent> {
         system_prompt: body.to_string(),
         skills: fm.skills,
         source_path: path.to_path_buf(),
+        role,
     })
 }
 
@@ -393,5 +421,60 @@ mod tests {
         );
         // Frontmatter must not leak into system prompt body.
         assert!(!config.system_prompt.content.contains("agent_type:"));
+    }
+
+    /// A DEPLOYED artifact, shaped exactly as trusty-mpm's composer emits one:
+    /// `agent_type` carries the domain and there is no `role` key at all.
+    /// This is the frontmatter that actually reaches this loader in
+    /// production, so it is the one the normalization must handle.
+    const DEPLOYED_ENGINEER_MD: &str = "---\nname: rust-engineer\ndescription: \"Rust specialist\"\nagent_type: engineer\nversion: \"1.2.2\"\n---\n# Rust Engineer\n\nYou are a Rust engineer.\n";
+
+    /// A real trusty-mpm specialist with NO counterpart in the coarse
+    /// vocabulary. It must stay on the sentinel — ineligible by design.
+    const DEPLOYED_SECURITY_MD: &str = "---\nname: security\ndescription: \"Security specialist\"\nagent_type: security\n---\n# Security\n\nYou audit things.\n";
+
+    #[test]
+    fn parse_normalizes_the_declared_domain() {
+        let agent = parse_agent_file(&PathBuf::from("rust-engineer.md"), DEPLOYED_ENGINEER_MD)
+            .expect("parses");
+        assert_eq!(
+            agent.role, "engineer",
+            "a deployed artifact declares its domain via agent_type, not role"
+        );
+        // The pre-existing fixture declares `agent_type: test`, which is not a
+        // domain — it must land on the fail-closed sentinel, i.e. exactly the
+        // value this loader hardcoded before #4502.
+        let unmapped =
+            parse_agent_file(&PathBuf::from("test.md"), SAMPLE_AGENT_MD).expect("parses");
+        assert_eq!(
+            unmapped.role,
+            crate::agents::claude_mpm_role::UNMAPPED_ROLE,
+            "an unrecognized agent_type must not become an eligible role"
+        );
+    }
+
+    #[test]
+    fn to_agent_config_carries_the_normalized_role() {
+        let agent = parse_agent_file(&PathBuf::from("rust-engineer.md"), DEPLOYED_ENGINEER_MD)
+            .expect("parses");
+        assert_eq!(agent.to_agent_config().agent.role, "engineer");
+    }
+
+    /// The fail-closed property, asserted end-to-end through the real parse +
+    /// projection path rather than only against the pure mapping function: a
+    /// declared domain the table does not admit must reach `AgentInfo.role` as
+    /// the sentinel, and the sentinel must not be role-eligible.
+    #[test]
+    fn to_agent_config_role_fails_closed_for_an_unmappable_declaration() {
+        let agent =
+            parse_agent_file(&PathBuf::from("security.md"), DEPLOYED_SECURITY_MD).expect("parses");
+        let role = agent.to_agent_config().agent.role;
+        assert_eq!(role, crate::agents::claude_mpm_role::UNMAPPED_ROLE);
+        assert!(
+            !crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+                .contains(&role.as_str()),
+            "an unmappable claude-mpm agent must stay role-ineligible, exactly \
+             as it was before #4502"
+        );
     }
 }

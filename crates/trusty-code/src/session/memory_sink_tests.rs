@@ -136,7 +136,7 @@ async fn wait_for_captures(captured: &Captured, n: usize, timeout: Duration) {
 #[tokio::test]
 async fn enqueue_drain_happy_path() {
     let (base_url, captured) = spawn_capturing_mock(PalaceState::Exists).await;
-    let sink = TurnMemorySink::new(base_url, "test-palace".to_string());
+    let sink = TurnMemorySink::new(base_url, "test-palace".to_string(), PalaceCreation::Allowed);
 
     sink.enqueue("sess-1", "what is 2+2?", "4");
     // 3 calls: palace_info (ensure, #2424) + the two dual-write calls.
@@ -194,7 +194,7 @@ async fn enqueue_drain_happy_path() {
 #[tokio::test]
 async fn ensure_palace_creates_missing_palace_once() {
     let (base_url, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
-    let sink = TurnMemorySink::new(base_url, "test-palace".to_string());
+    let sink = TurnMemorySink::new(base_url, "test-palace".to_string(), PalaceCreation::Allowed);
 
     sink.enqueue("sess-1", "p1", "r1");
     sink.enqueue("sess-1", "p2", "r2");
@@ -237,7 +237,7 @@ async fn ensure_palace_creates_missing_palace_once() {
 #[tokio::test]
 async fn ensure_palace_skips_create_when_palace_exists() {
     let (base_url, captured) = spawn_capturing_mock(PalaceState::Exists).await;
-    let sink = TurnMemorySink::new(base_url, "test-palace".to_string());
+    let sink = TurnMemorySink::new(base_url, "test-palace".to_string(), PalaceCreation::Allowed);
 
     sink.enqueue("sess-1", "p1", "r1");
     sink.enqueue("sess-1", "p2", "r2");
@@ -254,6 +254,87 @@ async fn ensure_palace_skips_create_when_palace_exists() {
     assert!(
         !names.contains(&"palace_create"),
         "an existing palace must never be re-created (metadata clobber)"
+    );
+}
+
+/// (#4638) THE BOUND, at the RPC layer: a [`PalaceCreation::Forbidden`] sink
+/// must never issue `palace_create`, so it can never increase the palace count
+/// no matter how many turns it drains.
+///
+/// Why: this is the leak itself. The palace id is derived from the session's
+/// project root, so a `tempfile::TempDir` root yields a per-RUN-unique id and
+/// the `Allowed` path auto-created one permanent, unreadable palace for every
+/// such run — 5,667 `t-tmp<random>` orphans, 97.8% of every palace on the
+/// machine. Asserting only that the happy path still works would not have
+/// caught that; the absence of `palace_create` is the whole property.
+/// What: drives the SAME `MissingUntilCreated` mock that
+/// `ensure_palace_creates_missing_palace_once` proves DOES create under
+/// `Allowed`, and asserts the Forbidden sink's entire RPC trace is probes —
+/// no `palace_create`, and no doomed `chat_turn_append`/`memory_remember`
+/// against a palace that does not exist.
+#[tokio::test]
+async fn forbidden_creation_never_creates_a_palace() {
+    let (base_url, captured) = spawn_capturing_mock(PalaceState::MissingUntilCreated).await;
+    let sink = TurnMemorySink::new(
+        base_url,
+        "t-tmpdeadbeef".to_string(),
+        PalaceCreation::Forbidden,
+    );
+
+    for i in 0..5 {
+        sink.enqueue("sess-ephemeral", format!("p{i}"), format!("r{i}"));
+    }
+    // Nothing to wait FOR (the assertion is an absence), so give the drain
+    // task ample time to do the wrong thing if the gate is broken.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let calls = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let names: Vec<&str> = calls.iter().map(|(_, p)| tool_name(p)).collect();
+    assert!(
+        !names.contains(&"palace_create"),
+        "a Forbidden sink must never mint a palace, however many turns it \
+         drains (#4638); got {names:?}"
+    );
+    assert!(
+        !names.contains(&"chat_turn_append") && !names.contains(&"memory_remember"),
+        "writes into a palace known not to exist are guaranteed to fail — \
+         they must be skipped, not issued (#4638); got {names:?}"
+    );
+    assert!(
+        names.iter().all(|n| *n == "palace_info"),
+        "the only traffic a homeless Forbidden sink may generate is its \
+         re-probe; got {names:?}"
+    );
+}
+
+/// (#4638) Withholding CREATE must not withhold RECORDING: a Forbidden sink
+/// whose palace already exists must dual-write exactly like an Allowed one.
+///
+/// Why: the fix bounds palace CREATION, not turn recording. If Forbidden also
+/// suppressed writes into an existing palace, a session bound to a durable
+/// project that merely resolved through an unusual root would silently stop
+/// recording — a regression of #2345 dressed up as a fix. This pins the
+/// distinction the design rests on.
+#[tokio::test]
+async fn forbidden_creation_still_writes_to_an_existing_palace() {
+    let (base_url, captured) = spawn_capturing_mock(PalaceState::Exists).await;
+    let sink = TurnMemorySink::new(
+        base_url,
+        "already-there".to_string(),
+        PalaceCreation::Forbidden,
+    );
+
+    sink.enqueue("sess-1", "p1", "r1");
+    // 3 calls: palace_info (probe) + both dual-write calls.
+    wait_for_captures(&captured, 3, Duration::from_secs(2)).await;
+
+    let calls = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let names: Vec<&str> = calls.iter().map(|(_, p)| tool_name(p)).collect();
+    assert_eq!(
+        names,
+        vec!["palace_info", "chat_turn_append", "memory_remember"],
+        "an existing palace must still receive the full dual-write under \
+         PalaceCreation::Forbidden (#4638)"
     );
 }
 
@@ -290,7 +371,11 @@ async fn write_turn_warns_on_skipped_status() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let sink = TurnMemorySink::new(format!("http://{addr}"), "test-palace".to_string());
+    let sink = TurnMemorySink::new(
+        format!("http://{addr}"),
+        "test-palace".to_string(),
+        PalaceCreation::Allowed,
+    );
     sink.enqueue("sess-skip", "prompt", "response");
     // The assertion is simply that this never panics/hangs; give the drain
     // task a moment to run.
@@ -307,6 +392,7 @@ fn base_url_and_palace_expose_construction_args() {
         tx,
         base_url: "http://example.test:1234".to_string(),
         palace: "a-palace".to_string(),
+        creation: PalaceCreation::Allowed,
     };
     assert_eq!(sink.base_url(), "http://example.test:1234");
     assert_eq!(sink.palace(), "a-palace");
@@ -317,7 +403,11 @@ fn base_url_and_palace_expose_construction_args() {
 /// also covers a failed palace ensure (probe AND create both unreachable).
 #[tokio::test]
 async fn write_turn_is_fail_open_on_unreachable_daemon() {
-    let sink = TurnMemorySink::new("http://127.0.0.1:1".to_string(), "p".to_string());
+    let sink = TurnMemorySink::new(
+        "http://127.0.0.1:1".to_string(),
+        "p".to_string(),
+        PalaceCreation::Allowed,
+    );
     sink.enqueue("sess-2", "prompt", "response");
     // Give the drain task a moment to attempt (and fail) the calls; the test
     // passing at all (no panic, no hang) is the assertion.
@@ -338,6 +428,7 @@ fn enqueue_drops_newest_when_queue_full() {
         tx,
         base_url: String::new(),
         palace: String::new(),
+        creation: PalaceCreation::Allowed,
     };
 
     sink.enqueue("s1", "p1", "r1");

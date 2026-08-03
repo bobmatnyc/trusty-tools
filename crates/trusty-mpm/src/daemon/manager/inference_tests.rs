@@ -11,8 +11,8 @@
 use std::sync::{Arc, Mutex};
 
 use serial_test::serial;
+use trusty_common::credentials::MemoryKeyStore;
 use trusty_common::inference::InferenceAdapter;
-use trusty_common::inference::credentials::MemoryKeyStore;
 use trusty_common::inference::registry::{ProviderId, capabilities};
 use trusty_common::inference::test_support::ScriptedAdapter;
 
@@ -25,7 +25,7 @@ use super::{
 /// resolver sees only the injected store.
 fn clear_env() {
     for var in [MANAGER_MODEL_ENV, FALLBACK_MODEL_ENV, "OPENROUTER_API_KEY"] {
-        // SAFETY: guarded by `#[serial(manager_inference_env)]` on each test.
+        // SAFETY: guarded by `#[serial(inference_env)]` on each test.
         unsafe { std::env::remove_var(var) };
     }
 }
@@ -50,7 +50,7 @@ fn credentialed_over(store: MemoryKeyStore, model: &str) -> ManagerInference {
 /// (never a panic), so the digest handler can fall back deterministically.
 /// Test: itself.
 #[test]
-#[serial(manager_inference_env)]
+#[serial(inference_env)]
 fn resolve_reports_no_provider_when_unconfigured() {
     clear_env();
     let seam = credentialed_over(MemoryKeyStore::new(), "openai/gpt-4o-mini");
@@ -79,7 +79,7 @@ fn resolve_returns_injected_adapter() {
 /// shared `&self` (the HTTP-test override path).
 /// Test: itself.
 #[test]
-#[serial(manager_inference_env)]
+#[serial(inference_env)]
 fn set_adapter_overrides_credentialed_source() {
     clear_env();
     let seam = credentialed_over(MemoryKeyStore::new(), "openai/gpt-4o-mini");
@@ -96,19 +96,19 @@ fn set_adapter_overrides_credentialed_source() {
 /// in turn wins over the built-in default.
 /// Test: itself.
 #[test]
-#[serial(manager_inference_env)]
+#[serial(inference_env)]
 fn manager_model_env_precedence() {
     clear_env();
     // Neither set → default.
     assert_eq!(resolve_manager_model(), DEFAULT_MANAGER_MODEL);
 
     // Fallback only.
-    // SAFETY: guarded by `#[serial(manager_inference_env)]`.
+    // SAFETY: guarded by `#[serial(inference_env)]`.
     unsafe { std::env::set_var(FALLBACK_MODEL_ENV, "fleet/model") };
     assert_eq!(resolve_manager_model(), "fleet/model");
 
     // Primary overrides fallback.
-    // SAFETY: guarded by `#[serial(manager_inference_env)]`.
+    // SAFETY: guarded by `#[serial(inference_env)]`.
     unsafe { std::env::set_var(MANAGER_MODEL_ENV, "manager/model") };
     assert_eq!(resolve_manager_model(), "manager/model");
 

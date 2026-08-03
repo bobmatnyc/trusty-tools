@@ -14,6 +14,7 @@
 pub mod bundled;
 pub mod claude_code_runner;
 pub mod claude_mpm_loader;
+pub(crate) mod claude_mpm_role;
 mod config;
 pub mod context_filter;
 // #4172 (epic #4167): L0-only cross-project git/search scoping.
@@ -26,6 +27,9 @@ pub mod harness_protocol;
 pub mod in_process_runner;
 mod loader;
 mod model;
+// The shared-frontmatter bridge for trusty-mpm's deployed `.claude/agents`
+// artifacts. `pub(crate)` — an internal parser selection, not public surface.
+pub(crate) mod mpm_bridge;
 mod params;
 pub mod permissions;
 pub mod persona;

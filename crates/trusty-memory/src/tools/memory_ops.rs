@@ -463,22 +463,12 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // List every palace on disk and open a handle for each. Palaces
     // that fail to open are skipped with a warning so a single bad
     // namespace cannot fail the whole fan-out.
-    let root = state.data_root.clone();
-    let palaces = tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .context("join list_palaces")??;
+    let palaces = crate::service::helpers::list_palaces_blocking(state).await?;
 
-    let mut handles = Vec::with_capacity(palaces.len());
-    for p in &palaces {
-        match state.registry.open_palace(&state.data_root, &p.id) {
-            Ok(h) => handles.push(h),
-            Err(e) => {
-                tracing::warn!(palace = %p.id, "memory_recall_all: open failed: {e:#}")
-            }
-        }
-    }
+    // #4637: open_palace (not peek) is deliberate — recall must see every
+    // palace; the shared helper keeps the blocking opens off the async executor.
+    let handles =
+        crate::service::helpers::open_palaces_blocking(state, &palaces, "memory_recall_all").await;
 
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
     let results = if state.readiness() == DaemonReadiness::Warming {

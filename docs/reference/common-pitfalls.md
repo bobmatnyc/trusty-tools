@@ -8,7 +8,7 @@ silent behavioral drift emerges. Before writing `Command::new(...)`, `reqwest::C
 `std::env::var()` for a concern used in multiple crates, search for an existing
 entry point (`git grep`, then trusty-common source tree) and extend it. See the
 common-entry-point principle and domain consolidation audit in
-[.trusty-mpm/INSTRUCTIONS.md](../../.trusty-mpm/INSTRUCTIONS.md).
+[CLAUDE.md](../../CLAUDE.md).
 
 🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
 it violates the project's hard rule. Use `?` with `thiserror` error types in
@@ -56,10 +56,12 @@ them. All patches must live in the root `Cargo.toml`.
 🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
 not stop you, but continued feature additions make the module harder to review,
 reason about, and test. Split proactively. The applicable cap is **500 SLOC for
-production files** and **1500 SLOC for test/benchmark files** (see the Key
-Conventions section for the exact classification rules). SLOC counts code lines
-only: blank lines, `//` comments, `///` doc comments, `//!` inner-doc comments,
-and `/* ... */` block comments (including multi-line spans) are all excluded.
+production files** and **3000 SLOC for test/benchmark files** (see CLAUDE.md's
+Key Conventions section for the exact classification rules, and
+[docs/reference/sloc-cap.md](sloc-cap.md) for the counting definition and ratchet
+mechanics). SLOC counts code lines only: blank lines, `//` comments, `///` doc
+comments, `//!` inner-doc comments, and `/* ... */` block comments (including
+multi-line spans) are all excluded.
 The trusty-agents `ctrl/`, `runtime/`, and `workflow/engine/` modules (#170,
 #171, #172) were the canonical examples of files that grew past the prod cap;
 all three have since been split into focused submodules and now serve as the
@@ -125,3 +127,16 @@ second, independent Tauri crate (`crates/trusty-code-gui`, for the
 GUI binary (no `install-trusty-code-signed.sh` script or `CODE_SET` exists);
 the Tauri `bundle.macOS.signingIdentity` config is the only signing path for
 `trusty-code-gui` today.
+
+🔴 **Naming an agent file `base…` without a hyphen** — `scan_agents`
+(`crates/trusty-mpm/src/core/delegation_authority.rs`) treats a case-insensitive
+`base-` file-stem prefix as a foundation template and removes it from the
+delegation roster entirely. That is the ONLY rule that hides a deployed agent,
+and it keys on the FILE NAME, never on frontmatter — an agent's `role:` value is
+irrelevant to it (#4589). The hyphen is the whole convention: `base-anything.md`
+is excluded, while `baseline-analyzer.md`, `base64-decoder.md`, and
+`basecamp-sync.md` are ordinary delegatable agents. If an agent you deployed
+never appears in the PM's `## Delegation Authority` section, check the file name
+first, then run `tm doctor` — its `agents` check reports the deployed file count
+and the delegatable roster size side by side, and a gap between them is the
+symptom. `RUST_LOG=debug` logs every file this rule excludes, with its directory.

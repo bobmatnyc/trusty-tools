@@ -44,7 +44,6 @@ exclude = []
 # either way — only the bare-command default is affected, so forgetting to add
 # a new crate here is a mildly stale default, not a build break).
 default-members = [
-    "crates/cto-assistant",
     "crates/tc-services",
     "crates/trusty-agents",
     "crates/trusty-agents-common",
@@ -96,7 +95,7 @@ trusty-code = { path = "crates/trusty-code" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.4.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.27" }
+trusty-common = { path = "crates/trusty-common", version = "0.28" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
@@ -204,12 +203,12 @@ rpassword = "7"
 toml = "0.8"
 libc = "0.2"
 unicode-width = "0.2"
-# `.env.local` loader for the trusty-common `inference::credentials` resolver
+# `.env.local` loader for the trusty-common `credentials` resolver
 # (issue #2401). Already used ad hoc by trusty-agents and trusty-search; the
 # workspace-shared pin lets those crates adopt the canonical loader later
 # without a version bump.
 dotenvy = "0.15"
-# OS-keychain credential storage for the `inference::credentials::KeyringStore`
+# OS-keychain credential storage for the `credentials::KeyringStore`
 # backend (issue #2401), gated behind trusty-common's `keyring-store` feature.
 # `apple-native`/`windows-native`/`sync-secret-service` select the per-OS
 # backend transparently; async D-Bus support is not needed here.

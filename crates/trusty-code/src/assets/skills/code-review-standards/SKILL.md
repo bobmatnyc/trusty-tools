@@ -55,6 +55,28 @@ a shorter review of confirmed issues — it forces the reader to re-triage the
 critic's own uncertainty. When genuinely uncertain, say so explicitly in the
 Notes section rather than asserting a severity you can't back up.
 
+## Finding Disposition
+
+Every finding ends in exactly one of three states, and the review STATES which
+one. This extends the shipped review-finding rule — fix it in the surfacing PR
+or drop it — by naming the third exit that rule left implicit: work that is
+genuinely separable.
+
+1. **`Fix here`** — corrected in the surfacing PR. The default for correctness,
+   security, acceptance criteria, regression coverage, and any small in-scope
+   repair.
+2. **`Parent`** — kept with the work already in flight, as a PR comment or a
+   checklist item on the parent issue. No durable artifact is created.
+3. **`Promote`** — recommended for a standalone issue. The reviewer only
+   recommends. Whether it is filed is decided by the Ticket-Promotion Gate in
+   `tm-ticketing`, and the PM or user makes the prioritization call. Do not
+   re-derive that gate's criteria here.
+
+**An APPROVE verdict does not generate tickets.** Approving means zero CRITICAL
+and zero HIGH findings; the MEDIUM/LOW observations that remain default to
+`Fix here` or `Parent`. `Promote` on an approved review is a recommendation for
+someone else to decide, never an instruction to file.
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
@@ -65,6 +87,7 @@ Notes section rather than asserting a severity you can't back up.
      generic "this is bad practice."
    - Provide the fix: concrete code or a specific, actionable change. Never
      stop at "this needs to be fixed."
+   - Assign the disposition: `Fix here`, `Parent`, or `Promote`.
 3. Apply the 80% confidence filter to every candidate finding.
 4. Compute the verdict from the finding set (see Verdict Protocol below).
 
@@ -75,10 +98,11 @@ Notes section rather than asserting a severity you can't back up.
 
 ## Findings
 
-| Severity | File | Line | Issue | Fix |
-|----------|------|------|-------|-----|
-| CRITICAL | path/to/file.ext | 42 | <one-line description> | <concrete fix> |
-| HIGH     | path/to/file.ext | 87 | ... | ... |
+| Severity | File | Line | Issue | Fix | Disposition |
+|----------|------|------|-------|-----|-------------|
+| CRITICAL | path/to/file.ext | 42 | <one-line description> | <concrete fix> | Fix here |
+| HIGH     | path/to/file.ext | 87 | ... | ... | Parent |
+| LOW      | path/to/file.ext | 96 | ... | ... | Promote |
 
 ## Required Changes (only if WARN or BLOCK)
 
@@ -89,10 +113,15 @@ Notes section rather than asserting a severity you can't back up.
 <caveats, scope assumptions, things explicitly not flagged and why>
 ```
 
+**Every row carries exactly one Disposition token — `Fix here`, `Parent`, or
+`Promote`.** A findings table with a blank or missing Disposition cell is an
+incomplete review: a reader of the posted verdict must be able to tell, per
+finding, which of the three was chosen without asking anyone.
+
 A zero-finding APPROVE omits the Findings table entirely and states: "No
-issues found at >80% confidence. APPROVED for next pipeline stage." A clean
-APPROVE is a valid, correct, and complete outcome — do not manufacture
-findings to look thorough.
+issues found at >80% confidence. APPROVED for next pipeline stage." It has no
+rows, so there are no dispositions to state. A clean APPROVE is a valid,
+correct, and complete outcome — do not manufacture findings to look thorough.
 
 ## Verdict Protocol
 
@@ -117,14 +146,19 @@ findings to look thorough.
   exist.
 - Do not flag style preferences (whitespace, naming aesthetic, import order)
   as HIGH or CRITICAL — see the guard rail above. LOW at most.
+- Do not leave a finding without a disposition. "Noted" is not one of the
+  three.
+- Do not file issues for your own LOW/MEDIUM polish after an APPROVE. Mark
+  them `Promote` and hand the decision to the PM.
 - A zero-finding APPROVE is correct and complete. Do not feel pressure to
   find issues that aren't there.
 
 ## Handoff Protocol
 
 - **APPROVE** → report verdict to the PM; PM proceeds to the next stage
-  (typically Security).
+  (typically Security). Any `Promote` rows go to the PM as recommendations,
+  not as filed issues.
 - **WARN** → report verdict + findings to the PM; PM proceeds AND attaches
-  the finding table to the Documentation handoff.
+  the finding table, dispositions included, to the Documentation handoff.
 - **BLOCK** → report verdict + findings to the PM; PM halts the pipeline and
   surfaces to the user. Do not auto-route back to the implementer.

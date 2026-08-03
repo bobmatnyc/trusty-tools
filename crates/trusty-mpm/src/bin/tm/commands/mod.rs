@@ -6,6 +6,10 @@
 //! What: re-exports handler modules — `auth`, `compress`, `daemon`,
 //! `hook_rewrite`, `install`, `launch`, `managed`, `managed_route`, `meta`,
 //! `misc`, `project`, `services`, `session`, `slack`, `supervisor`, `telegram`.
+//! Two client-side `tm doctor` probes also live here rather than in the daemon's
+//! `run_doctor`, because each needs state the responding daemon cannot report on
+//! itself: `doctor_stale` (this binary's own `CARGO_PKG_VERSION`, #2332) and
+//! `doctor_orphan` (whether launchd owns the process that answered, #4230).
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
@@ -15,6 +19,10 @@ pub(crate) mod banner;
 pub(crate) mod compress;
 pub(crate) mod daemon;
 pub(crate) mod delete;
+// #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
+// cannot detect that the process answering it is the unsupervised one.
+pub(crate) mod doctor_fix_skills;
+pub(crate) mod doctor_orphan;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
 pub(crate) mod generate;
@@ -28,10 +36,15 @@ pub(crate) mod hook_payload;
 pub(crate) mod hook_rewrite;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
+// split out of `install` for the 500-SLOC production cap.
+pub(crate) mod install_skills;
 pub(crate) mod issue;
 pub(crate) mod launch;
 pub(crate) mod launchd_probe;
 pub(crate) mod managed;
+// #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
+pub(crate) mod managed_merged_prs;
 pub(crate) mod managed_root;
 pub(crate) mod managed_route;
 pub(crate) mod managed_workspace;

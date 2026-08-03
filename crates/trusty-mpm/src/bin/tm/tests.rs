@@ -14,8 +14,8 @@
 use clap::Parser;
 
 use crate::cli::{
-    AgentAction, CatalogAction, Cli, Command, DEFAULT_URL, McpCmd, McpTransportArg, MetaAction,
-    ProjectAction, SessionAction, SlackCmd, TelegramCmd,
+    AgentAction, CatalogAction, Cli, Command, DEFAULT_URL, DoctorFlags, McpCmd, McpTransportArg,
+    MetaAction, ProjectAction, SessionAction, SlackCmd, TelegramCmd,
 };
 use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
@@ -274,7 +274,11 @@ fn cli_parses_doctor() {
     assert!(matches!(
         cli.command.unwrap(),
         Command::Doctor {
-            prune_stale_skills: false
+            flags: DoctorFlags {
+                prune_stale_skills: false,
+                fix_skills: false,
+                include_frozen: false,
+            }
         }
     ));
 }
@@ -285,9 +289,53 @@ fn cli_parses_doctor_prune_stale_skills() {
     assert!(matches!(
         cli.command.unwrap(),
         Command::Doctor {
-            prune_stale_skills: true
+            flags: DoctorFlags {
+                prune_stale_skills: true,
+                fix_skills: false,
+                include_frozen: false,
+            }
         }
     ));
+}
+
+/// #4604: `--fix-skills` is opt-in, and overwriting a FROZEN (hand-edited)
+/// skill needs a second, explicit opt-in on top of it.
+///
+/// Why: a frozen file is deliberate user customization; the CLI must make
+/// overwriting one impossible to reach by accident. `--include-frozen` alone
+/// must be REJECTED, not silently interpreted as a fix request.
+/// Test: this test.
+#[test]
+fn cli_parses_doctor_fix_skills() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-skills"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                prune_stale_skills: false,
+                fix_skills: true,
+                include_frozen: false,
+            }
+        }
+    ));
+
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-skills", "--include-frozen"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix_skills: true,
+                include_frozen: true,
+                ..
+            }
+        }
+    ));
+
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--include-frozen"]).is_err(),
+        "--include-frozen without --fix-skills must be rejected"
+    );
 }
 
 #[test]
@@ -1112,7 +1160,10 @@ fn cli_infers_abbreviated_subcommands() {
     assert!(matches!(
         cli.command.unwrap(),
         Command::Doctor {
-            prune_stale_skills: false
+            flags: DoctorFlags {
+                prune_stale_skills: false,
+                ..
+            }
         }
     ));
 

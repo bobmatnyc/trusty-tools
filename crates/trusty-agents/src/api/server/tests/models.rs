@@ -21,7 +21,7 @@ use crate::api::server::routes::build_router;
 use crate::api::server::state::AppState;
 
 /// Provider env vars the resolver's env tier checks, mirrored from
-/// `trusty_common::inference::credentials::env_var_for`.
+/// `trusty_common::credentials::env_var_for`.
 const CREDENTIAL_ENV_VARS: &[&str] = &[
     "FIREWORKS_API_KEY",
     "OPENROUTER_API_KEY",
@@ -237,7 +237,7 @@ async fn zero_credentials_configured_is_stable() {
         // `credential_configured` reports `true` unconditionally for either.
         let expected = id == "bedrock"
             || id == "local"
-            || trusty_common::inference::credentials::resolve_key(id).is_some();
+            || trusty_common::credentials::resolve_key(id).is_some();
         assert_eq!(
             entry["credential_configured"], expected,
             "provider {id} credential_configured mismatch: {entry}"

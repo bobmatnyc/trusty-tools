@@ -768,7 +768,7 @@ async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
 /// Test: This test itself.
 #[tokio::test]
 // Audit finding (same class as #3607/#3608): `OPENROUTER_API_KEY` is also
-// mutated by `inference::credentials::{resolver,dotenv}::tests` under
+// mutated by `credentials::{resolver,dotenv}::tests` under
 // `#[serial(dotenv_credential_env)]`. This file's `EnvVarGuard` has no lock
 // of its own, so join that same serial group rather than relying on the
 // (false) assumption that this is the only mutator of the var.

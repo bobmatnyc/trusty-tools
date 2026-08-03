@@ -17,7 +17,7 @@ use std::time::Duration;
 pub const SLACK_API_BASE: &str = "https://slack.com/api";
 
 /// Provider identifier passed to
-/// `trusty_common::inference::credentials::resolve_key` to obtain the Slack bot
+/// `trusty_common::credentials::resolve_key` to obtain the Slack bot
 /// token. Slack is not an inference provider, but the resolver's provider→key
 /// mapping (`env_var_for`) is the supported, non-parallel path for any token:
 /// this key resolves the process-env → `.env.local` → secure-store precedence

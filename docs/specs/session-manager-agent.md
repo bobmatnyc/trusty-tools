@@ -269,23 +269,63 @@ This routing logic is **internal to trusty-review**, not yet shared.
 
 ### 2.4 Reuse target — PM instruction composition
 
-`crates/trusty-mpm/src/core/instruction_pipeline.rs` +
-`instruction_overrides.rs` + `src/assets/instructions/*.md`:
+> **Stale as of 2026-08-01 — corrected below.** This subsection described the
+> pre-#4183 monolithic-file assembly (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`,
+> `AGENT_DELEGATION.md`, `BASE_PM.md` as four `include_str!`'d files). #4183
+> replaced those four files with one markdown file per section under
+> `assets/instructions/sections/*.md`, composed from an authored JSON
+> manifest,
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> (schema v2,
+> [`:2`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L2)),
+> compiled in via
+> [`bundled_pm_package.rs:98`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/bundled_pm_package.rs#L98).
+> None of the four named files exist as bundled assets anymore — a missing
+> section file is now a compile error
+> ([`instruction_pipeline.rs:47-55,94-96`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_pipeline.rs#L47-L55)).
+> `instruction_pipeline.rs` and `instruction_overrides.rs` still exist and are
+> still the right reuse targets; their internal composition changed. The
+> project-level `.trusty-mpm/` override surface (five files:
+> `INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `MEMORY.md`,
+> `PM_INSTRUCTIONS_DEPLOYED.md`;
+> [`instruction_overrides.rs:52-60`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60))
+> is unmodified by #4183/#4324 — nothing has removed it. But the
+> **direction** is project customization as named sections in the root
+> `CLAUDE.md`, read first
+> (`HOST_FILES[0]`, first host wins;
+> [`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72)).
+> The `.trusty-mpm/` files remain in the current binary's read paths;
+> [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
+> their removal, not their standing as a parallel, equally-valid surface.
 
-- Assets embedded via `include_str!`: `PM_INSTRUCTIONS.md`, `WORKFLOW.md`,
-  `AGENT_DELEGATION.md`, `BASE_PM.md` (`instruction_pipeline.rs:42-59`).
-- `assemble_system_prompt()` joins them in fixed order with `\n\n---\n\n`,
-  BASE_PM last as a non-overridable floor (`instruction_pipeline.rs:71`).
-- `resolve_pm_prompt(project_dir)` layers `<project>/.trusty-mpm/` overrides onto
-  bundled defaults, always appending BASE_PM last (`instruction_overrides.rs:132`).
-- Delivered to the spawned session via
-  `write_prompt_file` + `build_claude_command` →
-  `claude --append-system-prompt-file <tmp>`, started in tmux
-  (`core/model_inject.rs:30,69-76`, `bin/tm/commands/launch.rs:127-156`).
-- PM content structure: Identity (delegate-only) → canonical Prohibitions table
-  → strict Allowlist → workflow phases → BLOCKING verification gates → forbidden
-  phrases → BASE_PM floor. The open-mpm `PM_INSTRUCTIONS.md` (version `0014`) is
-  the assembled reference.
+`crates/trusty-mpm/src/core/instruction_pipeline.rs` +
+`instruction_overrides.rs` + `src/assets/instructions/sections/*.md`:
+
+- Assets embedded via `include_str!`: nine section files (`identity.md`,
+  `core.md`, `memory.md`, `search.md`, `workflow.md`, `agent-delegation.md`,
+  `enforcement.md`, `non-overridable-rules.md`,
+  `framework-guaranteed-conventions.md`; `instruction_pipeline.rs:59-92`),
+  composed per the JSON manifest above.
+- `resolve_pm_prompt(project_dir)` layers `<project>/.trusty-mpm/` (or
+  `CLAUDE.md` named-section) overrides onto the bundled defaults, always
+  appending the `enforcement`, `non-overridable-rules` and
+  `framework-guaranteed-conventions` sections last as the non-overridable
+  floor.
+- Delivered to the spawned session via a temp file
+  (`core/model_inject.rs:44-46`) →
+  `claude --append-system-prompt-file <tmp>`
+  (`runtime/claude_code.rs:842`), and stashed for inspection at
+  `<project>/.trusty-mpm/last-instructions.md`
+  (`core/session_launch/mod.rs:756`).
+- PM content structure: Identity (delegate-only, `fixed` tier) → strict
+  Allowlist → workflow phases → BLOCKING verification gates → forbidden
+  phrases → non-overridable floor (`fixed` tier: `enforcement` — the canonical
+  Prohibitions and Circuit Breakers tables — then `non-overridable-rules`,
+  `framework-guaranteed-conventions`). The Prohibitions table sat inside `core`
+  at `project` tier until
+  [#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573), where a
+  three-line `CLAUDE.md` CORE block deleted it and the Circuit Breakers table
+  from the delivered prompt.
 
 ### 2.5 Current state — memory & palaces
 

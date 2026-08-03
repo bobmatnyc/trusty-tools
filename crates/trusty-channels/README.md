@@ -94,7 +94,7 @@ markdown.
 | `RUST_LOG`         | Standard `tracing` filter (e.g. `trusty_channels=debug`)              |
 
 Both tokens are resolved through
-`trusty_common::inference::credentials::resolve_key`, which applies the
+`trusty_common::credentials::resolve_key`, which applies the
 standard **process env → `.env.local` → secure store** precedence. Construction
 succeeds without either token (so `tools/list` works); a missing token
 surfaces only when a tool makes a live call that requires it.

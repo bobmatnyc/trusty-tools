@@ -220,13 +220,13 @@ pub struct DaemonState {
     /// content-hash cache persists between calls; a `OnceLock` defers
     /// construction until the first activity request and amortizes the cost.
     /// What: holds the shared monitor; built on first access using the default
-    /// [`OpenRouterClassifier`] (reads `OPENROUTER_API_KEY` from env).
+    /// [`crate::activity::OpenRouterClassifier`], which resolves an inference
+    /// provider through the shared `trusty_common::inference` credential ladder
+    /// (#4427).
     /// Test: `managed_routes` handler tests exercise this via the router.
     pub(super) activity_monitor: std::sync::OnceLock<
         std::sync::Arc<
-            crate::activity::monitor::ActivityMonitor<
-                crate::activity::monitor::OpenRouterClassifier,
-            >,
+            crate::activity::monitor::ActivityMonitor<crate::activity::OpenRouterClassifier>,
         >,
     >,
 
@@ -300,6 +300,32 @@ pub struct DaemonState {
     /// `commands::launchd_probe::tests` cover the pure decision logic that
     /// `daemon_run` uses to compute the value passed to `set_supervised`.
     pub(super) supervised: std::sync::atomic::AtomicBool,
+    /// Whether this daemon was started with the `tm daemon --force` opt-in
+    /// (issue #4230, review MEDIUM-1).
+    ///
+    /// Why: `supervised == false` alone cannot distinguish the two populations
+    /// that reach it — an unwanted ORPHAN (the #4230 incident) and a run the
+    /// operator deliberately asked for with the `--force` flag that #4397 added
+    /// and that both #4230 refusal messages recommend. Without this flag the
+    /// `daemon_orphan` doctor check would call a deliberate `--force` daemon an
+    /// orphan and tell the operator to kill it, which trains them to ignore the
+    /// check — the exact alert-fatigue failure the check exists to avoid.
+    /// What: an `AtomicBool` defaulting to `false`, set once post-construction by
+    /// `daemon_run` alongside [`Self::set_supervised`]. Read via
+    /// [`Self::unsupervised_forced`].
+    /// Test: `health_response_serializes_forced_field` asserts the default;
+    /// `daemon_orphan`'s `warns_not_fails_when_the_operator_forced_it` covers the
+    /// verdict that consumes it.
+    pub(super) unsupervised_forced: std::sync::atomic::AtomicBool,
+    /// The three-state launchd answer behind [`Self::supervised`] (#4469).
+    ///
+    /// Why: see [`crate::daemon::api::types::HealthResponse::launchd_supervision`]
+    /// — a bool cannot express "launchd could not be asked", and reporting that
+    /// as `false` makes `tm doctor` prescribe killing a healthy daemon.
+    /// What: the discriminant string, written once at startup by `daemon_run`
+    /// via [`Self::set_launchd_supervision`]. Empty until then.
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    pub(super) launchd_supervision: std::sync::RwLock<String>,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
     ///
     /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
@@ -442,6 +468,8 @@ impl DaemonState {
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
+            unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
+            launchd_supervision: std::sync::RwLock::new(String::new()),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -513,6 +541,8 @@ impl DaemonState {
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
+            unsupervised_forced: std::sync::atomic::AtomicBool::new(false),
+            launchd_supervision: std::sync::RwLock::new(String::new()),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
@@ -563,6 +593,55 @@ impl DaemonState {
     /// default; the daemon e2e suite exercises the post-`run_daemon` value.
     pub fn set_supervised(&self, value: bool) {
         self.supervised
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record the THREE-STATE launchd answer for `/health` (issue #4469).
+    ///
+    /// Why: the `supervised` bool cannot distinguish "launchd says no" from
+    /// "launchd could not be asked", and the second must never drive the
+    /// destructive orphan remediation.
+    /// What: stores the discriminant string; a poisoned lock is recovered from
+    /// rather than panicking a running daemon over a diagnostic field.
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    pub fn set_launchd_supervision(&self, value: impl Into<String>) {
+        let mut slot = self
+            .launchd_supervision
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *slot = value.into();
+    }
+
+    /// Read the three-state launchd answer recorded at startup (issue #4469).
+    ///
+    /// Why: `/health` publishes it so clients can tell UNKNOWN from a negative.
+    /// What: the stored discriminant, or `""` before startup recorded one.
+    /// Test: `health_response_serializes_launchd_supervision_field`.
+    pub fn launchd_supervision(&self) -> String {
+        self.launchd_supervision
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Whether this daemon was started with the `tm daemon --force` opt-in
+    /// (issue #4230). See [`Self::unsupervised_forced`] field doc for why an
+    /// unsupervised run must be distinguishable from an unwanted orphan.
+    /// What: relaxed-ordering read — a startup-once flag, not a synchronization
+    /// primitive.
+    /// Test: `health_response_serializes_forced_field`.
+    pub fn unsupervised_forced(&self) -> bool {
+        self.unsupervised_forced
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record the `--force` opt-in (issue #4230). Called exactly once by
+    /// `daemon_run::run_daemon` alongside [`Self::set_supervised`].
+    /// What: relaxed-ordering store — see [`Self::unsupervised_forced`].
+    /// Test: `health_response_serializes_forced_field` exercises the default; the
+    /// daemon e2e suite exercises the post-`run_daemon` value.
+    pub fn set_unsupervised_forced(&self, value: bool) {
+        self.unsupervised_forced
             .store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -618,20 +697,21 @@ impl DaemonState {
     /// shared `ActivityMonitor` whose per-session content-hash cache persists
     /// across requests; a `OnceCell` amortises the construction cost and
     /// guarantees the same cache is reused for every request.
-    /// What: on first call builds `ActivityMonitor<OpenRouterClassifier>` with
-    /// the model from `TRUSTY_LLM_MODEL` (or `openai/gpt-4o-mini`); returns the
-    /// shared `Arc` on every subsequent call.
+    /// What: on first call builds `ActivityMonitor<OpenRouterClassifier>` and
+    /// labels it with the slug the classifier itself resolved (#4427: taken from
+    /// `classifier.model()` rather than re-reading `TRUSTY_LLM_MODEL` here, so
+    /// the model recorded in the cost metrics can never drift from the model
+    /// actually requested); returns the shared `Arc` on every subsequent call.
     /// Test: `handler_activity_cache_hit` in `tests/session_manager_mvp.rs`.
     pub fn activity_monitor(
         &self,
     ) -> std::sync::Arc<
-        crate::activity::monitor::ActivityMonitor<crate::activity::monitor::OpenRouterClassifier>,
+        crate::activity::monitor::ActivityMonitor<crate::activity::OpenRouterClassifier>,
     > {
         self.activity_monitor
             .get_or_init(|| {
-                let model = std::env::var("TRUSTY_LLM_MODEL")
-                    .unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
-                let classifier = crate::activity::monitor::OpenRouterClassifier::new();
+                let classifier = crate::activity::OpenRouterClassifier::new();
+                let model = classifier.model().to_owned();
                 Arc::new(crate::activity::monitor::ActivityMonitor::new(
                     classifier, model,
                 ))

@@ -161,13 +161,24 @@ pub(crate) async fn daemon_healthy(client: &reqwest::Client, url: &str) -> bool 
 ///
 /// Why: operators want one command that is safe to run repeatedly — it brings
 /// the daemon up if it is down and is a no-op (just status) if it is already
-/// up, so `tm start` can sit in shell profiles and setup scripts.
+/// up, so `tm start` can sit in shell profiles and setup scripts on a host where
+/// launchd does NOT own the daemon. Where launchd DOES own it, `tm start` is the
+/// wrong verb and now says so rather than racing launchd (#4230), so it is no
+/// longer appropriate in a shell profile on such a host — use `launchctl` there.
 /// What: probes `/health`; if healthy, prints "Daemon already running" plus the
 /// same listing as `tm status`. If not, opens `~/.trusty-mpm/daemon.log`, spawns
 /// `tm daemon` detached with stdout/stderr appended to that log, polls `/health`
 /// for up to 5 seconds, then prints "Starting daemon... done" and the status.
-/// Test: `cli_parses_start` covers parsing; the spawn/wait path is exercised by
-/// running `tm start` against a clean environment.
+///
+/// #4230: refuses to spawn at all when a trusty-mpm launchd unit is registered.
+/// This was the ONE client-side daemon-spawn path with no launchd awareness —
+/// the stdio bridge has had `no_spawn` since #2486 and `guided_autostart` has
+/// nudged launchd since #1900 — and it is the path that produced the #4230
+/// orphan.
+/// Test: `cli_parses_start` covers parsing; the refusal decision and message are
+/// covered by `launchd_probe`'s `daemon_label_*` and `cli_spawn_refusal_*` tests;
+/// the spawn/wait path is exercised by running `tm start` against a clean
+/// environment.
 pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Prefer the lock file URL — it's the address our daemon actually bound to,
     // not whatever default URL the CLI was given (which may point at a different
@@ -183,6 +194,18 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     if daemon_healthy(client, &check_url).await {
         println!("Daemon already running on {check_url}");
         return print_status(client, &check_url).await;
+    }
+
+    // #4230: nothing is serving, but launchd may still OWN the daemon. Spawning
+    // a detached `tm daemon` here is exactly how the #4230 orphan was created —
+    // it seized :7880 for two days while `com.trusty.mpm` reported `not running`,
+    // so a fresh signed install verified green against a stale 1.0.2 image. Bail
+    // out with the launchctl verb instead of racing launchd. The label is
+    // resolved rather than assumed so the recipe names a unit that exists here.
+    if let Some(label) = crate::commands::launchd_probe::daemon_launchd_label() {
+        anyhow::bail!(crate::commands::launchd_probe::cli_spawn_refusal_hint(
+            &label
+        ));
     }
 
     // Resolve the log file under `~/.trusty-mpm/`, creating the dir if absent.
@@ -253,9 +276,24 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
 /// `start` manually has a gap where the daemon is unreachable.
 /// What: if the daemon is healthy, sends SIGTERM (via pkill) and waits up to
 /// 3 s for the port to free, then calls `start`.
-/// Test: `cli_parses_start` covers parsing; the spawn/wait path is exercised by
-/// running `tm start` against a clean environment.
+///
+/// #4230: the launchd check happens BEFORE the `pkill`, not after. `start`
+/// refuses to spawn when launchd owns the daemon, so checking only there would
+/// tear the supervised daemon down and then decline to bring it back — worse
+/// than the pre-fix behaviour. `pkill` is also the pre-existing route into the
+/// #4230 state: SIGTERM makes the launchd job exit 0, and `KeepAlive
+/// {SuccessfulExit: false}` means launchd deliberately does NOT respawn it.
+/// Test: `cli_infers_abbreviated_subcommands` covers `restart` parsing (there is
+/// no `cli_parses_restart`); the refusal decision and message are covered by
+/// `launchd_probe`'s `daemon_label_*` and `cli_spawn_refusal_*` tests; the
+/// spawn/wait path is exercised by running `tm restart` against a clean
+/// environment.
 pub(crate) async fn restart(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+    if let Some(label) = crate::commands::launchd_probe::daemon_launchd_label() {
+        anyhow::bail!(crate::commands::launchd_probe::cli_spawn_refusal_hint(
+            &label
+        ));
+    }
     if daemon_healthy(client, url).await {
         print!("Stopping daemon... ");
         use std::io::Write as _;
@@ -293,8 +331,18 @@ pub(crate) async fn restart(client: &reqwest::Client, url: &str) -> anyhow::Resu
 /// `tm` process whose argv contains `daemon`, sends SIGTERM, polls 5 s for
 /// them to exit, then SIGKILLs stragglers. Removes the stale lock file
 /// when every targeted process has exited.
-/// Test: `cli_parses_stop`; the spawn/kill path is exercised by running
-/// `tm start` followed by `tm stop` against a clean environment.
+///
+/// #4230 (review, MEDIUM-2): `stop` is deliberately NOT refused — stopping the
+/// daemon is a legitimate thing to ask for — but it IS the last unblocked route
+/// into the #4230 precursor state, so it now says so. Its SIGTERM makes a
+/// launchd-owned daemon exit 0, and the plist's
+/// `KeepAlive {SuccessfulExit: false}` means launchd deliberately does not
+/// respawn it. That is exactly how the incident's `com.trusty.mpm` came to report
+/// `not running` for four days before anything else went wrong. The warning names
+/// the command that brings it back.
+/// Test: `cli_parses_stop`; the hint's resolution logic is covered by
+/// `launchd_probe`'s `restart_command_*` tests; the spawn/kill path is exercised
+/// by running `tm start` followed by `tm stop` against a clean environment.
 pub(crate) async fn stop_daemon() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
 
@@ -308,6 +356,16 @@ pub(crate) async fn stop_daemon() -> anyhow::Result<()> {
         targets.len(),
         targets
     );
+
+    // #4230: launchd will NOT bring this back on its own — the plist sets
+    // `KeepAlive {SuccessfulExit: false}` and a SIGTERM stop exits 0.
+    if let Some(label) = crate::commands::launchd_probe::daemon_launchd_label() {
+        println!(
+            "note: launchd unit `{label}` owns this daemon and will NOT respawn it \
+             (KeepAlive.SuccessfulExit=false). Bring it back with `{}` — issue #4230.",
+            crate::commands::launchd_probe::daemon_restart_command_for(Some(&label))
+        );
+    }
 
     // Phase 1: SIGTERM all targets.
     for pid in &targets {

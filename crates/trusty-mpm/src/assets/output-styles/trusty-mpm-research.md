@@ -34,10 +34,11 @@ without agent-verified evidence.
 
 **🔴 THIS IS ABSOLUTE. NO EXCEPTIONS** beyond the override phrases above. The
 full Prohibitions table, Circuit Breakers, Delegation Map, and PM Allowlist
-live in the appended system prompt (`PM_INSTRUCTIONS.md` + `WORKFLOW.md` +
-`AGENT_DELEGATION.md` + the non-overridable `BASE_PM.md` floor) whenever `tm`
-launches this session; the block above is this style's own self-contained
-floor for when that channel is absent (issue #2647).
+live in the appended system prompt (composed from
+`assets/instructions/sections/*.md` — `core`, `workflow`, `agent-delegation`,
+`enforcement`, and the rest) whenever `tm` launches this session; the block
+above is this style's own self-contained floor for when that channel is
+absent (issue #2647).
 
 ## Research Behavior (what makes this style different)
 

@@ -1,19 +1,26 @@
 <script>
   /*
-   * Why: Issue #97 — give every palace a per-palace visual knowledge graph
-   * so operators can spot clusters and inspect the auto-extracted triples
-   * coming out of `memory_remember`. The existing `KG.svelte` is a flat
-   * subject/triple table that hides topology; this view renders the same
-   * data as a force-directed node-link diagram so the structure is visible
-   * at a glance.
-   * What: Fetches `GET /api/v1/palaces/{id}/kg/graph`, converts the triple
-   * list into nodes+links, runs a lightweight d3-style force simulation
-   * (implemented inline to avoid a heavy d3 import), and renders the result
-   * into an SVG with labelled nodes and directional edges. Clicking a node
-   * opens a side panel listing the incident edges and the source drawer ids
-   * extracted from `drawer:<uuid>` nodes / triple subjects.
-   * Test: open `#/palace/<id>/graph`, confirm nodes render, drag a node to
-   * re-settle the layout, click a node and verify the side panel populates.
+   * Why: Issue #97 gave every palace a per-palace visual knowledge graph so
+   * operators can spot clusters and inspect auto-extracted triples. Issue
+   * #4670 fixed how it loads: it used to fetch the ENTIRE graph in one call
+   * and lay it out with an O(n²) force sim explicitly budgeted for "<500
+   * triples". Real palaces now hold 8,266 triples / 9,311 nodes — 16.5x that
+   * budget — and the server silently capped the payload at 5,000 triples while
+   * the header badge still read the full node count, so the view presented a
+   * partial graph as complete.
+   * What: loads a bounded top-degree SEED (`GET /kg/graph/seed`) on mount,
+   * expands on click (`GET /kg/graph/neighbors`, direction-aware — the only
+   * way to reach a node's INCOMING edges), merges results into the rendered
+   * set deduplicated by node id and by (subject,predicate,object), and pins
+   * existing node positions during re-layout so expansion grows outward
+   * instead of reshuffling. Full-graph load stays available as an explicit,
+   * size-warned opt-in. The header always states what is rendered vs. what
+   * exists.
+   * Test: no JS test harness exists in this crate's `ui/` (no vitest, no test
+   * script) — verified manually: open `#/palace/<id>/graph`, confirm the
+   * header reads "N of M nodes shown", click a node and confirm new nodes
+   * appear around it while existing ones do not move, then use "Load
+   * everything" and confirm the truncation warning appears.
    */
   import { onDestroy, onMount } from 'svelte';
   import { api } from '../api.js';
@@ -22,37 +29,59 @@
   // Selected palace + payload.
   let palaceId = $state('');
   let triples = $state([]);
+  // Palace-wide truth. `rendered*` below is what is actually on screen.
   let counts = $state({ node_count: 0, edge_count: 0, community_count: 0 });
   let loading = $state(true);
+  let expanding = $state(null); // node id currently being expanded
   let error = $state(null);
+  let notice = $state(null);
   let loadStartedAt = 0;
   let loadElapsedMs = $state(0);
+  /** 'seed' (progressive, default) or 'full' (explicit opt-in). */
+  let mode = $state('seed');
+  /** True when the daemon told us the full-graph payload was capped. */
+  let serverTruncated = $state(false);
 
-  // Layout state — populated by `runLayout`. Both arrays are keyed by index
-  // and mutated in-place by the simulation tick.
-  let nodes = $state([]); // {id, label, x, y, vx, vy, fx, fy, kind, community}
-  let links = $state([]); // {source, target, predicate}
+  // Layout state — mutated in-place by the simulation tick.
+  let nodes = $state([]); // {id,label,x,y,vx,vy,fx,fy,kind,community,degree,expanded}
   let selectedId = $state(null);
   let hoverId = $state(null);
+
+  // Dedup keys. Kept outside $state — they are bookkeeping, not view data.
+  let nodeIds = new Set();
+  let tripleKeys = new Set();
 
   // Viewport sizing — recalculated on mount + window resize.
   let width = $state(900);
   let height = $state(600);
   let svgEl = $state(null);
-  let resizeObserver;
   let simHandle = null;
+  let simDone = null;
 
   // Force simulation knobs.
   const LINK_DISTANCE = 90;
   const REPULSION = 1200;
   const CENTER_STRENGTH = 0.04;
   const DAMPING = 0.85;
-  const MAX_STEPS = 200; // sim auto-stops after this many ticks
+  const MAX_STEPS = 200; // full re-layout
+  const EXPAND_STEPS = 70; // settling newly-added nodes only
   const TICK_MS = 16; // ~60fps target
+
+  /*
+   * Why: the client-side force sim is O(n²) per tick. 75 nodes is ~2.8K pair
+   * computations per tick; the palace's full 9,311 nodes is ~43M — the freeze
+   * this view exists to avoid. 75 also reaches past the top hubs into the
+   * mid-degree tier (measured: 91.8% of nodes are degree-1 leaves, only ~7%
+   * have degree >= 5), so first paint shows real structure rather than five
+   * stars. The server clamps to [1, 200] independently.
+   */
+  const SEED_LIMIT = 75;
+  /** Above this, "load everything" warns before it runs. */
+  const FULL_LOAD_WARN_NODES = 500;
 
   onMount(() => {
     palaceId = palaceFromRoute();
-    if (palaceId) loadGraph();
+    if (palaceId) loadSeed();
     const onResize = () => sizeFromContainer();
     window.addEventListener('resize', onResize);
     sizeFromContainer();
@@ -73,7 +102,7 @@
     if (segs[0] === 'palace' && segs.length >= 2) next = segs[1];
     if (next && next !== palaceId) {
       palaceId = next;
-      loadGraph();
+      loadSeed();
     }
   });
 
@@ -89,31 +118,50 @@
     const r = svgEl.parentElement?.getBoundingClientRect();
     if (r) {
       width = Math.max(400, Math.floor(r.width));
-      // Keep the SVG within a sensible vertical budget so the side panel
-      // remains visible. The card body itself can scroll if needed.
       height = Math.max(420, Math.floor(Math.min(800, window.innerHeight - 240)));
     }
   }
 
-  async function loadGraph() {
+  // -------------------------------------------------------------------------
+  // Loading
+  // -------------------------------------------------------------------------
+
+  function resetGraph() {
+    stopSimulation();
+    nodes = [];
+    triples = [];
+    nodeIds = new Set();
+    tripleKeys = new Set();
+    selectedId = null;
+    serverTruncated = false;
+    notice = null;
+  }
+
+  /*
+   * Why (#4670): the default load. Fetches only the top-degree skeleton so
+   * first paint is bounded regardless of palace size, and records the
+   * palace-wide totals so the header can be honest about the gap.
+   */
+  async function loadSeed() {
     loading = true;
     error = null;
-    selectedId = null;
+    mode = 'seed';
     loadStartedAt = performance.now();
+    resetGraph();
     try {
-      const payload = await api.kgGraph(palaceId);
-      triples = Array.isArray(payload?.triples) ? payload.triples : [];
+      const payload = await api.kgGraphSeed(palaceId, SEED_LIMIT);
       counts = {
         node_count: payload?.node_count ?? 0,
         edge_count: payload?.edge_count ?? 0,
         community_count: payload?.community_count ?? 0
       };
-      buildLayout();
+      mergeSubgraph(payload, null);
+      scatterUnplaced();
+      relayout({ pinExisting: false, steps: MAX_STEPS });
+      await autoExpandIfEdgeless();
     } catch (e) {
       error = e.message || String(e);
-      triples = [];
-      nodes = [];
-      links = [];
+      resetGraph();
     } finally {
       loading = false;
       loadElapsedMs = Math.round(performance.now() - loadStartedAt);
@@ -121,48 +169,184 @@
   }
 
   /*
-   * Why: Convert the flat `Triple[]` list into the {nodes, links} shape
-   * d3-force expects. Each distinct subject and object becomes a node;
-   * each triple becomes one directed link.
-   * What: Walks `triples`, deduplicating node ids via a Map; produces
-   * `{nodes, links}` with stable string ids and assigns a `kind` field
-   * (`drawer` / `tag` / `topic` / `room` / `other`) for color coding.
-   * Test: visually — labels and edge directionality match the table view.
+   * Why (#4670): measured on the live 8,266-triple trusty-tools palace, only
+   * 0.48% of edges connect two nodes of degree >= 2 — the graph is
+   * overwhelmingly a star forest of `drawer:<uuid>` hubs with degree-1 leaves.
+   * The top-degree hubs are therefore pairwise UNCONNECTED, so the seed's
+   * induced subgraph comes back with zero edges and the first paint would be
+   * 75 disconnected dots. Auto-expanding the single highest-degree node turns
+   * that into one readable star the operator can navigate from, without
+   * pretending the rest of the graph is loaded (the badge and the dashed halos
+   * still say otherwise).
+   * What: no-op whenever the seed already has edges — i.e. on any
+   * densely-connected palace this never fires.
    */
-  function buildLayout() {
-    const nodeMap = new Map();
-    const nextLinks = [];
-    function ensureNode(label) {
-      if (!label) return null;
-      if (nodeMap.has(label)) return nodeMap.get(label);
-      const kind = classify(label);
-      const node = {
-        id: label,
-        label,
-        kind,
-        community: Math.abs(hashStr(label)) % Math.max(1, counts.community_count || 8),
-        x: width / 2 + (Math.random() - 0.5) * 200,
-        y: height / 2 + (Math.random() - 0.5) * 200,
+  async function autoExpandIfEdgeless() {
+    if (links.length > 0 || nodes.length === 0) return;
+    const top = nodes.reduce((a, b) => ((b.degree ?? 0) > (a.degree ?? 0) ? b : a));
+    if ((top.degree ?? 0) === 0) return;
+    selectedId = top.id;
+    await expandNode(top.id);
+  }
+
+  /*
+   * Why (#4670): kept as an explicit opt-in, never the default. The payload is
+   * server-capped at 5,000 triples; `truncated` tells us when what we drew is
+   * still not everything, and we say so rather than implying completeness.
+   */
+  async function loadFull() {
+    if (
+      counts.node_count > FULL_LOAD_WARN_NODES &&
+      !window.confirm(
+        `This palace has ${counts.node_count.toLocaleString()} nodes and ` +
+          `${counts.edge_count.toLocaleString()} edges. Rendering all of them ` +
+          `runs an O(n²) layout in your browser and may take a long time or ` +
+          `freeze the tab. Continue?`
+      )
+    ) {
+      return;
+    }
+    loading = true;
+    error = null;
+    mode = 'full';
+    loadStartedAt = performance.now();
+    resetGraph();
+    try {
+      const payload = await api.kgGraph(palaceId);
+      counts = {
+        node_count: payload?.node_count ?? 0,
+        edge_count: payload?.edge_count ?? 0,
+        community_count: payload?.community_count ?? 0
+      };
+      serverTruncated = payload?.truncated === true;
+      if (serverTruncated) {
+        notice =
+          `The daemon capped this response at ` +
+          `${(payload?.returned_triple_count ?? 0).toLocaleString()} of ` +
+          `${(payload?.active_triple_count ?? 0).toLocaleString()} active triples ` +
+          `(newest first). This is still not the whole graph.`;
+      }
+      // Full mode has no node list — derive nodes from the triple endpoints.
+      const derived = [];
+      for (const t of payload?.triples ?? []) {
+        derived.push({ id: t.subject }, { id: t.object });
+      }
+      mergeSubgraph({ nodes: derived, triples: payload?.triples ?? [] }, null);
+      scatterUnplaced();
+      relayout({ pinExisting: false, steps: MAX_STEPS });
+    } catch (e) {
+      error = e.message || String(e);
+      resetGraph();
+    } finally {
+      loading = false;
+      loadElapsedMs = Math.round(performance.now() - loadStartedAt);
+    }
+  }
+
+  /*
+   * Why (#4670): click-to-expand. `direction=both` is the point — the incoming
+   * half of the graph had no HTTP route before this endpoint, so a node's
+   * "what points at me" edges were simply unreachable.
+   * What: fetches one hop around `id`, merges, and re-settles ONLY the newly
+   * added nodes (see `relayout`), so the operator's existing mental map of the
+   * canvas survives the expansion.
+   */
+  async function expandNode(id) {
+    if (!id || expanding || mode === 'full') return;
+    const node = nodeById.get(id);
+    if (node?.expanded) return;
+    expanding = id;
+    error = null;
+    try {
+      const payload = await api.kgNeighbors(palaceId, id, {
+        direction: 'both',
+        maxHops: 1
+      });
+      mergeSubgraph(payload, id);
+      if (node) node.expanded = true;
+      relayout({ pinExisting: true, steps: EXPAND_STEPS });
+    } catch (e) {
+      error = e.message || String(e);
+    } finally {
+      expanding = null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Merge
+  // -------------------------------------------------------------------------
+
+  const tripleKey = (t) => `${t.subject} ${t.predicate} ${t.object}`;
+
+  /*
+   * Why: expansion results overlap what is already drawn; adding a node or an
+   * edge twice would double-render it and corrupt the layout's link forces.
+   * What: dedups nodes by `id` and triples by (subject,predicate,object).
+   * Already-known nodes get their `degree` refreshed (the server always
+   * reports graph-wide degree) but keep their x/y so the layout is stable.
+   * New nodes are seeded on a small ring around `originId` when there is one,
+   * so an expansion visibly grows out of the node that was clicked.
+   */
+  function mergeSubgraph(payload, originId) {
+    // Snapshot the id->node map once. Reading the `nodeById` derived inside
+    // the loop would re-materialise it after every push (O(n²) on a big
+    // expansion) for no benefit — nothing else mutates `nodes` here.
+    const byId = new Map();
+    for (const n of nodes) byId.set(n.id, n);
+    const origin = originId ? byId.get(originId) : null;
+    const incoming = payload?.nodes ?? [];
+    let placed = 0;
+    const fresh = incoming.filter((n) => n?.id && !nodeIds.has(n.id)).length;
+    for (const n of incoming) {
+      if (!n?.id) continue;
+      const existing = byId.get(n.id);
+      if (existing) {
+        if (typeof n.degree === 'number') existing.degree = n.degree;
+        continue;
+      }
+      nodeIds.add(n.id);
+      let x = null;
+      let y = null;
+      if (origin) {
+        // Ring placement around the expansion origin. Radius scales with the
+        // batch size so a 40-neighbour hub does not stack them on top of
+        // each other.
+        const angle = (placed / Math.max(1, fresh)) * Math.PI * 2;
+        const radius = LINK_DISTANCE * (0.9 + fresh / 40);
+        x = origin.x + Math.cos(angle) * radius;
+        y = origin.y + Math.sin(angle) * radius;
+      }
+      nodes.push({
+        id: n.id,
+        label: n.id,
+        kind: classify(n.id),
+        community: Math.abs(hashStr(n.id)) % Math.max(1, counts.community_count || 8),
+        degree: typeof n.degree === 'number' ? n.degree : 0,
+        expanded: false,
+        isNew: true,
+        x,
+        y,
         vx: 0,
         vy: 0,
         fx: null,
         fy: null
-      };
-      nodeMap.set(label, node);
-      return node;
+      });
+      placed++;
     }
-    for (const t of triples) {
-      const s = ensureNode(t.subject);
-      const o = ensureNode(t.object);
-      if (s && o && s !== o) {
-        nextLinks.push({ source: s.id, target: o.id, predicate: t.predicate });
-      }
+    for (const t of payload?.triples ?? []) {
+      const key = tripleKey(t);
+      if (tripleKeys.has(key)) continue;
+      tripleKeys.add(key);
+      triples.push(t);
     }
-    nodes = Array.from(nodeMap.values());
-    links = nextLinks;
-    // Restart the simulation against the new graph.
-    stopSimulation();
-    runLayout();
+  }
+
+  /** Give any node without a position a random one near the canvas centre. */
+  function scatterUnplaced() {
+    for (const n of nodes) {
+      if (n.x == null) n.x = width / 2 + (Math.random() - 0.5) * 240;
+      if (n.y == null) n.y = height / 2 + (Math.random() - 0.5) * 240;
+    }
   }
 
   function classify(label) {
@@ -178,8 +362,6 @@
    * Why: Tiny deterministic hash so node colors stay stable across reloads
    * without pulling in an external dep.
    * What: 32-bit djb2 variant returning a signed integer.
-   * Test: hashStr('rust') === hashStr('rust'); two distinct strings rarely
-   * collide on the same modulus.
    */
   function hashStr(s) {
     let h = 5381;
@@ -189,24 +371,56 @@
     return h | 0;
   }
 
+  // -------------------------------------------------------------------------
+  // Layout
+  // -------------------------------------------------------------------------
+
   /*
-   * Why: Inline a minimal force-directed layout (link + repulsion + center)
-   * so we don't add a 100KB d3-force bundle for what is essentially three
-   * loops. Modern browsers run this comfortably for the <500-triple target.
-   * What: A `setInterval`-driven tick that updates `nodes[i].x/y` in place
-   * and re-assigns `nodes` to trigger Svelte's reactivity. Stops itself
-   * after `MAX_STEPS` ticks or when total kinetic energy falls below a
-   * threshold.
-   * Test: load a palace with at least 5 triples and watch the layout settle
-   * within ~3 seconds.
+   * Why (#4670): a naive re-run of the whole simulation after every expansion
+   * throws the operator's mental map away — every node jumps. Pinning the
+   * nodes that were already on screen means the existing layout is literally
+   * frozen and only the new arrivals settle, so expansion reads as "the graph
+   * grew here" rather than "the graph was replaced".
+   * What: pins every non-new node (fx/fy = current position), runs the sim for
+   * `steps` ticks, then releases the pins. Pin/pin pairs are skipped in the
+   * repulsion loop since neither can move — that also keeps the O(n²) pass
+   * proportional to the number of NEW nodes, not the total.
    */
-  function runLayout() {
-    if (nodes.length === 0) return;
+  function relayout({ pinExisting, steps }) {
+    stopSimulation();
+    scatterUnplaced();
+    if (pinExisting) {
+      for (const n of nodes) {
+        if (!n.isNew) {
+          n.fx = n.x;
+          n.fy = n.y;
+        }
+      }
+    }
+    const release = () => {
+      for (const n of nodes) {
+        if (pinExisting && !n.isNew) {
+          n.fx = null;
+          n.fy = null;
+        }
+        n.isNew = false;
+      }
+      nodes = nodes;
+    };
+    runLayout(steps, release);
+  }
+
+  function runLayout(steps, onDone) {
+    if (nodes.length === 0) {
+      onDone?.();
+      return;
+    }
     let step = 0;
+    simDone = onDone;
     simHandle = setInterval(() => {
       tick();
       step++;
-      if (step >= MAX_STEPS) stopSimulation();
+      if (step >= steps) stopSimulation();
     }, TICK_MS);
   }
 
@@ -215,6 +429,9 @@
       clearInterval(simHandle);
       simHandle = null;
     }
+    const done = simDone;
+    simDone = null;
+    done?.();
   }
 
   function tick() {
@@ -222,11 +439,14 @@
     const nodeIndex = new Map();
     for (let i = 0; i < nodes.length; i++) nodeIndex.set(nodes[i].id, i);
 
-    // Repulsion — O(n^2) pairwise. Fine for <500 nodes.
+    // Repulsion — O(n²) pairwise, but pinned/pinned pairs are skipped because
+    // neither endpoint can move. During an expansion that reduces the real
+    // cost to (new × all), which is what keeps click-to-expand responsive.
     for (let i = 0; i < nodes.length; i++) {
       const ni = nodes[i];
       for (let j = i + 1; j < nodes.length; j++) {
         const nj = nodes[j];
+        if (ni.fx != null && nj.fx != null) continue;
         const dx = nj.x - ni.x;
         const dy = nj.y - ni.y;
         let dist2 = dx * dx + dy * dy;
@@ -268,30 +488,36 @@
     for (const n of nodes) {
       n.vx += (cx - n.x) * CENTER_STRENGTH;
       n.vy += (cy - n.y) * CENTER_STRENGTH;
-      // Apply velocity + damping.
       if (n.fx == null) n.x += n.vx;
       if (n.fy == null) n.y += n.vy;
       n.vx *= DAMPING;
       n.vy *= DAMPING;
     }
 
-    // Trigger Svelte rerender.
     nodes = nodes;
   }
 
+  // -------------------------------------------------------------------------
+  // Interaction
+  // -------------------------------------------------------------------------
+
   /*
-   * Why: Drag-to-pin lets the operator nudge a cluttered cluster into
-   * place. Standard d3 idiom: on `mousedown` pin the node, on `mousemove`
-   * move it, on `mouseup` release.
-   * What: Pins by setting fx/fy; unpins by setting them back to null. The
-   * `tick()` loop respects fx/fy when set, so dragged nodes stay put.
-   * Test: drag a node — the rest of the graph reshapes around it.
+   * Why: drag-to-pin (issue #97) and click-to-expand (#4670) share the same
+   * mouse gesture. Distinguishing them by travel distance keeps both: a press
+   * that moves less than DRAG_SLOP px is a click and expands the node; a press
+   * that moves further is a drag and only repositions it.
    */
+  const DRAG_SLOP = 4;
   let dragId = null;
+  let dragStart = null;
+  let dragMoved = false;
+
   function onNodeDown(ev, id) {
     dragId = id;
+    dragMoved = false;
+    dragStart = { x: ev.clientX, y: ev.clientY };
     selectedId = id;
-    const node = nodes.find((n) => n.id === id);
+    const node = nodeById.get(id);
     if (node) {
       node.fx = node.x;
       node.fy = node.y;
@@ -300,8 +526,14 @@
   }
   function onSvgMove(ev) {
     if (dragId == null) return;
+    if (
+      dragStart &&
+      Math.hypot(ev.clientX - dragStart.x, ev.clientY - dragStart.y) > DRAG_SLOP
+    ) {
+      dragMoved = true;
+    }
     const pt = clientToSvg(ev.clientX, ev.clientY);
-    const node = nodes.find((n) => n.id === dragId);
+    const node = nodeById.get(dragId);
     if (node) {
       node.fx = pt.x;
       node.fy = pt.y;
@@ -312,12 +544,16 @@
   }
   function onSvgUp() {
     if (dragId == null) return;
-    const node = nodes.find((n) => n.id === dragId);
+    const id = dragId;
+    const node = nodeById.get(id);
     if (node) {
       node.fx = null;
       node.fy = null;
     }
     dragId = null;
+    dragStart = null;
+    if (!dragMoved) expandNode(id);
+    dragMoved = false;
   }
   function clientToSvg(cx, cy) {
     if (!svgEl) return { x: cx, y: cy };
@@ -325,10 +561,43 @@
     return { x: cx - r.left, y: cy - r.top };
   }
 
-  // Side-panel derived view: triples incident on the selected node, split
-  // into outgoing and incoming for clarity. Also surfaces source drawer
-  // ids extracted from `drawer:<uuid>` references so the operator can jump
-  // from a node back to the drawer that produced it.
+  // -------------------------------------------------------------------------
+  // Derived views
+  // -------------------------------------------------------------------------
+
+  /** id -> node, so link rendering and hit-testing are O(1) not O(n). */
+  let nodeById = $derived.by(() => {
+    const m = new Map();
+    for (const n of nodes) m.set(n.id, n);
+    return m;
+  });
+
+  /** Rendered edges. Triples touching a node we have not loaded are dropped. */
+  let links = $derived.by(() => {
+    const out = [];
+    // Gate on `nodeById` (reactive) rather than the plain `nodeIds` Set, so a
+    // merge that adds nodes without adding triples still refreshes the edges.
+    const present = nodeById;
+    for (const t of triples) {
+      if (t.subject === t.object) continue;
+      if (!present.has(t.subject) || !present.has(t.object)) continue;
+      out.push({ source: t.subject, target: t.object, predicate: t.predicate });
+    }
+    return out;
+  });
+
+  /** How many of each node's edges are currently on screen. */
+  let shownDegree = $derived.by(() => {
+    const m = new Map();
+    for (const l of links) {
+      m.set(l.source, (m.get(l.source) ?? 0) + 1);
+      m.set(l.target, (m.get(l.target) ?? 0) + 1);
+    }
+    return m;
+  });
+
+  // Side-panel derived view: triples incident on the selected node that we
+  // have actually loaded, split into outgoing and incoming.
   let incident = $derived.by(() => {
     if (!selectedId) return { outgoing: [], incoming: [], drawerIds: [] };
     const outgoing = triples.filter((t) => t.subject === selectedId);
@@ -342,12 +611,14 @@
         drawerIds.add(t.object.slice('drawer:'.length));
       }
     }
-    return {
-      outgoing,
-      incoming,
-      drawerIds: Array.from(drawerIds)
-    };
+    return { outgoing, incoming, drawerIds: Array.from(drawerIds) };
   });
+
+  let selectedNode = $derived(selectedId ? nodeById.get(selectedId) : null);
+  /** True when the rendered set is a strict subset of the palace. */
+  let partial = $derived(
+    nodes.length < counts.node_count || links.length < counts.edge_count
+  );
 
   function colorFor(node) {
     const palette = [
@@ -363,7 +634,6 @@
     if (counts.community_count > 0) {
       return palette[node.community % palette.length];
     }
-    // Color-by-kind fallback when no Louvain pass has run.
     switch (node.kind) {
       case 'drawer':
         return '#6366f1';
@@ -377,6 +647,17 @@
         return '#64748b';
     }
   }
+
+  /** Radius grows with degree so hubs read as hubs at a glance. */
+  function radiusFor(node) {
+    const base = 4 + Math.min(7, Math.sqrt(node.degree ?? 0) * 1.6);
+    return selectedId === node.id ? base + 3 : base;
+  }
+
+  /** True when this node still has edges we have not fetched. */
+  function hasHiddenEdges(node) {
+    return (node.degree ?? 0) > (shownDegree.get(node.id) ?? 0);
+  }
 </script>
 
 <div class="page">
@@ -386,21 +667,44 @@
       {#if palaceId}
         <span class="badge badge-info">palace: {palaceId}</span>
       {/if}
-      <span class="badge badge-muted">{counts.node_count} nodes</span>
-      <span class="badge badge-muted">{counts.edge_count} edges</span>
+      <!--
+        #4670: the load-bearing badge. The old header printed the palace-wide
+        `node_count` unconditionally next to a truncated render, which is what
+        made the truncation invisible. It now always states rendered-vs-total.
+      -->
+      <span class="badge" class:badge-warn={partial} class:badge-muted={!partial}>
+        {nodes.length.toLocaleString()} of {counts.node_count.toLocaleString()} nodes
+        {#if partial}shown{/if}
+      </span>
+      <span class="badge" class:badge-warn={partial} class:badge-muted={!partial}>
+        {links.length.toLocaleString()} of {counts.edge_count.toLocaleString()} edges
+      </span>
+      {#if partial && mode === 'seed'}
+        <span class="hint">click a node to expand</span>
+      {/if}
       {#if loadElapsedMs > 0 && !loading}
         <span class="badge badge-muted" title="API + layout time">
           loaded in {loadElapsedMs}ms
         </span>
       {/if}
-      <button
-        type="button"
-        class="back-link"
-        onclick={() => navigate('/palaces')}>
+      {#if mode === 'seed'}
+        <button type="button" class="back-link" onclick={loadFull}>
+          load everything
+        </button>
+      {:else}
+        <button type="button" class="back-link" onclick={loadSeed}>
+          back to seed view
+        </button>
+      {/if}
+      <button type="button" class="back-link" onclick={() => navigate('/palaces')}>
         ← back to palaces
       </button>
     </div>
   </div>
+
+  {#if notice}
+    <div class="state state-warn">{notice}</div>
+  {/if}
 
   {#if loading}
     <div class="state">Loading graph…</div>
@@ -437,8 +741,8 @@
             </marker>
           </defs>
           {#each links as l (l.source + '|' + l.predicate + '|' + l.target)}
-            {@const a = nodes.find((n) => n.id === l.source)}
-            {@const b = nodes.find((n) => n.id === l.target)}
+            {@const a = nodeById.get(l.source)}
+            {@const b = nodeById.get(l.target)}
             {#if a && b}
               <line
                 x1={a.x}
@@ -460,14 +764,24 @@
               role="button"
               tabindex="0"
               class="node">
+              {#if hasHiddenEdges(n) && mode === 'seed'}
+                <!-- Dashed halo = this node has edges not yet fetched. -->
+                <circle
+                  r={radiusFor(n) + 4}
+                  fill="none"
+                  stroke={colorFor(n)}
+                  stroke-width="1"
+                  stroke-opacity={expanding === n.id ? 0.9 : 0.45}
+                  stroke-dasharray="2 3" />
+              {/if}
               <circle
-                r={selectedId === n.id ? 9 : 6}
+                r={radiusFor(n)}
                 fill={colorFor(n)}
                 stroke={selectedId === n.id ? '#0f172a' : '#fff'}
                 stroke-width={selectedId === n.id ? 2 : 1} />
               {#if selectedId === n.id || hoverId === n.id}
                 <text
-                  x="10"
+                  x={radiusFor(n) + 4}
                   y="4"
                   font-size="11"
                   fill="#0f172a"
@@ -486,7 +800,19 @@
           <div class="side-title">{selectedId}</div>
           <div class="side-sub">
             {incident.outgoing.length} outgoing · {incident.incoming.length} incoming
+            {#if selectedNode}
+              · {selectedNode.degree ?? 0} total in palace
+            {/if}
           </div>
+          {#if mode === 'seed' && selectedNode && hasHiddenEdges(selectedNode)}
+            <button
+              type="button"
+              class="expand-btn"
+              disabled={expanding != null}
+              onclick={() => expandNode(selectedId)}>
+              {expanding === selectedId ? 'expanding…' : 'expand neighbours'}
+            </button>
+          {/if}
           {#if incident.outgoing.length > 0}
             <div class="side-section">
               <div class="side-section-title">Outgoing</div>
@@ -529,8 +855,14 @@
           {/if}
         {:else}
           <div class="side-empty">
-            Click a node to inspect its edges and the source drawers that
-            produced them.
+            {#if mode === 'seed'}
+              Showing the {nodes.length} highest-connected nodes. Click a node to
+              load its neighbours (a dashed halo means it has edges not yet
+              fetched), or drag it to reposition.
+            {:else}
+              Click a node to inspect its edges and the source drawers that
+              produced them.
+            {/if}
           </div>
         {/if}
       </aside>
@@ -553,6 +885,15 @@
     align-items: center;
     flex-wrap: wrap;
   }
+  .hint {
+    font-size: var(--trusty-fs-xs);
+    color: var(--trusty-text-secondary, #6b7280);
+  }
+  .badge-warn {
+    background: var(--trusty-warn-soft, #fffbeb);
+    color: var(--trusty-warn, #b45309);
+    border: 1px solid var(--trusty-warn-border, #fde68a);
+  }
   .back-link {
     background: transparent;
     border: 1px solid var(--trusty-border, #e5e7eb);
@@ -566,15 +907,36 @@
   .back-link:hover {
     background: var(--trusty-surface-raised, #f8fafc);
   }
+  .expand-btn {
+    margin: var(--trusty-space-2) 0;
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--trusty-accent, #6366f1);
+    color: var(--trusty-accent, #6366f1);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: var(--trusty-fs-xs);
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .expand-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
   .state {
     padding: var(--trusty-space-4);
     background: var(--trusty-surface-raised, #f8fafc);
     border-radius: var(--trusty-radius, 6px);
     color: var(--trusty-text-secondary, #6b7280);
+    margin-bottom: var(--trusty-space-3);
   }
   .state-error {
     color: var(--trusty-danger, #dc2626);
     background: var(--trusty-danger-soft, #fef2f2);
+  }
+  .state-warn {
+    color: var(--trusty-warn, #b45309);
+    background: var(--trusty-warn-soft, #fffbeb);
   }
   .layout {
     display: grid;

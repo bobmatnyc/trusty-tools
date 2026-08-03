@@ -219,7 +219,7 @@ fn inject_native_delivers_secrets_via_env_local() {
     // Why (code-critic BLOCK, #2739): the token must still reach the native
     // server somehow — this proves the OTHER half of the fix: the real value
     // lands in the workspace-root `.env.local`, which
-    // `trusty_common::inference::credentials::resolve_key` reads via its
+    // `trusty_common::credentials::resolve_key` reads via its
     // env → .env.local → store precedence.
     let cfg = tempdir().unwrap();
     let ws = tempdir().unwrap();
@@ -840,7 +840,7 @@ fn quote_env_value_round_trips_special_characters_through_dotenvy() {
     // proves the exact contract: a value written by `quote_env_value` (via
     // `merge_env_file`) into a real `.env.local` is read back BYTE-FOR-BYTE by
     // the SAME reader the native servers use —
-    // `trusty_common::inference::credentials::read_var_from_env_local` (dotenvy).
+    // `trusty_common::credentials::read_var_from_env_local` (dotenvy).
     let ws = tempdir().unwrap();
     let nasty_token = r#"xoxb-a"b\c#d-token"#;
     let mut updates = BTreeMap::new();
@@ -852,11 +852,9 @@ fn quote_env_value_round_trips_special_characters_through_dotenvy() {
     std::fs::write(&env_local, &content).unwrap();
 
     // Read it back via the production reader (dotenvy) — must be verbatim.
-    let read_back = trusty_common::inference::credentials::read_var_from_env_local(
-        &env_local,
-        "SLACK_BOT_TOKEN",
-    )
-    .expect("the reader must find the key");
+    let read_back =
+        trusty_common::credentials::read_var_from_env_local(&env_local, "SLACK_BOT_TOKEN")
+            .expect("the reader must find the key");
     assert_eq!(
         read_back, nasty_token,
         "a token with \", \\ and # must round-trip verbatim through .env.local; \

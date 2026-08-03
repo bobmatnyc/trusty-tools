@@ -714,6 +714,80 @@ delegate_allowed = ["research-agent", "ticketing-agent"]
     );
 }
 
+/// #4350 (DOC-62 §5.2): `[subagents] default_style` parses into the closed
+/// `ExecutionStyle` vocabulary and stays independent of the two name lists.
+///
+/// Why: this is the CONFIG precedence level for coding-delegation ceremony. It
+/// must be a separate, additive key — reinterpreting either name list would
+/// make one config line mean two things — and it must be `None` when absent so
+/// an un-updated agent keeps today's built-in `engineer` behaviour.
+/// What: the key parses; absent leaves it `None`.
+/// Test: this function IS the test.
+#[test]
+fn subagents_config_parses_default_style() {
+    let base = r#"
+[agent]
+name = "seeded"
+role = "assistant"
+model = "m"
+description = "d"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig =
+        toml::from_str(&format!("{base}\n[subagents]\ndefault_style = \"vibe\"\n"))
+            .expect("parses");
+    assert_eq!(
+        cfg.subagents.default_style,
+        Some(crate::tools::execution_style::ExecutionStyle::Vibe)
+    );
+    assert!(cfg.subagents.allowed.is_none());
+    assert!(cfg.subagents.delegate_allowed.is_none());
+
+    let absent: AgentConfig = toml::from_str(base).expect("parses");
+    assert!(
+        absent.subagents.default_style.is_none(),
+        "an absent key must not invent a style"
+    );
+}
+
+/// An unrecognized style in config is a PARSE ERROR, never a silent default
+/// (DOC-62 §5.1) — the same rule the delegation parameter follows.
+///
+/// Why: silently mapping an unknown style onto a default is indistinguishable,
+/// from the operator's side, from the style having been honoured.
+/// What: a bad value fails `toml::from_str`.
+/// Test: this function IS the test.
+#[test]
+fn subagents_config_rejects_an_unknown_default_style() {
+    let toml_str = r#"
+[agent]
+name = "seeded"
+role = "assistant"
+model = "m"
+description = "d"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[subagents]
+default_style = "turbo"
+"#;
+    assert!(
+        toml::from_str::<AgentConfig>(toml_str).is_err(),
+        "an unknown style must not parse"
+    );
+}
+
 // --- `AgentInfo::tier` (#4168, epic #4167 — L0/L1 orchestration model) ---
 //
 // Fail-closed contract: absent, blank, or unrecognized `[agent].tier` must
@@ -908,15 +982,25 @@ content = "base"
 }
 
 #[test]
-fn agent_tier_for_kind_is_l0_only_for_the_assistant_role() {
-    // The derivation reads ONE value. Everything else — including the empty
-    // string, and including `orchestrator`/`controller` (which sit outside
-    // this model and are handed L0 explicitly at dispatch by
-    // `ctrl_delegate_posture`, not by this function) — lands on L1.
-    assert_eq!(
-        crate::agents::AgentTier::for_kind("assistant"),
-        crate::agents::AgentTier::L0Orchestration
-    );
+fn agent_tier_for_kind_is_l0_for_the_assistant_and_orchestrator_kinds() {
+    // #4497: the derivation is now the ONE mechanism that answers "is this
+    // agent L0?" for BOTH populations. `orchestrator`/`controller` (`pm`, and
+    // a `ctrl` declaring the controller spelling) previously landed on L1
+    // here and were handed L0 by a hardcoded literal at the dispatch call
+    // site (`ctrl_delegate_posture`) — the second mechanism this rule
+    // absorbed. They are still NOT assistants (see
+    // `agents::delegation::assistant_and_orchestrator_kinds_are_disjoint`);
+    // they share only the tier.
+    for l0 in ["assistant", "orchestrator", "controller"] {
+        assert_eq!(
+            crate::agents::AgentTier::for_kind(l0),
+            crate::agents::AgentTier::L0Orchestration,
+            "role {l0:?} is an L0 kind"
+        );
+    }
+    // Everything else — including the empty string and every near-miss
+    // spelling — still lands on L1. The rule recognizes a NAMED set, so a new
+    // specialist role can never fall into L0 by omission.
     for other in [
         "",
         "engineer",
@@ -928,10 +1012,12 @@ fn agent_tier_for_kind_is_l0_only_for_the_assistant_role() {
         "ticketing",
         "analysis",
         "observer",
-        "orchestrator",
-        "controller",
         "Assistant",
         "assistant-tier",
+        "Orchestrator",
+        "orchestration",
+        "ctrl",
+        "pm",
     ] {
         assert_eq!(
             crate::agents::AgentTier::for_kind(other),

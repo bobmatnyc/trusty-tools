@@ -5,42 +5,7 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
 
-### Fixed
-
-- **`SubprocessAnalyzeClient`'s health check ignored degraded-but-serving,
-  permanently blocking the review gate** (closes
-  [#4440](https://github.com/bobmatnyc/trusty-tools/issues/4440)).
-  - The MCP `review_pr` / `serve` path uses `SubprocessAnalyzeClient`, whose
-    `health()` probed trusty-search's `/health` and tested `status == "ok"` as a
-    literal string. trusty-search latches `status: "degraded"` for its entire
-    process lifetime once warm boot skips any index (the underlying
-    `degraded_by_timeout` / `degraded_by_tcc` counters are never decremented), so
-    `has_analysis()` returned `false` forever and `pipeline::context_gate` skipped
-    every review with "trusty-analyze unreachable/not-ready" — against a daemon
-    that was up, embedder-ready and answering queries normally.
-  - This was a duplicated health check that missed a fix applied to its twin:
-    `HealthResponse::serving_state()` already distinguishes "degraded but
-    serving" from "not serving" and was applied to the search-side gate under
-    #4079. `SubprocessAnalyzeClient` now **consumes** `serving_state()` /
-    `is_serving()` instead of re-deriving its own verdict, so one place decides
-    what a trusty-search health payload means.
-  - The gate is narrowed, not weakened: a genuinely not-serving trusty-search
-    (embedder down, or a status that is neither `ok` nor `degraded`) still fails
-    the probe as `Unavailable`. trusty-search's own status string is passed
-    through verbatim rather than laundered into `"ok"`.
-
-### Changed
-
-- The `require_analyze` skip message no longer tells every operator to run
-  `trusty-analyze serve`. That advice was irrelevant in the default subprocess
-  mode, where no analyze daemon exists at all; the message now names the real
-  preconditions (a serving trusty-search and a runnable `trusty-analyze` binary
-  on PATH) and scopes the daemon advice to daemon-backed deployments
-  ([#4440](https://github.com/bobmatnyc/trusty-tools/issues/4440)).
-
----
 ## [0.11.0] — 2026-07-27
 
 MINOR, not patch: `HealthResponse::is_serving` and
@@ -321,8 +286,6 @@ a new public module.
 
 - Root workspace `[workspace.dependencies]` pin for `trusty-review` bumped 0.7.0 → 0.8.0 (consumed by `trusty-analyze`'s optional `review` feature).
 
-## [Unreleased]
-
 ### Added
 
 - **Technical-DD report generation** (`trusty-review report --manifest <toml>`) — new manifest-driven report subcommand generating CAST-style technical due-diligence reports (markdown + JSON) from repository inspection:
@@ -333,8 +296,6 @@ a new public module.
 ### Fixed
 
 - MCP tools default to local (gh) auth, App only when creds present (closes #1993) ([#1995](https://github.com/bobmatnyc/trusty-tools/pull/1995)) ([`e11a5de`](https://github.com/bobmatnyc/trusty-tools/commit/e11a5de4e2d49c19894e4f47ec694bdf414de5b0))
-## [Unreleased]
-
 ### Fixed
 
 - MCP review path is now local-first: `review_pr`/`review_diff` authenticate with
@@ -343,8 +304,6 @@ a new public module.
   (closes #1993)
 - unify grade computation so outer and embedded grade never diverge (closes #1886) ([#1891](https://github.com/bobmatnyc/trusty-tools/pull/1891)) ([`8f6eab1`](https://github.com/bobmatnyc/trusty-tools/commit/8f6eab15718c9446579b87166bbfd763d72c48da))
 - aggregate token counts across map-reduce for shallow-review heuristic (closes #1885) ([#1890](https://github.com/bobmatnyc/trusty-tools/pull/1890)) ([`7b53d3f`](https://github.com/bobmatnyc/trusty-tools/commit/7b53d3fa2e4baf4578308babccdfc8caa11c86eb))
-## [Unreleased]
-
 ### Fixed
 
 - recalibrate RC gate + verifier + Medium floor ([#1876](https://github.com/bobmatnyc/trusty-tools/pull/1876)) ([`2f0169e`](https://github.com/bobmatnyc/trusty-tools/commit/2f0169ed93924e1e35b06770b20663f4d28ee9c2))
@@ -354,8 +313,6 @@ a new public module.
 ### Changed
 
 - bump trusty-review to v0.6.2 ([#1739](https://github.com/bobmatnyc/trusty-tools/pull/1739)) ([#1749](https://github.com/bobmatnyc/trusty-tools/pull/1749)) ([`7ef6107`](https://github.com/bobmatnyc/trusty-tools/commit/7ef6107ce9b28e45a4ee7998e2565d5867bdc5bf))
-## [Unreleased]
-
 ## [0.6.1] — 2026-06-25
 
 ### Fixed

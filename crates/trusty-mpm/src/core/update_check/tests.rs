@@ -505,21 +505,24 @@ fn detect_user_modified_managed_not_reported() {
 fn classify_drift_reconciles_on_disk() {
     // Unit-level: on-disk content matching the catalog hash is never drift, even
     // with no manifest entry; a managed+unmodified changed file is Changed.
+    // #4322: the third argument is now the on-disk CHECKSUM, not the on-disk
+    // content — the hashing moved to the call site so a fleet-wide caller can
+    // hash the shared deployed-agent tree once instead of once per session.
     let cat = checksum("catalog content");
     // Deployed-but-unmanifested and current → None (reconcile).
     assert_eq!(
-        super::classify_drift(&cat, None, Some("catalog content")),
+        super::classify_drift(&cat, None, Some(&checksum("catalog content"))),
         None
     );
     // Managed, unmodified on disk, catalog changed → Changed.
     let recorded = checksum("old content");
     assert_eq!(
-        super::classify_drift(&cat, Some(&recorded), Some("old content")),
+        super::classify_drift(&cat, Some(&recorded), Some(&checksum("old content"))),
         Some(ChangeKind::Changed)
     );
     // Managed, user-modified on disk, catalog changed → None (apply skips).
     assert_eq!(
-        super::classify_drift(&cat, Some(&recorded), Some("user edit")),
+        super::classify_drift(&cat, Some(&recorded), Some(&checksum("user edit"))),
         None
     );
 }
@@ -576,9 +579,12 @@ fn catalog_hashes_compute_is_unknown_without_either_source() {
         &root.path().join("no-skills"),
     );
     let report = cache.detect(
-        &AgentManifest::default(),
+        &DeployedAgentHashes::with_manifest(
+            AgentManifest::default(),
+            &root.path().join("dep-agents"),
+            &cache,
+        ),
         &SkillManifest::default(),
-        &root.path().join("dep-agents"),
         &root.path().join("dep-skills"),
         |_| true,
         |_| true,
@@ -632,9 +638,8 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
     let cache = CatalogHashes::compute(&catalog_agents, &catalog_skills);
 
     let report_a = cache.detect(
-        &a_agent_manifest,
+        &DeployedAgentHashes::with_manifest(a_agent_manifest.clone(), &a_agents_dir, &cache),
         &a_skill_manifest,
-        &a_agents_dir,
         &a_skills_dir,
         |_| true,
         |_| true,
@@ -646,9 +651,8 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
     );
 
     let report_b = cache.detect(
-        &b_agent_manifest,
+        &DeployedAgentHashes::with_manifest(b_agent_manifest.clone(), &b_agents_dir, &cache),
         &b_skill_manifest,
-        &b_agents_dir,
         &b_skills_dir,
         |_| true,
         |_| true,
@@ -689,4 +693,57 @@ fn catalog_hashes_shared_across_two_deployed_targets() {
         |_| false,
     );
     assert_eq!(fresh_b.stale, report_b.stale);
+}
+
+/// Issue #4619 review (MEDIUM): a SINGLE-target caller must not read more
+/// deployed agent files than its predicates actually select.
+///
+/// Why: #4322 pre-hashes the deployed agent tree so the fleet path can share
+/// ONE read across N sessions. Applied indiscriminately, that would be a read
+/// INCREASE for every single-target caller (`/health`, `tm catalog apply`, the
+/// single-session `GET …/managed/{id}`) whose manifest selects a subset:
+/// before, `agent_changes` read only the selected stems; an eager snapshot
+/// reads every catalog stem. Those callers share their read with nobody, so the
+/// eagerness buys nothing and costs real I/O. `DeployedAgentHashes::lazy` keeps
+/// their behavior byte-for-byte identical, and this pins it — a perf change
+/// that quietly regresses another call shape is misreported, not neutral.
+/// What: a 4-agent catalog with a predicate selecting exactly ONE, run through
+/// `detect_staleness` (the single-target entry point), asserting exactly one
+/// deployed agent file was read. Switching `detect_staleness` back to the eager
+/// `with_manifest` form makes this observe 4 and fail.
+#[test]
+fn single_target_detect_reads_only_selected_agents() {
+    let root = TempDir::new().unwrap();
+    let catalog_agents = root.path().join("single-target/catalog/agents");
+    let catalog_skills = root.path().join("single-target/catalog/skills");
+    let deployed_agents_dir = root.path().join("single-target/deployed/agents");
+    let deployed_skills_dir = root.path().join("single-target/deployed/skills");
+    for stem in ["alpha", "beta", "gamma", "delta"] {
+        write_agent(&catalog_agents, stem, "v1");
+        write_agent(&deployed_agents_dir, stem, "v1");
+    }
+    write_skill(&catalog_skills, "tm-doctor", "v1");
+
+    super::reset_deployed_read_log();
+    let _ = detect_staleness(
+        &catalog_agents,
+        &catalog_skills,
+        &AgentManifest::default(),
+        &SkillManifest::default(),
+        &deployed_agents_dir,
+        &deployed_skills_dir,
+        // Selects exactly one of the four catalog agents.
+        |name| name == "alpha",
+        |_| true,
+        |_| false,
+    );
+
+    assert_eq!(
+        super::deployed_reads_under(&deployed_agents_dir),
+        1,
+        "a single-target caller selecting 1 of 4 catalog agents must read \
+         exactly 1 deployed agent file. Observing 4 means the eager fleet-path \
+         snapshot leaked onto the single-target path and increased its I/O \
+         (#4619 review MEDIUM)"
+    );
 }

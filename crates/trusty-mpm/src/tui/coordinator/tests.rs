@@ -798,23 +798,12 @@ fn catalog_indicator_reflects_staleness() {
 
 // ---- Child #2: live polling — daemon-down branch (async) ------------------
 
-/// Reserve, then immediately release, a loopback port so a client pointed at it
-/// is guaranteed to be refused (nothing is listening).
-///
-/// Why: the daemon-down test needs a `DaemonClient` whose probe deterministically
-/// fails. Binding `127.0.0.1:0` lets the OS hand us a free port; dropping the
-/// listener frees it again, so a connect to it is refused rather than hanging on
-/// an open-but-silent socket.
-/// What: binds an ephemeral TCP listener, reads its local addr, drops it, and
-/// returns `http://127.0.0.1:<port>`.
-/// Test: consumed by `poll_marks_unreachable_clears_sessions`.
-fn dead_loopback_url() -> String {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
-    let port = listener.local_addr().expect("read bound local addr").port();
-    drop(listener); // release the port so a later connect is refused
-    format!("http://127.0.0.1:{port}")
-}
+// #4306/#4415: the dead-address fixture used to be a local bind-an-ephemeral-
+// port-then-drop-it helper, whose "nothing can be listening here" premise
+// expired the moment the OS re-handed that port to another binder. All three
+// former copies now share ONE fixture whose guarantee does not depend on
+// winning a port race — see `crate::test_support::dead_loopback_url`.
+use crate::test_support::dead_loopback_url;
 
 #[tokio::test]
 async fn poll_marks_unreachable_clears_sessions() {

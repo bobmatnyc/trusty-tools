@@ -57,6 +57,28 @@ Each row in §2 is one **primary behavior** (`BHV-NN`). The columns are:
 
 ### BHV-01 — Canonical instruction assembly + agent authority
 
+> **Citations stale as of 2026-08-01.** The file-level citations below
+> (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`, `BASE_PM.md`
+> as bundled assets, and the `PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION →
+> BASE_PM` concatenation order) describe the pre-#4183 layout and are
+> preserved below as the historical record of what was verified on
+> 2026-07-01. #4183 replaced those four monolithic files with one markdown
+> file per section under `assets/instructions/sections/*.md`, composed from
+> an authored JSON manifest
+> ([`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json),
+> schema v2). The Prohibitions heading now lives at
+> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L11)
+> (`core` section, tier `project`); the non-overridable floor is now the
+> `non-overridable-rules` and `framework-guaranteed-conventions` sections
+> (both tier `fixed`,
+> [`pm-instruction-package.json:42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L42-L44)),
+> appended last by `instruction_pipeline.rs`/`instruction_overrides.rs`,
+> which still exist and still own this assembly — only their internal
+> section sourcing changed. `BASE_SM.md` (SM-side) is unaffected by #4183
+> and remains accurate as cited. This BHV-01 entry needs a fresh conformance
+> run against the current manifest to requalify as CONFIRMED PASS; until
+> then treat its **Status** line below as historical, not current.
+
 **What it does:** Assembles the PM's non-overridable system prompt floor
 (prohibitions, delegation authority, mandatory 5-phase workflow) at session
 prep time, in a fixed precedence order that project-level overrides cannot

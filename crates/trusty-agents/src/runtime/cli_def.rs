@@ -307,7 +307,7 @@ pub(super) struct Cli {
 /// without needing a seam) — the tests below (`banner_suppressed_when_
 /// store_configures_a_key`, `banner_fires_when_nothing_resolves`) never
 /// touch the real developer machine's env or store.
-/// What: `true` when `trusty_common::inference::credentials::resolve_key`
+/// What: `true` when `trusty_common::credentials::resolve_key`
 /// finds `claude-code`, `anthropic`, OR `openrouter` — the exact same three
 /// providers `llm::credentials::pick_credentials` checks (this predicate
 /// does NOT gate `claude-code` on an agent's `runner` the way
@@ -317,9 +317,9 @@ pub(super) struct Cli {
 /// Test: `banner_suppressed_when_store_configures_a_key`,
 /// `banner_fires_when_nothing_resolves`.
 fn any_credential_resolves() -> bool {
-    trusty_common::inference::credentials::resolve_key("claude-code").is_some()
-        || trusty_common::inference::credentials::resolve_key("anthropic").is_some()
-        || trusty_common::inference::credentials::resolve_key("openrouter").is_some()
+    trusty_common::credentials::resolve_key("claude-code").is_some()
+        || trusty_common::credentials::resolve_key("anthropic").is_some()
+        || trusty_common::credentials::resolve_key("openrouter").is_some()
 }
 
 /// Print a prominent onboarding banner when no API credential resolves via
@@ -342,7 +342,7 @@ fn any_credential_resolves() -> bool {
 /// secure store, `tagent config keys list` correctly reported it, yet the
 /// startup banner still claimed no key existed.
 /// What: Consults the same 3-tier resolver
-/// (`trusty_common::inference::credentials::resolve_key`) `pick_credentials`
+/// (`trusty_common::credentials::resolve_key`) `pick_credentials`
 /// uses for the three provider names this binary's own LLM calls route
 /// through (`openrouter`, `anthropic`, `claude-code`); when at least one
 /// resolves, no banner prints. When none resolve, prints a boxed banner
@@ -368,9 +368,9 @@ pub(super) fn check_credentials_and_warn() {
 
     let project_env_local = std::env::current_dir()
         .ok()
-        .and_then(|cwd| trusty_common::inference::credentials::find_workspace_env_local(&cwd));
-    let user_env_local = dirs::home_dir()
-        .and_then(|h| trusty_common::inference::credentials::user_env_local_path(&h));
+        .and_then(|cwd| trusty_common::credentials::find_workspace_env_local(&cwd));
+    let user_env_local =
+        dirs::home_dir().and_then(|h| trusty_common::credentials::user_env_local_path(&h));
 
     eprintln!();
     eprintln!("┌─────────────────────────────────────────────────────────────────┐");
@@ -546,8 +546,8 @@ mod tests {
                 std::env::set_var("HOME", tmp.path());
             }
 
-            let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-            trusty_common::inference::credentials::KeyStore::set(
+            let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+            trusty_common::credentials::KeyStore::set(
                 &store,
                 "openrouter",
                 "sk-or-from-store", // pragma: allowlist secret

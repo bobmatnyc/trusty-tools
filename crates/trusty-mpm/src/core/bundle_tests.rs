@@ -14,7 +14,6 @@ fn constants_are_non_empty() {
     // `include_str!` target would mean a missing or truncated asset file.
     assert!(!OPTIMIZER_TOML.trim().is_empty());
     assert!(!OVERSEER_TOML.trim().is_empty());
-    assert!(!FRAMEWORK_INSTRUCTIONS.trim().is_empty());
     assert!(!BASE_AGENT.trim().is_empty());
     assert!(!BASE_ENGINEER.trim().is_empty());
     assert!(!BASE_RESEARCH.trim().is_empty());
@@ -314,16 +313,6 @@ fn output_style_registry_default_resolves() {
 }
 
 #[test]
-fn framework_instructions_overwrites() {
-    // The framework instructions must be refreshed on every install.
-    let instr = ALL
-        .iter()
-        .find(|a| a.rel_path == "instructions/INSTRUCTIONS.md")
-        .expect("INSTRUCTIONS.md present in bundle");
-    assert_eq!(instr.install, InstallPolicy::Overwrite);
-}
-
-#[test]
 fn seed_once_constructor_builds_the_expected_artifact() {
     // Issue #3381: no shipped artifact currently uses `SeedOnce`, so the
     // `seed_once()` constructor (the counterpart to `overwrite()`) is only
@@ -410,11 +399,16 @@ fn bundle_table_is_complete() {
     // Issue #4447 (1): tm-slack-canvas-delivery — a single flat-file bundled
     //   skill (no references/), the same shape as rust-build-performance.
     //   178 + 1 = 179.
-    assert_eq!(ALL.len(), 179);
+    // Issue #4286 split A (-1): the `instructions/INSTRUCTIONS.md` bundled
+    //   stub artifact was removed — `tm install`/`tm launch` always overwrite
+    //   that same on-disk path with the assembled system prompt in the same
+    //   call, so the stub's content never reached a live session; the
+    //   `FRAMEWORK_INSTRUCTIONS` constant it backed is gone too. 179 - 1 = 178.
+    assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 179, "artifact paths must be unique");
+    assert_eq!(paths.len(), 178, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

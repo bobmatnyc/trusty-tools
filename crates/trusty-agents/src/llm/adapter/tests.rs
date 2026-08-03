@@ -586,8 +586,8 @@ fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
         std::env::set_var("HOME", tmp.path());
     }
 
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "openrouter",
         "sk-or-FAKE-store-value", // pragma: allowlist secret
@@ -637,8 +637,8 @@ fn openrouter_endpoint_env_beats_store() {
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "openrouter",
         "sk-or-FAKE-store-value", // pragma: allowlist secret
@@ -688,8 +688,8 @@ fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "anthropic",
         "sk-ant-FAKE-store-value", // pragma: allowlist secret
@@ -741,8 +741,8 @@ fn anthropic_direct_endpoint_env_beats_store() {
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "anthropic",
         "sk-ant-FAKE-store-value", // pragma: allowlist secret
@@ -800,8 +800,8 @@ fn fireworks_api_endpoint_resolves_key_from_store_when_env_absent() {
         std::env::set_var("HOME", tmp.path());
     }
 
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "fireworks",
         "fw-FAKE-store-value", // pragma: allowlist secret
@@ -855,8 +855,8 @@ fn fireworks_api_endpoint_env_beats_store() {
     unsafe {
         std::env::set_var("HOME", tmp.path());
     }
-    let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::inference::credentials::KeyStore::set(
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
         &store,
         "fireworks",
         "fw-FAKE-store-value", // pragma: allowlist secret

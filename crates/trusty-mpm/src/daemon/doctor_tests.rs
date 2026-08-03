@@ -41,13 +41,48 @@ async fn memory_unreachable_is_fail() {
     assert_eq!(check.status, CheckStatus::Fail);
 }
 
+#[test]
+fn expected_search_index_id_derives_from_project_dir_not_hardcoded() {
+    // #4003: `tm doctor`'s search check used to hardcode the literal expected
+    // index id "trusty-mpm" (the crate name), which diverges from a repo's
+    // actual registered index id — this repo registers as "trusty-tools" —
+    // so a healthy, fully-indexed project permanently warned "index
+    // missing". Pin that the id is now DERIVED from the project root's
+    // basename (the same rule `trusty_common::derive_index_id` applies
+    // everywhere else an index id is resolved), not a fixed constant: a
+    // project literally named "trusty-mpm" must resolve to "trusty-mpm", and
+    // one named anything else must resolve to ITS OWN name, never the old
+    // hardcoded literal.
+    let tmp = tempfile::tempdir().unwrap();
+
+    let other_repo = tmp.path().join("trusty-tools");
+    std::fs::create_dir_all(other_repo.join(".git")).unwrap();
+    let other_id = expected_search_index_id(Some(&other_repo));
+    assert_eq!(other_id, "trusty-tools");
+    assert_ne!(
+        other_id, "trusty-mpm",
+        "must not fall back to the old hardcoded literal for an unrelated project"
+    );
+
+    let mpm_repo = tmp.path().join("trusty-mpm");
+    std::fs::create_dir_all(mpm_repo.join(".git")).unwrap();
+    let mpm_id = expected_search_index_id(Some(&mpm_repo));
+    assert_eq!(mpm_id, "trusty-mpm");
+
+    // Nested working directory inside the repo still resolves to the git
+    // root's basename, not the nested dir's own name.
+    let nested = other_repo.join("crates").join("trusty-mpm");
+    std::fs::create_dir_all(&nested).unwrap();
+    assert_eq!(expected_search_index_id(Some(&nested)), "trusty-tools");
+}
+
 #[tokio::test]
 async fn search_unreachable_is_fail() {
     unsafe {
         std::env::set_var("TRUSTY_SEARCH_ADDR", "127.0.0.1:0");
     }
     let tmp = tempfile::tempdir().unwrap();
-    let check = check_search(tmp.path()).await;
+    let check = check_search(tmp.path(), None).await;
     unsafe {
         std::env::remove_var("TRUSTY_SEARCH_ADDR");
     }
@@ -102,7 +137,7 @@ async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_twenty_three_checks() {
+async fn run_doctor_produces_twenty_nine_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -115,7 +150,12 @@ async fn run_doctor_produces_twenty_three_checks() {
     // → twenty); issue #3427 adds `scaffold_tracking` (twenty →
     // twenty-one); issue #2867 adds `push_guard` (twenty-one →
     // twenty-two); issue #4451 adds `agent_reachability` (twenty-two →
-    // twenty-three).
+    // twenty-three); issue #4467 adds `transcript_saving` (twenty-three →
+    // twenty-four); issue #4442 adds `asset_tier` (twenty-four →
+    // twenty-five); issue #2919 adds `worktree_disk` (twenty-five →
+    // twenty-six); issue #4605 adds `skill_unmanaged` (twenty-six →
+    // twenty-seven); issue #4033 adds `binary_provenance` (twenty-seven →
+    // twenty-eight).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[]).await;
@@ -124,6 +164,8 @@ async fn run_doctor_produces_twenty_three_checks() {
         "instructions",
         "agents",
         "agent_reachability",
+        "asset_tier",
+        "transcript_saving",
         "skills",
         "skill_source",
         "output_style",
@@ -131,12 +173,15 @@ async fn run_doctor_produces_twenty_three_checks() {
         "output_style_legacy_ids",
         "deployment",
         "skill_staleness",
+        "skill_unmanaged",
         "legacy_sources",
+        "legacy_overrides",
         "agent_skills",
         "agent_skills_prose_hints",
         "memory",
         "search",
         "worktrees",
+        "worktree_disk",
         "gh_account",
         "oauth_token",
         "hooks_contamination",
@@ -144,6 +189,7 @@ async fn run_doctor_produces_twenty_three_checks() {
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
+        "binary_provenance",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

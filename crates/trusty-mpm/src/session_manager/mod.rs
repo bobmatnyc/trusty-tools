@@ -35,6 +35,10 @@ pub mod task_inject;
 pub mod workspace_guard;
 mod worktree_nested;
 pub(crate) mod worktree_ownership;
+// #2919: merged-PR reclamation + the disk accounting `tm doctor` reports.
+pub(crate) mod worktree_reclaim;
+// #2919: the survey and the fresh-recheck delete loop that acts on it.
+pub(crate) mod worktree_reclaim_sweep;
 pub(crate) mod worktree_reconcile;
 pub(crate) mod worktree_registry;
 pub mod worktree_safety;

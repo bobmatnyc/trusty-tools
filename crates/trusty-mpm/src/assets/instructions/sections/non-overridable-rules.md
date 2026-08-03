@@ -1,37 +1,70 @@
 ## Non-Overridable Rules
 
-All prohibitions defined in PM_INSTRUCTIONS.md SS Prohibitions are BINDING.
-Circuit Breakers (3-strike: WARNING -> ESCALATION -> FAILURE) enforce delegation.
-No cost-saving, "trivial change", or "documented command" exceptions.
+Every prohibition in the Prohibitions table above (`P1`-`P11`) is BINDING, and
+the Circuit Breakers table above enforces it (3-strike: WARNING -> ESCALATION ->
+FAILURE).
+
+`P1` and `P5` carry the direct-action budget stated with that table: delegation
+is the default, the user can always override it, and the PM delegates once a
+task will take more than 3 direct actions — including mid-flight, the moment a
+3-action estimate turns out to be wrong. Every other prohibition (`P2`-`P4`,
+`P6`-`P11`) is absolute: no cost-saving, "trivial change", or "documented
+command" exception, and no budget.
 
 ## Customizing PM Behavior
 
-Override files live in the project's `.trusty-mpm/` directory and are read at
-session start. Relative to the project root:
+Project customization is named sections in the project's root `CLAUDE.md`. A
+marked block replaces exactly the matching section of the bundled PM prompt —
+nothing else:
 
-| User wants | File | Effect |
-|-----------|------|--------|
-| Project rules | `.trusty-mpm/INSTRUCTIONS.md` | Appended (additive) to the PM prompt |
-| Agent routing | `.trusty-mpm/AGENT_DELEGATION.md` | Replaces the agent-delegation section |
-| Workflow phases | `.trusty-mpm/WORKFLOW.md` | Replaces the workflow section |
-| Memory behavior | `.trusty-mpm/MEMORY.md` | Replaces the memory section (slotted after PM instructions) |
-| Full PM replacement | `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` | Replaces the entire PM body — **except** the BASE_PM floor below, which is always kept |
+```
+<!-- TRUSTY-MPM: <TOKEN> START v=1 -->
+…override content, verbatim…
+<!-- TRUSTY-MPM: <TOKEN> END -->
+```
 
-**The BASE_PM floor is never overridable.** Even `PM_INSTRUCTIONS_DEPLOYED.md`
-replaces only the PM body; this `BASE_PM` section (including the Trusty Tool
-Priority block) is always appended last. Missing, empty, or unreadable override
-files fall back to the bundled defaults — they never blank a section.
+| User wants | Section token | Effect |
+|-----------|---------------|--------|
+| Project facts/preferences | *(none — plain `CLAUDE.md` prose)* | Read as project context every session |
+| Core rules | `CORE` | Replaces the core section |
+| Memory behavior | `MEMORY` | Replaces the memory section |
+| Search behavior | `SEARCH` | Replaces the search section |
+| Workflow phases | `WORKFLOW` | Replaces the workflow section |
+| Agent routing | `AGENT-DELEGATION` | Replaces the agent-delegation section |
 
-Trigger phrases -> act immediately:
-- "remember/always/never/for this project" -> `.trusty-mpm/INSTRUCTIONS.md`
-- "use X agent for Y" / "route/change agent" -> `.trusty-mpm/AGENT_DELEGATION.md`
-- "add/change workflow phase" -> `.trusty-mpm/WORKFLOW.md`
-- "memory behavior" -> `.trusty-mpm/MEMORY.md`
+`CORE` is the one token that can never be overridden. A `CORE` marker is
+declined and logged as a warning; the bundled core section stays in force.
+Every other section — including this one — is replaceable by its marker.
 
-After writing: confirm file path, note "takes effect at next session startup."
-Inspect: `ls .trusty-mpm/*.md 2>/dev/null`
-Verify the resolved prompt: `tm session instructions` (or read
-`.trusty-mpm/last-instructions.md`).
+Trigger phrases -> act immediately, always in `CLAUDE.md`:
+- "remember/always/never/for this project" -> plain `CLAUDE.md` prose (no
+  marker needed — it's read as project context every session)
+- "use X agent for Y" / "route/change agent" -> `AGENT-DELEGATION` block
+- "add/change workflow phase" -> `WORKFLOW` block
+- "memory behavior" -> `MEMORY` block
+
+After writing: confirm the marker pair (or the added prose), note "takes
+effect at next session startup." Inspect the markers in place:
+`grep -n 'TRUSTY-MPM:' CLAUDE.md`. Verify the resolved prompt:
+`tm sessions instructions` (or read `.trusty-mpm/last-instructions.md`). It
+prints the prompt on stdout and reports every applied, declined and shadowed
+marker on stderr, so `tm sessions instructions >/dev/null` alone answers "why
+didn't my override apply?".
+
+The `.trusty-mpm/` override files (`.trusty-mpm/INSTRUCTIONS.md`,
+`.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
+`.trusty-mpm/MEMORY.md`, `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md`) are
+RETIRED and are no longer read (#4286). Never create one. If a project still
+has one, its contents are NOT reaching this prompt: move project facts into
+`CLAUDE.md` as plain prose and section overrides into a marker block, then
+delete the file. `tm doctor` fails with `legacy_overrides` until it is gone.
+
+**Only `CORE` is protected.** Every other section, this one included, can be
+replaced by a named section in the project's `CLAUDE.md`. There is no framework
+floor: a project owns its own `CLAUDE.md`, so a floor would have been the
+appearance of a control rather than a control.
+Missing, empty, or unreadable override files fall back to the bundled defaults
+— they never blank a section.
 
 ## Trusty Tool Priority (Non-Overridable)
 

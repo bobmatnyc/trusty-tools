@@ -29,7 +29,7 @@ use serde_json::json;
 // #4425: `OpenAiCompatClient::chat` is no longer an inherent method — it is
 // the SHARED `InferenceAdapter::chat`, so the trait must be in scope to call it.
 use trusty_code::llm::{ChatMessage, ChatRequest, InferenceAdapter, OpenAiCompatClient};
-use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
+use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::test_support::MockInferenceServer;
 
 /// A canned OpenAI-compatible chat/completions response the mock serves.

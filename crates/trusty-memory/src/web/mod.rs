@@ -143,6 +143,15 @@ pub fn router_with_self_origins(
         )
         .route("/api/v1/palaces/{id}/kg/all", get(kg_routes::kg_list_all))
         .route("/api/v1/palaces/{id}/kg/graph", get(kg_routes::kg_graph))
+        // #4670: progressive graph loading — seed on first paint, expand on click.
+        .route(
+            "/api/v1/palaces/{id}/kg/graph/seed",
+            get(kg_routes::kg_graph_seed),
+        )
+        .route(
+            "/api/v1/palaces/{id}/kg/graph/neighbors",
+            get(kg_routes::kg_graph_neighbors),
+        )
         .route("/api/v1/palaces/{id}/kg/count", get(kg_routes::kg_count))
         .route(
             "/api/v1/palaces/{id}/kg/triples/{triple_id}",

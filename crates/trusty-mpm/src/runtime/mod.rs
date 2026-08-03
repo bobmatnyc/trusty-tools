@@ -20,6 +20,10 @@ mod tcode;
 pub(crate) mod test_helpers;
 
 pub(crate) use claude_code::session_id_exists;
+// #4467: re-exported so the `transcript_saving` doctor check can read the scrub
+// set out of the REAL managed-spawn env prefix rather than restating the marker
+// constant — a check that compared the constant against itself could not fail.
+pub(crate) use claude_code::env_bin_prefix;
 pub use claude_code::{ClaudeCodeAdapter, InPlaceResumeCommand, build_inplace_resume_command};
 pub use tcode::TcodeAdapter;
 

@@ -95,7 +95,11 @@ pub(super) const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(130);
 /// server-side work legitimately runs long.
 /// Test: `tests::default_client_uses_default_bounds` asserts it exceeds
 /// [`DEFAULT_REQUEST_TIMEOUT`].
-pub(super) const PROVISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+///
+/// `pub(crate)` (#4488): `connectors::tm::TmConnector::create_session` POSTs
+/// the SAME route from a different module tree and needs the same bound; a
+/// second copy of the constant there would be free to drift.
+pub(crate) const PROVISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Build the `reqwest::Client` [`super::DaemonClient::new`] uses by default.
 ///

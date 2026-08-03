@@ -22,10 +22,10 @@
 //! into `.mcp.json` — see [`split_public_and_secret_env`]. Instead it is
 //! delivered out-of-band via a workspace-root `.env.local`
 //! ([`route_mcp_secrets_to_env_local`]), which the native binaries' own credential
-//! resolver (`trusty_common::inference::credentials::resolve_key`, confirmed at
+//! resolver (`trusty_common::credentials::resolve_key`, confirmed at
 //! `crates/trusty-channels/src/{slack,telegram}/api/client.rs`) already reads
 //! via env → `.env.local` → secure-store precedence
-//! (`trusty_common::inference::credentials::dotenv::load_env_local_once`,
+//! (`trusty_common::credentials::dotenv::load_env_local_once`,
 //! `find_workspace_env_local`). That loader searches upward from the spawned
 //! process's cwd and — critically — checks the STARTING directory itself before
 //! any repo-root boundary test (`dotenv.rs`'s
@@ -95,7 +95,7 @@ use crate::core::trusty_tools_config::managed_claude_config_dir;
 /// through.
 ///
 /// Why: must be exactly the filename
-/// `trusty_common::inference::credentials::dotenv` searches for — that loader
+/// `trusty_common::credentials::dotenv` searches for — that loader
 /// hardcodes `.env.local`, so this cannot be an arbitrary/dedicated filename.
 /// What: `.env.local`.
 /// Test: `inject_native_delivers_secrets_via_env_local`.

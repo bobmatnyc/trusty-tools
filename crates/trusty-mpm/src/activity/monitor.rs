@@ -5,11 +5,12 @@
 //! expensive; the monitor hashes pane content and skips the LLM when content
 //! is unchanged.
 //! What: [`ActivityMonitor`] manages a per-session [`ActivityCache`] map and
-//! delegates classification to an [`LlmClassifier`] trait; the default impl
-//! is [`OpenRouterClassifier`] which calls OpenRouter via
-//! `trusty_common::chat::OpenRouterProvider`.
+//! delegates classification to an [`LlmClassifier`] trait. The production impl
+//! lives in [`super::classifier`] — #4427 moved it out so both files stay under
+//! the 500-SLOC cap, and so this file is purely cache/policy with no provider
+//! knowledge.
 //! Test: `monitor_cache_hit_skips_llm`, `monitor_cache_miss_calls_llm`,
-//! `open_router_classifier_returns_degraded_without_key`.
+//! `missing_api_key_degrades_to_unknown_verdict`.
 
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -50,11 +51,11 @@ struct SummarySlot {
 /// Errors that can arise during an activity check.
 ///
 /// Why: the monitor and its callers need structured error types to distinguish
-/// configuration problems (missing API key) from transient failures.
+/// configuration problems (missing API key) from transient failures — only the
+/// former degrades to an `Unknown` verdict instead of failing the check.
 /// What: one variant per failure class.
-/// Test: `open_router_classifier_returns_degraded_without_key` avoids
-/// returning an error in the degraded-key path; `Llm` is returned on JSON
-/// parse failure.
+/// Test: `missing_api_key_degrades_to_unknown_verdict` covers the degraded-key
+/// path; `classifier_error_propagates` covers the failing path.
 #[derive(Debug, Error)]
 pub enum ActivityError {
     /// The LLM call failed for an unspecified reason.
@@ -65,7 +66,12 @@ pub enum ActivityError {
     #[error("serialization error: {0}")]
     Serialization(String),
 
-    /// The OPENROUTER_API_KEY environment variable was not set.
+    /// No inference credential could be resolved for the configured model.
+    ///
+    /// #4427: the check is no longer env-only — the classifier now resolves
+    /// credentials through the shared `trusty_common::inference` ladder (env >
+    /// `.env.local` > secure store). The variant name and message are unchanged
+    /// so every caller's degrade branch and log line keep working.
     #[error("OPENROUTER_API_KEY is not configured")]
     MissingApiKey,
 }
@@ -420,155 +426,6 @@ fn last_n_lines(text: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-/// OpenRouter-backed implementation of [`LlmClassifier`].
-///
-/// Why: the default production classifier calls OpenRouter using
-/// `trusty_common::chat::OpenRouterProvider`; the trait lets tests substitute
-/// a stub.
-/// What: reads `OPENROUTER_API_KEY` from the environment, reads
-/// `TRUSTY_LLM_MODEL` for the model (default `openai/gpt-4o-mini`), sends a
-/// classification prompt, and parses the JSON response.
-/// Test: `open_router_classifier_returns_degraded_without_key`.
-pub struct OpenRouterClassifier {
-    model: String,
-}
-
-impl OpenRouterClassifier {
-    /// Construct the classifier, reading the model from env or using the default.
-    ///
-    /// Why: the model must be configurable at runtime so operators can switch
-    /// between cheap and capable models without recompiling.
-    /// What: reads `TRUSTY_LLM_MODEL`; falls back to `openai/gpt-4o-mini`.
-    /// Test: used in `open_router_classifier_returns_degraded_without_key`.
-    pub fn new() -> Self {
-        let model =
-            std::env::var("TRUSTY_LLM_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
-        Self { model }
-    }
-}
-
-impl Default for OpenRouterClassifier {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LlmClassifier for OpenRouterClassifier {
-    async fn classify(
-        &self,
-        pane_text: &str,
-    ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
-        use tokio::sync::mpsc;
-        use trusty_common::ChatMessage;
-        use trusty_common::chat::{ChatEvent, ChatProvider, OpenRouterProvider};
-
-        let api_key = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
-            .map_err(|_| ActivityError::MissingApiKey)?;
-
-        let prompt = format!(
-            "Classify the activity state of this Claude Code terminal session.\n\
-             Respond ONLY with valid JSON: {{\"state\": \"<state>\", \"summary\": \"<summary>\", \"confidence\": <0.0-1.0>}}\n\
-             Valid states: working, idle, blocked_on_permission, errored, done, unknown\n\n\
-             Terminal output (last 60 lines):\n```\n{pane_text}\n```"
-        );
-
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: prompt,
-            tool_call_id: None,
-            tool_calls: None,
-        }];
-
-        let provider = OpenRouterProvider::new(api_key, self.model.clone());
-        let (tx, mut rx) = mpsc::channel::<ChatEvent>(64);
-
-        let send_fut = provider.chat_stream(messages, vec![], tx);
-        let mut full_text = String::new();
-        // #3757: the pump now reports a mid-stream error frame, a truncated
-        // EOF, and an unusable non-SSE body as `ChatEvent::Error`. Dropping it
-        // here would feed truncated text to the JSON parse below and misreport
-        // a provider failure as `Serialization` — a misleading diagnosis of
-        // someone else's outage.
-        let mut stream_error: Option<String> = None;
-
-        let (send_result, ()) = tokio::join!(send_fut, async {
-            while let Some(event) = rx.recv().await {
-                match event {
-                    ChatEvent::Delta(d) => full_text.push_str(&d),
-                    ChatEvent::Error(e) => stream_error = Some(e),
-                    // #3767: no usage-accounting consumer wired up here yet.
-                    ChatEvent::ToolCall(_) | ChatEvent::Done | ChatEvent::Usage(_) => {}
-                    // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
-                    // keeps a future variant from breaking this crate's build.
-                    _ => {}
-                }
-            }
-        });
-
-        send_result.map_err(|e| ActivityError::Llm(e.to_string()))?;
-        if let Some(e) = stream_error {
-            return Err(ActivityError::Llm(e));
-        }
-
-        // Parse the JSON verdict from the accumulated text.
-        let json_str = extract_json(&full_text).unwrap_or(&full_text);
-        let parsed: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-            ActivityError::Serialization(format!("parse failed: {e} — raw: {full_text}"))
-        })?;
-
-        let state_str = parsed["state"].as_str().unwrap_or("unknown");
-        let state = parse_state(state_str);
-        let summary = parsed["summary"]
-            .as_str()
-            .unwrap_or("no summary")
-            .to_owned();
-        let confidence = parsed["confidence"].as_f64().unwrap_or(0.5) as f32;
-
-        Ok((
-            ActivityVerdict {
-                state,
-                summary,
-                confidence,
-            },
-            0, // OpenRouterProvider does not expose token counts via SSE in this path
-            0,
-        ))
-    }
-}
-
-/// Extract the first `{…}` block from an LLM response that may have prose around it.
-///
-/// Why: LLMs sometimes wrap JSON in markdown fences or prepend text; finding
-/// the first balanced brace block extracts the actual JSON.
-/// What: scans for the first `{` and last `}` and returns the substring.
-/// Test: verified implicitly by `monitor_cache_miss_calls_llm` in tests.
-fn extract_json(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end > start {
-        Some(&text[start..=end])
-    } else {
-        None
-    }
-}
-
-/// Parse a state string into an [`ActivityState`] variant.
-///
-/// Why: the LLM returns a snake_case string; we need to map it to the enum
-/// without relying on serde since the LLM may return unexpected variants.
-/// What: case-insensitive substring match; falls back to `Unknown`.
-/// Test: validated by `monitor_cache_miss_calls_llm` stub.
-fn parse_state(s: &str) -> ActivityState {
-    match s.to_ascii_lowercase().as_str() {
-        "working" => ActivityState::Working,
-        "idle" => ActivityState::Idle,
-        "blocked_on_permission" => ActivityState::BlockedOnPermission,
-        "errored" => ActivityState::Errored,
-        "done" => ActivityState::Done,
-        _ => ActivityState::Unknown,
-    }
-}
-
 // Required for the async fn in trait on stable Rust with edition 2024.
 use std::future::Future;
 
@@ -771,17 +628,64 @@ mod tests {
         assert_eq!(lines[0], "40");
     }
 
-    #[test]
-    fn open_router_classifier_returns_degraded_without_key() {
-        // When the env var is absent the classifier must return MissingApiKey.
-        // We test the error variant rather than calling classify (which would
-        // require a live server).
-        let _prev = std::env::var("OPENROUTER_API_KEY").ok();
-        unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
-        // The real path is tested via classify() -> MissingApiKey, which the
-        // monitor converts to a degraded Unknown verdict. We just verify the
-        // enum match here.
-        let e = ActivityError::MissingApiKey;
-        assert!(e.to_string().contains("OPENROUTER_API_KEY"));
+    /// A classifier that always fails with a caller-chosen error.
+    ///
+    /// Why: the monitor treats `MissingApiKey` and every other `ActivityError`
+    /// differently — one degrades, one propagates. Proving that split needs a
+    /// classifier that fails on demand.
+    /// What: returns a clone of the configured error from every `classify`.
+    /// Test: `missing_api_key_degrades_to_unknown_verdict`,
+    /// `classifier_error_propagates`.
+    struct FailingClassifier {
+        /// Rendered once per call into the configured variant.
+        missing_key: bool,
+    }
+
+    impl LlmClassifier for FailingClassifier {
+        async fn classify(
+            &self,
+            _pane_text: &str,
+        ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
+            if self.missing_key {
+                Err(ActivityError::MissingApiKey)
+            } else {
+                Err(ActivityError::Llm("provider exploded".into()))
+            }
+        }
+    }
+
+    /// Why (#4427): an unconfigured daemon must keep serving `/activity` with a
+    /// degraded `Unknown` verdict rather than failing the check — and the
+    /// placeholder must NOT be stored as a real summary (D1). Nothing covered
+    /// this arm before the inference-adapter migration.
+    /// Test: itself.
+    #[tokio::test]
+    async fn missing_api_key_degrades_to_unknown_verdict() {
+        let monitor = ActivityMonitor::new(FailingClassifier { missing_key: true }, "test-model");
+        let result = monitor
+            .check("s1", "pane")
+            .await
+            .expect("degrades, not errors");
+        assert_eq!(result.verdict.state, ActivityState::Unknown);
+        assert_eq!(result.verdict.summary, "OPENROUTER_API_KEY not configured");
+        assert_eq!(
+            (result.cost.input_tokens, result.cost.output_tokens),
+            (0, 0)
+        );
+        assert_eq!(monitor.cached_summary("s1"), None);
+        assert!(!monitor.is_summarizing("s1"));
+    }
+
+    /// Why: every non-credential failure must propagate so the caller sees a
+    /// real error instead of a fabricated verdict — the counterpart to the
+    /// degrade arm above.
+    /// Test: itself.
+    #[tokio::test]
+    async fn classifier_error_propagates() {
+        let monitor = ActivityMonitor::new(FailingClassifier { missing_key: false }, "test-model");
+        let err = monitor.check("s1", "pane").await.expect_err("propagates");
+        assert!(matches!(err, ActivityError::Llm(_)), "got {err:?}");
+        // The in-flight guard still cleared on the error path.
+        assert!(!monitor.is_summarizing("s1"));
     }
 }

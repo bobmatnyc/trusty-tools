@@ -20,13 +20,20 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
 
-# Cancel superseded runs for the same ref to save CI minutes (matches
-# line-cap.yml).
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
 concurrency:
-  group: doc-numbers-${{ github.ref }}
-  cancel-in-progress: true
+  group: doc-numbers-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
   doc-numbers:
@@ -42,6 +49,14 @@ jobs:
       # clean. Mirrors line-cap.yml's selftest-then-gate ordering.
       - name: Doc-number parser selftest (fixtures)
         run: bash scripts/check_doc_numbers.sh --self-test
+
+      # Scan-floor mutation self-test (issue #4618): re-proves in CI that this
+      # gate REFUSES a vacuous scan. Without it the floor is untested code and a
+      # later refactor can silently restore the "0 examined, still green" pass.
+      # Runs before the real gate — a gate that cannot fail makes the real run's
+      # green meaningless. Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Scan-floor selftest (must refuse an empty scan)
+        run: bash scripts/check_scan_floor_selftest.sh doc_numbers
 
       - name: Enforce DOC-N / ADR number allocation (ratcheted allowlist)
         run: bash scripts/check_doc_numbers.sh

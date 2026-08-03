@@ -15,7 +15,7 @@
 
 use serde_json::{Value, json};
 use serial_test::serial;
-use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
+use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::providers::{
     anthropic, atlascloud, fireworks, openai, openrouter, together,
 };
@@ -568,6 +568,125 @@ async fn anthropic_direct_parses_native_usage_and_tool_use() {
     assert_eq!(body["tools"][0]["name"], "get_weather");
     assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
     assert_eq!(body["tool_choice"], json!({"type": "auto"}));
+}
+
+// ── #4493: the routing prefix must not survive onto a direct provider's wire ─────
+
+/// Why: issue #4493, reproduced end-to-end over a real socket. The two-stage
+/// resolver CONSUMES the `openai/` marker to route (stage 1 matches it whenever
+/// an `openai` credential resolves), but the slug then travelled into the request
+/// body unchanged, so `api.openai.com` was asked for a model id it does not
+/// publish and answered 400. The consumer flow is reproduced faithfully:
+/// `trusty-mpm`'s `ManagerInference::resolve` hands its handlers the CONFIGURED
+/// slug — the prefixed one — and they build the `ChatRequest` from exactly that,
+/// so the request here carries the prefixed slug too. The mock records what
+/// actually left the process: it must be `gpt-4o-mini`.
+/// Fails without the fix (`prepare_body` sent `openai/gpt-4o-mini` verbatim).
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openai_direct_receives_unprefixed_model_id_on_the_wire() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    // An `openai` credential resolving is all it takes — no config of the
+    // operator's changed; stage 1 now routes the default slug to OpenAI-direct.
+    store.set("openai", "sk-openai-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenAI,
+        Box::new(move |r: &ResolvedProvider| openai::build(r, &base)),
+    );
+
+    let slug = "openai/gpt-4o-mini"; // == trusty-mpm's DEFAULT_MANAGER_MODEL
+    let adapter = cfg.build(slug, &store).expect("build");
+    assert_eq!(adapter.name(), "openai");
+
+    let req = ChatRequest::new(slug, vec![ChatMessage::user("ping")]);
+    adapter.chat(&req).await.expect("chat ok");
+
+    let body = server.last_request().expect("captured").body.expect("json");
+    assert_eq!(
+        body["model"], "gpt-4o-mini",
+        "OpenAI-direct must receive the unprefixed model id: {body}"
+    );
+}
+
+/// Why: the #4493 REGRESSION GUARD for the workspace's primary provider. For
+/// OpenRouter the full `vendor/model` slug IS the wire id, and it additionally
+/// serves first-party models under a genuine `openrouter/` vendor
+/// (`openrouter/auto`) — a global strip would break every OpenRouter call.
+/// Driven through the ladder's stage-2 fall-through (no `openai` credential) so
+/// this pins the exact byte the fix must NOT touch.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openrouter_receives_the_full_slug_on_the_wire() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    // Only OpenRouter resolves → the same slug falls through to stage 2.
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+
+    for slug in ["openai/gpt-4o-mini", "openrouter/auto"] {
+        let adapter = cfg.build(slug, &store).expect("build");
+        assert_eq!(adapter.name(), "openrouter");
+        let req = ChatRequest::new(slug, vec![ChatMessage::user("ping")]);
+        adapter.chat(&req).await.expect("chat ok");
+        let body = server.last_request().expect("captured").body.expect("json");
+        assert_eq!(
+            body["model"], slug,
+            "OpenRouter must transmit the FULL slug verbatim: {body}"
+        );
+    }
+}
+
+/// Why: #4493 is a class of bug, not an OpenAI special case — every direct
+/// provider reachable from stage 1 has the same exposure. Together (a keyed
+/// OpenAI-compat provider) proves it generally, and its model ids are themselves
+/// `vendor/model` shaped, so it also pins that exactly ONE marker comes off:
+/// `together/meta-llama/…` must arrive as `meta-llama/…`, never `Llama-3.3-…`.
+/// Fails without the fix (the whole `together/meta-llama/…` slug went on the wire).
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn together_direct_receives_unprefixed_model_id_on_the_wire() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("together", "tg-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::Together,
+        Box::new(move |r: &ResolvedProvider| together::build(r, &base)),
+    );
+
+    let slug = "together/meta-llama/Llama-3.3-70B-Instruct-Turbo";
+    let adapter = cfg.build(slug, &store).expect("build");
+    assert_eq!(adapter.name(), "together");
+
+    let req = ChatRequest::new(slug, vec![ChatMessage::user("ping")]);
+    adapter.chat(&req).await.expect("chat ok");
+
+    let body = server.last_request().expect("captured").body.expect("json");
+    assert_eq!(
+        body["model"], "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "Together must receive its catalog id with only the routing marker removed: {body}"
+    );
 }
 
 // ── Error classification through a real socket ───────────────────────────────────

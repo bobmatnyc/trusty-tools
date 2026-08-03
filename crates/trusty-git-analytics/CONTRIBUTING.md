@@ -157,7 +157,9 @@ When a commit resolves a GitHub issue, add `(closes #N)` in the commit body.
    git checkout -b feat/my-feature
    ```
 3. Implement your changes, add tests, and verify all CI gates pass locally.
-4. Update `CHANGELOG.md` — add a line under `[Unreleased]` describing the change.
+4. Add a changelog fragment — `changelog.d/<issue-or-pr-number>-<slug>.md`, first
+   line the category (`Added`/`Fixed`/`Changed`/…), then the bullet. Release time
+   assembles the fragments into `CHANGELOG.md`; never edit that file by hand.
 
 ### PR guidelines
 
@@ -165,7 +167,8 @@ When a commit resolves a GitHub issue, add `(closes #N)` in the commit body.
 - **Keep diffs small.** Under 400 lines of diff is preferred. For larger changes,
   consider a sequence of smaller PRs.
 - **Tests required.** New features and bug fixes must include or update tests.
-- **CHANGELOG entry required.** Every user-visible change needs a changelog entry.
+- **Changelog fragment required.** Every user-visible change needs a
+  `changelog.d/` fragment (see step 4 above).
 
 ### PR review
 

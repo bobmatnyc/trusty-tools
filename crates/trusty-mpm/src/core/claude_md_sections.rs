@@ -26,7 +26,7 @@
 //! ```
 //!
 //! The section token is the [`SectionId`] kebab-case name uppercased (`CORE`,
-//! `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, and the three floor
+//! `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`, and the four floor
 //! tokens), matched case-insensitively. Content is what lies strictly between
 //! the two marker lines, trimmed. Text outside markers is not instruction
 //! content and is ignored.
@@ -63,13 +63,23 @@ use crate::core::instruction_package::{
 
 /// Project-relative files scanned for marker blocks, highest precedence first.
 ///
-/// Why: `CLAUDE.md` is the surface #4183 moves customization to, and
-/// `.trusty-mpm/INSTRUCTIONS.md` is scanned as well so a project already keeping
-/// its rules there can adopt named sections without moving the file first. Order
-/// is precedence: on a same-section collision the earlier host wins.
-/// What: the two host paths, joined onto the project root.
-/// Test: `claude_md_wins_a_same_section_collision_with_instructions_md`.
-pub const HOST_FILES: [&str; 2] = ["CLAUDE.md", ".trusty-mpm/INSTRUCTIONS.md"];
+/// Why: `CLAUDE.md` is the SOLE project customization surface (#4286).
+/// `.trusty-mpm/INSTRUCTIONS.md` was a second host while that file was still an
+/// additive override; keeping it after the read path retired would leave the
+/// file half-alive — honoured for marked blocks, ignored for everything else —
+/// which is precisely the ambiguous state the retirement removes. Dropping it
+/// costs nothing measurable: a survey of all 52 `.trusty-mpm/INSTRUCTIONS.md`
+/// instances on the development machine found ZERO containing a `TRUSTY-MPM:`
+/// marker, so no project loses a named override by this change.
+///
+/// The list stays an array, and [`scan_project`] keeps its cross-host
+/// precedence handling ([`REASON_SHADOWED`]), because the host set is DATA: that
+/// branch is what makes adding a host back a one-line change rather than a
+/// correctness question.
+/// What: the single host path, joined onto the project root.
+/// Test: `claude_md_is_the_only_marker_host`,
+/// `a_marker_in_the_retired_instructions_file_is_not_read`.
+pub const HOST_FILES: [&str; 1] = ["CLAUDE.md"];
 
 /// The only marker version this build understands.
 const SUPPORTED_VERSION: u32 = 1;
@@ -106,7 +116,7 @@ pub const REASON_SHADOWED: &str = "section already overridden by a higher-preced
 /// the enum. Deriving it from the serde name by hand here — and pinning that
 /// correspondence in a test — keeps a renamed section from silently orphaning
 /// every project's marker.
-/// What: the eight tokens, matched case-insensitively by [`section_for_token`].
+/// What: the nine tokens, matched case-insensitively by [`section_for_token`].
 /// Test: `every_section_token_is_the_kebab_case_id_uppercased`.
 pub const fn section_token(id: SectionId) -> &'static str {
     match id {
@@ -116,6 +126,7 @@ pub const fn section_token(id: SectionId) -> &'static str {
         SectionId::Search => "SEARCH",
         SectionId::Workflow => "WORKFLOW",
         SectionId::AgentDelegation => "AGENT-DELEGATION",
+        SectionId::Enforcement => "ENFORCEMENT",
         SectionId::NonOverridableRules => "NON-OVERRIDABLE-RULES",
         SectionId::FrameworkGuaranteedConventions => "FRAMEWORK-GUARANTEED-CONVENTIONS",
     }
@@ -407,8 +418,8 @@ fn read_host(path: &Path) -> Option<String> {
 /// it and any later claim is reported as [`REASON_SHADOWED`] (across hosts) or
 /// [`REASON_DUPLICATE`] (within one host). The result is sorted into
 /// [`SectionId`] canonical order so downstream application is deterministic.
-/// Test: `scans_claude_md_for_named_sections`,
-/// `claude_md_wins_a_same_section_collision_with_instructions_md`,
+/// Test: `scans_claude_md_for_named_sections`, `claude_md_is_the_only_marker_host`,
+/// `a_marker_in_the_retired_instructions_file_is_not_read`,
 /// `duplicate_section_in_one_host_keeps_the_first`.
 pub fn scan_project(project_dir: &Path) -> ProjectOverrides {
     let mut result = ProjectOverrides::default();
@@ -462,36 +473,11 @@ pub fn scan_project(project_dir: &Path) -> ProjectOverrides {
     result
 }
 
-/// Remove every paired marker block from an additive-addendum body.
-///
-/// Why: `.trusty-mpm/INSTRUCTIONS.md` is both a marker host and the source of
-/// the `project-addendum` generator. Without this, a section marked out there
-/// would be delivered twice — once as the override it is, once as raw addendum
-/// prose complete with the marker comments.
-/// What: drops the `START..=END` line span of every pair; text outside markers
-/// is untouched. A body containing NO pair is returned byte-for-byte unchanged,
-/// which is what makes today's marker-free `INSTRUCTIONS.md` files provably
-/// unaffected.
-/// Test: `strip_is_a_no_op_without_markers`,
-/// `strip_removes_marked_blocks_from_the_addendum`.
-pub fn strip_marker_blocks(text: &str) -> String {
-    let (blocks, _) = parse_blocks(text, Path::new(""));
-    if blocks.is_empty() {
-        return text.to_string();
-    }
-    text.lines()
-        .enumerate()
-        .filter(|(index, _)| {
-            !blocks
-                .iter()
-                .any(|b| *index >= b.start_line && *index <= b.end_line)
-        })
-        .map(|(_, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
-}
+// `strip_marker_blocks` lived here until #4286. It de-duplicated a marked block
+// that appeared in `.trusty-mpm/INSTRUCTIONS.md`, which was simultaneously a
+// marker host and the source of the additive `project-addendum`. Retiring that
+// file removed both roles at once, leaving the function with no caller — it is
+// deleted rather than kept as an unreachable helper.
 
 /// Report overrides that a non-package composition path cannot honour.
 ///
@@ -513,9 +499,8 @@ pub fn strip_marker_blocks(text: &str) -> String {
 /// about every override in the slice it is given.
 ///
 /// What: one `warn!` per accepted override, naming the file and the section.
-/// Test: `an_unrelated_legacy_file_does_not_shadow_a_named_section_override`,
-/// `a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported`,
-/// `identity_core_and_search_stay_reported_unapplied_on_the_legacy_path`.
+/// Test: `unaddressable_sections_are_reported_unapplied_on_the_roster_absent_path`,
+/// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`.
 pub fn warn_unapplied(scanned: &ProjectOverrides) {
     for applied in &scanned.overrides {
         tracing::warn!(

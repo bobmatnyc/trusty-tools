@@ -808,12 +808,25 @@ fn health_snapshot_deserializes() {
         "catalog_unknown": false,
         "catalog_changes": ["agents/foo"],
         "version": "0.42.0",
+        "supervised": false,
+        "pid": 98606,
+        "unsupervised_forced": true,
     }))
     .expect("full health body parses");
     assert_eq!(full.status, "ok");
     assert!(full.catalog_stale);
     assert!(!full.catalog_unknown);
     assert_eq!(full.version, "0.42.0");
+    // #4230: the orphan-daemon signals must survive the client round-trip — the
+    // `supervised` flag was already on the wire (#2486) and simply never parsed
+    // on this side; `pid` and `unsupervised_forced` are new.
+    assert_eq!(
+        full.supervised,
+        Some(false),
+        "supervised:false must deserialize as Some(false)"
+    );
+    assert_eq!(full.pid, Some(98606));
+    assert!(full.unsupervised_forced);
 
     let minimal: HealthSnapshot =
         serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
@@ -821,4 +834,52 @@ fn health_snapshot_deserializes() {
     assert!(!minimal.catalog_stale);
     assert!(!minimal.catalog_unknown);
     assert_eq!(minimal.version, "", "older daemon omitting version → empty");
+    assert!(
+        !minimal.unsupervised_forced,
+        "absent force flag reads as not-forced"
+    );
+}
+
+/// #4230 review: a daemon whose `/health` predates `supervised` must be
+/// DISTINGUISHABLE from one that reports `true`. A `bool` with a `true` default
+/// collapsed "cannot tell" into "fine" — a two-state answer to a three-state
+/// question — and let the verdict return `Ok` on a daemon it knew nothing about.
+#[test]
+fn health_snapshot_supervised_is_none_when_absent() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert_eq!(
+        minimal.supervised, None,
+        "absent supervised field must be None, not a defaulted bool"
+    );
+}
+
+/// #4230: an older daemon omits `pid`, so the authoritative PID comparison is
+/// unavailable and the verdict must fall back rather than compare against a
+/// fabricated zero.
+#[test]
+fn health_snapshot_pid_is_none_when_absent() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert_eq!(minimal.pid, None);
+}
+
+/// #4469: an older daemon that does not publish `launchd_supervision` must
+/// parse, yielding the empty string rather than a hard error.
+///
+/// Why: the field is new; a newer client talking to an older daemon must fall
+/// back to the `supervised` bool rather than failing to parse `/health` at all.
+/// Test: this test.
+#[test]
+fn health_snapshot_launchd_supervision_defaults_to_empty() {
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert_eq!(minimal.launchd_supervision, "");
+
+    let full: HealthSnapshot = serde_json::from_value(serde_json::json!({
+        "status": "ok",
+        "launchd_supervision": "unknown",
+    }))
+    .expect("body with the field parses");
+    assert_eq!(full.launchd_supervision, "unknown");
 }

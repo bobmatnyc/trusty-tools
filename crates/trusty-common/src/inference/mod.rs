@@ -6,10 +6,9 @@
 //! centralises all of that in `trusty-common` so every consumer shares one
 //! implementation instead of six.
 //!
-//! What: Wave 1 ticket #2401 shipped the credential resolution layer:
-//! [`credentials::KeyStore`] trait, three backends (`MemoryKeyStore`,
-//! `FileKeyStore`, `KeyringStore`), the `resolve_key` precedence chain (process
-//! env > `.env.local` > secure store), and the shared `redact_secret` helper.
+//! What: Wave 1 ticket #2401 shipped the credential resolution layer here;
+//! #4564 promoted it to [`crate::credentials`] because it was never
+//! inference-specific, leaving only a deprecated alias behind.
 //! Wave 1 ticket #2402 (behind the `inference-client` feature) adds the
 //! inference foundation on top of it: the [`types`] request/response model, the
 //! [`InferenceError`] error surface, the [`InferenceAdapter`] trait, the
@@ -18,11 +17,28 @@
 //! [`Configurator`]), and the [`test_support`] doubles. Concrete provider HTTP
 //! adapters land in #2403/#2407.
 //!
-//! Test: see `credentials` submodule and its `*_tests` sibling files; the
-//! `inference-client` surface is covered by each submodule's inline tests and
-//! `crates/trusty-common/tests/inference_foundation.rs`.
+//! Test: the `inference-client` surface is covered by each submodule's inline
+//! tests and `crates/trusty-common/tests/inference_foundation.rs`; the
+//! deprecated credential alias by
+//! `deprecated_inference_alias_still_resolves`.
 
-pub mod credentials;
+/// Deprecated compatibility alias for [`crate::credentials`] (#4564).
+///
+/// Why: the credential resolver moved out from under `inference::` because it
+/// was never inference-specific — four of its ten original registry entries
+/// were Slack/Telegram/`claude-code` tokens. This alias keeps
+/// `trusty_common::inference::credentials::…` resolving for out-of-tree
+/// consumers for one release rather than breaking them at the same moment the
+/// registry grows.
+/// What: a plain re-export. Every in-tree consumer was moved to
+/// `trusty_common::credentials` in the same change, so nothing in this
+/// workspace triggers the deprecation.
+/// Test: `credentials::registry::tests::deprecated_inference_alias_still_resolves`.
+#[deprecated(
+    since = "0.28.0",
+    note = "moved out of `inference` — use `trusty_common::credentials` instead (#4564)"
+)]
+pub use crate::credentials;
 
 #[cfg(feature = "inference-client")]
 pub mod adapter;

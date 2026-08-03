@@ -1039,6 +1039,21 @@ async fn begin_pm_transcript_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
+/// A DURABLE (non-temp) project root for the `memory_sink_for` tests.
+///
+/// Why (#4638): `memory_sink_for` now refuses any project root under a system
+/// temp root, so these tests can no longer use a `TempDir` — that is the very
+/// input the fix rejects. The path need not exist: `memory_sink_for` does no
+/// filesystem I/O, and `derive_palace_id_for_project`'s `git config` probe on a
+/// missing directory simply fails and falls through to the parent/dir slug,
+/// which is the branch under test. Using a synthetic path rather than a real
+/// on-disk fixture also keeps the suite from writing outside its temp space.
+/// What: a fixed absolute path whose last two components slugify to a stable
+/// palace id (`projects-tcode-fixture`).
+fn durable_project_root() -> &'static std::path::Path {
+    std::path::Path::new("/nonexistent-durable-root/projects/tcode-fixture")
+}
+
 /// `memory_sink_for` (#2345) must construct exactly ONE sink for a session
 /// and return the SAME `Arc` on every subsequent call — proving the sink (and
 /// therefore its background drain task) survives across repeated
@@ -1047,13 +1062,12 @@ async fn begin_pm_transcript_unknown_session_errors() {
 async fn memory_sink_for_reuses_the_same_sink_across_calls() {
     let registry = SessionRegistry::new();
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-    let project_dir = tempfile::TempDir::new().unwrap();
 
     let first = registry
-        .memory_sink_for(&session.id, Some(project_dir.path()))
+        .memory_sink_for(&session.id, Some(durable_project_root()))
         .expect("first call constructs a sink");
     let second = registry
-        .memory_sink_for(&session.id, Some(project_dir.path()))
+        .memory_sink_for(&session.id, Some(durable_project_root()))
         .expect("second call reuses the sink");
 
     assert!(
@@ -1067,11 +1081,107 @@ async fn memory_sink_for_reuses_the_same_sink_across_calls() {
 #[tokio::test]
 async fn memory_sink_for_unknown_session_returns_none() {
     let registry = SessionRegistry::new();
-    let project_dir = tempfile::TempDir::new().unwrap();
     assert!(
         registry
-            .memory_sink_for("nope", Some(project_dir.path()))
+            .memory_sink_for("nope", Some(durable_project_root()))
             .is_none()
+    );
+}
+
+/// (#4638) A session bound to a project root under a system temp root must
+/// still get a sink — but one that is FORBIDDEN to bring its palace into
+/// existence.
+///
+/// Why: the palace id is derived from the project root, and every
+/// `tempfile::TempDir` has a fresh random basename, so such a sink's palace id
+/// is unique per run. Letting it auto-create is what minted 5,667 permanent,
+/// unreadable `t-tmp<random>` orphans in three weeks (97.8% of every palace on
+/// the machine). The sink itself must survive, though: it is what registers
+/// #2348's `recall_session` on the PM's tool surface, so suppressing it
+/// entirely would change a temp-rooted run's behavior far beyond storage.
+/// What: asserts `PalaceCreation::Forbidden` for a raw `TempDir` path AND for
+/// the canonicalized form `ProjectBinding::resolve` hands the real
+/// `run_and_record` call path (macOS rewrites `/var/folders/…` to
+/// `/private/var/folders/…`, so the guard must recognise both spellings).
+#[tokio::test]
+async fn memory_sink_for_temp_rooted_session_forbids_palace_create() {
+    let registry = SessionRegistry::new();
+    let project_dir = tempfile::TempDir::new().unwrap();
+
+    let raw = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let sink = registry
+        .memory_sink_for(&raw.id, Some(project_dir.path()))
+        .expect("a temp-rooted session still gets a sink");
+    assert_eq!(
+        sink.palace_creation(),
+        crate::session::PalaceCreation::Forbidden,
+        "a temp-rooted session must never be entitled to mint a palace (#4638)"
+    );
+
+    let binding = crate::binding::ProjectBinding::resolve(Some(project_dir.path().to_path_buf()))
+        .expect("tempdir must bind");
+    let canonical = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let sink = registry
+        .memory_sink_for(&canonical.id, binding.root())
+        .expect("a temp-rooted session still gets a sink");
+    assert_eq!(
+        sink.palace_creation(),
+        crate::session::PalaceCreation::Forbidden,
+        "the CANONICALIZED temp root the real run_and_record path passes must \
+         be recognised too (#4638)"
+    );
+}
+
+/// (#4638) THE BOUND: N sessions must not be able to mint N palaces.
+///
+/// Why: a bound is the whole point of the fix, so it is asserted directly
+/// rather than inferred from a happy path. Before #4638 this exact loop would
+/// have yielded 50 distinct create-entitled palace ids — the 1:1
+/// session-to-palace ratio that accumulated 5,667 orphans and pushed
+/// trusty-memory's O(n) full-registry handlers (#4637) to ~90 minutes per
+/// `GET /api/v1/status`.
+/// What: drives 50 distinct sessions — 25 against ONE shared durable project
+/// root, 25 against 25 DISTINCT temp roots — and counts the set of palace ids
+/// that could actually be created, i.e. `palace()` taken only from sinks whose
+/// `palace_creation()` is `Allowed`. That set must have exactly one member.
+/// Counting create-entitled ids rather than sinks is deliberate: it measures
+/// palaces-that-could-be-minted, which is the quantity that leaked.
+#[tokio::test]
+async fn memory_sink_for_many_sessions_mint_at_most_one_palace() {
+    let registry = SessionRegistry::new();
+    let mut creatable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut temp_rooted = 0usize;
+
+    for _ in 0..25 {
+        let durable = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let sink = registry
+            .memory_sink_for(&durable.id, Some(durable_project_root()))
+            .expect("a durable project root must still record turns");
+        if sink.palace_creation() == crate::session::PalaceCreation::Allowed {
+            creatable.insert(sink.palace().to_string());
+        }
+
+        let ephemeral =
+            registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sink = registry
+            .memory_sink_for(&ephemeral.id, Some(tmp.path()))
+            .expect("a temp-rooted session still gets a sink");
+        temp_rooted += 1;
+        if sink.palace_creation() == crate::session::PalaceCreation::Allowed {
+            creatable.insert(sink.palace().to_string());
+        }
+    }
+
+    assert_eq!(
+        temp_rooted, 25,
+        "sanity: every ephemeral session was exercised"
+    );
+    assert_eq!(
+        creatable.len(),
+        1,
+        "50 sessions may mint at most ONE palace — the shared durable \
+         project's; got {creatable:?}"
     );
 }
 

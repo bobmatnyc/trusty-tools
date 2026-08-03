@@ -456,7 +456,10 @@ pub async fn run_pm_task_with_history(
         // `user_authority` has no `AgentConfig` field yet (#3074/AUTH-1), so
         // the fail-closed `Standard` tier is reported until it lands — never
         // an invented tier.
-        .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard),
+        .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard)
+        // #4350: the middle precedence level (DOC-62 §5.3). Absent =
+        // built-in `engineer` = today's behaviour.
+        .with_default_style(pm_cfg.subagents.default_style),
     ));
     let stop_pending: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let active_project_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -575,17 +578,30 @@ pub async fn run_pm_task_with_history(
 /// with no taint and no `allowed_target_roles` at all — even though
 /// `resolve_agent_config` can resolve `ctrl.toml`, which declares
 /// `role = "assistant"` (#3812).
-/// What: `role != "assistant"` (e.g. a resolved `pm.toml`, `role =
-/// "orchestrator"`) returns `(None, None, AgentTier::L0Orchestration)` —
+/// What: a non-assistant role (e.g. a resolved `pm.toml`, `role =
+/// "orchestrator"`) returns `(None, None, AgentTier::for_kind(role))` —
 /// completely unaffected on the taint/role front; `pm` is the trusted
 /// orchestrator, not a sandboxed persona, and this dispatch path must keep
-/// working exactly as before for it. The THIRD element is deliberately
-/// `AgentTier::L0Orchestration` here too (#4169, epic #4167) — not because
-/// `pm`/`ctrl`-as-orchestrator IS an L0 persona, but because it sits
-/// OUTSIDE the L0/L1 persona tier model entirely (already fully trusted,
-/// already unrestricted) and must not be newly blocked from reaching a
-/// future L0 persona by a gate that was never meant to restrict it; see
-/// `DelegateToAgentTool::delegator_tier`'s doc comment for the same pattern.
+/// working exactly as before for it. The THIRD element resolves
+/// `AgentTier::L0Orchestration` for the orchestrator kind (#4169, epic
+/// #4167) — not because `pm`/`ctrl`-as-orchestrator IS an L0 persona, but
+/// because it sits OUTSIDE the L0/L1 persona tier model entirely (already
+/// fully trusted, already unrestricted) and must not be newly blocked from
+/// reaching a future L0 persona by a gate that was never meant to restrict
+/// it; see `DelegateToAgentTool::delegator_tier`'s doc comment for the same
+/// pattern.
+///
+/// #4497: that third element was a hardcoded `AgentTier::L0Orchestration`
+/// literal — the SECOND mechanism by which an agent could become L0, running
+/// alongside the role-derived rule every assistant already used, so
+/// `AgentInfo::tier()` and this dispatch posture disagreed about `pm`. The
+/// rule (`AgentTier::for_kind`) now recognizes the orchestrator kind itself
+/// and this branch is a thin delegation to it. For every config
+/// `resolve_agent_config` can actually return — `pm.toml` (`orchestrator`),
+/// `ctrl.toml` (`assistant`), `ctrl_default()` (`controller`) — the answer is
+/// identical to the literal it replaced. It differs only for a hand-edited
+/// config carrying a specialist role, where it now fails CLOSED to
+/// `L1Standard` instead of handing out L0 by fallthrough.
 /// `role == "assistant"` returns `(Some(taint), Some(roles),
 /// declared_tier)`: `taint` is
 /// `compose_delegation_taint(native_allow, inbound_taint).unwrap_or_default()`
@@ -602,7 +618,8 @@ pub async fn run_pm_task_with_history(
 /// `ctrl_delegate_posture_assistant_role_forwards_native_allow`,
 /// `ctrl_delegate_posture_assistant_role_always_gates_target_roles`,
 /// `ctrl_delegate_posture_orchestrator_role_reports_l0_tier`,
-/// `ctrl_delegate_posture_assistant_role_reports_its_declared_tier`.
+/// `ctrl_delegate_posture_assistant_role_reports_its_declared_tier`,
+/// `ctrl_delegate_posture_specialist_role_is_not_silently_l0`.
 fn ctrl_delegate_posture(
     role: &str,
     native_allow: Option<&[String]>,
@@ -613,8 +630,8 @@ fn ctrl_delegate_posture(
     Option<Vec<String>>,
     crate::agents::AgentTier,
 ) {
-    if role != "assistant" {
-        return (None, None, crate::agents::AgentTier::L0Orchestration);
+    if !crate::agents::delegation::is_assistant_kind(role) {
+        return (None, None, crate::agents::AgentTier::for_kind(role));
     }
     let taint =
         crate::runtime::tool_registry::compose_delegation_taint(native_allow, inbound_taint)

@@ -5,37 +5,6 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
-
-### Removed
-
-- `agents::manifest::repair_stale_tmp` ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). It derived ONE scratch path from a target (`path.with_extension("tmp")`), which only holds while staging uses a single fixed name per target. With the per-process, per-attempt scratch names below there is no such thing as "the temp path for X", so the function was a silent no-op — and it made `tm repair deploy` report removing orphans it had left on disk, because `with_extension` strips only the last dot-segment and the round-trip never reconstructed the real name. Orphan cleanup is a `*.tmp` directory scan now, which needs no target-to-temp derivation.
-
-### Fixed
-
-- `agents::deployer::retract_locked`'s corrupt-manifest error now points at a remedy that actually works for a corrupt workspace ledger: manually deleting `.claude/agents/.trusty-mpm-manifest.json` in that workspace, instead of `tm repair deploy`, which since [#4437](https://github.com/bobmatnyc/trusty-tools/pull/4437) repairs only the machine-global user-tier deploy and can never touch a per-workspace ledger. Message-only change; behavior is unaffected. (PR #4437 review comment [5137295142](https://github.com/bobmatnyc/trusty-tools/pull/4437#pullrequestreview-5137295142))
-- `agents::manifest::atomic_write` stages through a per-process, per-attempt scratch path (`<file>.<pid>.<nanos>.tmp`) instead of a fixed `<file>.tmp` sibling, and removes the scratch file on a failed write ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). A shared temp name is a corruption bug in its own right: two writers interleave into the one scratch file and `rename` publishes the mangled result — a torn manifest (surfacing as `AgentManifestCorrupt` in the spawn/resume gate) or a torn agent file. Survivable while every deploy target was per-workspace; not once the target is a single machine-global directory. Same reasoning and naming scheme `trusty_common::json_rmw` adopted after the identical fixed-`projects.json.tmp` corruption (#3502).
-- `agents::deployer` now re-deploys a corrupted bundled agent instead of freezing it as user-modified (closes [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408)). A manifest entry whose origin is framework-owned (`Origin::Bundled`, the `InstallPolicy::Overwrite` tier) is refreshed from the bundle whenever its on-disk checksum drifts — a mismatch there means corruption or drift, never user ownership. Previously ANY checksum mismatch was read as "the user edited this file", which is unrecoverable for a bundled asset: corrupt content can never checksum-match again, so a 32-byte `v1` stub that replaced the real 25KB `rust-engineer.md` was permanently misclassified as a user edit and skipped by every subsequent deploy and by `tm validate --repair`, dropping the agent from the session roster for the life of the workspace. The user-owned tier is unchanged — an untracked file, and a tracked entry with `Origin::User`/`Origin::Registry`, are still preserved byte-for-byte. Each overwrite-on-mismatch repair logs the file, the expected and found checksums, and the on-disk byte count. ([#4419](https://github.com/bobmatnyc/trusty-tools/pull/4419)) ([`e8f30ef`](https://github.com/bobmatnyc/trusty-tools/commit/e8f30ef00bb3c7636c53182e88ee8a569acd6442))
-
-### Added
-
-- `agents::deployer::retract_framework_agents` / `retract_framework_agents_filtered` — the inverse of a deploy, for a directory that is no longer a deploy destination ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). Removes exactly the manifest-tracked, framework-owned (`Origin::Bundled`) files the deployer wrote, prunes their ledger entries, and returns a `RetractResult` naming what was removed and what was preserved. A file absent from the manifest (hand-placed) is never touched, a tracked entry with a user-owned origin is kept, a corrupt manifest is an error that removes nothing, and a retraction that empties the ledger deletes the manifest (and the directory, when empty) so the location returns to pristine. Checksum drift is deliberately not consulted: on a framework-owned file that means corruption, not ownership. The `_filtered` variant takes the same stem predicate `deploy_agents_filtered` does, so an operator-named agent scope can be honored.
-- `agents::manifest::with_agent_manifest_lock` / `manifest_lock_path` — serialise a deploy directory's whole load-modify-save cycle across PROCESSES via an advisory `flock(2)` on a `.trusty-mpm-manifest.json.lock` sidecar (#4409). Needed because the agent deploy target became one machine-global directory shared by every concurrent session launch, sync-assets run, and `tm catalog apply`: two writers that each load before either saves silently drop each other's entries, and the files those lost entries described then fall into the deployer's untracked branch and are skipped from then on — #4408's freeze shape reached by a race. An in-process `Mutex` cannot help; same sidecar convention and `fd-lock` crate `trusty_common::json_rmw` uses for the identical hazard (#3502).
-- `agents::manifest::Origin::is_framework_owned` — names the two install-ownership tiers so the deployer branches on declared ownership rather than on checksum mismatch alone (#4408).
-
-### Changed
-
-<!--
-  Note: the two entries below predate 0.2.1 (they reference #1959/#1968/#1750,
-  the trusty-agents-common 0.1.3 publish) and were left stranded under a stale
-  duplicate "## [Unreleased]" heading below the 0.2.1 section for several
-  releases (issue #2793 pattern) instead of being folded into whatever version
-  actually shipped them. Merged up into this changelog's single Unreleased
-  section during the 0.4.0 bump rather than deleted, since they are real
-  historical entries, not generator noise.
--->
-- hoist compress::tool_output from trusty-agents ([#1959](https://github.com/bobmatnyc/trusty-tools/pull/1959)) ([#1968](https://github.com/bobmatnyc/trusty-tools/pull/1968)) ([`7cf93b9`](https://github.com/bobmatnyc/trusty-tools/commit/7cf93b9ab3918aff316238bdfe540a4053aa971d))
-- publish trusty-agents-common 0.1.3 + trusty-mpm 0.11.0 to crates.io ([#1750](https://github.com/bobmatnyc/trusty-tools/pull/1750)) ([`70194ec`](https://github.com/bobmatnyc/trusty-tools/commit/70194ec1788fed2e71016912dae4e062baade139))
 
 ## [0.3.0] — 2026-07-21
 

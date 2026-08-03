@@ -1129,6 +1129,7 @@ fn resolve_statusline_binary() -> String {
 /// behaviour rather than disappearing outright.
 /// Test: `resolve_statusline_binary_with_prefers_current_exe`,
 /// `resolve_statusline_binary_with_rejects_ephemeral_current_exe`,
+/// `resolve_statusline_binary_with_rejects_system_temp_current_exe`,
 /// `resolve_statusline_binary_with_falls_back_to_path_lookup`,
 /// `resolve_statusline_binary_with_falls_back_to_trusty_mpm_name`,
 /// `resolve_statusline_binary_with_falls_back_to_bare_name`.
@@ -1136,6 +1137,10 @@ pub(super) fn resolve_statusline_binary_with(
     current_exe: impl Fn() -> std::io::Result<PathBuf>,
     path_lookup: impl Fn(&str) -> Option<PathBuf>,
 ) -> String {
+    // #4485/#4492: the guard now also rejects system temp roots, so a
+    // `current_exe()` under an agent harness's temp scratchpad no longer gets
+    // persisted into `statusLine.command`. Same guard as the hooks site by
+    // design — do not add a second check here.
     if let Ok(exe) = current_exe()
         && !trusty_common::bin_resolve::is_ephemeral_build_path(&exe)
         && let Some(s) = exe.to_str()

@@ -8,15 +8,26 @@
 //! leak-safe behaviour the default rather than something each call site must
 //! remember.
 //! What: [`SecretString`] holds a `String` whose `Debug`/`Display` render the
-//! redacted preview from [`crate::inference::credentials::redact_secret`]. It
+//! redacted preview from [`crate::credentials::redact_secret`]. It
 //! does NOT derive `Serialize`, so it can never be written to the wire. The raw
 //! value is reachable only via the explicit [`SecretString::expose`] method.
+//!
+//! **Superseded by [`crate::credentials::Secret`] (#4565).** That type is the
+//! canonical credential wrapper going forward and is strictly stricter: its
+//! `Debug`/`Display` are *value-independent* (this type discloses a
+//! four-character head preview, which does not meet DOC-45 `C-8.2`'s "contains
+//! no substring of the wrapped value"), and it implements neither `Clone` nor
+//! `Deserialize`. `SecretString` cannot simply become an alias for it: the
+//! inference stack relies on `Clone`/`PartialEq`, and the preview shape is
+//! pinned by this module's own `secret_debug_is_redacted`. Collapsing the two
+//! is therefore a deliberate follow-up, not a side effect of #4565.
+//! [`SecretString::into_secret`] is the one-line migration.
 //! Test: inline `tests` — `secret_debug_is_redacted`, `secret_display_is_redacted`,
-//! `secret_expose_returns_raw`.
+//! `secret_expose_returns_raw`, `secret_string_converts_to_the_canonical_secret`.
 
 use std::fmt;
 
-use crate::inference::credentials::redact_secret;
+use crate::credentials::{Secret, redact_secret};
 
 /// A string credential that redacts itself in `Debug`/`Display`.
 ///
@@ -51,6 +62,18 @@ impl SecretString {
     /// Test: `secret_expose_returns_raw`.
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// Convert into the canonical [`Secret`] wrapper (#4565).
+    ///
+    /// Why: the migration path off this type. `Secret<String>` is strictly
+    /// stricter — value-independent rendering, no `Clone`, no `Deserialize` —
+    /// so this conversion only ever tightens the guarantees; there is
+    /// deliberately no conversion in the other direction.
+    /// What: moves the wrapped string into a `Secret`.
+    /// Test: `secret_string_converts_to_the_canonical_secret`.
+    pub fn into_secret(self) -> Secret<String> {
+        Secret::new(self.0)
     }
 }
 
@@ -110,5 +133,26 @@ mod tests {
     fn secret_expose_returns_raw() {
         let s = SecretString::new("raw-key"); // pragma: allowlist secret
         assert_eq!(s.expose(), "raw-key");
+    }
+
+    /// Why: the migration path off this type must be lossless, and the
+    /// conversion must actually *tighten* the rendering — the head preview this
+    /// type discloses (see `secret_debug_is_redacted` above) must be gone once
+    /// the value is in a `Secret`.
+    /// Test: itself.
+    #[test]
+    fn secret_string_converts_to_the_canonical_secret() {
+        let s = SecretString::new("sk-or-verysecretvalue1234"); // pragma: allowlist secret
+        let leaky = format!("{s:?}");
+        assert!(
+            leaky.contains("sk-o"),
+            "precondition: this type leaks a head"
+        );
+
+        let tightened = s.into_secret();
+        assert_eq!(tightened.expose(), "sk-or-verysecretvalue1234");
+        let rendered = format!("{tightened:?} {tightened}");
+        assert!(!rendered.contains("sk-o"), "head survived: {rendered}");
+        assert!(!rendered.contains("verysecretvalue"), "leaked: {rendered}");
     }
 }

@@ -21,7 +21,7 @@
 
 use axum::Json;
 use serde::Serialize;
-use trusty_common::inference::credentials::resolve_key;
+use trusty_common::credentials::resolve_key;
 use trusty_common::inference::registry::{self, ProviderId};
 
 /// One provider entry in the `/api/models` catalog.

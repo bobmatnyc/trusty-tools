@@ -102,23 +102,34 @@ fn build_system_prompt_includes_trusty_block() {
 
 #[test]
 fn build_system_prompt_for_applies_project_override() {
-    // Why: the live launch prompt must reflect a project-level override file
-    // under `<project>/.trusty-mpm/` (issue #381), while still appending the
-    // non-overridable BASE_PM floor.
+    // Why: the live launch prompt must reflect the project's customization
+    // (issue #381 — an advertised override that no code reads), while still
+    // appending the non-overridable floor.
+    //
+    // #4286: the customization surface is a CLAUDE.md named section. The
+    // `.trusty-mpm/INSTRUCTIONS.md` file this used to write is retired, and the
+    // second half of this test now asserts it has no effect.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let override_dir = project.join(".trusty-mpm");
-    std::fs::create_dir_all(&override_dir).unwrap();
     std::fs::write(
-        override_dir.join("INSTRUCTIONS.md"),
-        "PROJECT_OVERRIDE_MARKER\n",
+        project.join("CLAUDE.md"),
+        "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+         PROJECT_OVERRIDE_MARKER\n\
+         <!-- TRUSTY-MPM: WORKFLOW END -->\n",
     )
     .unwrap();
+    // Present, and required to make no difference.
+    let override_dir = project.join(".trusty-mpm");
+    std::fs::create_dir_all(&override_dir).unwrap();
+    std::fs::write(override_dir.join("INSTRUCTIONS.md"), "RETIRED_MARKER\n").unwrap();
 
     let prompt = build_system_prompt_for(project);
     assert!(prompt.contains("PROJECT_OVERRIDE_MARKER"));
-    assert!(prompt.contains("# BASE_PM Framework Floor"));
-    // Bundled PM body is still present (INSTRUCTIONS.md is additive).
+    assert!(
+        !prompt.contains("RETIRED_MARKER"),
+        "the retired .trusty-mpm/INSTRUCTIONS.md must not reach the launch prompt"
+    );
+    assert!(prompt.contains("# Framework Instructions"));
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
 
@@ -130,7 +141,7 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     let prompt = build_system_prompt_for(tmp.path());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));
-    let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+    let base = prompt.find("# Framework Instructions").expect("base");
     let deleg = prompt.find("# Agent Delegation Routing").expect("deleg");
     assert!(base > deleg, "BASE_PM floor must be last");
 }
@@ -168,11 +179,14 @@ fn prepare_session_stash_reflects_override() {
         let project = tmp.path();
         let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-        let override_dir = project.join(".trusty-mpm");
-        std::fs::create_dir_all(&override_dir).unwrap();
+        // #4286: the override arrives as a CLAUDE.md named section. The
+        // retired `.trusty-mpm/WORKFLOW.md` this used to write is no longer
+        // read, so it could not produce an override to observe.
         std::fs::write(
-            override_dir.join("WORKFLOW.md"),
-            "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
+            project.join("CLAUDE.md"),
+            "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+             # Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n\
+             <!-- TRUSTY-MPM: WORKFLOW END -->\n",
         )
         .unwrap();
 
@@ -182,14 +196,14 @@ fn prepare_session_stash_reflects_override() {
 
         assert!(
             stash.contains("STASH_OVERRIDE_MARKER"),
-            "stash must reflect the WORKFLOW.md override (native_supported={native_supported})"
+            "stash must reflect the CLAUDE.md WORKFLOW override (native_supported={native_supported})"
         );
         assert!(
             !stash.contains("# PM Workflow Configuration"),
             "bundled workflow heading must be replaced in the stash (native_supported={native_supported})"
         );
         assert!(
-            stash.contains("# BASE_PM Framework Floor"),
+            stash.contains("# Framework Instructions"),
             "stash must still carry the BASE_PM floor (native_supported={native_supported})"
         );
         // The CORE INVARIANT: the persisted stash must equal the exact prompt the
@@ -2238,6 +2252,38 @@ fn resolve_statusline_binary_with_rejects_ephemeral_current_exe() {
     assert_eq!(
         resolved, "/opt/homebrew/bin/tm",
         "an ephemeral current_exe must be rejected in favour of the PATH-resolved install"
+    );
+}
+
+/// Why (#4492, same root cause as #4485): `statusLine.command` is resolved by
+/// this function, and the #2229 ephemeral guard it consults knew only about
+/// build/worktree layouts. A `current_exe()` under the agent harness's temp
+/// scratchpad therefore passed as "stable" and was persisted, leaving
+/// `statusLine.command` pointing at a dead libtest harness. Only the hooks call
+/// site had coverage for this, which is why the statusline path regressed
+/// independently.
+/// What: injects each system-temp `current_exe()` shape and asserts the
+/// PATH-resolved install wins instead.
+#[test]
+fn resolve_statusline_binary_with_rejects_system_temp_current_exe() {
+    let leaked: Vec<String> = [
+        PathBuf::from("/private/tmp/claude-502/-Users-x-proj/9f1c/scratchpad/base-bins/tm"),
+        PathBuf::from("/tmp/tm"),
+        std::env::temp_dir().join("claude-4485/base-bins/tm"),
+    ]
+    .into_iter()
+    .map(|exe| {
+        resolve_statusline_binary_with(
+            move || Ok(exe.clone()),
+            |_name| Some(PathBuf::from("/opt/homebrew/bin/tm")),
+        )
+    })
+    .filter(|resolved| resolved != "/opt/homebrew/bin/tm")
+    .collect();
+    assert!(
+        leaked.is_empty(),
+        "a system temp current_exe must be rejected in favour of the PATH-resolved install \
+         (#4492), but these were persisted verbatim: {leaked:#?}"
     );
 }
 
