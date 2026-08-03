@@ -455,7 +455,11 @@ async fn top_degree_subgraph_ranks_by_degree() {
     let (_dir, kg) = explore_fixture().await;
     let (nodes, _) = kg.top_degree_subgraph(3).unwrap();
     let names: Vec<&str> = nodes.iter().map(|n| n.entity.as_str()).collect();
-    assert_eq!(names, vec!["hub", "a", "b"], "seed must rank by degree desc");
+    assert_eq!(
+        names,
+        vec!["hub", "a", "b"],
+        "seed must rank by degree desc"
+    );
     assert_eq!(nodes[0].degree, 5);
     assert_eq!(nodes[0].out_degree, 3);
     assert_eq!(nodes[0].in_degree, 2);
@@ -474,8 +478,7 @@ async fn top_degree_subgraph_ranks_by_degree() {
 async fn top_degree_subgraph_returns_only_induced_edges() {
     let (_dir, kg) = explore_fixture().await;
     let (nodes, triples) = kg.top_degree_subgraph(3).unwrap();
-    let seed: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.entity.as_str()).collect();
+    let seed: std::collections::HashSet<&str> = nodes.iter().map(|n| n.entity.as_str()).collect();
     assert_eq!(triples.len(), 3, "expected the 3 induced edges");
     for t in &triples {
         assert!(seed.contains(t.subject.as_str()), "dangling subject {t:?}");
@@ -519,11 +522,8 @@ async fn top_degree_subgraph_limit_above_graph_size_returns_all() {
 async fn expand_neighbors_in_returns_incoming_only() {
     use super::explore::ExpandDirection;
     let (_dir, kg) = explore_fixture().await;
-    let (nodes, triples) = kg
-        .expand_neighbors("hub", ExpandDirection::In, 1)
-        .unwrap();
-    let names: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.entity.as_str()).collect();
+    let (nodes, triples) = kg.expand_neighbors("hub", ExpandDirection::In, 1).unwrap();
+    let names: std::collections::HashSet<&str> = nodes.iter().map(|n| n.entity.as_str()).collect();
     assert_eq!(names, ["hub", "s1", "s2"].into_iter().collect());
     assert_eq!(triples.len(), 2);
     for t in &triples {
@@ -538,11 +538,8 @@ async fn expand_neighbors_in_returns_incoming_only() {
 async fn expand_neighbors_out_returns_outgoing_only() {
     use super::explore::ExpandDirection;
     let (_dir, kg) = explore_fixture().await;
-    let (nodes, triples) = kg
-        .expand_neighbors("hub", ExpandDirection::Out, 1)
-        .unwrap();
-    let names: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.entity.as_str()).collect();
+    let (nodes, triples) = kg.expand_neighbors("hub", ExpandDirection::Out, 1).unwrap();
+    let names: std::collections::HashSet<&str> = nodes.iter().map(|n| n.entity.as_str()).collect();
     assert_eq!(names, ["hub", "a", "b", "c"].into_iter().collect());
     assert_eq!(triples.len(), 3);
     for t in &triples {
@@ -563,15 +560,17 @@ async fn expand_neighbors_both_returns_union() {
     let (nodes, triples) = kg
         .expand_neighbors("hub", ExpandDirection::Both, 1)
         .unwrap();
-    let names: std::collections::HashSet<&str> =
-        nodes.iter().map(|n| n.entity.as_str()).collect();
+    let names: std::collections::HashSet<&str> = nodes.iter().map(|n| n.entity.as_str()).collect();
     assert_eq!(
         names,
         ["hub", "a", "b", "c", "s1", "s2"].into_iter().collect()
     );
     assert_eq!(triples.len(), 5);
     let hub = nodes.iter().find(|n| n.entity == "hub").unwrap();
-    assert_eq!(hub.degree, 5, "degree must be graph-wide, not fragment-wide");
+    assert_eq!(
+        hub.degree, 5,
+        "degree must be graph-wide, not fragment-wide"
+    );
     // The origin is always first so the client can anchor new nodes on it.
     assert_eq!(nodes[0].entity, "hub");
 }
@@ -584,20 +583,14 @@ async fn expand_neighbors_both_returns_union() {
 async fn expand_neighbors_respects_max_hops() {
     use super::explore::ExpandDirection;
     let (_dir, kg) = explore_fixture().await;
-    let (n1, t1) = kg
-        .expand_neighbors("hub", ExpandDirection::Out, 1)
-        .unwrap();
-    let (n2, t2) = kg
-        .expand_neighbors("hub", ExpandDirection::Out, 2)
-        .unwrap();
+    let (n1, t1) = kg.expand_neighbors("hub", ExpandDirection::Out, 1).unwrap();
+    let (n2, t2) = kg.expand_neighbors("hub", ExpandDirection::Out, 2).unwrap();
     assert_eq!(t1.len(), 3);
     assert_eq!(t2.len(), 4, "2 hops must additionally discover a→b");
     assert_eq!(n1.len(), 4);
     assert_eq!(n2.len(), 4);
 
-    let (n0, t0) = kg
-        .expand_neighbors("hub", ExpandDirection::Out, 0)
-        .unwrap();
+    let (n0, t0) = kg.expand_neighbors("hub", ExpandDirection::Out, 0).unwrap();
     assert!(n0.is_empty() && t0.is_empty(), "0 hops must expand nothing");
 }
 

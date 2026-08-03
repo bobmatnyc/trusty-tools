@@ -179,7 +179,8 @@ impl MemoryService {
     /// Top-`limit` nodes by degree plus the edges among them (issue #4670).
     ///
     /// Why: first paint must show the graph's skeleton, not 9,311 nodes in an
-    /// O(n²) layout. 91.8% of a real palace's nodes are degree-1 leaves, so a
+    /// O(n²) layout. Measured on the live 8,266-triple palace, 90.2% of nodes
+    /// are degree-1 leaves and only 7.2% have degree >= 5, so a
     /// top-degree slice carries essentially all of the visible structure and
     /// everything else stays one click away.
     /// What: runs [`KnowledgeGraph::top_degree_subgraph`] over the resident

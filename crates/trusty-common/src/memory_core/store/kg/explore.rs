@@ -13,7 +13,8 @@
 //! `(Vec<SeedNode>, Vec<Triple>)` so every progressive response has the exact
 //! same wire shape as the existing full-graph payload's `triples` array — the
 //! client merges them without a second code path.
-//! Test: `explore_tests` in `kg/tests.rs`.
+//! Test: `top_degree_subgraph_ranks_by_degree`,
+//! `expand_neighbors_both_returns_union` (and siblings) in `kg/tests.rs`.
 
 use super::graph::KnowledgeGraph;
 use super::types::Triple;
@@ -71,11 +72,19 @@ pub struct SeedNode {
 impl KnowledgeGraph {
     /// Return the `limit` highest-degree entities plus every edge *among* them.
     ///
-    /// Why (issue #4670): 91.8% of nodes in a real palace are degree-1 leaves;
-    /// only ~7% have degree >= 5. Rendering all 9,311 nodes buries the
-    /// structure in a hairball and freezes the O(n²) layout. The top-degree
-    /// slice is the graph's skeleton — it is what an operator actually wants
-    /// on first paint, and everything else is reachable from it by expansion.
+    /// Why (issue #4670): measured on the live 8,266-triple palace, 90.2% of
+    /// nodes are degree-1 leaves and only 7.2% have degree >= 5. Rendering all
+    /// 9,311 nodes buries the structure in a hairball and freezes the O(n²)
+    /// layout. The top-degree slice is the graph's skeleton — it is what an
+    /// operator actually wants on first paint, and everything else is
+    /// reachable from it by expansion.
+    ///
+    /// Caveat worth knowing: on a palace that is a STAR FOREST (the live
+    /// trusty-tools palace is — only 0.48% of its edges join two nodes of
+    /// degree >= 2) the top-degree nodes are pairwise unconnected, so the
+    /// induced edge set is legitimately empty. That is a true statement about
+    /// the data, not a bug here; the graph view detects it and auto-expands
+    /// the top node so first paint is not a field of disconnected dots.
     /// What: one pass over `node_indices` to score degree, a sort by
     /// `(degree desc, name asc)` — the name tie-break keeps the response
     /// deterministic across calls so the client's layout is stable — then a
@@ -96,7 +105,8 @@ impl KnowledgeGraph {
             .read()
             .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
 
-        let mut scored: Vec<(NodeIndex<u32>, SeedNode)> = Vec::with_capacity(adj.graph.node_count());
+        let mut scored: Vec<(NodeIndex<u32>, SeedNode)> =
+            Vec::with_capacity(adj.graph.node_count());
         for idx in adj.graph.node_indices() {
             let Some(name) = adj.graph.node_weight(idx) else {
                 continue;
@@ -260,7 +270,8 @@ impl KnowledgeGraph {
 /// `/kg/graph` `triples` array and the UI needs no second parser.
 /// What: copies predicate / confidence / provenance / validity off the
 /// `KgEdge` and pairs it with the supplied subject and object names.
-/// Test: covered by every `explore_tests` assertion on returned triples.
+/// Test: `top_degree_subgraph_returns_only_induced_edges` asserts the
+/// reassembled endpoints; every neighbors test asserts the metadata.
 fn triple_from_edge(subject: &str, object: &str, edge: &super::types::KgEdge) -> Triple {
     Triple {
         subject: subject.to_string(),
@@ -274,11 +285,7 @@ fn triple_from_edge(subject: &str, object: &str, edge: &super::types::KgEdge) ->
 }
 
 /// Push `t` only when its `(subject, predicate, object)` identity is new.
-fn push_unique(
-    out: &mut Vec<Triple>,
-    seen: &mut HashSet<(String, String, String)>,
-    t: Triple,
-) {
+fn push_unique(out: &mut Vec<Triple>, seen: &mut HashSet<(String, String, String)>, t: Triple) {
     let key = (t.subject.clone(), t.predicate.clone(), t.object.clone());
     if seen.insert(key) {
         out.push(t);

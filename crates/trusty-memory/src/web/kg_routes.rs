@@ -346,7 +346,7 @@ pub(crate) use crate::service::{KgNeighborsPayload, KgSeedPayload};
 /// (~555K total) — imperceptible; at the palace's full 9,311 nodes it is ~43M
 /// per tick (~8.7B total), which is the freeze this endpoint exists to avoid.
 /// 75 sits deliberately above the sibling list endpoints' 50: measured degree
-/// distribution on a real palace is 91.8% degree-1 leaves with top degrees of
+/// distribution on the live palace is 90.2% degree-1 leaves with top degrees of
 /// 48/46/45/44/32, so a 50-node seed stops right where the mid-tier hubs
 /// (degree 5–10, ~7% of nodes) begin. 75 reaches into that tier while leaving
 /// ~2.5× headroom under the max before layout cost becomes noticeable, so a

@@ -394,10 +394,7 @@ async fn kg_graph_meets_perf_budget_for_500_triples() {
 /// `s2`) → degree 5. `a→b` gives `a` and `b` degree 2 each. Every other node
 /// is degree 1. Each subject needs distinct predicates because the adjacency
 /// keeps at most one active edge per `(subject, predicate)`.
-async fn seed_explore_palace(
-    state: &crate::AppState,
-    name: &str,
-) -> axum::Router {
+async fn seed_explore_palace(state: &crate::AppState, name: &str) -> axum::Router {
     let app = router().with_state(state.clone());
     let resp = app
         .clone()
@@ -525,7 +522,10 @@ async fn kg_graph_seed_clamps_limit() {
         app.clone(),
     )
     .await;
-    assert_eq!(lo["limit"], 1, "limit=0 must clamp to 1, not mean unbounded");
+    assert_eq!(
+        lo["limit"], 1,
+        "limit=0 must clamp to 1, not mean unbounded"
+    );
     assert_eq!(lo["nodes"].as_array().unwrap().len(), 1);
 
     let def = get("/api/v1/palaces/kg-seed-clamp/kg/graph/seed", app).await;
@@ -635,7 +635,10 @@ async fn kg_neighbors_clamps_max_hops() {
         app.clone(),
     )
     .await;
-    assert_eq!(lo["max_hops"], 1, "max_hops=0 must clamp to 1, not expand nothing");
+    assert_eq!(
+        lo["max_hops"], 1,
+        "max_hops=0 must clamp to 1, not expand nothing"
+    );
     assert!(lo["returned_triple_count"].as_u64().unwrap() > 0);
 
     let one = fetch(
@@ -708,7 +711,10 @@ async fn kg_graph_signals_truncation() {
     let _app = seed_explore_palace(&state, "kg-trunc").await;
     let svc = crate::service::MemoryService::new(state);
 
-    let capped = svc.kg_graph_with_cap("kg-trunc", 3).await.expect("kg_graph");
+    let capped = svc
+        .kg_graph_with_cap("kg-trunc", 3)
+        .await
+        .expect("kg_graph");
     assert_eq!(capped.triples.len(), 3);
     assert_eq!(capped.returned_triple_count, 3);
     assert_eq!(
@@ -729,5 +735,8 @@ async fn kg_graph_signals_truncation() {
         .expect("kg_graph");
     assert_eq!(whole.returned_triple_count, 6);
     assert_eq!(whole.active_triple_count, 6);
-    assert!(!whole.truncated, "a complete payload must not claim truncation");
+    assert!(
+        !whole.truncated,
+        "a complete payload must not claim truncation"
+    );
 }
