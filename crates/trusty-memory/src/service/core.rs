@@ -307,6 +307,9 @@ impl MemoryService {
         // in-memory state. The registry's `remove` is a no-op when the entry
         // is absent (lazy-open palaces that no caller has touched yet).
         self.state.registry.remove(&PalaceId::new(palace_id));
+        // #4639: drop the cached chat_sessions.redb handle too — otherwise the
+        // fd survives `remove_dir_all` and pins the deleted inode forever.
+        self.state.session_stores.remove(palace_id);
         // Issue #228: drop the palace-name cache entry so future writes never
         // resolve to a stale label.
         self.state.palace_names.remove(palace_id);
