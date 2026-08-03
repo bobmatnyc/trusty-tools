@@ -13,7 +13,8 @@ spec_refs:
 
 # DOC-63 — OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary
 
-**Status:** Draft
+**Status:** Accepted — all three §14 open questions resolved by owner decision
+2026-08-03 (see §14); landed 2026-08-01 (#4530).
 **Spec ID:** `SPEC-OKGSRC-01~draft` … `SPEC-OKGSRC-14~draft` (DOC-63)
 **Subsystem:** trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credentials consumption, Knowledge config pane; trusty-kb — `okg` engine (ledger, registry, entity tree); trusty-search — index over the store
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
@@ -1554,6 +1555,10 @@ construction; each still a capability grant.
 
 ## 14. Open Questions for the Owner
 
+**All three forks below (Q1–Q3) RESOLVED by owner decision 2026-08-03 —
+recorded inline against each question, not deleted, so the reasoning trail
+survives.**
+
 Genuine forks only. Each states what stays blocked until answered.
 
 **Resolved since the first draft, recorded so they are not re-opened:** the
@@ -1598,6 +1603,13 @@ an issue-level decision (as #4406 itself suggests).
 **Blocked until answered:** nothing in this epic — every ticket here names the OKF
 store. What stays blocked is #4406's own closure, and any work bridging the two.
 
+**RESOLVED (owner decision, 2026-08-03):** keep both, separate jobs. The OKF
+store is knowledge built from sources; trusty-memory's KG is structured
+recall. They remain independent with no bridge. This is the status quo made
+deliberate: no feed direction is defined, and any future feature must state
+explicitly which of the two it writes to. The accepted consequence: the KG
+stays underused.
+
 ### Q2 — Do you accept the residual prompt-injection risk in §6.5?
 
 With the §5 boundary implemented, an assistant may still be influenced by
@@ -1615,6 +1627,12 @@ answered:** Phase D in its entirety. This is flagged for explicit sign-off rathe
 than absorbed as a design assumption, because it is a security acceptance and
 those belong to you.
 
+**RESOLVED (owner decision, 2026-08-03):** accepted, on the stated condition —
+Phase A lands before Phase D, and every new source type is reviewed as a
+capability grant. This condition is **binding, not advisory**: Phase D
+(slack-sent, slack-channel, notion, granola) does not start until Phase A has
+landed.
+
 ### Q3 — Should scheduled refresh be a listener, or its own runner?
 
 §8.3 recommends **its own runner**, reusing `listeners::poll`'s *pattern*
@@ -1628,6 +1646,10 @@ wakes nobody.
 **Blocked until answered:** Phase B's runner ticket. Lower stakes than Q1–Q2 —
 recorded because it is a structural choice a reviewer could reasonably reverse,
 not because the recommendation is weak.
+
+**RESOLVED (owner decision, 2026-08-03):** its own runner, reusing the
+`listeners::poll` pattern but not its module, per the recommendation. Unblocks
+Phase B's runner ticket.
 
 ---
 
