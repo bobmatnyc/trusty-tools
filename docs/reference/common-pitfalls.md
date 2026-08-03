@@ -8,7 +8,7 @@ silent behavioral drift emerges. Before writing `Command::new(...)`, `reqwest::C
 `std::env::var()` for a concern used in multiple crates, search for an existing
 entry point (`git grep`, then trusty-common source tree) and extend it. See the
 common-entry-point principle and domain consolidation audit in
-[.trusty-mpm/INSTRUCTIONS.md](../../.trusty-mpm/INSTRUCTIONS.md).
+[CLAUDE.md](../../CLAUDE.md).
 
 🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
 it violates the project's hard rule. Use `?` with `thiserror` error types in
@@ -56,10 +56,12 @@ them. All patches must live in the root `Cargo.toml`.
 🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
 not stop you, but continued feature additions make the module harder to review,
 reason about, and test. Split proactively. The applicable cap is **500 SLOC for
-production files** and **1500 SLOC for test/benchmark files** (see the Key
-Conventions section for the exact classification rules). SLOC counts code lines
-only: blank lines, `//` comments, `///` doc comments, `//!` inner-doc comments,
-and `/* ... */` block comments (including multi-line spans) are all excluded.
+production files** and **3000 SLOC for test/benchmark files** (see CLAUDE.md's
+Key Conventions section for the exact classification rules, and
+[docs/reference/sloc-cap.md](sloc-cap.md) for the counting definition and ratchet
+mechanics). SLOC counts code lines only: blank lines, `//` comments, `///` doc
+comments, `//!` inner-doc comments, and `/* ... */` block comments (including
+multi-line spans) are all excluded.
 The trusty-agents `ctrl/`, `runtime/`, and `workflow/engine/` modules (#170,
 #171, #172) were the canonical examples of files that grew past the prod cap;
 all three have since been split into focused submodules and now serve as the

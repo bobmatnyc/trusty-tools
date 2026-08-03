@@ -159,7 +159,7 @@ changelog requirement), `sld-lint.yml`, `doc-numbers.yml`, `test-pointers.yml`,
 `capabilities-drift.yml`, `version-parity.yml`, `cargo-audit.yml`,
 `generation-artifact-lint.yml`, `agent-assets.yml`), GitHub branch protection
 and required reviews on `main`, and the trusty-review gate in the delivery
-chain (`.trusty-mpm/INSTRUCTIONS.md:575`).
+chain (`CLAUDE.md:493`).
 
 The distinguishing test is **who renders the verdict**. If the delegated task
 renders it, it is ceremony. If something outside the delegated task renders
@@ -786,7 +786,7 @@ consumes them.
 - [DOC-61](./DOC-61-canonical-agent-standard.md) §4 — source model vs per-product builder; §9 declarative-agents-only.
 - [`docs/trusty-code/vision-and-architecture-spec.md`](../trusty-code/vision-and-architecture-spec.md) §5.10, §10 D3 — Execution Patterns; the `HarnessMode` non-conflation rule.
 - [`docs/research/quality-gates-agent-prs-article-2026-04.md`](../research/quality-gates-agent-prs-article-2026-04.md) — risk-weighted routing; the author-tags finding cited in §5.4.
-- [`.trusty-mpm/INSTRUCTIONS.md`](../../.trusty-mpm/INSTRUCTIONS.md) — the delivery chain and the repository's own gate list.
+- [`CLAUDE.md`](../../CLAUDE.md) — the delivery chain and the repository's own gate list.
 
 ### 10.2 Change log
 

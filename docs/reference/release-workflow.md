@@ -168,6 +168,26 @@ to regenerate the ad-hoc signature against the final file.
 
 ## Developer ID Signing for Persistent macOS TCC Grants (fixes #873, #2558)
 
+### TCC Scope Summary — read this before re-granting anything
+
+🟢 **Full Disk Access scope: `trusty-search` and external-volume daemons
+only.** `trusty-mpm` / `tm` does **NOT** require FDA re-granting — the daemon
+manages tmux sessions and git worktrees under `$HOME` only and never reads
+TCC-protected or external (`/Volumes/…`) paths. `trusty-memory` and
+`trusty-analyze` read `$HOME` locations only and also do NOT require FDA.
+
+🟢 **App Data TCC scope: `trusty-mpm` IS in scope — a *different* category
+than FDA above** (owner-authorized extension, #2558, 2026-07-14). `tm` reads
+other apps' `$HOME` containers (Claude config dirs, tmux state), so macOS
+re-prompts `'trusty-mpm' would like to access data from other apps` after
+every ad-hoc-signed rebuild, for the same cdhash-identity reason FDA does.
+
+**Do not cross the two:** granting `trusty-search` Full Disk Access does
+nothing for the `trusty-mpm` App-Data prompt, and `trusty-mpm` never needs —
+and should never be granted — Full Disk Access. Re-signing with a stable
+Developer-ID identity (below) fixes both categories permanently, each for
+the binary that actually needs it.
+
 ### The Problem
 
 `cargo install` produces a new binary with a new **cdhash** every time it
@@ -470,6 +490,33 @@ xcrun stapler staple ~/.cargo/bin/trusty-search
 > Gatekeeper when the binary first runs on the target machine. For local use
 > (your own machine), notarization adds no benefit; Developer ID signing alone
 > is sufficient for FDA persistence.
+
+## Connection-Safe Daemon Restart (issue #534)
+
+As of trusty-common 0.10.0, all four HTTP daemons (trusty-memory, trusty-search,
+trusty-analyze, trusty-mpm) implement graceful shutdown: they drain in-flight
+requests before exiting when they receive SIGTERM. The `serve --stdio` proxy
+reconnects automatically with exponential backoff when the daemon restarts (the
+`trusty-memory-mcp-bridge` binary is a deprecated shim that forwards to
+`serve --stdio`; update your `.mcp.json` to `"command": "trusty-memory", "args":
+["serve", "--stdio"]`).
+
+**Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
+
+```bash
+# Graceful stop → install → restart
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+cargo install --path crates/<dir> --locked
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+# Re-grant Full Disk Access only for trusty-search (and other external-volume
+# daemons) — see the TCC Scope Summary above. trusty-mpm never needs FDA.
+```
+
+For verifying the restart actually took (a 200 `GET /health` is not sufficient
+evidence, `PPID == 1` is not evidence of supervision, and the orphan-listener
+check to run before `bootout`), see the FDA-grant restart playbook above under
+[One-Time FDA Grant](#one-time-fda-grant-after-first-signed-install) — the
+same verification steps apply regardless of which daemon you restarted.
 
 ## Version Management
 

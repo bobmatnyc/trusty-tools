@@ -164,54 +164,14 @@ results, and agent-to-PM reporting keeps raw output in all cases
 
 ### Baseline failures — the Rust specifics
 
-The six-step baseline-failure protocol (establish whose red it is, fix if
-branch-caused, append to the canonical issue if tracked, one canonical issue if
-not, and the literal report string) lives in `tm-pr-workflow`. It is **not**
-restated here. What follows is only what that generic version cannot carry.
-
-**Known-environmental on this machine — expect these, do not re-file them:**
-
-| Gate | Where | Why it fails independent of your branch |
-|---|---|---|
-| The `trusty-search` filesystem-watcher tests (~6; the set drifts) | `crates/trusty-search/src/service/watch_loop.rs`, `watcher.rs`, `watcher_manager.rs` | FSEvents delivery on this host is nondeterministic. They fail on any branch, and they still fail under `-- --test-threads=1` — so it is the machine, not parallel-test load |
-| `execute_doctor_against_test_daemon` | `crates/trusty-mpm/src/client/executor/tests.rs` | It takes 9–13 s against a 10 s client timeout, so it loses on timing alone under any load |
-
-🔴 **The correct response is to prove your diff touches zero files in those
-crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
-path list, and empty output is the evidence; paste it in the PR:
-
-```bash
-git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
-                                           crates/trusty-mpm/src/client/
-```
-
-**Telling a pre-existing red from one you caused — crate-scoped confirmation:**
-
-1. **Re-run the failure alone on your branch**, not the whole suite:
-   `cargo test -p <crate> <test> -- --exact --nocapture`. A single named test
-   removes ordering and load from the picture.
-2. **Run the identical command against `origin/main` in a second worktree** —
-   never by mutating the main checkout, and never with `git stash`:
-   ```bash
-   git worktree add .claude/worktrees/baseline-<n> origin/main
-   cd .claude/worktrees/baseline-<n> && cargo test -p <crate> <test> -- --exact
-   ```
-   Failing on both is the evidence that the branch did not cause it.
-3. **Serialize before blaming isolation:** `-- --test-threads=1`. If it still
-   fails serialized, parallel interference is not the explanation and "flaky
-   under load" is the wrong diagnosis.
-4. **Check the path evidence:** `git diff --name-only origin/main...HEAD`. If the
-   failing crate does not appear there, and you did not touch a shared library it
-   depends on, the red is not yours.
-5. 🔴 **The shared-crate caveat:** a green `cargo test -p <your-crate>` does
-   **not** clear you when you changed `trusty-common`, `trusty-embedderd`, or any
-   other shared library. A red in a *dependent* crate is yours until rung 4 of
-   the ladder above says otherwise. This is the one case where scoping down is
-   the wrong instinct.
-
-Report it in the shape `tm-pr-workflow` mandates, naming the crate-scoped gate:
-`change-specific gates pass; cargo test -p trusty-search blocked by canonical
-issue #N`. Never "all tests pass" while a gate is red, whoever caused it.
+🔴 **Never turn a red gate green by `#[ignore]`-ing, `cfg`-gating, or
+`--exclude`-ing a failing test** — prove your diff touches zero files in the
+failing crate instead (`git diff --name-only origin/main...HEAD -- <crate>/`).
+For the known-environmental flaky tests on this machine (the `trusty-search`
+filesystem-watcher tests, `execute_doctor_against_test_daemon`'s timing), the
+five-step protocol for telling a pre-existing red from one you caused, and the
+exact report-string format: see
+[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 ## Key Conventions
 
@@ -293,65 +253,15 @@ A file is classified as a **test/benchmark file** when ANY of these match:
 
 All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 
-As of issue #610 the production cap is no longer advice: it is gated by
-`scripts/check_line_cap.sh`, wired into CI (`.github/workflows/line-cap.yml`)
-and the local pre-commit hook (`line-cap`). A new tracked production `.rs` file
-over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 3000 SLOC
-**cannot merge**. Files approaching their limit are a signal to split into
-focused submodules before the next feature lands on them. When splitting, prefer:
-one public module per logical concept, a thin `mod.rs` that re-exports, and
-sibling files with clear single responsibilities.
-
-**SLOC definition:** a line counts only when it contains non-whitespace source
-code after all comment matter is stripped. These are **excluded** from the count:
-- blank / whitespace-only lines
-- `//` line comments (including `///` doc comments and `//!` inner-doc comments)
-- `/* ... */` block comments — including multi-line spans; every line inside an
-  open block comment is excluded
-- lines that consist entirely of a closing `*/`
-
-A line that has code followed by a trailing `// comment` **still counts** — it
-has code. The counter is a pragmatic awk heuristic that errs toward leniency:
-edge cases (e.g. `//` inside a string literal) may undercount SLOC but will
-never falsely fail a legitimate file.
-
-**The ratchet (allowlist that can only shrink):** grandfathered files over their
-applicable cap are listed in `.line-cap-allowlist.tsv` (one
-`relative/path<TAB>budget` line each, where `budget` is that file's frozen max
-SLOC count). The gate enforces per-applicable-cap ratchet semantics:
-
-- SLOC ≤ applicable cap and **not** allowlisted → OK;
-- SLOC > applicable cap and **not** allowlisted → **FAIL** (new oversized file — split it);
-- allowlisted, current SLOC **exceeds its budget** → **FAIL** (it grew — split it);
-- allowlisted, current SLOC **≤ applicable cap** → **FAIL** (drop the entry; ratchet-down forcing function);
-- allowlisted, `applicable_cap < SLOC ≤ budget` → OK (grandfathered, not growing).
-
-So allowlisted files may only shrink, and no new oversized file may be added.
-As the #607 sweep and per-crate refactors land, the allowlist ratchets down
-toward empty.
-
-**Run it locally:** `bash scripts/check_line_cap.sh` (exit 0 = clean). After you
-intentionally split a file (or a file otherwise drops below its budget), refresh
-the frozen budgets with `scripts/check_line_cap.sh --update` — this only *lowers*
-budgets or *removes* entries that fell ≤ their applicable cap; it **refuses** to
-add a new oversized file or raise a budget unless you pass `--seed` (initial
-bootstrap) or `--force-add` (rare, intentional bump). Commit the regenerated
-`.line-cap-allowlist.tsv` alongside your split.
-
-Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
-landed — all three former monoliths are now under the 500-SLOC cap):
-- `crates/trusty-agents/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
-  submodules under `crates/trusty-agents/src/ctrl/` (`state`, `config`, `repl`,
-  `handlers`, `pm_task`, …); `mod.rs` is now a ~50-line re-export facade.
-- `crates/trusty-agents/src/runtime/` — RESOLVED (#171). The original `runtime.rs`
-  was split into a `runtime/` module; every submodule is now under the cap.
-- `crates/trusty-agents/src/workflow/engine/` — RESOLVED (#172). The original
-  `engine.rs` was split into an `engine/` module; every submodule is now under
-  the cap (largest is `engine/executor/run.rs` at ~485 lines).
-
-The largest remaining production file in `trusty-agents` (not tied to an open
-ticket) is `tm/manager.rs` — file a fresh refactor ticket before growing it
-further. Current per-file SLOC budgets live in `.line-cap-allowlist.tsv`.
+🔴 As of issue #610 this is mechanically enforced by `scripts/check_line_cap.sh`,
+wired into CI and the pre-commit hook — a new tracked file over its cap
+**cannot merge**. Never turn this gate green by deleting, `#[ignore]`-ing, or
+excluding a file from the count; split it instead (one public module per
+logical concept, a thin `mod.rs` re-export facade, sibling single-responsibility
+files). See [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md) for the
+exact SLOC counting definition, the ratchet-allowlist mechanics
+(`.line-cap-allowlist.tsv`, `--update`/`--seed`/`--force-add`), and the
+resolved #170/#171/#172 refactor history.
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -524,123 +434,19 @@ convention (i.e. `tga-v<version>`, matching the abbreviation table) works.
 
 🔴 **CRITICAL macOS note:** Never use `cp` to install release binaries on macOS — always use `cargo install`. See release workflow reference for the detailed explanation.
 
-### macOS Full Disk Access / App Data TCC must be re-granted after every `cargo install` (issues #873, #2558)
+### macOS TCC (Full Disk Access / App Data) and daemon restart (issues #873, #2558, #534)
 
-🟢 **Full Disk Access scope: `trusty-search` and external-volume daemons only.** `trusty-mpm` / `tm` does NOT require FDA re-granting because the daemon manages tmux sessions and git worktrees under `$HOME` only — it never reads TCC-protected or external (`/Volumes/…`) paths. FDA caveat applies only to daemons that index external volumes (currently `trusty-search`); `trusty-memory` and `trusty-analyze` read `$HOME` locations only and also do NOT require FDA.
+🟢 **Scope split — read before re-granting anything:** `trusty-search` (and
+other external-volume daemons) needs **Full Disk Access**; `trusty-mpm` / `tm`
+needs the separate **App Data** TCC category only — it never needs, and should
+never be granted, Full Disk Access. Every `cargo install` mints a new cdhash,
+invalidating the previous grant; `tctl install <crate>` re-signs with a stable
+Developer-ID identity so the grant persists across reinstalls.
 
-🟢 **App Data TCC scope (owner-authorized extension, #2558, 2026-07-14): `trusty-mpm` IS in scope.** This is a *different* TCC category than FDA above — `tm` reads other apps' `$HOME` containers (Claude config dirs, tmux state), so macOS re-prompts `'trusty-mpm' would like to access data from other apps` after every ad-hoc-signed `cargo install` rebuild, for the same cdhash-identity reason FDA does. `tctl install trusty-mpm` signs the `trusty-mpm` binary with a stable Developer-ID identity automatically (fail-soft, same as trusty-search). On macOS the preferred local-source install path is `scripts/install-trusty-mpm-signed.sh` (or `make install-mpm-signed`, #2721): it runs `cargo install --path crates/trusty-mpm --locked` then signs **both** binaries — `trusty-mpm` (`com.trusty.trusty-mpm`) **and** the `tm` alias (`com.trusty.tm`). This closes a gap: `tctl sign trusty-mpm` (single source of truth in `crates/trusty-installer/src/commands/macos_signing.rs`) covers only the `trusty-mpm` binary today, leaving `tm` ad-hoc-signed and re-prompting. tm still needs NO FDA re-grant — this is the App-Data category only. See `docs/reference/release-workflow.md#signed-install-trusty-mpm-2558-2721`.
-
-On macOS, every `cargo install` of a binary writes a NEW file at
-`~/.cargo/bin/<binary>` with a new **cdhash** (code-signing hash). macOS TCC
-keys the **Full Disk Access** grant by cdhash, so the previously-granted FDA no
-longer applies to the freshly-installed binary. The launchd daemon then cannot
-read indexes on `/Volumes/…` and warm-boot collapses from ~102 indexes to
-**indexes:2** (only non-external-volume indexes load).
-
-**Permanent fix (recommended): use `scripts/install-trusty-search-signed.sh`**
-
-Once you have a Developer ID Application certificate installed in your login
-keychain, install via the signed-install script instead of bare `cargo install`:
-
-```bash
-# From the repo root (installs from source + signs both binaries)
-scripts/install-trusty-search-signed.sh
-# or
-make install-search-signed
-```
-
-Developer-ID signing anchors the designated requirement (DR) to your Team ID
-and a fixed `--identifier` per binary — not the binary content — so the FDA
-grant persists across all future reinstalls. After the one-time FDA grant you
-never need to re-grant it again, even after `cargo install` rebuilds.
-
-See `docs/reference/release-workflow.md` for the one-time cert setup steps,
-`TRUSTY_SIGN_IDENTITY` override, and the optional notarization appendix.
-
-**Workaround (without a Developer ID cert): re-grant FDA manually after each install.**
-
-After every `cargo install trusty-search` (or any binary that accesses
-external/protected volumes as a launchd daemon), re-grant FDA:
-
-1. Open **System Settings → Privacy & Security → Full Disk Access**.
-2. Remove `~/.cargo/bin/trusty-search` from the list.
-3. Re-add it (`+` button, navigate to `~/.cargo/bin/trusty-search`).
-4. Restart the daemon: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
-
-**Symptom:** `trusty-search status` shows `indexes:2` (or very few) immediately
-after a reinstall, with warm-boot logs showing `skipped: blocked-volume` or
-`tcc=57`. This is NOT data loss — all on-disk indexes are intact.
-
-The daemon now detects this automatically: when the loaded count drops below 80%
-of the prior-known count, `GET /health` returns `warm_boot_degraded: true` and
-the daemon logs an error with the actionable FDA re-grant hint.
-
-### Connection-safe daemon restart convention (issue #534)
-
-As of trusty-common 0.10.0, all four HTTP daemons (trusty-memory, trusty-search,
-trusty-analyze, trusty-mpm) implement graceful shutdown: they drain in-flight
-requests before exiting when they receive SIGTERM. The `serve --stdio` proxy
-reconnects automatically with exponential backoff when the daemon restarts (the
-`trusty-memory-mcp-bridge` binary is a deprecated shim that forwards to
-`serve --stdio`; update your `.mcp.json` to `"command": "trusty-memory", "args":
-["serve", "--stdio"]`).
-
-**Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
-
-```bash
-# Graceful stop → install → restart
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
-cargo install --path crates/<dir> --locked
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
-# NOTE: re-grant Full Disk Access only for trusty-search (and external-volume daemons), not for trusty-mpm (see FDA section above)
-```
-
-🔴 **A 200 `GET /health` is NOT sufficient evidence the restart succeeded**
-(issue #2486). During this exact `bootout → cargo install → bootstrap` window,
-trusty-mpm's `tm serve --stdio` MCP bridge (e.g. trusty-console's auto-reconnect)
-can race the restart: it spawns before launchd relaunches the daemon and, on an
-older binary, would auto-spawn an ORPHAN `tm daemon` — PPID pointing at the
-client chain, not launchd. That orphan answers `/health` 200 but is missing the
-plist's `EnvironmentVariables` (`TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`) and
-runs with `cwd=$HOME`, so features like the Telegram poller silently never
-start. As of the #2486 fix the bridge refuses to auto-spawn while a trusty-mpm
-launchd unit is registered, and `GET /health` reports a `supervised` flag — but
-always verify the restart with ONE of the two robust checks below:
-
-```bash
-# (a) does launchd itself think it owns the process? (most direct)
-launchctl print gui/$(id -u)/com.trusty.mpm.supervisor   # or com.trusty.mpm
-
-# (b) does /health say so directly?
-curl -s http://127.0.0.1:<port>/health | jq '.supervised' # must print true
-```
-
-🔴 **`PPID == 1` is NOT evidence of supervision** (issue #4230) — do not use the
-`ps -o ppid=` variant that used to be documented here. macOS reparents ANY
-orphaned process to PID 1, so the #4230 orphan reported `PPID 1` while launchd's
-`com.trusty.mpm` was `not running`: the check CONFIRMED the orphan as supervised.
-Note this also makes `.supervised` itself non-conclusive when it reads `true`, as
-its fallback prong is exactly that PPID test.
-
-The one form that distinguishes the two is comparing the PID launchd owns against
-the PID that actually holds the port:
-
-```bash
-# (c) does launchd own the process that is actually serving?
-launchctl print "gui/$(id -u)/com.trusty.mpm" | grep -E 'state|pid'
-lsof -nP -iTCP:7880 -sTCP:LISTEN
-# The listening PID must equal launchd's pid. If it does not, `kill -TERM` the
-# listener, then: launchctl kickstart -k gui/$(id -u)/com.trusty.mpm
-```
-
-`tm doctor`'s `daemon_orphan` check performs exactly this comparison
-automatically — prefer it to running the two commands by hand.
-
-Note that `tm start` / `tm restart` REFUSE to run on a host where launchd owns
-the daemon (#4230); use the `kickstart` above.
-
-Prefer restarting between Claude Code sessions. See the cargo-publish skill
-(`.claude/skills/cargo-publish/SKILL.md`) for the full restart convention.
+See [docs/reference/release-workflow.md](docs/reference/release-workflow.md)
+for certificate setup, signed-install scripts, the restart playbook
+(`launchctl bootout`, never `cp`, never trust a bare `GET /health`), and
+orphan-listener verification (issues #2486, #4230).
 
 ## Cross-Crate Development Workflow
 
@@ -688,10 +494,9 @@ cd .claude/worktrees/<dirname>
 branch → one cohesive PR → applicable Rust gates → trusty-review gate →
 squash-merge → worktree cleanup. The framework skill `tm-pr-workflow` owns the
 full sequence and the optional-issue rule; this file adds only the Rust-specific
-gates (see the Rust Test Ladder above). *(The pointer here used to name
-`.claude-mpm/INSTRUCTIONS.md`, a path that has never existed in this repo — the
-tracked project-instruction host is this file, `.trusty-mpm/INSTRUCTIONS.md`,
-and the delivery chain itself now lives in `tm-pr-workflow`.)*
+gates (see the Rust Test Ladder above). *(This project-instruction host was
+`.trusty-mpm/INSTRUCTIONS.md` until #4286 retired it; the delivery chain itself
+now lives in `tm-pr-workflow`.)*
 
 🔴 **A worktree is a writer; the branch is the workstream.** The durable unit is
 the **branch** — one branch per workstream, and a session owns exactly one
