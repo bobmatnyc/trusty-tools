@@ -516,11 +516,18 @@ pub async fn handle_start(
     match crate::service::run_daemon(state, port).await {
         Ok(()) => {}
         Err(crate::service::DaemonError::AlreadyRunning(p)) => {
-            // Issue #126: launchd respawns `start` every ~30 s while the
-            // daemon is up. Exit non-zero so `SuccessfulExit=false` stops
-            // the respawn loop. Suppress the stderr message (demote to debug).
+            // Issue #126: a launchd-spawned `start` that finds a daemon
+            // already holding the lock is a duplicate — refuse rather than
+            // run two. Suppress the stderr message (demote to debug) so the
+            // benign case does not spam the log.
+            //
+            // #4113: the exit code no longer selects a restart policy. Under
+            // the old `KeepAlive { SuccessfulExit: false }` a non-zero exit
+            // was restarted and a clean one was not; under `KeepAlive: true`
+            // launchd relaunches either way after `ThrottleInterval`, and
+            // finds the lock still held until the real daemon goes away.
             tracing::debug!(
-                "daemon already running (lock at {}), exiting non-zero to stop launchd respawn",
+                "daemon already running (lock at {}), exiting to avoid a second instance",
                 p.display()
             );
             std::process::exit(1);

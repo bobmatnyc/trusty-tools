@@ -71,6 +71,13 @@ pub async fn handle_stop() -> Result<()> {
         );
     }
 
+    // #4113: under launchd this stop is temporary — say so, and name the
+    // command that isn't.
+    #[cfg(target_os = "macos")]
+    if let Some(notice) = launchd_restart_notice(crate::commands::service::launchd_agent_loaded()) {
+        println!("{} {notice}", "·".dimmed());
+    }
+
     // Phase 1: SIGTERM all targets.
     for pid in &targets {
         let _ = send_signal(*pid, "TERM");
@@ -120,6 +127,33 @@ pub async fn handle_stop() -> Result<()> {
         println!("{} Daemon stopped", "✓".green());
     }
     Ok(())
+}
+
+/// Build the operator notice explaining that a launchd-supervised stop is
+/// temporary, or `None` when the agent is not loaded.
+///
+/// Why: #4113 gave the LaunchAgent `KeepAlive=true` so a clean exit no longer
+/// leaves search down forever. The cost is that `trusty-search stop` alone no
+/// longer means "stay stopped" on a supervised host — launchd re-launches the
+/// daemon after its throttle interval. Announcing that at the moment of the
+/// stop, with the `launchctl bootout` command that does keep it stopped, means
+/// the new policy never reads as "stop is broken".
+/// What: pure — returns `None` when `agent_loaded` is false, otherwise the
+/// message naming both the reason and the bootout target. Split out from the
+/// print so the wording is unit-testable without touching `launchctl`.
+/// Test: `launchd_restart_notice_absent_when_agent_not_loaded`,
+/// `launchd_restart_notice_names_bootout_command`.
+#[cfg(target_os = "macos")]
+fn launchd_restart_notice(agent_loaded: bool) -> Option<String> {
+    if !agent_loaded {
+        return None;
+    }
+    let label = crate::commands::service::LAUNCHD_LABEL;
+    Some(format!(
+        "launchd will restart the daemon shortly ({label} sets KeepAlive=true, \
+         issue #4113).\n  To stop it and keep it stopped: launchctl bootout \
+         gui/$(id -u)/{label}"
+    ))
 }
 
 /// Why: `pgrep -x trusty-search` would work on macOS/Linux but we already
@@ -194,4 +228,41 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> bool {
     true
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// Why: an unsupervised daemon really does stay stopped, so printing a
+    /// launchd notice there would be wrong information, not extra help.
+    /// What: asserts the notice is `None` when the agent is not loaded.
+    /// Test: itself.
+    #[test]
+    fn launchd_restart_notice_absent_when_agent_not_loaded() {
+        assert_eq!(launchd_restart_notice(false), None);
+    }
+
+    /// Why: the notice only earns its place if it hands the operator the
+    /// command that actually keeps the daemon stopped — the whole tradeoff
+    /// #4113 accepts is that `bootout`, not `stop`, is now the durable stop.
+    /// What: asserts the message names the LaunchAgent label, the #4113
+    /// rationale, and a `launchctl bootout` invocation.
+    /// Test: itself.
+    #[test]
+    fn launchd_restart_notice_names_bootout_command() {
+        let notice = launchd_restart_notice(true).expect("loaded agent must produce a notice");
+        assert!(
+            notice.contains(crate::commands::service::LAUNCHD_LABEL),
+            "notice must name the LaunchAgent label, got: {notice}"
+        );
+        assert!(
+            notice.contains("launchctl bootout"),
+            "notice must give the command that keeps the daemon stopped, got: {notice}"
+        );
+        assert!(
+            notice.contains("#4113"),
+            "notice must cite the issue that changed the policy, got: {notice}"
+        );
+    }
 }
