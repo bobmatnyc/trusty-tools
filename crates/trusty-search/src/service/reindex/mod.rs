@@ -15,6 +15,8 @@
 //! - `stages`      — stage-transition helpers (lexical→semantic→graph pipeline).
 //! - `batch`       — single-batch parse/embed/commit cycle.
 //! - `completion`  — KG rebuild + terminal `complete` SSE event builder.
+//! - `checkpoint`  — resume-from-checkpoint: the durable record stamped into a
+//!   staging corpus and the pure adopt/discard decision (issue #3979).
 //! - `corpus_swap` — atomic `index.redb.tmp` → `index.redb` swap.
 //! - `hnsw_swap`   — staged-write-then-swap for the periodic HNSW snapshot (issue #3970).
 //! - `guard`       — `ReindexTerminationGuard` RAII safety guard.
@@ -40,6 +42,9 @@
 
 // ── new submodules (issue #1175 split) ──────────────────────────────────────
 mod batch;
+// Issue #3979: resume-from-checkpoint — durable "which run is building this
+// staging corpus" record plus the pure adopt/discard decision.
+mod checkpoint;
 mod completion;
 mod corpus_swap;
 mod finish;
@@ -189,3 +194,8 @@ mod tests;
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]
 mod root_hijack_tests;
+// Issue #3979: end-to-end interrupt/resume equivalence plus the corrupt- and
+// stale-checkpoint fallbacks. Isolated from `tests.rs` for the same reason
+// `root_hijack_tests` is — the 1500-SLOC test-file cap.
+#[cfg(test)]
+mod resume_tests;
