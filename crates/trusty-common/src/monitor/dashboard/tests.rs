@@ -137,6 +137,61 @@ fn test_format_count() {
     assert_eq!(format_count(10_000), "10.0k");
 }
 
+/// Why (issue #4682): the guard that stops the next caller printing a bare `0`
+/// for a value nobody measured. `format_count` cannot express "unknown";
+/// `format_opt_count` can, and every count renderer now goes through it.
+/// What: asserts `None` renders as the shared placeholder and never as `"0"`,
+/// while `Some(0)` — a genuinely empty palace — still renders as `"0"`.
+/// Test: this test.
+#[test]
+fn test_format_opt_count() {
+    assert_eq!(format_opt_count(None), UNKNOWN_COUNT);
+    assert_ne!(format_opt_count(None), "0", "unknown must not read as zero");
+    assert_eq!(format_opt_count(Some(0)), "0");
+    assert_eq!(format_opt_count(Some(1_200)), "1,200");
+    assert_eq!(format_opt_count(Some(19_400)), "19.4k");
+}
+
+/// Why (issue #4682): `PalaceRow`'s raw count fields hold `0` in both the
+/// "genuinely empty" and the "daemon never loaded it" case. The accessors are
+/// what let a renderer tell the two apart, so their contract is pinned here.
+/// What: asserts a row flagged `counts_unknown` yields `None` from every
+/// accessor even though the raw fields hold non-zero values, and that the
+/// default (unflagged) row reports its counts.
+/// Test: this test.
+#[test]
+fn palace_row_counts_are_unknown_when_not_cached() {
+    // Non-zero raw fields prove the accessors read the flag, not the value.
+    let cold = PalaceRow {
+        id: "cold".into(),
+        vector_count: 912,
+        drawer_count: 38,
+        kg_triple_count: 122,
+        node_count: 9,
+        edge_count: 8,
+        counts_unknown: true,
+        ..Default::default()
+    };
+    assert_eq!(cold.vectors(), None);
+    assert_eq!(cold.drawers(), None);
+    assert_eq!(cold.kg_triples(), None);
+    assert_eq!(cold.nodes(), None);
+    assert_eq!(cold.edges(), None);
+
+    let warm = PalaceRow {
+        id: "warm".into(),
+        vector_count: 912,
+        drawer_count: 38,
+        ..Default::default()
+    };
+    assert!(
+        !warm.counts_unknown,
+        "a hand-built row defaults to reporting real counts"
+    );
+    assert_eq!(warm.vectors(), Some(912));
+    assert_eq!(warm.drawers(), Some(38));
+}
+
 #[test]
 fn test_search_total_chunks() {
     assert_eq!(sample_search().total_chunks(), 20_194);

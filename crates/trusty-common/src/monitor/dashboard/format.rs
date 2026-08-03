@@ -42,6 +42,32 @@ pub fn format_count(n: u64) -> String {
     }
 }
 
+/// Placeholder rendered in place of a count that is not known.
+///
+/// Why (issue #4682): an unknown count printed as `0` reads as a measurement.
+/// An em dash reads as "no value", which is what it is.
+/// What: the single string every count renderer uses for the unknown case.
+/// Test: `test_format_opt_count`.
+pub const UNKNOWN_COUNT: &str = "—";
+
+/// Format an optional count, rendering [`UNKNOWN_COUNT`] when it is unknown.
+///
+/// Why (issue #4682): `GET /api/v1/palaces` returns `0` for every count of a
+/// palace whose handle is not resident (`cached: false`) — the zeros mean
+/// *unknown*, not *empty*. Printing them verbatim made the /ui dashboard
+/// contradict itself (`0 drawers` above a "Drawers (1)" list). Funnelling every
+/// count through one formatter that takes an `Option` is the guard: a caller
+/// holding an `Option<u64>` cannot accidentally print `0` for "not loaded".
+/// What: `Some(n)` formats exactly as [`format_count`]; `None` returns
+/// [`UNKNOWN_COUNT`].
+/// Test: `test_format_opt_count`.
+pub fn format_opt_count(n: Option<u64>) -> String {
+    match n {
+        Some(n) => format_count(n),
+        None => UNKNOWN_COUNT.to_string(),
+    }
+}
+
 /// Insert commas every three digits into a number.
 ///
 /// Why: shared by [`format_count`] for the exact-count branch.

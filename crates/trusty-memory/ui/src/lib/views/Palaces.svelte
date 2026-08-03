@@ -42,6 +42,9 @@
   // Per-palace expand state + lazily-loaded drawers, keyed by palace id.
   let expanded = $state({});
   let drawers = $state({}); // { [id]: { items, loading, error } }
+  // #4682: in-flight single-palace count fetches, keyed by palace id. Badges
+  // show '…' while true so they never flicker stale-'—' → real.
+  let countsLoading = $state({});
 
   onMount(loadPalaces);
 
@@ -59,15 +62,66 @@
   }
 
   /**
+   * Why (issue #4682): `GET /api/v1/palaces` builds every row from
+   * `PalaceRegistry::peek` since #4640 — zero disk I/O, so a palace whose
+   * handle is not resident comes back with `cached: false` and every count
+   * zeroed. Those zeros mean UNKNOWN, not empty: 2,180 of 2,183 rows on a live
+   * daemon. Rendering them verbatim made this view contradict itself —
+   * `0 drawers` in the header directly above a "Drawers (1)" list. Every count
+   * badge goes through this one helper so the next badge added here cannot
+   * repeat the mistake.
+   * What: returns the count when the row's counts are live, `'—'` when they
+   * are not. `cached === undefined` means a daemon predating the flag, which
+   * always opened every palace, so its counts are trusted.
+   * Test: no test harness exists for this UI (see the manual check in the PR);
+   * the Rust-side rule is pinned by `parse_palaces_marks_uncached_rows_unknown`.
+   */
+  function countLabel(p, field) {
+    if (countsLoading[p?.id]) return '…';
+    if (p?.cached === false) return '—';
+    return p?.[field] ?? 0;
+  }
+
+  /**
+   * Why (issue #4682): `— wings / — drawers` is honest but not useful. The
+   * single-palace route opens the palace and returns live counts in ~0.1s, so
+   * expanding a row — the moment the user asks about this palace specifically —
+   * is exactly when it is worth paying for.
+   * What: fetches `GET /api/v1/palaces/{id}` and replaces that row in
+   * `palaces` with the live version. Failures are swallowed: the badges simply
+   * stay `—`, which is still truthful, and the drawer list carries its own
+   * error surface.
+   * Test: manual — expand a cold palace and watch its badges go `—` → real.
+   */
+  async function refreshPalaceCounts(id) {
+    countsLoading = { ...countsLoading, [id]: true };
+    try {
+      const live = await api.getPalace(id);
+      if (live && live.id) {
+        palaces = palaces.map((p) => (p.id === id ? { ...p, ...live } : p));
+      }
+    } catch {
+      /* leave the badges reading '—' — an unknown count stays unknown */
+    } finally {
+      countsLoading = { ...countsLoading, [id]: false };
+    }
+  }
+
+  /**
    * Why: drawers are the most expensive part of the tree, so we fetch them
    * lazily the first time a palace is expanded and cache the result.
    * What: toggles `expanded[id]`; on first expand, fetches the palace's
-   * drawers and stores them in `drawers[id]`.
+   * drawers and stores them in `drawers[id]`, and (issue #4682) refreshes that
+   * row's counts from the single-palace route so the header badges stop
+   * disagreeing with the drawer list rendered right below them.
    * Test: click a palace, confirm its drawer list appears below the row.
    */
   async function togglePalace(id) {
     expanded = { ...expanded, [id]: !expanded[id] };
-    if (expanded[id] && !drawers[id]) {
+    if (!expanded[id]) return;
+    // #4682: refresh counts on every expand — the row may have gone stale.
+    const counts = refreshPalaceCounts(id);
+    if (!drawers[id]) {
       drawers = { ...drawers, [id]: { items: [], loading: true, error: null } };
       try {
         const items = await api.listDrawers(id, { limit: 200 });
@@ -82,6 +136,7 @@
         };
       }
     }
+    await counts;
   }
 
   /**
@@ -247,7 +302,10 @@
    * Why: Group view sorts groups alphabetically and applies the current
    * sort within each group, so operators can scan a project's palaces in
    * the same order they expect across modes.
-   * What: returns [{project, palaces, drawerTotal}] grouped + sorted.
+   * What: returns [{project, palaces, drawerTotal, partial}] grouped +
+   * sorted. `drawerTotal` sums only palaces whose counts the daemon actually
+   * measured; `partial` is true when the group also holds unloaded palaces, so
+   * the badge can render `N+` instead of claiming a complete total (#4682).
    * Test: groupedPalaces with two palaces sharing project should produce
    * one group with both.
    */
@@ -261,8 +319,15 @@
     const arr = [];
     for (const [project, items] of groups.entries()) {
       items.sort(sortComparator(sortBy));
-      const drawerTotal = items.reduce((s, p) => s + (p?.drawer_count ?? 0), 0);
-      arr.push({ project, palaces: items, drawerTotal });
+      // #4682: an unloaded palace contributes an unknown, not a zero.
+      const known = items.filter((p) => p?.cached !== false);
+      const drawerTotal = known.reduce((s, p) => s + (p?.drawer_count ?? 0), 0);
+      arr.push({
+        project,
+        palaces: items,
+        drawerTotal,
+        partial: known.length !== items.length
+      });
     }
     arr.sort((a, b) => a.project.localeCompare(b.project));
     return arr;
@@ -351,7 +416,12 @@
               <span class="group-name">{g.project}</span>
               <span class="counts">
                 <span class="badge badge-muted">{g.palaces.length} palaces</span>
-                <span class="badge badge-info">{g.drawerTotal} drawers</span>
+                <span
+                class="badge badge-info"
+                title={g.partial ? 'Some palaces in this group are not loaded; total is a lower bound' : ''}
+              >
+                {g.drawerTotal}{g.partial ? '+' : ''} drawers
+              </span>
               </span>
             </div>
             {#each g.palaces as p (p.id)}
@@ -385,17 +455,21 @@
           <span class="badge badge-muted" title="Last write">
             {relTime(p.last_write_at)}
           </span>
-          <span class="badge badge-muted">{p.wing_count ?? 0} wings</span>
-          <span class="badge badge-muted">{p.drawer_count ?? 0} drawers</span>
-          <span class="badge badge-info">{p.vector_count ?? 0} vectors</span>
-          <span class="badge badge-info">{p.kg_triple_count ?? 0} triples</span>
+          <!-- #4682: every count goes through countLabel — a peek-based row
+               reports 0 for UNKNOWN, and printing that reads as fact. -->
+          <span class="badge badge-muted" title={p.cached === false ? 'Not loaded — expand for live counts' : ''}>
+            {countLabel(p, 'wing_count')} wings
+          </span>
+          <span class="badge badge-muted">{countLabel(p, 'drawer_count')} drawers</span>
+          <span class="badge badge-info">{countLabel(p, 'vector_count')} vectors</span>
+          <span class="badge badge-info">{countLabel(p, 'kg_triple_count')} triples</span>
           <!-- Issue #97: surface KG graph density inline so users can spot
                palaces with content without opening the graph view. -->
           <span class="badge badge-graph" title="KG nodes">
-            {p.node_count ?? 0} nodes
+            {countLabel(p, 'node_count')} nodes
           </span>
           <span class="badge badge-graph" title="KG edges">
-            {p.edge_count ?? 0} edges
+            {countLabel(p, 'edge_count')} edges
           </span>
         </span>
       </button>

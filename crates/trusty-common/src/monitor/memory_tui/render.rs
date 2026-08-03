@@ -295,7 +295,9 @@ fn render_activity_and_stats(frame: &mut Frame, state: &MemoryTuiState, area: Re
         .selected
         .checked_sub(1)
         .and_then(|i| state.palaces.get(i))
-        .map(|p| p.drawer_count)
+        // #4682: read through the accessor so an unloaded palace's placeholder
+        // zero is an explicit `None` here rather than a silent count.
+        .and_then(|p| p.drawers())
         .unwrap_or(0);
     let drawer_lines = drawer_panel_lines(state, drawer_total);
     // Issue #215: render the drawer page as a stateful List so the

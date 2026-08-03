@@ -14,7 +14,7 @@ mod tests {
     use super::super::client::MemoryClient;
     use super::super::parsers::{
         creator_label, parse_drawers, parse_dream_stats, parse_memory_details, parse_memory_event,
-        parse_palaces, parse_recall_hits,
+        parse_palace_detail, parse_palaces, parse_recall_hits,
     };
     use super::super::types::{DEFAULT_MEMORY_URL, normalize_url, resolve_memory_url};
     use super::super::types::{
@@ -78,6 +78,108 @@ mod tests {
 
         // An unexpected shape yields no rows rather than panicking.
         assert!(parse_palaces(&serde_json::json!("nonsense")).is_empty());
+    }
+
+    /// Why (issue #4682): since #4640 the bulk list route returns `cached:
+    /// false` plus all-zero counts for any palace whose handle is not
+    /// resident — 2,180 of 2,183 rows on a live daemon. Projecting those zeros
+    /// as measurements is what made the /ui header read `0 drawers` above a
+    /// "Drawers (1)" list.
+    /// What: asserts an uncached row is flagged `counts_unknown` and every
+    /// accessor returns `None`, while a `cached: true` row keeps real counts.
+    /// Test: this test.
+    #[test]
+    fn parse_palaces_marks_uncached_rows_unknown() {
+        let raw = serde_json::json!([
+            {"id": "cold", "name": "cold", "vector_count": 0, "drawer_count": 0,
+             "kg_triple_count": 0, "node_count": 0, "edge_count": 0, "cached": false},
+            {"id": "warm", "name": "warm", "vector_count": 912, "drawer_count": 38,
+             "kg_triple_count": 122, "node_count": 9, "edge_count": 8, "cached": true},
+        ]);
+        let rows = parse_palaces(&raw);
+        assert_eq!(rows.len(), 2);
+
+        let cold = &rows[0];
+        assert!(cold.counts_unknown, "cached:false marks the counts unknown");
+        assert_eq!(cold.vectors(), None, "a placeholder 0 must not read as 0");
+        assert_eq!(cold.drawers(), None);
+        assert_eq!(cold.kg_triples(), None);
+        assert_eq!(cold.nodes(), None);
+        assert_eq!(cold.edges(), None);
+
+        let warm = &rows[1];
+        assert!(!warm.counts_unknown);
+        assert_eq!(warm.vectors(), Some(912));
+        assert_eq!(warm.drawers(), Some(38));
+        assert_eq!(warm.kg_triples(), Some(122));
+    }
+
+    /// Why (issue #4682): `cached` only exists on daemons carrying #4640. An
+    /// older daemon opened every palace, so its counts are authoritative —
+    /// defaulting the absent flag to `false` would make a current client print
+    /// `—` for every palace against it.
+    /// What: asserts a payload with no `cached` key keeps its counts, and that
+    /// a genuinely empty *cached* palace still reads as a known `0` rather
+    /// than unknown.
+    /// Test: this test.
+    #[test]
+    fn parse_palaces_trusts_counts_when_cached_flag_absent() {
+        let legacy = serde_json::json!([{"id": "p1", "name": "p1", "vector_count": 8400}]);
+        let rows = parse_palaces(&legacy);
+        assert!(!rows[0].counts_unknown, "absent flag != not loaded");
+        assert_eq!(rows[0].vectors(), Some(8400));
+
+        let empty_but_loaded =
+            serde_json::json!([{"id": "p2", "name": "p2", "vector_count": 0, "cached": true}]);
+        let rows = parse_palaces(&empty_but_loaded);
+        assert_eq!(
+            rows[0].vectors(),
+            Some(0),
+            "an empty loaded palace is a known zero, not unknown"
+        );
+    }
+
+    /// Why (issue #4682): the CLI's single-id path must read the route that
+    /// opens the palace; this pins the projection it depends on.
+    /// What: asserts a single palace object projects to a row with live counts.
+    /// Test: this test.
+    #[test]
+    fn parse_palace_detail_reads_live_counts() {
+        let raw = serde_json::json!({
+            "id": "t-tmpugxp9v", "name": "t-tmpugxp9v",
+            "drawer_count": 1, "vector_count": 1, "kg_triple_count": 8,
+            "node_count": 9, "edge_count": 8, "cached": true,
+        });
+        let row = parse_palace_detail(&raw).expect("single palace object projects");
+        assert_eq!(row.id, "t-tmpugxp9v");
+        assert_eq!(row.vectors(), Some(1));
+        assert_eq!(row.drawers(), Some(1));
+        assert_eq!(row.kg_triples(), Some(8));
+    }
+
+    /// Why (issue #4682): a non-object 2xx body must surface as an error, not
+    /// as a row of silent zeros the CLI would print as fact.
+    /// What: asserts arrays, strings, and null all yield `None`.
+    /// Test: this test.
+    #[test]
+    fn parse_palace_detail_rejects_non_object() {
+        assert!(parse_palace_detail(&serde_json::json!([])).is_none());
+        assert!(parse_palace_detail(&serde_json::json!("nonsense")).is_none());
+        assert!(parse_palace_detail(&serde_json::Value::Null).is_none());
+    }
+
+    /// Why (issue #4682): the single-palace route is the whole point of the
+    /// fix; asserting the URL keeps a future refactor from quietly pointing it
+    /// back at the bulk list.
+    /// What: asserts the built URL is `<base>/api/v1/palaces/<id>`.
+    /// Test: this test.
+    #[test]
+    fn fetch_palace_url_is_the_single_palace_route() {
+        let client = MemoryClient::new("http://127.0.0.1:7070");
+        assert_eq!(
+            client.palace_url("t-tmpugxp9v"),
+            "http://127.0.0.1:7070/api/v1/palaces/t-tmpugxp9v"
+        );
     }
 
     #[test]

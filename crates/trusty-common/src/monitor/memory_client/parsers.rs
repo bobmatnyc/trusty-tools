@@ -120,7 +120,8 @@ pub fn parse_memory_event(value: &serde_json::Value) -> Option<MemoryEvent> {
 /// What: accepts a JSON array of palace objects, or an object carrying a
 /// `palaces` array, and returns the projected rows; any other shape yields an
 /// empty list.
-/// Test: `palace_list_accepts_array_and_object_shapes`.
+/// Test: `palace_list_accepts_array_and_object_shapes`,
+/// `parse_palaces_marks_uncached_rows_unknown`.
 pub fn parse_palaces(raw: &serde_json::Value) -> Vec<PalaceRow> {
     let array = match raw {
         serde_json::Value::Array(items) => items.clone(),
@@ -133,20 +134,54 @@ pub fn parse_palaces(raw: &serde_json::Value) -> Vec<PalaceRow> {
     array
         .into_iter()
         .filter_map(|v| serde_json::from_value::<PalaceWire>(v).ok())
-        .map(|p| PalaceRow {
-            id: p.id,
-            name: p.name,
-            vector_count: p.vector_count,
-            drawer_count: p.drawer_count,
-            last_write_at: p.last_write_at,
-            description: p.description,
-            kg_triple_count: p.kg_triple_count,
-            node_count: p.node_count,
-            edge_count: p.edge_count,
-            community_count: p.community_count,
-            is_compacting: p.is_compacting,
-        })
+        .map(row_from_wire)
         .collect()
+}
+
+/// Project a single palace object (`GET /api/v1/palaces/{id}`) into a [`PalaceRow`].
+///
+/// Why (issue #4682): the single-palace route opens the palace, so its counts
+/// are live — unlike the peek-based list route, whose zeros mean "unknown".
+/// The CLI's single-id path needs that route, and needs the same projection the
+/// list path uses so the two cannot drift.
+/// What: deserializes one palace object; returns `None` when the payload is
+/// not an object the wire shape accepts.
+/// Test: `parse_palace_detail_reads_live_counts`,
+/// `parse_palace_detail_rejects_non_object`.
+pub fn parse_palace_detail(raw: &serde_json::Value) -> Option<PalaceRow> {
+    if !raw.is_object() {
+        return None;
+    }
+    serde_json::from_value::<PalaceWire>(raw.clone())
+        .ok()
+        .map(row_from_wire)
+}
+
+/// Project one deserialized wire row into a [`PalaceRow`].
+///
+/// Why: shared by [`parse_palaces`] and [`parse_palace_detail`] so the
+/// unknown-counts rule (#4682) is applied identically on both routes.
+/// What: copies the fields across and sets `counts_unknown` when the daemon
+/// explicitly reported `cached: false`. An absent flag means a daemon that
+/// predates #4640 and always opened every palace, so its counts are trusted.
+/// Test: `parse_palaces_marks_uncached_rows_unknown`,
+/// `parse_palaces_trusts_counts_when_cached_flag_absent`.
+fn row_from_wire(p: PalaceWire) -> PalaceRow {
+    PalaceRow {
+        id: p.id,
+        name: p.name,
+        vector_count: p.vector_count,
+        drawer_count: p.drawer_count,
+        last_write_at: p.last_write_at,
+        description: p.description,
+        kg_triple_count: p.kg_triple_count,
+        node_count: p.node_count,
+        edge_count: p.edge_count,
+        community_count: p.community_count,
+        is_compacting: p.is_compacting,
+        // #4682: `cached: false` means these counts are placeholder zeros.
+        counts_unknown: p.cached == Some(false),
+    }
 }
 
 /// Project a `…/drawers` JSON payload into [`MemoryDetail`]s (issue #215).
