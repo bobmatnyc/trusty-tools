@@ -32,9 +32,14 @@ impl TrustyAgentsRepl {
     /// display. Also subscribes to the global `events::Event` bus and
     /// translates relevant signals into `ThinkingStep` updates so the user
     /// sees progress (delegating to engineer, generating code, etc.).
+    ///
+    /// `origin` is threaded straight through to [`Self::attempt_forward`]
+    /// (#4685) rather than asserted here — an intermediate that hardcoded the
+    /// claim would reintroduce exactly the forgery path this issue closes.
     pub(crate) async fn forward_task_to_channel(
         &mut self,
         task_text: &str,
+        origin: crate::attendance::TurnOrigin,
         tx: tokio::sync::mpsc::UnboundedSender<tui::ReplEvent>,
     ) -> Result<()> {
         let _ = tx.send(tui::ReplEvent::LlmThinking(true));
@@ -62,7 +67,7 @@ impl TrustyAgentsRepl {
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         spawn_thinking_relay(tx.clone(), cancel.clone());
 
-        let result = self.attempt_forward(task_text).await;
+        let result = self.attempt_forward(task_text, origin).await;
         cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 
         match result {
@@ -119,13 +124,36 @@ impl TrustyAgentsRepl {
     /// - `AgentScope::Project` → keep the existing PM orchestrator path
     ///   (`run_pm_task_with_history`) so project tasks can still delegate
     ///   to sub-agents.
-    pub(crate) async fn attempt_forward(&self, task_text: &str) -> Result<(String, TokenUsage)> {
-        // #4652: every path through this function starts with a line the user
-        // typed, so one call here covers all six dispatch arms below. Recorded
+    /// `origin` declares who produced `task_text`, and must be threaded from
+    /// whoever actually read it (#4685). This function used to assert
+    /// `TurnOrigin::Human` unconditionally on the claim that "every path
+    /// through this function starts with a line the user typed" — that claim
+    /// was already false: `try_handle_slash`'s `/run <file>` arm reaches here
+    /// with the contents of a FILE, and `predispatch::handle_slash_passthrough`
+    /// dispatches `tagent /run task.txt` from argv, a documented scripting
+    /// surface. A cron job invoking that forged a human turn on every fire.
+    /// Now the caller's origin governs, so the forgery is impossible by
+    /// construction rather than by convention.
+    /// Test: `argv_run_command_with_assistant_origin_records_nothing`.
+    pub(crate) async fn attempt_forward(
+        &self,
+        task_text: &str,
+        origin: crate::attendance::TurnOrigin,
+    ) -> Result<(String, TokenUsage)> {
+        // #4652: one call here covers all six dispatch arms below, recorded
         // against the persona the line was addressed to (none = `ctrl`).
-        crate::attendance::note_turn(
+        // #4685: honours the caller's origin — a non-human one records nothing —
+        // and records through the SAME injected root `try_handle_slash` uses.
+        // The bare `note_turn` this replaced always resolved `$HOME`, so no test
+        // could observe this call site; the first draft of the regression test
+        // below passed against the unfixed code for exactly that reason, and
+        // wrote into the developer's real `~/.trusty-agents` doing it.
+        crate::attendance::note_command_turn_in(
+            self.attendance_root.as_deref(),
             self.active_persona.as_deref().unwrap_or("ctrl"),
-            crate::attendance::TurnOrigin::Human,
+            origin,
+            true,
+            chrono::Utc::now(),
         );
 
         // #343: Thin-client mode — forward to the running daemon over HTTP

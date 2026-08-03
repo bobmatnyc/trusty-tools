@@ -54,6 +54,23 @@ Changed
   a human-origin contrast so it fails against an unhooked dispatcher rather than
   passing vacuously.
 
+  **`attempt_forward` honours the caller's origin too**, which closes a second,
+  independent forgery path found in review. Its doc comment claimed "every path
+  through this function starts with a line the user typed" and it recorded
+  `TurnOrigin::Human` unconditionally — but `try_handle_slash`'s `/run <file>`
+  arm reaches it with the contents of a FILE, and `tagent /run task.txt` arrives
+  there from argv through `predispatch`. A cron job invoking that forged a human
+  turn on every fire, through a recording call the dispatcher's own hook never
+  covered. `origin` now threads through `forward_task_to_channel` and
+  `attempt_forward` to every call site, so no intermediate re-asserts humanity on
+  a caller's behalf; the stale doc claim is corrected rather than left to
+  mislead. Pinned by `argv_run_command_with_assistant_origin_records_nothing`.
+
+  That call site also now records through the same injected attendance root as
+  the dispatcher instead of resolving `$HOME` directly — without which it is not
+  observable from a test at all, and a test asserting on it silently writes into
+  the developer's real `~/.trusty-agents`.
+
   The TUI's `ReplBridge::handle_input` records too, because it intercepts and
   returns from six commands (`/exit`, `/clear`, `/switch`, `/model`,
   `/provider`, `/update`) before `try_handle_slash` ever sees them — the same

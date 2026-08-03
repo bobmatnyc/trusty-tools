@@ -230,7 +230,13 @@ impl TrustyAgentsRepl {
                                 let _ = writeln!(out, "error: task file is empty");
                             } else {
                                 let _ = writeln!(out, "→ Running task from {}", path.display());
-                                match self.attempt_forward(&task).await {
+                                // #4685: forward THIS dispatcher's origin. The
+                                // task text came out of a file, and `tagent
+                                // /run task.txt` reaches here from argv with
+                                // `TurnOrigin::Assistant`; hardcoding human
+                                // here would let a cron job forge a turn on
+                                // every fire.
+                                match self.attempt_forward(&task, origin).await {
                                     Ok((response, _)) => {
                                         let _ = writeln!(out, "{response}");
                                     }

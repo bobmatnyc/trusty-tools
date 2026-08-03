@@ -185,7 +185,12 @@ pub async fn run_plain_cli() -> Result<()> {
 /// context keeps flowing exactly like the TUI.
 async fn dispatch_free_text(repl: &mut crate::repl::TrustyAgentsRepl, trimmed: &str) {
     let start = std::time::Instant::now();
-    match repl.attempt_forward(trimmed).await {
+    // #4685: `trimmed` came off the interactive stdin prompt in
+    // `run_plain_cli`'s loop — the only caller — so a person typed it.
+    match repl
+        .attempt_forward(trimmed, crate::attendance::TurnOrigin::Human)
+        .await
+    {
         Ok((response, _usage)) => {
             let elapsed = start.elapsed();
             println!("{response}");

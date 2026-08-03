@@ -709,3 +709,47 @@ async fn an_automated_repl_slash_caller_records_nothing() {
         "the human-origin path must record, or the assertion above proves nothing"
     );
 }
+
+/// #4685 HIGH regression: `/run <file>` reaches a SECOND recording call —
+/// `attempt_forward` — that the dispatcher's own hook does not cover. Before
+/// this fix `attempt_forward` asserted `TurnOrigin::Human` unconditionally, so
+/// an argv invocation (`tagent /run task.txt`, which `predispatch` dispatches
+/// with `TurnOrigin::Assistant`) forged a human turn on every fire — a cron job
+/// would have masked the owner's absence forever.
+///
+/// The dispatch is short-circuited offline by pointing thin-client mode at a
+/// dead port: `attempt_forward` records BEFORE that branch, so the assertion is
+/// about the hook and not about reaching an LLM.
+///
+/// Note the dispatcher's own hook cannot mask this: it honours `origin` too, so
+/// with `Assistant` neither call may write. A human-origin contrast would be
+/// satisfied by the dispatcher hook alone and is covered separately by
+/// `repl_slash_command_records_a_human_turn`.
+#[tokio::test]
+async fn argv_run_command_with_assistant_origin_records_nothing() {
+    let (dir, mut repl, root) = repl_with_attendance_root();
+    repl.set_service_client_mode("http://127.0.0.1:1");
+
+    let task = dir.path().join("task.txt");
+    std::fs::write(&task, "ship it").expect("write task file");
+
+    let out = repl
+        .try_handle_slash(
+            &format!("/run {}", task.display()),
+            crate::attendance::TurnOrigin::Assistant,
+        )
+        .await
+        .expect("`/run` is a slash command")
+        .expect("`/run` reports dispatch failure rather than erroring");
+    assert!(
+        out.1.contains("Running task from"),
+        "the `/run` arm must actually have executed: {:?}",
+        out.1
+    );
+
+    assert_eq!(
+        recorded_turn(&root, "ctrl"),
+        None,
+        "an argv-driven `/run` forged a human turn through attempt_forward"
+    );
+}

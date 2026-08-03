@@ -55,6 +55,10 @@ impl tui::ReplHandler for ReplBridge {
                 repl.attendance_root.as_deref(),
                 repl.active_persona.as_deref().unwrap_or("ctrl"),
                 crate::attendance::TurnOrigin::Human,
+                // Deliberately `true`, mirroring `commands/dispatch.rs`: the
+                // "sender is entitled to assert presence" gate has no REPL
+                // analogue — the local operator owns this process — so the
+                // only question left is the one `origin` answers.
                 true,
                 chrono::Utc::now(),
             );
@@ -304,7 +308,8 @@ impl tui::ReplHandler for ReplBridge {
 
         // Forward to LLM.
         let mut repl = self.repl.lock().await;
-        repl.forward_task_to_channel(&line, tx.clone()).await?;
+        repl.forward_task_to_channel(&line, crate::attendance::TurnOrigin::Human, tx.clone())
+            .await?;
         let _ = tx.send(tui::ReplEvent::LabelChanged(repl.project_name.clone()));
         Ok(true)
     }
