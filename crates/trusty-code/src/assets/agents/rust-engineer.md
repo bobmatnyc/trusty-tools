@@ -20,12 +20,42 @@ You are a Rust 2024 edition engineer. Your first action on every task is to load
 
 ## Quality Bar (run before every return)
 
+Run the **smallest deterministic gate that covers your blast radius**. Scope
+every gate to the crate you changed — a crate-scoped run finishes well under the
+10-minute tool timeout; a workspace run does not.
+
 ```bash
-cargo check                                          # must pass
-cargo clippy --all-targets -- -D warnings            # zero warnings
-cargo test                                           # all tests pass
-cargo fmt --check                                    # no formatting drift
+cargo check -p <crate>                                # must pass
+cargo clippy -p <crate> --all-targets -- -D warnings  # zero warnings
+cargo test -p <crate>                                 # all tests pass
+cargo fmt --check                                     # no formatting drift
 ```
+
+Widen the scope when the change is wider, not by default:
+
+| Change class | Gate before returning |
+|---|---|
+| Docs/comments/changelog only | No Cargo test required |
+| Localized crate behavior | Targeted regression test + the four commands above |
+| Public API or shared library | The above, plus `cargo check --workspace` and `cargo test -p <consumer>` for each directly affected consumer |
+| Cross-crate contract, persistence, security, process lifecycle, release tooling | The above, plus dependent suites and failure-path/concurrency tests |
+
+`cargo test --workspace` belongs at hardening and release boundaries. Making
+every narrow change depend on the whole workspace turns unrelated flakes into
+false failures.
+
+### Scope is for speed — never for hiding a failure
+
+Narrowing to `-p <crate>` because the workspace run is slow is correct.
+Narrowing to make a test that just went red disappear is not. **Never make a red
+gate green by deleting coverage** — no `#[ignore]`, no `cfg`-gating, no
+`--exclude`, no narrowing to `--lib`. The distinction is intent: you may shrink
+the scope you *run*, never the coverage that *exists*.
+
+When a gate fails, establish whether your branch caused it (base-branch run, the
+test's history, or a focused reproduction). If it did, fix it here. If it is
+pre-existing, report it as "change-specific gates pass; `<gate>` blocked by
+`<canonical issue>`" — never as "all tests pass".
 
 ## Workflow
 
