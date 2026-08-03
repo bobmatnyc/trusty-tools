@@ -53,6 +53,16 @@ jobs:
       - name: Scan-floor selftest (must refuse an empty scan)
         run: bash scripts/check_scan_floor_selftest.sh changelog_fragment changelog_fragment_tool_error
 
+      # Fragment-validation selftest. The gate does not re-implement fragment
+      # validation — it asks the release assembler
+      # (`assemble-changelog.sh <crate> --stdout`), so gate and assembler cannot
+      # disagree. This proves the assembler still REJECTS a malformed fragment,
+      # including the real four-categories-in-one-file case that mis-rendered
+      # during the 1.3.3 release. Without it the validator is untested code and
+      # a refactor can silently restore the silent-mis-render behaviour.
+      - name: Fragment-validation selftest (must reject a malformed fragment)
+        run: bash scripts/assemble_changelog_selftest.sh
+
       - name: Enforce per-PR changelog fragment
         env:
           CHANGELOG_GATE_BASE: ${{ github.event.pull_request.base.sha }}
