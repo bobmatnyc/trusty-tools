@@ -79,7 +79,16 @@ pub(super) async fn handle_slash_passthrough(cli: &Cli) -> Result<bool> {
         let slash_line = cli.rest.join(" ");
         let user_profile = identity::user_profile::UserProfile::load();
         let mut repl = repl::TrustyAgentsRepl::new(user_profile)?;
-        match repl.try_handle_slash(&slash_line).await {
+        // #4685: `tagent /status` is a fire-and-exit argv invocation, and this
+        // function is documented as the surface "scripts can detect bad
+        // commands" through. A cron job polling it every minute would mask the
+        // owner's absence forever — the exact forgery #4685 weighed — and a
+        // human who really is present is also typing into a live session that
+        // records. Not human.
+        match repl
+            .try_handle_slash(&slash_line, crate::attendance::TurnOrigin::Assistant)
+            .await
+        {
             Some(Ok((_continue, output))) => {
                 // The REPL slash dispatcher captures "unknown command: ..."
                 // for slashes it doesn't recognize. Surface that as exit 1

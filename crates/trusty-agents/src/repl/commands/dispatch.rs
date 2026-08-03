@@ -26,15 +26,51 @@ impl TrustyAgentsRepl {
     ///   through `Some(Err(_))` for the caller to surface.
     /// Test: `try_handle_slash_*` unit tests verify return shape; tmux e2e
     ///   verifies `/help` renders cleanly inside ratatui.
+    ///
+    /// `origin` (#4685) declares who produced `input`, and is what makes this
+    /// dispatcher safe to hook for attendance. The REPL has no pairing or RBAC
+    /// gate — the transports' answer to "may this sender assert presence?" —
+    /// because there is no remote sender to authenticate: the process already
+    /// runs under the operator's own uid. What the REPL has instead is the
+    /// caller, and only the caller knows whether a line came from a terminal.
+    /// That distinction is load-bearing rather than ceremonial: this method has
+    /// non-human callers TODAY (`ctrl::repl::plain_cli::run_plain_cli` issues
+    /// its own `/switch assistant` at startup, and
+    /// `runtime::predispatch::handle_slash_passthrough` serves `tagent /status`
+    /// from argv, a surface documented for scripting), so an unconditional hook
+    /// would have made every REPL launch forge attendance for an absent owner.
+    ///
+    /// See [`crate::attendance::TurnOrigin`]; passing
+    /// [`crate::attendance::TurnOrigin::Assistant`] records nothing.
     // Why: Widened from `pub(crate)` to `pub` so the `trusty-agents` binary
     //      (now a separate crate consuming `trusty-agents` as a library) can
     //      invoke `repl.try_handle_slash(...)` from `main.rs`.
-    // What: Public async method; signature otherwise unchanged.
+    // What: Public async method.
     // Test: Existing slash-command unit tests + tmux e2e cover behaviour.
-    pub async fn try_handle_slash(&mut self, input: &str) -> Option<Result<(bool, String)>> {
+    pub async fn try_handle_slash(
+        &mut self,
+        input: &str,
+        origin: crate::attendance::TurnOrigin,
+    ) -> Option<Result<(bool, String)>> {
         if !input.starts_with('/') {
             return None;
         }
+
+        // #4685: closes the last gap left by #4652 — this dispatch table is
+        // separate from `repl::dispatch::attempt_forward`, so a recognized
+        // slash command returned here and never reached that hook. Recorded
+        // against the persona the line was addressed to (none = `ctrl`).
+        crate::attendance::note_command_turn_in(
+            self.attendance_root.as_deref(),
+            self.active_persona.as_deref().unwrap_or("ctrl"),
+            origin,
+            // The REPL's "sender is entitled to assert presence" check: the
+            // local operator owns this process, so the only question left is
+            // the one `origin` answers.
+            true,
+            chrono::Utc::now(),
+        );
+
         let mut parts = input.splitn(2, char::is_whitespace);
         let cmd = parts.next().unwrap_or("");
         let arg = parts.next().map(str::trim).unwrap_or("");

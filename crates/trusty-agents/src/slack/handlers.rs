@@ -54,17 +54,20 @@ const SLACK_SNIPPET_MAX_CHARS: usize = 140;
 /// and mute their notifications. `handle_message` already refuses to record for
 /// an unknown user (it returns the Virtual CTO reply before its own hook); this
 /// keeps the two paths agreeing.
-/// What: records for `persona` at `now` when the channel is paired AND the
-/// sender resolves to a known RBAC identity. Infallible; returns whether the
-/// clock advanced. Deliberately does NOT gate whether the command itself
-/// proceeds — an unknown user's `/slack-status` still answers, exactly as
-/// before.
+/// What: records a turn of the caller-declared `origin` for `persona` at `now`
+/// when the channel is paired AND the sender resolves to a known RBAC identity.
+/// `origin` is threaded rather than assumed (#4685) so this transport obeys the
+/// same rule every other surface does — no wrapper hardcodes humanity on a
+/// caller's behalf. Infallible; returns whether the clock advanced.
+/// Deliberately does NOT gate whether the command itself proceeds — an unknown
+/// user's `/slack-status` still answers, exactly as before.
 /// Test: `paired_slash_command_records_a_human_turn`,
 /// `unpaired_slash_command_records_nothing`,
 /// `unknown_rbac_user_cannot_manufacture_attendance`.
 pub(super) fn note_command_turn(
     root: Option<&std::path::Path>,
     persona: &str,
+    origin: crate::attendance::TurnOrigin,
     is_paired: bool,
     sender_is_known_to_rbac: bool,
     now: chrono::DateTime<chrono::Utc>,
@@ -72,6 +75,7 @@ pub(super) fn note_command_turn(
     crate::attendance::note_command_turn_in(
         root,
         persona,
+        origin,
         is_paired && sender_is_known_to_rbac,
         now,
     )
@@ -116,6 +120,8 @@ pub(super) async fn handle_command(
     note_command_turn(
         crate::attendance::default_attendance_root().ok().as_deref(),
         &persona_for_attendance,
+        // #4685: an inbound Slack command is a person typing.
+        crate::attendance::TurnOrigin::Human,
         is_paired,
         rbac.user(&user_id).is_some(),
         chrono::Utc::now(),
@@ -420,7 +426,7 @@ pub(super) async fn handle_message(
 
     // #4652: past the pairing and RBAC gates, this is a known human speaking —
     // record it as attendance for the persona they addressed.
-    crate::attendance::note_human_turn(&active_persona);
+    crate::attendance::note_turn(&active_persona, crate::attendance::TurnOrigin::Human);
 
     let result = ctrl::run_pm_task_with_persona(
         &path,

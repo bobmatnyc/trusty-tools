@@ -123,7 +123,10 @@ impl TrustyAgentsRepl {
         // #4652: every path through this function starts with a line the user
         // typed, so one call here covers all six dispatch arms below. Recorded
         // against the persona the line was addressed to (none = `ctrl`).
-        crate::attendance::note_human_turn(self.active_persona.as_deref().unwrap_or("ctrl"));
+        crate::attendance::note_turn(
+            self.active_persona.as_deref().unwrap_or("ctrl"),
+            crate::attendance::TurnOrigin::Human,
+        );
 
         // #343: Thin-client mode — forward to the running daemon over HTTP
         // and bypass all in-process dispatch (persona, ctrl socket, PM).

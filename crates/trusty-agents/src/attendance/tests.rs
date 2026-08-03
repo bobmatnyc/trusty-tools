@@ -316,30 +316,30 @@ fn parse_threshold_rejects_junk_and_zero() {
     );
 }
 
-/// The one-line hook the four human-facing surfaces call.
+/// The one-line hook the human-facing surfaces call.
 #[test]
-fn note_human_turn_records_a_turn_and_is_infallible() {
+fn note_turn_records_a_turn_and_is_infallible() {
     let (dir, tracker, instance) = tracker();
     let root = attendance_root(dir.path());
 
-    assert!(note_human_turn_in(&root, "izzie", t0()));
+    assert!(note_turn_in(&root, "izzie", TurnOrigin::Human, t0()));
     assert_eq!(
         tracker.last_human_turn(&instance).expect("read"),
         Some(t0())
     );
 
     // Re-recording the same instant is not an advance, and is still not an error.
-    assert!(!note_human_turn_in(&root, "izzie", t0()));
+    assert!(!note_turn_in(&root, "izzie", TurnOrigin::Human, t0()));
 }
 
 #[test]
-fn note_human_turn_swallows_an_unusable_instance_name() {
+fn note_turn_swallows_an_unusable_instance_name() {
     let dir = TempDir::new().expect("temp dir");
     let root = attendance_root(dir.path());
 
     for bad in ["../escape", "", "Izzie", "a/b"] {
         assert!(
-            !note_human_turn_in(&root, bad, t0()),
+            !note_turn_in(&root, bad, TurnOrigin::Human, t0()),
             "`{bad}` must not record, and must not panic a live turn"
         );
     }
@@ -361,6 +361,7 @@ fn a_command_only_session_stays_attended() {
         note_command_turn_in(
             Some(&root),
             "izzie",
+            TurnOrigin::Human,
             true,
             t0() + chrono::Duration::minutes(5 * step),
         );
@@ -384,6 +385,62 @@ fn a_command_only_session_stays_attended() {
     assert!(
         silent.is_unattended(&silent_instance, now).expect("query"),
         "the same window with no recorded turn is unattended"
+    );
+}
+
+/// #4685: the property caller-declared origin buys. An automated caller
+/// reaching for the CONVENIENT command helper — the exact mistake the old
+/// `note_command_turn_in`, which hardcoded `TurnOrigin::Human` internally,
+/// could not prevent — must record nothing even with every transport gate
+/// satisfied.
+///
+/// The contrast in the second half is what makes the first half mean
+/// something: the same call with `TurnOrigin::Human` DOES record, so the
+/// assistant-origin no-op cannot be confused with a missing hook.
+#[test]
+fn an_assistant_origin_caller_records_nothing() {
+    let (dir, tracker, instance) = tracker();
+    let root = attendance_root(dir.path());
+
+    for step in 0..4 {
+        // Paired, authenticated, at a command path — every gate the transports
+        // have is open. Origin is the only thing standing in the way.
+        assert!(
+            !note_command_turn_in(
+                Some(&root),
+                "izzie",
+                TurnOrigin::Assistant,
+                true,
+                t0() + chrono::Duration::minutes(5 * step),
+            ),
+            "an assistant-origin command turn advanced the clock"
+        );
+    }
+    assert!(
+        !note_turn_in(&root, "izzie", TurnOrigin::Assistant, t0()),
+        "an assistant-origin turn advanced the clock"
+    );
+
+    assert!(
+        !tracker.record_path(&instance).exists(),
+        "automation forged an attendance record"
+    );
+    assert_eq!(
+        tracker
+            .attendance(&instance, t0() + chrono::Duration::minutes(20))
+            .expect("query"),
+        Attendance::NeverAttended,
+        "twenty minutes of automated commands must leave the owner absent"
+    );
+
+    // Same call, same gates, human origin — this one records.
+    assert!(
+        note_command_turn_in(Some(&root), "izzie", TurnOrigin::Human, true, t0()),
+        "the human-origin path must still record, or the test above proves nothing"
+    );
+    assert_eq!(
+        tracker.last_human_turn(&instance).expect("read"),
+        Some(t0())
     );
 }
 
