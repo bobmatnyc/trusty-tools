@@ -494,10 +494,9 @@ cd .claude/worktrees/<dirname>
 branch → one cohesive PR → applicable Rust gates → trusty-review gate →
 squash-merge → worktree cleanup. The framework skill `tm-pr-workflow` owns the
 full sequence and the optional-issue rule; this file adds only the Rust-specific
-gates (see the Rust Test Ladder above). *(The pointer here used to name
-`.claude-mpm/INSTRUCTIONS.md`, a path that has never existed in this repo — the
-tracked project-instruction host is this file, `.trusty-mpm/INSTRUCTIONS.md`,
-and the delivery chain itself now lives in `tm-pr-workflow`.)*
+gates (see the Rust Test Ladder above). *(This project-instruction host was
+`.trusty-mpm/INSTRUCTIONS.md` until #4286 retired it; the delivery chain itself
+now lives in `tm-pr-workflow`.)*
 
 🔴 **A worktree is a writer; the branch is the workstream.** The durable unit is
 the **branch** — one branch per workstream, and a session owns exactly one

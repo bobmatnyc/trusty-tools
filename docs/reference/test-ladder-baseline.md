@@ -2,8 +2,7 @@
 
 > **The ladder table, the rung selection rule, and "never make a red gate
 > green by deleting coverage" live in
-> [`.trusty-mpm/INSTRUCTIONS.md`](../../.trusty-mpm/INSTRUCTIONS.md) /
-> `CLAUDE.md`** (Rust Test Ladder). This page is the Rust-specific detail for
+> [`CLAUDE.md`](../../CLAUDE.md)** (Rust Test Ladder). This page is the Rust-specific detail for
 > telling a pre-existing red from one your branch caused — consult it while
 > triaging a failing gate, not to decide which rung to run.
 

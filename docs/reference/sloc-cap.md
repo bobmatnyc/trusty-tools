@@ -1,8 +1,7 @@
 # SLOC File Size Cap — Mechanics Reference
 
 > **The cap numbers, classification rule, and merge-blocking prohibition are
-> in [`.trusty-mpm/INSTRUCTIONS.md`](../../.trusty-mpm/INSTRUCTIONS.md) /
-> `CLAUDE.md`** (Key Conventions). This page is the counting definition, the
+> in [`CLAUDE.md`](../../CLAUDE.md)** (Key Conventions). This page is the counting definition, the
 > ratchet-allowlist mechanics, and the resolved-refactor history — consult it
 > when running the gate locally or updating the allowlist, not to decide
 > whether a file needs splitting.
