@@ -386,7 +386,9 @@ Fixed
   CI gate, because "verbatim" means the second category would render as body
   text under the first one's heading. That shipped once (the 1.3.3
   `4286-retire-trusty-mpm-override-files.md` fragment put four categories under
-  `### Removed`). Split it: same number, different slug.
+  `### Removed`). Split it: same number, different slug. The heading form
+  (`## Changed`) counts as a second category too; anything inside a code fence
+  does not, so a fragment may show example output freely.
 - **The file must sit directly in `changelog.d/`.** A nested one (`changelog.d/sub/…`)
   is rejected at release time; `changelog.d/README.md` is the tracked directory
   placeholder and is never treated as a fragment.

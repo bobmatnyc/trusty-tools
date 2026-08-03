@@ -28,6 +28,14 @@
 #   BEGINS with a category word, plus an indented continuation line that is one,
 #   must both pass.
 #
+#   Three more came out of the adversarial review of PR #4686:
+#     - fence guard: a bare category inside ```, ~~~, a longer run, or a fence
+#       with an info string is CONTENT and must pass;
+#     - heading form: `## Changed` / `### Fixed ###` is the same defect in
+#       different markup and must be rejected;
+#     - wrapped-continuation: pinned as a deliberate KNOWN LIMITATION (still
+#       rejected), including the assertion that the error states the remedy.
+#
 # Test: this IS the test. Run directly:
 #   bash scripts/assemble_changelog_selftest.sh
 #
@@ -144,6 +152,92 @@ Changed
 EOF
 assert_case false-positive-guard 0 '^### Changed$'
 assert_case false-positive-guard 0 '^- Changed the default timeout from 30s to 10s'
+
+# ---------------------------------------------------------------------------
+# 3b. FENCE GUARD (review finding 1). A bare category word inside a fenced code
+#     block is CONTENT — a fragment may document the fragment format itself, or
+#     show example assembler output. Covers ```, ~~~, a run longer than three,
+#     and an info string. Whole-line matching that ignored fences is the
+#     seeded-stub bug shape from #4286; this pins that it cannot come back.
+# ---------------------------------------------------------------------------
+d="$(new_crate fence-guard)"
+cat >"$d/1240-fences.md" <<'EOF'
+Documentation
+
+- Documents the fragment format. Every fenced line below is content, not a
+  heading, and none of it may be read as a second category.
+
+```
+Fixed
+```
+
+~~~
+Changed
+~~~
+
+````text
+Removed
+## Security
+````
+EOF
+assert_case fence-guard 0 '^### Documentation$'
+assert_case fence-guard 0 '^Fixed$'
+assert_case fence-guard 0 '^## Security$'
+
+# ---------------------------------------------------------------------------
+# 3c. HEADING FORM (review finding 2). A second category written as a markdown
+#     heading is the same defect in different markup, and structurally worse: a
+#     stray `## …` inside a release section splits it for anything parsing on
+#     `^## ` boundaries, including the cliff.toml GitHub Release body step.
+# ---------------------------------------------------------------------------
+d="$(new_crate heading-form-category)"
+cat >"$d/1241-heading-form.md" <<'EOF'
+Removed
+
+- the thing that was removed (#1241)
+
+## Changed
+
+- a bullet that would land under Removed, below a stray heading
+
+### Fixed ###
+
+- and another
+EOF
+assert_case heading-form-category 1 'carries a second category inside its bullet body'
+
+heading_out="$(bash "$ASSEMBLER" heading-form-category --stdout 2>&1 || true)"
+for stray in '5: ## Changed' '9: ### Fixed ###'; do
+  if grep -qF "1241-heading-form.md:$stray" <<<"$heading_out"; then
+    echo "PASS: heading form names 1241-heading-form.md:$stray"
+  else
+    echo "FAIL: heading form does not name 1241-heading-form.md:$stray" >&2
+    fail=1
+  fi
+done
+
+# A heading-form category INSIDE a fence is still content — the two rules must
+# not fight. Covered by the `## Security` assertion in the fence-guard case.
+
+# ---------------------------------------------------------------------------
+# 3d. KNOWN LIMITATION (review finding 3), pinned deliberately. An unindented
+#     hard-wrapped continuation line that is solely a category word is still
+#     rejected. Suppressing it needs a "preceded by a blank line" rule, which
+#     would let a fragment written without blank lines between its categories
+#     sail through — reopening the defect this guard exists to close. A false
+#     positive costs one indent; a false negative ships a mis-rendered
+#     CHANGELOG.md permanently. The error must state that remedy.
+# ---------------------------------------------------------------------------
+d="$(new_crate wrapped-continuation-limitation)"
+cat >"$d/1242-wrapped.md" <<'EOF'
+Fixed
+
+- Renamed the response status value from
+Changed
+to Resolved (#1242)
+EOF
+assert_case wrapped-continuation-limitation 1 'carries a second category inside its bullet body'
+assert_case wrapped-continuation-limitation 1 'indent it'
 
 # ---------------------------------------------------------------------------
 # 4. An invalid line-1 category is rejected.

@@ -127,22 +127,79 @@ canonical_category() {
 # four categories into one file during the 1.3.3 release and only a human diffing
 # the `--stdout` preview caught it. Nothing in the tooling would have.
 # What: prints "<file-line-number>\t<text>" for every line after the category
-# line that is a bare category word standing alone. Only an UNINDENTED,
-# un-bulleted line qualifies — `- Changed the default timeout` is a legitimate
-# bullet and an indented `  Changed` is authored continuation text; neither is a
-# smuggled heading.
+# line that reads as a SECOND category heading. Two forms are caught:
+#   - a bare category word standing alone, unindented and un-bulleted
+#   - a category as a markdown heading — `## Changed`, `### Fixed ###`
+# The heading form is the same defect wearing different markup, and structurally
+# worse: a stray `## …` inside a release section splits it for anything that
+# parses on `^## ` boundaries, including this repo's cliff.toml-driven GitHub
+# Release body step.
+#
+# Three things are deliberately NOT flagged, because they are legitimate content:
+#   - anything inside a fenced code block. A fragment may show example output or
+#     document the fragment format itself, and that example may contain a bare
+#     `Fixed`. Fence state is tracked across ``` and ~~~, runs longer than three,
+#     and info strings (```text). Whole-line matching that ignored code fences is
+#     what made the seeded-CLAUDE.md-stub bug in #4286 — the third instance of
+#     that shape in this codebase. A validator that rejects a fragment for
+#     documenting its own format punishes thoroughness.
+#   - a bullet, whatever it says: `- Changed the default timeout` is prose.
+#   - an indented line: `  Changed` is authored continuation text.
+#
+# KNOWN LIMITATION, deliberate: an UNINDENTED hard-wrapped continuation line
+# consisting solely of a category word is still flagged. Suppressing it needs a
+# "preceded by a blank line" rule, and that reopens the very defect this guard
+# closes — a fragment written without blank lines between its categories would
+# sail through. A false positive costs one indent; a false negative ships a
+# mis-rendered CHANGELOG.md permanently. The error text states the remedy.
 stray_category_lines() {
   local path="$1"
   awk -v cats="${CATEGORY_ORDER}" '
     BEGIN {
       n = split(tolower(cats), list, " ")
       for (i = 1; i <= n; i++) known[list[i]] = 1
+      fence = ""                                         # open fence marker, "" when closed
     }
-    { line = $0; sub(/\r$/, "", line) }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      probe = line
+      sub(/^[[:space:]]+/, "", probe)
+    }
     !seen && line ~ /[^[:space:]]/ { seen = 1; next }   # the category line
     !seen { next }                                       # leading blank lines
+    # Fence open/close. Counted char-by-char rather than with a /`{3,}/ interval,
+    # which the classic awks this script must run under do not all support.
+    probe ~ /^```/ || probe ~ /^~~~/ {
+      ch = substr(probe, 1, 1)
+      len = 1
+      while (substr(probe, len + 1, 1) == ch) len++
+      rest = substr(probe, len + 1)
+      if (fence == "") {
+        fence = substr(probe, 1, len)                    # info string may follow
+      } else if (substr(fence, 1, 1) == ch && len >= length(fence) && rest ~ /^[[:space:]]*$/) {
+        fence = ""                                       # closer: same char, no info string
+      }
+      next
+    }
+    fence != "" { next }                                 # inside a fence: content, never a category
+    probe ~ /^[-*+]/ { next }                            # a bullet, whatever it says
+    probe ~ /^#/ {                                       # heading form
+      head = probe
+      hashes = 0
+      while (substr(head, hashes + 1, 1) == "#") hashes++
+      if (hashes > 6) next                               # 7+ hashes is not a heading
+      head = substr(head, hashes + 1)
+      sub(/^[[:space:]]+/, "", head)
+      sub(/[[:space:]]*#*[[:space:]]*$/, "", head)       # closing ATX hashes
+      if (tolower(head) in known) {
+        text = probe
+        sub(/[[:space:]]+$/, "", text)
+        printf "%d\t%s\n", NR, text
+      }
+      next
+    }
     line ~ /^[[:space:]]/ { next }                       # continuation / sub-bullet
-    line ~ /^[-*+]/ { next }                             # a bullet, whatever it says
     {
       text = line
       sub(/[[:space:]]+$/, "", text)
@@ -209,6 +266,8 @@ parse_fragment() {
     echo "       may repeat, only the whole name must be unique:" >&2
     echo "         changelog.d/<number>-<slug>-removed.md" >&2
     echo "         changelog.d/<number>-<slug>-changed.md" >&2
+    echo "       If that line is really wrapped prose and not a heading, indent it" >&2
+    echo "       by two spaces (continuation text) or put it inside a code fence." >&2
     return 1
   fi
 
