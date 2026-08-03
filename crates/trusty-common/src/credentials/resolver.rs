@@ -1,11 +1,13 @@
-//! Composite credential resolver (issue #2401).
+//! Composite credential resolver (issue #2401; promoted out of `inference::`
+//! by #4564).
 //!
-//! Why: every inference-adapter consumer needs the same 3-tier answer to
-//! "what is provider X's API key" — process env var, then `.env.local`,
+//! Why: every credential consumer needs the same 3-tier answer to
+//! "what is provider X's secret" — process env var, then `.env.local`,
 //! then the secure store — checked in that exact order every time.
 //! What: [`resolve_key`] is the production entry point (loads `.env.local`
 //! once, then delegates to [`resolve_key_with`] against
-//! [`default_store`]). [`env_var_for`] is the provider→env-var-name mapping.
+//! [`default_store`]). The provider→env-var-name mapping lives in
+//! [`super::registry`].
 //! [`resolve_key_with`] is the hermetic, store-injectable core: it checks
 //! `std::env::var` (which — because `dotenvy` never overrides an existing
 //! var — transparently reflects "process env" *or* "already-loaded
@@ -25,47 +27,7 @@ use super::file_store::FileKeyStore;
 #[cfg(feature = "keyring-store")]
 use super::keyring_store::KeyringStore;
 use super::memory_store::MemoryKeyStore;
-
-/// Canonical process-env variable name for a provider's API key.
-///
-/// Why: every call site (the resolver, and eventually the `config` clap
-/// module's `--env` hint) must agree on one name per provider rather than
-/// re-deriving `{PROVIDER}_API_KEY` ad hoc (which breaks for providers whose
-/// canonical env var doesn't follow that shape).
-/// What: case-insensitive match on `provider`; extend this list as new
-/// providers are added in later Wave 1/2 tickets. Not limited to inference
-/// providers — any consumer that needs the same env → `.env.local` → store
-/// precedence for a token registers its provider→env-var name here (e.g.
-/// `slack` → `SLACK_BOT_TOKEN` for the native Slack MCP server, issue #2638).
-/// `None` for an unknown provider — callers treat that as "env tier does not
-/// apply", not an error.
-/// Test: `resolver_tests::env_var_for_known_providers`,
-/// `resolver_tests::env_var_for_unknown_provider_is_none`.
-pub fn env_var_for(provider: &str) -> Option<&'static str> {
-    match provider.to_ascii_lowercase().as_str() {
-        "fireworks" => Some("FIREWORKS_API_KEY"),
-        "openrouter" => Some("OPENROUTER_API_KEY"),
-        "anthropic" => Some("ANTHROPIC_API_KEY"),
-        "openai" => Some("OPENAI_API_KEY"),
-        "together" => Some("TOGETHER_API_KEY"),
-        "atlascloud" => Some("ATLASCLOUD_API_KEY"),
-        "slack" => Some("SLACK_BOT_TOKEN"),
-        // Second Slack token: `search.messages` (and other user-scope-only
-        // methods) require a Slack *user* token, which a bot token cannot
-        // substitute for. Kept as a distinct provider so bot-token tools and
-        // user-token tools resolve independently (issue #2640, epic #2636).
-        "slack-user" => Some("SLACK_USER_TOKEN"),
-        // Non-inference token: the native Telegram MCP server (issue #2641).
-        "telegram" => Some("TELEGRAM_BOT_TOKEN"),
-        // trusty-agents' ctrl/PM OAuth routing (issue #3248): the `claude`
-        // CLI subprocess token from `claude setup-token`. Registered here so
-        // `llm::credentials::pick_credentials` consults the same env >
-        // `.env.local` > store precedence as every other credential instead
-        // of a raw `std::env::var` read.
-        "claude-code" => Some("CLAUDE_CODE_OAUTH_TOKEN"),
-        _ => None,
-    }
-}
+use super::registry::env_var_for;
 
 /// Resolve `provider`'s credential using the full 3-tier precedence.
 ///
@@ -144,36 +106,6 @@ pub fn default_store() -> Box<dyn KeyStore> {
 mod tests {
     use super::*;
     use serial_test::serial;
-
-    /// Why: pins the canonical mapping used everywhere else in the epic.
-    /// Test: itself.
-    #[test]
-    fn env_var_for_known_providers() {
-        assert_eq!(env_var_for("fireworks"), Some("FIREWORKS_API_KEY"));
-        assert_eq!(env_var_for("OpenRouter"), Some("OPENROUTER_API_KEY"));
-        assert_eq!(env_var_for("anthropic"), Some("ANTHROPIC_API_KEY"));
-        assert_eq!(env_var_for("OPENAI"), Some("OPENAI_API_KEY"));
-        assert_eq!(env_var_for("together"), Some("TOGETHER_API_KEY"));
-        assert_eq!(env_var_for("atlascloud"), Some("ATLASCLOUD_API_KEY"));
-        // Non-inference token: the native Slack MCP server (issue #2638).
-        assert_eq!(env_var_for("slack"), Some("SLACK_BOT_TOKEN"));
-        assert_eq!(env_var_for("Slack"), Some("SLACK_BOT_TOKEN"));
-        // Second Slack token for user-scope search methods (issue #2640).
-        assert_eq!(env_var_for("slack-user"), Some("SLACK_USER_TOKEN"));
-        assert_eq!(env_var_for("Slack-User"), Some("SLACK_USER_TOKEN"));
-        // Non-inference token: the native Telegram MCP server (issue #2641).
-        assert_eq!(env_var_for("telegram"), Some("TELEGRAM_BOT_TOKEN"));
-        // trusty-agents' ctrl/PM `claude` CLI OAuth token (issue #3248).
-        assert_eq!(env_var_for("claude-code"), Some("CLAUDE_CODE_OAUTH_TOKEN"));
-        assert_eq!(env_var_for("Claude-Code"), Some("CLAUDE_CODE_OAUTH_TOKEN"));
-    }
-
-    /// Why: an unmapped provider must not panic or synthesise a guess.
-    /// Test: itself.
-    #[test]
-    fn env_var_for_unknown_provider_is_none() {
-        assert_eq!(env_var_for("some-future-provider"), None);
-    }
 
     /// Why: tier 1 (process env) must win over tier 3 (store) — the core
     /// precedence contract.

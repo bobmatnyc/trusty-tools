@@ -141,7 +141,7 @@ impl ModelAdapter for AnthropicAdapter {
         // here too, not just in the reporting/banner path (see module-level
         // fix note on `openrouter_endpoint`).
         if use_direct
-            && let Some(key) = trusty_common::inference::credentials::resolve_key("anthropic")
+            && let Some(key) = trusty_common::credentials::resolve_key("anthropic")
             && !key.is_empty()
         {
             return ApiEndpoint {
@@ -316,8 +316,7 @@ impl ModelAdapter for FireworksAdapter {
         let base_url = std::env::var(FIREWORKS_BASE_URL_ENV).unwrap_or_else(|_| {
             trusty_common::inference::providers::fireworks::FIREWORKS_BASE_URL.to_string()
         });
-        let key =
-            trusty_common::inference::credentials::resolve_key("fireworks").unwrap_or_default();
+        let key = trusty_common::credentials::resolve_key("fireworks").unwrap_or_default();
         ApiEndpoint {
             base_url,
             auth_header_name: "Authorization".to_string(),

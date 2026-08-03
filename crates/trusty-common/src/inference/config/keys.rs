@@ -17,8 +17,8 @@ use std::io::IsTerminal;
 
 use anyhow::Context;
 
+use crate::credentials::{default_store, load_env_local_once};
 use crate::inference::configurator::Configurator;
-use crate::inference::credentials::{default_store, load_env_local_once};
 use crate::inference::providers::register_default_factories;
 
 use super::ops;
@@ -89,7 +89,7 @@ impl KeysCommand {
     /// Run the parsed `keys` verb against the production environment.
     ///
     /// Why: the production wiring the mount recipe relies on — it resolves the
-    /// real secure [`crate::inference::credentials::KeyStore`] and, for `test`,
+    /// real secure [`crate::credentials::KeyStore`] and, for `test`,
     /// the default provider [`Configurator`], so a mounting binary supplies
     /// nothing. Every operation is delegated to the injectable [`super::ops`]
     /// seam so this method stays a thin, side-effecting shell.

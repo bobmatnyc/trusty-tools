@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serial_test::serial;
-use trusty_common::inference::credentials::MemoryKeyStore;
+use trusty_common::credentials::MemoryKeyStore;
 use trusty_common::inference::registry::{ProviderCapabilities, ProviderId, capabilities};
 use trusty_common::inference::test_support::ScriptedAdapter;
 use trusty_common::inference::{

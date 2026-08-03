@@ -87,8 +87,8 @@ impl WorkflowEngine {
                     // Resolve via the shared 3-tier resolver (env > .env.local >
                     // secure store, #3248) rather than a raw env read, so a
                     // store-only credential isn't silently invisible here.
-                    let api_key = trusty_common::inference::credentials::resolve_key("openrouter")
-                        .unwrap_or_default();
+                    let api_key =
+                        trusty_common::credentials::resolve_key("openrouter").unwrap_or_default();
                     let resolver = ConflictResolver::new(api_key);
                     // #3671: `merge()` only returns `Err` for a genuine I/O
                     // fault (create_dir_all/read_dir/read/write) — every

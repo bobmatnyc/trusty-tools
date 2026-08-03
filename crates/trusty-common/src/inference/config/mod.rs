@@ -15,7 +15,7 @@
 //! ([`keys::KeysCommand`]) with `set` / `list` / `test` / `unset`. The
 //! operations themselves live in the injectable [`ops`] seam so they are 100%
 //! testable without a TTY or a live provider. [`ConfigCommand::run`] resolves its
-//! own secure [`crate::inference::credentials::KeyStore`] and
+//! own secure [`crate::credentials::KeyStore`] and
 //! [`crate::inference::Configurator`], so a mounting binary needs no wiring.
 //!
 //! # Mount recipe for #2405 (the entire integration — two lines)

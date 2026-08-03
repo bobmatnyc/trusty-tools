@@ -399,7 +399,7 @@ pub(crate) fn bedrock_model_id(slug: &str) -> &str {
 /// constructed lazily on first `chat`.
 /// Test: `crates/trusty-common/tests/inference_bedrock.rs`.
 ///
-/// [`KeyStore`]: crate::inference::credentials::KeyStore
+/// [`KeyStore`]: crate::credentials::KeyStore
 pub fn build(resolved: &ResolvedProvider) -> Result<Box<dyn InferenceAdapter>, InferenceError> {
     debug_assert_eq!(resolved.provider(), ProviderId::Bedrock);
     Ok(Box::new(BedrockAdapter::new(None)))

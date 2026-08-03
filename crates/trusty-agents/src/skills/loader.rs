@@ -318,7 +318,7 @@ impl SkillsLoader {
         // read — a store-only credential must not false-negative this gate
         // before `crate::llm::create_client()` (below) ever gets a chance to
         // resolve it.
-        if trusty_common::inference::credentials::resolve_key("openrouter").is_none() {
+        if trusty_common::credentials::resolve_key("openrouter").is_none() {
             anyhow::bail!("openrouter credential not found (env, .env.local, or secure store)");
         }
 

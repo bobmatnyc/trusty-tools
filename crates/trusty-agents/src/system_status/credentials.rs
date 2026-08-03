@@ -13,8 +13,8 @@
 //! Test: `super::tests::credential_status_never_leaks_a_value`.
 
 use serde::Serialize;
+use trusty_common::credentials::{KeyStore, env_local_value};
 use trusty_common::inference::config::ops::classify_tier;
-use trusty_common::inference::credentials::{KeyStore, env_local_value};
 use trusty_common::inference::registry::all;
 
 /// One provider's configuration status — never a value.
@@ -64,7 +64,7 @@ pub fn list_status(store: &dyn KeyStore) -> Vec<CredentialStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::inference::credentials::FileKeyStore;
+    use trusty_common::credentials::FileKeyStore;
 
     /// Why: the never-echo-a-value mandate is the single most security
     /// critical property of this whole tool — a seeded sentinel key must

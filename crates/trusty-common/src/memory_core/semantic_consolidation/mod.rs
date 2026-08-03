@@ -130,7 +130,7 @@ mod tests {
         // were the one inside `inference_available` below, it could re-populate
         // the very var this test just cleared, mid-assertion (the #3464
         // mechanism). Forcing it now makes the clear below the last word.
-        crate::inference::credentials::load_env_local_once();
+        crate::credentials::load_env_local_once();
         let _guard = EnvVarGuard::clear("OPENROUTER_API_KEY");
         assert!(!inference_available("", false));
         assert!(!inference_available("   ", false));
@@ -164,7 +164,7 @@ mod tests {
     /// resolved key. `#[serial(dotenv_credential_env)]` + a local
     /// `EnvVarGuard` avoid racing other tests that read/write the same real
     /// env var — the named group joins the SAME lock used by
-    /// `inference::credentials::{resolver,dotenv}::tests` and
+    /// `credentials::{resolver,dotenv}::tests` and
     /// `memory_core::dream::tests` (audit finding, same class as
     /// #3607/#3608: a bare unnamed `#[serial]` here does NOT coordinate with
     /// those other files' named group, since serial_test treats each group

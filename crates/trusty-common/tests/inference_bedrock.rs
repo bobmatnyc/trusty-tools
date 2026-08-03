@@ -10,7 +10,7 @@
 //! What: `bedrock_factory_registers_and_builds`,
 //! `unregistered_bedrock_provider_errors`.
 
-use trusty_common::inference::credentials::MemoryKeyStore;
+use trusty_common::credentials::MemoryKeyStore;
 use trusty_common::inference::{
     Configurator, InferenceError, ProviderId, register_bedrock_factory,
 };

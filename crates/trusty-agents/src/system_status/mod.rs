@@ -262,7 +262,7 @@ async fn gather_inner(tagent: TagentSelfStatus) -> SystemStatusReport {
     let mcp_servers = mcp_server_status().await;
 
     let credentials =
-        credentials::list_status(trusty_common::inference::credentials::default_store().as_ref());
+        credentials::list_status(trusty_common::credentials::default_store().as_ref());
 
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (agent_registry_count, skills_count) = registry_counts::counts(&project_root).await;

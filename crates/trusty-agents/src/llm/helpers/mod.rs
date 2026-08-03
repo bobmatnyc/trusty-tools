@@ -64,7 +64,7 @@ pub struct ChatResponse {
 /// Why: OpenRouter exposes an OpenAI-compatible API on a different base URL;
 /// using async-openai's `OpenAIConfig` keeps us on a well-maintained client.
 /// What: Resolves the OpenRouter credential via the shared 3-tier resolver
-/// (`trusty_common::inference::credentials::resolve_key` — process env >
+/// (`trusty_common::credentials::resolve_key` — process env >
 /// `.env.local` > secure store, #3248), sets base URL to OpenRouter. Before
 /// this fix the key was read via a raw `std::env::var`, so a credential
 /// configured ONLY via the secure store (`tagent config keys set`) produced
@@ -80,13 +80,12 @@ pub fn create_client() -> Result<Client<OpenAIConfig>> {
     // `use_anthropic_direct=true` which bypasses this client. The base URL
     // stays OpenRouter so any OpenRouter-routed call still works when its
     // key is present.
-    let api_key =
-        trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_else(|| {
-            // Empty key — async-openai will only fail if the request actually
-            // tries to use it. Direct-Anthropic / claude-code paths short-circuit
-            // before then.
-            String::new()
-        });
+    let api_key = trusty_common::credentials::resolve_key("openrouter").unwrap_or_else(|| {
+        // Empty key — async-openai will only fail if the request actually
+        // tries to use it. Direct-Anthropic / claude-code paths short-circuit
+        // before then.
+        String::new()
+    });
     // Note: this is the bare-client constructor. We don't have an agent
     // runner context here; pass `None` so claude-code is never auto-selected
     // just because OAuth is in the env.

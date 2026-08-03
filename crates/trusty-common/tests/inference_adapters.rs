@@ -15,7 +15,7 @@
 
 use serde_json::{Value, json};
 use serial_test::serial;
-use trusty_common::inference::credentials::{KeyStore, MemoryKeyStore};
+use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::providers::{
     anthropic, atlascloud, fireworks, openai, openrouter, together,
 };

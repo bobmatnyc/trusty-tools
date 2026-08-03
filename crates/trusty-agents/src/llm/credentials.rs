@@ -8,7 +8,7 @@
 //! is active.
 //!
 //! Credential detection consults the SAME shared resolver
-//! (`trusty_common::inference::credentials::resolve_key`) that
+//! (`trusty_common::credentials::resolve_key`) that
 //! `trusty-channels` (Slack/Telegram) and this crate's own `GET /api/models`
 //! catalog already use, rather than a raw `std::env::var` read (#3248). That
 //! resolver checks process env, then `.env.local`, then the secure
@@ -17,7 +17,7 @@
 //! no longer silently invisible to `pick_credentials()`. The three provider
 //! names (`openrouter`, `anthropic`, `claude-code`) map to the exact same env
 //! var names this module always used
-//! (`trusty_common::inference::credentials::env_var_for`), so the env-tier
+//! (`trusty_common::credentials::env_var_for`), so the env-tier
 //! behaviour is unchanged — only the store fallback is new.
 //!
 //! What: `pick_credentials()` resolves the same three credentials in priority
@@ -78,7 +78,7 @@ impl LlmCredentials {
 /// (lower-latency direct API). `OPENROUTER_API_KEY` is the deployment / CI
 /// fallback.
 /// What: Resolves three credentials via
-/// [`trusty_common::inference::credentials::resolve_key`] (env >
+/// [`trusty_common::credentials::resolve_key`] (env >
 /// `.env.local` > secure store — #3248). Returns `ClaudeCode` only when
 /// `runner == Some(RunnerKind::ClaudeCode)` AND the `claude-code` credential
 /// resolves. Otherwise prefers `AnthropicDirect` then `OpenRouter`. Returns
@@ -139,7 +139,7 @@ pub fn missing_credentials_error() -> String {
 /// What: walks the shared provider registry, excludes the three providers
 /// `pick_credentials` already checks, and returns the `id` of every
 /// remaining provider whose credential resolves via
-/// [`trusty_common::inference::credentials::resolve_key`]. Never exposes a
+/// [`trusty_common::credentials::resolve_key`]. Never exposes a
 /// value — names only, same discipline as `config keys list`.
 /// Test: `other_configured_providers_names_fireworks_when_store_has_it`,
 /// `other_configured_providers_empty_when_nothing_else_configured`.
@@ -160,11 +160,11 @@ pub fn other_configured_providers() -> Vec<&'static str> {
 /// precedence as every other unified-inference consumer (#3248) instead of a
 /// raw `std::env::var` read that only ever saw the env tier.
 /// What: delegates to
-/// [`trusty_common::inference::credentials::resolve_key`] and keeps only the
+/// [`trusty_common::credentials::resolve_key`] and keeps only the
 /// `is_some()` boolean.
 /// Test: `pick_consults_store_when_env_absent`.
 fn resolve_key_set(provider: &str) -> bool {
-    trusty_common::inference::credentials::resolve_key(provider).is_some()
+    trusty_common::credentials::resolve_key(provider).is_some()
 }
 
 /// Qualify a bare Claude / Anthropic model id with the `anthropic/` provider
@@ -245,9 +245,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         clear_all();
-        let expect_some = trusty_common::inference::credentials::resolve_key("openrouter")
-            .is_some()
-            || trusty_common::inference::credentials::resolve_key("anthropic").is_some();
+        let expect_some = trusty_common::credentials::resolve_key("openrouter").is_some()
+            || trusty_common::credentials::resolve_key("anthropic").is_some();
         assert_eq!(pick_credentials(None).is_some(), expect_some);
     }
 
@@ -280,8 +279,8 @@ mod tests {
             std::env::set_var("HOME", tmp.path());
         }
 
-        let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-        trusty_common::inference::credentials::KeyStore::set(
+        let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+        trusty_common::credentials::KeyStore::set(
             &store,
             "openrouter",
             "sk-or-from-store", // pragma: allowlist secret
@@ -500,8 +499,8 @@ mod tests {
             std::env::set_var("HOME", tmp.path());
         }
 
-        let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
-        trusty_common::inference::credentials::KeyStore::set(
+        let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+        trusty_common::credentials::KeyStore::set(
             &store,
             "fireworks",
             "fw-from-store", // pragma: allowlist secret

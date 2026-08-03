@@ -120,7 +120,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // (a superset of the old cwd-only lookup) and, like all dotenvy loads, never
     // overrides an already-set process env var. The plain `.env` load and the
     // detected self-project `.env.local` load below are kept as-is.
-    trusty_common::inference::credentials::load_env_local_once();
+    trusty_common::credentials::load_env_local_once();
     dotenvy::dotenv().ok();
     if let Some(project_dir) = ctrl::detect_self_project() {
         let project_env = project_dir.join(".env.local");

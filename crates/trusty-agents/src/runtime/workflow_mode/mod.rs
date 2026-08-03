@@ -271,8 +271,7 @@ pub(super) async fn run_workflow(
     // Resolved via the shared 3-tier resolver (env > .env.local > secure
     // store, #3248) rather than a raw env read, so a store-only credential
     // isn't silently invisible to the indexer/cleaner.
-    let api_key =
-        trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default();
+    let api_key = trusty_common::credentials::resolve_key("openrouter").unwrap_or_default();
     let indexer = context::HistoryIndexer::spawn(store_dir.clone(), api_key.clone());
     let cleaner = context::cleaner::MemoryCleaner::spawn(store_dir.clone(), api_key.clone(), 20);
 

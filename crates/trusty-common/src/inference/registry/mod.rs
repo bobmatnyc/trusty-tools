@@ -82,7 +82,7 @@ impl ProviderId {
     /// The provider name to hand the credential resolver, or `None` when the
     /// provider does not use an API key.
     ///
-    /// Why: [`crate::inference::credentials::resolve_key_with`] keys off a
+    /// Why: [`crate::credentials::resolve_key_with`] keys off a
     /// provider name; Bedrock has no key (AWS chain) and Local has no key
     /// (unauthenticated `localhost` endpoint), so their resolution is skipped
     /// entirely by the configurator — both resolve immediately in stage 1 of

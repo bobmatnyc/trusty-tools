@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use trusty_common::inference::credentials::{KeyStore, default_store};
+use trusty_common::credentials::{KeyStore, default_store};
 use trusty_common::inference::{
     ChatMessage, ChatRequest, Configurator, InferenceAdapter, InferenceError,
     register_default_factories,

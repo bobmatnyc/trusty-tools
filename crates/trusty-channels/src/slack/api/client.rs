@@ -77,7 +77,7 @@ impl BaseClient {
     /// server boots for `tools/list` without credentials; the `MissingToken`
     /// error is deferred to the first call that actually needs auth.
     /// What: Builds the `reqwest::Client` and resolves both tokens through
-    /// `trusty_common::inference::credentials::resolve_key` — the bot token from
+    /// `trusty_common::credentials::resolve_key` — the bot token from
     /// [`SLACK_PROVIDER`] (`SLACK_BOT_TOKEN`) and the optional user token from
     /// [`SLACK_USER_PROVIDER`] (`SLACK_USER_TOKEN`), each via process env →
     /// `.env.local` → secure store. Returns `Err` only if the HTTP client fails
@@ -85,8 +85,8 @@ impl BaseClient {
     /// Test: `new_succeeds_without_token`; env-tier pickup in `tests/client_http.rs`.
     pub fn new() -> Result<Self> {
         let http = build_http_client()?;
-        let token = trusty_common::inference::credentials::resolve_key(SLACK_PROVIDER);
-        let user_token = trusty_common::inference::credentials::resolve_key(SLACK_USER_PROVIDER);
+        let token = trusty_common::credentials::resolve_key(SLACK_PROVIDER);
+        let user_token = trusty_common::credentials::resolve_key(SLACK_USER_PROVIDER);
         Ok(Self {
             http,
             token,

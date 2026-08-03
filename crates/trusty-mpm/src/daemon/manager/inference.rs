@@ -23,7 +23,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use trusty_common::inference::credentials::{KeyStore, default_store};
+use trusty_common::credentials::{KeyStore, default_store};
 use trusty_common::inference::{
     Configurator, InferenceAdapter, InferenceError, register_default_factories,
 };

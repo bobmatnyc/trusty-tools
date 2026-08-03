@@ -20,8 +20,8 @@ pub use resolver::{ResolvedProvider, provider_for};
 
 use std::collections::HashMap;
 
+use crate::credentials::KeyStore;
 use crate::inference::adapter::InferenceAdapter;
-use crate::inference::credentials::KeyStore;
 use crate::inference::error::InferenceError;
 use crate::inference::registry::ProviderId;
 
@@ -130,7 +130,7 @@ impl Configurator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::credentials::MemoryKeyStore;
+    use crate::credentials::MemoryKeyStore;
     use crate::inference::registry::capabilities;
     use crate::inference::test_support::ScriptedAdapter;
     use serial_test::serial;

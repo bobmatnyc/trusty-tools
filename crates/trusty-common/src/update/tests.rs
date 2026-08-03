@@ -760,7 +760,7 @@ async fn verify_installed_binary_honours_cargo_home_override() {
 // `std::sync::Mutex` guard can't span the `.await` below without tripping
 // `clippy::await_holding_lock`, so `#[serial]` (already used elsewhere in
 // this crate for the same class of problem, e.g.
-// `inference::credentials::resolver::tests`) is the correct primitive: it
+// `credentials::resolver::tests`) is the correct primitive: it
 // serializes the whole async test body, including the await, against every
 // other test carrying the same group tag.
 #[serial(update_verify_installed_binary_env)]

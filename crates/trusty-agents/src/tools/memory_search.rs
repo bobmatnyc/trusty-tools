@@ -48,7 +48,7 @@ impl MemorySearchTool {
     pub fn from_env() -> Self {
         Self::new(
             PathBuf::from(".trusty-agents").join("history"),
-            trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default(),
+            trusty_common::credentials::resolve_key("openrouter").unwrap_or_default(),
         )
     }
 }

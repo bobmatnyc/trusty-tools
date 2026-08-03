@@ -452,7 +452,7 @@ impl InferenceAdapter for OpenAiCompatClient {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use trusty_common::inference::credentials::MemoryKeyStore;
+    use trusty_common::credentials::MemoryKeyStore;
 
     /// RAII guard clearing one credential env var for the duration of a test.
     ///

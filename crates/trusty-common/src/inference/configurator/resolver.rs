@@ -17,7 +17,7 @@
 //! `bedrock_resolves_without_key`, `local_resolves_without_key`,
 //! `no_credential_anywhere_errors`.
 
-use crate::inference::credentials::{KeyStore, resolve_key_with};
+use crate::credentials::{KeyStore, resolve_key_with};
 use crate::inference::error::InferenceError;
 use crate::inference::registry::{ProviderCapabilities, ProviderId, capabilities};
 use crate::inference::types::SecretString;
@@ -158,7 +158,7 @@ pub fn provider_for(slug: &str, store: &dyn KeyStore) -> Result<ResolvedProvider
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::credentials::MemoryKeyStore;
+    use crate::credentials::MemoryKeyStore;
     use serial_test::serial;
 
     /// Build a store with the given provider→key entries, and clear any process
