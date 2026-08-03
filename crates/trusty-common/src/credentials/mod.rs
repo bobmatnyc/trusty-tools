@@ -12,43 +12,65 @@
 //! path had become actively misleading, which is why consumers kept adding a
 //! raw `std::env::var` read instead of finding it.
 //!
-//! What: [`KeyStore`] is the storage trait ([`memory_store::MemoryKeyStore`],
-//! [`file_store::FileKeyStore`], and — behind the `keyring-store` feature —
-//! `keyring_store::KeyringStore`). [`registry`] is the
-//! provider→environment-variable table. [`resolver::resolve_key`] applies the
-//! 3-tier precedence (process env var via [`registry::env_var_for`] >
-//! `.env.local` via [`dotenv`] > [`resolver::default_store`]).
-//! [`redact::redact_secret`] is the one credential-masking implementation,
-//! also reused by `memory_core::filter`.
+//! What: two layers.
+//!
+//! **Storage and naming.** [`KeyStore`] is the storage trait
+//! ([`memory_store::MemoryKeyStore`], [`file_store::FileKeyStore`], and —
+//! behind the `keyring-store` feature — `keyring_store::KeyringStore`).
+//! [`registry`] is the provider→environment-variable table.
+//! [`resolver::resolve_key`] applies the 3-tier precedence (process env var via
+//! [`registry::env_var_for`] > `.env.local` via [`dotenv`] >
+//! [`resolver::default_store`]). [`redact::redact_secret`] is the one
+//! credential-masking implementation, also reused by `memory_core::filter`.
+//!
+//! **Reference and use-time resolution** (#4565). [`CredentialRef`] is the
+//! opaque, non-secret handle a config row holds *instead of* a credential;
+//! [`Secret`] is what a resolved credential comes back in, and it cannot be
+//! serialised, cloned, or printed; [`authority::resolve`] is the single entry
+//! point, taking a [`Principal`] and a [`Scope`] so resolution happens where
+//! the credential is consumed rather than at config load;
+//! [`CredentialError`] is the five-variant denial taxonomy.
 //!
 //! This module holds **no** authorization. Which principal may resolve which
 //! credential is DOC-45 §5 and lands with #4566; the storage tiers here
-//! determine *where a value lives*, never *who may read it* (`C-9.8`).
+//! determine *where a value lives*, never *who may read it* (`C-9.8`). The
+//! [`Principal`] argument exists so no consumer is migrated twice when that
+//! check lands — see [`authority`]'s honesty clause.
 //!
 //! Test: `cargo test -p trusty-common --features credentials -- credentials::`
 //! and (KeyringStore compile/probe-failure-path only, never a real keychain)
 //! `cargo test -p trusty-common --features keyring-store -- credentials::`.
 
+pub mod authority;
 mod dotenv;
+mod error;
 mod file_store;
+mod handle;
 #[cfg(feature = "keyring-store")]
 mod keyring_store;
 mod memory_store;
+mod principal;
 mod redact;
 pub mod registry;
 mod resolver;
+mod secret;
 
+pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with, resolve_with};
 pub use dotenv::{
     env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
     read_var_from_env_local, user_env_local_path,
 };
+pub use error::CredentialError;
 pub use file_store::FileKeyStore;
+pub use handle::{CredentialRef, CredentialRefError};
 #[cfg(feature = "keyring-store")]
 pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryKeyStore;
+pub use principal::{Access, Principal, Scope, ServiceId};
 pub use redact::redact_secret;
 pub use registry::{REGISTRY, env_var_for, registered_providers};
 pub use resolver::{default_store, resolve_key, resolve_key_with};
+pub use secret::Secret;
 
 use std::path::PathBuf;
 
