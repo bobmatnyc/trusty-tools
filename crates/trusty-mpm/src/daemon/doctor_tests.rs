@@ -137,7 +137,7 @@ async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_twenty_eight_checks() {
+async fn run_doctor_produces_twenty_nine_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -175,6 +175,7 @@ async fn run_doctor_produces_twenty_eight_checks() {
         "skill_staleness",
         "skill_unmanaged",
         "legacy_sources",
+        "legacy_overrides",
         "agent_skills",
         "agent_skills_prose_hints",
         "memory",

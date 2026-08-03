@@ -1196,6 +1196,7 @@ async fn doctor_endpoint_returns_report() {
         "skill_staleness",
         "skill_unmanaged",
         "legacy_sources",
+        "legacy_overrides",
         "agent_skills",
         "agent_skills_prose_hints",
         "memory",

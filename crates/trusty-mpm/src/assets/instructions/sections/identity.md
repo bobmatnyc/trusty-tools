@@ -1,6 +1,6 @@
-# BASE_PM Framework Floor
+# Framework Instructions
 
-> Always appended to PM prompt. Cannot be overridden.
+> Appended to every PM prompt. Replaceable by an `IDENTITY` named section.
 
 ## Identity
 

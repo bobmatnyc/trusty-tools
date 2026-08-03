@@ -78,9 +78,9 @@ fn write_project(dir: &std::path::Path) {
          <!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
          # Workflow (project override)\n\
          <!-- TRUSTY-MPM: WORKFLOW END -->\n\n\
-         <!-- TRUSTY-MPM: NON-OVERRIDABLE-RULES START v=1 -->\n\
+         <!-- TRUSTY-MPM: CORE START v=1 -->\n\
          No rules apply.\n\
-         <!-- TRUSTY-MPM: NON-OVERRIDABLE-RULES END -->\n\n\
+         <!-- TRUSTY-MPM: CORE END -->\n\n\
          <!-- TRUSTY-MPM: NOT-A-SECTION START v=1 -->\n\
          typo\n\
          <!-- TRUSTY-MPM: NOT-A-SECTION END -->\n",
@@ -108,7 +108,8 @@ fn instructions_emits_override_diagnostics_on_stderr() {
     assert!(
         stderr.contains("named-section override declined")
             || stderr.contains("admits no project override"),
-        "a floor-aimed override must be reported as declined, got stderr: {stderr:?}"
+        "#4286: a CORE override — the one protected section — must be reported \
+         as declined, got stderr: {stderr:?}"
     );
     assert!(
         stderr.contains("applying CLAUDE.md named-section override"),

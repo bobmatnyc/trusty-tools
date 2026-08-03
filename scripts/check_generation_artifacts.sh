@@ -17,7 +17,7 @@
 #   An audit of every existing gate (check_line_cap.sh, check_test_pointers.sh,
 #   check_sld.sh, check_agent_assets.sh, check_buildrs_sync.sh,
 #   check_capabilities.sh, check_claude_md_not_tracked.sh,
-#   check_instruction_floor.sh, token-drift.yml) confirmed none of them cover
+#   token-drift.yml) confirmed none of them cover
 #   this class of defect — token-drift.yml's `:root\s*\{([\s\S]*?)\n\}` regex
 #   in particular stops at the first `\n}`, so the CSS artifact sits just
 #   outside the parsed block. No markdownlint/remark/vale exists either.

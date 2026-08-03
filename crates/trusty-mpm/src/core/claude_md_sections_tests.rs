@@ -15,10 +15,10 @@
 use super::*;
 use crate::core::bundled_pm_package::bundled_fallback_package;
 use crate::core::instruction_overrides::{
-    FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_WORKFLOW, OVERRIDE_DIR_NAME, PromptSource,
+    FILE_INSTRUCTIONS, FILE_WORKFLOW, OVERRIDE_DIR_NAME, PromptSource,
     resolve_pm_prompt_with_roster,
 };
-use crate::core::instruction_package::{Generator, InstructionBlock, Join};
+use crate::core::instruction_package::Generator;
 use tempfile::TempDir;
 
 /// A fixed roster, so composed output never depends on the machine's agents.
@@ -161,39 +161,16 @@ fn text_outside_markers_is_ignored() {
     assert_eq!(scanned.overrides[0].body, "INSIDE_TEXT");
 }
 
-#[test]
-fn claude_md_wins_a_same_section_collision_with_instructions_md() {
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(tmp.path(), &block(SectionId::Workflow, "FROM_CLAUDE_MD"));
-    write_trusty_file(
-        tmp.path(),
-        FILE_INSTRUCTIONS,
-        &block(SectionId::Workflow, "FROM_INSTRUCTIONS_MD"),
-    );
-
-    let scanned = scan_project(tmp.path());
-    assert_eq!(scanned.overrides.len(), 1);
-    assert_eq!(scanned.overrides[0].body, "FROM_CLAUDE_MD");
-    assert_eq!(reasons(&scanned), vec![REASON_SHADOWED]);
-}
-
-#[test]
-fn instructions_md_supplies_sections_claude_md_does_not_claim() {
-    // Both hosts are scanned; precedence only settles collisions.
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(tmp.path(), &block(SectionId::Workflow, "FROM_CLAUDE_MD"));
-    write_trusty_file(
-        tmp.path(),
-        FILE_INSTRUCTIONS,
-        &block(SectionId::Memory, "FROM_INSTRUCTIONS_MD"),
-    );
-
-    let scanned = scan_project(tmp.path());
-    assert_eq!(scanned.diagnostics, vec![]);
-    assert_eq!(scanned.overrides.len(), 2);
-    assert_eq!(scanned.overrides[0].section, SectionId::Memory);
-    assert_eq!(scanned.overrides[1].section, SectionId::Workflow);
-}
+// `claude_md_wins_a_same_section_collision_with_instructions_md` and
+// `instructions_md_supplies_sections_claude_md_does_not_claim` were deleted with
+// the second marker host (#4286). Both asserted cross-host precedence between
+// `CLAUDE.md` and `.trusty-mpm/INSTRUCTIONS.md`; with one host there is no
+// cross-host case to settle. `a_marker_in_the_retired_instructions_file_is_not_
+// read` and `claude_md_is_the_only_marker_host` cover the replacement contract.
+//
+// `scan_project` keeps its `REASON_SHADOWED` arm — see `HOST_FILES` — so adding
+// a host back stays a data change. `duplicate_section_in_one_host_keeps_the_first`
+// below keeps that arm's sibling (`REASON_DUPLICATE`) exercised.
 
 #[test]
 fn duplicate_section_in_one_host_keeps_the_first() {
@@ -370,32 +347,14 @@ fn diagnostics_carry_the_host_and_a_one_based_line() {
     );
 }
 
-#[test]
-fn strip_is_a_no_op_without_markers() {
-    // The universal case today. Byte-for-byte identity here is what proves the
-    // existing `project-addendum` generator cannot regress.
-    for text in [
-        "",
-        "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK\n",
-        "trailing whitespace kept   \n\n\n",
-        "<!-- an ordinary comment -->\n",
-    ] {
-        assert_eq!(strip_marker_blocks(text), text);
-    }
-}
-
-#[test]
-fn strip_removes_marked_blocks_from_the_addendum() {
-    let text = format!(
-        "KEEP_BEFORE\n\n{}\nKEEP_AFTER\n",
-        block(SectionId::Workflow, "MOVED_TO_A_SECTION")
-    );
-    let stripped = strip_marker_blocks(&text);
-    assert!(stripped.contains("KEEP_BEFORE"));
-    assert!(stripped.contains("KEEP_AFTER"));
-    assert!(!stripped.contains("MOVED_TO_A_SECTION"));
-    assert!(!stripped.contains("TRUSTY-MPM:"), "markers go too");
-}
+// `strip_is_a_no_op_without_markers` and
+// `strip_removes_marked_blocks_from_the_addendum` were deleted with
+// `strip_marker_blocks` itself (#4286). Both covered de-duplicating a marked
+// block inside `.trusty-mpm/INSTRUCTIONS.md`, which was simultaneously a marker
+// host and the `project-addendum` source. Retiring that file removed both roles,
+// so the function had no caller and the tests had no behaviour to pin. The
+// replacement coverage — that the retired file is no longer a marker host at
+// all — is `a_marker_in_the_retired_instructions_file_is_not_read` below.
 
 // ---------------------------------------------------------------------------
 // APPLICATION — `InstructionPackage::with_overrides`
@@ -431,7 +390,10 @@ fn floor_sections_refuse_every_named_section_override() {
     // a fourth floor section, and a hand-listed set would have kept passing
     // while the new one went untested — the exact drift shape that let the
     // Prohibitions table ship at tier `project`.
-    for section in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
+    for section in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id == SectionId::Core)
+    {
         let (result, rejected) = package.with_overrides(&[over(section, "SUBVERTED")]);
         assert_eq!(&result, package, "{section:?} must be untouched");
         assert_eq!(
@@ -446,13 +408,18 @@ fn floor_sections_refuse_every_named_section_override() {
 
 #[test]
 fn content_sections_accept_a_project_override() {
+    // #4286 flipped which sections these are: `core` became the one protected
+    // section and the four former floor sections joined the overridable set.
     let package = bundled_fallback_package().expect("manifest parses");
     for section in [
-        SectionId::Core,
+        SectionId::Identity,
         SectionId::Memory,
         SectionId::Search,
         SectionId::Workflow,
         SectionId::AgentDelegation,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
     ] {
         let (result, rejected) = package.with_overrides(&[over(section, "REPLACED_BODY")]);
         assert_eq!(rejected, vec![], "{section:?} is tier project");
@@ -512,13 +479,13 @@ fn agent_delegation_override_keeps_the_generated_roster() {
 fn one_bad_override_does_not_discard_a_good_one() {
     let package = bundled_fallback_package().expect("manifest parses");
     let (result, rejected) = package.with_overrides(&[
-        over(SectionId::Identity, "SUBVERTED"),
+        over(SectionId::Core, "SUBVERTED"),
         over(SectionId::Workflow, "CUSTOM_WORKFLOW"),
     ]);
     assert_eq!(
         rejected,
         vec![Rejection::NotOverridable {
-            section: SectionId::Identity,
+            section: SectionId::Core,
             tier: CustomizationTier::Fixed,
         }]
     );
@@ -631,21 +598,21 @@ fn an_undeclared_section_is_rejected_and_the_package_is_reverted() {
 
 #[test]
 fn an_override_that_cannot_validate_is_discarded_and_the_package_reverts() {
-    // Contrived package carrying an overridable Memory block AFTER the floor,
-    // so anything derived from it fails `OverridableAfterFloor`. Overriding
-    // Workflow cannot fix that, so the override is discarded on its own
-    // diagnosis, the final validation then refuses the whole, and the package as
-    // supplied comes back. Applying an override must never make things worse
+    // Contrived package that cannot validate for a reason no override can fix:
+    // a second `fixed` section, which #4286's core-only tier invariant rejects.
+    // Overriding Workflow does not repair it, so the override is discarded on
+    // its own diagnosis, the final validation refuses the whole, and the package
+    // as supplied comes back. Applying an override must never make things worse
     // than not applying it.
+    //
+    // Before #4286 this used a Memory block placed after the floor, tripping
+    // `OverridableAfterFloor`; that rule died with the floor.
     let mut package = bundled_fallback_package().expect("manifest parses").clone();
-    package.blocks.push(InstructionBlock {
-        section: SectionId::Memory,
-        body: BlockBody::Text {
-            text: "TRAILING".to_string(),
-        },
-        join_before: Join::Rule,
-        optional: false,
-    });
+    for section in &mut package.sections {
+        if section.id == SectionId::NonOverridableRules {
+            section.customization_tier = CustomizationTier::Fixed;
+        }
+    }
 
     let (result, rejected) = package.with_overrides(&[over(SectionId::Workflow, "X")]);
     assert_eq!(
@@ -658,9 +625,9 @@ fn an_override_that_cannot_validate_is_discarded_and_the_package_reverts() {
             [
                 Rejection::Invalidates {
                     section: SectionId::Workflow,
-                    error: ValidationError::OverridableAfterFloor { .. },
+                    error: ValidationError::TierNotCoreOnly { .. },
                 },
-                Rejection::PackageInvalid(ValidationError::OverridableAfterFloor { .. }),
+                Rejection::PackageInvalid(ValidationError::TierNotCoreOnly { .. }),
             ]
         ),
         "unexpected rejections: {rejected:?}"
@@ -707,7 +674,10 @@ fn a_floor_marker_composes_byte_identically_to_no_claude_md() {
     let baseline = TempDir::new().unwrap();
     let (expected, _) = resolve(baseline.path());
 
-    for section in SectionId::CANONICAL.into_iter().filter(|id| id.is_floor()) {
+    for section in SectionId::CANONICAL
+        .into_iter()
+        .filter(|id| *id == SectionId::Core)
+    {
         let tmp = TempDir::new().unwrap();
         write_claude_md(tmp.path(), &block(section, "SUBVERTED_FLOOR"));
         let (prompt, source) = resolve(tmp.path());
@@ -772,237 +742,86 @@ fn tm_never_writes_claude_md() {
     );
 }
 
-#[test]
-fn an_unrelated_legacy_file_does_not_shadow_a_named_section_override() {
-    // #4399 REGRESSION GATE (this test previously pinned the bug it now
-    // guards against). A project carrying a legacy `.trusty-mpm/` override
-    // file composes through the sectionless legacy assembly — but an
-    // unrelated legacy file (here `AGENT_DELEGATION.md`) must not shadow a
-    // CLAUDE.md named override for a DIFFERENT section (here `WORKFLOW`):
-    // that override has nothing to do with the file that forced this branch,
-    // so it must still land.
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(tmp.path(), &block(SectionId::Workflow, "NAMED_WORKFLOW"));
-    write_trusty_file(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(
-        prompt.contains("NAMED_WORKFLOW"),
-        "an unrelated legacy file must not drop this override: {prompt}"
-    );
-    assert!(
-        !prompt.contains("# PM Workflow Configuration"),
-        "the bundled workflow must be replaced by the named override"
-    );
-    assert!(
-        prompt.contains("X"),
-        "the unrelated legacy file still applies to ITS OWN section"
-    );
-    assert!(prompt.contains("# BASE_PM Framework Floor"));
-    assert_eq!(
-        scan_project(tmp.path()).overrides.len(),
-        1,
-        "the named override was scanned"
-    );
-}
-
-#[test]
-fn a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported() {
-    // The flip side of #4399: a legacy file for the SAME section a CLAUDE.md
-    // marker names is a genuine, deliberate collision — the legacy file (the
-    // more specific, project-authored mechanism for that exact section) still
-    // wins, unchanged from before. The named override is correctly declined,
-    // and that decline is still reported — never silently.
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(tmp.path(), &block(SectionId::Workflow, "NAMED_WORKFLOW"));
-    write_trusty_file(
-        tmp.path(),
-        FILE_WORKFLOW,
-        "# Legacy Workflow\n\nLEGACY_WORKFLOW\n",
-    );
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(
-        prompt.contains("LEGACY_WORKFLOW"),
-        "the same-section legacy file wins"
-    );
-    assert!(
-        !prompt.contains("NAMED_WORKFLOW"),
-        "the named override cannot also apply once its own section has a legacy file"
-    );
-    // Not just "one override was scanned" — the SPECIFIC section that lost to
-    // the legacy file, so a miscounted or wrong-section regression cannot pass
-    // this test by accident. `warn_unapplied` is only ever handed the entries
-    // `resolve_pm_prompt_with_roster` still considers unapplied, and this is
-    // that entry: same section (`Workflow`), same host (`CLAUDE.md`).
-    let scanned = scan_project(tmp.path());
-    assert_eq!(scanned.overrides.len(), 1, "the named override was scanned");
-    assert_eq!(
-        scanned.overrides[0].section,
-        SectionId::Workflow,
-        "the reported override is the WORKFLOW one the legacy file shadowed"
-    );
-    assert_eq!(
-        scanned.overrides[0].host,
-        tmp.path().join("CLAUDE.md"),
-        "the reported override was authored in CLAUDE.md, not a legacy file"
-    );
-}
-
-#[test]
-fn an_unrelated_legacy_file_does_not_shadow_a_named_memory_override() {
-    // #4399: same guarantee for MEMORY as for WORKFLOW.
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(
-        tmp.path(),
-        &block(SectionId::Memory, "Recall from the `team` palace first."),
-    );
-    write_trusty_file(
-        tmp.path(),
-        FILE_WORKFLOW,
-        "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
-    );
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(
-        prompt.contains("Recall from the `team` palace first."),
-        "an unrelated WORKFLOW.md must not drop the named MEMORY override: {prompt}"
-    );
-    assert!(prompt.contains("## Memory Behavior (project override)"));
-}
-
-#[test]
-fn an_unrelated_legacy_file_does_not_shadow_a_named_delegation_override() {
-    // #4399: same guarantee for AGENT-DELEGATION, including the roster
-    // survival rule (#4196) — the named override replaces the bundled
-    // doctrine, but the LIVE roster (host-computed, not authored) still
-    // follows, exactly as it does on the packaged path.
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(
-        tmp.path(),
-        &block(SectionId::AgentDelegation, "# Custom Routing\n\nROUTE_ALL"),
-    );
-    write_trusty_file(
-        tmp.path(),
-        FILE_WORKFLOW,
-        "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
-    );
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(
-        prompt.contains("ROUTE_ALL"),
-        "the named override lands: {prompt}"
-    );
-    assert!(
-        !prompt.contains("## Make / Mise Command Routing"),
-        "the bundled doctrine is replaced"
-    );
-    assert!(
-        prompt.contains("## Delegation Authority") && prompt.contains("### ticketing"),
-        "the LIVE roster must still be emitted: {prompt}"
-    );
-    assert!(
-        prompt.contains("TWO_PHASE_ONLY"),
-        "the unrelated legacy file still applies to ITS OWN section"
-    );
-}
-
-#[test]
-fn identity_core_and_search_stay_reported_unapplied_on_the_legacy_path() {
-    // Unlike WORKFLOW/MEMORY/AGENT-DELEGATION, these sections have no
-    // independent slot in the string-assembled legacy assembly — they live
-    // inside the single opaque `pm_instructions()` blob. A legacy file
-    // forcing that assembly genuinely cannot honour them, and that must stay
-    // loud (`warn_unapplied`), never silently dropped without a trace.
-    let tmp = TempDir::new().unwrap();
-    write_claude_md(tmp.path(), &block(SectionId::Core, "NAMED_CORE"));
-    write_trusty_file(tmp.path(), FILE_AGENT_DELEGATION, "# Custom Routing\n\nX\n");
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Legacy);
-    assert!(!prompt.contains("NAMED_CORE"));
-    // Not just "one override was scanned" — the SPECIFIC section that has no
-    // slot on this path, so a miscounted or wrong-section regression cannot
-    // pass this test by accident.
-    let scanned = scan_project(tmp.path());
-    assert_eq!(
-        scanned.overrides.len(),
-        1,
-        "and it is still reported, never silently"
-    );
-    assert_eq!(
-        scanned.overrides[0].section,
-        SectionId::Core,
-        "the reported override is the CORE one this legacy path cannot honour"
-    );
-}
-
-#[test]
-fn an_unmarked_instructions_md_still_feeds_the_project_addendum() {
-    // No regression to the existing additive-addendum behaviour: a marker-free
-    // `.trusty-mpm/INSTRUCTIONS.md` is delivered exactly as it is today.
-    let tmp = TempDir::new().unwrap();
-    write_trusty_file(
-        tmp.path(),
-        FILE_INSTRUCTIONS,
-        "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK\n",
-    );
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Package);
-    assert!(prompt.contains("ALWAYS_RUN_MAKE_CHECK"));
-    let addendum = prompt.find("ALWAYS_RUN_MAKE_CHECK").expect("addendum");
-    let base = prompt.find("# BASE_PM Framework Floor").expect("floor");
-    assert!(addendum < base, "the addendum still precedes the floor");
-}
-
-#[test]
-fn a_marked_block_in_instructions_md_is_delivered_once() {
-    // `INSTRUCTIONS.md` is both a marker host and the addendum source. The
-    // marked block must arrive as the override it is, NOT also as raw prose.
-    let tmp = TempDir::new().unwrap();
-    write_trusty_file(
-        tmp.path(),
-        FILE_INSTRUCTIONS,
-        &format!(
-            "# Project Rules\n\nSTILL_ADDITIVE\n\n{}",
-            block(SectionId::Workflow, "SECTIONED_WORKFLOW")
-        ),
-    );
-
-    let (prompt, source) = resolve(tmp.path());
-    assert_eq!(source, PromptSource::Package);
-    assert!(
-        prompt.contains("STILL_ADDITIVE"),
-        "unmarked prose still added"
-    );
-    // Not a blanket `!contains("TRUSTY-MPM:")`: the Non-Overridable Rules floor
-    // itself now documents the marker grammar with a `<TOKEN>` placeholder
-    // example, so that literal substring legitimately appears in every
-    // composed prompt. What must never leak is THIS override's own concrete
-    // WORKFLOW marker lines.
-    let workflow_token = section_token(SectionId::Workflow);
-    assert!(
-        !prompt.contains(&format!("<!-- TRUSTY-MPM: {workflow_token} START")),
-        "this override's start marker never reaches the prompt"
-    );
-    assert!(
-        !prompt.contains(&format!("<!-- TRUSTY-MPM: {workflow_token} END")),
-        "this override's end marker never reaches the prompt"
-    );
-    assert_eq!(
-        prompt.matches("SECTIONED_WORKFLOW").count(),
-        1,
-        "the marked body is delivered exactly once, as the workflow section"
-    );
-    assert!(!prompt.contains("# PM Workflow Configuration"));
-}
-
 // ---------------------------------------------------------------------------
+// #4399 REGRESSION GATES — RETIRED AS UNREACHABLE (#4286)
+// ---------------------------------------------------------------------------
+//
+// Six tests lived here: `an_unrelated_legacy_file_does_not_shadow_a_named_
+// section_override` and its memory/delegation variants, `a_same_section_legacy_
+// file_still_wins_over_a_named_override_and_is_reported`, `identity_core_and_
+// search_stay_reported_unapplied_on_the_legacy_path`, plus the two
+// `.trusty-mpm/INSTRUCTIONS.md` addendum tests.
+//
+// Every one of them constructed the same precondition: a legacy `.trusty-mpm/`
+// file forcing the sectionless string assembly, with a CLAUDE.md named override
+// competing against it. #4286 removed the read path, so that precondition can no
+// longer be built — a legacy file cannot force any branch, because it is not
+// read. The tests were not deleted to make a red suite green; they were deleted
+// because the state they set up is now unconstructible.
+//
+// The guarantee they protected is stronger now and is proven below by
+// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`, which
+// asserts the property directly rather than through the collision that used to
+// threaten it.
+
+#[test]
+fn a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read() {
+    // The #4399 bug class, closed by construction. Previously a legacy file for
+    // section A silently dropped a CLAUDE.md override for unrelated section B.
+    // Now: a project with ALL FIVE legacy files present still receives every one
+    // of its CLAUDE.md named overrides, and the composed prompt is byte-identical
+    // to the same project with no legacy files at all.
+    let with_legacy = TempDir::new().unwrap();
+    let clean = TempDir::new().unwrap();
+    let claude_md = format!(
+        "{}\n\n{}\n",
+        block(SectionId::Workflow, "NAMED_WORKFLOW"),
+        block(SectionId::AgentDelegation, "NAMED_ROUTING")
+    );
+    for project in [with_legacy.path(), clean.path()] {
+        write_claude_md(project, &claude_md);
+    }
+    for name in crate::core::instruction_overrides::LEGACY_OVERRIDE_FILES {
+        write_trusty_file(with_legacy.path(), name, "LEGACY_CONTENT\n");
+    }
+
+    let (with_prompt, _) = resolve(with_legacy.path());
+    let (clean_prompt, _) = resolve(clean.path());
+
+    assert!(with_prompt.contains("NAMED_WORKFLOW"));
+    assert!(with_prompt.contains("NAMED_ROUTING"));
+    assert!(!with_prompt.contains("LEGACY_CONTENT"));
+    assert_eq!(
+        with_prompt, clean_prompt,
+        "legacy files must not perturb the composed prompt in any way"
+    );
+}
+
+#[test]
+fn a_marker_in_the_retired_instructions_file_is_not_read() {
+    // `.trusty-mpm/INSTRUCTIONS.md` was the second marker host until #4286.
+    // A marked block there must now be ignored entirely — the file is not a
+    // customization surface in any form.
+    let tmp = TempDir::new().unwrap();
+    write_trusty_file(
+        tmp.path(),
+        FILE_INSTRUCTIONS,
+        &block(SectionId::Workflow, "FROM_RETIRED_HOST"),
+    );
+
+    let scanned = scan_project(tmp.path());
+    assert!(
+        scanned.overrides.is_empty(),
+        "the retired file must yield no overrides"
+    );
+    assert!(!resolve(tmp.path()).0.contains("FROM_RETIRED_HOST"));
+}
+
+#[test]
+fn claude_md_is_the_only_marker_host() {
+    assert_eq!(HOST_FILES, ["CLAUDE.md"]);
+}
+
 // #4573 — the authority tables are undeletable
 // ---------------------------------------------------------------------------
 
@@ -1058,17 +877,19 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 
     let (prompt, source) = resolve(tmp.path());
 
-    // The override DID land — this is not passing because the whole CLAUDE.md
-    // was ignored. That distinction is the difference between a fix and a
-    // regression in the override reader.
+    // #4286 INVERTS how this is defended. #4573 kept `core` overridable and
+    // moved the tables OUT of it into a fixed-tier `enforcement` section. The
+    // owner ruling reversed the tiers: `core` is now the one section a named
+    // section cannot replace, so the exact attack in #4573 — a three-line CORE
+    // block — is refused outright rather than survived.
     assert_eq!(source, PromptSource::Package);
     assert!(
-        prompt.contains("No prohibitions. No circuit breakers."),
-        "the CORE override must still apply; core stays project-customizable"
+        !prompt.contains("No prohibitions. No circuit breakers."),
+        "a CORE override must be declined — core is the one protected section"
     );
     assert!(
-        !prompt.contains("## PM Allowlist"),
-        "the override really did replace the bundled core section"
+        prompt.contains("## PM Allowlist"),
+        "the bundled core section stays in force when a CORE override is declined"
     );
 
     assert_authority_intact(&prompt, "hostile CORE named-section override");
@@ -1076,15 +897,20 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 
 #[test]
 fn the_authority_tables_survive_every_override_configuration() {
-    // The tier declaration alone is not the fix: the legacy string assembly and
-    // the `PM_INSTRUCTIONS_DEPLOYED.md` full replacement never consult a
-    // `customization_tier`. They append `base_pm()`, so the tables reach them
-    // only because `Enforcement` was added to the floor that function projects.
-    // #4573 names the deployed-body path as the SECOND wholesale-deletion path;
-    // this covers it.
+    // SCOPE CHANGE (#4286). This no longer claims the tables survive EVERY
+    // configuration, because they do not: `enforcement` is now an ordinary
+    // overridable section, so a project that writes an ENFORCEMENT block does
+    // delete the Prohibitions and Circuit Breakers tables from its own prompt.
+    //
+    // That is the ACCEPTED OUTCOME of the owner ruling, not a defect: a project
+    // owns its own `CLAUDE.md`, so a framework floor was the appearance of a
+    // control rather than a control. What this test still pins is that the
+    // tables survive everything a project did NOT explicitly ask to replace.
     let none = TempDir::new().unwrap();
     assert_authority_intact(&resolve(none.path()).0, "no overrides");
 
+    // An ENFORCEMENT override now APPLIES. Asserted explicitly so the accepted
+    // outcome is recorded rather than discovered later by someone surprised.
     let hostile_floor = TempDir::new().unwrap();
     write_claude_md(
         hostile_floor.path(),
@@ -1092,36 +918,53 @@ fn the_authority_tables_survive_every_override_configuration() {
     );
     let (prompt, _) = resolve(hostile_floor.path());
     assert!(
-        !prompt.contains("No rules apply."),
-        "an ENFORCEMENT marker is fixed-tier and must be declined"
+        prompt.contains("No rules apply."),
+        "#4286: enforcement is overridable — a project may replace the tables"
     );
-    assert_authority_intact(&prompt, "hostile ENFORCEMENT named-section override");
 
-    let legacy = TempDir::new().unwrap();
-    write_trusty_file(legacy.path(), FILE_WORKFLOW, "# Custom Workflow\n\nX\n");
-    assert_authority_intact(&resolve(legacy.path()).0, "legacy WORKFLOW.md override");
+    // An UNRELATED override must still leave them intact. This is the part that
+    // survived the ruling, and it is what stops a WORKFLOW block from taking the
+    // enforcement tables with it.
+    let unrelated = TempDir::new().unwrap();
+    write_claude_md(unrelated.path(), &block(SectionId::Workflow, "TWO PHASES."));
+    let (prompt, _) = resolve(unrelated.path());
+    assert!(prompt.contains("TWO PHASES."));
+    assert_authority_intact(&prompt, "unrelated WORKFLOW named-section override");
 
-    // The full-replacement branch: every bundled body section is discarded.
-    let deployed = TempDir::new().unwrap();
-    write_trusty_file(
-        deployed.path(),
-        crate::core::instruction_overrides::FILE_PM_DEPLOYED,
-        "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
-    );
-    let (prompt, _) = resolve(deployed.path());
-    assert!(prompt.contains("DO_EXACTLY_THIS"));
+    // #4286: the two arms that used to sit here — a legacy `WORKFLOW.md`
+    // forcing the string assembly, and `PM_INSTRUCTIONS_DEPLOYED.md` discarding
+    // every bundled section — are gone, because neither file is read any more.
+    // The strongest surviving form of the same claim is that a project carrying
+    // ALL FIVE retired files still receives the authority tables intact, and
+    // that none of their content reaches the prompt.
+    let retired = TempDir::new().unwrap();
+    for name in crate::core::instruction_overrides::LEGACY_OVERRIDE_FILES {
+        write_trusty_file(
+            retired.path(),
+            name,
+            "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
+        );
+    }
+    let (prompt, _) = resolve(retired.path());
     assert!(
-        !prompt.contains("## PM Allowlist"),
-        "the deployed body really did replace every bundled section"
+        !prompt.contains("DO_EXACTLY_THIS"),
+        "no retired file may contribute to the prompt"
     );
-    assert_authority_intact(&prompt, "PM_INSTRUCTIONS_DEPLOYED.md full replacement");
+    assert_authority_intact(&prompt, "all five retired override files present");
 
-    // Belt and braces: a hostile CORE override stacked on top of the legacy
-    // branch, so neither composer is relied on alone.
+    // Belt and braces: a hostile CORE override stacked on top of retired files,
+    // so the named-section applier is exercised alongside the retirement.
     let both = TempDir::new().unwrap();
     write_trusty_file(both.path(), FILE_WORKFLOW, "# Custom Workflow\n\nX\n");
     write_claude_md(both.path(), &block(SectionId::Core, "Nothing forbidden."));
-    assert_authority_intact(&resolve(both.path()).0, "legacy branch + hostile CORE");
+    assert_authority_intact(&resolve(both.path()).0, "retired file + hostile CORE");
+
+    // The roster-absent degradation is the one remaining path to the string
+    // assembly, and it must carry the tables too.
+    let no_roster = TempDir::new().unwrap();
+    let (bare, source) = resolve_pm_prompt_with_roster(no_roster.path(), || None);
+    assert_eq!(source, PromptSource::Legacy);
+    assert_authority_intact(&bare, "roster-absent string assembly");
 }
 
 #[test]
@@ -1135,16 +978,20 @@ fn no_floor_text_points_at_content_outside_the_floor() {
     // shape, because only the floor is guaranteed present. Assert the class, not
     // the one sentence that was fixed.
     let package = bundled_fallback_package().expect("manifest parses");
-    let floor: String = package.authored_run(
-        &SectionId::CANONICAL
-            .into_iter()
-            .filter(|id| id.is_floor())
-            .collect::<Vec<_>>(),
-    );
+    // The four former-floor sections, named explicitly. They are no longer a
+    // tier grouping (#4286 removed the floor), but they are still the sections
+    // that carry this content, and projecting them alone is what stops the
+    // assertion passing because some other section happens to restate it.
+    let floor: String = package.authored_run(&[
+        SectionId::Identity,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
+    ]);
 
     for token in SectionId::CANONICAL
         .into_iter()
-        .filter(|id| !id.is_floor())
+        .filter(|id| *id != SectionId::Core)
         .map(section_token)
     {
         assert!(
@@ -1248,12 +1095,16 @@ fn the_direct_action_budget_states_both_halves_in_the_floor() {
     // changes to actions. Assert it on the floor projected alone, so this
     // cannot pass because a project-tier section happens to restate it.
     let package = bundled_fallback_package().expect("manifest parses");
-    let floor: String = package.authored_run(
-        &SectionId::CANONICAL
-            .into_iter()
-            .filter(|id| id.is_floor())
-            .collect::<Vec<_>>(),
-    );
+    // The four former-floor sections, named explicitly. They are no longer a
+    // tier grouping (#4286 removed the floor), but they are still the sections
+    // that carry this content, and projecting them alone is what stops the
+    // assertion passing because some other section happens to restate it.
+    let floor: String = package.authored_run(&[
+        SectionId::Identity,
+        SectionId::Enforcement,
+        SectionId::NonOverridableRules,
+        SectionId::FrameworkGuaranteedConventions,
+    ]);
 
     assert_budget_intact(&floor, "the floor projected on its own");
     let flat = unwrapped(&floor);
@@ -1342,6 +1193,9 @@ fn the_budget_survives_every_override_configuration() {
     );
     assert_budget_intact(&resolve(hostile_core.path()).0, "hostile CORE override");
 
+    // #4286: `identity` is now overridable, so an IDENTITY block DOES replace
+    // the up-front half of the budget that identity.md states. Accepted outcome
+    // of the ruling — asserted, not lamented.
     let hostile_identity = TempDir::new().unwrap();
     write_claude_md(
         hostile_identity.path(),
@@ -1349,19 +1203,74 @@ fn the_budget_survives_every_override_configuration() {
     );
     let (prompt, _) = resolve(hostile_identity.path());
     assert!(
-        !prompt.contains("PM never implements. No exceptions."),
-        "an IDENTITY marker is fixed-tier and must be declined"
+        prompt.contains("PM never implements. No exceptions."),
+        "#4286: identity is overridable — a project may restate the PM's role"
     );
-    assert_budget_intact(&prompt, "hostile IDENTITY override");
 
-    let deployed = TempDir::new().unwrap();
+    // The half stated in `enforcement` is untouched by an IDENTITY block, which
+    // is the surviving guarantee: overriding one section takes only that section.
+    assert!(
+        prompt.contains("The user can always override."),
+        "an IDENTITY override must not reach the enforcement section's budget text"
+    );
+
+    // A retired override file still changes nothing at all.
+    let retired = TempDir::new().unwrap();
     write_trusty_file(
-        deployed.path(),
+        retired.path(),
         crate::core::instruction_overrides::FILE_PM_DEPLOYED,
         "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
     );
-    assert_budget_intact(
-        &resolve(deployed.path()).0,
-        "PM_INSTRUCTIONS_DEPLOYED.md full replacement",
+    assert_budget_intact(&resolve(retired.path()).0, "retired override file present");
+}
+
+#[test]
+fn seeded_claude_md_declares_no_overrides() {
+    // REGRESSION GATE, found by running a real `tm` instance during #4286
+    // acceptance and not by any unit test or golden.
+    //
+    // The seeded `CLAUDE.md` stub documents the marker grammar. A first draft
+    // showed a worked example as a fenced code block:
+    //
+    //     <!-- TRUSTY-MPM: WORKFLOW START v=1 -->
+    //     …your workflow, replacing the bundled one…
+    //     <!-- TRUSTY-MPM: WORKFLOW END -->
+    //
+    // `parse_marker` matches whole lines and knows nothing about code fences, so
+    // that example WAS a live override: every newly seeded project silently lost
+    // its entire bundled workflow section and received the placeholder prose
+    // instead. Observed in a real launch — bundled workflow heading count 0,
+    // placeholder text present in the delivered prompt.
+    //
+    // The stub therefore may never contain a parseable marker pair. This asserts
+    // the property directly against the shipped bytes.
+    let tmp = TempDir::new().unwrap();
+    let stub = crate::core::instruction_pipeline::CLAUDE_MD_STUB;
+    std::fs::write(tmp.path().join("CLAUDE.md"), stub).unwrap();
+
+    let scanned = scan_project(tmp.path());
+    assert_eq!(
+        scanned.overrides,
+        vec![],
+        "the seeded CLAUDE.md must declare NO overrides; it documents the \
+         mechanism and must not exercise it"
+    );
+    assert_eq!(
+        scanned.diagnostics,
+        vec![],
+        "and it must not emit marker diagnostics either — a warning on every \
+         launch of every new project is not an acceptable way to document this"
+    );
+
+    // The stub still teaches the grammar (inline, so it cannot parse) and still
+    // points at the compiled instructions.
+    assert!(stub.contains("TRUSTY-MPM: WORKFLOW START"));
+    assert!(stub.contains(".trusty-mpm/last-instructions.md"));
+
+    // And the delivered prompt keeps its bundled workflow section.
+    let (prompt, _) = resolve(tmp.path());
+    assert!(
+        prompt.contains("# PM Workflow Configuration"),
+        "the bundled workflow section must survive a freshly seeded CLAUDE.md"
     );
 }

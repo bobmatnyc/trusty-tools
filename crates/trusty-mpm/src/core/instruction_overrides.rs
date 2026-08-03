@@ -1,35 +1,37 @@
-//! Project-level PM instruction overrides read from `<project>/.trusty-mpm/`.
+//! Composes the PM system prompt, and detects retired override files.
 //!
-//! Why: `BASE_PM.md` advertises a "Customizing PM Behavior" table telling the PM
-//! it can drop override files into the project's `.trusty-mpm/` directory and
-//! that they take effect on the next session start. Historically *no code read
-//! them* — the system prompt was a fixed compile-time concatenation, so every
-//! advertised override was a silent no-op (issue #381). This module makes the
-//! advertised behaviour real: it resolves the override files at session-prepare
-//! time and layers them onto the bundled PM prompt per the documented
-//! append/replace semantics.
-//! What: [`resolve_pm_prompt`] reads up to five override files from
-//! `<project>/.trusty-mpm/` and produces the effective PM prompt, *always*
-//! appending the non-overridable `BASE_PM.md` floor last. The bundled assets are
-//! the defaults for any section that has no override.
-//! Named sections (#4183 / #4286): a project may instead mark out an override
-//! inside its `CLAUDE.md`, read by [`crate::core::claude_md_sections`]. Those
-//! compose cleanly on the packaged path; on the legacy string assembly (forced
-//! by the presence of any of the five files below) `WORKFLOW`, `MEMORY` and
-//! `AGENT-DELEGATION` are still individually addressable slots, so a named
-//! override for one of THOSE sections lands there too, UNLESS the project's own
-//! same-section legacy file is what forced the branch — that file still wins
-//! (#4399: an unrelated legacy file must never shadow an unrelated named
-//! override). `IDENTITY`/`CORE`/`SEARCH` have no such slot — they live inside
-//! the single opaque `pm_instructions()` blob — so those genuinely cannot be
-//! honoured on this path, and, like a same-section collision, that is reported
-//! by `warn_unapplied` rather than dropped in silence. The five override file
-//! constants below are unchanged and keep working.
+//! Why: the project's customization surface is named sections in its root
+//! `CLAUDE.md`, and nothing else (#4286). Five files under
+//! `<project>/.trusty-mpm/` used to be a second, higher-precedence surface with
+//! whole-document granularity. They are RETIRED: not read, not honoured. The
+//! retirement had to be loud rather than silent — a project whose rules stop
+//! reaching the PM with no error is the worst outcome available — so this module
+//! also owns the detector both halves of that signal share.
 //!
-//! Test: the `tests` module exercises every documented file, the BASE_PM floor
-//! invariant, and the robustness fallbacks (missing/empty/unreadable files);
-//! `claude_md_sections_tests.rs` covers the named-section wiring end to end,
-//! including the #4399 non-shadowing guarantee.
+//! What: [`resolve_pm_prompt`] composes the effective PM prompt. It scans
+//! `CLAUDE.md` for named-section overrides via
+//! [`crate::core::claude_md_sections`], folds in the auto-derived stack profile
+//! and the live agent roster, and *always* appends the non-overridable framework
+//! floor last. Two composers exist and the roster alone selects between them: with
+//! a roster the typed [`crate::core::instruction_package::InstructionPackage`]
+//! composes every section; with none (no agent deployed in any tier) it degrades
+//! to [`assemble_sections`], where only `WORKFLOW`, `MEMORY` and
+//! `AGENT-DELEGATION` are independently addressable and any other named override
+//! is reported by `warn_unapplied` rather than dropped in silence.
+//!
+//! [`detect_legacy_overrides`] reports leftover retired files;
+//! [`warn_legacy_overrides`] logs them on every resolution, and the
+//! `legacy_overrides` `tm doctor` check fails on them.
+//!
+//! Naming note: `base_pm()` and the `# Framework Instructions` heading are
+//! historical labels. `BASE_PM.md` the FILE was deleted by #4183 and
+//! `scripts/check_instruction_floor.sh` fails the build if it returns; the floor
+//! is authored as four `fixed`-tier sections and reconstituted by that function.
+//!
+//! Test: the `tests` module inverts one gate per retired file (a retired file
+//! must change nothing), pins the survival set across every reachable
+//! configuration, and covers the detector; `claude_md_sections_tests.rs` covers
+//! the named-section wiring end to end.
 
 use std::path::Path;
 
@@ -48,16 +50,95 @@ use crate::core::instruction_pipeline::{
 /// Test: every `resolve_*` test writes files under `<project>/.trusty-mpm/`.
 pub const OVERRIDE_DIR_NAME: &str = ".trusty-mpm";
 
-/// File name: full replacement of the PM instruction body (short-circuits).
+// RETIRED OVERRIDE FILE NAMES (#4286).
+//
+// These five names are no longer an override surface. Nothing below reads them
+// as instruction content any more — they are retained ONLY so the retirement is
+// DETECTABLE: [`detect_legacy_overrides`] reports a leftover file, and both the
+// prompt resolver and the `legacy_overrides` doctor check turn that report into
+// a loud, actionable signal. Deleting the constants would make a leftover file
+// silent, which is the one outcome the retirement may not produce.
+
+/// Retired: formerly a full replacement of the PM instruction body.
 pub const FILE_PM_DEPLOYED: &str = "PM_INSTRUCTIONS_DEPLOYED.md";
-/// File name: replaces the bundled `AGENT_DELEGATION` section.
+/// Retired: formerly replaced the bundled `AGENT_DELEGATION` section.
 pub const FILE_AGENT_DELEGATION: &str = "AGENT_DELEGATION.md";
-/// File name: replaces the bundled `WORKFLOW` section.
+/// Retired: formerly replaced the bundled `WORKFLOW` section.
 pub const FILE_WORKFLOW: &str = "WORKFLOW.md";
-/// File name: replaces the memory guidance section.
+/// Retired: formerly replaced the memory guidance section.
 pub const FILE_MEMORY: &str = "MEMORY.md";
-/// File name: appended (additive) project rules.
+/// Retired: formerly appended (additive) project rules.
 pub const FILE_INSTRUCTIONS: &str = "INSTRUCTIONS.md";
+
+/// Every retired override file name, in former precedence order.
+///
+/// Why: the detector and the doctor check must agree on the set exactly. Two
+/// hand-maintained lists would drift, and a name missing from one of them is a
+/// file that gets silently ignored — the failure mode #4286 exists to end.
+/// What: the five names, joined onto `<project>/.trusty-mpm/`.
+/// Test: `legacy_override_files_are_the_five_retired_names`.
+pub const LEGACY_OVERRIDE_FILES: [&str; 5] = [
+    FILE_PM_DEPLOYED,
+    FILE_AGENT_DELEGATION,
+    FILE_WORKFLOW,
+    FILE_MEMORY,
+    FILE_INSTRUCTIONS,
+];
+
+/// The migration sentence every leftover-file signal must carry.
+///
+/// Why: a warning that says only "this file is ignored" leaves the operator
+/// with a dead file and no next step. One shared constant keeps the resolver's
+/// log line and the doctor check's message from drifting into two different
+/// pieces of advice.
+/// What: the one-line migration, naming `CLAUDE.md` and the marker grammar.
+/// Test: `legacy_file_signal_names_the_migration`,
+/// `legacy_overrides_fail_names_the_migration`.
+pub const LEGACY_MIGRATION_HINT: &str = "move project facts into CLAUDE.md as plain prose, and section overrides into a \
+     `<!-- TRUSTY-MPM: <SECTION> START v=1 -->` … `<!-- TRUSTY-MPM: <SECTION> END -->` \
+     block in CLAUDE.md, then delete the file (#4286)";
+
+/// Report which retired override files a project still carries.
+///
+/// Why: the hard cut (#4286) stops READING these files, and a silent stop would
+/// delete a project's rules with no error — the unacceptable outcome. Detection
+/// is therefore a first-class, testable function rather than an incidental log
+/// line, and it is shared by the resolver and by `tm doctor` so the two can
+/// never disagree about whether a project is affected.
+/// What: the existing `<project>/.trusty-mpm/<name>` paths, in
+/// [`LEGACY_OVERRIDE_FILES`] order. A missing `.trusty-mpm/` directory yields an
+/// empty vector. Presence only — the contents are never read.
+/// Test: `no_legacy_files_detected_in_a_clean_project`,
+/// `every_retired_file_is_detected`.
+pub fn detect_legacy_overrides(project_dir: &Path) -> Vec<std::path::PathBuf> {
+    let dir = project_dir.join(OVERRIDE_DIR_NAME);
+    LEGACY_OVERRIDE_FILES
+        .iter()
+        .map(|name| dir.join(name))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
+/// Emit the resolver-side loud signal for any leftover retired override file.
+///
+/// Why: `tm doctor` only fires when someone runs it. The prompt resolver runs on
+/// EVERY session launch and on every `tm session instructions`, so it is the one
+/// place guaranteed to observe the condition at the moment it matters. `error!`
+/// rather than `warn!` deliberately: the project's instructions are no longer
+/// reaching the PM, which is a broken configuration, not a style note.
+/// What: one `tracing::error!` per leftover file, naming the path and
+/// [`LEGACY_MIGRATION_HINT`]. Silent when the project is clean.
+/// Test: `legacy_file_signal_names_the_migration`.
+fn warn_legacy_overrides(project_dir: &Path) {
+    for path in detect_legacy_overrides(project_dir) {
+        tracing::error!(
+            path = %path.display(),
+            migration = LEGACY_MIGRATION_HINT,
+            "RETIRED override file is NO LONGER READ (#4286): its contents do not reach \
+             the PM prompt"
+        );
+    }
+}
 
 /// Heading that delimits a `MEMORY.md` override block.
 ///
@@ -69,50 +150,8 @@ pub const FILE_INSTRUCTIONS: &str = "INSTRUCTIONS.md";
 /// makes it unambiguous to a reader — and to the launched PM — that the project
 /// has overridden memory behaviour.
 /// What: the Markdown heading prepended to the `MEMORY.md` body when slotted.
-/// Test: `memory_override_is_slotted_after_pm_instructions`.
+/// Test: `a_named_memory_override_is_slotted_on_the_roster_absent_path`.
 const MEMORY_OVERRIDE_HEADING: &str = "## Memory Behavior (project override)";
-
-/// Read an override file, returning `Some(trimmed_contents)` only when it is
-/// present and non-empty.
-///
-/// Why: the override semantics distinguish three states — absent, present but
-/// empty, and present with content. Absent and empty both fall back to the
-/// bundled default; an unreadable file (e.g. permission denied) also falls back.
-/// Treating an empty file as "no override" (with a warning) avoids silently
-/// blanking a whole section because someone `touch`ed a file. Robustness must
-/// never hard-fail the launch.
-/// What: joins `dir/name`; on a successful read of non-whitespace content
-/// returns the trimmed body; on `NotFound` returns `None` silently; on an empty
-/// file or any other IO error logs a `tracing::warn!` and returns `None`.
-/// Test: `unreadable_override_falls_back`, `empty_override_falls_back`,
-/// `missing_override_dir_uses_bundled`.
-fn read_override(dir: &Path, name: &str) -> Option<String> {
-    let path = dir.join(name);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                tracing::warn!(
-                    path = %path.display(),
-                    "instruction override file is empty; using bundled default"
-                );
-                None
-            } else {
-                tracing::info!(path = %path.display(), "applying instruction override");
-                Some(trimmed.to_string())
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => {
-            tracing::warn!(
-                path = %path.display(),
-                %err,
-                "instruction override file unreadable; using bundled default"
-            );
-            None
-        }
-    }
-}
 
 /// Resolve the effective PM prompt for `project_dir`, applying any overrides.
 ///
@@ -171,18 +210,16 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// the legacy assembly below. Every other configuration is deliberately still
 /// assembled by [`assemble_sections`]; see the branch comment for why.
 ///
-/// Test: `no_overrides_uses_bundled`, `instructions_appended`,
-/// `workflow_override_replaces`, `agent_delegation_override_replaces`,
+/// Test: `no_overrides_uses_bundled`,
+/// `a_retired_instructions_file_no_longer_reaches_the_prompt`,
+/// `a_retired_workflow_file_no_longer_replaces_the_workflow_section`,
+/// `a_retired_delegation_file_no_longer_suppresses_the_live_roster`,
 /// `bundled_delegation_appends_deployed_roster`,
-/// `pm_deployed_replaces_body_but_keeps_base_floor`,
-/// `memory_override_is_slotted_after_pm_instructions`,
+/// `a_retired_deployed_file_no_longer_replaces_the_body`,
+/// `a_named_memory_override_is_slotted_on_the_roster_absent_path`,
 /// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
-/// the robustness tests, and (#4399, in `claude_md_sections_tests.rs`)
-/// `an_unrelated_legacy_file_does_not_shadow_a_named_section_override`,
-/// `a_same_section_legacy_file_still_wins_over_a_named_override_and_is_reported`,
-/// `an_unrelated_legacy_file_does_not_shadow_a_named_memory_override`,
-/// `an_unrelated_legacy_file_does_not_shadow_a_named_delegation_override`,
-/// `identity_core_and_search_stay_reported_unapplied_on_the_legacy_path`.
+/// the robustness tests, and (in `claude_md_sections_tests.rs`)
+/// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
     // `info!`, deliberately: this is the operator-visible record of WHICH
@@ -207,7 +244,7 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 /// [`PromptSource::Legacy`] for the two override configurations and for the
 /// compose-error degradation.
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
-/// `workflow_override_forces_the_legacy_path_even_with_a_roster`.
+/// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromptSource {
     /// Composed via [`crate::core::bundled_pm_package`] / `InstructionPackage`.
@@ -224,7 +261,7 @@ pub(crate) enum PromptSource {
 /// What: the resolved prompt plus its source, with the deployed-agent roster
 /// scanned from the real tiers.
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
-/// `workflow_override_forces_the_legacy_path_even_with_a_roster`.
+/// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
 pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
     resolve_pm_prompt_with_roster(project_dir, || {
         crate::core::delegation_authority::deployed_roster_section(project_dir)
@@ -253,77 +290,71 @@ pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, Prom
 /// a closure, not a value, so it stays LAZY: an `AGENT_DELEGATION.md` override
 /// short-circuits before any scan, exactly as before.
 /// Test: `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`,
-/// `resolve_pm_prompt_is_byte_identical_with_a_project_addendum`,
+/// `a_retired_instructions_file_cannot_feed_the_project_addendum`,
 /// `gate_is_deterministic_across_repeated_runs`.
 pub(crate) fn resolve_pm_prompt_with_roster(
     project_dir: &Path,
     roster_source: impl FnOnce() -> Option<String>,
 ) -> (String, PromptSource) {
-    let dir = project_dir.join(OVERRIDE_DIR_NAME);
-
-    // #4183/#4286: named-section overrides marked out in the project's
-    // `CLAUDE.md`. Scanned before any branch so a project that still carries a
-    // legacy override file gets a loud "not applied" rather than a silent drop —
-    // an advertised-but-unread override is issue #381 verbatim.
+    // #4286: named sections in `CLAUDE.md` are now the ONLY project override
+    // surface. Scanned first because every branch below consumes the result.
     let named = crate::core::claude_md_sections::scan_project(project_dir);
     named.log();
 
-    // Floor is always appended last and never replaceable.
-    let floor = base_pm();
+    // #4286: the five `.trusty-mpm/` files are no longer read. A project that
+    // still carries one gets a loud resolver-side error naming the migration —
+    // never silence. `tm doctor`'s `legacy_overrides` check is the second half
+    // of the same signal.
+    warn_legacy_overrides(project_dir);
 
-    // Per-project stack profile derived from detected marker files (#1971). This
-    // is auto-derived framework context, not a user override, so it is folded in
-    // regardless of which assembly branch runs — every project's PM priming is
-    // configured from that project's detected stack, never a hardcoded default.
+    // Per-project stack profile derived from detected marker files (#1971).
+    // Auto-derived framework context, not a user override.
     let stack = crate::core::stack_profile::stack_profile_section(project_dir);
 
-    // Branch 1 (configuration 3): full replacement short-circuit. BASE_PM still
-    // floors it. See #4183 — deliberately still on the legacy path: a deployed
-    // body is opaque prose contributing no delegation section, so it fails both
-    // `SectionWithoutBlocks` and `RosterNotConsumed`. Porting it needs schema
-    // work tracked as follow-up on the epic; do not make it "schema-valid" by
-    // weakening either check.
-    if let Some(body) = read_override(&dir, FILE_PM_DEPLOYED) {
-        crate::core::claude_md_sections::warn_unapplied(&named);
-        let mut sections: Vec<String> = vec![body, stack];
-        if let Some(extra) = read_override(&dir, FILE_INSTRUCTIONS) {
-            sections.push(extra);
+    let roster = roster_source();
+
+    // The packaged composer is now the ordinary path for every project: with no
+    // legacy file able to force the string assembly, the only remaining gate is
+    // whether a roster exists for the `agent-roster` generator block to consume
+    // (`RosterNotConsumed` forbids composing without one).
+    if let Some(roster) = roster.as_deref() {
+        let (composed, rejected) =
+            crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides(
+                &stack,
+                roster,
+                // #4286: `.trusty-mpm/INSTRUCTIONS.md` was the only production
+                // source for the optional `project-addendum` block. With it
+                // retired the generator is never fed; the block is `optional`
+                // in the manifest, so it simply does not emit.
+                None,
+                &named.overrides,
+            );
+        for rejection in &rejected {
+            tracing::warn!(
+                %rejection,
+                "named-section override declined; keeping the bundled section"
+            );
         }
-        sections.push(floor.trim().to_string());
-        return (join_sections(sections), PromptSource::Legacy);
+        match composed {
+            Ok(prompt) => return (prompt, PromptSource::Package),
+            // Unreachable for the shipped assets — `shipped_assets_build_and_
+            // validate` proves it — so this is a loud last resort, never a
+            // routine fallback. The string assembly below composes the same
+            // configuration, so degrading still delivers a correct prompt.
+            Err(err) => tracing::error!(
+                %err,
+                "bundled PM instruction package failed to compose; \
+                 falling back to the legacy assembly"
+            ),
+        }
     }
 
-    // Branch 2: section-by-section assembly with per-section overrides.
-    let workflow_override = read_override(&dir, FILE_WORKFLOW);
-    let delegation_override = read_override(&dir, FILE_AGENT_DELEGATION);
-    let memory_override = read_override(&dir, FILE_MEMORY);
-    // `INSTRUCTIONS.md` is BOTH the additive addendum and a named-section host,
-    // so any marked block is removed here — otherwise it would be delivered
-    // twice, once as the override it is and once as raw prose with its markers.
-    // A file carrying no marker is returned byte-for-byte unchanged.
-    let addendum = read_override(&dir, FILE_INSTRUCTIONS)
-        .map(|body| crate::core::claude_md_sections::strip_marker_blocks(&body))
-        .filter(|body| !body.is_empty());
-
-    // #4399: which legacy file, if any, forced this branch is tracked per
-    // section BEFORE any of the three `Option`s below are consumed, so the
-    // final `warn_unapplied` report can tell "shadowed by this project's own
-    // same-section legacy file" (unavoidable — the file IS the override) apart
-    // from "shadowed only because an UNRELATED legacy file forced this whole
-    // branch" (the #4399 bug: that must not happen any more).
-    let workflow_has_legacy_file = workflow_override.is_some();
-    let memory_has_legacy_file = memory_override.is_some();
-    let delegation_has_legacy_file = delegation_override.is_some();
-
-    // A CLAUDE.md named-section override for a section with NO active
-    // same-section legacy file must still land, even though an unrelated
-    // legacy file forced this string-assembled branch (#4399) — otherwise, for
-    // example, an `AGENT_DELEGATION.md` file silently drops a `WORKFLOW` named
-    // override that has nothing to do with it. Only the three sections this
-    // legacy assembly can independently address (`Workflow`, `Memory`,
-    // `AgentDelegation`) are representable here; `Identity`/`Core`/`Search`
-    // stay inside the opaque `pm_instructions()` blob and remain reported as
-    // unapplied on this path, exactly as before.
+    // Roster-absent degradation (no agent deployed in any tier) and the
+    // compose-error last resort. The string assembly can address `WORKFLOW`,
+    // `MEMORY` and `AGENT-DELEGATION` independently, so named overrides for
+    // those three still land here; `IDENTITY`/`CORE`/`SEARCH` live inside the
+    // opaque `pm_instructions()` blob and are reported unapplied rather than
+    // dropped in silence.
     let named_section = |id: SectionId| {
         named
             .overrides
@@ -331,103 +362,24 @@ pub(crate) fn resolve_pm_prompt_with_roster(
             .find(|o| o.section == id)
             .map(|o| o.body.clone())
     };
-    let named_workflow = named_section(SectionId::Workflow);
-    let named_memory = named_section(SectionId::Memory);
-    let named_delegation = named_section(SectionId::AgentDelegation);
 
-    let delegation = match delegation_override {
-        // See #4183 — configuration 2 is deliberately still on the legacy path:
-        // an `AGENT_DELEGATION.md` override replaces the whole section and so
-        // never consumes the computed roster, which `RosterNotConsumed` exists
-        // to forbid. Follow-up on the epic, not a check to relax. It also wins
-        // over a same-section CLAUDE.md override — one file, one winner, same
-        // as before #4399.
-        Some(body) => body,
-        None => {
-            let roster = roster_source();
-
-            // #4183: configuration 1 (bundled fallback) composes through the
-            // typed InstructionPackage. Gated on there being no section
-            // override and a roster to consume — the only shape the schema can
-            // express — and byte-identical to the assembly below.
-            let bundled_fallback = roster
-                .as_deref()
-                .filter(|_| workflow_override.is_none() && memory_override.is_none());
-            if let Some(roster) = bundled_fallback {
-                // PRECONDITION, established by the `filter` directly above and
-                // relied on by the error arm: on this branch `workflow_override`
-                // and `memory_override` are both `None`. That is what makes the
-                // degradation below byte-identical rather than merely "close" —
-                // the legacy assembly reached on error must be the SAME
-                // configuration the package was composing. If the filter ever
-                // widens, the error path silently stops being equivalent.
-                debug_assert!(
-                    workflow_override.is_none() && memory_override.is_none(),
-                    "the bundled-fallback branch requires no workflow/memory override"
-                );
-                let (composed, rejected) =
-                    crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides(
-                        &stack,
-                        roster,
-                        addendum.as_deref(),
-                        &named.overrides,
-                    );
-                for rejection in &rejected {
-                    tracing::warn!(
-                        %rejection,
-                        "named-section override declined; keeping the bundled section"
-                    );
-                }
-                match composed {
-                    Ok(prompt) => return (prompt, PromptSource::Package),
-                    // Unreachable for the shipped assets — `shipped_assets_
-                    // build_and_validate` proves it — so this is a loud last
-                    // resort, never a routine fallback. Given the precondition
-                    // above, the legacy assembly below composes the identical
-                    // configuration and is byte-identical to it, so degrading
-                    // still delivers the right prompt; the error is what says
-                    // the package model drifted from the assets.
-                    Err(err) => tracing::error!(
-                        %err,
-                        "bundled PM instruction package failed to compose; \
-                         falling back to the legacy assembly"
-                    ),
-                }
-            }
-
-            // #4399: no legacy `AGENT_DELEGATION.md` claimed this section, so a
-            // CLAUDE.md `AGENT-DELEGATION` named override (if any) must still
-            // apply here — an unrelated `WORKFLOW.md`/`MEMORY.md` legacy file
-            // forcing this branch is not a reason to fall back to the bundled
-            // doctrine.
-            delegation_with_named_override(named_delegation.as_deref(), roster.as_deref())
-        }
-    };
-
-    // The bundled workflow comes from the manifest, not the raw section constant:
-    // the manifest appends the opportunistic-fix rule as its own block, and a
-    // project that overrides nothing must receive the identical bytes here and on
-    // the packaged path (#4318). #4399: a same-section `WORKFLOW.md` still wins;
-    // otherwise an unrelated legacy file must not drop a named `WORKFLOW` override.
-    let workflow = workflow_override
-        .or(named_workflow)
+    let delegation = delegation_with_named_override(
+        named_section(SectionId::AgentDelegation).as_deref(),
+        roster.as_deref(),
+    );
+    let workflow = named_section(SectionId::Workflow)
         .unwrap_or_else(|| crate::core::instruction_pipeline::workflow_section().to_string());
-    // #4399: same rule for `MEMORY.md` versus a named `MEMORY` override.
-    let memory_override = memory_override.or(named_memory);
+    let memory_override = named_section(SectionId::Memory);
 
-    // Only report a named override as genuinely unapplied: a same-section
-    // legacy file legitimately wins (that section IS what the file replaces),
-    // and `Identity`/`Core`/`Search` have no slot in this string assembly. Any
-    // OTHER section landed above and must not be reported as dropped.
     let unapplied = ProjectOverrides {
         overrides: named
             .overrides
             .iter()
-            .filter(|o| match o.section {
-                SectionId::Workflow => workflow_has_legacy_file,
-                SectionId::Memory => memory_has_legacy_file,
-                SectionId::AgentDelegation => delegation_has_legacy_file,
-                _ => true,
+            .filter(|o| {
+                !matches!(
+                    o.section,
+                    SectionId::Workflow | SectionId::Memory | SectionId::AgentDelegation
+                )
             })
             .cloned()
             .collect(),
@@ -435,7 +387,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
     };
     crate::core::claude_md_sections::warn_unapplied(&unapplied);
     (
-        assemble_sections(stack, memory_override, workflow, delegation, addendum),
+        assemble_sections(stack, memory_override, workflow, delegation, None),
         PromptSource::Legacy,
     )
 }
@@ -448,8 +400,8 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// What: `PM_INSTRUCTIONS` → stack profile → optional memory block → workflow →
 /// delegation → optional addendum → the non-overridable floor, joined with
 /// [`SECTION_SEPARATOR`] and with empty sections dropped.
-/// Test: `no_overrides_uses_bundled`, `workflow_override_replaces`,
-/// `memory_override_is_slotted_after_pm_instructions`, and
+/// Test: `no_overrides_uses_bundled`,
+/// `a_named_memory_override_is_slotted_on_the_roster_absent_path`, and
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback` in
 /// `bundled_pm_package_tests.rs`.
 pub(crate) fn assemble_sections(
@@ -536,8 +488,8 @@ pub(crate) fn assemble_sections(
 /// behaviour). Takes the already-rendered roster rather than scanning itself
 /// (#4183) so `resolve_pm_prompt` scans the agent tiers exactly once whichever
 /// composition path it takes.
-/// Test: `bundled_delegation_appends_deployed_roster`,
-/// `no_overrides_uses_bundled`, `agent_delegation_override_replaces`.
+/// Test: `bundled_delegation_appends_deployed_roster`, `no_overrides_uses_bundled`,
+/// `a_retired_delegation_file_no_longer_suppresses_the_live_roster`.
 pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
     match roster {
         Some(roster) => format!(
@@ -567,7 +519,7 @@ pub(crate) fn delegation_with_roster(roster: Option<&str>) -> String {
 ///
 /// What: `Some(body)` returns `body` (trimmed), followed by the roster when
 /// `roster` is `Some`; `None` defers to [`delegation_with_roster`] unchanged.
-/// Test: `an_unrelated_legacy_file_does_not_shadow_a_named_delegation_override`
+/// Test: `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`
 /// (`claude_md_sections_tests.rs`).
 fn delegation_with_named_override(named_override: Option<&str>, roster: Option<&str>) -> String {
     match named_override {
@@ -597,400 +549,5 @@ fn join_sections(sections: Vec<String>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// Write `<project>/.trusty-mpm/<name>` with `content`, creating dirs.
-    fn write_override(project: &Path, name: &str, content: &str) {
-        let dir = project.join(OVERRIDE_DIR_NAME);
-        fs::create_dir_all(&dir).expect("create .trusty-mpm");
-        fs::write(dir.join(name), content).expect("write override");
-    }
-
-    /// Deploy a composed agent into the PROJECT tier (`<project>/.claude/agents`).
-    ///
-    /// Why: the project tier is the highest-precedence roster source and the one
-    /// the daemon managed-spawn path actually deploys into, so a test that writes
-    /// here asserts the real launch shape without depending on the machine's
-    /// `~/.claude/agents` (which these tests must never require or forbid).
-    fn deploy_agent(project: &Path, name: &str) {
-        let dir = project.join(".claude").join("agents");
-        fs::create_dir_all(&dir).expect("create .claude/agents");
-        fs::write(
-            dir.join(format!("{name}.md")),
-            format!(
-                "---\nname: {name}\nrole: {name}\ndescription: Handles {name} work.\n\
-                 model: sonnet\n---\n\n# {name}\n"
-            ),
-        )
-        .expect("write agent");
-    }
-
-    #[test]
-    fn bundled_delegation_appends_deployed_roster() {
-        // Issue #4069 REGRESSION GATE. The delegation section must describe the
-        // agents that are actually deployed, not the static asset's
-        // hand-maintained table. `ticketing` and `memory-manager` are deployed
-        // in reality but appear NOWHERE in any bundled asset, so a rendered
-        // `### <name>` roster entry for them can only come from the live scan.
-        // Against the pre-fix code this assertion fails: `resolve_pm_prompt`
-        // returned the static `AGENT_DELEGATION.md` verbatim.
-        let tmp = TempDir::new().unwrap();
-        deploy_agent(tmp.path(), "ticketing");
-        deploy_agent(tmp.path(), "memory-manager");
-
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(
-            prompt.contains("## Delegation Authority"),
-            "the live roster section must be present"
-        );
-        assert!(
-            prompt.contains("### ticketing"),
-            "a deployed agent absent from the static asset must reach the prompt"
-        );
-        assert!(
-            prompt.contains("### memory-manager"),
-            "a deployed agent absent from the static asset must reach the prompt"
-        );
-        assert!(
-            prompt.contains("Handles ticketing work."),
-            "the agent's own description must reach the prompt"
-        );
-
-        // The bundled routing doctrine is APPENDED to, never replaced: the
-        // roster carries no make/mise or keyword routing rules.
-        assert!(prompt.contains("# Agent Delegation Routing"));
-        assert!(prompt.contains("## Make / Mise Command Routing"));
-
-        // Review HIGH-2 / MEDIUM-2: the two blocks contradict each other on
-        // concrete points, and the roster is a tier UNION that no single launch
-        // mode fully loads. Both are resolved by the note between them, which
-        // must be present whenever a roster is rendered.
-        assert!(
-            prompt.contains("trust the roster"),
-            "the roster must be declared authoritative over the stale doctrine table"
-        );
-        assert!(
-            prompt.contains("re-route to the closest listed alternative"),
-            "an advertised-but-unloadable agent must carry a recovery instruction"
-        );
-
-        // Ordering: doctrine first, note, roster after, BASE_PM floor last.
-        let doctrine = prompt.find("# Agent Delegation Routing").expect("doctrine");
-        let note = prompt.find("trust the roster").expect("note");
-        let roster = prompt.find("## Delegation Authority").expect("roster");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(doctrine < note, "doctrine precedes the note");
-        assert!(note < roster, "the note precedes the roster it governs");
-        assert!(roster < base, "BASE_PM floor stays last");
-    }
-
-    #[test]
-    fn no_overrides_uses_bundled() {
-        // No `.trusty-mpm/` dir at all → the bundled four sections are present
-        // and BASE_PM is the last section.
-        let tmp = TempDir::new().unwrap();
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# Agent Delegation Routing"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        let delegation = prompt.find("# Agent Delegation Routing").expect("deleg");
-        assert!(base > delegation, "BASE_PM floor must be last");
-    }
-
-    #[test]
-    fn instructions_appended() {
-        // INSTRUCTIONS.md is additive: its content appears, the bundled sections
-        // remain, and BASE_PM is still last.
-        let tmp = TempDir::new().unwrap();
-        write_override(
-            tmp.path(),
-            FILE_INSTRUCTIONS,
-            "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK\n",
-        );
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(prompt.contains("ALWAYS_RUN_MAKE_CHECK"));
-        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# Agent Delegation Routing"));
-
-        let extra = prompt.find("ALWAYS_RUN_MAKE_CHECK").expect("extra");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(extra < base, "INSTRUCTIONS.md precedes the BASE_PM floor");
-    }
-
-    #[test]
-    fn workflow_override_replaces() {
-        // WORKFLOW.md replaces the bundled workflow section; other sections are
-        // intact and the bundled workflow heading is gone.
-        let tmp = TempDir::new().unwrap();
-        write_override(
-            tmp.path(),
-            FILE_WORKFLOW,
-            "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
-        );
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(prompt.contains("TWO_PHASE_ONLY"));
-        assert!(
-            !prompt.contains("# PM Workflow Configuration"),
-            "bundled workflow heading must be replaced"
-        );
-        // Other sections intact.
-        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# Agent Delegation Routing"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-    }
-
-    #[test]
-    fn agent_delegation_override_replaces() {
-        // AGENT_DELEGATION.md replaces the bundled delegation section; others
-        // intact. Issue #4069 must not weaken this precedence: an agent is
-        // deployed here, and the override still replaces the WHOLE section, so
-        // neither the bundled doctrine nor the auto-generated roster is emitted.
-        let tmp = TempDir::new().unwrap();
-        deploy_agent(tmp.path(), "ticketing");
-        write_override(
-            tmp.path(),
-            FILE_AGENT_DELEGATION,
-            "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n",
-        );
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(prompt.contains("ROUTE_ALL_TO_ENGINEER"));
-        assert!(
-            !prompt.contains("# Agent Delegation Routing"),
-            "bundled delegation heading must be replaced"
-        );
-        assert!(
-            !prompt.contains("### ticketing"),
-            "an override replaces the section outright — the roster is not re-appended"
-        );
-        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-    }
-
-    #[test]
-    fn memory_override_is_slotted_after_pm_instructions() {
-        // MEMORY.md slots in as a delimited block right after PM_INSTRUCTIONS
-        // and before the workflow section.
-        let tmp = TempDir::new().unwrap();
-        write_override(
-            tmp.path(),
-            FILE_MEMORY,
-            "Recall from the `team` palace before any task.\n",
-        );
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(prompt.contains(MEMORY_OVERRIDE_HEADING));
-        assert!(prompt.contains("Recall from the `team` palace"));
-
-        let pm = prompt.find("# PM Agent -- Trusty MPM").expect("pm");
-        let mem = prompt.find(MEMORY_OVERRIDE_HEADING).expect("mem");
-        let wf = prompt.find("# PM Workflow Configuration").expect("wf");
-        assert!(pm < mem, "memory block follows PM_INSTRUCTIONS");
-        assert!(mem < wf, "memory block precedes the workflow section");
-        // Floor still last.
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(wf < base);
-    }
-
-    #[test]
-    fn pm_deployed_replaces_body_but_keeps_base_floor() {
-        // PM_INSTRUCTIONS_DEPLOYED.md fully replaces the body, but the
-        // non-overridable BASE_PM floor is STILL appended last, and the bundled
-        // PM/workflow/delegation sections are gone.
-        let tmp = TempDir::new().unwrap();
-        write_override(
-            tmp.path(),
-            FILE_PM_DEPLOYED,
-            "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
-        );
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        assert!(prompt.contains("DO_EXACTLY_THIS"));
-        // The non-overridable floor is preserved.
-        assert!(
-            prompt.contains("# BASE_PM Framework Floor"),
-            "BASE_PM floor must always be appended"
-        );
-        assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
-        // Bundled body sections are replaced.
-        assert!(!prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(!prompt.contains("# PM Workflow Configuration"));
-        assert!(!prompt.contains("# Agent Delegation Routing"));
-
-        // Floor is last.
-        let body = prompt.find("DO_EXACTLY_THIS").expect("body");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(body < base, "BASE_PM floor must come after the custom body");
-    }
-
-    #[test]
-    fn pm_deployed_still_appends_instructions() {
-        // Even under full replacement, INSTRUCTIONS.md (additive) is appended
-        // between the custom body and the BASE_PM floor.
-        let tmp = TempDir::new().unwrap();
-        write_override(tmp.path(), FILE_PM_DEPLOYED, "CUSTOM_BODY\n");
-        write_override(tmp.path(), FILE_INSTRUCTIONS, "PROJECT_ADDENDUM\n");
-        let prompt = resolve_pm_prompt(tmp.path());
-
-        let body = prompt.find("CUSTOM_BODY").expect("body");
-        let addendum = prompt.find("PROJECT_ADDENDUM").expect("addendum");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(body < addendum && addendum < base);
-        // Bundled sections still absent under full replacement.
-        assert!(!prompt.contains("# PM Workflow Configuration"));
-    }
-
-    #[test]
-    fn missing_override_dir_uses_bundled() {
-        // A `.trusty-mpm/` directory that does not exist is not an error.
-        let tmp = TempDir::new().unwrap();
-        assert!(!tmp.path().join(OVERRIDE_DIR_NAME).exists());
-        let prompt = resolve_pm_prompt(tmp.path());
-        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-    }
-
-    #[test]
-    fn empty_override_falls_back() {
-        // An empty (whitespace-only) override file is treated as "no override":
-        // the bundled default for that section is used (no silent blanking).
-        let tmp = TempDir::new().unwrap();
-        write_override(tmp.path(), FILE_WORKFLOW, "   \n\t\n");
-        let prompt = resolve_pm_prompt(tmp.path());
-        // Bundled workflow heading survives because the empty override is ignored.
-        assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-    }
-
-    #[test]
-    fn unreadable_override_falls_back() {
-        // A file that cannot be read (here: a directory in the file's place)
-        // falls back to the bundled default rather than failing the launch.
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path().join(OVERRIDE_DIR_NAME);
-        fs::create_dir_all(&dir).unwrap();
-        // Create a *directory* named WORKFLOW.md so read_to_string errors with
-        // something other than NotFound.
-        fs::create_dir(dir.join(FILE_WORKFLOW)).unwrap();
-
-        let prompt = resolve_pm_prompt(tmp.path());
-        // Did not panic; bundled workflow is used.
-        assert!(prompt.contains("# PM Workflow Configuration"));
-        assert!(prompt.contains("# BASE_PM Framework Floor"));
-    }
-
-    #[test]
-    fn separators_are_consistent() {
-        // The resolved prompt uses the same `---` rule the bundled assembler
-        // uses, so the two never visually diverge.
-        let tmp = TempDir::new().unwrap();
-        let prompt = resolve_pm_prompt(tmp.path());
-        assert!(prompt.contains(SECTION_SEPARATOR));
-    }
-
-    #[test]
-    fn stack_profile_present_when_detected() {
-        // A detected project (Cargo.toml) folds in the auto-derived stack profile
-        // right after PM_INSTRUCTIONS and before the BASE_PM floor, routing to the
-        // detected engineer — never a hardcoded default (#1971).
-        use crate::core::stack_profile::STACK_PROFILE_HEADING;
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
-
-        let prompt = resolve_pm_prompt(tmp.path());
-        assert!(prompt.contains(STACK_PROFILE_HEADING));
-        assert!(prompt.contains("`rust-engineer`"));
-
-        let pm = prompt.find("# PM Agent -- Trusty MPM").expect("pm");
-        let stack = prompt.find(STACK_PROFILE_HEADING).expect("stack");
-        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
-        assert!(pm < stack, "stack profile follows PM_INSTRUCTIONS");
-        assert!(stack < base, "stack profile precedes the BASE_PM floor");
-    }
-
-    #[test]
-    fn stack_profile_neutral_when_undetected() {
-        // An unknown project type yields a neutral, detect-first profile — the PM
-        // is told NOT to assume any stack rather than inheriting a default.
-        use crate::core::stack_profile::STACK_PROFILE_HEADING;
-        let tmp = TempDir::new().unwrap();
-        let prompt = resolve_pm_prompt(tmp.path());
-        assert!(prompt.contains(STACK_PROFILE_HEADING));
-        assert!(prompt.contains("Do NOT assume any stack"));
-    }
-
-    #[test]
-    fn framework_guaranteed_conventions_survive_every_override_combination() {
-        // Issue #3374 (mirrors `primary_directive_mandate_not_duplicated_across_
-        // channels` in instruction_pipeline.rs): the commit/PR attribution
-        // footer, the proportional-documentation policy, and the ticket-
-        // attribution-at-change-site convention must live in the BASE_PM floor
-        // and therefore survive EVERY override combination — including the
-        // full-PM-replacement branch, where every bundled body section is
-        // discarded but the floor is still appended.
-        const MARKERS: &[&str] = &[
-            "Generated with trusty-mpm",
-            "Proportional documentation",
-            "Ticket attribution at the change site",
-        ];
-
-        // No overrides at all: conventions present via the bundled floor.
-        let tmp = TempDir::new().unwrap();
-        let prompt = resolve_pm_prompt(tmp.path());
-        for marker in MARKERS {
-            assert!(
-                prompt.contains(marker),
-                "no-override prompt must carry the guaranteed convention {marker:?}"
-            );
-        }
-
-        // Section-by-section overrides (workflow + delegation + instructions):
-        // the floor is untouched by any of these, so the conventions persist.
-        let tmp2 = TempDir::new().unwrap();
-        write_override(tmp2.path(), FILE_WORKFLOW, "# Custom Workflow\n\nX\n");
-        write_override(
-            tmp2.path(),
-            FILE_AGENT_DELEGATION,
-            "# Custom Routing\n\nY\n",
-        );
-        write_override(tmp2.path(), FILE_INSTRUCTIONS, "# Project Rules\n\nZ\n");
-        let prompt2 = resolve_pm_prompt(tmp2.path());
-        for marker in MARKERS {
-            assert!(
-                prompt2.contains(marker),
-                "section-override prompt must still carry {marker:?}"
-            );
-        }
-
-        // Full-PM-replacement branch: every bundled body section is discarded,
-        // but the non-overridable floor — and therefore these conventions —
-        // must still be appended last.
-        let tmp3 = TempDir::new().unwrap();
-        write_override(
-            tmp3.path(),
-            FILE_PM_DEPLOYED,
-            "# Wholly Custom PM\n\nDO_THIS\n",
-        );
-        let prompt3 = resolve_pm_prompt(tmp3.path());
-        for marker in MARKERS {
-            assert!(
-                prompt3.contains(marker),
-                "full-replacement prompt must still carry {marker:?} via the floor"
-            );
-        }
-        let body = prompt3.find("DO_THIS").expect("custom body");
-        let base = prompt3.find("# BASE_PM Framework Floor").expect("base");
-        assert!(body < base, "floor (and its conventions) must come last");
-    }
-}
+#[path = "instruction_overrides_tests.rs"]
+mod tests;

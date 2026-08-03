@@ -88,6 +88,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "No legacy global instruction sources linger from a pre-migration install (issue #2876).",
     ),
     (
+        "legacy_overrides",
+        "The project carries none of the five RETIRED `.trusty-mpm/` instruction override files. They are no longer read, so a leftover one means the project's instructions are not reaching the PM — migrate the content to `CLAUDE.md` named sections (issue #4286).",
+    ),
+    (
         "agent_skills",
         "Every agent's declared `skills:` frontmatter resolves to a real skill — dangling references fail (DOC-42, issue #2889).",
     ),
