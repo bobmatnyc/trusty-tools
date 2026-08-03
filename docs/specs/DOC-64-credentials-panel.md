@@ -39,9 +39,10 @@ Five acts, each an audited event: view a set (§5), move a credential (§6),
 approve or deny a copy request (§7), see provenance and last-use (§8), revoke
 (§9).
 
-**Two questions block building it** (§13): whether DOC-57's read-only rule
-exempts this write path, and whether a "credential set" is a store or a grant
-set. Everything else here is decided.
+**One question still blocks building it** (§13 OQ-1): whether DOC-57's
+read-only rule exempts this write path. Whether a "credential set" is a store
+or a grant set is **resolved** (§13 OQ-2, 2026-08-03): both — a store *is* a
+grant set, viewed two ways. Everything else here is decided.
 
 ### 1.1 Verified current state — `origin/main` (`99f085a3`)
 
@@ -65,8 +66,9 @@ credential acquisition, the notification transport (#4646), and **any widening o
 reach** — this document grants nothing and adds no name to any reachable-set
 floor. It also answers none of the three sub-questions #4040's Q1 deferred (§12).
 
-**Terms.** *Credential set* — what one instance's principal can resolve (the word
-is ambiguous between store contents and grant set: §13 OQ-2). *Instance* — an
+**Terms.** *Credential set* — what one instance's principal can resolve: a
+store *and* a grant set, not competing models (§13 OQ-2, RESOLVED
+2026-08-03). *Instance* — an
 `AssistantInstanceId`; `izzie` and `cto-assistant` are two. *Move* — revoke from
 A, issue to B.
 
@@ -168,7 +170,9 @@ panel response, rendered view, or panel-emitted audit record.
 ## 6. SPEC-CREDPANEL-04 — Move a Credential Between Assistants {#SPEC-CREDPANEL-04~draft}
 
 **ID:** `SPEC-CREDPANEL-04~draft`
-**Status:** Draft. Semantics depend on §13 OQ-2.
+**Status:** Draft. Semantics settled by §13 OQ-2 (RESOLVED 2026-08-03): a move
+rewrites the store's grant — revoke the source instance's grant, issue the
+target's.
 
 | Clause | Requirement |
 |---|---|
@@ -176,7 +180,7 @@ panel response, rendered view, or panel-emitted audit record.
 | **P-4.2** | A move SHALL be atomic from the user's point of view. The dangerous failure is the partial move that issued to the target and failed to revoke the source: a silent copy that looks like success. |
 | **P-4.3** | A move SHALL carry the source scope **unchanged or narrowed**, never widened — a move that could widen would be the cheapest way to escalate. |
 | **P-4.4** | A move SHALL be refused with a stated, recoverable reason when the source holds no grant, the target already holds one, or the source grant is `Revoked` (DOC-45 `C-3.11`, `C-5.7`). Never a silent no-op. |
-| **P-4.5** | A move SHALL NOT move the secret's bytes through the panel's process boundary, under either reading of §13 OQ-2. |
+| **P-4.5** | A move SHALL NOT move the secret's bytes through the panel's process boundary. Under §13 OQ-2's resolution the credential lives in exactly one store; a move rewrites which instance holds the grant against it, never the bytes. |
 | **P-4.6** | A move SHALL NOT affect any sub-agent — §11. |
 
 ---
@@ -376,9 +380,9 @@ since the panel never touches storage (`P-4.5`).
 
 ## 13. Open Questions for the Owner
 
-Two, and only two, genuinely block building the panel. What was unresolved but
-non-blocking is now a stated assumption in §3 and §7 — a wrong guess there costs
-rework, not a rebuild.
+One question genuinely blocks building the panel (OQ-1). OQ-2 is resolved
+below. What was unresolved but non-blocking is now a stated assumption in §3
+and §7 — a wrong guess there costs rework, not a rebuild.
 
 ### OQ-1 — Does DOC-57's PM-4 read-only rule exempt this panel?
 
@@ -394,18 +398,53 @@ approval in it, so it cannot be read-only and still discharge #4663.
 | A per-write operator confirmation gate around the panel | One extra dialog and its record. Composes with DOC-45 `C-10.6`, which already requires confirmation on first use of a credential. |
 | A `user_authority` check (DOC-41 §5.5 / #3074) | Blocks the panel indefinitely — #3074 is unimplemented. |
 
-### OQ-2 — Is a "credential set" a store, or a grant set?
+### OQ-2 — Is a "credential set" a store, or a grant set? — RESOLVED
+2026-08-03 (owner): BOTH — A STORE IS A GRANT SET.
 
-#4040's Q3 says **store** (*"one credential store per assistant instance"*).
-DOC-45 `C-2.3` models **grants** — one stored credential, several principals
-separately granted against it. #4566 builds to one of them, so a wrong guess
-wastes its principal and grant model and §6's move semantics.
+> *"OQ-2 is a store AND a grant set. An assistant with access to the store can
+> use what's in it."*
 
-| Option | Cost |
+**Resolution.** A credential set is both a store (it holds credential
+material) and a grant set (holding access to it is the grant). These are not
+competing models; they are the same object viewed two ways: holding a grant
+against a store **is** what it means to have access to what's in it.
+
+**Grant granularity is the store.** There is no per-credential grant *inside*
+a store. To scope an assistant to a single credential, that credential gets
+its own store. A store that holds several credentials is granted or revoked
+as one unit; the panel exposes no way to grant a subset of a store's
+contents. This settles §6's move semantics (P-4.1–P-4.6) and §7's copy
+request (P-5.6): both act on a store-as-grant, never on an individual
+credential row inside a larger one.
+
+**DOC-45 `C-2.2` and `C-6.7` remain true.** `C-2.2` requires a `CredentialRef`
+to be stable across rotation; `C-6.7` requires rotation to not invalidate
+grants, because that ref is stable. Neither clause says anything about how
+many principals may hold a grant against one ref, or how many refs a "store"
+groups for presentation — this decision operates entirely above that layer.
+A store's credentials are still each named by a stable `CredentialRef`
+(`C-2.2`), and rotating one still leaves every grant against it valid
+(`C-6.7`); this decision only fixes the *granularity at which the panel
+grants and revokes*, not the identity or rotation behavior of the ref
+underneath. No conflict.
+
+**Rotation — stated assumption, owner-confirmable, not settled here.** This
+spec proceeds on the assumption that a credential lives in exactly **one**
+store, and that multiple assistants sharing it hold their grants **by
+reference** to that one store — so a rotation is a single write. The
+alternative — a credential copied into multiple stores, requiring an
+N-write rotation to keep every copy live — has a materially different cost
+profile (rotation becomes a fan-out operation with partial-failure modes)
+and is **not** what this spec assumes. If the owner intends copies rather
+than references, §6 (move), §8 (`shared_with`), and the rotation story above
+need rework; until then, single-store-by-reference is the working
+assumption.
+
+| Option | Status |
 |---|---|
-| **Grant set** — one stored credential, N grants | §6's move rewrites two grant rows; `shared_with` is a lookup; DOC-45 `C-2.2` (ref stable across rotation) and `C-6.7` stay true. Departs from the Q3 wording. |
-| **Store** — N stores, N copies of the bytes | Matches the Q3 wording. Rotation must reach every store holding the credential or `C-2.2` breaks for all but one instance; `shared_with` becomes a cross-store comparison. |
-| **Both** — one physical store, per-instance grant partitions presented *as* per-instance stores | Reconciles them, at the cost of a presentation layer. A product decision about what the user is told they own, not an implementation detail. |
+| **Grant set** — one stored credential, N grants, `shared_with` a lookup | Superseded by the resolution above: this *is* what "access to the store" means. |
+| **Store** — N stores, N copies of the bytes, N-write rotation | Rejected implicitly by the single-store-by-reference assumption above; would need its own owner confirmation to reopen. |
+| **Both** — one physical store, per-instance grant partitions presented as per-instance stores | This is the resolution: store and grant set are one object, two views, not a presentation layer over two different mechanisms. |
 
 ---
 
@@ -437,3 +476,4 @@ credential state without a credential); epic **#4040**'s owner comment of
 |---|---|
 | 2026-08-03 | Initial draft (#4663). Specifies the five panel acts, the never-display-a-value constraint, and the audited-event shapes. Found that DOC-45's landed audit record cannot carry those events; filed as **#4667**. |
 | 2026-08-03 | Simplified on owner feedback (*"too complicated"*). Cut 53% (944 → 439 lines): extended rationale, restatements of decisions already recorded in DOC-45 / ADR-0026 / #4040, and the DOC-45 amendment analysis (now #4667's, cited in one clause). §§5, 6, 8 and 9.1 became clause tables; prose was kept only where the security reasoning is load-bearing. Reduced five open questions to the two that block building — PM-4 exemption (was OQ-3) and store-vs-grant-set (was OQ-4); the other three became stated assumptions in §3 and §7. Section numbers, spec IDs, and clause ids are unchanged where the clause survived; `P-8.12`–`P-8.15` were removed with their content living in #4667, and `P-8.11` / `P-8.16` retained. |
+| 2026-08-03 | **OQ-2 RESOLVED (owner):** a "credential set" is both a store and a grant set — holding a grant against a store is what it means to have access to what's in it. Grant granularity is the store; there is no per-credential grant inside a store, so scoping an assistant to a single credential means giving that credential its own store. Verified DOC-45 `C-2.2`/`C-6.7` remain true under this model (§13 OQ-2). Rotation-is-a-single-write stated as an explicit, owner-confirmable assumption (single store per credential, shared by reference), not settled fact. §1, the §2 Terms note, §6's status line and `P-4.5`, and §13's intro updated for consistency. OQ-1 unchanged, still open. |
