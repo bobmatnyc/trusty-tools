@@ -248,9 +248,17 @@ const SYSTEM_TEMP_ROOTS: &[&str] = &[
 /// parent (`/`) is ignored rather than allowed to reject every absolute path.
 /// Deliberately free of `#[cfg(target_os)]`: the extra Unix roots simply never
 /// match on Windows, where `temp_dir()` supplies the real answer.
+///
+/// (#4638) Public because a SECOND caller needs exactly this question and
+/// nothing else in [`is_ephemeral_build_path`]: trusty-code's turn recorder
+/// refuses to mint a memory palace for a temp-rooted project. That caller must
+/// NOT use `is_ephemeral_build_path`, whose [`EPHEMERAL_PATH_SEGMENTS`] half
+/// also flags `.claude/worktrees/` — a legitimate, git-remote-carrying project
+/// checkout whose turns belong in the repo's real palace.
 /// Test: `is_ephemeral_build_path_flags_system_temp_paths`,
-/// `is_ephemeral_build_path_ignores_temp_lookalike_paths`.
-fn is_under_system_temp(path: &Path) -> bool {
+/// `is_ephemeral_build_path_ignores_temp_lookalike_paths`,
+/// `is_under_system_temp_is_true_for_temp_and_false_for_worktrees`.
+pub fn is_under_system_temp(path: &Path) -> bool {
     if SYSTEM_TEMP_ROOTS.iter().any(|root| path.starts_with(root)) {
         return true;
     }
@@ -376,6 +384,41 @@ mod tests {
                 "{p} is not under a temp ROOT and must NOT be flagged"
             );
         }
+    }
+
+    /// Why (#4638): trusty-code's turn recorder asks THIS predicate — not
+    /// [`is_ephemeral_build_path`] — whether a session's project root is
+    /// durable enough to justify minting a memory palace for it. The two must
+    /// stay distinguishable: a `.claude/worktrees/` checkout is an ephemeral
+    /// BINARY location but a perfectly durable PROJECT (it carries the repo's
+    /// git remote, so its turns belong in the repo's real palace), and
+    /// conflating the two would silently stop recording every agent session.
+    /// What: pins that `is_under_system_temp` flags real temp roots in both
+    /// macOS spellings while accepting a worktree path that
+    /// `is_ephemeral_build_path` deliberately rejects.
+    #[test]
+    fn is_under_system_temp_is_true_for_temp_and_false_for_worktrees() {
+        for p in [
+            "/private/var/folders/xx/T/.tmpAbC123/project",
+            "/tmp/claude-502/session/scratchpad",
+        ] {
+            assert!(
+                is_under_system_temp(Path::new(p)),
+                "{p} is under a system temp root and must be flagged"
+            );
+        }
+
+        let worktree = Path::new("/Users/x/repo/.claude/worktrees/eng-1");
+        assert!(
+            !is_under_system_temp(worktree),
+            "a worktree checkout is a durable PROJECT root — it must not be \
+             flagged as temp (#4638)"
+        );
+        assert!(
+            is_ephemeral_build_path(worktree),
+            "sanity: the same path IS an ephemeral BINARY location, which is \
+             exactly why the turn recorder must not use that predicate"
+        );
     }
 
     #[test]

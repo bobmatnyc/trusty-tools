@@ -25,6 +25,19 @@
 //! palace and fails `-32603 "palace metadata missing"` against a missing
 //! one, which is exactly how the #2343 soak lost all 50 turns. The ensure
 //! result is cached on success so steady state adds zero extra RPCs.
+//! (#4638) That auto-create is gated on [`PalaceCreation`], decided from the
+//! session's project root by `SessionRegistry::memory_sink_for`. The palace id
+//! is DERIVED from that root, so an ephemeral root (a `tempfile::TempDir`)
+//! yields a per-run-unique id and the ensure minted one permanent, unreadable
+//! palace per run — 5,667 `t-tmp<random>` orphans in three weeks, 97.8% of
+//! every palace on the machine, which made trusty-memory's O(n) full-registry
+//! handlers (#4637) unusable. A palace is an expensive object (usearch index,
+//! KG redb, drawer table, recall log), not a per-session scratch container:
+//! the intended shape is ONE durable palace per PROJECT with each session
+//! distinguished INSIDE it by `chat_turn_append`'s `session_id` and
+//! `memory_remember`'s `session:<id>` tag, and that shape is what
+//! [`PalaceCreation::Forbidden`] restores by making `palace_create`
+//! unreachable from an ephemeral root.
 //! (#2363) `memory_remember`'s dedup gate (jaro_winkler >0.92,
 //! 5-min same-palace window) is documented as hostile to sequential
 //! conversational turns, so every turn-recorder write passes `force: true`
@@ -51,7 +64,7 @@ use std::path::Path;
 
 use serde_json::json;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::memory_envelope::call_tool_wrapped;
 
@@ -63,6 +76,34 @@ use crate::memory_envelope::call_tool_wrapped;
 /// policy below kicks in.
 /// Test: `memory_sink::tests::enqueue_drops_newest_when_queue_full`.
 pub const QUEUE_CAPACITY: usize = 50;
+
+/// Whether a sink is entitled to bring its target palace into EXISTENCE
+/// (#4638).
+///
+/// Why: the recorder's palace id is derived from the session's project root,
+/// so an EPHEMERAL root yields an id that is unique per run — and `drain`'s
+/// [`ensure_palace`] step then auto-created one permanent, unreadable palace
+/// for every such run. That is how 5,667 `t-tmp<random>` orphans accumulated
+/// in three weeks (97.8% of every palace on the machine), which in turn made
+/// trusty-memory's O(n) full-registry handlers (#4637) unusable. A palace is
+/// an expensive object (usearch vector index, KG redb, drawer table, recall
+/// log), not a cheap per-session namespace, so the entitlement to mint one is
+/// modelled explicitly rather than left implicit in "whoever writes first
+/// wins". Making it a two-variant enum rather than a `bool` parameter means no
+/// call site can pass the dangerous value by accident.
+/// What: [`Self::Allowed`] reproduces the pre-#4638 behavior exactly (probe,
+/// then `palace_create` on a miss — #2424); [`Self::Forbidden`] probes and
+/// writes into a palace that already exists but never creates one, so a sink
+/// carrying it can never increase the palace count.
+/// Test: `memory_sink::tests::forbidden_creation_never_creates_a_palace`,
+/// `memory_sink::tests::ensure_palace_creates_missing_palace_once`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PalaceCreation {
+    /// The project root is durable — auto-create the palace if missing (#2424).
+    Allowed,
+    /// The project root is ephemeral — never auto-create (#4638).
+    Forbidden,
+}
 
 /// One user-prompt/assistant-response turn queued for durable dual-write.
 #[derive(Debug, Clone)]
@@ -89,6 +130,8 @@ pub struct TurnMemorySink {
     base_url: String,
     /// This sink's already-resolved palace id (#2348 reuse).
     palace: String,
+    /// Whether this sink may bring `palace` into existence (#4638).
+    creation: PalaceCreation,
 }
 
 impl TurnMemorySink {
@@ -96,8 +139,8 @@ impl TurnMemorySink {
     /// `base_url`, and spawn its background drain task with the default
     /// [`QUEUE_CAPACITY`].
     /// Test: `memory_sink::tests::enqueue_drain_happy_path`.
-    pub fn new(base_url: String, palace: String) -> Self {
-        Self::with_capacity(base_url, palace, QUEUE_CAPACITY)
+    pub fn new(base_url: String, palace: String, creation: PalaceCreation) -> Self {
+        Self::with_capacity(base_url, palace, QUEUE_CAPACITY, creation)
     }
 
     /// Same as [`Self::new`] with an explicit queue capacity — tests use a
@@ -116,14 +159,30 @@ impl TurnMemorySink {
     /// receiver half of a `capacity`-bounded channel; returns the sink
     /// holding only the sender half.
     /// Test: `memory_sink::tests::enqueue_drops_newest_when_queue_full`.
-    pub fn with_capacity(base_url: String, palace: String, capacity: usize) -> Self {
+    pub fn with_capacity(
+        base_url: String,
+        palace: String,
+        capacity: usize,
+        creation: PalaceCreation,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
-        tokio::spawn(drain(base_url.clone(), palace.clone(), rx));
+        tokio::spawn(drain(base_url.clone(), palace.clone(), creation, rx));
         Self {
             tx,
             base_url,
             palace,
+            creation,
         }
+    }
+
+    /// Whether this sink may bring its palace into existence (#4638).
+    ///
+    /// Why: the #4638 bound is a property of the sink, so it must be
+    /// observable to assert on directly rather than inferred from RPC traffic.
+    /// What: returns the [`PalaceCreation`] fixed at construction.
+    /// Test: `registry_tests::memory_sink_for_many_sessions_mint_at_most_one_palace`.
+    pub fn palace_creation(&self) -> PalaceCreation {
+        self.creation
     }
 
     /// This sink's already-resolved trusty-memory base URL.
@@ -197,15 +256,46 @@ impl TurnMemorySink {
 /// and so a failed ensure is naturally retried on the next turn (the flag is
 /// only set on success), covering a daemon that comes up mid-session.
 /// What: on success `palace_ensured` latches true and steady state adds
-/// zero extra RPCs per turn; on failure the turn's writes are still
-/// attempted (fail-open — they carry their own warnings).
+/// zero extra RPCs per turn; on failure under [`PalaceCreation::Allowed`] the
+/// turn's writes are still attempted (fail-open — they carry their own
+/// warnings).
+///
+/// (#4638) Under [`PalaceCreation::Forbidden`] a failed ensure means "this
+/// palace does not exist and I am not entitled to create it", so the turn is
+/// DROPPED instead of written: the two writes could not have landed anyway
+/// (`memory_remember` fails `-32603 "palace metadata missing"` against an
+/// absent palace), and skipping them keeps a temp-rooted session down to one
+/// probe RPC per turn instead of three. The ensure is deliberately re-probed
+/// rather than latched-off, so a Forbidden sink whose palace is created
+/// out-of-band mid-session (or whose daemon was merely down for the first
+/// probe) starts recording normally — "the daemon is unreachable" and "the
+/// palace is absent" are not distinguishable from one failed probe, and only
+/// the latter is permanent.
 /// Test: `memory_sink::tests::ensure_palace_creates_missing_palace_once`,
-/// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`.
-async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTurn>) {
+/// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`,
+/// `memory_sink::tests::forbidden_creation_never_creates_a_palace`,
+/// `memory_sink::tests::forbidden_creation_still_writes_to_an_existing_palace`.
+async fn drain(
+    base_url: String,
+    palace: String,
+    creation: PalaceCreation,
+    mut rx: mpsc::Receiver<QueuedTurn>,
+) {
     let mut palace_ensured = false;
     while let Some(turn) = rx.recv().await {
         if !palace_ensured {
-            palace_ensured = ensure_palace(&base_url, &palace).await;
+            palace_ensured = ensure_palace(&base_url, &palace, creation).await;
+        }
+        // #4638: no palace and no entitlement to make one — the writes below
+        // are guaranteed to fail, so don't issue them.
+        if !palace_ensured && creation == PalaceCreation::Forbidden {
+            debug!(
+                palace = %palace,
+                session_id = %turn.session_id,
+                "turn_recorder: dropping turn — palace absent and auto-create \
+                 withheld for an ephemeral project root (#4638)"
+            );
+            continue;
         }
         write_turn(&base_url, &palace, &turn).await;
     }
@@ -230,14 +320,24 @@ async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTu
 /// authz gate in default single-tenant mode) via `tools/call`. Never
 /// propagates an error — failure is logged and reported as `false` so the
 /// caller retries on the next turn.
+///
+/// (#4638) `creation` gates the CREATE half only — the probe always runs, so a
+/// [`PalaceCreation::Forbidden`] sink still discovers and uses a palace that
+/// already exists. Returning `false` without attempting a create is what makes
+/// the bound structural: `palace_create` is unreachable from an ephemeral
+/// project root, not merely unlikely.
 /// Test: `memory_sink::tests::ensure_palace_creates_missing_palace_once`,
-/// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`.
-async fn ensure_palace(base_url: &str, palace: &str) -> bool {
+/// `memory_sink::tests::ensure_palace_skips_create_when_palace_exists`,
+/// `memory_sink::tests::forbidden_creation_never_creates_a_palace`.
+async fn ensure_palace(base_url: &str, palace: &str, creation: PalaceCreation) -> bool {
     if call_tool_wrapped(base_url, "palace_info", json!({"palace": palace}))
         .await
         .is_ok()
     {
         return true;
+    }
+    if creation == PalaceCreation::Forbidden {
+        return false;
     }
     let create_params = json!({
         "name": palace,
