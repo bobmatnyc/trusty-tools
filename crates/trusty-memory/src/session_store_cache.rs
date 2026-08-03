@@ -33,7 +33,9 @@
 //!      `.await`, so `parking_lot::Mutex` is safe here.
 //!
 //! Test: `tests::open_handles_are_bounded_by_cap`,
-//! `tests::open_fd_count_is_bounded_by_cap`,
+//! `session_store_fd_count_is_bounded_by_cap` (in
+//! `tests/session_store_fd_bound.rs` — needs its own process to measure real
+//! fds; see that file's header),
 //! `tests::evicted_store_reopens_with_data_intact`,
 //! `tests::in_use_store_is_never_evicted`,
 //! `tests::concurrent_callers_share_one_store`,

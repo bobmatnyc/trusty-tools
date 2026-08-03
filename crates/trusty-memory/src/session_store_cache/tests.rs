@@ -2,15 +2,16 @@
 //!
 //! Why: the bug these pin is a *quantitative* one — nothing was functionally
 //! broken, the daemon simply never released a `chat_sessions.redb` fd. So the
-//! assertions here are on counts (resident entries, and real process fds via
-//! `fd_metrics::count_open_fds`), not just on happy-path behaviour, plus the
-//! two correctness invariants eviction must not violate.
-//! What: exercises the cap, the fd bound, transparent reopen after eviction,
-//! the in-use guard, concurrent-open dedup, and explicit removal.
+//! assertions here are on counts (resident entries), not just on happy-path
+//! behaviour, plus the two correctness invariants eviction must not violate.
+//! The matching *real file descriptor* assertion lives in
+//! `tests/session_store_fd_bound.rs`, which needs its own process to be
+//! meaningful — see that file's header.
+//! What: exercises the cap, transparent reopen after eviction, the in-use
+//! guard, concurrent-open dedup, and explicit removal.
 //! Test: this module.
 
 use super::*;
-use crate::fd_metrics::count_open_fds;
 use std::sync::Barrier;
 use tempfile::TempDir;
 
@@ -41,27 +42,6 @@ fn open_handles_are_bounded_by_cap() {
         8,
         "resident stores must be capped at 8, got {}",
         cache.len()
-    );
-}
-
-/// Why: the entry count is a proxy; the actual production symptom was 844 open
-/// *file descriptors*. This asserts the thing that broke.
-/// What: records the process fd count, touches 120 distinct palaces, and
-/// asserts the growth stays within the cap plus a small allowance for
-/// unrelated fd churn — pre-fix this would grow by ~120.
-/// Test: this test.
-#[test]
-fn open_fd_count_is_bounded_by_cap() {
-    let dir = TempDir::new().unwrap();
-    let cache = SessionStoreCache::with_max_open(8);
-    let before = count_open_fds().expect("fd count available on this platform");
-    touch_palaces(&cache, dir.path(), 120);
-    let after = count_open_fds().expect("fd count available on this platform");
-    let growth = after.saturating_sub(before);
-    // 8 resident redb handles + slack for test-harness/allocator fd churn.
-    assert!(
-        growth <= 24,
-        "fd growth after 120 palaces must stay bounded, grew by {growth} (before={before}, after={after})"
     );
 }
 
