@@ -121,7 +121,119 @@ Most match (e.g. `crates/trusty-search/` → `-p trusty-search`) but note these 
 
 Always verify the `name` field in the crate's `Cargo.toml` if you get a "package not found" error.
 
+## Rust Test Ladder — how much testing this change needs
+
+🔴 **This ladder is the authoritative answer to "how much testing does this
+change need" for this repo.** Run the smallest deterministic gate that covers the
+change's blast radius — no less, and no more. The framework's phase-entry table
+labels a change Low / Normal / High risk; those labels map onto the rungs below
+(rungs 1–2 = Low, 3–4 = Normal, 5–6 = High). The framework does not carry a
+competing Rust matrix: when the question is *which command to run*, this table
+decides.
+
+Required tests stay in the implementation PR (`tm-pr-workflow`, "One Outcome,
+One PR"). Name the rung and paste its command in the PR body so a reviewer can
+see which rung was actually run.
+
+| # | Change class | Risk | Development proof | PR gate — the command to run | Hardening / release gate |
+|---|---|---|---|---|---|
+| 1 | Docs, comments, changelog fragments only | Low | Read the rendered file | `bash scripts/check_sld.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
+| 2 | Test-only stabilization — flake fix, fixture, test harness | Low | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `cargo fmt --check` && `cargo test -p <crate>`; add `-- --test-threads=1` when the flake is isolation-shaped | `cargo test --workspace` **only** when shared test infrastructure changed |
+| 3 | Localized behavior inside one crate | Normal | One targeted regression test that provably fails before the change | `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate>` | Workspace gate only when release policy requires it |
+| 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `cargo check --workspace` && `cargo test -p <consumer>` for **each direct dependent** | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
+| 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
+| 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rust crate tests **plus** direct UI/API evidence (curl the route, call the MCP tool, load the page) | rung 3 or 4 for the Rust side, plus `pnpm -C crates/<crate>/ui test` (where the package defines one; otherwise `… build`) and one smoke run of the binary | full product/e2e gate plus `cargo test -- --include-ignored` when hardening |
+
+🔴 **`cargo test --workspace` is not the default inner-loop proof for a localized
+change.** It belongs at the hardening boundaries (rungs 4–6). Making every narrow
+PR depend on the whole workspace turns unrelated flakes into an issue factory
+without adding one line of coverage for your change.
+
+🔴 **Scope down, never scope away.** Choosing a lower rung is a statement about
+blast radius, and you must be able to prove it (see the baseline-failure rules
+below). It is never licence to make a red gate green by deleting, `#[ignore]`-ing,
+`cfg`-gating, `--exclude`-ing, or `--lib`-narrowing coverage. That remains the
+hard line it has always been.
+
+**Evidence detail:** a PR body may summarise a **passing** gate as command +
+counts + scope — `cargo test -p trusty-mpm — 214 passed, 0 failed` — because the
+reviewer's question there is which rung ran, not what scrolled past. Raw output
+stays **mandatory** for failures, flakes, performance claims, and disputed
+results, and agent-to-PM reporting keeps raw output in all cases
+(`BASE-AGENT.md`: never summarise test results in your own words).
+
+### Baseline failures — the Rust specifics
+
+The six-step baseline-failure protocol (establish whose red it is, fix if
+branch-caused, append to the canonical issue if tracked, one canonical issue if
+not, and the literal report string) lives in `tm-pr-workflow`. It is **not**
+restated here. What follows is only what that generic version cannot carry.
+
+**Known-environmental on this machine — expect these, do not re-file them:**
+
+| Gate | Where | Why it fails independent of your branch |
+|---|---|---|
+| The `trusty-search` filesystem-watcher tests (~6; the set drifts) | `crates/trusty-search/src/service/watch_loop.rs`, `watcher.rs`, `watcher_manager.rs` | FSEvents delivery on this host is nondeterministic. They fail on any branch, and they still fail under `-- --test-threads=1` — so it is the machine, not parallel-test load |
+| `execute_doctor_against_test_daemon` | `crates/trusty-mpm/src/client/executor/tests.rs` | It takes 9–13 s against a 10 s client timeout, so it loses on timing alone under any load |
+
+🔴 **The correct response is to prove your diff touches zero files in those
+crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
+path list, and empty output is the evidence; paste it in the PR:
+
+```bash
+git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
+                                           crates/trusty-mpm/src/client/
+```
+
+**Telling a pre-existing red from one you caused — crate-scoped confirmation:**
+
+1. **Re-run the failure alone on your branch**, not the whole suite:
+   `cargo test -p <crate> <test> -- --exact --nocapture`. A single named test
+   removes ordering and load from the picture.
+2. **Run the identical command against `origin/main` in a second worktree** —
+   never by mutating the main checkout, and never with `git stash`:
+   ```bash
+   git worktree add .claude/worktrees/baseline-<n> origin/main
+   cd .claude/worktrees/baseline-<n> && cargo test -p <crate> <test> -- --exact
+   ```
+   Failing on both is the evidence that the branch did not cause it.
+3. **Serialize before blaming isolation:** `-- --test-threads=1`. If it still
+   fails serialized, parallel interference is not the explanation and "flaky
+   under load" is the wrong diagnosis.
+4. **Check the path evidence:** `git diff --name-only origin/main...HEAD`. If the
+   failing crate does not appear there, and you did not touch a shared library it
+   depends on, the red is not yours.
+5. 🔴 **The shared-crate caveat:** a green `cargo test -p <your-crate>` does
+   **not** clear you when you changed `trusty-common`, `trusty-embedderd`, or any
+   other shared library. A red in a *dependent* crate is yours until rung 4 of
+   the ladder above says otherwise. This is the one case where scoping down is
+   the wrong instinct.
+
+Report it in the shape `tm-pr-workflow` mandates, naming the crate-scoped gate:
+`change-specific gates pass; cargo test -p trusty-search blocked by canonical
+issue #N`. Never "all tests pass" while a gate is red, whoever caused it.
+
 ## Key Conventions
+
+🔴 **Rust issue boundary — what to search by before filing.** Whether a finding
+earns an issue at all is decided by the **Ticket-Promotion Gate** in the
+framework skill `tm-ticketing` (search first, the five promotion criteria, the
+confidence label, outcome-sized granularity, the six-field schema). That gate is
+not restated here — read it there. What this repo adds is *what to search by*,
+because a Cargo workspace hands you four high-signal keys a generic search
+misses:
+
+| Search key | Example | Why it finds the canonical issue |
+|---|---|---|
+| **Test name** | `execute_doctor_against_test_daemon` | Rust test names are effectively unique and get quoted verbatim in every prior report and CI log |
+| **Panic / error text** | `called Option::unwrap() on a None value`, or a `thiserror` Display string | The literal message is what people paste into issue bodies |
+| **Affected symbol** | `WatcherManager::reconcile` | Survives the file moves and module splits that break any path-based search — and this repo splits modules constantly under the 500-SLOC cap |
+| **Crate** | `-p trusty-search`, `-p tga` | Scopes to the owning workstream; expand abbreviations first (see the table below — `tm` is trusty-memory, not the binary) |
+
+Search **open and recently closed** issues on all four. A repeat failure in the
+same crate is almost always another occurrence of an existing canonical issue:
+append the run URL, SHA, command, and failure signature to that issue rather than
+filing a second one.
 
 🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
 documentation proportional to how surprising the code is. The full three-section
@@ -572,11 +684,38 @@ cd .claude/worktrees/<dirname>
 # … edit, build, test, commit, push from here …
 ```
 
-**End-to-end delivery chain:** spec → issue → worktree branch → PR (linked to issue) → trusty-review gate → squash-merge → worktree cleanup. See `.claude-mpm/INSTRUCTIONS.md` for the full required sequence.
+**End-to-end delivery chain:** accepted outcome → optional issue → worktree
+branch → one cohesive PR → applicable Rust gates → trusty-review gate →
+squash-merge → worktree cleanup. The framework skill `tm-pr-workflow` owns the
+full sequence and the optional-issue rule; this file adds only the Rust-specific
+gates (see the Rust Test Ladder above). *(The pointer here used to name
+`.claude-mpm/INSTRUCTIONS.md`, a path that has never existed in this repo — the
+tracked project-instruction host is this file, `.trusty-mpm/INSTRUCTIONS.md`,
+and the delivery chain itself now lives in `tm-pr-workflow`.)*
 
-Each ticket, refactor, or experiment gets its own worktree. Worktrees are
-disposable — delete them with `git worktree remove --force <path>` once the
-PR has merged.
+🔴 **A worktree is a writer; the branch is the workstream.** The durable unit is
+the **branch** — one branch per workstream, and a session owns exactly one
+workstream. A worktree is only the checkout that lets you write to that branch:
+ephemeral, disposable, and recreatable at any time with `git worktree add`.
+Never treat a worktree as the thing being preserved; losing one loses nothing
+the branch does not still hold.
+
+What follows from that:
+
+- **One branch and worktree per independently reviewable PR outcome** — not per
+  ticket, per refactor step, or per experiment. Several related tickets may
+  share one worktree when a single coherent change satisfies them
+  (`Closes #A`, `Closes #B`).
+- **Everything that outcome owes stays in the same worktree and PR:** the
+  implementation, its regression tests, necessary local refactoring, docs, the
+  changelog fragment, and in-scope review fixes. Do not open a second worktree
+  for the tests you still owe the first one.
+- **Experiments stay session-local.** Promote an experiment to a branch and
+  worktree only once its result is accepted for implementation.
+- **Cleanup:** `git worktree remove --force <path>` once the PR has merged, then
+  `git branch -D <branch>` and `git push origin --delete <branch>` — the branch
+  goes last, because until the squash-merge has landed it is the only durable
+  copy of the workstream.
 
 🟡 **If you absolutely must run a command from the main checkout** — for
 example `cargo install --path crates/<name> --locked` after a merge —
