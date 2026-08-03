@@ -156,9 +156,8 @@ reviewer, or a human-operated review step. Gates in this repository include —
 non-exhaustively — the workflows in `.github/workflows/` (`ci.yml`,
 `line-cap.yml` (the 500-SLOC cap), `changelog-fragment.yml` (the per-PR
 changelog requirement), `sld-lint.yml`, `doc-numbers.yml`, `test-pointers.yml`,
-`token-drift.yml`, `instruction-floor-guard.yml`,
-`capabilities-drift.yml`, `version-parity.yml`, `cargo-audit.yml`,
-`generation-artifact-lint.yml`, `agent-assets.yml`), GitHub branch protection
+`token-drift.yml`, `capabilities-drift.yml`, `version-parity.yml`,
+`cargo-audit.yml`, `generation-artifact-lint.yml`, `agent-assets.yml`), GitHub branch protection
 and required reviews on `main`, and the trusty-review gate in the delivery
 chain (`CLAUDE.md:493`).
 
