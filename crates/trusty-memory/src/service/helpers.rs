@@ -138,47 +138,134 @@ pub(crate) fn is_reserved_system_palace(id: &PalaceId) -> bool {
 /// single helper eliminates the byte-for-byte duplicate and makes future
 /// changes (e.g. adding a `total_vectors_orphaned` field) land in one place.
 /// What: saturating sums of `drawers.read().len()`, `vector_store.index_size()`,
-/// and `kg.count_active_triples()` across the supplied palace ids.
+/// and `kg.count_active_triples()` across the supplied palace ids, plus
+/// `cached_palace_count` — how many of those ids actually contributed (issue
+/// #4637). The three totals are therefore a **cache-resident** roll-up, not a
+/// whole-disk one; `cached_palace_count` is what makes that legible.
 /// Test: indirectly via `status_endpoint_returns_payload` and any SSE test
-/// that observes `StatusChanged`.
+/// that observes `StatusChanged`; cache-only behaviour is pinned by
+/// `status_does_not_open_uncached_palaces`.
 pub(crate) struct PalaceStats {
     pub total_drawers: usize,
     pub total_vectors: usize,
     pub total_kg_triples: usize,
+    /// Number of `ids` that were resident in the registry's LRU cache and so
+    /// contributed real counts to the three totals above (issue #4637).
+    pub cached_palace_count: usize,
 }
 
-/// Sum drawer / vector / KG-triple counts across `ids`, skipping palaces that
-/// cannot be opened.
+/// Sum drawer / vector / KG-triple counts across the `ids` that are already
+/// resident in the registry's open-handle cache.
 ///
 /// Why (issue #228): centralises the previously-duplicated loop from
 /// `status()` and `aggregate_status_event()`. Callers pass an iterator of
 /// `PalaceId` so the helper works for both the on-disk view (used by
 /// `status()`) and the in-memory registry view (used by
 /// `aggregate_status_event()` on the SSE hot path).
-/// What: for each id, calls `registry.open_palace` (cheap when the handle is
-/// already cached, slow only on first-ever open) and accumulates the three
-/// counts via `saturating_add` so overflow is impossible. Palaces that fail
-/// to open are silently skipped — one bad palace must not blank the
-/// dashboard.
-/// Test: indirectly through `status_endpoint_returns_payload`.
+/// Why (issue #4637): this used to call `registry.open_palace` per id. On a
+/// daemon with 5,794 palaces on disk and a 64-slot LRU that is ~5,730 cold
+/// opens of ~1s each — roughly 90 minutes of blocking disk I/O inline on the
+/// async executor, which made `GET /api/v1/status` never respond. Switching
+/// to `PalaceRegistry::peek` (a mutex lock + `Arc` clone, zero I/O, no LRU
+/// promotion) makes the call O(n) in cheap lock acquisitions instead of O(n)
+/// in cold palace opens. This mirrors the fix #1924 already landed in
+/// `console_metrics.rs`.
+/// What: for each id, `peek`s the registry and accumulates the three counts
+/// via `saturating_add` so overflow is impossible. Ids that are not currently
+/// cached contribute nothing and are counted only by the caller's own
+/// `palace_count`. The totals are consequently a cache-resident
+/// approximation — callers must surface `cached_palace_count` alongside them
+/// so the wire shape says so.
+/// Test: `status_does_not_open_uncached_palaces`, and indirectly through
+/// `status_endpoint_returns_payload`.
 pub(crate) fn collect_palace_stats<'a, I>(state: &AppState, ids: I) -> PalaceStats
 where
     I: IntoIterator<Item = &'a PalaceId>,
 {
     let (mut total_drawers, mut total_vectors, mut total_kg_triples): (usize, usize, usize) =
         (0, 0, 0);
+    let mut cached_palace_count: usize = 0;
     for id in ids {
-        if let Ok(handle) = state.registry.open_palace(&state.data_root, id) {
+        // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
+        if let Some(handle) = state.registry.peek(id) {
             total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
             total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
             total_kg_triples = total_kg_triples.saturating_add(handle.kg.count_active_triples());
+            cached_palace_count += 1;
         }
     }
     PalaceStats {
         total_drawers,
         total_vectors,
         total_kg_triples,
+        cached_palace_count,
     }
+}
+
+/// List every palace on disk without blocking the async executor.
+///
+/// Why (issue #4637): `PalaceRegistry::list_palaces` is a synchronous
+/// directory walk that reads one `palace.json` per palace — at 5,794 palaces
+/// that is thousands of `stat`+read syscalls. Every caller in the service
+/// layer ran it inline on a tokio worker. `console_metrics.rs` already hops
+/// to the blocking pool for exactly this call; this helper makes that the
+/// shared behaviour instead of a one-off.
+/// What: clones `data_root`, runs the walk on `spawn_blocking`, and folds
+/// both the join error and the walk error into `anyhow`.
+/// Test: exercised by every `list_palaces`/`status` service test.
+pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace>> {
+    let root = state.data_root.clone();
+    tokio::task::spawn_blocking(move || {
+        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
+    })
+    .await
+    .map_err(|e| anyhow!("join list_palaces: {e}"))?
+    .map_err(|e| anyhow!("list palaces: {e:#}"))
+}
+
+/// Open a handle for every palace in `palaces`, off the async executor.
+///
+/// Why (issue #4637): the cross-palace recall fan-out genuinely needs every
+/// palace open — answering a recall from cache-resident palaces only would
+/// silently drop ~98.9% of the corpus, which is a correctness regression, not
+/// an optimisation. So `peek()` is the wrong tool here. What *was* wrong is
+/// that the open loop ran inline on a tokio worker thread, parking it for the
+/// full duration. This helper keeps the semantics (every palace is opened)
+/// and moves the blocking work to the blocking pool where it belongs. Three
+/// byte-identical copies of this loop previously existed (`MemoryService::recall_all`,
+/// `chat::tools::execute_recall_all`, `tools::memory_ops::handle_memory_recall_all`).
+/// What: clones the registry `Arc` + `data_root`, opens each palace serially
+/// on `spawn_blocking` (serial on purpose — parallel cold opens would thrash
+/// the 64-slot LRU), and skips failures with a `tracing::warn!` so one bad
+/// palace cannot fail the whole fan-out. `label` names the caller in that
+/// warning.
+/// Test: `recall_all_opens_every_palace` pins that the fan-out still sees
+/// palaces that were never cached.
+pub(crate) async fn open_palaces_blocking(
+    state: &AppState,
+    palaces: &[Palace],
+    label: &'static str,
+) -> Vec<Arc<PalaceHandle>> {
+    let registry = Arc::clone(&state.registry);
+    let root = state.data_root.clone();
+    let ids: Vec<PalaceId> = palaces.iter().map(|p| p.id.clone()).collect();
+    // #4637: open_palace is correct here (recall must see every palace) but must
+    // not run inline on the async executor — hop to the blocking pool.
+    tokio::task::spawn_blocking(move || {
+        let mut handles = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match registry.open_palace(&root, id) {
+                Ok(h) => handles.push(h),
+                Err(e) => tracing::warn!(palace = %id, "{label}: open failed: {e:#}"),
+            }
+        }
+        handles
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("{label}: join open_palaces failed: {e}");
+        Vec::new()
+    })
 }
 
 /// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.
@@ -187,7 +274,11 @@ where
 /// the helper avoids field-set drift between them.
 /// What: reads drawer/vector/triple counts, distinct rooms, max
 /// `created_at`, KG node/edge/community counts, and the `is_compacting` flag.
-/// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`.
+/// When `handle` is `None` every count is `0` and `cached` is `false` — since
+/// issue #4637 that is the normal case on the full-registry list route, so
+/// `cached` is what tells a client "these zeros mean unknown, not empty".
+/// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`,
+/// `list_palaces_does_not_open_uncached_palaces`.
 pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
     let (
         drawer_count,
@@ -231,6 +322,7 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
         edge_count,
         community_count,
         is_compacting,
+        cached: handle.is_some(),
     }
 }
 
@@ -532,5 +624,167 @@ mod tests {
     fn drawer_snippet_handles_empty_content() {
         assert_eq!(drawer_snippet(""), "");
         assert_eq!(drawer_snippet("   \n\t  "), "");
+    }
+
+    /// Build an `AppState` over a temp dir whose registry holds at most two
+    /// open handles, with palaces `a`, `b`, `c` created in that order.
+    ///
+    /// Why: a capacity-2 LRU plus three creations gives a deterministic
+    /// cached/evicted split — `a` is guaranteed evicted, `b` and `c` are
+    /// guaranteed resident — which is exactly the shape the #4637 regression
+    /// guards need. Mirrors the fixture the #1924 guard uses in
+    /// `console_metrics.rs`.
+    /// What: returns the `AppState`; the temp dir is leaked so it outlives the
+    /// test body (same convention as `test_state`).
+    /// Test: used by `list_palaces_does_not_open_uncached_palaces`,
+    /// `status_does_not_open_uncached_palaces`, and
+    /// `open_palaces_blocking_opens_every_palace`.
+    fn state_with_one_evicted_palace() -> AppState {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+
+        let registry = trusty_common::memory_core::PalaceRegistry::with_max_open(2);
+        for name in ["a", "b", "c"] {
+            let palace = Palace {
+                id: PalaceId::new(name),
+                name: name.to_string(),
+                description: None,
+                created_at: Utc::now(),
+                data_dir: data_root.join(name),
+            };
+            registry
+                .create_palace(&data_root, palace)
+                .unwrap_or_else(|e| panic!("create_palace({name}) failed: {e:#}"));
+        }
+        assert_eq!(registry.len(), 2, "capacity-2 registry holds 2 of 3");
+        assert!(
+            registry.peek(&PalaceId::new("a")).is_none(),
+            "'a' must be evicted before the route under test runs"
+        );
+
+        let mut state = AppState::new(data_root);
+        state.registry = Arc::new(registry);
+        state
+    }
+
+    /// Issue #4637 regression guard — `GET /api/v1/palaces` must never
+    /// force-open a palace that isn't already in the registry's LRU cache.
+    ///
+    /// Why: the previous implementation called `open_palace` per row. On the
+    /// live daemon (5,794 palaces, 64-slot LRU) that is ~5,730 cold opens of
+    /// ~1s each per request — the route was unusable, and it evicted the
+    /// entire working set every time it ran. A test that only checked the row
+    /// count would not have caught that, so this asserts on the *cache*.
+    /// What: builds the capacity-2 / three-palace fixture, calls
+    /// `MemoryService::list_palaces`, and asserts (1) all three palaces are
+    /// listed, (2) the evicted one is flagged `cached: false` with zero counts
+    /// while the resident ones are `cached: true`, and (3) the registry's
+    /// membership and size are byte-for-byte unchanged — nothing was opened,
+    /// nothing was evicted.
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_palaces_does_not_open_uncached_palaces() {
+        let state = state_with_one_evicted_palace();
+        let svc = MemoryService::new(state.clone());
+
+        let rows = svc.list_palaces().await.expect("list_palaces");
+
+        assert_eq!(rows.len(), 3, "every on-disk palace is still listed");
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("row for '{id}' present"))
+        };
+        assert!(!row("a").cached, "'a' was evicted, so it is not cached");
+        assert_eq!(
+            row("a").drawer_count,
+            0,
+            "an uncached row reports 0 (unknown), not a live count"
+        );
+        assert!(row("b").cached, "'b' is resident");
+        assert!(row("c").cached, "'c' is resident");
+
+        assert_eq!(
+            state.registry.len(),
+            2,
+            "list_palaces must not grow the LRU cache"
+        );
+        assert!(
+            state.registry.peek(&PalaceId::new("a")).is_none(),
+            "list_palaces must not reopen the evicted palace 'a'"
+        );
+        assert!(state.registry.peek(&PalaceId::new("b")).is_some());
+        assert!(state.registry.peek(&PalaceId::new("c")).is_some());
+    }
+
+    /// Issue #4637 regression guard — `GET /api/v1/status` must never
+    /// force-open a palace that isn't already cached.
+    ///
+    /// Why: `status()` fed every on-disk palace id through
+    /// `collect_palace_stats`, which called `open_palace` per id. Measured
+    /// live, the endpoint did not respond within 90s while `/health` returned
+    /// in 36ms. The totals are now a cache-resident roll-up, which is only
+    /// honest if `cached_palace_count` says so — this pins both halves.
+    /// What: builds the capacity-2 / three-palace fixture, calls
+    /// `MemoryService::status`, and asserts `palace_count` still reports all
+    /// three on-disk palaces while `cached_palace_count` reports only the two
+    /// resident ones, and that the cache is untouched afterwards.
+    /// Test: this test.
+    #[tokio::test]
+    async fn status_does_not_open_uncached_palaces() {
+        let state = state_with_one_evicted_palace();
+        let svc = MemoryService::new(state.clone());
+
+        let payload = svc.status().await;
+
+        assert_eq!(
+            payload.palace_count, 3,
+            "palace_count still reflects every palace on disk"
+        );
+        assert_eq!(
+            payload.cached_palace_count, 2,
+            "the totals cover only the 2 cache-resident palaces"
+        );
+
+        assert_eq!(
+            state.registry.len(),
+            2,
+            "status must not grow the LRU cache"
+        );
+        assert!(
+            state.registry.peek(&PalaceId::new("a")).is_none(),
+            "status must not reopen the evicted palace 'a'"
+        );
+    }
+
+    /// Issue #4637 — the recall fan-out deliberately still opens every palace.
+    ///
+    /// Why: this is the other half of the fix and the more important half to
+    /// pin. `peek()` is the right tool for stat/list routes and the WRONG tool
+    /// here — a cross-palace recall answered from cache-resident palaces only
+    /// would silently omit ~98.9% of the corpus. If someone later "optimises"
+    /// `open_palaces_blocking` into a `peek`, this test fails.
+    /// What: builds the capacity-2 / three-palace fixture (so `a` is evicted)
+    /// and asserts `open_palaces_blocking` still returns three handles,
+    /// including one for the palace that was not cached.
+    /// Test: this test.
+    #[tokio::test]
+    async fn open_palaces_blocking_opens_every_palace() {
+        let state = state_with_one_evicted_palace();
+        let palaces = list_palaces_blocking(&state).await.expect("list palaces");
+        assert_eq!(palaces.len(), 3);
+
+        let handles = open_palaces_blocking(&state, &palaces, "test").await;
+
+        assert_eq!(
+            handles.len(),
+            3,
+            "recall fan-out must open every palace, including uncached ones"
+        );
+        assert!(
+            handles.iter().any(|h| h.id == PalaceId::new("a")),
+            "the evicted palace 'a' must still be opened and searched"
+        );
     }
 }

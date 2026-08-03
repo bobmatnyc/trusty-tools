@@ -9,6 +9,7 @@
 //! Test: `all_tools_returns_expected_set`, `execute_tool_dispatches_known_tools`
 //! in `web::tests`.
 
+use crate::service::helpers::{collect_palace_stats, list_palaces_blocking, open_palaces_blocking};
 use crate::web::{load_user_config, palace_info_from, DreamStatusPayload};
 use crate::AppState;
 use serde::Deserialize;
@@ -277,15 +278,25 @@ pub(crate) async fn execute_tool(name: &str, args: &str, state: &AppState) -> Va
     }
 }
 
+/// Chat-surface twin of `MemoryService::list_palaces` (issue #4637).
+///
+/// Why: shares the fix, not just the shape — this path had the identical
+/// force-open-every-palace loop, so it was identically unusable at 5,794
+/// palaces. Rows for uncached palaces carry `cached: false` and zero counts.
+/// What: lists palaces on the blocking pool, enriches each row from the
+/// registry's open-handle cache via `peek`.
+/// Test: `list_palaces_does_not_open_uncached_palaces` covers the shared
+/// `palace_info_from` contract this relies on.
 async fn execute_list_palaces(state: &AppState) -> Value {
-    let palaces = match PalaceRegistry::list_palaces(&state.data_root) {
+    let palaces = match list_palaces_blocking(state).await {
         Ok(v) => v,
-        Err(e) => return json!({ "error": format!("list palaces: {e:#}") }),
+        Err(e) => return json!({ "error": format!("{e:#}") }),
     };
     let out: Vec<Value> = palaces
         .into_iter()
         .map(|p| {
-            let handle = state.registry.open_palace(&state.data_root, &p.id).ok();
+            // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
+            let handle = state.registry.peek(&p.id);
             let info = palace_info_from(&p, handle.as_ref());
             serde_json::to_value(info).unwrap_or(json!({}))
         })
@@ -347,19 +358,13 @@ pub(crate) async fn execute_recall_all(
     top_k: usize,
     deep: bool,
 ) -> Value {
-    let palaces = match PalaceRegistry::list_palaces(&state.data_root) {
+    let palaces = match list_palaces_blocking(state).await {
         Ok(v) => v,
-        Err(e) => return json!({ "error": format!("list palaces: {e:#}") }),
+        Err(e) => return json!({ "error": format!("{e:#}") }),
     };
-    let mut handles = Vec::with_capacity(palaces.len());
-    for p in &palaces {
-        match state.registry.open_palace(&state.data_root, &p.id) {
-            Ok(h) => handles.push(h),
-            Err(e) => {
-                tracing::warn!(palace = %p.id, "execute_recall_all: open failed: {e:#}");
-            }
-        }
-    }
+    // #4637: open_palace (not peek) is deliberate — recall must see every
+    // palace; the spawn_blocking hop keeps it off the async executor.
+    let handles = open_palaces_blocking(state, &palaces, "execute_recall_all").await;
     if handles.is_empty() {
         return json!([]);
     }
@@ -420,24 +425,29 @@ fn execute_get_config(state: &AppState) -> Value {
     })
 }
 
+/// Chat-surface twin of `MemoryService::status` (issue #4637).
+///
+/// Why: this had a byte-identical inline copy of the `collect_palace_stats`
+/// loop — including the force-open-every-palace bug. It now delegates to the
+/// shared helper so the fix (and any future one) lands once, and it reports
+/// `cached_palace_count` so the changed meaning of the totals is on the wire
+/// here too.
+/// What: lists palaces on the blocking pool, sums counts across the
+/// cache-resident subset via `collect_palace_stats`.
+/// Test: `status_does_not_open_uncached_palaces` covers the shared helper.
 async fn execute_get_status(state: &AppState) -> Value {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root).unwrap_or_default();
-    let (mut total_drawers, mut total_vectors, mut total_kg_triples) = (0usize, 0usize, 0usize);
-    for p in &palaces {
-        if let Ok(handle) = state.registry.open_palace(&state.data_root, &p.id) {
-            total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
-            total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
-            total_kg_triples = total_kg_triples.saturating_add(handle.kg.count_active_triples());
-        }
-    }
+    let palaces = list_palaces_blocking(state).await.unwrap_or_default();
+    // #4637: peek() not open_palace() — full-registry open is O(n) cold disk I/O
+    let stats = collect_palace_stats(state, palaces.iter().map(|p| &p.id));
     json!({
         "version": state.version,
         "palace_count": palaces.len(),
         "default_palace": state.default_palace,
         "data_root": state.data_root.display().to_string(),
-        "total_drawers": total_drawers,
-        "total_vectors": total_vectors,
-        "total_kg_triples": total_kg_triples,
+        "total_drawers": stats.total_drawers,
+        "total_vectors": stats.total_vectors,
+        "total_kg_triples": stats.total_kg_triples,
+        "cached_palace_count": stats.cached_palace_count,
     })
 }
 

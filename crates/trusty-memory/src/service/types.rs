@@ -41,6 +41,18 @@ pub struct PalaceInfo {
     pub community_count: u64,
     #[serde(default)]
     pub is_compacting: bool,
+    /// Whether the palace's handle was resident in the registry's open-handle
+    /// cache when this row was built (issue #4637).
+    ///
+    /// The full-registry list route no longer force-opens every palace — at
+    /// 5,794 palaces that was ~90 minutes of cold disk I/O per request. When
+    /// this is `false`, `drawer_count` / `vector_count` / `kg_triple_count` /
+    /// `wing_count` / `node_count` / `edge_count` / `community_count` are `0`
+    /// because they are **unknown**, not because they are empty; fetch
+    /// `GET /api/v1/palaces/{id}` for live counts on a specific palace.
+    /// `#[serde(default)]` keeps the field omissible for older clients.
+    #[serde(default)]
+    pub cached: bool,
 }
 
 /// Dream statistics wire shape used by both per-palace and aggregate endpoints.
@@ -198,15 +210,30 @@ pub struct KgGraphPayload {
 }
 
 /// Status payload returned by `GET /api/v1/status`.
+///
+/// Issue #4637 changed the meaning of the three `total_*` fields: they are now
+/// summed over the palaces resident in the registry's open-handle cache, not
+/// over every palace on disk, because summing over disk meant force-opening
+/// ~5,730 cold palaces per request. `palace_count` still reports the true
+/// on-disk total; `cached_palace_count` reports how many of those the totals
+/// actually cover.
 #[derive(Serialize, Clone, Debug)]
 pub struct StatusPayload {
     pub version: String,
+    /// Every palace on disk.
     pub palace_count: usize,
     pub default_palace: Option<String>,
     pub data_root: String,
+    /// Summed over cache-resident palaces only — see the type docs (#4637).
     pub total_drawers: usize,
+    /// Summed over cache-resident palaces only — see the type docs (#4637).
     pub total_vectors: usize,
+    /// Summed over cache-resident palaces only — see the type docs (#4637).
     pub total_kg_triples: usize,
+    /// How many of `palace_count` palaces the three totals above cover
+    /// (issue #4637). `#[serde(default)]` keeps it omissible for older clients.
+    #[serde(default)]
+    pub cached_palace_count: usize,
 }
 
 /// Service-level error type that maps cleanly onto HTTP status codes.
