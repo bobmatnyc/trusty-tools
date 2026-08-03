@@ -6,6 +6,115 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.3] — 2026-08-03
+
+### Added
+
+- `tm doctor` check `legacy_overrides`: FAILS when a project still carries any
+  retired override file, naming every file found and the migration. The prompt
+  resolver logs the same signal on every session launch, so a leftover file can
+  never drop a project's rules silently (#4286).
+- `crates/trusty-mpm/src/assets/instructions/sections/README.md` documenting how
+  framework instructions compose, the customization tiers, why there is no
+  floor, and what must not be reintroduced (#4286).
+
+### Fixed
+
+- The seeded `CLAUDE.md` stub could declare a live override. A worked marker
+  example in the stub was parsed as a real `WORKFLOW` block — marker recognition
+  is whole-line and knows nothing about code fences — so every newly seeded
+  project silently lost its entire bundled workflow section and received the
+  placeholder prose instead. Found by running a real `tm` instance during
+  acceptance; guarded by `seeded_claude_md_declares_no_overrides` (#4286).
+- Swept shipped asset text that still advertised the five retired
+  `.trusty-mpm/` per-file PM instruction overrides (#4286): the `tm-workflow`
+  skill described them as the live customization mechanism and told the PM to
+  write to them; three output styles (`trusty-mpm`, `trusty-mpm-research`,
+  `trusty-mpm-teacher`) described the compiled prompt as four monolithic files
+  (`PM_INSTRUCTIONS.md` + `WORKFLOW.md` + `AGENT_DELEGATION.md` +
+  `BASE_PM.md`) that haven't existed since #4183; `tm-delegation-patterns`,
+  `tm-circuit-breaker`, and `tm-pr-workflow` pointed at `AGENT_DELEGATION.md`
+  / `.trusty-mpm/INSTRUCTIONS.md` as if still reachable. All now describe the
+  current model: framework instructions compose from
+  `assets/instructions/sections/*.md`, and the sole project-customization
+  channel is a named-section marker in the project's root `CLAUDE.md` — `core`
+  is the only section such a marker cannot replace.
+- `assets/instructions/sections/workflow.md` pointed the project test-ladder
+  lookup at the retired `.trusty-mpm/INSTRUCTIONS.md`; it now points at
+  `CLAUDE.md`. This is a compiled-prompt change, so the `pm-prompt-bundled-
+  fallback.md` and `pm-prompt-roster-absent.md` golden fixtures were
+  regenerated (`UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`) to match.
+- Verified no scaffolding path (`tm-init`, `tm project init`) creates any of
+  the five retired override files — the only writers found were the
+  `legacy_overrides` doctor check's own fixtures.
+
+### Changed
+
+- `ticketing` agent's default model tier is now `sonnet`, up from `haiku`.
+  Duplicate-detection and scope-boundary judgement (is this issue already
+  filed, is this work in scope for a milestone) are judgement calls, not
+  clerical ones — observed 2026-08-03: a haiku-tier ticketing agent filed a
+  duplicate issue after being told not to, and cleared milestones on a shipped
+  release when asked only to report them.
+- `core` is now the ONLY section a named-section override cannot replace.
+  `identity`, `enforcement`, `non-overridable-rules` and
+  `framework-guaranteed-conventions` become tier `project` and are overridable
+  like every other section; no content moved between sections. `validate`
+  enforces the tier assignment as an iff, so both retiering `core` away from
+  `fixed` and marking a second section `fixed` are hard errors (#4286).
+- The seeded project `CLAUDE.md` stub now documents the marker grammar, lists
+  the accepted tokens, and points at `.trusty-mpm/last-instructions.md` as the
+  record of what the session actually received. It no longer refers to
+  `BASE_PM.md`, which has not existed since #4183 (#4286).
+- Credential resolution now imports from `trusty_common::credentials` instead of
+  `trusty_common::inference::credentials`, which was deprecated in the same
+  change (see [#4564](https://github.com/bobmatnyc/trusty-tools/issues/4564)).
+  Import-path churn only — no behaviour, precedence, or credential surface
+  changes in this crate.
+- The bundled `tm-ticketing` skill now carries a Ticket-Promotion Gate: a finding is not automatically a ticket. Filing requires a duplicate search first (by test name, error text, affected symbol, and package) and then at least one of five promotion criteria — a reproduced user-visible defect, accepted feature work, a different owner/release/dependency/security disposition, work that cannot fit the current PR without changing its outcome or risk, or an explicit user request to track it. Everything else stays a session task, a PR review comment, or a parent-issue checklist item, and "follow-up" is named as a category that does NOT bypass the gate. Four overlapping recommendations are merged into one five-step protocol rather than stacked as near-duplicates: the gate also fixes issue granularity to outcomes instead of findings (one canonical issue per recurring flaky test, occurrences appended; never a separate issue for the tests, docs, changelog, or review cleanup of one outcome) and supplies a six-field issue schema. It cross-references the already-shipped Opportunistic Fixes rule instead of restating it — an easy fix found while working a file never enters the gate at all (#4630).
+- Findings filed as issues now state a confidence level — Observed, Reproduced, Inferred, or Speculative — with a default disposition for each. Inferred and Speculative belong on the parent issue or PR unless severity justifies escalation. The skill says explicitly that nothing reads this label mechanically: it is a drafting rule whose only check is whether a reader of the filed issue can tell which state was claimed (#4630).
+- The bundled `tm-pr-workflow` skill now states the one-outcome-one-PR invariant, which the skill previously lacked entirely. A PR carries one primary outcome plus everything needed to ship it safely — implementation, regression tests, refactoring, docs, the changelog fragment, and in-scope review fixes — and those are never split across PRs merely because different agents produced them. One PR may close several tickets when one coherent change satisfies them, which is preferred over coupled PRs with an artificial merge order. A seven-field minimal PR body accompanies it (#4630).
+- `tm-pr-workflow` gains a six-step baseline-failure protocol for a red gate the branch did not cause: establish causation against the base branch, fix branch-caused red in the PR, append run/SHA/command/failure-signature to the canonical issue when the failure is already tracked, and open exactly one canonical issue when it is not — after reproduction or sufficient CI evidence, never from a single unrelated red run. Step 6 mandates a literal report string, `change-specific gates pass; <gate name> blocked by canonical issue #N`, so the rule is checkable; "all tests pass" is never reportable while a gate is red. Step 1 cross-references the shipped "never turn red green by deleting coverage" line rather than duplicating it (#4630).
+- The `tm-pr-workflow` delivery chain now reads `accepted outcome -> optional issue -> worktree branch -> one cohesive PR -> applicable gates -> trusty-review gate -> squash-merge -> worktree cleanup`. The issue step is optional for docs/CI/chore work and a small explicitly-requested fix that completes in one PR, and required for features, reproduced defects, security work, cross-release dependencies, and work that must survive the current session (#4630).
+- `rust-engineer` agent now scopes its Quality Bar to the crate under change
+  (`cargo test -p <crate>`, not a bare unscoped `cargo test`), matching the
+  crate-scoped-gate guidance the PM already ships in `core.md`. A crate-scoped
+  run finishes well under the 10-minute tool timeout; a workspace run does not.
+  - Adds a change-class table for widening scope deliberately, and an explicit
+    "scope is for speed, never for hiding a failure" rule: narrowing the scope
+    you *run* is fine, shrinking the coverage that *exists* — `#[ignore]`,
+    `cfg`-gating, `--exclude`, dropping to `--lib` — is never allowed.
+- The bundled `code-review-standards` skill now gives every review finding a three-way disposition, extending the shipped "fix it in the surfacing PR or drop it" rule with the third exit it left implicit. A finding ends as `Fix here` (corrected in the surfacing PR — the default for correctness, security, acceptance criteria, and regression coverage), `Parent` (kept with the work in flight as a PR comment or parent-issue checklist item, creating no durable artifact), or `Promote` (recommended for a standalone issue). `Promote` is a recommendation only: the reviewer never files, the Ticket-Promotion Gate in `tm-ticketing` decides, and the PM or user makes the prioritization call. An APPROVE verdict no longer implies tickets for its non-blocking MEDIUM/LOW observations (#4633).
+- The critic verdict template carries the disposition explicitly, so the rule is checkable rather than decorative: the Findings table gains a Disposition column, every row must carry exactly one token, and a blank or missing cell is named an incomplete review — a reader of the posted verdict can tell per finding which of the three was chosen. A zero-finding APPROVE has no rows and so no dispositions to state (#4633).
+- `tm-ticketing` gains the reciprocal pointer: a review or QA finding reaches the Ticket-Promotion Gate by exactly one route, the `Promote` disposition, and `Fix here` / `Parent` findings never reach it. The gate's five criteria stay stated once, in `tm-ticketing` (#4633).
+- Risk is now the second input to phase entry in the PM instruction package. Three labels — Low (docs, comments, mechanical metadata), Normal (a localized behaviour change inside one package), and High (security, destructive or irreversible paths, persisted state, release/SemVer, or a contract another package depends on) — fold into the EXISTING skip conditions rather than forming a competing gate matrix. Where a skip condition is a size or simplicity heuristic, High risk means it does not hold: a 30-line change to a credential path is small and still earns its review. Phase 2's skip condition gains "not High risk" in both the canonical CORE phase table and its WORKFLOW restatement, so the two cannot drift. The labels carry no testing standard — the project's test ladder answers how much testing a change needs (#4633).
+
+### Removed
+
+- The bundled `crates/trusty-mpm/src/assets/instructions/INSTRUCTIONS.md`
+  stub and the `FRAMEWORK_INSTRUCTIONS` constant/bundle-table entry that
+  embedded it. This is the framework-owned launch-artifact stub, distinct
+  from (and unrelated to) the project-level `.trusty-mpm/INSTRUCTIONS.md`
+  override file retired by #4665. Its content never reached a live session:
+  `tm install`/`tm launch` always overwrite the same on-disk path
+  (`instructions/INSTRUCTIONS.md`) with the fully assembled system prompt in
+  the same call, and the one legacy reader that treats it as optional
+  (`build_instructions`) already discards its result for anything but a
+  side-effect (#4286 split A).
+- The five `.trusty-mpm/` PM instruction override files
+  (`PM_INSTRUCTIONS_DEPLOYED.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`,
+  `MEMORY.md`, `INSTRUCTIONS.md`) are retired and no longer read. Project
+  customization is named sections in the project's root `CLAUDE.md`.
+  `.trusty-mpm/INSTRUCTIONS.md` also stops being a marker host; `CLAUDE.md` is
+  the only one (#4286).
+- The non-overridable framework floor, in full: `SectionId::is_floor()`, the
+  `FloorNotFixed` and `OverridableAfterFloor` validation rules,
+  `validate_floor_is_last`, `scripts/check_instruction_floor.sh`,
+  `scripts/instruction_floor.sha256`, and
+  `.github/workflows/instruction-floor-guard.yml` (plus its duplicated step in
+  `ci.yml`). A project owns its own `CLAUDE.md`, so the floor was the appearance
+  of a control rather than a control (#4286).
+
 ## [1.3.2] — 2026-08-03
 
 ### Added
