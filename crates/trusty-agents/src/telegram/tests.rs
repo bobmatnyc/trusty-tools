@@ -639,7 +639,13 @@ fn paired_slash_command_records_a_human_turn() {
     let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 8, 3, 12, 0, 0).unwrap();
 
     assert!(
-        crate::attendance::note_command_turn_in(Some(&root), "izzie", true, now),
+        crate::attendance::note_command_turn_in(
+            Some(&root),
+            "izzie",
+            crate::attendance::TurnOrigin::Human,
+            true,
+            now
+        ),
         "a paired chat's slash command is a human turn"
     );
 
@@ -663,6 +669,7 @@ fn unpaired_slash_command_records_nothing() {
     assert!(!crate::attendance::note_command_turn_in(
         Some(&root),
         "izzie",
+        crate::attendance::TurnOrigin::Human,
         false,
         now
     ));

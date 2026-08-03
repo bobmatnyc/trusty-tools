@@ -63,8 +63,8 @@ mod tracker;
 mod tests;
 
 pub use tracker::{
-    AttendanceTracker, attendance_root, default_attendance_root, note_command_turn_in,
-    note_human_turn, note_human_turn_in,
+    AttendanceTracker, attendance_root, default_attendance_root, note_command_turn_in, note_turn,
+    note_turn_in,
 };
 
 /// How long after the last human turn an instance counts as unattended.
@@ -103,11 +103,19 @@ pub const UNATTENDED_AFTER_ENV: &str = "TAGENT_UNATTENDED_AFTER_MINS";
 /// What: two variants, and deliberately only two. Anything that is not a human
 /// putting words in front of this assistant is [`Self::Assistant`]: the
 /// assistant's own replies, its tool calls and their results, hook fires,
-/// scheduled wakes, and event-listener-triggered turns. Passing
-/// [`Self::Assistant`] is always SAFE — it is a documented no-op, not an
-/// error — so a call site that is unsure has a correct default.
+/// scheduled wakes, event-listener-triggered turns, and program-issued
+/// commands. Passing [`Self::Assistant`] is always SAFE — it is a documented
+/// no-op, not an error — so a call site that is unsure has a correct default.
+///
+/// #4685 pushed this argument OUT to every recording helper
+/// ([`note_turn`], [`note_turn_in`], [`note_command_turn_in`]), which had each
+/// hardcoded [`Self::Human`] internally. That made the "automation cannot forge
+/// presence" property depend on which wrapper a caller happened to reach for
+/// rather than on the type system; now no human turn can be recorded without
+/// some call site naming [`Self::Human`] in its own source.
 /// Test: `assistant_turns_never_advance_the_clock`,
-/// `assistant_only_activity_leaves_no_record_at_all`.
+/// `assistant_only_activity_leaves_no_record_at_all`,
+/// `an_assistant_origin_caller_records_nothing`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TurnOrigin {
     /// A person addressed this assistant: a chat message they typed, a

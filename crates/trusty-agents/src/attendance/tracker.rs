@@ -240,51 +240,66 @@ impl AttendanceTracker {
     }
 }
 
-/// Record that a human just addressed `instance`, best-effort (#4652).
+/// Record a turn of CALLER-DECLARED origin against `instance`, best-effort
+/// (#4652, origin made caller-declared in #4685).
 ///
-/// Why: the four surfaces a person can actually talk to an assistant through
-/// (`POST /api/task`, the REPL, Telegram, Slack) each hold a persona NAME and a
-/// message they know came from a human — and nothing else. Handing them one
-/// infallible call, rather than a tracker to build and a `Result` to handle,
-/// is what makes the hook a single line at each site and keeps the
-/// human-vs-assistant judgement where the evidence is. It is also why this
-/// function exists at all instead of the handlers calling
-/// [`AttendanceTracker::record_turn`]: an assistant-side caller has no
-/// `TurnOrigin` argument here to get wrong.
-/// What: validates the name, resolves [`default_attendance_root`], and records
-/// a [`TurnOrigin::Human`] turn at `now`. Returns whether the clock advanced.
-/// Every failure — an unusable name, no home directory, an I/O error — is
-/// logged at debug and swallowed: attendance is a hint for #4653, never a
-/// reason to fail a turn the user is waiting on. A swallowed failure biases the
-/// instance toward looking LESS attended, i.e. toward B2 staying quiet.
-/// Test: `note_human_turn_records_a_turn_and_is_infallible`,
-/// `note_human_turn_swallows_an_unusable_instance_name`.
-pub fn note_human_turn_in(root: impl Into<PathBuf>, instance: &str, now: DateTime<Utc>) -> bool {
-    match record_human(root, instance, now) {
+/// Why: the surfaces a turn can arrive through each hold a persona NAME and a
+/// line of input — and each one, and ONLY each one, knows who produced that
+/// line. Handing them one infallible call, rather than a tracker to build and a
+/// `Result` to handle, is what makes the hook a single line at each site.
+///
+/// `origin` is a required argument rather than a value this function supplies
+/// because the earlier shape — a `note_human_turn_in` that hardcoded
+/// [`TurnOrigin::Human`] internally — made "automation cannot forge presence" a
+/// property of WHICH WRAPPER a caller happened to reach for. That is not a
+/// property at all: a future automated caller picking the convenient function
+/// forges presence silently and nothing in the type system objects. With the
+/// origin on the signature, the compiler makes every new call site name a
+/// variant, and an automated one that names [`TurnOrigin::Assistant`] records
+/// nothing. The REPL proved this is not hypothetical — `run_plain_cli` issues
+/// its own `/switch assistant` at startup (#4685).
+/// What: for [`TurnOrigin::Human`], validates the name, and records at `now`,
+/// returning whether the clock advanced. For [`TurnOrigin::Assistant`] it
+/// touches nothing and returns `false`. Every failure — an unusable name, an
+/// I/O error — is logged at debug and swallowed: attendance is a hint for
+/// #4653, never a reason to fail a turn the user is waiting on. A swallowed
+/// failure biases the instance toward looking LESS attended, i.e. toward B2
+/// staying quiet.
+/// Test: `note_turn_records_a_turn_and_is_infallible`,
+/// `note_turn_swallows_an_unusable_instance_name`,
+/// `an_assistant_origin_caller_records_nothing`.
+pub fn note_turn_in(
+    root: impl Into<PathBuf>,
+    instance: &str,
+    origin: TurnOrigin,
+    now: DateTime<Utc>,
+) -> bool {
+    match record_turn_at(root, instance, origin, now) {
         Ok(advanced) => advanced,
         Err(error) => {
-            tracing::debug!(instance, %error, "could not record human turn for attendance");
+            tracing::debug!(instance, %error, "could not record turn for attendance");
             false
         }
     }
 }
 
-/// [`note_human_turn_in`] over [`default_attendance_root`] and the system
-/// clock — the form the four human-facing call sites use.
+/// [`note_turn_in`] over [`default_attendance_root`] and the system clock —
+/// the form the live call sites use.
 ///
 /// The root and `now` are injectable one layer down (rather than sandboxed via
 /// `$HOME`) for the reason `test_env` states outright: injection is the durable
-/// fix, `HOME_LOCK` is the legacy one. So every test drives
-/// [`note_human_turn_in`] against a temp directory and this wrapper stays a
-/// two-line delegation with nothing of its own to get wrong.
-/// Test: covered through `note_human_turn_in`; the root resolution it adds is
+/// fix, `HOME_LOCK` is the legacy one. So every test drives [`note_turn_in`]
+/// against a temp directory and this wrapper stays a two-line delegation with
+/// nothing of its own to get wrong. `origin` is threaded through rather than
+/// assumed here for the reason [`note_turn_in`] documents.
+/// Test: covered through [`note_turn_in`]; the root resolution it adds is
 /// pinned by `default_root_is_under_the_app_state_tree`.
-pub fn note_human_turn(instance: &str) -> bool {
+pub fn note_turn(instance: &str, origin: TurnOrigin) -> bool {
     let Ok(root) = default_attendance_root() else {
-        tracing::debug!(instance, "no home directory; not recording human turn");
+        tracing::debug!(instance, "no home directory; not recording turn");
         return false;
     };
-    note_human_turn_in(root, instance, Utc::now())
+    note_turn_in(root, instance, origin, Utc::now())
 }
 
 /// Record an inbound SLASH COMMAND as a human turn, but only from an
@@ -299,35 +314,43 @@ pub fn note_human_turn(instance: &str) -> bool {
 /// route through this ONE helper rather than each re-deriving the gate, because
 /// the previous shape of this bug was two sibling dispatch functions drifting
 /// apart.
-/// What: records a [`TurnOrigin::Human`] turn for `instance` at `now` when
-/// `sender_is_paired`, and does nothing otherwise. The `authenticated` gate is
-/// not decoration: `/start` and `/pair` are reachable by ANY sender, so
-/// recording unconditionally would let an unpaired stranger manufacture
-/// attendance for someone else's assistant and mute their notifications. A
-/// `None` root (no home directory) is likewise a no-op. Returns whether the
-/// clock advanced; infallible, like [`note_human_turn_in`].
+/// What: records a turn of the CALLER-DECLARED `origin` for `instance` at
+/// `now` when `sender_is_paired`, and does nothing otherwise. Both gates must
+/// hold, and neither substitutes for the other: `sender_is_paired` answers "is
+/// this sender entitled to assert presence" (`/start` and `/pair` are reachable
+/// by ANY sender, so recording unconditionally would let an unpaired stranger
+/// manufacture attendance for someone else's assistant and mute their
+/// notifications), while `origin` answers "was this a person at all" — the
+/// question no transport-level check can answer, and the one #4685 made the
+/// caller state. A `None` root (no home directory) is likewise a no-op. Returns
+/// whether the clock advanced; infallible, like [`note_turn_in`].
 /// Test: `a_command_only_session_stays_attended`,
 /// `paired_slash_command_records_a_human_turn`,
-/// `unpaired_slash_command_records_nothing`.
+/// `unpaired_slash_command_records_nothing`,
+/// `an_assistant_origin_caller_records_nothing`.
 pub fn note_command_turn_in(
     root: Option<&Path>,
     instance: &str,
+    origin: TurnOrigin,
     sender_is_paired: bool,
     now: DateTime<Utc>,
 ) -> bool {
     match (root, sender_is_paired) {
-        (Some(root), true) => note_human_turn_in(root, instance, now),
+        (Some(root), true) => note_turn_in(root, instance, origin, now),
         _ => false,
     }
 }
 
-/// The fallible body of [`note_human_turn_in`], split out so the error can be
-/// logged in one place.
-fn record_human(root: impl Into<PathBuf>, instance: &str, now: DateTime<Utc>) -> Result<bool> {
+/// The fallible body of [`note_turn_in`], split out so the error can be logged
+/// in one place. The origin is forwarded verbatim to
+/// [`AttendanceTracker::record_turn`], which is where a non-human origin
+/// becomes a no-op.
+fn record_turn_at(
+    root: impl Into<PathBuf>,
+    instance: &str,
+    origin: TurnOrigin,
+    now: DateTime<Utc>,
+) -> Result<bool> {
     let id = AssistantInstanceId::new(instance)?;
-    AttendanceTracker::new(root, AttendanceConfig::default()).record_turn(
-        &id,
-        TurnOrigin::Human,
-        now,
-    )
+    AttendanceTracker::new(root, AttendanceConfig::default()).record_turn(&id, origin, now)
 }

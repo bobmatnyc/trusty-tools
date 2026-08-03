@@ -148,6 +148,16 @@ pub struct TrustyAgentsRepl {
     /// forwarded over HTTP via `crate::service::submit_task_via_service`
     /// instead of running in-process. Set via `set_service_client_mode`.
     pub(crate) service_url: Option<String>,
+    /// Where `try_handle_slash` records attendance (#4685).
+    ///
+    /// Why: injected rather than resolved at the call site so a test can drive
+    /// the REAL dispatcher against a temp directory. That matters more here
+    /// than elsewhere because the defect #4685 fixes was precisely a
+    /// dispatcher nobody had wired — a test of the helper alone would have
+    /// passed throughout the bug. `None` (no home directory) disables
+    /// recording, exactly as every other attendance call site treats it.
+    /// Test: `repl_slash_command_records_a_human_turn`.
+    pub(crate) attendance_root: Option<PathBuf>,
 }
 
 impl TrustyAgentsRepl {
@@ -241,6 +251,7 @@ impl TrustyAgentsRepl {
             tm_manager,
             tm_monitor,
             service_url: None,
+            attendance_root: crate::attendance::default_attendance_root().ok(),
         })
     }
 

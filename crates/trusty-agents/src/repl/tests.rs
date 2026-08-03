@@ -1,5 +1,11 @@
 //! REPL unit tests, split from `mod.rs` (#357). `super` resolves to the
 //! `repl` module, so the original `use super::*` imports are unchanged.
+//!
+//! #4685: every `try_handle_slash` call below that is not ABOUT attendance
+//! passes `TurnOrigin::Assistant`, because a test harness is an automated
+//! caller — that is the honest tag, and it is also what keeps these tests from
+//! writing attendance records into the developer's real `~/.trusty-agents`.
+//! The two tests that do exercise attendance inject a temp root first.
 
 #![cfg(test)]
 
@@ -28,14 +34,20 @@ fn default_history_path_under_trusty_agents() {
 #[tokio::test]
 async fn try_handle_slash_returns_none_for_non_slash() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("hello world").await;
+    let r = repl
+        .try_handle_slash("hello world", crate::attendance::TurnOrigin::Assistant)
+        .await;
     assert!(r.is_none());
 }
 
 #[tokio::test]
 async fn try_handle_slash_help_returns_continue() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("/help").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/help", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(r.0, "/help should keep REPL running");
     assert!(
         r.1.contains("slash commands"),
@@ -47,7 +59,11 @@ async fn try_handle_slash_help_returns_continue() {
 #[tokio::test]
 async fn try_handle_slash_exit_returns_break() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("/exit").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/exit", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!r.0, "/exit should signal REPL break");
     assert!(r.1.contains("Bye"));
 }
@@ -64,7 +80,11 @@ async fn try_handle_slash_exit_returns_break() {
 #[tokio::test]
 async fn try_handle_slash_disconnect_is_recognized_alias() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("/disconnect").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/disconnect", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!r.0, "/disconnect should signal REPL break");
     assert!(
         !r.1.contains("unknown command"),
@@ -85,7 +105,11 @@ async fn try_handle_slash_disconnect_is_recognized_alias() {
 async fn try_handle_slash_exit_in_client_mode_shows_disconnect_message() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
     repl.set_service_client_mode("http://localhost:7654");
-    let r = repl.try_handle_slash("/exit").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/exit", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!r.0, "/exit should still signal REPL break in client mode");
     assert!(
         r.1.contains("Server still running"),
@@ -99,7 +123,11 @@ async fn try_handle_slash_exit_in_client_mode_shows_disconnect_message() {
 #[tokio::test]
 async fn try_handle_slash_unknown_captures_into_buffer() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("/nope").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/nope", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(r.0);
     assert!(
         r.1.contains("unknown command"),
@@ -119,7 +147,7 @@ async fn try_handle_slash_switch_ctrl_clears_persona() {
     repl.active_persona = Some("izzie".to_string());
     repl.project_name = "Izzie".to_string();
     let r = repl
-        .try_handle_slash("/switch ctrl")
+        .try_handle_slash("/switch ctrl", crate::attendance::TurnOrigin::Assistant)
         .await
         .unwrap()
         .unwrap();
@@ -140,7 +168,11 @@ async fn try_handle_slash_switch_ctrl_clears_persona() {
 #[tokio::test]
 async fn try_handle_slash_switch_accepts_aliases() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("/switch CTO").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/switch CTO", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(r.0);
     assert!(
         !r.1.contains("Unknown persona"),
@@ -159,7 +191,11 @@ async fn try_handle_slash_switch_accepts_aliases() {
 #[tokio::test]
 async fn try_handle_slash_switch_empty_lists_choices() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
-    let r = repl.try_handle_slash("/switch").await.unwrap().unwrap();
+    let r = repl
+        .try_handle_slash("/switch", crate::attendance::TurnOrigin::Assistant)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(r.0);
     assert!(r.1.contains("Assistant"));
     assert!(r.1.contains("Izzie"));
@@ -173,7 +209,7 @@ async fn try_handle_slash_switch_empty_lists_choices() {
 async fn try_handle_slash_switch_unknown_alias_errors() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
     let r = repl
-        .try_handle_slash("/switch bogus")
+        .try_handle_slash("/switch bogus", crate::attendance::TurnOrigin::Assistant)
         .await
         .unwrap()
         .unwrap();
@@ -573,4 +609,147 @@ fn resolve_active_model_falls_back_to_haiku_when_no_toml() {
         return;
     }
     assert_eq!(repl.resolve_active_model(), "anthropic/claude-haiku-4-5");
+}
+
+// ---------------------------------------------------------------------------
+// #4685: REPL slash-command attendance. `try_handle_slash` is a SEPARATE
+// dispatch table from `repl::dispatch::attempt_forward` (the only REPL site
+// #4652 hooked), so every recognized slash command returned here and recorded
+// nothing — an owner typing `/status` every few minutes read as absent. These
+// drive the real dispatcher against an injected temp root.
+// ---------------------------------------------------------------------------
+
+/// A REPL whose attendance records land in a temp dir instead of `$HOME`.
+fn repl_with_attendance_root() -> (tempfile::TempDir, TrustyAgentsRepl, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = crate::attendance::attendance_root(dir.path());
+    let mut repl = TrustyAgentsRepl::new(None).expect("repl");
+    repl.attendance_root = Some(root.clone());
+    (dir, repl, root)
+}
+
+/// The last human turn recorded for `persona` under `root`.
+fn recorded_turn(root: &std::path::Path, persona: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let tracker = crate::attendance::AttendanceTracker::new(
+        root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new(persona).expect("valid id");
+    tracker.last_human_turn(&id).expect("read")
+}
+
+/// #4685: a person typing a REPL slash command is attending. `/help` is used
+/// because it touches no socket, no network and no disk — the assertion is
+/// about the hook, not the command.
+#[tokio::test]
+async fn repl_slash_command_records_a_human_turn() {
+    let (_dir, mut repl, root) = repl_with_attendance_root();
+    let before = chrono::Utc::now();
+
+    repl.try_handle_slash("/help", crate::attendance::TurnOrigin::Human)
+        .await
+        .expect("`/help` is a slash command")
+        .expect("`/help` succeeds");
+
+    let recorded = recorded_turn(&root, "ctrl")
+        .expect("a human typing `/help` must advance the last-human-turn clock");
+    assert!(
+        recorded >= before,
+        "recorded turn {recorded} predates the command at {before}"
+    );
+
+    // And the whole point: the instance now reads attended rather than the
+    // never-attended state a command-only REPL session used to be stuck in.
+    let tracker = crate::attendance::AttendanceTracker::new(
+        &root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new("ctrl").expect("valid id");
+    assert!(
+        !tracker
+            .is_unattended(&id, recorded + chrono::Duration::minutes(1))
+            .expect("query"),
+    );
+}
+
+/// #4685: the REPL has no pairing or RBAC gate, so `TurnOrigin` IS its gate —
+/// and it is load-bearing, not ceremonial. `plain_cli::run_plain_cli` issues
+/// its own `/switch assistant` at startup and `predispatch` serves `tagent
+/// /status` from argv; if the hook ignored origin, every launch and every
+/// scripted poll would forge presence for an absent owner.
+///
+/// The contrast at the end is what makes this test fail against an unhooked
+/// dispatcher rather than passing vacuously.
+#[tokio::test]
+async fn an_automated_repl_slash_caller_records_nothing() {
+    let (_dir, mut repl, root) = repl_with_attendance_root();
+
+    // The commands the two automated callers actually issue: the startup
+    // bootstrap's `/switch`, and an argv-driven status poll.
+    for line in ["/switch", "/help", "/session"] {
+        let _ = repl
+            .try_handle_slash(line, crate::attendance::TurnOrigin::Assistant)
+            .await
+            .expect("slash command");
+    }
+    assert_eq!(
+        recorded_turn(&root, "ctrl"),
+        None,
+        "automation forged attendance through the REPL dispatcher"
+    );
+
+    // Same dispatcher, same command, human origin — this one records. Without
+    // it, the assertion above would also hold for a dispatcher with no hook.
+    let _ = repl
+        .try_handle_slash("/help", crate::attendance::TurnOrigin::Human)
+        .await
+        .expect("slash command");
+    assert!(
+        recorded_turn(&root, "ctrl").is_some(),
+        "the human-origin path must record, or the assertion above proves nothing"
+    );
+}
+
+/// #4685 HIGH regression: `/run <file>` reaches a SECOND recording call —
+/// `attempt_forward` — that the dispatcher's own hook does not cover. Before
+/// this fix `attempt_forward` asserted `TurnOrigin::Human` unconditionally, so
+/// an argv invocation (`tagent /run task.txt`, which `predispatch` dispatches
+/// with `TurnOrigin::Assistant`) forged a human turn on every fire — a cron job
+/// would have masked the owner's absence forever.
+///
+/// The dispatch is short-circuited offline by pointing thin-client mode at a
+/// dead port: `attempt_forward` records BEFORE that branch, so the assertion is
+/// about the hook and not about reaching an LLM.
+///
+/// Note the dispatcher's own hook cannot mask this: it honours `origin` too, so
+/// with `Assistant` neither call may write. A human-origin contrast would be
+/// satisfied by the dispatcher hook alone and is covered separately by
+/// `repl_slash_command_records_a_human_turn`.
+#[tokio::test]
+async fn argv_run_command_with_assistant_origin_records_nothing() {
+    let (dir, mut repl, root) = repl_with_attendance_root();
+    repl.set_service_client_mode("http://127.0.0.1:1");
+
+    let task = dir.path().join("task.txt");
+    std::fs::write(&task, "ship it").expect("write task file");
+
+    let out = repl
+        .try_handle_slash(
+            &format!("/run {}", task.display()),
+            crate::attendance::TurnOrigin::Assistant,
+        )
+        .await
+        .expect("`/run` is a slash command")
+        .expect("`/run` reports dispatch failure rather than erroring");
+    assert!(
+        out.1.contains("Running task from"),
+        "the `/run` arm must actually have executed: {:?}",
+        out.1
+    );
+
+    assert_eq!(
+        recorded_turn(&root, "ctrl"),
+        None,
+        "an argv-driven `/run` forged a human turn through attempt_forward"
+    );
 }

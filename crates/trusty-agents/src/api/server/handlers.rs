@@ -325,7 +325,10 @@ pub(super) async fn submit_task(
     // assistant's own tool calls. Record it as attendance for the instance the
     // human addressed (no roster selection = the `ctrl` concierge).
     // Infallible: a failure is logged and swallowed, never surfaced here.
-    crate::attendance::note_human_turn(agent_override(&req).as_deref().unwrap_or("ctrl"));
+    crate::attendance::note_turn(
+        agent_override(&req).as_deref().unwrap_or("ctrl"),
+        crate::attendance::TurnOrigin::Human,
+    );
 
     // #192 Phase B: announce the new session immediately on the event bus so
     // SSE subscribers (Sidebar task list, ChatView session bootstrap) update

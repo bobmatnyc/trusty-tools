@@ -325,7 +325,14 @@ fn paired_slash_command_records_a_human_turn() {
     let (_dir, root, now) = attendance_fixture();
 
     assert!(
-        super::handlers::note_command_turn(Some(&root), "cto-assistant", true, true, now),
+        super::handlers::note_command_turn(
+            Some(&root),
+            "cto-assistant",
+            crate::attendance::TurnOrigin::Human,
+            true,
+            true,
+            now,
+        ),
         "a known user's slash command in a paired channel is a human turn"
     );
     assert_eq!(recorded_turn(&root, "cto-assistant"), Some(now));
@@ -338,6 +345,7 @@ fn unpaired_slash_command_records_nothing() {
     assert!(!super::handlers::note_command_turn(
         Some(&root),
         "cto-assistant",
+        crate::attendance::TurnOrigin::Human,
         false,
         true,
         now
@@ -359,6 +367,7 @@ fn unknown_rbac_user_cannot_manufacture_attendance() {
     assert!(!super::handlers::note_command_turn(
         Some(&root),
         "cto-assistant",
+        crate::attendance::TurnOrigin::Human,
         true,
         false,
         now

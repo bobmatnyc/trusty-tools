@@ -93,6 +93,8 @@ pub(super) async fn handle_command(
     crate::attendance::note_command_turn_in(
         crate::attendance::default_attendance_root().ok().as_deref(),
         persona_for_attendance.as_deref().unwrap_or("ctrl"),
+        // #4685: a Telegram update is by definition somebody's typing.
+        crate::attendance::TurnOrigin::Human,
         is_paired,
         chrono::Utc::now(),
     );
@@ -306,7 +308,8 @@ pub(super) fn note_turn_and_is_switch(
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     if let Some(root) = root {
-        crate::attendance::note_human_turn_in(root, persona, now);
+        // #4685: an inbound Telegram message is a person typing.
+        crate::attendance::note_turn_in(root, persona, crate::attendance::TurnOrigin::Human, now);
     }
     text.starts_with("/switch")
 }
