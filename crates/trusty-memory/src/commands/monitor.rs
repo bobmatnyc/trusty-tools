@@ -11,8 +11,8 @@
 //! Test: unit tests cover `fmt_count`; live behaviour is exercised by
 //! `cargo run -p trusty-memory -- monitor status` against a running daemon.
 
-use anyhow::{bail, Result};
-use trusty_common::monitor::dashboard::{MemoryData, PalaceRow};
+use anyhow::{Context, Result};
+use trusty_common::monitor::dashboard::{MemoryData, PalaceRow, UNKNOWN_COUNT};
 use trusty_common::monitor::memory_client::{resolve_memory_url, MemoryClient};
 
 /// Format a count with comma thousands separators (`8400` → `"8,400"`).
@@ -32,6 +32,22 @@ fn fmt_count(n: u64) -> String {
         out.push(c);
     }
     out.chars().rev().collect()
+}
+
+/// Format an optional count, printing `—` when the value is not known.
+///
+/// Why (issue #4682): `GET /api/v1/palaces` reports `0` for every count of a
+/// palace whose handle is not resident (`cached: false`). Those zeros mean
+/// *unknown*, not *empty*, and printing them as numbers made
+/// `monitor palaces <id>` claim `vectors: 0` for a palace the API said had 912.
+/// What: `Some(n)` formats as [`fmt_count`]; `None` yields the shared
+/// `UNKNOWN_COUNT` placeholder.
+/// Test: `fmt_opt_count_marks_unknown`.
+fn fmt_opt_count(n: Option<u64>) -> String {
+    match n {
+        Some(n) => fmt_count(n),
+        None => UNKNOWN_COUNT.to_string(),
+    }
 }
 
 /// Fetch the full trusty-memory dashboard payload or fail with a clear error.
@@ -89,19 +105,49 @@ pub async fn handle_status(json: bool) -> Result<()> {
 ///
 /// Why: operators want the same per-palace vector-count view the TUI shows,
 /// but reachable from a shell pipeline.
-/// What: with no `id`, prints an `ID / NAME / VECTORS` table (or a JSON array);
-/// with an `id`, prints that one palace's detail (or a JSON object), failing
-/// with a clear error when the id is not registered.
+/// What: with no `id`, prints an `ID / NAME / VECTORS` table (or a JSON array)
+/// from the bulk list; with an `id`, reads `GET /api/v1/palaces/{id}` — the
+/// route that actually opens the palace — and prints that one palace's detail
+/// (or a JSON object), failing with a clear error when the id is unknown.
 /// Test: `cargo run -p trusty-memory -- monitor palaces` against a live daemon.
+///
+/// # Spec References
+/// - issue #4682 — the single-id path used to filter the peek-based bulk list,
+///   so its counts depended on whether the palace happened to be LRU-resident.
 pub async fn handle_palaces(id: Option<String>, json: bool) -> Result<()> {
-    let data = fetch_memory_data().await?;
     match id {
-        Some(id) => print_palace_detail(&data.palaces, &id, json),
+        // #4682: one palace => ask the route that opens it, never the bulk list.
+        Some(id) => {
+            let row = fetch_palace(&id).await?;
+            print_palace_detail(&row, json);
+            Ok(())
+        }
         None => {
+            let data = fetch_memory_data().await?;
             print_palace_table(&data.palaces, json);
             Ok(())
         }
     }
+}
+
+/// Fetch one palace's live counts, or fail with a clear error.
+///
+/// Why (issue #4682): `fetch_memory_data` returns the peek-based bulk list,
+/// whose counts are placeholder zeros for any palace the daemon has not
+/// loaded. The single-palace route opens the palace, so it is the only source
+/// that answers "how big is this palace" deterministically.
+/// What: resolves the daemon URL, calls [`MemoryClient::fetch_palace`], and
+/// wraps transport / not-found failures with the daemon address so `main()`
+/// exits 1 with an actionable message.
+/// Test: covered live by `trusty-memory monitor palaces <id>`; the URL and the
+/// projection are unit-tested in `trusty-common`.
+async fn fetch_palace(id: &str) -> Result<PalaceRow> {
+    let url = resolve_memory_url();
+    let client = MemoryClient::new(url.clone());
+    client
+        .fetch_palace(id)
+        .await
+        .with_context(|| format!("could not read palace '{id}' from trusty-memory at {url}"))
 }
 
 /// Render every palace as a JSON array or an aligned plain-text table.
@@ -109,7 +155,9 @@ pub async fn handle_palaces(id: Option<String>, json: bool) -> Result<()> {
 /// Why: shared by `handle_palaces` for the list case; isolating it keeps the
 /// handler's branching readable.
 /// What: emits a JSON array of `{id, name, vectors}` objects when `json`,
-/// otherwise a header row plus one aligned row per palace.
+/// otherwise a header row plus one aligned row per palace. A palace the daemon
+/// has not loaded reports `null` / `—` rather than `0` (issue #4682) — the bulk
+/// list cannot know its counts.
 /// Test: side-effect-only (prints); the alignment is verified via the live
 /// command.
 fn print_palace_table(palaces: &[PalaceRow], json: bool) {
@@ -120,7 +168,8 @@ fn print_palace_table(palaces: &[PalaceRow], json: bool) {
                 serde_json::json!({
                     "id": p.id,
                     "name": p.name,
-                    "vectors": p.vector_count,
+                    // #4682: `null`, not `0`, when the count is unknown.
+                    "vectors": p.vectors(),
                 })
             })
             .collect();
@@ -151,37 +200,37 @@ fn print_palace_table(palaces: &[PalaceRow], json: bool) {
             "{:<id_w$}  {:<name_w$}  {}",
             p.id,
             p.name,
-            fmt_count(p.vector_count),
+            // #4682: `—` for a palace the daemon has not loaded.
+            fmt_opt_count(p.vectors()),
         );
     }
 }
 
 /// Render one palace's detail as a JSON object or plain-text lines.
 ///
-/// Why: shared by `handle_palaces` for the single-id case.
-/// What: looks up `id` in `palaces`; on a hit prints the detail, on a miss
-/// returns an `Err` listing the unknown id so `main()` exits 1.
-/// Test: side-effect-only (prints); the not-found path is covered by the live
-/// command behaviour.
-fn print_palace_detail(palaces: &[PalaceRow], id: &str, json: bool) -> Result<()> {
-    let Some(row) = palaces.iter().find(|p| p.id == id) else {
-        bail!("no palace named '{id}' is registered");
-    };
+/// Why: shared by `handle_palaces` for the single-id case. Takes the row the
+/// single-palace route returned rather than searching a list — resolving the
+/// id is [`fetch_palace`]'s job now (issue #4682), so a miss is a transport
+/// error, not a filter that silently found nothing.
+/// What: prints `id` / `name` / `vectors`, rendering an unknown count as
+/// `—` (text) or `null` (JSON) instead of `0`.
+/// Test: `print_palace_detail_renders_unknown_vectors`.
+fn print_palace_detail(row: &PalaceRow, json: bool) {
     if json {
         println!(
             "{}",
             serde_json::json!({
                 "id": row.id,
                 "name": row.name,
-                "vectors": row.vector_count,
+                // #4682: `null`, not `0`, when the daemon could not load it.
+                "vectors": row.vectors(),
             })
         );
     } else {
         println!("id:       {}", row.id);
         println!("name:     {}", row.name);
-        println!("vectors:  {}", fmt_count(row.vector_count));
+        println!("vectors:  {}", fmt_opt_count(row.vectors()));
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -196,19 +245,54 @@ mod tests {
         assert_eq!(fmt_count(1_234_567), "1,234,567");
     }
 
+    /// Why (issue #4682): a count the daemon never measured must not print as
+    /// a number. `fmt_count` cannot express "unknown", which is exactly how a
+    /// cold palace came to report `vectors: 0` while the API said `912`.
+    /// What: asserts `None` renders as the placeholder and `Some(0)` — a
+    /// genuinely empty palace — still renders as `0`, so the two stay
+    /// distinguishable.
+    /// Test: this test.
     #[test]
-    fn print_palace_detail_errors_on_unknown_id() {
-        // Why: PalaceRow gained `drawer_count`, `last_write_at`, and
-        // `description` fields after this test was written. Use struct-
-        // update syntax with `Default::default()` so future additions don't
-        // re-break the test.
-        let rows = vec![PalaceRow {
-            id: "default".into(),
-            name: "default".into(),
-            vector_count: 8_400,
+    fn fmt_opt_count_marks_unknown() {
+        assert_eq!(fmt_opt_count(None), UNKNOWN_COUNT);
+        assert_ne!(fmt_opt_count(None), "0");
+        assert_eq!(fmt_opt_count(Some(0)), "0");
+        assert_eq!(fmt_opt_count(Some(8_400)), "8,400");
+    }
+
+    /// Why (issue #4682): the owner's report — `monitor palaces <id>` printing
+    /// `vectors: 0` for a palace that has 912. This pins the row-level rule the
+    /// printer depends on: a row flagged `counts_unknown` yields `None`, never
+    /// a number, no matter what the placeholder field holds.
+    /// What: builds a cold row carrying a placeholder zero and a warm row with
+    /// a real count, and asserts the accessor separates them.
+    /// Test: this test.
+    #[test]
+    fn print_palace_detail_renders_unknown_vectors() {
+        // A cold row as the daemon reports it: `cached: false`, counts zeroed.
+        let cold = PalaceRow {
+            id: "t-tmpugxp9v".into(),
+            name: "t-tmpugxp9v".into(),
+            vector_count: 0,
+            counts_unknown: true,
             ..Default::default()
-        }];
-        assert!(print_palace_detail(&rows, "missing", false).is_err());
-        assert!(print_palace_detail(&rows, "default", true).is_ok());
+        };
+        assert_eq!(cold.vectors(), None);
+        assert_eq!(fmt_opt_count(cold.vectors()), UNKNOWN_COUNT);
+
+        // The same palace after the single-palace route opened it.
+        let warm = PalaceRow {
+            id: "t-tmpugxp9v".into(),
+            name: "t-tmpugxp9v".into(),
+            vector_count: 912,
+            ..Default::default()
+        };
+        assert_eq!(warm.vectors(), Some(912));
+        assert_eq!(fmt_opt_count(warm.vectors()), "912");
+
+        // Side-effect-only; exercised for panic-freedom on both shapes.
+        print_palace_detail(&cold, false);
+        print_palace_detail(&cold, true);
+        print_palace_detail(&warm, true);
     }
 }

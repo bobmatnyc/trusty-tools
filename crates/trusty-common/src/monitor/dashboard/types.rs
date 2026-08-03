@@ -228,6 +228,21 @@ pub struct PalaceRow {
     /// What: `is_compacting` from `/api/v1/palaces`.
     /// Test: `test_palace_activity_state`.
     pub is_compacting: bool,
+    /// Whether the count fields above are placeholders rather than measurements.
+    ///
+    /// Why (issue #4682): since #4640 `GET /api/v1/palaces` builds each row from
+    /// `PalaceRegistry::peek` and returns `cached: false` with all counts `0`
+    /// for any palace whose handle is not resident. Those zeros mean *unknown*,
+    /// not *empty* — 2,180 of 2,183 palaces on a live daemon report them.
+    /// Carrying the provenance on the row is what lets a renderer tell the two
+    /// apart; read the counts through [`PalaceRow::vectors`] and its siblings,
+    /// which fold this flag in and hand back `None` for unknown.
+    /// What: `true` when the daemon reported `cached: false`. Defaults to
+    /// `false`, so a hand-built row (and any daemon predating the `cached`
+    /// flag) is treated as reporting real counts.
+    /// Test: `palace_row_counts_are_unknown_when_not_cached`,
+    /// `parse_palaces_marks_uncached_rows_unknown`.
+    pub counts_unknown: bool,
 }
 
 #[cfg(feature = "monitor-tui")]
@@ -280,6 +295,49 @@ impl PalaceRow {
             .and_then(|p| p.rsplit('/').next())
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.name)
+    }
+
+    /// Stored vectors, or `None` when the daemon did not load the palace.
+    ///
+    /// Why (issue #4682): the raw field is `0` in both the "genuinely empty"
+    /// and the "not loaded" case, and a renderer reading it cannot tell them
+    /// apart. This accessor can only return a number it actually knows, so a
+    /// caller is forced to decide what an unknown count looks like — pair it
+    /// with [`super::format_opt_count`], which renders `—`.
+    /// What: `None` when [`Self::counts_unknown`] is set, else `Some(count)`.
+    /// Test: `palace_row_counts_are_unknown_when_not_cached`.
+    pub fn vectors(&self) -> Option<u64> {
+        self.known(self.vector_count)
+    }
+
+    /// Drawers, or `None` when the daemon did not load the palace (#4682).
+    pub fn drawers(&self) -> Option<u64> {
+        self.known(self.drawer_count)
+    }
+
+    /// Active KG triples, or `None` when the palace was not loaded (#4682).
+    pub fn kg_triples(&self) -> Option<u64> {
+        self.known(self.kg_triple_count)
+    }
+
+    /// KG nodes, or `None` when the palace was not loaded (#4682).
+    pub fn nodes(&self) -> Option<u64> {
+        self.known(self.node_count)
+    }
+
+    /// KG edges, or `None` when the palace was not loaded (#4682).
+    pub fn edges(&self) -> Option<u64> {
+        self.known(self.edge_count)
+    }
+
+    /// Fold [`Self::counts_unknown`] into one raw count field.
+    ///
+    /// Why: the five public accessors differ only in which field they read;
+    /// one private helper keeps the unknown rule single-source.
+    /// What: `None` when the counts are placeholders, else `Some(raw)`.
+    /// Test: `palace_row_counts_are_unknown_when_not_cached`.
+    fn known(&self, raw: u64) -> Option<u64> {
+        if self.counts_unknown { None } else { Some(raw) }
     }
 }
 

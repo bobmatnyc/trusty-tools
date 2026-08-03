@@ -19,7 +19,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
-use super::format::{format_count, format_uptime, help_text, status_badge, truncate};
+use super::format::{
+    format_count, format_opt_count, format_uptime, help_text, status_badge, truncate,
+};
 use super::types::{
     DaemonPanel, DashboardState, Focus, KEY_HINT, MemoryData, PanelStatus, SearchData, VERSION,
 };
@@ -99,7 +101,8 @@ pub fn memory_panel_lines(panel: &DaemonPanel<MemoryData>) -> Vec<String> {
                     lines.push(format!(
                         "{:<16} {:>10} vectors",
                         label,
-                        format_count(palace.vector_count),
+                        // #4682: `—` when the daemon did not load the palace.
+                        format_opt_count(palace.vectors()),
                     ));
                 }
             }

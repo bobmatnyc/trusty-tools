@@ -10,7 +10,7 @@
 //! Test: `cargo test -p trusty-common --features monitor-tui` covers these
 //! via the tests module in `mod.rs`.
 
-use crate::monitor::dashboard::{PalaceRow, format_count};
+use crate::monitor::dashboard::{PalaceRow, format_count, format_opt_count};
 use crate::monitor::memory_client::DrawerInfo;
 use crate::monitor::memory_tui::activity::{PalaceActivity, activity_label, palace_activity_state};
 use crate::monitor::memory_tui::state::MemoryTuiState;
@@ -55,6 +55,12 @@ pub fn sort_label(key: ThreeWaySortKey) -> &'static str {
 /// What: returns `true` when any of `vector_count`, `kg_triple_count`, or
 /// `drawer_count` is non-zero; returns `false` only when all three are zero.
 /// Test: `test_filter_empty_palaces`.
+//
+// #4682: this reads the raw fields on purpose. Since #4640 an unloaded palace
+// reports zeros that mean *unknown*, so this gate now also hides cold palaces —
+// the same "unknown treated as empty" class as #68. Changing it would make
+// every one of ~2,180 cold palaces appear, which is a visibility decision this
+// change deliberately does not take. Tracked in #4682 as a known adjacent gap.
 pub fn palace_has_content(palace: &PalaceRow) -> bool {
     palace.vector_count > 0 || palace.kg_triple_count > 0 || palace.drawer_count > 0
 }
@@ -270,7 +276,8 @@ pub fn palace_row_with_activity(
     format!(
         "{prefix} {:<10} {:>7}v",
         truncate(label, 10),
-        format_count(palace.vector_count),
+        // #4682: an unloaded palace's `0` is unknown, not empty — render `—`.
+        format_opt_count(palace.vectors()),
     )
 }
 
@@ -295,7 +302,8 @@ pub(crate) fn palace_row_indented_with_activity(
     format!(
         " {prefix} {:<9} {:>7}v",
         truncate(label, 9),
-        format_count(palace.vector_count),
+        // #4682: an unloaded palace's `0` is unknown, not empty — render `—`.
+        format_opt_count(palace.vectors()),
     )
 }
 
@@ -333,7 +341,8 @@ pub fn palace_lines_at(
     // The synthetic "All palaces" row always leads the list — including when
     // filtering or grouping is active. The selection highlight is rendered by
     // the List widget's highlight_symbol so the row text carries no marker.
-    let total_vectors: u64 = state.palaces.iter().map(|p| p.vector_count).sum();
+    // #4682: sum only the palaces whose counts the daemon actually measured.
+    let total_vectors: u64 = state.palaces.iter().filter_map(|p| p.vectors()).sum();
     let all_selected = state.selected == 0;
     rows.push(PalaceListRow {
         text: format!("  {ALL_LABEL}  {}v", format_count(total_vectors)),
@@ -474,7 +483,7 @@ pub fn stats_lines(state: &MemoryTuiState) -> Vec<String> {
                 lines.push(format!(
                     "  · {:<12} {:>7}v",
                     truncate(label, 12),
-                    format_count(palace.vector_count),
+                    format_opt_count(palace.vectors()),
                 ));
             }
         }
@@ -492,13 +501,14 @@ pub fn stats_lines(state: &MemoryTuiState) -> Vec<String> {
             let activity = palace_activity_state(palace, now);
             let mut lines = vec![
                 format!("Palace:       {label}"),
-                format!("Vectors:      {}", format_count(palace.vector_count)),
+                // #4682: `—` for a palace the daemon has not loaded.
+                format!("Vectors:      {}", format_opt_count(palace.vectors())),
                 format!("Id:           {}", palace.id),
                 String::new(),
                 "Knowledge Graph".to_string(),
-                format!("  Nodes:        {}", format_count(palace.node_count)),
-                format!("  Edges:        {}", format_count(palace.edge_count)),
-                format!("  Triples:      {}", format_count(palace.kg_triple_count)),
+                format!("  Nodes:        {}", format_opt_count(palace.nodes())),
+                format!("  Edges:        {}", format_opt_count(palace.edges())),
+                format!("  Triples:      {}", format_opt_count(palace.kg_triples())),
                 String::new(),
             ];
             match palace.last_write_at {

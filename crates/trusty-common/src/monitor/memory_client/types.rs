@@ -106,6 +106,20 @@ pub(super) struct PalaceWire {
     /// forward-compat against pre-spinner daemon builds.
     #[serde(default)]
     pub(super) is_compacting: bool,
+    /// Whether the daemon had this palace's handle resident when it built the
+    /// row — i.e. whether the counts above are measurements (#4682).
+    ///
+    /// Why: `Option`, not a plain `bool`, so the three states stay distinct.
+    /// `Some(true)` = counts are live; `Some(false)` = counts are placeholder
+    /// zeros (the normal case on the peek-based list route since #4640);
+    /// `None` = the daemon predates the `cached` flag and always opened every
+    /// palace, so its counts are authoritative. Defaulting the absent case to
+    /// `false` would make a current client show `—` for every palace against
+    /// an older daemon.
+    /// Test: `parse_palaces_marks_uncached_rows_unknown`,
+    /// `parse_palaces_trusts_counts_when_cached_flag_absent`.
+    #[serde(default)]
+    pub(super) cached: Option<bool>,
 }
 
 /// One recalled memory from a trusty-memory query, projected for the log.
