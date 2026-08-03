@@ -114,6 +114,12 @@ is noted on the CURRENT issue and made in the same work — see **Opportunistic
 Fixes** in the instruction package, which this gate extends rather than
 restates.
 
+A code-review or QA finding reaches this gate by exactly one route: the
+`Promote` disposition in `code-review-standards`. A reviewer marking `Promote`
+has recommended, not filed — the finding still has to clear the criteria above,
+and an APPROVE verdict never files a ticket on its own. `Fix here` and `Parent`
+findings never reach this gate.
+
 ### 3. Label the confidence state
 
 Every filed issue states which of these it is, in the body:

@@ -214,7 +214,7 @@ unconditionally mandatory.
 | Phase | `subagent_type` | Gate | Skip When |
 |-------|-------|------|-----------|
 | 1. Research | `research` | Findings documented | User provides explicit instructions, simple task, language/approach known |
-| 2. Code Analysis | `code-analyzer` | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact |
+| 2. Code Analysis | `code-analyzer` | APPROVED / NEEDS_IMPROVEMENT / BLOCKED | Change is < 100 lines, no architectural impact, not High risk (risk labels: Workflow) |
 | 3. Implementation | `engineer` (per lang detect) | Tests pass, files tracked, changelog entry added | Docs-only/CI-only change |
 | 4. QA | `web-qa` / `api-qa` / `qa` | All criteria verified with evidence | Engineer self-verified (ran full test suite, raw output shown), user says "no QA" |
 | 5. Documentation | `documentation` | Docs updated | No public API changes, internal refactor only |
