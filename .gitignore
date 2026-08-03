@@ -24,12 +24,16 @@
 # Re-include tracked files from .claude/
 !.claude/
 !.claude/settings.json
-!.claude/agents/
-!.claude/agents/**
 
-# Exclude agent runtime-state dot-files (not source-controlled)
-.claude/agents/.dependency_cache
-.claude/agents/.mpm_deployment_state
+# Project-tier agent files are NEVER tracked in this repo. They are deployed
+# artifacts, not source: the bundled roster is the product and lives in
+# crates/trusty-mpm/src/assets/agents/ (and crates/trusty-code/src/assets/agents/).
+# A tracked copy under any crate's .claude/agents/ SHADOWS the bundled agent of
+# the same name, because Claude Code resolves project tier before user tier —
+# the shadowing hazard tracked in #4448/#4526. The `**/` prefix is required:
+# a bare `.claude/agents/` contains an internal slash and would anchor to the
+# repo root only, leaving every crate-level copy un-ignored.
+**/.claude/agents/
 
 # Claude Code's native `isolation: "worktree"` agent worktrees are
 # machine-local, not a deliverable (issue #3972). `.claude/` is broadly
