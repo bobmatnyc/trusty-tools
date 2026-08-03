@@ -37,8 +37,7 @@ pub struct BundledArtifact {
 /// again the moment any bundled artifact is meant to be user-owned.
 /// What: [`Overwrite`](InstallPolicy::Overwrite) always writes the embedded
 /// contents; [`SeedOnce`](InstallPolicy::SeedOnce) writes only when absent.
-/// Test: `framework_instructions_overwrites`,
-/// `seed_once_artifact_is_not_clobbered_without_force`,
+/// Test: `seed_once_artifact_is_not_clobbered_without_force`,
 /// `seed_once_artifact_force_resets_to_shipped_default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPolicy {
@@ -94,14 +93,17 @@ pub(super) const fn seed_once(rel_path: &'static str, contents: &'static str) ->
 
 /// Every bundled framework artifact, in install order.
 ///
-/// Why: gives the installer (and tests) one canonical list to walk.
-/// What: optimizer policy, framework instructions, agent catalog, placeholder
+/// Why: gives the installer (and tests) one canonical list to walk. (#4286
+/// split A removed the `instructions/INSTRUCTIONS.md` stub entry: `tm
+/// install`/`tm launch` always overwrite that same path with the assembled
+/// system prompt in the same call, so the bundled stub's content never
+/// reached a live session.)
+/// What: optimizer/overseer policy, agent catalog, placeholder
 /// skill, and Phase 1 (#770) mpm-* guidance skills.
 /// Test: `bundle_table_is_complete`.
 pub const ALL: &[BundledArtifact] = &[
     overwrite("hooks/optimizer.toml", OPTIMIZER_TOML),
     overwrite("hooks/overseer.toml", OVERSEER_TOML),
-    overwrite("instructions/INSTRUCTIONS.md", FRAMEWORK_INSTRUCTIONS),
     overwrite("agents/BASE-AGENT.md", BASE_AGENT),
     overwrite("agents/BASE-ENGINEER.md", BASE_ENGINEER),
     overwrite("agents/BASE-RESEARCH.md", BASE_RESEARCH),
