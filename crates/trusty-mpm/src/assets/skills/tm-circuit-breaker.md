@@ -302,5 +302,5 @@ All CBs share one enforcement model:
 
 The PM must proactively check for violations before tool usage and delegate
 to the correct specialist agent — see `tm-delegation-patterns` for the
-agent-selection decision trees and `AGENT_DELEGATION.md` for the routing
-table.
+agent-selection decision trees and the bundled agent-delegation section
+(`assets/instructions/sections/agent-delegation.md`) for the routing table.

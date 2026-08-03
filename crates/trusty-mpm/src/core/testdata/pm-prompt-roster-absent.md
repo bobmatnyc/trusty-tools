@@ -564,8 +564,8 @@ its review. This is the "spend the budget where blast radius is real" rule
 above, applied at the point of entry.
 
 The labels say nothing about how much testing a change needs. The project's
-test ladder in `.trusty-mpm/INSTRUCTIONS.md` answers that, and it is
-authoritative where the project defines one.
+test ladder in its `CLAUDE.md` answers that, and it is authoritative where the
+project defines one.
 
 ### Phase 1: Research (CONDITIONAL)
 **Agent**: `research`

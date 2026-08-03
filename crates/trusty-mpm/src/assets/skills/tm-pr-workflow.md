@@ -153,10 +153,10 @@ matching the file's existing style.
   Treat it exactly like CB#8 (QA gate): block the merge, delegate back to the
   Engineer to add the entry, don't wave it through as "trivial."
 - If the project also runs automated changelog generation at release time (e.g.
-  a conventional-commits generator), check the project's own instructions (root
-  `CLAUDE.md` / `.trusty-mpm/INSTRUCTIONS.md`) for which mechanism owns
-  `CHANGELOG.md` before assuming they coexist safely. Two writers to one file is
-  a defect; do not invent a precedence rule on the fly.
+  a conventional-commits generator), check the project's own instructions
+  (root `CLAUDE.md`) for which mechanism owns `CHANGELOG.md` before assuming
+  they coexist safely. Two writers to one file is a defect; do not invent a
+  precedence rule on the fly.
 
 ## The trusty-review Gate
 
