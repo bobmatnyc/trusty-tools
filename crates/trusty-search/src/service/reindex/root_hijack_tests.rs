@@ -34,10 +34,6 @@ use crate::service::persistence::PersistedIndex;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// Marker env var identifying the isolated child process. Set by
-/// [`isolate_in_child_process`] on the spawned command, never in-process.
-const CHILD_MARKER: &str = "TRUSTY_SEARCH_ROOT_HIJACK_ISOLATED_CHILD";
-
 /// Run this test's body in a dedicated child process whose `TRUSTY_DATA_DIR`
 /// is set at spawn time, and which runs this one test alone.
 ///
@@ -55,48 +51,18 @@ const CHILD_MARKER: &str = "TRUSTY_SEARCH_ROOT_HIJACK_ISOLATED_CHILD";
 /// data-loss* regression for #2178, so "usually green" is not good enough:
 /// a test that is green by luck is indistinguishable from a test that is
 /// green by correctness.
-/// What: in the parent, re-executes the current test binary with this test's
-/// exact name (`--exact`, `--test-threads=1`) and `TRUSTY_DATA_DIR` supplied
-/// through [`Command::env`] — a per-process value, so no in-process
-/// `set_var` and nothing for a sibling to race — then asserts the child
-/// exited successfully and returns `false` so the parent skips the body. In
-/// the child (identified by [`CHILD_MARKER`]) returns `true`: it is the only
-/// test running in that process, so its data dir is inviolate for the whole
-/// run. The child's output is replayed on the parent's streams, so a failing
-/// assertion prints exactly as it would in-process.
-///
-/// The parent additionally asserts the child ran EXACTLY one test. `--exact`
-/// with a stale name (a renamed test) would otherwise match nothing, exit 0,
-/// and turn this guard into a silent no-op — a vacuum failure worse than the
-/// race it replaces.
+/// What: allocates the throwaway data dir and defers to
+/// [`super::test_isolation::run_isolated`], which does the re-execution. The
+/// tempdir is held alive for the whole child run and removed when this
+/// function returns. (#4721 extracted the mechanism so the #3979 resume tests
+/// could reuse it rather than clone it a third time.)
 /// Test: both tests in this module route through it.
 fn isolate_in_child_process(test_name: &str) -> bool {
-    if std::env::var_os(CHILD_MARKER).is_some() {
+    if super::test_isolation::is_isolated_child() {
         return true;
     }
-    let exe = std::env::current_exe().expect("current test binary path");
     let data_dir = tempfile::tempdir().expect("isolated data dir");
-    let out = std::process::Command::new(&exe)
-        .args([test_name, "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD_MARKER, "1")
-        .env("TRUSTY_DATA_DIR", data_dir.path())
-        .output()
-        .unwrap_or_else(|e| panic!("spawn isolated child {}: {e}", exe.display()));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    eprint!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
-    assert!(
-        out.status.success(),
-        "isolated child run of `{test_name}` failed ({}) — see its output \
-         above for the actual assertion failure",
-        out.status
-    );
-    assert!(
-        stdout.contains("test result: ok. 1 passed"),
-        "isolated child for `{test_name}` did not run exactly one test — the \
-         name passed to isolate_in_child_process is stale (test renamed?), so \
-         the body never executed and this guard proved nothing"
-    );
-    false
+    super::test_isolation::run_isolated(test_name, &[("TRUSTY_DATA_DIR", data_dir.path())])
 }
 
 /// Minimal `RawChunk` fixture — mirrors the helper duplicated across

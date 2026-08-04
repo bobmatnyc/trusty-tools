@@ -74,6 +74,17 @@ Two knobs, both optional:
 | `TRUSTY_REINDEX_RESUME` | enabled | Set to `0`/`false`/`no`/`off` to restore the pre-#3979 always-rebuild behaviour. |
 | `TRUSTY_REINDEX_CHECKPOINT_MAX_AGE_SECS` | `86400` | Maximum age of an adoptable checkpoint. `0` disables the age gate. |
 
+The config fingerprint is a SHA-256 over a **length-prefixed** rendering of every
+walk filter and pipeline flag (#4721). Separator-based framing was not injective
+— `exclude_globs = ["a", "b"]` and `["a,b"]` hashed identically — which would let
+a checkpoint be adopted for a configuration it was not built under. Records
+written by trusty-search 0.42.0 predate that change and invalidate on the
+`schema_version` gate (1 → 2), falling back to a full reindex. The staging corpus
+is opened exactly once, by the probe, which hands the open handle to the
+adoption; and the record is cleared from the staging corpus as an inseparable
+part of releasing it for promotion, so a promoted `index.redb` can never
+advertise itself as mid-reindex.
+
 Deliberate non-goals: `force` reindexes neither write nor consume a checkpoint
 (a force run stages an empty corpus and skips the prune pass, so a resumed one
 could keep chunks for files deleted since the crash), and the staged HNSW

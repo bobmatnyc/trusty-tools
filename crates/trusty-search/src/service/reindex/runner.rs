@@ -222,6 +222,11 @@ pub(super) async fn run_reindex(
         Some(cp) => checkpoint::probe_resume(&handle, &index_id, &canonical_root, cp).await,
         None => None,
     };
+    // #4721: `resume` now OWNS the probe's open staging-corpus handle and is
+    // moved into `begin_staged_corpus_swap` below, so capture the two facts the
+    // later stages need before it goes.
+    let resumed = resume.is_some();
+    let resumed_chunks = resume.as_ref().map(|r| r.staged_chunks).unwrap_or(0);
 
     // Issues #840 / #662: load the persisted hash cache BEFORE emitting
     // the `start` event so `hashes_loaded` is available for the event payload.
@@ -304,8 +309,8 @@ pub(super) async fn run_reindex(
             "defer_embed": effective_defer_embed,
             // #3979: tell the CLI/operator this run is continuing an
             // interrupted one, and how much work it inherited.
-            "resumed": resume.is_some(),
-            "resumed_chunks": resume.as_ref().map(|r| r.staged_chunks).unwrap_or(0),
+            "resumed": resumed,
+            "resumed_chunks": resumed_chunks,
         }))
         .await;
 
@@ -334,7 +339,9 @@ pub(super) async fn run_reindex(
                 &handle,
                 &index_id,
                 force,
-                resume.as_ref(),
+                // #4721: moved, not borrowed — adoption takes ownership of the
+                // probe's open staging handle.
+                resume,
                 checkpoint_for_run.as_ref(),
             )
             .await
@@ -370,6 +377,10 @@ pub(super) async fn run_reindex(
                 }
             }
         } else {
+            // #4721: staging was skipped after all — release the probe's open
+            // staging handle now rather than holding the redb file for the rest
+            // of the run.
+            drop(resume);
             None
         };
 
@@ -594,7 +605,7 @@ pub(super) async fn run_reindex(
         force,
         // #3979: a resumed run inherits chunks whose vectors only ever reached
         // the staged HNSW snapshot, so `finish` must run a vector catch-up.
-        resumed: resume.is_some(),
+        resumed,
     };
     let batch_totals = BatchTotals {
         walk_ms,

@@ -11,7 +11,9 @@
 //! - `begin_staged_corpus_swap` — open a fresh staging store and optionally
 //!   seed it from the live corpus for an incremental reindex (#839), or ADOPT an
 //!   interrupted run's staging store when resuming (#3979).
-//! - `commit_staged_corpus_swap` — rename staging → live on success.
+//! - `commit_staged_corpus_swap` — rename staging → live on success, gated on
+//!   the `PromotionRelease` token so the resume checkpoint cannot be left in a
+//!   promoted corpus by reordering the caller's statements (#4721).
 //! - `abort_staged_corpus_swap` — delete staging and re-open live on failure.
 //!
 //! Test: `incremental_reindex_no_durable_data_loss` and
@@ -87,7 +89,10 @@ pub(super) async fn begin_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     force: bool,
-    resume: Option<&ResumeState>,
+    // #4721: taken BY VALUE so the adoption consumes the probe's open store —
+    // a shared handle left behind would still hold the redb file at promote
+    // time, when the rename requires every handle released.
+    resume: Option<ResumeState>,
     checkpoint: Option<&ReindexCheckpoint>,
 ) -> Result<Option<PathBuf>, anyhow::Error> {
     // #3979: adopt the already-validated staging corpus rather than deleting it.
@@ -211,10 +216,13 @@ pub(super) async fn begin_staged_corpus_swap(
 /// re-seeding from live, because the interrupted run already copied the live
 /// rows in (#839) and then added its own committed batches on top.
 ///
-/// What: opens the staging corpus (serialized against concurrent openers,
-/// #3659), installs it on the indexer via `swap_corpus_store` — the same sink
-/// the fresh path uses, deliberately NOT `set_corpus_store`, so the #4122 write
-/// quarantine is neither lifted nor bypassed — and then drops the in-memory
+/// What: installs the staging corpus the probe already opened and validated
+/// (#4721 — this used to re-open the same redb file, which is both wasted work
+/// on a multi-GB corpus and a window in which the exclusive file lock is held by
+/// nobody; an `Err` from that second open silently abandoned the resume) via
+/// `swap_corpus_store` — the same sink the fresh path uses, deliberately NOT
+/// `set_corpus_store`, so the #4122 write quarantine is neither lifted nor
+/// bypassed — and then drops the in-memory
 /// chunk/BM25/entity caches. That last step is required for correctness, not
 /// memory: those caches were rehydrated at warm boot from the LIVE corpus, so
 /// for any file the interrupted run had already re-indexed they hold the OLD
@@ -224,34 +232,21 @@ pub(super) async fn begin_staged_corpus_swap(
 /// `ensure_corpus_rehydrated` guards, so the served state matches the corpus
 /// that will be promoted.
 ///
-/// Returns `Ok(Some(tmp_path))` on success. An open failure is NOT fatal: it
-/// returns `Ok(None)` so the caller proceeds without staging (writing to the
-/// live corpus, the pre-existing fallback) rather than aborting the reindex.
-/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`.
+/// Returns `Ok(Some(tmp_path))` — since #4721 the handle is already open, so
+/// there is no adoption failure mode left to fall back from.
+/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`,
+/// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`.
 async fn adopt_staged_corpus(
     handle: &IndexHandle,
     index_id: &IndexId,
-    state: &ResumeState,
+    state: ResumeState,
 ) -> Result<Option<PathBuf>, anyhow::Error> {
-    let tmp_path = state.tmp_path.clone();
-    let open_path = tmp_path.clone();
-    let opened = crate::core::corpus::open_serialized(&tmp_path, move || {
-        crate::core::corpus::CorpusStore::open(&open_path)
-            .with_context(|| format!("adopt staging corpus {}", open_path.display()))
-    })
-    .await;
-    let staged = match opened {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "reindex[{}]: could not adopt the staging corpus at {} ({e}) — \
-                 continuing without staging (issue #3979)",
-                index_id.0,
-                tmp_path.display(),
-            );
-            return Ok(None);
-        }
-    };
+    let ResumeState {
+        tmp_path,
+        staged,
+        staged_chunks,
+        ..
+    } = state;
     {
         let mut indexer = handle.indexer.write().await;
         let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
@@ -264,7 +259,7 @@ async fn adopt_staged_corpus(
          rehydrate from the adopted corpus (issue #3979)",
         index_id.0,
         tmp_path.display(),
-        state.staged_chunks,
+        staged_chunks,
         reclaimed,
     );
     Ok(Some(tmp_path))
@@ -321,32 +316,147 @@ async fn write_checkpoint(
     }
 }
 
-/// Clear the resume checkpoint from the staging corpus just before it is
-/// promoted (issue #3979).
+/// Proof that a staging corpus was released for promotion with its resume
+/// checkpoint already cleared (issue #4721).
+///
+/// Why: "a promoted corpus never carries an in-progress checkpoint" used to hold
+/// only because `commit_staged_corpus_swap` happened to call
+/// `clear_checkpoint_before_promote` before `take_corpus_store`. The clear needs
+/// the OPEN store, so swapping those two statements — a reorder no compiler,
+/// type, or test would object to — turns the clear into a silent no-op and
+/// promotes a finished corpus that advertises itself as mid-reindex. Nothing
+/// ever cleans that up: the probe only reads `*.tmp` paths.
+///
+/// What: an opaque token with a private field, so the ONLY way to obtain one is
+/// [`release_staging_for_promotion`], which performs the clear and the release
+/// in that order and verifies the outcome. `rename_staging_over_live` takes the
+/// token by reference, so the rename is unreachable without it. This is the
+/// [`crate::service::warm_boot::BoundedRestoreOutcome`] pattern from #4718:
+/// remove the call site's opportunity to get the order wrong rather than
+/// documenting the right order and hoping.
+/// Test: `super::resume_tests::promotion_clears_the_checkpoint_even_when_the_store_was_released_early`.
+struct PromotionRelease {
+    /// Private: only this module can mint the token.
+    _sealed: (),
+}
+
+/// Clear the resume checkpoint, then release the staging store, then verify
+/// (issue #3979; made unbypassable by #4721).
 ///
 /// Why: promotion is a RENAME, so whatever sits in the staging corpus's `_meta`
-/// table becomes live metadata. A completed corpus carrying an "in progress"
-/// marker would be a corpus lying about itself, and the next run's probe reads
-/// only `*.tmp` paths so it would never be cleaned up.
-/// What: best-effort `clear_reindex_checkpoint_sync` on a blocking worker.
-/// Failures are logged at `debug` and ignored — a stale record in a promoted
-/// live corpus is inert (the probe never reads the live corpus, and
-/// `copy_all_from` never copies this key into a staging corpus).
+/// table becomes live metadata. The clear must happen while the store is still
+/// open, and the store must then be released so redb lets go of the file before
+/// the rename — two steps whose order is load-bearing in opposite directions.
+/// Fusing them into one function that returns the [`PromotionRelease`] the
+/// rename requires makes the order structural.
+/// What: (1) clears via the installed store when there is one; (2) takes the
+/// store out of the indexer, dropping its last `Arc`; (3) when step 1 could not
+/// CONFIRM the clear — no store installed (e.g. a #4122 quarantine or a future
+/// reorder), a redb error, or a panicked worker — re-opens the now-released
+/// staging file and clears it there, which is possible precisely because step 2
+/// already ran. A failure of that fallback is logged at ERROR and promotion
+/// still proceeds: a stale record in a live corpus is inert (the probe never
+/// reads live corpora and `copy_all_from` never copies this key), so refusing to
+/// promote would throw away a completed reindex to avoid a cosmetic defect.
+/// Test: `super::resume_tests::completed_reindex_leaves_no_checkpoint`,
+/// `super::resume_tests::promotion_clears_the_checkpoint_even_when_the_store_was_released_early`.
+async fn release_staging_for_promotion(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    tmp_path: &Path,
+) -> PromotionRelease {
+    let cleared = clear_checkpoint_before_promote(handle, index_id).await;
+    // Drop the staging store's last Arc so redb releases the temp file before
+    // the rename.
+    {
+        let mut indexer = handle.indexer.write().await;
+        let _ = indexer.take_corpus_store();
+    }
+    // #4721: the clear could not be confirmed through the installed store —
+    // do it on the released file instead, so the invariant does not depend on
+    // the store still being installed at this point.
+    if !cleared {
+        clear_checkpoint_on_released_file(tmp_path, index_id).await;
+    }
+    PromotionRelease { _sealed: () }
+}
+
+/// Clear the resume checkpoint through the currently-installed corpus store.
+///
+/// Why: the fast path of [`release_staging_for_promotion`] — while the store is
+/// open, clearing is one redb transaction with no extra file open.
+/// What: returns `true` only when the clear was CONFIRMED (a store was installed
+/// and `clear_reindex_checkpoint_sync` returned `Ok`). `false` means "not proven
+/// cleared", which is what drives the fallback — #4721 made this a `bool`
+/// precisely because the old `()` return let an absent store look like success.
 /// Test: `super::resume_tests::completed_reindex_leaves_no_checkpoint`.
-pub(super) async fn clear_checkpoint_before_promote(handle: &IndexHandle, index_id: &IndexId) {
+async fn clear_checkpoint_before_promote(handle: &IndexHandle, index_id: &IndexId) -> bool {
     let corpus = {
         let indexer = handle.indexer.read().await;
         indexer.corpus_store()
     };
     let Some(corpus) = corpus else {
-        return;
+        tracing::debug!(
+            "reindex[{}]: no corpus store installed at promote time — clearing the \
+             resume checkpoint on the released staging file instead (issue #4721)",
+            index_id.0
+        );
+        return false;
     };
     let res = tokio::task::spawn_blocking(move || corpus.clear_reindex_checkpoint_sync()).await;
+    if matches!(res, Ok(Ok(()))) {
+        return true;
+    }
+    tracing::debug!(
+        "reindex[{}]: could not clear the resume checkpoint through the installed \
+         staging store — retrying on the released file (issue #4721)",
+        index_id.0
+    );
+    false
+}
+
+/// Fallback clear: re-open the released staging file and remove the record.
+///
+/// Why: the last line of defence for the checkpoint-exclusion invariant when the
+/// in-store clear could not be confirmed. Safe to open here — and only here —
+/// because the caller has already dropped the store's last `Arc`.
+/// What: `open_serialized` + `clear_reindex_checkpoint_sync`, dropping the store
+/// again immediately so the rename that follows is not blocked. Failure is
+/// logged at ERROR (the operator-visible surface) and swallowed.
+/// Test: `super::resume_tests::promotion_clears_the_checkpoint_even_when_the_store_was_released_early`.
+async fn clear_checkpoint_on_released_file(tmp_path: &Path, index_id: &IndexId) {
+    let open_path = tmp_path.to_path_buf();
+    let opened = crate::core::corpus::open_serialized(tmp_path, move || {
+        crate::core::corpus::CorpusStore::open(&open_path)
+            .with_context(|| format!("re-open staging corpus {}", open_path.display()))
+    })
+    .await;
+    let store = match opened {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                "reindex[{}]: could not re-open the staging corpus at {} to clear its \
+                 resume checkpoint before promotion ({e}) — the promoted corpus will \
+                 carry an inert in-progress record (issue #4721)",
+                index_id.0,
+                tmp_path.display(),
+            );
+            return;
+        }
+    };
+    let res = tokio::task::spawn_blocking(move || {
+        let out = store.clear_reindex_checkpoint_sync();
+        drop(store);
+        out
+    })
+    .await;
     if !matches!(res, Ok(Ok(()))) {
-        tracing::debug!(
-            "reindex[{}]: could not clear the resume checkpoint before promoting the \
-             staging corpus — the stale record is inert (issue #3979)",
-            index_id.0
+        tracing::error!(
+            "reindex[{}]: could not clear the resume checkpoint on the released staging \
+             corpus at {} — the promoted corpus will carry an inert in-progress record \
+             (issue #4721)",
+            index_id.0,
+            tmp_path.display(),
         );
     }
 }
@@ -357,12 +467,14 @@ pub(super) async fn clear_checkpoint_before_promote(handle: &IndexHandle, index_
 /// Why: once the reindex has committed every batch to `index.redb.tmp`, the
 /// temp file holds the complete rebuilt corpus. Renaming it over the live
 /// `index.redb` makes the swap atomic.
-/// What: takes the staging store out of the indexer, drops its last `Arc`
-/// (redb keeps the file mapped while any handle is alive, so the handle MUST
-/// be dropped before the rename), renames `index.redb.tmp` → `index.redb`,
-/// re-opens a `CorpusStore` on the swapped-in file, and installs it on the
-/// indexer. Any failure leaves the previous live corpus in place and logs at
-/// `warn` — a botched swap must not crash the daemon.
+/// What: resolves the live path, calls [`release_staging_for_promotion`] (which
+/// clears the resume checkpoint and then takes the staging store out of the
+/// indexer, dropping its last `Arc` — redb keeps the file mapped while any
+/// handle is alive, so the handle MUST be dropped before the rename), renames
+/// `index.redb.tmp` → `index.redb` via [`rename_staging_over_live`], re-opens a
+/// `CorpusStore` on the swapped-in file, and installs it on the indexer. Any
+/// failure leaves the previous live corpus in place and logs at `warn` — a
+/// botched swap must not crash the daemon.
 /// Test: `incremental_reindex_no_durable_data_loss` verifies the promoted
 /// corpus contains all chunks (changed + unchanged).
 pub(super) async fn commit_staged_corpus_swap(
@@ -398,40 +510,12 @@ pub(super) async fn commit_staged_corpus_swap(
             }
         }
     };
-    // #3979: the promote is a rename, so the staging corpus's `_meta` becomes
-    // live metadata — clear the "reindex in progress" record first. Must run
-    // BEFORE the store handle is dropped below, since it needs the open store.
-    clear_checkpoint_before_promote(handle, index_id).await;
-    // Drop the staging store's last Arc so redb releases the temp file before
-    // the rename.
-    {
-        let mut indexer = handle.indexer.write().await;
-        let _ = indexer.take_corpus_store();
-    }
-    let tmp = tmp_path.to_path_buf();
+    // #4721: one call performs the checkpoint clear AND the handle release, in
+    // the only order in which both can work, and yields the token
+    // `rename_staging_over_live` demands. Reordering is not expressible.
+    let release = release_staging_for_promotion(handle, index_id, tmp_path).await;
     let live = live_path.clone();
-    let index_id_inner = index_id.0.clone();
-    // Rename on a blocking worker (filesystem sync call).
-    let rename_result: anyhow::Result<()> = {
-        let tmp = tmp.clone();
-        let live = live.clone();
-        let index_id_for_msg = index_id_inner.clone();
-        tokio::task::spawn_blocking(move || {
-            std::fs::rename(&tmp, &live).with_context(|| {
-                format!(
-                    "atomic-swap rename {} -> {} for '{index_id_for_msg}'",
-                    tmp.display(),
-                    live.display()
-                )
-            })
-        })
-        .await
-        .unwrap_or_else(|join_err| {
-            Err(anyhow::anyhow!(
-                "atomic-swap rename task panicked for '{index_id_inner}': {join_err}"
-            ))
-        })
-    };
+    let rename_result = rename_staging_over_live(&release, tmp_path, &live, index_id).await;
     // Re-open the swapped-in live corpus, serialized + panic-safe (issue
     // #3659) against any other concurrent opener of this SAME path (e.g. a
     // lazy-load or another handler racing this reindex's swap) — this used
@@ -468,6 +552,43 @@ pub(super) async fn commit_staged_corpus_swap(
             index_id.0
         ),
     }
+}
+
+/// Rename the staging corpus over the live one — the promotion itself.
+///
+/// Why: takes `_release` so it is unreachable without the
+/// [`PromotionRelease`] token, i.e. without having cleared the resume checkpoint
+/// and released the staging handle first (#4721). The token is the whole point:
+/// this signature is what makes "clear, then release, then rename" a property of
+/// the types rather than of the order statements happen to appear in.
+/// What: `std::fs::rename` on a blocking worker (filesystem sync call), with a
+/// panicked worker rendered as an `Err` rather than a lost result.
+/// Test: `super::resume_tests::completed_reindex_leaves_no_checkpoint`.
+async fn rename_staging_over_live(
+    _release: &PromotionRelease,
+    tmp_path: &Path,
+    live_path: &Path,
+    index_id: &IndexId,
+) -> anyhow::Result<()> {
+    let tmp = tmp_path.to_path_buf();
+    let live = live_path.to_path_buf();
+    let index_id_inner = index_id.0.clone();
+    let index_id_for_msg = index_id_inner.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::rename(&tmp, &live).with_context(|| {
+            format!(
+                "atomic-swap rename {} -> {} for '{index_id_for_msg}'",
+                tmp.display(),
+                live.display()
+            )
+        })
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        Err(anyhow::anyhow!(
+            "atomic-swap rename task panicked for '{index_id_inner}': {join_err}"
+        ))
+    })
 }
 
 /// Discard the staging corpus after an aborted / failed reindex
