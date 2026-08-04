@@ -432,7 +432,6 @@ crates/trusty-mpm/src/core/auto_resume.rs	effective_from_env_parses_truthy
 crates/trusty-mpm/src/core/compress.rs	caveman_summary_contains_tool_and_size
 crates/trusty-mpm/src/core/compress.rs	strip_ansi_leaves_plain_text
 crates/trusty-mpm/src/core/deploy_validate/mod.rs	repair_reports_error_when_prepare_session_fails
-crates/trusty-mpm/src/core/instruction_pipeline.rs	install_writes_assembled_prompt
 crates/trusty-mpm/src/core/manifest/schema.rs	instruction_layers_roundtrip
 crates/trusty-mpm/src/core/manifest/schema.rs	mcp_servers_roundtrip
 crates/trusty-mpm/src/core/manifest/schema.rs	model_tiers_roundtrip
