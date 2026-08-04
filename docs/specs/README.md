@@ -81,6 +81,7 @@ normative grammar — this note does not restate it.
 | DOC-62 | `SPEC-STYLE-01~draft` … `-10~draft` | [Style Modes for Coding Delegation: `hack` / `vibe` / `engineer`](./DOC-62-style-modes-coding-delegation.md) | cross-crate — trusty-agents (delegation surface, `HandoffContext`, preamble carriage); trusty-code (style parameter, internal pipeline selection); trusty-mpm/GUI (style selector, downstream) |
 | DOC-63 | `SPEC-OKGSRC-01~draft` … `-14~draft` | [OKG Sources: Per-Assistant Knowledge Sources, Scheduled Refresh, and the Untrusted-Content Boundary](./DOC-63-okg-sources.md) | trusty-agents — assistant home / OKG store, source catalog, scheduled refresh, credential consumption, Knowledge config pane; trusty-kb — `okg` engine; trusty-search — index over the store |
 | DOC-64 | `SPEC-CREDPANEL-01~draft` … `-09~draft` | [The Credentials Panel: Per-Assistant Credential Sets, Transfer, and the User-Granted Copy](./DOC-64-credentials-panel.md) | trusty-agents — the assistant configuration surface (panel, backing route, audited actions); trusty-common — the authority it is a **client** of (`Principal`, `CredentialRef`, grants, revocation state, audit stream). Encodes the owner's 2026-08-03 #4040 answers (one store per instance; assistant asks, only the user grants; one audit stream at per-call grain) and finds that DOC-45 §9.1's landed record shape **requires amendment** to carry the panel's events (§10.3) |
+| DOC-65 | `SPEC-UNIVAGENT-01~draft` … `-06~draft` | [Universal Framework Agents: Catalog, Boundaries, and the Four-Category Model](./DOC-65-universal-framework-agents.md) | trusty-mpm — bundled agent catalog, delegation roster, language scoping; consumed identically by trusty-code and referenced by trusty-agents' sub-agent tier. Catalogs the universal (non-language-gated) agent roster, maps it onto ADR-0025's four-category model, and reports (not resolves) the deprecated-but-still-deployed `ops` agent, the unscoped platform-ops agents (`gcp-ops`/`vercel-ops`), and undocumented routing gaps |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -94,7 +95,12 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-65`** (updated 2026-08-03 — DOC-64 claimed by
+> **Next free `DOC-N` = `DOC-66`** (updated 2026-08-04 — DOC-65 claimed by
+> [Universal Framework Agents](./DOC-65-universal-framework-agents.md) (#4755),
+> verified free on `origin/main` (`d6e13326`): no filename/self-label claim
+> under `docs/specs/**`, no open pull requests at all, `check_doc_numbers.sh`
+> clean (96 docs / 90 claims) before the file was added. Previously — updated
+> 2026-08-03 — DOC-64 claimed by
 > [The Credentials Panel](./DOC-64-credentials-panel.md) (#4663), verified free four
 > ways per the scan-before-claim rule: no filename claim or header self-label under
 > `docs/specs/**` or `docs/trusty-installer/research/02-design/**` on `origin/main`
