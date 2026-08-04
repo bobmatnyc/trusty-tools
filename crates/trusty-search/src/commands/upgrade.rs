@@ -88,7 +88,8 @@ pub async fn handle_upgrade(check_only: bool, yes: bool) -> Result<()> {
     // Delegate to the shared install + health-gate + restart-or-hint helper.
     // When the process is launchd-supervised this call may not return — it
     // calls std::process::exit(1) after a successful install + health-gate so
-    // launchd's KeepAlive::OnSuccess respawns the new binary.
+    // launchd's KeepAlive::Always respawns the new binary (#4113 — the old
+    // KeepAlive::OnSuccess respawned only on the non-zero exit this path uses).
     match upgrade_and_restart(crate_name, crate_name).await {
         Ok(Some(hint)) => {
             eprintln!("{hint}");
