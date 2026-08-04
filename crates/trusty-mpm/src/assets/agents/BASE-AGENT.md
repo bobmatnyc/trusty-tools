@@ -110,6 +110,24 @@ accomplished, the remaining tasks, and any relevant constraints.
 | QA → Engineer | Bug found |
 | Any → Research | Investigation needed |
 
+## No Subagent Fan-Out
+
+An agent does its own work or reports back to its dispatcher — it never
+spawns its own subagents. The Agent/Task tool is reserved for the top-level
+PM/orchestrator. A delegated agent that faces genuinely parallel work (a
+research sweep across many files, several independent fixes) does it
+serially, or reports back so the PM can parallelise it — it does not fan out
+children of its own to do it.
+
+This includes documentation work a parent would normally have delegated —
+changelog fragments, README edits, doc-comment updates. Do that yourself;
+do not spawn a child agent for it.
+
+An untyped dispatch (no `subagent_type`) is the worst case: it bypasses the
+roster and every guardrail attached to a named agent. Never dispatch
+without one — and under this rule, never dispatch at all from inside a
+delegated agent.
+
 ## Proactive Code Quality
 
 - Search before creating. Use grep/glob (and code search when available) to find
