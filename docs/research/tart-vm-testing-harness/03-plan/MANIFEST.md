@@ -115,9 +115,134 @@ not been completed is not complete, regardless of what its code does.
 | **P5** — Pattern (c) complete: installs, N2, oracle | `complete` | 2026-08-03 | `298a02c7`, `462f6d5c`, `2bf453bc` |
 | **P6** — Pattern (b): branch | `complete` | 2026-08-04 | `d9f09253` |
 | **P7** — Pattern (a): released | `complete` | 2026-08-04 | `4f81bb37`, `b6017459` |
-| **P8** — Hardening, docs, measurement write-back | `not-started` | — | — |
+| **P8** — Hardening, docs, measurement write-back | `complete` | 2026-08-04 | `e02954b7`, `4661266d`, + this commit |
 
-**Plan status:** Phase 1 complete, 2026-07-31; **closed out 2026-08-01** with a
+## PLAN STATUS — CLOSED OUT, 2026-08-04
+
+**All eight phases are `complete`. `vmtest-harness/` is finished. The plan is
+closed.** Nothing is `blocked` and nothing is `in-progress`.
+
+| Phase | State | What it retired | VM runs |
+|---|---|---|---|
+| **P1** Transport spike | `complete` | **The transport risk** — DOC-1 §14's headline gap | 2 |
+| **P2** Host-side skeleton | `complete` | Host-side contract risk; **no VM created by any harness path** | 0 |
+| **P3** Guest bring-up | `complete` | Guest bring-up risk | 7 |
+| **P4** Expectation table + `--check-table` | `complete` | Expectation-table drift; **found NO drift** | 0 |
+| **P5** Pattern (c) + full oracle | `complete` | Oracle risk; **first full-stack timing** | 3 |
+| **P6** Pattern (b) | `complete` | — (the only phase that found **no** contract defect) | 1 |
+| **P7** Pattern (a) | `complete` | — (**proved the D2/D3 reversal by execution**) | 2 |
+| **P8** Hardening, docs, write-back | `complete` | **Doc drift** | 1 |
+
+### The measurement table — everything the plan produced
+
+One host throughout: Apple M5 Pro, 18 physical cores, 64 GiB, macOS 26.5.2 arm64,
+tart 2.32.1. Guest: 8 vCPU / 16 GiB / 100 GiB, shared `CARGO_TARGET_DIR`,
+`SKIP_UI_BUILD=1`. **Every figure below is this machine's**, not the harness's.
+
+| # | Measurement | Value | Research baseline | Verdict |
+|---|---|---|---|---|
+| 1 | **Full-stack wall clock** | **511–919 s** (6 runs: 722/919/656 (c), 650 (b), 511 (a), 632 (c, P8 drill)) | DOC-1 §9's **4–8 min EXTRAPOLATION** | **SUPERSEDED.** The measured floor is above the old ceiling. Written back to DOC-1 §9 at source. |
+| 2 | **Install phase** | **437–614 s**, i.e. **83–86 %** of every run | — | The dominant term. **The transport is not the cost.** |
+| 3 | **Per-crate install** | 13–146 s; worst **146 s** (`trusty-search`) | 112 s (`:934-935`) | Held (1.3×). 900 s built-in budget is **6.2×**. |
+| 4 | **Registry vs source install** | registry **22 % faster** in aggregate; `tga` **1.9×** | 131 s @ 4 vCPU for `tga` | 32 s @ 8 vCPU. |
+| 5 | **Boot → ready** | **12–34 s** (11 runs) | 34.4 s first / **18.0 s subsequent** (`:378`, `:483`) | **`:483` DID NOT REPRODUCE.** Every boot looks like a first boot. 150 s max = 4.4× slowest. |
+| 6 | **Provisioning** | **16–137 s** (13 runs) — an **8.6× spread on one host** | **30.079 s** (`:857-858`) | **Two runs exceed the 3× bound**, not one (97 s, 137 s). 300 s budget is **2.19×** the slowest, not the "10×" DOC-2 §10.2 claimed. |
+| 7 | **Host→guest tar stream** | **96.8–99.2 MB / 5,337–5,574 files in 4 s** (≈24 MB/s), 7 runs | never measured | **The gap is closed.** No build-time penalty vs a guest clone. |
+| 8 | **Wire vs content bytes** | wire **96,788,480 B**; content **81,762,761 B**; **+18.4 % tar framing** | DOC-1 §6.1's "~81 MiB" | §6.1 was a **content** figure. Both now recorded, labelled. |
+| 9 | **Guest `git clone`** | **4 s** (5,540 files) | **50.131 s** (`:942`) | **12.5× overstatement.** P6-T4's predicted ~50 s (b)−(c) delta is really **~0 s**. |
+| 10 | **`tart clone`** | not re-measured | 0.31 s (`:875`) | Untouched; 60 s budget ~190×. The unmeasured first-use **pull** path has still never been exercised. |
+| 11 | **`vm_request_stop` → `stopped`** | **<1 s** — below the harness's own poll floor | never measured | 120 s max stays a **judgment call**, deliberately loose. |
+| 12 | **Daemon time-to-ready** | **never measured**; budget never hit in 6 runs | never measured | Still a **judgment call**. Bound only as *(0, 60] s*. |
+| 13 | **Expectation table** | **28 rows == 28 `[[bin]]` targets**; 13 in scope, 8 crate dirs, 8 packages | DOC-2 §9.3's seed | **NO DRIFT** at P4-T3 and still none at P8. |
+| 14 | **K5 — `tga` toolchain override** | **rustc 1.97.1** vs workspace **1.91.1**, under (b) and (c) | K5 | Reproduces under **(b)/(c)**; **does NOT reproduce under (a)** — a published `tga` builds in cargo's temp unpack directory, where no crate-local `rust-toolchain.toml` applies. **Pattern-scoped, not drift.** |
+| 15 | **RC-2 — `tctl install` cargo-absent exit** | **3**, stdout 0 B, stderr 204 B with **no cargo token** | RC-2, unpinned | **3 is the consent-gate code, not the cargo guard's.** Not pinned. |
+| 16 | **Base-image digest** | `sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c` | truncated only (`:652`) | **CLOSED**, committed as `base-image.pin`. |
+
+### Open items that survive into normal use
+
+**These are not leftovers from the build; they are the standing limits of what a
+green run means.** Anyone using this harness needs all six.
+
+1. **RC-1 — no unified daemon health envelope. OPEN, and not this plan's to close.**
+   Four daemons, four different `/health` body shapes. The oracle asserts
+   **liveness only**: HTTP 200 + parseable JSON + a `.status` that is not
+   `down`/`error`/`unhealthy`. It says `LIVENESS ONLY — see RC-1` in its own PASS
+   line. **A green run does not mean the daemons work.**
+2. **RC-2 — the `tctl install` cargo-absent exit code is still unpinned. OPEN on
+   the product side.** The **harness** half is closed as *unreachable-by-design*:
+   the non-interactive consent gate returns **3** before the guard at
+   `install.rs:826`, and `--yes` would install released binaries over the
+   source-built ones under test. **N2 therefore reports `BLOCKED` on every run and
+   is not a pass.** Pinning it needs a route that is not `tctl install` on a
+   networked guest — a `crates/trusty-installer` unit test, or an offline-network
+   scenario. **Do not re-run the same probe.**
+3. **`trusty-analyze` is a daemon the oracle does NOT probe.** DOC-2 §1.3 does not
+   enumerate it, so the harness has no described health shape for it and skips it,
+   logging the gap by name on every run since Phase 3.
+   `verify_daemon_liveness PASS: 4 in-scope daemon(s) live` means **four of five**.
+   Its binaries are still asserted present.
+4. **Daemon time-to-ready is wholly unmeasured.** `health_timeout` 60 s is labelled
+   `judgment call` in `vmtest.defaults`. Closing it needs instrumentation.
+5. **`install.sh` is out of scope (D1) and `--dir` mounts were never measured.**
+   The harness makes **no claim whatsoever** about the `install.sh` user path, and
+   any future proposal to mount a directory must measure first.
+6. **One host, one user, one terminal.** Every timing figure here is from one
+   machine. Every TCC observation is conditional on having been run **from iTerm2,
+   by one user**: `kTCCServiceAudioCapture` fires on VM start **even with
+   `--no-graphics`** (a Virtualization.framework property), and a LaunchAgent, cron
+   job or different terminal is a **different responsible process and may prompt**.
+   **The harness cannot promise unattended operation in a launch context that has
+   not previously been granted.**
+
+### What the harness proves — and what it does not
+
+**It proves**, for a given pattern, on a machine carrying none of your state:
+
+- the stack **builds** from that source — all eight in-scope crates;
+- **all thirteen in-scope binaries land**, and the count is derived from the table
+  rather than hardcoded;
+- **no multi-binary package installed a partial set** — the Single-Install
+  Convention gate, once per multi-binary package, four today;
+- the installed tool's **versions are internally consistent**, and under (b)/(c)
+  agree with the source tree it was built from;
+- **no launchd plist was written** — asserted directly under all three patterns, so
+  a `tctl install` leaking into a source-install scenario fails **closed, by name**;
+- the four enumerated daemons **answer `/health`**;
+- pattern (c) delivers **uncommitted work** and still excludes gitignored paths —
+  proved by content, not by presence;
+- **the host is clean afterwards**: no `vmtest-*` VM survives, `~/.tart` is
+  unchanged at its baseline, and the base image is not modified, re-pulled or
+  re-tagged.
+
+**It does not prove:**
+
+- that the daemons **work** — see RC-1, item 1 above;
+- that `tctl install` **guides a user helpfully when cargo is absent** — N2 is
+  BLOCKED, item 2;
+- anything at all about **`install.sh`** or **prebuilt tarballs** — out of scope by
+  decision;
+- anything about **`trusty-analyze`'s health**, item 3;
+- that these **timings generalise** to another host, item 6;
+- that a run will be **unattended** in a launch context that has not been granted
+  TCC, item 6.
+
+### The thing this plan actually demonstrated
+
+**Six of the seven implementation phases found a wrong contract, and every one was
+found by executing something rather than by reading it.** N1 asserted something
+weaker than its prose claimed. `--keep` left a VM that `clean` could never remove.
+§1.1's `stack doctor` predicate was unsatisfiable for a source install. §6.2's N2
+probe could not reach the behaviour it described. §1.1a's pattern-(a) inheritance
+was a true premise with a false conclusion. §F-7's transcription of
+`tctl port --json-port` had the wrong JSON shape. Three research baselines — boot
+time, `git clone`, and provisioning's bound — did not reproduce. **Not one of these
+was visible to a careful reader; all of them were visible on the first run.** That
+is the case for the harness, and it is the case for having built it in phases whose
+checkpoints are runs.
+
+---
+
+**Plan status (original running log, retained):** Phase 1 complete, 2026-07-31; **closed out 2026-08-01** with a
 second observed result (the dirty-worktree validation) and two plan corrections.
 **Phase 2 complete, 2026-08-01** — the host-side contract risk is retired: driver,
 configuration, run registry, `lib/vm.sh`, preflight, `clean` and `run --dry-run`
@@ -3712,7 +3837,7 @@ detected before. See Phase 7 Deviations items 1 and 2.
 
 ## Phase 8 — Hardening, documentation, and measurement write-back
 
-- **State:** `not-started`
+- **State:** `complete`
 - **Pass condition:** all four hold — (i) the `~/.zshenv` deletion drill passes:
   every assertion still passes with the file removed mid-run; (ii)
   `vmtest.defaults` timeouts are grounded in Phase 5–7 measurements, each with a
@@ -3720,13 +3845,331 @@ detected before. See Phase 7 Deviations items 1 and 2.
   reader who has never seen the doc set can run `vmtest run local` from it alone;
   (iv) `git grep -n 'publish = false' docs/research/tart-vm-testing-harness/`
   returns **no** claim that `trusty-mpm` is unpublished.
-- **Observed result:** — not run
-- **Files delivered:** — none
-- **Measurements:** — none
-- **Deviations from plan:** None. *(No entry expected for §F-8: the
-  `02-design/README.md` correction was made at source on 2026-07-31, and P8-T5 is
-  now a verification check that should deliver no diff.)*
-- **Tasks:** — none complete *(P8-T1 … P8-T6)*
+- **Observed result:** **MET, all four clauses.** (run 2026-08-04 UTC, host: same
+  Apple M5 Pro / 64 GiB / macOS 26.5.2 arm64 / tart 2.32.1 as every prior phase.)
+
+  **Clause (i) — the `~/.zshenv` deletion drill. PASSED, exit 0 in 632 s.**
+
+  P8-T1 specifies **"Files: none (a deliberate one-off run)"**, so **no harness
+  file was modified to run it**. `vmtest run local` ran **unmodified**, and a
+  separate host process watched the run log for the last provisioning line and
+  deleted the guest's `~/.zshenv` the instant it appeared — which is precisely
+  the window the task names, *after provisioning and before the install steps*.
+  The watcher is not part of the harness and is not committed.
+
+  The deletion, verbatim, with the run's own log line at that instant:
+
+  ```
+  [12:50:24Z] MARKER 'provisioning OK' seen -> deleting /Users/admin/.zshenv NOW
+  [12:50:25Z] before: -rw-r--r--  1 admin  staff  132 Aug  4 12:50 /Users/admin/.zshenv
+  [12:50:25Z] rm issued, exit 0
+  [12:50:26Z] after:  ls: /Users/admin/.zshenv: No such file or directory
+  ZSHENV_ABSENT_CONFIRMED
+  [12:50:26Z] last run-log line at deletion: vmtest: host file set (git ls-files -co --exclude-standard | wc -l): 5574
+  [12:50:37Z] recheck 1: ABSENT
+  [12:50:48Z] recheck 2: ABSENT
+  [12:50:59Z] recheck 3: ABSENT
+  [13:00:19Z] vmtest exited 0
+  ```
+
+  **The window is proved, not assumed.** The last run-log line at the moment of
+  deletion is `host file set … 5574`, which the driver emits **inside
+  `source_deliver_local`** — after `provisioning OK` and **before** the first
+  `install_from_path`. The first `cargo install` line appears after it. So every
+  install step and every assertion in this run executed with the file **absent**,
+  and three rechecks over the following 30 s confirm nothing recreated it.
+
+  **What still passed with the file gone** — the assertion lines, verbatim:
+
+  ```
+  vmtest: N1 PASS (base PATH: cargo=1 rustc=1 rustup=1; and no toolchain reachable on disk, through mise, or through a login/interactive shell)
+  vmtest: streamed 99225600 bytes in 4s
+  vmtest: guest file set (find ! -type d):     5574
+  vmtest: file counts match: guest == host == 5574
+  vmtest: MEASURE install_s trusty-search 92
+  vmtest: MEASURE install_s trusty-memory 78
+  vmtest: MEASURE install_s trusty-analyze 57
+  vmtest: MEASURE install_s trusty-code 47
+  vmtest: MEASURE install_s trusty-installer 21
+  vmtest: MEASURE install_s trusty-git-analytics 59
+  vmtest: MEASURE install_s trusty-mpm 129
+  vmtest: MEASURE install_s trusty-review 58
+  vmtest: *** N2 BLOCKED (RC-2 / DOC-2 §6.2) — NOT A PASS. ***
+  vmtest: verify_binaries PASS: 13/13 in-scope binaries present, 0 correctly absent (N is derived from the count of in_scope=yes rows, not hardcoded)
+  vmtest: verify_single_install PASS: trusty-search — all 2 binaries present from ONE package-granular install (trusty-search trusty-embedderd)
+  vmtest: verify_single_install PASS: trusty-memory — all 3 binaries present from ONE package-granular install (trusty-memory trusty-bm25-daemon trusty-memory-mcp-bridge)
+  vmtest: verify_single_install PASS: trusty-installer — all 2 binaries present from ONE package-granular install (trusty-installer tctl)
+  vmtest: verify_single_install PASS: trusty-mpm — all 2 binaries present from ONE package-granular install (tm trusty-mpm)
+  vmtest: verify_stack_doctor PASS: all 5 in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern c, AND every launchd member among them is plist_installed=false — asserted directly since 2026-08-04, not inferred (verdict 'degraded' logged but not asserted)
+  vmtest: verify_versions PASS: tool_version='0.5.0', stack_version='0.0.0-scaffold' (stub value, field asserted only), contract_floor <= contract_target
+  vmtest: verify_daemon_liveness PASS: 4 in-scope daemon(s) live (HTTP 200 + parseable JSON + acceptable .status). LIVENESS ONLY — see RC-1.
+  vmtest: run complete: pattern 'local' reached the end of its scenario. Teardown follows.
+  vmtest: MEASURE run_wall_clock_s 632 (exit 0; excludes teardown) — DOC-1 §9's replacement measurement
+  vmtest: teardown: deleted vmtest-p8zshenv
+  ```
+
+  **This is the single highest-value hardening check in the plan and it is the
+  one that could most easily have been faked.** Every guest command self-prefixes
+  its `PATH` in `vm_exec`, so nothing read the file — and now that is observed
+  rather than argued. The failure it guards against (a missing dotfile presenting
+  as "cargo is not installed", exit 127) is documented as having broken a golden
+  image once.
+
+  **Clause (ii) — every timeout key carries a citation or `judgment call`.**
+  Machine-checked by reading each key's preceding comment block:
+
+  ```
+  $ awk -F'\t' '/^#/{b=b"\n"$0;next} /^$/{b="";next} NF>=2{
+      c=(b ~ /vm-install-probe-findings\.md:|logs\/|MANIFEST/)?"CITATION":"-";
+      j=(b ~ /judgment call|JUDGMENT CALL/)?"judgment call":"-";
+      printf "%-26s %-10s %s\n",$1,c,j; b=""}' vmtest-harness/vmtest.defaults
+
+  boot_ready_timeout         CITATION   -
+  boot_ready_interval        CITATION   -
+  stopped_timeout            CITATION   judgment call
+  stopped_interval           -          judgment call
+  provision_timeout          CITATION   -
+  install_timeout            CITATION   -
+  health_timeout             CITATION   judgment call
+  health_interval            -          judgment call
+  ```
+
+  All eight polling/watchdog keys satisfy the acceptance. **No value changed** and
+  **no maximum was invented** — see Measurements 2. The file still parses:
+
+  ```
+  $ vmtest-harness/vmtest run local --runid p8cfg --dry-run ; echo "exit=$?"
+  ...
+    boot_ready_timeout 150 (default)
+    boot_ready_interval 2 (default)
+    stopped_timeout 120 (default)
+    stopped_interval 1 (default)
+    provision_timeout 300 (default)
+    install_timeout 1800 (default)
+    health_timeout 60 (default)
+    health_interval 1 (default)
+  exit=0
+  ```
+
+  **Clause (iii) — `vmtest-harness/README.md` exists and is standalone.**
+  Created. It documents the three subcommands, the full exit-code table, the three
+  config tiers, §3.4's six-step pin-roll procedure (including step 4's *all three
+  scenarios green* rule and step 5's preinstalled-tool re-verification), the two
+  rules a contributor is most likely to break, the microphone TCC caveat, and —
+  in its own section — **what a green run does not prove**. It was followed
+  literally rather than from memory to confirm the quick start is complete on a
+  host that has `tart`, `jq`, `git` and `cargo`.
+
+  **Clause (iv) — no surviving `publish = false` claim about `trusty-mpm`.**
+  Raw output, unedited:
+
+  ```
+  $ git grep -n 'publish = false' docs/research/tart-vm-testing-harness/
+  01-research/collated-recommendation.md:28:impossible (`publish = false`)~~ **[FALSE — see the correction below]**;
+  01-research/collated-recommendation.md:32:> **CORRECTION 2026-08-04 (plan P8-T5). The `publish = false` claim about
+  01-research/fact-check-reconciliation.md:63:   `cargo install tga`**; ~~**trusty-mpm → `tm`/`trusty-mpm` but `publish = false`, NOT
+  01-research/vm-install-testing-trackB-opus.md:243:Never-published (`publish = false`), so must NOT appear after any install:
+  02-design/01-vm-install-harness.md:52:The superseded text asserted that `trusty-mpm` "carries `publish = false` and is
+  02-design/01-vm-install-harness.md:63:record that the Tauri GUI is deliberately kept in the separate, `publish = false`
+  02-design/01-vm-install-harness.md:88:> `publish = false` for a crate that has no `publish` key. Everything downstream of
+  02-design/01-vm-install-harness.md:111:"— (`publish = false`)" / "**no** — D2"; that is corrected per the D2 reversal
+  02-design/02-harness-contracts.md:1607:The original DOC-1 D2 stated that `trusty-mpm` "carries `publish = false` and is
+  02-design/02-harness-contracts.md:1616:explain that the Tauri GUI is kept as a separate `publish = false` crate
+  03-plan/01-implementation-plan.md:1858:> set can run `vmtest run local` from it alone; (iv) `git grep -n 'publish = false'
+  03-plan/01-implementation-plan.md:1957:  pattern (a) only (`publish = false`)"* — the superseded premise, surviving in the
+  03-plan/01-implementation-plan.md:1965:- **Acceptance:** `git grep -n 'publish = false'
+  03-plan/01-implementation-plan.md:2242:  pattern (a) only (`publish = false`)."*
+  03-plan/MANIFEST.md:3721:  (iv) `git grep -n 'publish = false' docs/research/tart-vm-testing-harness/`
+  ```
+
+  The acceptance is *"returns no line **claiming** `trusty-mpm` is unpublished"*,
+  not *"returns nothing"* — the string is unavoidable in a doc set that records
+  the reversal. **Every line above adjudicated:**
+
+  | Lines | What they are | Live claim? |
+  |---|---|---|
+  | `collated-recommendation.md:28,32` | **WAS a live false claim.** Struck at source today with a dated correction that carries the crates.io reading and Phase 7's run. | **no** |
+  | `fact-check-reconciliation.md:63` | **WAS a live false claim.** Struck at source today, correction appended to the item. | **no** |
+  | `vm-install-testing-trackB-opus.md:243` | A list of genuinely never-published crates. **`trusty-mpm` is not in it**; `trusty-mpm-gui` is, correctly. | **no** |
+  | `01-vm-install-harness.md:52,88,111`, `02-harness-contracts.md:1607` | The D2 reversal's own record — each explicitly labels the claim as **superseded/false**. | **no** |
+  | `01-vm-install-harness.md:63`, `02-harness-contracts.md:1616` | About **`trusty-mpm-gui`**, the Tauri GUI crate, which *is* `publish = false`. **True.** | **no** |
+  | `01-implementation-plan.md:1858,1957,1965,2242`, `MANIFEST.md:3721` | The acceptance check quoting itself, and P8-T5's record of the text it replaced. | **no** |
+
+  **Two live false claims existed at the start of Phase 8, both in `01-research/`,
+  and neither had been caught by the four prior audits of this string.** They are
+  now struck rather than deleted, per this file's record-reversals rule.
+
+  **Host cleanliness — raw `tart list`, unedited, before and after.**
+
+  ```
+  $ tart list                                   # BEFORE, 2026-08-04
+  Source Name                                                                                                        Disk Size Accessed     State
+  local  tahoe-base                                                                                                  50   33   10 hours ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago  stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago  stopped
+
+  $ tart list                                   # AFTER
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   12 minutes ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+
+  $ tart list | grep -c 'vmtest-'
+  0
+  $ du -sh ~/.tart
+   62G	/Users/mac/.tart
+  ```
+
+  **No `vmtest-*` VM survives.** The same three pre-existing rows, same `Disk`,
+  `Size` and `State`; only `tahoe-base`'s `Accessed` moved, which is what an APFS
+  CoW clone does to its source. `~/.tart` is **62G**, the recorded baseline, and
+  `tahoe-base` is still `Disk 50 / Size 33` — the base image was not modified,
+  re-pulled or re-tagged.
+
+  **No `crates/` source was changed**, on this phase as on every other:
+
+  ```
+  $ git diff --stat origin/main..HEAD -- crates/
+  (no output)
+  ```
+- **Files delivered:**
+  - create `vmtest-harness/README.md`
+  - modify `vmtest-harness/vmtest.defaults` — P8-T2's grounding comments (comments
+    only; **no value changed**)
+  - modify `docs/research/tart-vm-testing-harness/02-design/01-vm-install-harness.md`
+    — §9 amendment (full-stack, boot, git-clone rows), §14 transport gap CLOSED
+  - modify `docs/research/tart-vm-testing-harness/02-design/02-harness-contracts.md`
+    — §10.2 re-grounding amendment; open items (digest CLOSED, introspection
+    CLOSED, full-stack watchdog CLOSED, RC-1 and daemon-time-to-ready explicitly
+    LEFT OPEN, RC-2 status clarified)
+  - modify `docs/research/tart-vm-testing-harness/02-design/README.md` — P8-T5:
+    the "not implemented" status, and the two stale published versions
+  - modify `docs/research/tart-vm-testing-harness/01-research/collated-recommendation.md`
+    — the struck `publish = false` claim
+  - modify `docs/research/tart-vm-testing-harness/01-research/fact-check-reconciliation.md`
+    — the struck `publish = false` claim
+  - modify `docs/research/tart-vm-testing-harness/03-plan/01-implementation-plan.md`
+    — §A.1b's worked example rewritten; §F reconciliation
+  - modify `docs/research/tart-vm-testing-harness/03-plan/MANIFEST.md`
+- **Measurements:**
+
+  **1. The Phase 8 drill run, beside the five that preceded it.** Pattern (c), with
+  `~/.zshenv` deleted mid-run.
+
+  | | P5 run A | P5 run B | P5 run C | P6 (b) | P7 (a) | **P8 drill (c)** |
+  |---|---|---|---|---|---|---|
+  | boot → ready | 12 s | 34 s | 17 s | 17 s | 17 s | **18 s** |
+  | provisioning | 64 s | 137 s | 17 s | 19 s | 16 s | **18 s** |
+  | source acquisition | 4 s | 4 s | 4 s | 4 s | n/a | **4 s** (99,225,600 B / 5,574 files) |
+  | install phase (8 crates) | 588 s | 614 s | 562 s | 557 s | 437 s | **541 s** |
+  | **TOTAL wall clock** | 722 s | 919 s | 656 s | 650 s | **511 s** | **632 s** |
+
+  Six full-stack runs, **511–919 s**. The drill is the **second fastest pattern-(c)
+  run** and it ran without the guest rc file — **removing `~/.zshenv` cost nothing,
+  which is the point**.
+
+  **2. The timeout re-grounding — which research baselines reproduced, and which
+  did not.** This is P8-T2's real output. Every budget is **unchanged**; what
+  changed is the figure each is now sized against.
+
+  | Budget | Research baseline | Observed | Multiple, restated | Verdict |
+  |---|---|---|---|---|
+  | boot-ready **150 s** | 34.4 s first / **18.0 s subsequent** (`:378`, `:483`) | **12–34 s** across 11 runs | **4.4× the slowest observed (34 s)** | **`:483` DID NOT REPRODUCE** — every boot looks like a first boot. Already re-grounded at source 2026-08-02; **verified still accurate**, and P8-T2 no longer claims it outstanding. |
+  | provisioning **300 s** | **30.079 s** (`:857-858`) | **16, 17, 18, 19, 24, 35, 38, 40, 52, 64, 78, 97, 137 s** (13 runs) | ~~10×~~ **2.19× the slowest observed (137 s)** | **The doc's multiple was wrong by 4.6×.** Budget holds, with thinner margin than claimed. **The 3× bound does NOT hold for one outlier — it fails for TWO**, 97 s and 137 s. |
+  | single-crate install **900 s** | 112 s (`:934-935`) | **146 s** worst of 24+ installs | ~~~8×~~ **6.2×** | Baseline held (1.3×). Unchanged. |
+  | full-stack **1800 s** | DOC-1 §9's 4–8 min EXTRAPOLATION | scenario **610–748 s**; totals **511–919 s** | **2.4× the slowest scenario** | Extrapolation **superseded**. Tightened 2700→1800 at P5-T8; re-confirmed here. |
+  | guest `git clone` **300 s** | **50.131 s** (`:942`) | **4 s** | ~~~6×~~ **~75×** | **12.5× overstatement.** Budget unchanged — one reading, one host, network-bound. |
+  | `tart clone` **60 s** | 0.31 s (`:875`) | not re-measured | ~190× | Untouched. §10.3's residual (an unmeasured first-use *pull*) is **NOT closed** — every run has cloned a local `tahoe-base`. |
+  | stop → stopped **120 s** | never measured | **<1 s**, below the harness's own poll floor | — | Still a **judgment call**; deliberately loose, only ever spent on a stuck VM. |
+  | daemon health **60 s** | never measured | **never hit** across 6 runs | — | Still **wholly unmeasured**. Labelled `judgment call`. |
+
+  **3. Provisioning's spread is the finding, not its bound.** Thirteen observations
+  on **one host** span **16–137 s, a factor of 8.6**. The step is network-bound —
+  the rust toolchain download alone is 20.8 s (`:854`) — and the two slowest runs
+  are the two that exceeded plan P3-T2's 3× note. **A single mean would have hidden
+  this**; the useful statement is that the 300 s budget clears the *slowest thing
+  ever seen* by 2.19×, and that a slower link could plausibly reach it without the
+  step being hung. It is the one budget in the table with a realistic failure path.
+
+  **4. K5 under pattern (c), and why it is pattern-scoped.** Reproduced in the
+  drill: `rustc(/Users/admin/vmtest-src/crates/trusty-git-analytics): rustc 1.97.1
+  (8bab26f4f 2026-07-14)` against the workspace's **1.91.1**, exactly as under (b)
+  and (c) previously. **It does NOT reproduce under pattern (a), and that is
+  expected rather than drift**: `crates/trusty-git-analytics/rust-toolchain.toml`
+  governs builds run *inside that directory*, and a published `tga` is built from
+  **cargo's own temporary unpack directory**, where no crate-local override exists.
+  Every registry install in Phase 7 resolved 1.91.1. **Recorded as a property of
+  the pattern, not as a discrepancy between the patterns.**
+- **Deviations from plan:**
+
+  1. **P8-T1 was run WITHOUT modifying any harness file, using an external
+     watcher.** The task says *"Files: none"*, and the obvious implementation — a
+     temporary `rm` inserted into `install-local.sh` or `provision.sh` — would have
+     meant editing a harness file and reverting it, with a real chance of the edit
+     surviving into a commit. Instead `vmtest run local` ran unmodified and a
+     separate host process polled the run log for the last provisioning line and
+     issued the `rm` through the guest exec channel. **The window is proved from
+     the run's own log** (see Observed result) rather than asserted. The watcher is
+     not committed and is not part of the harness.
+
+  2. **P8-T2 found that DOC-2 §10.2 still carried `2700 s` for `install_timeout`
+     two days after P5-T8 tightened the shipped config to `1800 s`.** A
+     doc-vs-shipped-configuration drift, in the direction the doc set is least
+     equipped to notice: `vmtest.defaults` is the thing that runs, and §10.2 is the
+     thing that is read. Corrected at source with the drift itself recorded, rather
+     than quietly re-typed.
+
+  3. **P8-T2's own framing was wrong about provisioning, and the correction is
+     material.** The task carried forward a list of seven provisioning observations
+     and the statement that *"the 3× bound holds for all but the single 97 s
+     outlier"*. Re-reading every phase's logs found **thirteen** observations, and
+     **two** exceed the bound: 97 s (Phase 1 run 2) and **137 s (Phase 5 run B)**.
+     The 137 s reading was recorded in Phase 5's own measurement table and had not
+     been carried into the timeout discussion. **The bound is exceeded twice, not
+     once**, and §10.2's "10×" is really 2.19×.
+
+  4. **P8-T5 was specified as a verification check expected to deliver NO diff. It
+     delivered one.** §F-8's D2 correction was intact — that part verified clean.
+     But the same file carried three further stale claims nobody had audited:
+     **(a)** the status line and the body both said **"Nothing here is implemented.
+     `vmtest-harness/` does not exist"**, which is the doc set's most visible
+     falsehood after eight phases of building it; **(b)** `trusty-mpm` at
+     **v1.0.2** — now **1.3.4**; **(c)** `trusty-review` at **v0.10.1** — now
+     **0.11.0**. All three corrected with dated amendments, and the version pair is
+     now labelled *illustrative, not a fixture*, because both moved within four
+     days of being written.
+
+  5. **The clause-(iv) grep found TWO live false claims, both in `01-research/`.**
+     P8-T5's acceptance had been read as scoped to `02-design/README.md`; it is
+     scoped to the **whole directory**. `collated-recommendation.md:28` said
+     *"`cargo install trusty-mpm` impossible (`publish = false`)"* and
+     `fact-check-reconciliation.md:63` said *"`publish = false`, NOT installable
+     from crates.io"*. Both were **false when written** — the manifest has no
+     `publish` key at all — and Phase 7 had already disproved them **by executing
+     `cargo install trusty-mpm --locked` in a VM**. Struck at source with dated
+     corrections; the original text is retained.
+
+  6. **§A.1b's worked example was stale and is rewritten** — see plan §A.1b. The
+     `trusty-review` 0.10.1-vs-0.11.0 pair has converged to 0.11.0/0.11.0 and
+     illustrated nothing. Rewritten on **`trusty-installer` published 0.4.10 vs
+     working tree 0.5.0**, the pair Phase 7's run actually skipped, with an explicit
+     note that version pairs drift.
+
+  7. **§F's count was stale and is reconciled** — see plan §F. *"Four resolved, six
+     open"* had counted nothing since 2026-07-31 and only ever counted the four
+     resolved **by amendment**. All ten are settled; six were resolved **by
+     execution**, which is how a decision rule is meant to be resolved. §F-7 is
+     recorded as *resolved, and containing its own factual error*.
+
+  8. **The README states three things the plan did not list, because a reader of
+     the README alone would otherwise be misled by a green run.** N2's BLOCKED
+     status and RC-2's open product half; RC-1 meaning liveness-only; and
+     **`trusty-analyze` being a daemon the oracle does NOT probe** (§1.3 does not
+     enumerate it, so `verify_daemon_liveness PASS: 4 in-scope daemon(s) live`
+     means **four of five**). The plan's P8-T3 contract list does not mention the
+     last one; it has been logged on every run since Phase 3 and belongs in front
+     of anyone who reads a PASS line.
+- **Tasks:** P8-T1 … P8-T6 complete
 
 ---
 
@@ -3737,14 +4180,27 @@ A future agent picking this up, in order:
 1. Read [DOC-1](../02-design/01-vm-install-harness.md) and
    [DOC-2](../02-design/02-harness-contracts.md) in full. **Do not re-litigate a
    settled decision**; note in particular that D2/D3 were **reversed on
-   2026-07-31** — `trusty-mpm` is published at v1.0.2, pattern (a) covers all
+   2026-07-31** — `trusty-mpm` is published (v1.0.2 then; **v1.3.4** as of
+   2026-08-04 — *treat every published version in this doc set as illustrative, not
+   as a fixture*), pattern (a) covers all
    **seven** crates, and `tm` is asserted **present**, not absent. Note that **D3
    was widened again the same day** — `trusty-review` was added by owner decision,
    so the scope is **eight** crates and **thirteen** in-scope binaries (plan §A.1b).
    A doc that says "seven" is recording the state between the two amendments.
 2. Read [the plan](./01-implementation-plan.md), including **§F** — the flagged
-   under-specifications and their decision rules. **Ten were flagged; four (§F-2,
-   §F-3, §F-8, §F-9) are resolved and six remain open.** If you hit a decision the plan
+   under-specifications and their decision rules.
+   > **2026-08-04 (P8-T6) — §F IS FULLY RECONCILED. All ten are settled and none is
+   > open.** Four (§F-2, §F-3, §F-8, §F-9) were resolved **at source** by amending
+   > the documents; the other six (§F-1, §F-4, §F-5, §F-6, §F-7, §F-10) were
+   > resolved **by execution** across Phases 1–7, which is how a decision rule is
+   > meant to be resolved. The per-item audit, with a pointer to where each was
+   > settled, is in **plan §F's reconciliation block**. **§F-7 is recorded as
+   > resolved AND as having contained its own factual error** — its transcription
+   > of `tctl port <m> --json-port` had the wrong JSON shape, and only a run found
+   > that. The two superseded counts below are retained, not deleted.
+
+   **~~Ten were flagged; four (§F-2,
+   §F-3, §F-8, §F-9) are resolved and six remain open.~~** If you hit a decision the plan
    and DOC-2 do not settle and §F does not cover, **stop and record it here**
    rather than inventing a contract.
    > **2026-08-01 — §F-1 and §F-5 are now DECIDED, in the implementation rather
@@ -3753,8 +4209,9 @@ A future agent picking this up, in order:
    > source" the way §F-2 / §F-8 / §F-9 were — the plan's §F text still reads as
    > it did — so do not re-decide them from §F alone; the record of what was
    > chosen, and of why the alternative §F-5 explicitly permits was rejected,
-   > is in this file. **Four of the six remain undecided: §F-4, §F-6, §F-7,
-   > §F-10.**
+   > is in this file. **~~Four of the six remain undecided: §F-4, §F-6, §F-7,
+   > §F-10.~~** *(Superseded 2026-08-04 — all four were decided in Phases 3–5, and
+   > all ten §F items are now settled; see the reconciliation note above.)*
 3. Read this file's summary table. Start at the first phase that is not `complete`.
    If any phase is `blocked`, resolve that first — the plan does not route around a
    blocked phase.

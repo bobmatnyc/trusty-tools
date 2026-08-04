@@ -60,11 +60,22 @@ research tracks A and B.
    `trusty-gworkspace-mcp`; trusty-sld-lint → `sld-lint`; trusty-publish-guard →
    `publish-guard`; trusty-console → `trusty-console` (standalone `[[bin]]`,
    `Cargo.toml:33-35`); **trusty-git-analytics → package name is literally `tga`, so
-   `cargo install tga`**; **trusty-mpm → `tm`/`trusty-mpm` but `publish = false`, NOT
-   installable from crates.io**. `docs/reference/release-workflow.md:450-460` is
+   `cargo install tga`**; ~~**trusty-mpm → `tm`/`trusty-mpm` but `publish = false`, NOT
+   installable from crates.io**~~ **[FALSE — struck 2026-08-04, plan P8-T5; see the
+   correction at the end of this item]**. `docs/reference/release-workflow.md:450-460` is
    **stale** — claims trusty-console is bundled with no standalone binary;
    `release.yml:356-368,1690` shows it released as its own artifact (de-bundled by
    #1318).
+
+   > **CORRECTION 2026-08-04 (plan P8-T5) — the `trusty-mpm` half of this item is
+   > FALSE.** Struck above, not deleted: this file is the record of what the
+   > fact-check concluded, and the reversal is part of that record.
+   > `crates/trusty-mpm/Cargo.toml` carries **no `publish` key**, so cargo defaults
+   > to `publish = true`; `cargo search trusty-mpm` returns **1.3.4** as of
+   > 2026-08-04. Phase 7 of the implementation plan installed it from crates.io in a
+   > clean VM with `cargo install trusty-mpm --locked` and landed `tm` and
+   > `trusty-mpm` — the outcome this line called impossible. DOC-1 D2 was reversed
+   > on 2026-07-31; every other claim in this item is unaffected and stands.
 
 7. **Repo is PUBLIC** — `{"nameWithOwner":"bobmatnyc/trusty-tools","visibility":"PUBLIC"}`.
    No GH token needed for read-only branch/local patterns.

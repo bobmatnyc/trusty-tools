@@ -830,10 +830,65 @@ meaningful claim rather than a file-existence check.
 | Provisioning (`mise` + `rust@1.91` + `uv` + `gh`) | **30s** | finding K2 |
 | CoW clone (`tart clone`) | **0.31s** | APFS copy-on-write |
 | First boot to `tart exec` responding | **~34s** | |
-| Subsequent boots | **~18s** | |
-| **Full stack** | **~4–8 min** | **EXTRAPOLATION, not a measurement** — see note |
+| Subsequent boots | ~~**~18s**~~ **12–34 s, indistinguishable from a first boot** | *(amended 2026-08-04, P8-T4 — see below)* |
+| Guest-side `git clone` (pattern b) | ~~**50.1s**~~ **4 s** | *(amended 2026-08-04, P8-T4 — see below)* |
+| **Full stack** | ~~**~4–8 min**~~ **511–919 s (8.5–15.3 min), 5 measured runs** | *(amended 2026-08-04, P8-T4 — the extrapolation is SUPERSEDED; see below)* |
 
-**Full-stack figure — read this before quoting it.** The 4–8 minute range is an
+> **AMENDMENT 2026-08-04 (plan P8-T4) — the full-stack row is now a measurement,
+> and it is recorded HERE, at source, not only in the MANIFEST.**
+>
+> **What changed:** the `Full stack` row no longer says `~4–8 min` and no longer
+> says `EXTRAPOLATION`. **Why:** DOC-1 §9 itself asked for this — *"the first
+> pattern-(c) full-stack run should be recorded as the replacement measurement"*
+> — and five such runs now exist across all three patterns. The extrapolation is
+> **superseded, not refuted**: it was a low-confidence planning estimate that did
+> its job and has been replaced by the thing it was standing in for.
+>
+> | Pattern | Runs | Total wall clock | Source |
+> |---|---|---|---|
+> | (c) local | 3 | **722 s / 919 s / 656 s** | MANIFEST Phase 5, Measurement 1 |
+> | (b) branch | 1 | **650 s** | MANIFEST Phase 6, Measurement 1 |
+> | (a) released | 1 | **511 s** | MANIFEST Phase 7, Measurement 1 |
+>
+> **Range 511–919 s (8.5–15.3 min); the measured floor is above the old 8-minute
+> ceiling.** All five: 8 crates, 13 binaries, 8 vCPU / 16 GiB, shared
+> `CARGO_TARGET_DIR`, `SKIP_UI_BUILD=1`, one host. Pattern (a) is fastest because
+> it builds published sources with published lockfiles and touches no repository;
+> (b) and (c) are **indistinguishable** (650 s vs 656 s, inside the ±17 % host
+> variance the three (c) runs measured).
+>
+> **The install phase is 83–86 % of every run** (562–614 s over 8 crates). Boot
+> and provisioning together never exceeded 171 s. **The transport is not the
+> cost** — which is the single most useful thing these runs say, because two of
+> §9's caveats below are about transport and neither turned out to matter.
+>
+> **The `Subsequent boots ~18 s` row did not reproduce and is re-grounded.** The
+> research read 18.0 s once
+> ([`../01-research/vm-install-probe-findings.md:483`](../01-research/vm-install-probe-findings.md));
+> every boot the harness has measured — 12, 17, 17, 17, 18, 18, 24, 28, 33, 33,
+> 34 s across Phases 1–8 — looks like the 34.4 s *first*-boot reading's
+> distribution, not like a warmed one. DOC-2 §10.1's boot row was amended at
+> source on 2026-08-02 on the same evidence and its 150 s maximum is
+> **unchanged**, sized against the slowest observed boot.
+>
+> **The `git clone` row is new here and it corrects a 12.5× overstatement.** The
+> research measured `GIT_CLONE_MS=50131`
+> ([`../01-research/vm-install-probe-findings.md:942`](../01-research/vm-install-probe-findings.md));
+> Phase 6's pattern-(b) run cloned `bobmatnyc/trusty-tools@main` and checked out
+> 5,540 files in **4 s** (MANIFEST Phase 6, Measurement 1). Plan P6-T4 predicted a
+> ~50 s (b)−(c) delta from this figure; the observed delta is **~0 s**. DOC-2
+> §10.2's 300 s budget for the step is **left unchanged** — it is now ~75× the
+> measured value rather than ~6×, and a network-bound step measured once on one
+> host is not grounds to tighten. See P8-T2's note in `vmtest.defaults`.
+>
+> **What this amendment does NOT do:** it invents no new maximum, and it does not
+> re-scope the *per-crate* rows above, which were measured for the crates they
+> name and are still the only per-crate figures in this document. The harness's
+> own per-crate series lives in MANIFEST Phase 5, Measurement 2.
+
+**Full-stack figure — the original note, retained.** *(Superseded by the
+amendment above on 2026-08-04; kept because this doc set records reversals rather
+than making silent edits.)* The 4–8 minute range is an
 **extrapolation**, and it was extrapolated for **six** crates. D3 now puts
 **eight** crates in scope for **every** pattern — six when the range was computed,
 then seven when the D2 reversal dissolved the `trusty-mpm` exclusion, then eight
@@ -970,7 +1025,56 @@ first.
 - **`install.sh` end-to-end in a guest.** Never tested. This is now out of scope
   per D1, so it is **no longer blocking** — but it also means the harness makes no
   claim whatsoever about the `install.sh` user path.
-- **Pattern (c)'s tar-over-`tart exec -i` transport, end-to-end.** Never measured.
+- ~~**Pattern (c)'s tar-over-`tart exec -i` transport, end-to-end.** Never
+  measured.~~ **CLOSED 2026-08-04 (plan P8-T4) — the transport works, and it is
+  measured.** *(Amendment; the original text is retained immediately below,
+  unedited, because this doc set records reversals rather than deleting them.)*
+
+  > **AMENDMENT 2026-08-04 — this was §14's headline gap and it is now shut.**
+  >
+  > **Phase 1 (2026-07-31)** ran the exact sequence this gap names — receive-tar →
+  > unpack → build — as a disposable spike: **96,788,480 B / 5,337 files** streamed
+  > host→guest through `git ls-files -co --exclude-standard | tar | tart exec -i`
+  > in **4 s** (≈24 MB/s), unpacked with an **exact file-count match** at both
+  > ends, and `trusty-search` built and installed from the unpacked tree in
+  > **105 s** — *faster* than the 112 s K3 baseline, which reached its tree by
+  > guest-side `git clone`. **The transport imposes no build-time penalty**;
+  > devil's-advocate critique #9 is retired and D4's fallback re-ordering to
+  > (b) → (c) → (a) was never triggered.
+  >
+  > **Phase 5 (2026-08-02/03)** then ran it three times inside the real harness at
+  > full scope: 97,126,400–97,198,080 B / 5,345–5,346 files, **4 s every time**,
+  > followed by eight `cargo install --path` builds and the complete oracle. The
+  > 4 s figure has not varied across seven runs at three tree sizes.
+  >
+  > **Two things this measurement adds that the gap did not ask for.**
+  >
+  > 1. **§6.1's payload figure is a *content* figure; the streamed figure is a
+  >    *wire* figure, and this document did not distinguish them.** The delivered
+  >    file set's raw content is **81,762,761 B (78.0 MiB)**, close to §6.1's
+  >    ~81 MiB estimate. What actually crosses the pipe is **96,788,480 B** — that
+  >    content plus **≈15.0 MB (+18.4 %) of `tar` framing** (a 512-byte header per
+  >    entry plus 512-byte block padding), which is large in relative terms
+  >    precisely because this repository is many small files. §6.1 was not wrong
+  >    about the payload; it was answering a different question from the one the
+  >    implementation has to answer. **Both figures are now recorded, labelled.**
+  > 2. **Pattern (c)'s *defining* property — that it delivers uncommitted work —
+  >    was untested by the first run and has since been tested directly.** Phase 1
+  >    run 1 streamed a **clean** worktree, so `-o` contributed **zero** files and
+  >    the streamed set was exactly the tracked set. A deliberate dirty-worktree
+  >    run (2026-08-01, ported into `lib/source.sh` at P3-T4 as
+  >    `VMTEST_DIRTY_CHECK=1`) then observed: a **modified tracked** file arriving
+  >    with **working-tree** content (whole-file `cksum` equality with the host, so
+  >    a `git archive HEAD` transport would fail it), an **untracked** file
+  >    arriving, and a **gitignored** file absent by three independent checks. §6.1's
+  >    "lower bound / close proxy" caveat is now grounded in a measurement instead
+  >    of an argument.
+  >
+  > Full output: MANIFEST Phase 1 (Observed result, runs 1 and 2) and Phase 5,
+  > Measurement 1.
+
+  **Original text, unedited:** *Pattern (c)'s tar-over-`tart exec -i` transport,
+  end-to-end. Never measured.*
   What was measured is a generic channel property — 200,000 lines untruncated
   ([`../01-research/vm-install-probe-findings.md:179`](../01-research/vm-install-probe-findings.md))
   — not the receive-tar → unpack → build sequence pattern (c) depends on. The 112s

@@ -1720,10 +1720,53 @@ into a long interval it happens to land, in exchange for saving a handful of
 | Site | Blocking call | Timeout | §8.2 key | Grounding |
 |---|---|---|---|---|
 | `tart clone` | `vm_clone` | **60 s** | **none — built-in** | 0.31 s measured, APFS CoW (`vm-install-probe-findings.md:875`). ~190× — deliberately loose because §3.3's by-construction variant may pull an image on the first run, which is unmeasured. |
-| `provision.sh` | one `tart exec` | **300 s** | `provision_timeout` | 30.079 s measured (`vm-install-probe-findings.md:857-858`, `PROVISION_MS=30079`). 10×, because the step is network-bound (rust toolchain download alone is 20.8 s, `:854`) and a slow link is not a defect. |
-| single-crate install | one `tart exec` per crate | **900 s** | **none — built-in** | 112 s for `trusty-search`, 409 dependency crates compiled, 8 vCPU (`vm-install-probe-findings.md:934-935`); 131 s for `cargo install tga --locked` at 4 vCPU (DOC-1 §9). ~8× the largest measured single-crate build. |
-| full-stack scenario | scenario wall clock | **2700 s** (45 min) | `install_timeout` | DOC-1 §9 extrapolates 4–8 min **and labels it low-confidence, for six crates when D3 now scopes eight**. ~5.6× the upper bound. |
-| guest `git clone` (pattern b) | one `tart exec` | **300 s** | **none — built-in** | 50.131 s measured (`vm-install-probe-findings.md:942`, `GIT_CLONE_MS=50131`). ~6×. |
+| `provision.sh` | one `tart exec` | **300 s** | `provision_timeout` | 30.079 s measured (`vm-install-probe-findings.md:857-858`, `PROVISION_MS=30079`). ~~10×~~ **2.19× the slowest of thirteen harness observations (137 s)** — *(re-grounded 2026-08-04, P8-T2; see the amendment below)*. Network-bound (rust toolchain download alone is 20.8 s, `:854`); a slow link is not a defect. |
+| single-crate install | one `tart exec` per crate | **900 s** | **none — built-in** | 112 s for `trusty-search`, 409 dependency crates compiled, 8 vCPU (`vm-install-probe-findings.md:934-935`); 131 s for `cargo install tga --locked` at 4 vCPU (DOC-1 §9). ~~~8×~~ **6.2× the largest single-crate install the harness has observed (146 s, `trusty-search`, MANIFEST Phase 5 Measurement 2)** — *(re-grounded 2026-08-04, P8-T2; the multiple moved, the budget did not)*. |
+| full-stack scenario | scenario wall clock | ~~**2700 s** (45 min)~~ **1800 s** (30 min) | `install_timeout` | ~~DOC-1 §9 extrapolates 4–8 min **and labels it low-confidence, for six crates when D3 now scopes eight**. ~5.6× the upper bound.~~ **TIGHTENED 2700 → 1800 at plan P5-T8 on measurement, 2026-08-02.** Scenario wall clock 640 s / 748 s / 610 s across three pattern-(c) runs (MANIFEST Phase 5 Measurement 1); **2.4× the slowest**. Confirmed unchanged at P8-T2 against (b) 650 s and (a) 511 s total. |
+| guest `git clone` (pattern b) | one `tart exec` | **300 s** | **none — built-in** | ~~50.131 s measured (`vm-install-probe-findings.md:942`, `GIT_CLONE_MS=50131`). ~6×.~~ **The research figure did not reproduce: measured 4 s, a 12.5× overstatement** (MANIFEST Phase 6 Measurement 1). The budget is **unchanged** and is now **~75×** the measured value — *(re-grounded 2026-08-04, P8-T2; see the amendment below)*. |
+
+> **AMENDMENT 2026-08-04 (plan P8-T2) — three of these five rows now cite a
+> harness measurement instead of, or beside, a research baseline. NO BUDGET IN
+> THIS TABLE CHANGED IN THIS PASS.**
+>
+> **What changed and why.** P8-T2 owns grounding the timeouts, and the honest
+> finding is that **several research baselines this table was built on did not
+> reproduce on this host**. Each row is re-grounded on the observations rather
+> than on the baseline, and each states which figure its multiple is now sized
+> against. Where a budget still holds with margin it is **left alone and the
+> margin is stated** — no maximum was invented, and none was tightened on a
+> single reading.
+>
+> - **`provision.sh` — the multiple was wrong by 4.6×, and it is the row that
+>   matters most.** Thirteen observations across Phases 1–8: **16, 17, 18, 19,
+>   24, 35, 38, 40, 52, 64, 78, 97, 137 s** against the 30.079 s baseline. The
+>   spread is **8.6× end to end on one host**, which is the finding — not the
+>   mean. Plan P3-T2's acceptance note bounds provisioning at 3× baseline (90 s);
+>   **two of thirteen runs exceeded it** (97 s at Phase 1 run 2, 137 s at Phase 5
+>   run B), which is why that note is recorded as non-fatal. Against the slowest
+>   observed run the 300 s budget is **2.19×**, not the "10×" this row claimed.
+>   That is much thinner than the doc implied and it is still real margin, so the
+>   budget stands and the multiple is corrected. **This is the one row where a
+>   future host could plausibly hit the budget without being hung.**
+> - **guest `git clone` — a 12.5× overstatement.** `GIT_CLONE_MS=50131` is
+>   retained above as the budget's *provenance*; the measurement is **4 s** for
+>   5,540 files. Plan P6-T4 predicted a ~50 s (b)−(c) transport delta from the
+>   research figure and the observed delta is **~0 s**. One reading on one host is
+>   not grounds to tighten a network-bound budget, so 300 s stands at ~75×.
+> - **single-crate install — the baseline held.** 146 s worst observed against a
+>   112 s baseline (1.3×), across 24 installs in three runs. 900 s stands.
+> - **`tart clone` — untouched.** Still 0.31 s measured, still ~190×, and §10.3's
+>   recorded residual (an unmeasured first-use image *pull* could blow 60 s) is
+>   **not closed by anything the harness has run**: every run since has cloned a
+>   local `tahoe-base`, so the pull path has still never been exercised.
+> - **full-stack scenario — already tightened at P5-T8; re-confirmed, not
+>   re-cut.** Five full-stack runs now span **511–919 s** total wall clock across
+>   all three patterns and no scenario has come within 2.4× of 1800 s.
+>
+> **§10.1 is not re-grounded here.** Its boot-ready row was amended at source on
+> 2026-08-02 on Phase 3's evidence and P8-T2 leaves it alone by explicit
+> instruction; its daemon-health row is still **wholly unmeasured** and P8-T2 says
+> so in `vmtest.defaults` rather than dressing 60 s up as grounded.
 
 **The `§8.2 key` column is new.** *(Amended 2026-08-02.)* It records a fact that
 was previously implicit and, once made explicit, resolves a contradiction between
@@ -1736,8 +1779,16 @@ being only 2/5 covered. Note also that `install_timeout` (2700) is the **full-st
 scenario** budget despite its name; the single-crate 900 s budget is a different
 site and has no key at all.
 
-**Why the full-stack multiple is so loose, stated as reasoning rather than
-precision.** DOC-1 §9 is explicit that 4–8 minutes is an extrapolation, that it was
+**Why the full-stack multiple was so loose, stated as reasoning rather than
+precision.** *(Retained as written; the paragraph describes the **2700 s**
+original, which P5-T8 replaced with 1800 s on 2026-08-02. Its closing request —
+"it should be tightened once the first pattern-(c) full-stack run is timed" — is
+the thing that was acted on, so the paragraph is kept rather than deleted: it is
+the reasoning the tightening had to satisfy. Note also that `install_timeout` was
+tightened in `vmtest.defaults` at P5-T8 but this table still read 2700 s until
+P8-T2 corrected it on 2026-08-04 — a doc-vs-shipped-config drift of two days,
+recorded rather than quietly fixed.)* DOC-1 §9 is explicit that 4–8 minutes is an
+extrapolation, that it was
 computed for six crates against what is now an **eight**-crate scope (six when the
 range was computed, seven after the D2 reversal, eight after the 2026-07-31 D3
 amendment), and that it should be treated
@@ -2541,6 +2592,13 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
 
 - **RC-1 — unified daemon health envelope** (§1.3). Does not exist. Until it does,
   the oracle asserts liveness only, and DOC-1 §7.1's third JSON source is aspirational.
+  **STILL OPEN at plan close-out, 2026-08-04, and deliberately so** — P8-T4's
+  instruction is *"leave RC-1 open; it is not this plan's to close"*. Confirmed
+  against the shipped oracle: `verify_daemon_liveness` probes **four** daemons and
+  gets **four different `/health` body shapes**, so it asserts only HTTP 200 +
+  parseable JSON + a `.status` that is not `down`/`error`/`unhealthy`, and it says
+  `LIVENESS ONLY — see RC-1` in its own PASS line every run. Anyone reading a green
+  run must not read it as "the daemons are healthy".
 - ~~**RC-2 — `tctl install` cargo-absent exit code and message** (§6.2). Not pinned
   to a verified value. N2's predicate is deliberately weak until it is.~~
   **CLOSED 2026-08-03 as *unreachable-by-design*** (§6.2's RC-2 closure). Not
@@ -2554,12 +2612,40 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
   networked guest — a `crates/trusty-installer` unit test, or an offline-network
   scenario — and neither is this harness's job. **Do not re-open and re-run the same
   probe.**
-- **Full base-image digest** (§3.2). Never recorded in the research — only the
+
+  > **STATUS CLARIFIED 2026-08-04 (plan P8-T4), because "closed" here has been read
+  > as more than it is.** Two different things carry the name RC-2 and only one of
+  > them is closed.
+  >
+  > - **The HARNESS obligation is closed.** N2 cannot reach the guard through
+  >   `tctl install` from a guest, the reason is structural rather than incidental,
+  >   and no further harness work will change that. Nothing here is outstanding.
+  > - **The PRODUCT-side item is OPEN.** `crates/trusty-installer/src/commands/
+  >   install.rs:826`'s cargo-absent exit code and message are **still unpinned by
+  >   any test**, and P5-T2 did not pin them. The observed **3** is
+  >   `decide_install_gate`'s consent-gate code, observed identically twice
+  >   (in-guest source-built `tctl` 0.5.0, and host released `tctl` 0.4.10 with
+  >   `stdin=/dev/null`), with **zero** cargo-related tokens in 204 bytes of
+  >   stderr. Recording 3 as RC-2's value would be exactly the false precision
+  >   §6.2 refuses.
+  >
+  > **N2 therefore reports BLOCKED on every run and prints why.** It is a known gap
+  > in what a green run proves, not a silent omission — see `vmtest-harness/README.md`,
+  > which states it for a reader who never opens this document. The plan's close-out
+  > carries RC-2 as **open**.
+- ~~**Full base-image digest** (§3.2). Never recorded in the research — only the
   truncated `sha256:a8e1...` (`vm-install-probe-findings.md:652`). Must be captured
-  at implementation time.
-- **`tart list` digest introspection** (§3.3). The invocation that yields a full
+  at implementation time.~~ **CLOSED 2026-07-31 by plan P1-T3; recorded here at
+  source 2026-08-04 (P8-T4).** The full digest is
+  `sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c`,
+  captured **untruncated** and committed as `vmtest-harness/base-image.pin`, which
+  preflight verifies on every run.
+- ~~**`tart list` digest introspection** (§3.3). The invocation that yields a full
   machine-readable digest was not measured. §3.3's by-construction variant is the
-  fallback.
+  fallback.~~ **CLOSED 2026-07-31 by plan P1-T3.** The introspection branch works:
+  `tart list --format json | jq -r '.[] | .Name'` emits the OCI row's name as
+  `<oci_ref>@sha256:<64 hex>`, untruncated. **§3.3's by-construction variant was
+  not needed** and remains the fallback it was specified as.
 - ~~**`trusty-mpm` `publish` premise** (§9.5).~~ **Closed 2026-07-31.** The premise
   was false — no `publish` key, and `cargo search trusty-mpm` returns `1.0.2`. DOC-1
   D2 is reversed, D3 scopes `trusty-mpm` into pattern (a) along with the rest of the
@@ -2581,9 +2667,22 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
   the project's Single-Install sidecar inventory checklist
   (`.claude-mpm/INSTRUCTIONS.md`) — the upstream source of the omission — is
   corrected in the same PR.
-- **Full-stack watchdog is 5.6× a low-confidence estimate** (§10.2). Tighten once
-  the first pattern-(c) full-stack run is timed, as DOC-1 §9 already requests.
+- ~~**Full-stack watchdog is 5.6× a low-confidence estimate** (§10.2). Tighten once
+  the first pattern-(c) full-stack run is timed, as DOC-1 §9 already requests.~~
+  **CLOSED 2026-08-02 by plan P5-T8 and confirmed at P8-T2, 2026-08-04.**
+  `install_timeout` is **1800 s**, sized at **2.4×** the slowest measured scenario
+  (640 / 748 / 610 s, three pattern-(c) runs) rather than at a multiple of an
+  extrapolation. Five full-stack runs across all three patterns now span
+  **511–919 s** total and none has approached it. §10.2's row is corrected at
+  source; DOC-1 §9's `EXTRAPOLATION` row is superseded in the same pass.
 - **Daemon time-to-ready** (§10.1). Wholly unmeasured; the 60 s maximum is a guess.
+  **STILL OPEN at plan close-out, 2026-08-04, and P8-T2 declined to promote it.**
+  P5-T7 produced no number: `_verify_wait_for_addr` and the `/health` probe assert
+  an outcome and never log an elapsed time, so six full-stack runs bound daemon
+  readiness only as *(0, 60] s* — the budget has never been hit, which is a bound
+  in the unhelpful direction. `vmtest.defaults` labels both `health_timeout` and
+  `health_interval` **`judgment call`** rather than citing a grounding they do not
+  have. Closing this needs instrumentation, which is a code change P8-T2 does not own.
 - ~~**Guest-side graceful shutdown** (§12.2, added 2026-07-31).~~ **Closed
   2026-07-31.** Not an open question and not a judgment call: a guest-side
   `shutdown -h now` is **forbidden** as the shutdown initiator (§12.2). Its only

@@ -153,12 +153,38 @@ faithfully recording the state between the two amendments.
   than by omission"*; it has been.
 - **It is published.** `crates/trusty-review/Cargo.toml` declares `publish = true`
   **explicitly**, and `cargo search trusty-review --limit 5` returned
-  `trusty-review = "0.10.1"` on 2026-07-31. Pattern (a) installs it with
-  `cargo install trusty-review --locked`.
-- **The published version is 0.10.1; the working tree is 0.11.0.** Pattern (a) will
-  therefore install a *different version* from (b) and (c). This is expected, not
-  drift. DOC-2 §1.2's version cross-check applies only to patterns (b) and (c), so
-  nothing asserts them equal.
+  `trusty-review = "0.10.1"` on 2026-07-31 and **`0.11.0` on 2026-08-04**. Pattern
+  (a) installs it with `cargo install trusty-review --locked`.
+- ~~**The published version is 0.10.1; the working tree is 0.11.0.**~~ **STALE —
+  rewritten 2026-08-04 at plan P8-T2/P8-T5. The example no longer illustrated
+  anything, because the pair converged.** The original text read: *"The published
+  version is 0.10.1; the working tree is 0.11.0. Pattern (a) will therefore install
+  a different version from (b) and (c)."* As of 2026-08-04 `trusty-review` is
+  **0.11.0 in both places**, so it demonstrates the exemption by *not* exercising
+  it. (`trusty-mpm` moved too, 1.0.2 → **1.3.4**, and is likewise equal on both
+  sides now.)
+
+  **The exemption still earns its place, and here is the pair that earns it —
+  the one Phase 7's run actually skipped:**
+
+  | Crate | Published (crates.io) | Working tree | Pattern (a) behaviour |
+  |---|---|---|---|
+  | **`trusty-installer`** | **0.4.10** | **0.5.0** | `tool_version` **0.4.10** ≠ `source_tree_version` **0.5.0** → **the equality is SKIPPED** |
+
+  DOC-2 §1.2's `tool_version == source_tree_version(trusty-installer)` cross-check
+  applies only to patterns (b) and (c) — under (a) the binary comes from crates.io
+  and the tree it would be compared against is not the tree it was built from. That
+  is exactly the situation above, and Phase 7 observed it: a released `tctl` at
+  0.4.10 against a working tree at 0.5.0. Under (b)/(c) the same comparison is
+  meaningful and is asserted. **This is expected, not drift.**
+
+  **Read the table as illustrative, not as a fixture.** It is a snapshot of
+  2026-08-04 and the whole point of this rewrite is that such snapshots rot: the
+  previous example was written on 2026-07-31 and was stale within four days.
+  Nothing in the harness reads these numbers — `verify_versions` computes both
+  sides at run time and skips the comparison **by pattern**, never by version. If
+  `trusty-installer` is published at 0.5.0 tomorrow, the example stops
+  illustrating and the contract does not change.
 - **It is single-binary** — one `[[bin]]`, `name = "trusty-review"`,
   `path = "src/main.rs"`, `required-features = []`. So it adds **one** in-scope TSV
   row (twelve → thirteen), **one** `crate_dir` (seven → eight), and **no**
@@ -1971,10 +1997,48 @@ decision rule says **stop and record**, not **choose something**.
 > Honest uncertainty is this doc set's established register. A plan that silently
 > filled these gaps would read more confident and be worth less.
 
+> ### §F RECONCILIATION — the audit of all ten, 2026-08-04 (plan P8-T6)
+>
+> **The count below is STALE and is corrected here.** It says *"Four are RESOLVED …
+> Six remain open"*, which was true on 2026-07-31 and describes only the four that
+> were resolved **by amending a document**. It has counted nothing since. Phases 1–7
+> then resolved the rest **by executing them** — which was always the intended
+> mechanism for the six that carry a *decision rule* rather than an amendment; a
+> decision rule is resolved when the code lands and the MANIFEST records it, not
+> when someone edits §F.
+>
+> **All ten are now settled. Nothing in §F is outstanding.** One of the ten was
+> settled *and found to contain its own factual error*, which is recorded rather
+> than smoothed over.
+>
+> | Item | Status | Settled where | Note |
+> |---|---|---|---|
+> | **§F-1** `run --dry-run` undefined | **RESOLVED** | **P2-T7**, by the narrowest reading, implemented | The driver runs preflight + banner + acquire/release, then halts **before the clone**, and logs `plan §F-1` by name. Phase 2's checkpoint is that path. |
+> | **§F-2** §1.2 predicate cited a TSV column §9.1 does not define | **RESOLVED** | **at source, 2026-07-31**, by amending DOC-2 | Already marked below. |
+> | **§F-3** thirteen in-scope rows, eight crate directories | **RESOLVED**; decision unchanged, **rationale corrected** 2026-07-31 | **at source**, then **empirically confirmed at P4-T3** | P4-T3 found **NO DRIFT** (28 rows == 28 targets; 13 in scope; 8 directories; 8 packages) and the run-level tripwire `install_assert_install_count` now fails closed if the dedupe is ever lost between the helper and the loop. |
+> | **§F-4** negative probes have no assigned module | **RESOLVED** | **P3-T1 / P5-T3**, by the narrowest reading, implemented | Both `negative_probe_n1` and `negative_probe_n2` live in `lib/verify.sh` and die **30**, not 60. No fifth `lib/` module was added. MANIFEST Phase 3 Deviations. |
+> | **§F-5** no module owns the TSV reader | **RESOLVED** | **P2-T2**, by the narrowest reading, implemented | `tsv_field` / `tsv_get` / `tsv_validate_keys` live in the **driver**, above the point where `lib/` is sourced, so they are shell-global to every module. One parser, three files, as §3.1 promised. `lib/vm.sh`'s header records it. |
+> | **§F-6** scenario dispatch unspecified | **RESOLVED** | **P3-T5**, by the only mapping consistent with both docs | `vmtest run <p>` → `scenarios/install-<p>.sh` :: `scenario_install_<p>()`; unknown pattern is **exit 2** before any VM work. `scenario_dispatch` cites `plan §F-6`. Proved three times over: (c), (b) and (a) each needed **only** a new scenario file. |
+> | **§F-7** daemon start and port discovery | **RESOLVED by step 2** — and **§F-7's own transcription of the product was WRONG** | **P5-T7**; the error corrected at source 2026-08-03 | Both machine-readable surfaces exist (`tctl start --json`, `tctl port <m> --json-port`), so the **BLOCKED branch was not taken**. But §F-7 recorded `--json-port` as emitting `{"addr":"host:port","port":N}` and **it does not**: `.addr` is the **host alone**. An oracle built on that reading composed `http://127.0.0.1/health` with no port and got HTTP 000 from all four daemons. The address is composed from **both** fields. The harness adapted; `port.rs` is correct and unchanged. |
+> | **§F-8** design README carried the superseded D2 premise | **RESOLVED** | **at source, 2026-07-31**; **re-verified at P8-T5, 2026-08-04** | Still correct — eight crates, all three patterns, both crates named. P8-T5 found **three further stale claims in the same file** (see Phase 8 Deviations) and fixed them; the D2 premise was not among them. |
+> | **§F-9** nothing specified what initiates guest shutdown | **RESOLVED** | **at source, 2026-07-31**, by amending DOC-2 §12.2 | `vm_request_stop` is the only permitted initiator; a guest-side `shutdown -h now` is **forbidden**, not pending. |
+> | **§F-10** five smaller gaps, (a)–(e) | **RESOLVED**, all five | (a),(b),(e) at P4/P5; (c) at P3-T6; (d) at P1 | (a) guest paths composed from `guest_home`; (b) install order is TSV row order; (c) `~/.zshenv` written, never depended on — **and drilled at P8-T1**; (d) `tart-run.pid` **reaped** after `vm_wait_for_stopped`, never killed; (e) an unexpected `stack doctor` member (`trusty-console`) is **LOGGED, NOT ASSERTED**, and prints on every run. |
+>
+> **What the audit says about §F as a device.** Ten flagged gaps, ten settled, and
+> **not one was filled in with an invented contract** — §F's own rule. Six were
+> settled by a decision rule that survived contact with a real run; four needed the
+> document amended. The one that went wrong (§F-7) went wrong in exactly the way
+> this doc set keeps finding: a fact was **transcribed from source by reading**
+> rather than by running it, and reading got the shape wrong. That is §F-3's
+> lesson, restated by a different item, one phase later.
+
 **Ten items were flagged. Four — §F-2, §F-3, §F-8, §F-9 — are RESOLVED, each on
 2026-07-31, by amending DOC-2 and the design README rather than leaving them for the
 executing engineer, because each was a defect with a determinable answer rather than
-a genuine unknown. Six remain open.** §F-3 is the newest of the four and the odd one
+a genuine unknown. ~~Six remain open.~~** *(Count superseded 2026-08-04 — see the
+reconciliation above. **All ten are settled**; the six not listed in this sentence
+were resolved by execution across Phases 1–7, which is how a decision rule is meant
+to be resolved.)* §F-3 is the newest of the four and the odd one
 out: its *decision* was right from the start and is unchanged, but its *rationale*
 was factually false, and the correction is what closes it — see §F-3 for both the
 false claim and the empirical result that disproves it. The resolved three are retained below with
