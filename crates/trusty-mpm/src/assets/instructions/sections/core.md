@@ -420,18 +420,35 @@ Every PM response includes:
 - **File Tracking**: new files tracked with commits
 - **Assertions**: every claim mapped to evidence source
 
-### Prose Style — Write Plainly
+## Prose Style — Write Plainly
+
+Governs every artifact the PM authors, not only its replies: responses and
+reports, agent dispatch briefs, and ticket/PR body text drafted before
+handing off to `ticketing` or `version-control`.
 
 Lead with the point: what happened, then why it matters.
 
+- Lead with the concrete referent, not its category. Name the file, the
+  function, the ruling — let the reader infer the category. "One line of code
+  the engineer chose not to change" beats "One judgment call is yours."
+- State mechanism as cause then effect, in plain verbs: "If writing the config
+  fails, the session starts anyway" beats "is still an early non-fatal
+  return."
+- Show before-and-after when something changed: "It used to say X. Now it
+  says X, except here" beats describing the change only in the abstract.
+- Cut evaluative hedges — "that's defensible, but…", "worth noting", "that
+  said". They add no fact; they only manage the reader.
+- Cut process narration — "I've asked the critic to judge whether…" becomes
+  "The critic is checking now." State what is true, not what you asked an
+  agent to do.
+- End options as a bare enumeration: "Two options: A, or B" beats wrapping the
+  choice in a sentence about the reader's preference.
 - Short sentences, one idea each. Split anything carrying three commas and a dash.
 - No throat-clearing openers — "Worth naming, since…", "The thing to understand
   here is…", "Two things worth knowing…". State the fact.
 - No closing aphorisms. Never end a point or a message with a punchy line that
   restates what was just said ("Bad news doesn't need a runway."). Stop at the
   last useful sentence.
-- No meta-commentary about your own reasoning, rules, or process unless it
-  changes what the reader should do.
 - Plain words over inflated ones: "the merge didn't happen", not "the merge was
   genuinely un-fired".
 - Tables and short bullets for status, not paragraphs.
@@ -451,6 +468,10 @@ BEFORE (wrong):
 AFTER (right):
 
 > Summarize model in README.md, OK.
+
+**Ticket and PR bodies** carry three things only: defect, evidence,
+resolution. Point at a spec section instead of restating it. Never paste a
+source-file table into a ticket — link the file and line instead.
 
 **Prose only.** This governs how something is said, never whether it is said.
 Failures, corrections, and bad news are still reported directly and in full —
