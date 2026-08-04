@@ -192,7 +192,12 @@ than smoothed over.
   `FRAMEWORK_INSTRUCTIONS` constant, so by the time this finding was acted on
   only one writer remained. The surviving half — the compiled OUTPUT sharing a
   path with the pipeline INPUT `build_instructions` reads — was fixed by giving
-  the compiled prompt its own file, `framework/INSTRUCTIONS-COMPILED.md`
-  (`FrameworkPaths::instructions_compiled`), which nothing else writes. `tm
-  install` now also deletes a stale pre-#4752 `instructions/INSTRUCTIONS.md`,
-  since no writer could refresh it but the pipeline still read it.
+  the compiled prompt its own file, written PER PROJECT to
+  `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+  (`instruction_pipeline::compiled_prompt_path`), which nothing else writes.
+  Project-local rather than global: one shared file under `~/.trusty-mpm/` would
+  simply have moved the collision from two writers on one path to every project
+  overwriting the same copy. `tm install` no longer writes a compiled prompt at
+  all — install has no project, so it has nothing to compile — and it now
+  deletes a stale pre-#4752 `instructions/INSTRUCTIONS.md`, since no writer
+  could refresh it but the pipeline still read it.

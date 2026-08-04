@@ -224,14 +224,17 @@ pub struct PrepReport {
     pub instructions: PipelineOutput,
     /// Path the merged instructions were stashed to for inspection.
     pub stash: PathBuf,
-    /// Path the framework-level compiled prompt was written to (#4752).
+    /// Path the PROJECT-LOCAL compiled prompt was written to (#4752).
     ///
     /// Why: exposing it makes the launch-ordering guarantee assertable — a
     /// returned `PrepReport` means this file exists and holds the exact text
     /// the session is about to receive, because the write is fatal and happens
     /// before this value is constructed.
-    /// What: `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` (or the `fw`
-    /// root a test supplies), byte-identical to [`Self::stash`].
+    /// What: `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`, as
+    /// resolved by [`crate::core::instruction_pipeline::compiled_prompt_path`],
+    /// byte-identical to [`Self::stash`]. NOT the global
+    /// `~/.trusty-mpm/framework/` path — that shared location was the collision
+    /// #4752 removed, since every project would have overwritten the same file.
     /// Test: `prepare_session_writes_the_compiled_prompt_before_returning`,
     /// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`.
     pub compiled_prompt: PathBuf,
@@ -386,9 +389,7 @@ impl PrepError {
 /// written to `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
 /// ([`crate::core::instruction_pipeline::compiled_prompt_path`]) as this
 /// function's LAST step, and a failure returns [`PrepError::CompiledPrompt`],
-/// which every spawning caller treats as FATAL — the launch is refused. So a
-/// session that starts always has a compiled prompt on disk matching the text
-/// it received.
+/// which every spawning caller treats as FATAL — the launch is refused.
 ///
 /// This is the ONE preparation failure that blocks a launch. #2149's
 /// non-fatal-preparation design still governs every other variant (a roster or
@@ -399,9 +400,22 @@ impl PrepError {
 /// injectors or the trust pre-seed — see the inline comment at the call and
 /// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
 ///
-/// The resume path never calls this function; it is covered by an equivalent
-/// fatal write in `daemon::managed_routes::lifecycle::resume_managed`. See
-/// spec §10.3.
+/// WHAT THE CONTRACT DOES **NOT** SAY: it is not "every started session has a
+/// compiled prompt". Making the compiled write fatal while a neighbouring write
+/// under the same `.trusty-mpm/` stayed a short-circuiting non-fatal error would
+/// be incoherent, so the stash write above it now degrades to a warning instead
+/// of returning early — an unwritable `.trusty-mpm/` can no longer skip the
+/// injectors or this write. One early exit remains BEFORE it: a
+/// [`build_instructions`] failure, which returns a non-fatal error, so the
+/// caller still launches and no compiled prompt is refreshed. That is a
+/// different condition (the instruction pipeline itself, not a `.trusty-mpm/`
+/// write) and it predates this issue; it is left to #2149's policy rather than
+/// silently promoted to fatal here.
+///
+/// The resume path never calls this function. Both other entry points carry the
+/// same fatal write: `daemon::managed_routes::lifecycle::resume_managed` (daemon
+/// resume) and `runtime::refresh_compiled_prompt` as called from the bare-`tm`
+/// in-place relaunch in `tm::commands::guided_inplace`. See spec §10.3.
 /// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
 /// `prepare_session_stash_reflects_override`,
 /// `prepare_session_writes_the_compiled_prompt_before_returning`,
@@ -867,16 +881,27 @@ fn prepare_session_inner(
         effective_style.as_deref(),
         native_supported,
     );
+    // #4752: these two writes DEGRADE TO A WARNING; they must never short-circuit
+    // this function. An unwritable `.trusty-mpm/` (disk full, bad perms) used to
+    // return `PrepError::Io` HERE — before the MCP injectors below — and because
+    // `Io` is non-fatal every caller then launched the session anyway, with the
+    // injectors skipped. That is the same security shape as the round-1 regression
+    // this issue already fixed for the compiled write, reached by a second route.
+    // The stash is an inspection artifact (`tm session instructions`); losing it
+    // is not worth skipping the MCP trust boundary or the compiled write.
+    // See the ordering contract on `prepare_session`.
+    // Test: `stash_write_failure_does_not_skip_the_mcp_injectors`.
     let stash_dir = project_dir.join(".trusty-mpm");
-    std::fs::create_dir_all(&stash_dir).map_err(|source| PrepError::Io {
-        path: stash_dir.clone(),
-        source,
-    })?;
     let stash = stash_dir.join("last-instructions.md");
-    std::fs::write(&stash, &resolved_prompt).map_err(|source| PrepError::Io {
-        path: stash.clone(),
-        source,
-    })?;
+    match std::fs::create_dir_all(&stash_dir)
+        .and_then(|()| std::fs::write(&stash, &resolved_prompt))
+    {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(
+            "could not refresh the instruction stash at {} (non-fatal): {e}",
+            stash.display()
+        ),
+    }
 
     // Resolve the active output style for settings.json using the same
     // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
@@ -1186,9 +1211,10 @@ fn prepare_session_inner(
         None
     };
 
-    // #4752: refresh the framework-level compiled prompt with the text this
-    // session will actually receive (`resolved_prompt`, the same string stashed
-    // to `.trusty-mpm/last-instructions.md` above).
+    // #4752: refresh the PROJECT-LOCAL compiled prompt
+    // (`<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`) with the
+    // text this session will actually receive (`resolved_prompt`, the same
+    // string stashed to `.trusty-mpm/last-instructions.md` above).
     //
     // POSITION IS LOAD-BEARING, and it is deliberately the LAST step. An earlier
     // revision of this change put the write immediately after the stash, where

@@ -557,6 +557,23 @@ pub(crate) async fn run_inplace_relaunch(
         return InPlaceOutcome::FallThrough;
     }
 
+    // #4752: refresh the project's compiled prompt BEFORE building the resume
+    // command, and treat a failure as FATAL — the same policy `prepare_session`
+    // and `resume_managed` apply.
+    //
+    // This path is the THIRD entry point that hands a runtime a prompt, and it
+    // calls neither of those two: its only daemon call is `reactivate` below,
+    // which does no prompt work. Until this call existed, the sole compiled write
+    // here was `build_prompt_file`'s best-effort refresh, so a bare-`tm` relaunch
+    // in a managed pane was the one way to start a session on a stale or missing
+    // compiled prompt where a fresh launch would have refused.
+    //
+    // Ordered BEFORE `build_inplace_resume_command` so a refusal costs nothing
+    // and, like the other two sites, cannot half-provision the pane.
+    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt(&cwd) {
+        return InPlaceOutcome::Result(Err(anyhow::anyhow!("{msg}")));
+    }
+
     let resume = match trusty_mpm::runtime::build_inplace_resume_command(
         &cwd,
         record.claude_session_id.as_deref(),

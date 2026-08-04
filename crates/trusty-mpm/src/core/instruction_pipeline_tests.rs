@@ -723,3 +723,64 @@ fn session_start_count_matches_the_delivered_delegation_roster() {
         "engineer + qa + writer + ticketing, with the cross-tier `qa` counted once"
     );
 }
+
+// ── #4752 round 4: the shared fatal compiled-prompt refresh ─────────────────
+
+#[test]
+fn refresh_compiled_prompt_writes_the_project_local_file() {
+    // Why (#4752 round 4): this is the single entry point all THREE pre-spawn
+    // paths now route through — fresh start, daemon resume, and the bare-`tm`
+    // in-place relaunch that round 3 missed entirely. Pinning it directly means
+    // the guarantee is asserted on the implementation, not only through the
+    // daemon's thin `refresh_compiled_prompt_for_resume` delegate.
+    //
+    // FIXTURE: a stale sentinel is pre-seeded so "the file exists" cannot pass;
+    // only a real refresh overwrites it.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = compiled_prompt_path(tmp.path());
+    fs::create_dir_all(dest.parent().expect("has a parent")).expect("create parent");
+    const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
+    fs::write(&dest, STALE).expect("seed stale");
+
+    refresh_compiled_prompt(tmp.path()).expect("refresh must succeed");
+
+    let on_disk = fs::read_to_string(&dest).expect("readable");
+    assert_ne!(
+        on_disk, STALE,
+        "a stale compiled prompt must be overwritten"
+    );
+    assert!(
+        on_disk.contains("# PM Agent -- Trusty MPM"),
+        "must hold the resolved PM prompt, not a fragment: {on_disk}"
+    );
+    assert!(
+        dest.starts_with(tmp.path()),
+        "the compiled prompt is PROJECT-LOCAL; a global path would restore the \
+         cross-project collision #4752 removed"
+    );
+}
+
+#[test]
+fn refresh_compiled_prompt_reports_an_actionable_failure() {
+    // Why (#4752): the write is fatal at all three call sites, so a refusal is
+    // operator-facing — it must name the path and say the session did not
+    // start, never surface a bare io error.
+    //
+    // FIXTURE: a directory planted at the exact destination, so only this write
+    // fails and nothing else in the compose path does.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = compiled_prompt_path(tmp.path());
+    fs::create_dir_all(&dest).expect("plant a directory at the compiled path");
+
+    let msg = refresh_compiled_prompt(tmp.path())
+        .expect_err("a failed compiled write must be reported as an error");
+    assert!(
+        msg.contains(&dest.display().to_string()),
+        "must name the path: {msg}"
+    );
+    assert!(
+        msg.contains("was NOT started"),
+        "must say the session did not start: {msg}"
+    );
+    assert!(msg.contains("permissions"), "must point at a remedy: {msg}");
+}

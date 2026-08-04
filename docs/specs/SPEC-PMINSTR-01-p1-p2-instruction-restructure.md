@@ -1184,16 +1184,27 @@ prompt cannot launch. The compiled file is a second copy alongside a write that
 is fatal by necessity, so a loud, diagnosable refusal beats a session running
 against a silently stale artifact.
 
-**Where the fatal write happens — both pre-spawn provisioning steps:**
+**Where the fatal write happens — all THREE pre-spawn paths:**
 
 | Path | Fatal write | Error |
 |---|---|---|
 | start / connect / in-project / cloned | `session_launch::prepare_session_inner`, as its LAST step | `PrepError::CompiledPrompt` |
 | resume / guided-resume / crash recovery | `daemon::managed_routes::lifecycle::resume_managed`, immediately before `spawn_resume` | `ResumeManagedError::Other` |
+| bare `tm` in a managed pane (in-place relaunch) | `tm::commands::guided_inplace::run_inplace_relaunch`, before it builds the resume command | `anyhow::Error` from `compiled_prompt_failure_message` |
 
 `resume_managed` needs its own write because it never calls `prepare_session*`
 on its healthy path (`resume_self_heal` → `ensure_status_line` →
 `ensure_deployment_complete` → `spawn_resume`).
+
+`run_inplace_relaunch` needs one for the same reason and was **missed until
+round 4** of this issue: it calls neither `prepare_session*` nor
+`resume_managed`, and its only daemon call is the `reactivate` route, which does
+no prompt work. Its sole compiled write was therefore
+`build_prompt_file`'s best-effort refresh — so a bare-`tm` relaunch could start
+a session on a stale or missing compiled prompt exactly where a fresh launch
+would have refused. All three now route through the single entry point
+`instruction_pipeline::refresh_compiled_prompt`, which composes, writes, and
+formats the failure message, so the three sites cannot drift apart.
 
 **Only this one preparation failure is fatal.** #2149 deliberately made
 preparation non-fatal so a roster or skill deploy hiccup could not stop a
@@ -1225,16 +1236,36 @@ Under a FATAL write the placement matters more, not less — a refusal must not
 also mean provisioning was half-applied. Pinned by
 `compiled_write_failure_does_not_skip_the_mcp_injectors`.
 
+**The `.trusty-mpm/` stash write degrades to a warning.** Making the compiled
+write fatal while `last-instructions.md`, one directory up in the same tree,
+stayed a short-circuiting non-fatal `PrepError::Io` was incoherent — and worse,
+it left the round-1 security regression live by a second route: an unwritable
+`.trusty-mpm/` (disk full, bad perms) returned FIRST, upstream of the MCP
+injectors, and because `Io` is non-fatal every caller launched the session
+anyway with the injectors skipped. The stash write now logs and continues, so no
+`.trusty-mpm/` write failure can skip the injectors or the compiled write.
+Pinned by `stash_write_failure_does_not_skip_the_mcp_injectors`.
+
+**The contract is not "every started session has a compiled prompt."** One
+early exit remains upstream of the write: a `build_instructions` failure returns
+a non-fatal error, so the caller still launches and no compiled prompt is
+refreshed. That is a different condition — the instruction pipeline itself, not
+a `.trusty-mpm/` write — and it predates this issue. It is left to #2149's
+policy rather than silently promoted to a second fatal error, which would
+contradict the "exactly one fatal preparation failure" ruling above.
+
 **One best-effort write remains, deliberately.**
 `runtime::claude_code::build_prompt_file` refreshes the file from the exact
 bytes it hands to `--append-system-prompt-file`. It is NOT fatal, because it
-sits *inside* the spawn, past the provisioning gate — every path reaching it has
-already had a fatal compiled write succeed, so it is a belt-and-braces refresh,
-never the sole guarantee. Making it fatal would also invert that function's own
-priority: a failure of the strictly more important write beside it (the actual
-system-prompt file) already degrades to spawning without it (#2173). Refusing to
-launch over the inspection copy while shrugging at the real prompt would be
-backwards.
+sits *inside* the spawn, past the provisioning gate — and, now that the in-place
+relaunch carries its own fatal write, every one of the three paths reaching it
+has already had a fatal compiled write succeed, so it is a belt-and-braces
+refresh rather than the sole guarantee. That claim was false until round 4; a
+fourth spawn path must add its own fatal write before relying on it. Making it
+fatal would also invert that function's own priority: a failure of the strictly
+more important write beside it (the actual system-prompt file) already degrades
+to spawning without it (#2173). Refusing to launch over the inspection copy
+while shrugging at the real prompt would be backwards.
 
 **Cost.** Every write reuses an already-composed string; none adds a composition
 pass. Not benchmarked — no no-regression claim is made.

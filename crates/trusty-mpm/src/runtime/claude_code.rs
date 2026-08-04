@@ -350,14 +350,24 @@ fn spawn_command(
 /// (`<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`) is refreshed
 /// from the exact bytes handed to `--append-system-prompt-file`.
 ///
-/// WHY THIS ONE IS BEST-EFFORT while the same write is FATAL in
-/// `prepare_session_inner` and `resume_managed` — the asymmetry is deliberate:
-/// those two are PROVISIONING steps, whose job is to establish the session's
-/// on-disk state before anything spawns; refusing there is coherent and is what
-/// the owner ruled. This call sits INSIDE the spawn, past that gate, and every
-/// path that reaches it has already had a fatal compiled write succeed
-/// (start → `prepare_session_inner`; resume → `resume_managed`). So it is a
-/// belt-and-braces refresh, never the sole guarantee.
+/// WHY THIS ONE IS BEST-EFFORT while the same write is FATAL in the
+/// provisioning paths — the asymmetry is deliberate: those are PROVISIONING
+/// steps, whose job is to establish the session's on-disk state before anything
+/// spawns; refusing there is coherent and is what the owner ruled. This call
+/// sits INSIDE the spawn, past that gate.
+///
+/// That holds only because ALL THREE entry points that reach this function have
+/// already had a fatal compiled write succeed:
+///   * fresh start → `session_launch::prepare_session_inner`
+///   * daemon resume → `managed_routes::lifecycle::resume_managed`
+///   * bare-`tm` in-place relaunch → `guided_inplace::run_inplace_relaunch`,
+///     via `instruction_pipeline::refresh_compiled_prompt`
+///
+/// The third was missing until round 4 of #4752, which made the earlier version
+/// of this comment false: `run_inplace_relaunch` calls neither of the other two,
+/// so this best-effort write was its ONLY compiled write. Adding a call here
+/// without that fatal upstream write would resurrect the same hole — check the
+/// list above before adding a fourth spawn path.
 ///
 /// Making it fatal here would also invert this function's own priority: a
 /// failure of the strictly MORE important write below (the actual system-prompt

@@ -465,6 +465,62 @@ fn compiled_write_failure_does_not_skip_the_mcp_injectors() {
 
 #[test]
 #[serial_test::serial]
+fn stash_write_failure_does_not_skip_the_mcp_injectors() {
+    // Why (#4752 round 4, HIGH 3): making the compiled write fatal while the
+    // `last-instructions.md` stash — one directory up in the SAME
+    // `.trusty-mpm/` tree — stayed a short-circuiting non-fatal `PrepError::Io`
+    // was incoherent, and it left the round-1 security regression live by a
+    // second route. An unwritable `.trusty-mpm/` returned FIRST, upstream of
+    // `write_output_style`, `write_project_hooks`, the trust pre-seed and all
+    // four MCP injectors; because `Io` is non-fatal, every caller then launched
+    // the session anyway with the #3918/#3950 content-pinning defense skipped.
+    //
+    // FIXTURE: a directory planted at `.trusty-mpm/last-instructions.md`, so
+    // `create_dir_all` on the parent succeeds and only the stash WRITE fails.
+    // The compiled write below it is untouched and must still succeed, so
+    // preparation reports Ok. This test fails if the stash write is ever
+    // restored to a `?`.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(project.join(".trusty-mpm/last-instructions.md"))
+        .expect("plant a directory where the stash file goes");
+
+    let report = prepare_session(&fw, project)
+        .expect("a failed stash write must NOT refuse the launch (#2149) nor abort preparation");
+
+    // The compiled write still ran and is still the fatal one …
+    assert!(
+        report.compiled_prompt.exists(),
+        "the compiled prompt must still be written when only the stash fails"
+    );
+
+    // … and every security-relevant side effect downstream of the stash ran.
+    let mcp_json = project.join(".mcp.json");
+    assert!(
+        mcp_json.exists(),
+        ".mcp.json must be written even when the stash write fails — the MCP \
+         injectors must not sit downstream of a short-circuiting stash error"
+    );
+    let mcp = std::fs::read_to_string(&mcp_json).expect("read .mcp.json");
+    for server in ["trusty-mpm", "trusty-review"] {
+        assert!(
+            mcp.contains(server),
+            "`{server}` MCP entry missing from .mcp.json — the #3918/#3950 \
+             content-pinning injector was skipped by the stash-write failure"
+        );
+    }
+    assert!(
+        project.join(".claude/settings.json").exists(),
+        "project settings/hooks must still be written"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn prepare_session_deploys_project_tier_output_style() {
     // Why (#2125 item 2): the daemon managed-spawn path launches `claude`
     // with `--setting-sources project,local`, excluding the `user` tier the

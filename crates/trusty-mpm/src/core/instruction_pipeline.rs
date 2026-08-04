@@ -360,6 +360,36 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
     std::fs::write(dest, prompt)
 }
 
+/// Compose a project's prompt and refresh its compiled prompt on disk — fatally.
+///
+/// Why (#4752): THREE entry points hand a runtime a prompt, and each must
+/// guarantee the compiled copy is current first — fresh start
+/// ([`crate::core::session_launch::prepare_session`]), daemon resume
+/// (`managed_routes::lifecycle::resume_managed`), and the bare-`tm` in-place
+/// relaunch (`tm::commands::guided_inplace::run_inplace_relaunch`). Round 3 of
+/// this issue missed the third: it calls neither of the other two, so its only
+/// compiled write was `build_prompt_file`'s best-effort refresh. A resumed
+/// session could therefore run on a stale or missing compiled prompt exactly
+/// where a fresh launch would have refused. Consolidating the compose+write+
+/// message triple here keeps the three call sites from drifting apart.
+/// What: composes the project-resolved prompt through the same seam the launcher
+/// uses, writes it to [`compiled_prompt_path`], and on failure returns the
+/// operator-facing string from [`compiled_prompt_failure_message`] — callers
+/// refuse the launch with it.
+/// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
+/// `refresh_compiled_prompt_reports_an_actionable_failure`.
+pub fn refresh_compiled_prompt(project_dir: &std::path::Path) -> Result<(), String> {
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
+        project_dir,
+        None,
+        native,
+    );
+    let dest = compiled_prompt_path(project_dir);
+    write_compiled_prompt_to(&dest, &prompt)
+        .map_err(|source| compiled_prompt_failure_message(&dest, &source))
+}
+
 /// Delete a stale `instructions/INSTRUCTIONS.md` left by a pre-#4752 install.
 ///
 /// Why: until #4752, `tm install` wrote the compiled prompt to

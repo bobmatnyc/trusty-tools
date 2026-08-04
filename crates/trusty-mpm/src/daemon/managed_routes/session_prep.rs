@@ -103,14 +103,9 @@ pub(super) fn prepare_inproject_session(
 pub(super) fn refresh_compiled_prompt_for_resume(
     workspace: &std::path::Path,
 ) -> Result<(), String> {
-    let native = crate::core::output_style::claude_supports_native_output_style();
-    let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
-        workspace, None, native,
-    );
-    let dest = crate::core::instruction_pipeline::compiled_prompt_path(workspace);
-    crate::core::instruction_pipeline::write_compiled_prompt_to(&dest, &prompt).map_err(|source| {
-        crate::core::instruction_pipeline::compiled_prompt_failure_message(&dest, &source)
-    })
+    // #4752: delegates to the shared entry point so the daemon-resume,
+    // fresh-start, and bare-`tm` in-place relaunch paths cannot drift apart.
+    crate::core::instruction_pipeline::refresh_compiled_prompt(workspace)
 }
 
 #[cfg(test)]
