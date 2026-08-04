@@ -263,6 +263,91 @@ fn prepare_session_writes_claude_md_and_stash() {
     );
 }
 
+// ── #4752: INSTRUCTIONS-COMPILED.md must be current BEFORE the spawn ────────
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_writes_the_compiled_prompt_before_returning() {
+    // Why (#4752, owner ruling 2026-08-04): the framework-level compiled prompt
+    // must reflect the prompt the session is ABOUT TO RUN WITH, not the one the
+    // last `tm install` produced. Every caller spawns `claude` only after
+    // `prepare_session` returns `Ok`, so "current at return" IS "current at
+    // launch".
+    //
+    // FIXTURE NOTE — this is deliberately not an existence check. The compiled
+    // path is PRE-SEEDED with stale sentinel content, so a test that only
+    // asserted "the file exists" would pass against a broken implementation
+    // that never writes at launch. Only an actual launch-time write of the
+    // resolved prompt can turn the assertions below green.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    const STALE: &str = "STALE-FROM-A-PREVIOUS-INSTALL";
+    let compiled = fw.instructions_compiled();
+    std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
+    std::fs::write(&compiled, STALE).unwrap();
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    assert_eq!(
+        report.compiled_prompt, compiled,
+        "the report must name the compiled path the launch actually wrote"
+    );
+    let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt must be readable");
+    assert_ne!(
+        on_disk, STALE,
+        "the launch must overwrite a stale compiled prompt, not leave it in place"
+    );
+    // The stash is the byte-exact text handed to
+    // `claude --append-system-prompt-file` (issue #1409). Equality here is what
+    // makes the compiled file "the prompt this session runs with" rather than
+    // merely "some compiled prompt".
+    let launch_prompt = std::fs::read_to_string(&report.stash).expect("stash must be readable");
+    assert_eq!(
+        on_disk, launch_prompt,
+        "the compiled prompt must be byte-identical to the text passed to claude"
+    );
+    assert!(!on_disk.is_empty(), "the compiled prompt must not be empty");
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
+    // Why (#4752): the ordering requirement is that the write BLOCKS the
+    // launch — not that it happens eventually and not that it is best-effort.
+    // This is the test that distinguishes those: if the write were a
+    // `let _ = …`, a warn-and-continue, or deferred to a background task,
+    // `prepare_session` would return `Ok` here and the assertion below fails.
+    //
+    // FIXTURE: a DIRECTORY is planted at the compiled prompt's exact path.
+    // `create_dir_all(parent)` still succeeds, so the failure is isolated to
+    // the compiled write itself — no other step of the preparation is
+    // sabotaged, which is what keeps this test about the guard it names.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(fw.instructions_compiled()).unwrap();
+
+    let err = prepare_session(&fw, project)
+        .expect_err("a failed compiled-prompt write must abort the launch preparation");
+    match err {
+        PrepError::Io { path, .. } => assert_eq!(
+            path,
+            fw.instructions_compiled(),
+            "the error must name the compiled prompt path"
+        ),
+        other => panic!("expected PrepError::Io for the compiled prompt, got {other:?}"),
+    }
+}
+
 #[test]
 #[serial_test::serial]
 fn prepare_session_deploys_project_tier_output_style() {

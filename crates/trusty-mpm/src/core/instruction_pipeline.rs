@@ -285,38 +285,98 @@ pub fn assemble_system_prompt() -> String {
     .join(SECTION_SEPARATOR)
 }
 
+/// Filename of the compiled PM system prompt.
+///
+/// Why (#4752): the compiled prompt needs a path NO other writer targets. It
+/// previously shared `instructions/INSTRUCTIONS.md` with a bundled 4-line stub
+/// and with the pipeline's own input file, so the on-disk answer to "what
+/// instructions is my session running?" depended on which writer ran last —
+/// the regression #383 already fixed once and #4752 closes structurally.
+/// What: `INSTRUCTIONS-COMPILED.md`, resolved directly under the framework root
+/// by [`crate::core::paths::FrameworkPaths::instructions_compiled`] — NOT under
+/// `framework/instructions/`.
+/// Test: `compiled_prompt_file_is_not_the_bundled_instructions_name`,
+/// `no_other_writer_targets_the_compiled_prompt_path`.
+pub const COMPILED_PROMPT_FILE: &str = "INSTRUCTIONS-COMPILED.md";
+
+/// Write an already-composed prompt to the compiled-prompt path.
+///
+/// Why (#4752): both writers of `INSTRUCTIONS-COMPILED.md` — `tm install`
+/// (bundled compilation) and the launch path (the project-resolved prompt the
+/// session actually receives) — must go through one function so the file can
+/// never hold anything but a full compiled prompt. This is also the seam that
+/// keeps the launch write cheap: it takes the prompt the composer ALREADY built
+/// for `--append-system-prompt-file` rather than recomposing it, so the launch
+/// cost is one `write`, not a second composition pass.
+/// What: creates `dest`'s parent directory if absent, then writes `prompt`
+/// verbatim. Returns the underlying IO error unchanged — callers decide whether
+/// a failure is fatal (at launch it is; see
+/// `crate::core::session_launch::prepare_session`).
+/// Test: `write_compiled_prompt_to_creates_parent_dirs`,
+/// `install_system_prompt_to_writes_assembled`.
+pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, prompt)
+}
+
 /// Write the assembled system prompt to an explicit path.
 ///
 /// Why: `tm install` must be testable against a temp directory rather than the
 /// real `~/.trusty-mpm`; extracting the path-parameterised write here lets both
 /// the production path ([`install_system_prompt`]) and the install handler use
 /// the same assembly logic without touching the real home during unit tests.
-/// What: creates parent directories if absent, then writes
-/// [`assemble_system_prompt`] to `dest`.
+/// What: composes [`assemble_system_prompt`] and hands it to
+/// [`write_compiled_prompt_to`]. Callers pass
+/// [`crate::core::paths::FrameworkPaths::instructions_compiled`].
 /// Test: `install_system_prompt_to_writes_assembled`, `install_writes_assembled_prompt`.
 pub fn install_system_prompt_to(dest: &std::path::Path) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(dest, assemble_system_prompt())
+    write_compiled_prompt_to(dest, &assemble_system_prompt())
 }
 
 /// Write the assembled system prompt to the trusty-mpm framework directory.
 ///
-/// Why: `tm launch` passes `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
-/// to `claude --append-system-prompt-file`; this regenerates that file from the
-/// bundled assets so it always reflects the current trusty-mpm build.
-/// What: creates `~/.trusty-mpm/framework/instructions/` if needed and writes
-/// the output of [`assemble_system_prompt`] to `INSTRUCTIONS.md`, returning the
-/// path it wrote. Delegates the write to [`install_system_prompt_to`].
+/// Why: an operator inspecting `~/.trusty-mpm/framework/` must find the
+/// compiled prompt at one predictable place. #4752 moved that place off
+/// `instructions/INSTRUCTIONS.md` (shared with a bundled stub and with the
+/// pipeline's own input) and onto [`COMPILED_PROMPT_FILE`].
+/// What: creates `~/.trusty-mpm/framework/` if needed and writes the output of
+/// [`assemble_system_prompt`] to `INSTRUCTIONS-COMPILED.md`, returning the path
+/// it wrote. Delegates the write to [`install_system_prompt_to`].
 /// Test: `install_system_prompt_writes_file`.
 pub fn install_system_prompt() -> std::io::Result<std::path::PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir"))?;
-    let out_dir = home.join(".trusty-mpm/framework/instructions");
-    let out_path = out_dir.join("INSTRUCTIONS.md");
+    let out_path = home
+        .join(".trusty-mpm/framework")
+        .join(COMPILED_PROMPT_FILE);
     install_system_prompt_to(&out_path)?;
     Ok(out_path)
+}
+
+/// Delete a stale `instructions/INSTRUCTIONS.md` left by a pre-#4752 install.
+///
+/// Why: until #4752, `tm install` wrote the compiled prompt to
+/// `framework/instructions/INSTRUCTIONS.md`. Nothing writes that path anymore —
+/// but [`build_instructions`] still READS it as an optional framework section,
+/// so an upgraded machine would keep folding a frozen copy of an OLD compiled
+/// prompt into [`PipelineOutput::merged`] forever, with no writer left to
+/// refresh it. A stale input nothing can update is worse than an absent one, and
+/// the pipeline already treats absence as normal (`instructions_loaded: false`).
+/// The file is framework-owned — trusty-mpm has always overwritten it on every
+/// install — so removing it takes nothing from the operator.
+/// What: removes `dest` if it exists; returns whether a file was removed. A
+/// `NotFound` race is reported as "nothing removed", not an error, so a
+/// concurrent install cannot fail this one.
+/// Test: `remove_stale_bundled_instructions_deletes_a_leftover`,
+/// `remove_stale_bundled_instructions_is_a_noop_when_absent`.
+pub fn remove_stale_bundled_instructions(dest: &std::path::Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(dest) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
 /// The CLAUDE.md stub seeded into a project on first session start.

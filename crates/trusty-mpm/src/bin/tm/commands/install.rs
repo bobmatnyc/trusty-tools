@@ -77,12 +77,31 @@ pub(crate) async fn install(
         println!("  {line}");
     }
 
-    // Overwrite the bundle stub with the fully assembled PM prompt (#383).
+    // #4752: the assembled PM prompt lands on its OWN path — nothing else
+    // writes `framework/INSTRUCTIONS-COMPILED.md`. It used to overwrite
+    // `instructions/INSTRUCTIONS.md`, which a bundled stub also targeted (#383)
+    // and which `build_instructions` reads back as a pipeline INPUT. A session
+    // launch rewrites this same file with the project-RESOLVED prompt before
+    // spawning `claude` (see `session_launch::prepare_session`); this install
+    // write is the bundled compilation, current until the next launch.
     match trusty_mpm::core::instruction_pipeline::install_system_prompt_to(
+        &paths.instructions_compiled(),
+    ) {
+        Ok(()) => println!("  \u{2713} INSTRUCTIONS-COMPILED.md (assembled)"),
+        Err(e) => eprintln!("warning: failed to assemble system prompt: {e:#}"),
+    }
+
+    // #4752: a pre-#4752 install left the compiled prompt at
+    // `instructions/INSTRUCTIONS.md`. Nothing writes that path now, but
+    // `build_instructions` still READS it — so an upgraded machine would fold a
+    // frozen copy of an old prompt into the pipeline forever. Remove it here
+    // rather than leaving a stale input no writer can refresh.
+    match trusty_mpm::core::instruction_pipeline::remove_stale_bundled_instructions(
         &paths.framework_instructions_path(),
     ) {
-        Ok(()) => println!("  \u{2713} instructions/INSTRUCTIONS.md (assembled)"),
-        Err(e) => eprintln!("warning: failed to assemble system prompt: {e:#}"),
+        Ok(true) => println!("  \u{2717} instructions/INSTRUCTIONS.md (stale, removed)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: failed to remove stale instructions/INSTRUCTIONS.md: {e:#}"),
     }
 
     // #4409: bundled agents deploy ONLY into the tm-managed config-dir tier.

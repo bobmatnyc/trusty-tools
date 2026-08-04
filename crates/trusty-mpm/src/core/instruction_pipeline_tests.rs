@@ -420,6 +420,107 @@ fn assemble_system_prompt_contains_all_sections() {
     assert!(!prompt.contains("ticketing_agent"));
 }
 
+// ── #4752: the compiled prompt owns a path nothing else writes ─────────────
+
+#[test]
+fn compiled_prompt_path_is_distinct_from_the_bundled_instructions_path() {
+    // Why (#4752): the compiled prompt used to be written to
+    // `framework/instructions/INSTRUCTIONS.md` — the SAME path a bundled stub
+    // targeted (#383) and that `build_instructions` reads back as a pipeline
+    // INPUT. FAILS BEFORE THIS CHANGE: `instructions_compiled()` did not exist,
+    // and the compiled write landed on `framework_instructions_path()`.
+    // What: pins the compiled path to `framework/INSTRUCTIONS-COMPILED.md`,
+    // directly under the framework root and NOT under `instructions/`, and
+    // asserts it is a different path from the bundled-input file.
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+
+    let compiled = paths.instructions_compiled();
+    let bundled = paths.framework_instructions_path();
+
+    assert_ne!(
+        compiled, bundled,
+        "the compiled prompt must not share a path with the bundled instructions input"
+    );
+    assert_eq!(
+        compiled,
+        paths.framework.join("INSTRUCTIONS-COMPILED.md"),
+        "the compiled prompt sits directly under framework/, not framework/instructions/"
+    );
+    assert_eq!(
+        compiled.parent(),
+        Some(paths.framework.as_path()),
+        "framework/ is the compiled prompt's parent — `instructions/` is not"
+    );
+}
+
+#[test]
+fn no_bundled_artifact_targets_the_compiled_prompt_path() {
+    // Why (#4752): the defect was two writers on one path. This pins the
+    // bundle-installer half — no entry in the canonical artifact table may
+    // resolve to the compiled prompt's filename, at any depth, so the
+    // `install_to` pass can never write there. A future artifact re-adding a
+    // stub under that name turns this red instead of silently reintroducing
+    // last-writer-wins.
+    // What: scans `bundle::ALL` for any `rel_path` whose file name is
+    // `COMPILED_PROMPT_FILE`.
+    let clashing: Vec<&str> = crate::core::bundle::ALL
+        .iter()
+        .map(|a| a.rel_path)
+        .filter(|p| Path::new(p).file_name().and_then(|n| n.to_str()) == Some(COMPILED_PROMPT_FILE))
+        .collect();
+    assert!(
+        clashing.is_empty(),
+        "no bundled artifact may target {COMPILED_PROMPT_FILE}; found {clashing:?}"
+    );
+}
+
+#[test]
+fn remove_stale_bundled_instructions_deletes_a_leftover() {
+    // Why (#4752): a pre-#4752 install left the compiled prompt at
+    // `instructions/INSTRUCTIONS.md`. Nothing writes it now but
+    // `build_instructions` still reads it, so an upgraded machine would fold a
+    // frozen old prompt into the pipeline forever. `tm install` removes it.
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+    let stale = paths.framework_instructions_path();
+    write_file(&stale, "# an old compiled prompt\n");
+
+    assert!(
+        remove_stale_bundled_instructions(&stale).expect("removal succeeds"),
+        "an existing leftover must be reported as removed"
+    );
+    assert!(!stale.exists(), "the stale leftover must be gone");
+    // The compiled prompt is a DIFFERENT file and must be untouched by this.
+    assert_ne!(stale, paths.instructions_compiled());
+}
+
+#[test]
+fn remove_stale_bundled_instructions_is_a_noop_when_absent() {
+    // Why: the common case is a fresh machine that never had the file. That
+    // must not be an error, and must not report a removal.
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+    assert!(
+        !remove_stale_bundled_instructions(&paths.framework_instructions_path())
+            .expect("absence is not an error"),
+        "nothing was removed, so the call must report false"
+    );
+}
+
+#[test]
+fn write_compiled_prompt_to_creates_parent_dirs() {
+    // Why: the launch path calls this against a framework root that may not
+    // exist yet on a machine that never ran `tm install`; a missing parent must
+    // not fail the launch.
+    // What: writes into a two-deep absent directory and reads the bytes back
+    // verbatim.
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("a").join("b").join(COMPILED_PROMPT_FILE);
+    write_compiled_prompt_to(&dest, "COMPILED-BODY").expect("write succeeds");
+    assert_eq!(fs::read_to_string(&dest).unwrap(), "COMPILED-BODY");
+}
+
 // Why serial + fake-HOME (extra sweep hit — review-gate report on top of
 // #2459/#2460/#2461): `install_system_prompt()` resolves `dirs::home_dir()`
 // internally and previously wrote straight into the REAL
@@ -433,9 +534,10 @@ fn assemble_system_prompt_contains_all_sections() {
 #[serial_test::serial]
 #[test]
 fn install_system_prompt_writes_file() {
-    // Why: `tm launch` depends on `install_system_prompt` regenerating
-    // INSTRUCTIONS.md; this asserts it writes a non-empty file under the
-    // expected `~/.trusty-mpm/framework/instructions/` path.
+    // Why: `install_system_prompt` must regenerate the compiled prompt under
+    // the expected `~/.trusty-mpm/framework/` path. #4752 moved that target off
+    // `instructions/INSTRUCTIONS.md` — the shared, last-writer-wins path — onto
+    // `INSTRUCTIONS-COMPILED.md`, which nothing else writes.
     let fake_home = TempDir::new().expect("create fake home");
     let prev_home = std::env::var("HOME").ok();
     // SAFETY: serialized via `#[serial_test::serial]`, so no other test
@@ -455,7 +557,14 @@ fn install_system_prompt_writes_file() {
 
     let out = install_system_prompt().expect("install succeeds");
     assert!(out.starts_with(fake_home.path()));
-    assert!(out.ends_with("INSTRUCTIONS.md"));
+    assert_eq!(
+        out,
+        fake_home
+            .path()
+            .join(".trusty-mpm/framework")
+            .join(COMPILED_PROMPT_FILE),
+        "#4752: the compiled prompt lands directly under framework/, on its own path"
+    );
     assert!(out.exists());
     let on_disk = fs::read_to_string(&out).unwrap();
     assert_eq!(on_disk, assemble_system_prompt());
@@ -471,11 +580,11 @@ fn install_system_prompt_to_writes_assembled() {
     // equals `assemble_system_prompt()` and contains key PM headings.
     // Test: call the helper against a temp path; read back and verify content.
     let tmp = TempDir::new().unwrap();
-    let dest = tmp.path().join("instructions").join("INSTRUCTIONS.md");
+    let dest = tmp.path().join("framework").join(COMPILED_PROMPT_FILE);
     install_system_prompt_to(&dest).expect("write succeeds");
     assert!(
         dest.exists(),
-        "INSTRUCTIONS.md must exist after install_system_prompt_to"
+        "{COMPILED_PROMPT_FILE} must exist after install_system_prompt_to"
     );
     let on_disk = fs::read_to_string(&dest).unwrap();
     assert_eq!(

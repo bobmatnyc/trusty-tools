@@ -165,14 +165,7 @@ the findings below.
 Written against the actual code, these do not explain cleanly. Recorded rather
 than smoothed over.
 
-1. **Two writers target one path.** `bundle_all.rs` writes a 4-line stub to
-   `instructions/INSTRUCTIONS.md`, and `instruction_pipeline.rs`'s
-   `install_system_prompt` writes the *full composed prompt* to the same
-   `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`. Whichever runs last
-   wins. Neither is read by the launch path, which composes in memory. The
-   bundled-asset retirement is still open.
-
-2. **`base_pm()` is now a misnomer twice over.** It refers to a file that does
+1. **`base_pm()` is now a misnomer twice over.** It refers to a file that does
    not exist, and it hardcodes four section ids in one order to reconstitute a
    "floor" that no longer exists as a concept. It is still live — the
    roster-absent string assembly appends it — so it is a real function whose
