@@ -101,9 +101,10 @@ failure.
 **Gate:** Interface document exists. Zero implementation code (no function bodies with logic,
 no algorithm steps, no I/O calls). The architect produces the contract; the engineer fills it.
 
-**Important:** The `code-critic` agent may optionally be dispatched here to review the
-interface design for API coherence before implementation begins. This is the Phase 2 design
-critic pass. If dispatched, critic input is the interface document only — no code exists yet.
+**Note:** `code-critic` is not dispatched at this stage — it reviews working,
+tested code only (see the "code-critic Dispatch Standard" in
+`agent-delegation.md`). If interface-level review is wanted before
+implementation begins, dispatch `code-analyzer` instead.
 
 **See:** `references/stage-architect.md` for interface specification templates.
 
@@ -171,6 +172,11 @@ When tests pass green, provide updated implementation + passing pytest output.
 ### Stage 4: Critic Review
 
 **Agent:** `code-critic`
+
+Dispatch here still follows the "code-critic Dispatch Standard" in
+`agent-delegation.md`, keyed to the project's test-ladder rung — this stage
+describes how the critic reviews when dispatched, not a standing exemption
+from that standard.
 
 **Skills loaded:** `code-review-standards`, `code-production-process`
 

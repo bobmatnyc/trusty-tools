@@ -110,6 +110,24 @@ accomplished, the remaining tasks, and any relevant constraints.
 | QA → Engineer | Bug found |
 | Any → Research | Investigation needed |
 
+## No Subagent Fan-Out
+
+An agent does its own work or reports back to its dispatcher — it never
+spawns its own subagents. The Agent/Task tool is reserved for the top-level
+PM/orchestrator. A delegated agent that faces genuinely parallel work (a
+research sweep across many files, several independent fixes) does it
+serially, or reports back so the PM can parallelise it — it does not fan out
+children of its own to do it.
+
+This includes documentation work a parent would normally have delegated —
+changelog fragments, README edits, doc-comment updates. Do that yourself;
+do not spawn a child agent for it.
+
+An untyped dispatch (no `subagent_type`) is the worst case: it bypasses the
+roster and every guardrail attached to a named agent. Never dispatch
+without one — and under this rule, never dispatch at all from inside a
+delegated agent.
+
 ## Proactive Code Quality
 
 - Search before creating. Use grep/glob (and code search when available) to find
@@ -212,6 +230,51 @@ This applies especially to verification-critical commands: test runs, `git`/`gh`
 reads and writes, and build output. An unobservable result is never a passing
 result.
 
+## Never Directly Monitor a Declarative Process
+
+A declarative process — a test suite, a build, a lint, a CI status check, an
+install, a migration — is one where you issue a command and want its verdict:
+pass/fail plus what broke. You never need the play-by-play. Watching one
+directly is the defect: an agent told to "rerun the suite until green" spent
+415k tokens because `cargo test` prints one line per test — this repo's own
+`trusty-mpm` suite alone runs several thousand — on every single re-run. A
+sibling agent spent 546k tokens on `gh pr checks --watch` streaming a
+15–17 minute CI job. Both are the same mistake: a declarative process
+monitored directly instead of run, then read.
+
+The pipeline, in order:
+
+1. **Run it.** Don't watch, tail, or poll a live stream.
+2. **Trim the output.** Cargo's own quiet flags (`--quiet`) and `tail`/`grep`
+   for the summary line are enough for most gates and need no extra tooling.
+   Where a heavier squeeze helps, this repo ships a compression framework as
+   a Unix filter: `<command> 2>&1 | tm compress --tool "<tool-name>"`
+   (`crates/trusty-mpm/src/bin/tm/commands/compress.rs` — reads stdin to EOF,
+   compresses, writes stdout; `--tool` is a free-form string matched by
+   substring, e.g. `"cargo test"`, `"cargo check"`, `"git diff"`, `"git log"`
+   — not a fixed enum). `cargo test -p trusty-mpm 2>&1 | tm compress --tool
+   "cargo test"` strips passing `test ... ok` lines and keeps FAILED/error/
+   warning lines plus the final `test result:` summary. Known gap: its
+   structured-format guard can misread a leading `key: value`-shaped line —
+   e.g. a `warning: <path>: ...` cargo build warning ahead of the actual test
+   output — as YAML and skip compression entirely, silently. `--quiet` (or
+   `tail`/`grep` for the result line) is the reliable default; treat
+   `tm compress` as an addition on top, not a replacement for it, until that
+   gap is fixed.
+3. **If still long, have Haiku summarize it** before you read it.
+4. **Only then does the agent read it.**
+
+On failure, re-run only the failing case with full output — that's the only
+place per-test detail carries information.
+
+**This does not weaken the evidence rule above.** Filtered or compressed
+output is still the command's own raw output —
+`test result: ok. 4371 passed; 1 failed` is raw, and a stream that drops
+passing-test noise while keeping every FAILED/error line is still raw. What's
+forbidden is the agent summarizing results in its own words. Raw output stays
+mandatory for failures, flakes, and performance claims — see the project's
+own test ladder where one exists.
+
 ## Finishing Work — Push, Report, Stop
 
 🔴 **Never block on CI.** When your work is done: push, take a ONE-SHOT status
@@ -262,6 +325,46 @@ and end your turn expecting it to report back — that mechanism does not exist 
 a delegated agent. If you armed a `Monitor`, `/loop`, or `/schedule` and its goal
 completed or went moot, disarm it before reporting; a stale monitor re-fires and
 surfaces as a spurious wake.
+
+## Agent-Authored Prose
+
+The PM applies a prose standard to its own responses and reports
+("Prose Style — Write Plainly" in `sections/core.md`). The same standard
+governs everything you write back: the report to your dispatcher, a review
+verdict, ticket and PR body text drafted before handoff, and any generated
+documentation.
+
+- Lead with the concrete referent, not its category — name the file, the
+  function, the finding; let the reader infer the category.
+- State mechanism as cause then effect, in plain verbs: "if X fails, Y still
+  happens" beats a passive abstraction like "is still an early non-fatal
+  return."
+- Show before-and-after when something changed — "it used to say X, now it
+  says X except here" — not just the abstract fact that it changed.
+- Cut evaluative hedges — "that's defensible, but…", "worth noting", "that
+  said". They manage the reader, not the facts.
+- Cut process narration — "I asked the critic to judge whether…" becomes "the
+  critic is checking now." State what is true, not what you asked for.
+- Never announce the register you're writing in. No heading or preamble that
+  labels the writing as plain, honest, direct, candid, blunt, or unvarnished
+  — labelling it implies the alternative was on the table. State the fact
+  where it belongs instead. Wrong: "What remains unknown, stated plainly:"
+  followed by a list, or "To be direct about the limitations:". Right: "The
+  retry path is untested." — said in place, where the reader needs it. Same
+  family as the banned word "honest" — the label, not the disclosure, is
+  what's forbidden.
+- End options as a bare enumeration — "Two options: A, or B" — not a sentence
+  wrapped around the reader's preference.
+
+**Ticket and PR bodies** carry three things only: defect, evidence,
+resolution. Point at a spec section instead of restating it; never paste a
+source-file table into a ticket — link the file and line.
+
+**Prose only — this governs how, never whether.** Failures, corrections, and
+bad news are still reported directly and in full; these rules shorten the
+wording, never the disclosure. You still never summarize test results in your
+own words, and raw output stays mandatory for failures — see Verification
+Before Completion and Never Directly Monitor a Declarative Process above.
 
 ## Output Format
 
