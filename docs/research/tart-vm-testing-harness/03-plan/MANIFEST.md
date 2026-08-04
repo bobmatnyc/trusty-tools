@@ -113,7 +113,7 @@ not been completed is not complete, regardless of what its code does.
 | **P3** — Guest bring-up | `complete` | 2026-08-02 | `345e5b12`, `f181a44e`, + the 2026-08-02 defect-fix commits |
 | **P4** — Expectation table and `--check-table` | `complete` | 2026-08-02 | `0c25d48f`, `12a87f28` |
 | **P5** — Pattern (c) complete: installs, N2, oracle | `complete` | 2026-08-03 | `298a02c7`, `462f6d5c`, `2bf453bc` |
-| **P6** — Pattern (b): branch | `not-started` | — | — |
+| **P6** — Pattern (b): branch | `complete` | 2026-08-04 | `d9f09253` |
 | **P7** — Pattern (a): released | `not-started` | — | — |
 | **P8** — Hardening, docs, measurement write-back | `not-started` | — | — |
 
@@ -194,6 +194,25 @@ reverse. **RC-1 is unchanged**; §F-7 resolved by **step 2** (both `tctl start
 taken, though `verify_daemon_liveness` did not execute because §12.4 ends a run at
 the first classified failure. Per the state rules, `blocked` **halts the plan**:
 Phase 6 does not start around it.
+
+**Phase 6 complete, 2026-08-04 — and it is the first phase that found NO contract
+defect.** `vmtest run branch` exited **0 on its first run**, in **650 s**: the
+guest cloned `bobmatnyc/trusty-tools@main` at `a28698c8` in **4 s**, installed all
+eight in-scope crates with eight package-granular `cargo install --path` commands,
+landed all thirteen binaries, passed all four Single-Install gates, and satisfied
+the full oracle under pattern `b`. **No host→guest byte stream exists on this
+path** and the checkpoint asserts it mechanically: `grep -c 'streamed'` over the
+run log is **0**. **The scenario abstraction held** — `install-branch.sh` differs
+from `install-local.sh` only in the function name, step 1, and the pattern letter,
+and **no `lib/` function needed a pattern-(b) case; `verify.sh` was not touched at
+all.** Two results worth carrying forward: **(1)** the plan predicted a ~50 s
+transport delta between (b) and (c) and the measured delta is **~0 s** — the
+research's `GIT_CLONE_MS=50131` is a **12.5× overstatement** on this host, and the
+install phase remains 86 % of the run; **(2)** DOC-2 §1.2's guest-side version read
+was exercised against a commit **the host does not have**, but every in-scope crate
+version happened to match across the two trees, so this run proves the read is
+**correct** without falsifying the host-side alternative **by result**. Both are
+recorded in Phase 6 Measurements rather than claimed as more than they cover.
 
 > **BOTH PHASE 3 CONTRACT DEFECTS ARE RESOLVED AT SOURCE, 2026-08-02**, by owner
 > decision, each on the reading Phase 3 identified as the narrower/stronger fix.
@@ -2922,22 +2941,334 @@ Phase 6 does not start around it.
 
 ## Phase 6 — Pattern (b): branch
 
-- **State:** `not-started`
+- **State:** `complete`
+
+  > **2026-08-04 — `not-started` → `complete` in one pass.** The checkpoint was
+  > run once and met on the first attempt. Per the State rules this phase passed
+  > through `in-progress` at its first commit (`afae5648`, P6-T1); it is recorded
+  > `complete` here because the checkpoint has been **run** and its output is
+  > pasted below, which is the gate the rules make it.
 - **Pass condition:** `vmtest run branch` **exits 0** with the **same derived binary
   and package assertions as Phase 5** — N/N where N is the count of `in_scope=yes`
   rows (**13** today), over `tsv_scope_packages`' values (**8** today) — and the run
   log shows a
   guest-side `git clone` (no host→guest byte stream) and the checked-out branch
   name.
-- **Observed result:** — not run
-- **Files delivered:** — none
-- **Measurements:** — none *(expected: guest `git clone` duration for comparison
-  with the measured `GIT_CLONE_MS=50131`; total wall clock beside Phase 5's — the
-  first side-by-side comparison of the two transports)*
-- **Deviations from plan:** None. *(Record here if `install-branch.sh` needed
-  anything beyond a different step 1 and pattern letter — that would mean the
-  scenario abstraction leaked, which is a finding.)*
-- **Tasks:** — none complete *(P6-T1 … P6-T5)*
+- **Observed result:** **PASS CONDITION MET — every clause, on the first run.**
+
+  **2026-08-04 UTC, harness tree `d9f09253`. `vmtest run branch` exited 0**, VM
+  `vmtest-20260804T004933Z-7781`, **total wall clock 650 s**. Run started
+  `00:49:32Z`, ended `01:00:27Z`. The guest cloned
+  `https://github.com/bobmatnyc/trusty-tools.git` at branch `main`, commit
+  **`a28698c8`**.
+
+  | clause | result |
+  |---|---|
+  | `vmtest run branch` exits 0 | **PASS** — `EXIT_CODE=0` |
+  | same derived binary assertions as Phase 5 — N/N, N = count of `in_scope=yes` rows (**13**) | **PASS** — 13/13 |
+  | over `tsv_scope_packages`' values (**8**) | **PASS** — 8 installs / 8 directories; 5 of the 8 packages carry a health obligation, 3 do not (§1.1a(a)) |
+  | run log shows a guest-side `git clone` | **PASS** |
+  | **no host→guest byte stream** | **PASS** — `grep -c 'streamed'` = **0** |
+  | run log shows the checked-out branch name | **PASS** — `checked-out branch: main` |
+
+  **Guest-side clone, and the absence of a host→guest stream.** The clone is the
+  only step that differs from pattern (c):
+  ```
+  vmtest: guest-side clone (NO host->guest byte stream; the host repository is not read at all — DOC-1 §6.2, §11): https://github.com/bobmatnyc/trusty-tools.git branch main
+  vmtest: MEASURE git_clone_s 4 (measured baseline GIT_CLONE_MS=50131, i.e. 50.131 s)
+  vmtest: checked-out branch: main   [the branch under test; select it with VMTEST_DEFAULT_BRANCH — DOC-2 §8.2's mechanical override mapping, NOT a --branch flag]
+  vmtest: resolved commit SHA: a28698c85d09efed4ddd0d27bda68937d5ee2cd7
+  vmtest: guest working tree at /Users/admin/vmtest-src: 5540 files (excluding .git)
+  vmtest: THE HOST REPOSITORY WAS NOT READ: pattern (b) has no host path argument and no host->guest transfer (DOC-1 §6.2).
+  ```
+  The checkpoint's "no host→guest byte stream" clause is asserted **mechanically**,
+  not by inspection — P6-T1's acceptance is `grep -c 'streamed'` over the run log,
+  and it is **0**. The word appears only on `source_deliver_local`'s path, which
+  pattern (b) does not enter.
+
+  **Installs are package-granular: 8 installs for 13 binaries, never `--bin`.**
+  ```
+  vmtest: install_from_path trusty-search
+  vmtest: install_from_path trusty-memory
+  vmtest: install_from_path trusty-analyze
+  vmtest: install_from_path trusty-code
+  vmtest: install_from_path trusty-installer
+  vmtest: install_from_path trusty-git-analytics
+  vmtest: install_from_path trusty-mpm
+  vmtest: install_from_path trusty-review
+  vmtest: install count OK: 8 package-granular installs for 8 in-scope crate directories, none installed twice (trusty-analyze trusty-code trusty-git-analytics trusty-installer trusty-memory trusty-mpm trusty-review trusty-search )
+  ```
+  Each was preceded by a `rustc --version` emitted from inside the crate
+  directory, and **K5 reproduced again under (b)** — the same toolchain override
+  pattern (c) found:
+  ```
+  vmtest: rustc(trusty-git-analytics): K5 REPRODUCED — 'rustc 1.97.1 (8bab26f4f 2026-07-14)' differs from the workspace pin 1.91.1
+  ```
+
+  **13/13 in-scope binaries present.**
+  ```
+  vmtest: verify_binaries PASS: 13/13 in-scope binaries present, 0 correctly absent (N is derived from the count of in_scope=yes rows, not hardcoded)
+  ```
+  **All four Single-Install Convention gates pass**, including the three-sidecar
+  `trusty-memory` case:
+  ```
+  vmtest: verify_single_install PASS: trusty-search — all 2 binaries present from ONE package-granular install (trusty-search trusty-embedderd)
+  vmtest: verify_single_install PASS: trusty-memory — all 3 binaries present from ONE package-granular install (trusty-memory trusty-bm25-daemon trusty-memory-mcp-bridge)
+  vmtest: verify_single_install PASS: trusty-installer — all 2 binaries present from ONE package-granular install (trusty-installer tctl)
+  vmtest: verify_single_install PASS: trusty-mpm — all 2 binaries present from ONE package-granular install (tm trusty-mpm)
+  ```
+
+  **§1.1a's health predicate under `H_b`, exercised for the first time.** The
+  `down`-acceptance is gated on pattern `b|c`; this is the first run to take the
+  `b` arm, and it behaved exactly as (c)'s did — nothing bootstraps a daemon under
+  (b), so `down` with `plist_installed=false` is the expected state:
+  ```
+  vmtest:   trusty-search: health='down' accepted (plist_installed=false; H_b = {healthy,stale,down})
+  vmtest:   trusty-memory: health='down' accepted (plist_installed=false; H_b = {healthy,stale,down})
+  vmtest:   trusty-analyze: health='down' accepted (plist_installed=false; H_b = {healthy,stale,down})
+  vmtest:   trusty-mpm: health='unknown' accepted (plist_installed=null; H_b = {healthy,stale,unknown})
+  vmtest:   trusty-review: health='down' accepted (plist_installed=false; H_b = {healthy,stale,down})
+  vmtest: in-scope package(s) `stack doctor` does not report as members: trusty-code trusty-installer tga  [NO HEALTH OBLIGATION — DOC-2 §1.1a(a)]
+  vmtest: verify_stack_doctor PASS: all 5 in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern b (verdict 'degraded' logged but not asserted)
+  ```
+  §1.1a(c)'s corrected mechanism reproduced end to end again: the same four
+  members reported `down` by `doctor` answered HTTP 200 once
+  `verify_daemon_liveness` ran `tctl start --json`.
+  ```
+  vmtest:   trusty-search: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-memory: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-mpm: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-review: LIVE — HTTP 200, JSON parses, .status='degraded'
+  vmtest: verify_daemon_liveness PASS: 4 in-scope daemon(s) live (HTTP 200 + parseable JSON + acceptable .status). LIVENESS ONLY — see RC-1.
+  ```
+
+  **§1.2's guest-side version cross-check — the clause pattern (b) exists to
+  exercise. See Measurements item 2 for what it proved and what it did not.**
+  ```
+  vmtest:   source_tree_version(trusty-installer) = 0.5.0 (cargo metadata, in the guest at /Users/admin/vmtest-src)
+  vmtest: verify_versions PASS: tool_version='0.5.0', stack_version='0.0.0-scaffold' (stub value, field asserted only), contract_floor <= contract_target
+  ```
+
+  **N2 — recorded BLOCKED, identically to Phase 5.** RC-2 is unchanged by this
+  phase; the observed shape is byte-identical to (c)'s, which is itself the
+  expected result since the probe's subject is the same source-built `tctl`.
+  ```
+  vmtest: N2 step 1: TCTL_PATH=/Users/admin/.cargo/bin/tctl (located under the installed environment)
+  vmtest: N2 step 2: probe PATH is /bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin — cargo confirmed ABSENT under it
+  vmtest: N2 OBSERVED exit code: 3
+  vmtest: N2 OBSERVED stdout (0 bytes):
+  vmtest: N2 OBSERVED stderr (204 bytes):
+  vmtest: *** N2 BLOCKED (RC-2 / DOC-2 §6.2) — NOT A PASS. ***
+  ```
+
+  **P6-T3's acceptance, run separately with no VM created:**
+  ```
+  $ VMTEST_DEFAULT_BRANCH=main vmtest run branch --dry-run
+  vmtest run branch (dry run)
+    repo_url https://github.com/bobmatnyc/trusty-tools.git (default)
+    default_branch main (env)
+  vmtest: dry run: preflight passed and the run registry entry was acquired; halting before the clone (plan §F-1). NO VM WAS CREATED.
+
+  $ vmtest run branch --dry-run          # control, no override
+    default_branch main (default)
+  ```
+
+  **Host cleanliness — before and after, raw. No `vmtest-*` survived.**
+  ```
+  $ tart list                                    # before
+  Source Name                                                                                                        Disk Size Accessed    State
+  local  tahoe-base                                                                                                  50   33   1 hour ago  stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago stopped
+
+  $ tart list                                    # after
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   10 minutes ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+  ```
+  `vmtest: teardown: deleted vmtest-20260804T004933Z-7781`.
+- **Files delivered:** modify `vmtest-harness/lib/source.sh`; create
+  `vmtest-harness/scenarios/install-branch.sh`; modify
+  `docs/research/tart-vm-testing-harness/02-design/02-harness-contracts.md`;
+  modify `docs/research/tart-vm-testing-harness/03-plan/MANIFEST.md`
+- **Measurements:**
+
+  **1. THE FIRST SIDE-BY-SIDE COMPARISON OF THE TWO TRANSPORTS — and the
+  transport is not the cost.** P6-T4 expected the (b)−(c) delta to be
+  "approximately the difference between the streamed transport and a guest-side
+  clone (measured 50.131 s)". **It is not: the delta is ~0 s, because the clone
+  took 4 s, not 50.**
+
+  | | pattern (c), run C (2026-08-03) | **pattern (b) (2026-08-04)** |
+  |---|---|---|
+  | source acquisition | 97,198,080 B / 5,346 files streamed in **4 s** | `git clone` + checkout, 5,540 files in **4 s** |
+  | boot → ready | 17 s | **17 s** |
+  | provisioning | 17 s | **19 s** |
+  | install phase (8 crates) | 562 s | **557 s** |
+  | **TOTAL wall clock** | **656 s** | **650 s** |
+
+  Beside the full Phase 5 series: **722 s / 919 s / 656 s (c)** and **650 s (b)**
+  — the fastest of the four, by 6 s over run C, which is well inside the ±17 %
+  host variance Phase 5 measured. **The two transports are indistinguishable at
+  this repository's size**, and the install phase remains the dominant term
+  (**86 %** of the total, unchanged from (c)'s 83–86 %).
+
+  **`GIT_CLONE_MS=50131` is superseded for this host: measured 4 s, a 12.5×
+  overstatement.** The research figure is retained as the *provenance* of §10.2's
+  300 s budget, which is now **75×** the measured value rather than ~6×. The
+  budget is **left unchanged** — §10.2's own reasoning applies unaltered ("a tight
+  timeout over a low-confidence estimate does not enforce a budget, it
+  manufactures flaky failures"), a clone is network-bound, and one reading on one
+  host is not grounds to tighten. **Flagged for P8-T2**, which is the task that
+  owns grounding the timeouts.
+
+  **2. §1.2's guest-side read under (b) — what it proved, and what it did NOT.**
+  This is the clause DOC-2 §1.2 reads guest-side *precisely because* host-side
+  reading is "equivalent under pattern (c) by construction, and simply wrong under
+  pattern (b)". Phase 6 is its first real exercise, and the honest result is
+  **structural, not numerical**:
+
+  - **The trees genuinely differ.** The guest built commit **`a28698c8`**
+    (`bobmatnyc/trusty-tools@main`). That commit **does not exist in the host
+    repository at all** — `git cat-file -e a28698c8` fails there, and it is not an
+    ancestor of the host HEAD. A host-side `cargo metadata` would have been
+    reading a different artifact, which is exactly the hazard §1.2 names.
+  - **The two versions nonetheless agreed**, so the cross-check passed on equal
+    values: `tool_version = 0.5.0` and `source_tree_version(trusty-installer) =
+    0.5.0`, the latter read by `cargo metadata --no-deps` **in the guest at
+    `/Users/admin/vmtest-src`**.
+  - **That agreement is a coincidence of today's trees, and it was checked rather
+    than assumed.** All eight in-scope crates carry identical versions on the host
+    worktree and on `bobmatnyc/main` as of 2026-08-04 (`trusty-search` 0.40.0,
+    `trusty-memory` 0.22.0, `trusty-analyze` 0.8.0, `trusty-code` 0.3.0,
+    `trusty-installer` 0.5.0, `tga` 2.11.0, `trusty-mpm` 1.3.4, `trusty-review`
+    0.11.0). **No in-scope version differs**, so this run could not have
+    distinguished a guest-side read from a host-side one by its result.
+  - **Conclusion, stated so it is not over-read:** the guest-side read is
+    **correct** and was **exercised against a tree the host does not have**, but
+    this run is **not** a falsification test of the host-side alternative. A run
+    against a branch whose crate versions differ from the working tree's would be
+    the sharper test. **Recorded as an open item, not as a pass claimed for more
+    than it covers.** Pattern (a) exercises the complementary case in Phase 7,
+    where the published version legitimately differs (`trusty-review` 0.10.1 vs
+    0.11.0, §A.1b) and the comparison is skipped entirely.
+
+  **3. Per-crate install times** (`MEASURE install_s`), TSV row order, beside
+  pattern (c)'s three runs:
+
+  | crate_dir | (c) run A | (c) run B | (c) run C | **(b)** |
+  |---|---|---|---|---|
+  | trusty-search | 117 s | 146 s | 91 s | **95 s** |
+  | trusty-memory | 78 s | 92 s | 80 s | **85 s** |
+  | trusty-analyze | 67 s | 66 s | 59 s | **59 s** |
+  | trusty-code | 64 s | 55 s | 49 s | **47 s** |
+  | trusty-installer | 21 s | 22 s | 22 s | **21 s** |
+  | trusty-git-analytics | 62 s | 55 s | 64 s | **60 s** |
+  | trusty-mpm | 121 s | 124 s | 138 s | **132 s** |
+  | trusty-review | 58 s | 54 s | 59 s | **58 s** |
+  | **total** | **588 s** | **614 s** | **562 s** | **557 s** |
+
+  Every crate lands inside the pattern-(c) spread. **The install step is
+  transport-agnostic**, which is the expected result — `install_from_path` is
+  shared and does not know which pattern delivered the tree.
+
+  **4. `trusty-mpm` reports 1.3.4, where Phase 5 run C observed 1.3.0.** Both
+  readings are correct: the trees are three weeks apart. Recorded because a reader
+  comparing the two `stack doctor` member tables would otherwise see it as drift
+  between patterns rather than between dates.
+- **Deviations from plan:**
+
+  1. **P6-T2's acceptance holds for executable code, and the scenario headers
+     differ BY P6-T3'S OWN INSTRUCTION.** P6-T2 asks that the diff between the two
+     scenario files show differences "**only** in the function name, step 1, and
+     the pattern letter". P6-T3 asks that the branch-selection mechanism be
+     documented "in the scenario header comment" and delivers **no other file**.
+     The two cannot both hold literally: satisfying P6-T3 puts a block of prose in
+     `install-branch.sh` that `install-local.sh` does not carry.
+
+     **Resolved by reading P6-T2's acceptance as a statement about the code**,
+     which is what makes it a test of the abstraction. Comments and blank lines
+     stripped, the diff is **exactly** the three permitted differences:
+     ```
+     -scenario_install_local() {
+     -    local _bytes _guest_src _dir _pkg
+     +scenario_install_branch() {
+     +    local _sha _guest_src _dir _pkg
+          _guest_src=$(conf_get guest_src_dir)
+     -    _bytes=$(source_deliver_local "$VMTEST_VM" "$VMTEST_HOST_REPO" "$_guest_src")
+     -    log "streamed ${_bytes} bytes of git-tracked + untracked-unignored source"
+     +    _sha=$(source_deliver_branch "$VMTEST_VM" "$(conf_get repo_url)" \
+     +                                 "$(conf_get default_branch)" "$_guest_src")
+     +    log "guest cloned $(conf_get repo_url) at branch $(conf_get default_branch), commit ${_sha}"
+          for _dir in $(tsv_scope_crate_dirs); do
+              install_from_path "$VMTEST_VM" "$_guest_src" "$_dir"
+          done
+          install_assert_install_count
+          negative_probe_n2 "$VMTEST_VM"
+     -    verify_snapshot_inputs "$VMTEST_VM" c
+     -    verify_binaries "$VMTEST_VM" c
+     +    verify_snapshot_inputs "$VMTEST_VM" b
+     +    verify_binaries "$VMTEST_VM" b
+          for _pkg in $(tsv_scope_multibin_packages); do
+              verify_single_install "$VMTEST_VM" "$_pkg"
+          done
+     -    verify_stack_doctor    "$VMTEST_VM" c
+     -    verify_versions        "$VMTEST_VM" c
+     -    verify_daemon_liveness "$VMTEST_VM" c
+     +    verify_stack_doctor    "$VMTEST_VM" b
+     +    verify_versions        "$VMTEST_VM" b
+     +    verify_daemon_liveness "$VMTEST_VM" b
+      }
+     ```
+     **THE SCENARIO ABSTRACTION DID NOT LEAK.** Steps 2, 2b, 3, 3b and 4 are the
+     same calls in the same order; the install step, both tripwires, N2 and all
+     six oracle functions were reused with no edit. **No `lib/` function needed a
+     pattern-(b) special case, and `verify.sh` was not touched at all.**
+
+  2. **`source_deliver_branch` emits the resolved commit SHA on stdout; DOC-2
+     §12.2 specifies only "0 or dies 50".** §12.1 permits a single value on the
+     value channel and P6-T1's acceptance requires the SHA to reach the run log,
+     so the function emits it and the scenario logs it — the same shape
+     `source_deliver_local` uses for its byte count. Nothing asserts on it; it is
+     a value the scenario prints.
+
+  3. **`git clone` then `git checkout` as two stages, rather than
+     `git clone --branch`.** DOC-1 §6.2 describes both actions and the checkpoint
+     requires the run log to show "the checked-out branch name". An explicit
+     checkout, followed by reading `git rev-parse --abbrev-ref HEAD` back and
+     asserting it equals the requested branch, makes the branch an **observed**
+     state of the guest tree rather than an argument the harness passed and never
+     confirmed. It also leaves every remote branch fetched, so
+     `VMTEST_DEFAULT_BRANCH` can name a branch that is not the remote HEAD with no
+     code change.
+
+  4. **No §F item was newly resolved, and none was newly opened.** §F-1, §F-3,
+     §F-4, §F-5, §F-6, §F-10(a)/(b)/(e) applied exactly as previously resolved.
+     **§F-7 unchanged** — `verify_daemon_liveness` ran and passed under (b) using
+     the same two machine-readable surfaces. **RC-1 and RC-2 are both unchanged by
+     this phase:** RC-1 was neither advanced nor retired, and RC-2's N2 shape is
+     byte-identical to (c)'s, which is expected because the probe's subject is the
+     same source-built `tctl`.
+
+  5. **NO CONTRACT DEFECT WAS FOUND.** Every phase from 1 to 5 found at least one
+     contract that was wrong when executed; **Phase 6 found none**, and the
+     checkpoint passed on its first run with nothing weakened. That is recorded as
+     a result rather than passed over, and it is the expected shape of a phase the
+     plan describes as reusing existing scaffolding with **no new mechanism**
+     (plan §A): the contracts pattern (b) depends on had already been executed and
+     corrected by pattern (c). The one plan expectation that did **not** hold is a
+     measurement, not a contract — see Measurements item 1, where the predicted
+     ~50 s transport delta was measured at ~0 s.
+
+  6. **One open item is carried forward, and it is a limit on the evidence rather
+     than a defect:** §1.2's guest-side read was exercised against a tree the host
+     does not have, but every in-scope crate version happened to match, so this run
+     cannot distinguish the guest-side read from a host-side one **by result**. See
+     Measurements item 2.
+- **Tasks:** P6-T1 … P6-T5 complete. **The phase checkpoint is MET** — `vmtest run
+  branch` exited 0 with all clauses satisfied on the first run, and no assertion
+  was weakened to reach it.
 
 ## Phase 7 — Pattern (a): released
 

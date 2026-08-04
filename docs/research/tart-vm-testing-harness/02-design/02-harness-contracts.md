@@ -230,6 +230,29 @@ from both sides: members without a plist have been observed `healthy`, and a
 member with a plist has been observed `down`. In both readings health tracked the
 **probe**, never the plist.
 
+> **The host reading is one half of a natural experiment, and it was recorded
+> without its other half.** *(Amended 2026-08-04.)* The four launchd members above
+> that reported `healthy` with `"plist_installed": false` **had been started
+> manually by the operator** — a fact the original entry omitted. Read cold, that
+> observation alone invites the conclusion that `healthy` is simply the default
+> state of a member with no plist. The complementary reading is the Phase 5
+> pattern-(c) **guest**, where nothing had started anything:
+>
+> | | plists installed | daemon started | `health` |
+> |---|---|---|---|
+> | **host**, 2026-08-03 | none | **yes — manually, by the operator** | `healthy` |
+> | **guest**, Phase 5 run C | none | **no** | `down` |
+>
+> Same `plist_installed: false` on both sides, **opposite** health, and exactly
+> **one** variable between them: whether the daemon was started. That pairing is
+> what isolates the cause — either observation on its own is still consistent with
+> the falsified plist explanation, and only the pair rules it out. The guest half
+> is recorded verbatim in [MANIFEST](../03-plan/MANIFEST.md) Phase 5, **"Run C,
+> clause (iii)"**, where `trusty-search`, `trusty-memory`, `trusty-analyze` and
+> `trusty-review` each read
+> `health='down' accepted (plist_installed=false; H_c = {healthy,stale,down})`.
+> This **strengthens** the correction above; it does not reopen it.
+
 **The correct statement.** Under DOC-1 §6.5's patterns (b) and (c), **nothing has
 started the daemons at the point the oracle reads `doctor`.**
 `plans_service_bootstrap` (`install.rs:528`) is banned under those patterns, so

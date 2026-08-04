@@ -1,9 +1,9 @@
 # vmtest-harness/lib/source.sh — host->guest transport and install steps
 # (DOC-1 §3.4, §6.1; DOC-2 §12.2).
 #
-# AT PLAN PHASE 3 THIS FILE CONTAINS `source_deliver_local` AND THE
-# DIRTY-WORKTREE ASSERTIONS THAT PROVE IT. `source_deliver_branch` (P6-T1),
-# `source_deliver_released`, `install_from_path` (P5-T1) and
+# AT PLAN PHASE 6 THIS FILE CONTAINS `source_deliver_local` AND THE
+# DIRTY-WORKTREE ASSERTIONS THAT PROVE IT, `source_deliver_branch` (P6-T1), and
+# `install_from_path` (P5-T1). `source_deliver_released` and
 # `install_from_registry` (P7-T1) land later.
 #
 # NAMING TENSION, RECORDED (DOC-2 §12.2). DOC-1 §3.4 calls this module "source
@@ -14,8 +14,11 @@
 # call the functions, not the file.
 #
 # THE HOST REPO IS NEVER MOUNTED INTO THE GUEST, IN EITHER DIRECTION (DOC-1
-# §6.4, §11). Source reaches the guest ONLY as a tar stream over the exec
-# channel's stdin. Every host-side read below is read-only; the sole exception
+# §6.4, §11). Under pattern (c) source reaches the guest ONLY as a tar stream
+# over the exec channel's stdin; under pattern (b) it does not cross from the
+# host AT ALL — the guest clones the public repository itself (DOC-1 §6.2), and
+# `source_deliver_branch` has no host path argument to read. Every host-side read
+# below is therefore pattern (c)'s alone; the sole exception
 # is the opt-in dirty-check fixture, which is held to the same discipline as the
 # VM — created only after asserting the paths are clean, and restored on EVERY
 # exit path by the driver's cleanup trap.
@@ -107,6 +110,134 @@ source_deliver_local() {
     log 'target/ absent in the guest, by construction'
 
     printf '%s\n' "$bytes"
+}
+
+# --- pattern (b): a branch of the public repo (DOC-1 §6.2) -----------------
+
+# source_deliver_branch <vm_name> <repo_url> <branch> <guest_dir>
+# EMITS the resolved commit SHA on stdout. 0, or dies 50.
+#
+# ============================================================================
+# NO HOST->GUEST BYTE STREAM EXISTS ON THIS PATH, AND THAT IS THE POINT.
+#
+# DOC-1 §6.2: "The guest performs `git clone` directly (the repo is public, so no
+# credential plumbing is needed), checks out the target branch, and runs
+# `cargo install --path` per crate. No host->guest source transfer occurs; the
+# host repository is not read." This function therefore takes NO host path
+# argument — `source_deliver_local`'s `<host_repo>` has no counterpart here —
+# and touches `$VMTEST_HOST_REPO` nowhere. That is a structural guarantee, not a
+# discipline: there is no host path in scope to read.
+#
+# The phase checkpoint asserts the absence mechanically (`grep -c 'streamed'` in
+# the run log is 0), which is why nothing on this path may borrow
+# `source_deliver_local`'s vocabulary.
+#
+# NO NEW MECHANISM (plan §A). Pattern (b) reuses pattern (c)'s scaffolding
+# entirely: the same `lib/vm.sh` exec boundary, the same `run_watchdog`, the same
+# `install_from_path` install step, the same oracle. Only the acquisition of the
+# tree differs, and it differs by being done BY THE GUEST.
+#
+# THE GUEST'S TREE IS NOT THE HOST'S WORKING TREE, AND SEVERAL THINGS DEPEND ON
+# THAT BEING UNDERSTOOD. `branch` is `default_branch` (DOC-2 §8.2), so the tree
+# built here is whatever that branch carries on the remote — it need not equal,
+# and in general does not equal, the checkout the driver is running from. Two
+# consequences, both already handled at source rather than here:
+#   - DOC-2 §1.2's version cross-check reads `source_tree_version` GUEST-SIDE at
+#     `guest_src_dir` precisely for this reason. Host-side reading is equivalent
+#     under (c) by construction and WRONG under (b). `verify_versions` already
+#     does the right thing; this is the pattern that first makes the difference
+#     real rather than theoretical.
+#   - the install loop iterates `tsv_scope_crate_dirs`, derived from the HOST's
+#     `expected-binaries.tsv`. A crate directory the cloned branch does not carry
+#     fails in `install_from_path`, where `cd` fails and `&&` (never `;`, §7.4)
+#     stops cargo running in the wrong directory. That is a correct, classified
+#     failure and it is deliberately NOT pre-checked here: a table/branch
+#     disagreement is a finding about the branch, and the failure should name the
+#     crate it happened on.
+#
+# `tctl install` IS BANNED ON THIS PATH exactly as it is under (c) (DOC-1 §6.5).
+# The prohibition is about the INSTALL step, which is shared, so it is stated and
+# enforced in `install_from_path`; it is repeated here only so that a reader
+# writing a new pattern-(b) step does not conclude the ban was pattern-(c)'s.
+# ============================================================================
+source_deliver_branch() {
+    local vm="$1" repo_url="$2" branch="$3" guest_dir="$4"
+    local t0 elapsed rc sha head_branch files
+
+    [ -n "$repo_url" ] || die 50 'source_deliver_branch: empty repo_url (DOC-2 §8.2 key repo_url)'
+    [ -n "$branch" ]   || die 50 'source_deliver_branch: empty branch (DOC-2 §8.2 key default_branch)'
+
+    log "guest-side clone (NO host->guest byte stream; the host repository is not read at all — DOC-1 §6.2, §11): ${repo_url} branch ${branch}"
+
+    # The clone target must not pre-exist: `git clone` refuses a non-empty
+    # directory. Removing it is the same preparation `source_deliver_local` does,
+    # for the same reason — a run must not build on a previous run's tree.
+    vm_exec_raw "$vm" "rm -rf $guest_dir" \
+        || die 50 "could not prepare the guest source directory $guest_dir"
+
+    # ------------------------------------------------------------------
+    # 300 s, DOC-2 §10.2's `guest git clone (pattern b)` row, grounded in the
+    # measured GIT_CLONE_MS=50131 (~6x). §10.2's `§8.2 key` column records this
+    # budget as "none — built-in", so §10.3's requirement that a timeout message
+    # name the key that changes it is satisfied by saying that NO key exists —
+    # naming one that does not would be worse than naming none.
+    #
+    # CLONE THEN CHECKOUT, IN THAT ORDER AND AS TWO STEPS, not `clone --branch`.
+    # DOC-1 §6.2 describes both actions and the checkpoint requires the run log
+    # to show "the checked-out branch name"; an explicit checkout is what makes
+    # the branch an OBSERVED state of the tree rather than an argument the harness
+    # passed and never confirmed. It also leaves every remote branch fetched, so
+    # `default_branch` can be overridden to a branch that is not the remote HEAD
+    # with no change here.
+    #
+    # `&&` between every stage, never `;` (DOC-2 §7.4): a failed clone must not be
+    # followed by a `cd` into a directory that does not exist and a checkout in
+    # whatever directory the shell happened to be in.
+    # ------------------------------------------------------------------
+    t0=$(date '+%s')
+    rc=0
+    run_watchdog 300 "$VMTEST_TMPDIR/git-clone.log" \
+        vm_exec "$vm" "git clone ${repo_url} ${guest_dir} && cd ${guest_dir} && git checkout ${branch}" || rc=$?
+    elapsed=$(( $(date '+%s') - t0 ))
+
+    if [ "$rc" -ne 0 ]; then
+        tail -40 "$VMTEST_TMPDIR/git-clone.log" 2>/dev/null | sed 's/^/    | /' >&2 || :
+        if [ "$rc" -eq 124 ]; then
+            die 50 "the guest \`git clone\` of ${repo_url} exceeded its 300 s budget (DOC-2 §10.2 guest-git-clone row; NO vmtest.defaults key exists for this budget). No retry, ever (§10.3)."
+        fi
+        die 50 "the guest \`git clone ${repo_url}\` / \`git checkout ${branch}\` exited ${rc} (last 40 lines above). The repository is public (DOC-1 §6.2), so this is not a credentials failure."
+    fi
+    log "MEASURE git_clone_s ${elapsed} (measured baseline GIT_CLONE_MS=50131, i.e. 50.131 s)"
+
+    # ------------------------------------------------------------------
+    # Read the delivered tree back and ASSERT what it is. The clone's own exit
+    # status says the command succeeded; it does not say which commit is checked
+    # out, and DOC-1 §8.1's "an exit code is not a completion signal" is the same
+    # discipline applied to a different tool.
+    # ------------------------------------------------------------------
+    vm_exec_raw "$vm" "[ -d ${guest_dir}/.git ]" >/dev/null 2>&1 \
+        || die 50 "${guest_dir}/.git does not exist in the guest after a \`git clone\` that exited 0"
+
+    head_branch=$(vm_exec "$vm" "cd ${guest_dir} && git rev-parse --abbrev-ref HEAD") \
+        || die 50 "could not read the checked-out branch name at ${guest_dir}"
+    sha=$(vm_exec "$vm" "cd ${guest_dir} && git rev-parse HEAD") \
+        || die 50 "could not resolve HEAD at ${guest_dir}"
+    [ -n "$sha" ] || die 50 "\`git rev-parse HEAD\` at ${guest_dir} produced nothing"
+
+    # The requested branch is what must be checked out. A clone that silently
+    # left the remote's default branch checked out would build the wrong tree and
+    # every downstream assertion would pass against it.
+    [ "$head_branch" = "$branch" ] \
+        || die 50 "the guest checked out '${head_branch}', not the requested branch '${branch}' (DOC-2 §8.2 key default_branch)"
+
+    files=$(vm_exec_raw "$vm" "find $guest_dir -path $guest_dir/.git -prune -o ! -type d -print | wc -l" | tr -d ' ')
+
+    log "checked-out branch: ${head_branch}   [the branch under test; select it with VMTEST_DEFAULT_BRANCH — DOC-2 §8.2's mechanical override mapping, NOT a --branch flag]"
+    log "resolved commit SHA: ${sha}"
+    log "guest working tree at ${guest_dir}: ${files} files (excluding .git)"
+    log 'THE HOST REPOSITORY WAS NOT READ: pattern (b) has no host path argument and no host->guest transfer (DOC-1 §6.2).'
+
+    printf '%s\n' "$sha"
 }
 
 # --- install steps (DOC-2 §12.2; DOC-1 §7.3, §7.4, §8.4, §8.6, §6.5) -------
