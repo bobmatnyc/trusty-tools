@@ -780,7 +780,7 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 |-------|---------------|------------------|---------------|
 | `research` | Understanding codebase, investigating approaches, analyzing files | Grep, Glob, Read multiple files, WebSearch | Investigation tools |
 | `engineer` | Writing/modifying code, implementing features, refactoring | Edit, Write, codebase knowledge, testing workflows | Prefer the language-specific engineer when one exists (`rust-engineer`, `python-engineer`, `typescript-engineer`, …) |
-| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Generic `ops` is DEPRECATED; use `local-ops` for localhost/PM2/docker |
+| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Generic `ops` was REMOVED from the bundle (#4760); use `local-ops` for localhost/PM2/docker |
 | `qa`, `web-qa`, `api-qa` | Testing implementations, verifying deployments, regression tests, browser testing | Playwright (web), fetch (APIs), verification protocols | For browser: use `web-qa` (never use chrome-devtools, claude-in-chrome, or playwright directly) |
 | `code-analyzer` | Reviewing a proposed solution before implementation; static analysis, correctness and architectural health | Static analysis, APPROVED/NEEDS_IMPROVEMENT/BLOCKED verdict | This is the phase-2 "Code Analysis" agent. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
 | `code-critic` | Adversarial code review with a rubric-based verdict (APPROVE/WARN/BLOCK) on code that already exists and passes its tests. NOT for design critique, NOT for every engineer dispatch — dispatch is gated, see "code-critic Dispatch Standard" below | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal), dispatch-gated |
@@ -826,7 +826,10 @@ These are EXAMPLES of routing, not an exhaustive list. Default to delegation for
 | version, release, publish, bump, pyproject.toml, package.json | `local-ops` | Version management, releases |
 | Unknown/ambiguous | `local-ops` | Default fallback |
 
-**NOTE**: Generic `ops` agent is DEPRECATED. Use platform-specific agents.
+**NOTE**: The generic `ops` agent was REMOVED from the bundle (#4760). Use
+`local-ops` for platform-agnostic local work. `gcp-ops` and `vercel-ops` are
+platform-gated and deploy only to projects showing a GCP or Vercel marker, so
+they may be absent from this project's roster.
 
 ## Make / Mise Command Routing
 

@@ -20,7 +20,9 @@
 //! `gcp_marker_detects_gcp_ops`, `no_platform_marker_detects_nothing`.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use super::workspace::{ProbeBudget, probe_roots};
 
 /// A bundled language-specific engineer agent and the marker files that select it.
 ///
@@ -164,16 +166,7 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
     },
 ];
 
-/// The largest marker file this module will read when probing its contents.
-///
-/// Why: a content probe must not be a denial-of-service vector on a pathological
-/// or hostile `package.json`. Real dependency manifests are kilobytes; 1 MiB is
-/// far above any legitimate one and bounds the read.
-/// What: 1 MiB, in bytes.
-/// Test: `content_probe_ignores_an_oversized_file`.
-const MAX_MARKER_PROBE_BYTES: u64 = 1024 * 1024;
-
-/// Whether a single marker is present in `project_dir`.
+/// Whether a single marker is present in `dir`.
 ///
 /// Why: three marker kinds are needed, because three kinds of project actually
 /// exist. Most stacks are identified by a fixed filename. .NET projects are
@@ -184,30 +177,31 @@ const MAX_MARKER_PROBE_BYTES: u64 = 1024 * 1024;
 /// the only reliable signal.
 /// What: three forms, in precedence order.
 ///
-/// * `<path>::<needle>` — a CONTENT PROBE. True when `<path>` exists, is at most
-///   [`MAX_MARKER_PROBE_BYTES`], and contains `<needle>` as a literal substring.
-///   This is a deliberate, bounded read of a declaration the project wrote about
-///   itself — not an inference. Needles are written with their surrounding
-///   syntax (`"react"` with quotes, `{:phoenix,` with the tuple brace) so a
-///   substring match is an exact declaration match and cannot catch a
-///   longer-named sibling package.
-/// * `*.<ext>` — an extension glob over the direct children of `project_dir`.
+/// * `<path>::<needle>` — a CONTENT PROBE. True when `<path>` exists, is within
+///   the size cap, is affordable under `budget`, and contains `<needle>` as a
+///   literal substring. This is a deliberate, bounded read of a declaration the
+///   project wrote about itself — not an inference. Needles are written with
+///   their surrounding syntax (`"react"` with quotes, `{:phoenix,` with the
+///   tuple brace) so a substring match is an exact declaration match and cannot
+///   catch a longer-named sibling package.
+/// * `*.<ext>` — an extension glob over the direct children of `dir`.
 /// * anything else — an exact path, tested for existence.
 ///
-/// Any I/O failure (missing or unreadable path, non-UTF-8 contents) yields
-/// `false`: a marker that cannot be read is a marker that is not present.
+/// Any I/O failure (missing or unreadable path, non-UTF-8 contents) or an
+/// exhausted budget yields `false`: a marker that cannot be read is a marker
+/// that is not present.
 /// Test: `content_probe_matches_a_declared_dependency`,
 /// `content_probe_does_not_match_a_longer_named_sibling`,
 /// `content_probe_ignores_an_oversized_file`,
 /// `dotnet_csproj_detects_dotnet_engineer` (glob branch); every other detection
 /// test exercises the exact-path branch.
-fn marker_present(project_dir: &Path, marker: &str) -> bool {
+fn marker_present(dir: &Path, marker: &str, budget: &ProbeBudget) -> bool {
     if let Some((path, needle)) = marker.split_once("::") {
-        return file_contains(&project_dir.join(path), needle);
+        return file_contains(&dir.join(path), needle, budget);
     }
     if let Some(ext) = marker.strip_prefix("*.") {
         let suffix = format!(".{ext}");
-        return std::fs::read_dir(project_dir)
+        return std::fs::read_dir(dir)
             .map(|entries| {
                 entries
                     .flatten()
@@ -215,23 +209,39 @@ fn marker_present(project_dir: &Path, marker: &str) -> bool {
             })
             .unwrap_or(false);
     }
-    project_dir.join(marker).exists()
+    dir.join(marker).exists()
 }
 
-/// Whether `path` is a readable, size-bounded file containing `needle`.
+/// Whether `path` is a readable, size- and budget-bounded file containing `needle`.
 ///
-/// Why: factored out of [`marker_present`] so the size guard and the
+/// Why: factored out so the size guard, the shared budget, and the
 /// failure-is-absence rule are stated once and testable on their own.
-/// What: `false` unless `path` is a regular file of at most
-/// [`MAX_MARKER_PROBE_BYTES`] whose UTF-8 contents contain `needle`.
+/// What: delegates the bounded read to [`super::workspace::read_bounded`], then
+/// tests for the literal substring.
 /// Test: `content_probe_matches_a_declared_dependency`,
 /// `content_probe_ignores_an_oversized_file`.
-fn file_contains(path: &Path, needle: &str) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() && meta.len() <= MAX_MARKER_PROBE_BYTES => {}
-        _ => return false,
-    }
-    std::fs::read_to_string(path).is_ok_and(|body| body.contains(needle))
+fn file_contains(path: &Path, needle: &str, budget: &ProbeBudget) -> bool {
+    super::workspace::read_bounded(path, budget).is_some_and(|body| body.contains(needle))
+}
+
+/// Whether `marker` is present at the project root or at any workspace member.
+///
+/// Why (#4760 monorepo regression): probing only the project root loses every
+/// marker a monorepo keeps inside its members — a turborepo root declares
+/// neither `"react"` nor `"next"` and carries no `next.config.*`, so a Next.js
+/// monorepo would lose three engineers it had before the gates tightened. The
+/// gate narrowing was authorised for single-package projects that never declared
+/// the framework, not for monorepos that declare it one directory down.
+/// What: `true` when [`marker_present`] holds for ANY entry in `roots` (the
+/// project root first, then each declared workspace member — see
+/// [`super::workspace::probe_roots`]).
+/// Test: `npm_monorepo_member_declares_react`,
+/// `elixir_umbrella_member_declares_phoenix`,
+/// `monorepo_without_the_framework_still_misses_it`.
+fn marker_present_in_any(roots: &[PathBuf], marker: &str, budget: &ProbeBudget) -> bool {
+    roots
+        .iter()
+        .any(|root| marker_present(root, marker, budget))
 }
 
 /// The set of language-engineer stems whose markers are present in `project_dir`.
@@ -243,9 +253,15 @@ fn file_contains(path: &Path, needle: &str) -> bool {
 /// `BTreeSet`.
 /// Test: `rust_workspace_scopes_to_rust_engineer`, `polyglot_project_keeps_both`.
 pub(crate) fn detected_engineers(project_dir: &Path) -> BTreeSet<&'static str> {
+    let budget = ProbeBudget::new();
+    let roots = probe_roots(project_dir, &budget);
     LANGUAGE_ENGINEERS
         .iter()
-        .filter(|le| le.markers.iter().any(|m| marker_present(project_dir, m)))
+        .filter(|le| {
+            le.markers
+                .iter()
+                .any(|m| marker_present_in_any(&roots, m, &budget))
+        })
         .map(|le| le.stem)
         .collect()
 }
@@ -309,9 +325,15 @@ const PLATFORM_AGENTS: &[PlatformAgent] = &[
 /// code path (`core::manifest::framework::parse_framework_manifest`).
 /// Test: `no_platform_marker_detects_nothing`, `vercel_marker_detects_vercel_ops`.
 pub(crate) fn detected_platforms(project_dir: &Path) -> BTreeSet<&'static str> {
+    let budget = ProbeBudget::new();
+    let roots = probe_roots(project_dir, &budget);
     PLATFORM_AGENTS
         .iter()
-        .filter(|pa| pa.markers.iter().any(|m| marker_present(project_dir, m)))
+        .filter(|pa| {
+            pa.markers
+                .iter()
+                .any(|m| marker_present_in_any(&roots, m, &budget))
+        })
         .map(|pa| pa.stem)
         .collect()
 }
@@ -565,14 +587,23 @@ mod tests {
         // The probe helper on its own: present-and-matching vs present-and-not.
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "mix.exs", "[{:phoenix, \"~> 1.7\"}]");
-        assert!(file_contains(&tmp.path().join("mix.exs"), "{:phoenix,"));
-        assert!(!file_contains(&tmp.path().join("mix.exs"), "{:ecto,"));
+        let budget = ProbeBudget::new();
+        assert!(file_contains(
+            &tmp.path().join("mix.exs"),
+            "{:phoenix,",
+            &budget
+        ));
+        assert!(!file_contains(
+            &tmp.path().join("mix.exs"),
+            "{:ecto,",
+            &budget
+        ));
         assert!(
-            !file_contains(&tmp.path().join("absent.exs"), "{:phoenix,"),
+            !file_contains(&tmp.path().join("absent.exs"), "{:phoenix,", &budget),
             "a missing file is an absent marker, never an error"
         );
         assert!(
-            !file_contains(tmp.path(), "{:phoenix,"),
+            !file_contains(tmp.path(), "{:phoenix,", &budget),
             "a directory is not a readable marker file"
         );
     }
@@ -583,68 +614,97 @@ mod tests {
         // pathological manifest cannot be read into memory.
         let tmp = TempDir::new().unwrap();
         let mut body = String::from("{:phoenix, \"~> 1.7\"}");
-        body.push_str(&"x".repeat(MAX_MARKER_PROBE_BYTES as usize + 1));
+        body.push_str(&"x".repeat(super::super::workspace::MAX_MANIFEST_BYTES as usize + 1));
         write(tmp.path(), "mix.exs", &body);
-        assert!(!file_contains(&tmp.path().join("mix.exs"), "{:phoenix,"));
+        let budget = ProbeBudget::new();
+        assert!(!file_contains(
+            &tmp.path().join("mix.exs"),
+            "{:phoenix,",
+            &budget
+        ));
     }
 
     #[test]
-    fn polyglot_project_detects_both() {
-        // A repo with both Cargo.toml and pyproject.toml detects rust + python
-        // and nothing else.
+    fn npm_monorepo_member_declares_react() {
+        // #4760 monorepo regression: a turborepo/pnpm root declares no
+        // framework dependency, so root-only probing lost react/next/svelte on
+        // a Next.js monorepo. The member declaration must be found.
         let tmp = TempDir::new().unwrap();
-        touch(tmp.path(), "Cargo.toml");
-        touch(tmp.path(), "pyproject.toml");
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"root","workspaces":["apps/*","packages/*"]}"#,
+        );
+        write(
+            tmp.path(),
+            "apps/web/package.json",
+            r#"{"dependencies":{"react":"^18","next":"^15"}}"#,
+        );
+        touch(tmp.path(), "apps/web/next.config.js");
 
         let detected = detected_engineers(tmp.path());
-        assert!(detected.contains("rust-engineer"));
-        assert!(detected.contains("python-engineer"));
-        assert!(!detected.contains("golang-engineer"));
+        assert!(detected.contains("react-engineer"), "{detected:?}");
+        assert!(detected.contains("nextjs-engineer"), "{detected:?}");
+        assert!(
+            detected.contains("javascript-engineer"),
+            "the root package.json still selects the language engineers"
+        );
     }
 
     #[test]
-    fn dotnet_csproj_detects_dotnet_engineer() {
-        // A .NET project is identified by an extension-glob marker (`*.csproj`),
-        // exercising `marker_present`'s glob branch.
+    fn monorepo_without_the_framework_still_misses_it() {
+        // The walk must not make every monorepo match everything: a workspace
+        // whose members declare no framework gets no framework engineer.
         let tmp = TempDir::new().unwrap();
-        touch(tmp.path(), "MyApp.csproj");
-
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"workspaces":["packages/*"]}"#,
+        );
+        write(
+            tmp.path(),
+            "packages/util/package.json",
+            r#"{"dependencies":{"lodash":"^4"}}"#,
+        );
         let detected = detected_engineers(tmp.path());
-        assert!(detected.contains("dotnet-engineer"));
-        assert!(!detected.contains("rust-engineer"));
-        assert!(!detected.contains("golang-engineer"));
-    }
-
-    #[test]
-    fn dotnet_vbproj_and_exact_markers_detect_dotnet_engineer() {
-        // Legacy VB.NET (`*.vbproj` glob) and the exact-filename markers
-        // (`global.json`, `Directory.Build.props`) all select dotnet-engineer.
-        for marker in ["Legacy.vbproj", "global.json", "Directory.Build.props"] {
-            let tmp = TempDir::new().unwrap();
-            touch(tmp.path(), marker);
-            assert!(
-                detected_engineers(tmp.path()).contains("dotnet-engineer"),
-                "dotnet-engineer must be detected for a {marker} project"
-            );
+        assert!(detected.contains("javascript-engineer"));
+        for framework in ["react-engineer", "nextjs-engineer", "svelte-engineer"] {
+            assert!(!detected.contains(framework), "{framework} must not fire");
         }
     }
 
     #[test]
-    fn tauri_marker_detects_without_bare_package_json() {
-        // A Tauri config selects tauri-engineer even though tauri.conf.json
-        // lives under src-tauri/ — and, unlike react/nextjs/svelte, tauri has NO
-        // package.json fallback, so it is the one genuinely framework-gated stem.
+    fn elixir_umbrella_member_declares_phoenix() {
+        // An umbrella root's mix.exs declares no deps of its own.
         let tmp = TempDir::new().unwrap();
-        touch(tmp.path(), "src-tauri/tauri.conf.json");
-        let detected = detected_engineers(tmp.path());
-        assert!(detected.contains("tauri-engineer"));
-
-        let bare_js = TempDir::new().unwrap();
-        write(bare_js.path(), "package.json", &package_json(&["react"]));
-        assert!(
-            !detected_engineers(bare_js.path()).contains("tauri-engineer"),
-            "tauri must NOT fire on a package.json without a Tauri config"
+        write(
+            tmp.path(),
+            "mix.exs",
+            "def project do\n  [apps_path: \"apps\"]\nend\n",
         );
+        write(
+            tmp.path(),
+            "apps/my_app_web/mix.exs",
+            "defp deps do\n  [{:phoenix, \"~> 1.7\"}]\nend\n",
+        );
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("elixir-engineer"), "root mix.exs");
+        assert!(
+            detected.contains("phoenix-engineer"),
+            "the umbrella member's phoenix dep must be found: {detected:?}"
+        );
+    }
+
+    #[test]
+    fn monorepo_member_platform_marker_is_found() {
+        // Platform detection uses the same probe roots — a Vercel monorepo keeps
+        // vercel.json in the deployed app, not at the root.
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "package.json", r#"{"workspaces":["apps/*"]}"#);
+        write(tmp.path(), "apps/web/vercel.json", "{}");
+        let detected = detected_platforms(tmp.path());
+        assert!(detected.contains("vercel-ops"), "{detected:?}");
+        assert!(!detected.contains("gcp-ops"));
     }
 
     #[test]

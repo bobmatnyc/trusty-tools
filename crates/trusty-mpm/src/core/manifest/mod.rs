@@ -21,6 +21,7 @@ pub mod framework;
 pub(crate) mod project_lang;
 mod resolve;
 mod schema;
+mod workspace;
 
 pub use apply::HarnessPlan;
 pub use default::default_manifest;

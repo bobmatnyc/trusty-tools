@@ -37,5 +37,5 @@ Elixir 1.16+/OTP 26+, Phoenix 1.7+ with LiveView/HEEx, Ecto repos/migrations, Ob
 
 ## Handoff Recommendations
 - **Frontend focus** → `web-ui-engineer` or `react-engineer`
-- **Infrastructure/deployment** → `ops` or `gcp-ops`
+- **Infrastructure/deployment** → `local-ops`, or `gcp-ops` on a GCP project
 - **Comprehensive QA** → `qa` agent

@@ -95,7 +95,10 @@ language = [
 # These gate on FRAMEWORK evidence, not language evidence. React and Phoenix
 # ship no config file that distinguishes them, so they gate on a bounded content
 # probe of the project's own dependency declaration (`package.json::"react"`,
-# `mix.exs::{:phoenix,`) — see `project_lang.rs::marker_present`.
+# `mix.exs::{:phoenix,`) — see `project_lang.rs::marker_present`. Markers are
+# evaluated at the project root AND at every workspace member the root manifest
+# declares, so a monorepo that keeps its framework one directory down still
+# matches (`workspace.rs`).
 framework = [
   "nextjs-engineer",
   "phoenix-engineer",

@@ -229,11 +229,52 @@ apps — and `phoenix-engineer`'s description narrowed to the web layer
 (Router, Controllers, LiveView, Channels, HEEx) so the two roles do not
 overlap.
 
-**This is a deliberate behavior change, not accidental scope loss.** A plain
-JavaScript project no longer receives `react-engineer`, `nextjs-engineer`, or
-`svelte-engineer`. A non-Phoenix Elixir project no longer receives
-`phoenix-engineer`. All four were deploying by accident, on a marker that
-identified the language rather than the framework.
+**Monorepos probe their members, not just the root.** Marker detection
+evaluates every marker against the project root AND every workspace member the
+ROOT MANIFEST ITSELF declares — npm/yarn `workspaces` (array and
+`{packages: […]}` forms), `pnpm-workspace.yaml` `packages:`, and an Elixir
+umbrella's `apps_path:`. Without this, a turborepo or pnpm-workspaces root —
+which declares neither `"react"` nor `"next"` and carries no `next.config.*` —
+would lose three engineers it had before the gates tightened, and an Elixir
+umbrella would lose `phoenix-engineer`. Narrowing was authorised for
+single-package projects that never declared the framework; it was not
+authorised for monorepos that declare it one directory down. Declared globs are
+honoured rather than `packages/*` and `apps/*` being assumed, so a workspace
+using `services/*` or `libs/*` is covered without the code guessing at
+conventions (`core::manifest::workspace`).
+
+Every dimension of that walk is bounded, because it runs on the launch path:
+
+| Bound | Value | Rationale |
+|---|---|---|
+| Glob depth | one `*` segment, no recursive descent | npm/pnpm globs are overwhelmingly one level. Expanding one level makes enumeration O(entries in one directory) and never exponential. A `**` is treated as a single `*`. |
+| Patterns read | 64 per manifest | A manifest declaring more member globs than this is malformed, not large. |
+| Members probed | 256 | Bounds directory enumeration. Detection is a boolean OR — one matching member decides the answer — so the marginal member past 256 almost never changes the result. |
+| Bytes read | 16 MiB per detection call, shared | Per-file caps alone still permit `members × cap` in aggregate (256 MiB). One shared allowance bounds the quantity that actually matters. A real 256-member monorepo with few-KB manifests reads well under 1 MiB. |
+
+Exhausting a bound is fail-closed: probing stops and the unread members read as
+carrying no marker, exactly as an unreadable file does. It never errors and
+never blocks a launch. A declared pattern containing `..` is rejected so a
+manifest cannot walk outside the project.
+
+**This is a deliberate behavior change, not accidental scope loss.** Stated
+precisely — the earlier claim of "plain JavaScript projects" was too narrow,
+and that imprecision is what let the monorepo case go unnamed until review:
+
+| Project shape | Loses | Keeps |
+|---|---|---|
+| Single-package JS repo that declares react/next/svelte | nothing | all three, as before |
+| Single-package JS repo that declares NONE of them | `react-engineer`, `nextjs-engineer`, `svelte-engineer` | `javascript-engineer`, `typescript-engineer`, every universal agent |
+| JS monorepo whose members declare the framework | nothing | all three, via member probing |
+| JS monorepo whose members declare none of them | the same three | the language engineers |
+| Plain Elixir project (`mix.exs`, no Phoenix dep) | `phoenix-engineer` | **gains** `elixir-engineer` |
+| Elixir umbrella with a Phoenix app under `apps_path` | nothing | both, via member probing |
+| Project with no GCP/Vercel marker at root or in a member | `gcp-ops`, `vercel-ops` | everything else |
+
+Residual gaps, named rather than left implicit: a framework declared ONLY as a
+transitive dependency (absent from every member's own manifest) is not seen; a
+member beyond the 256-member or 16-MiB bound is not probed; and a workspace glob
+relying on recursion deeper than one level resolves only its first level.
 
 ### 4.2 `platform` — a genuinely new gate
 

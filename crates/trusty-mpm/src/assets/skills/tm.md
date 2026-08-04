@@ -32,25 +32,37 @@ Documentation. See `tm-delegation-patterns` for the concrete chains and
 
 Verified against `bundle_all.rs`'s `ALL` table — this is not exhaustive of
 every possible custom agent a project may add, but every name below is
-really bundled.
+really bundled. For the mechanically generated version, including each
+agent's DEPLOYMENT CATEGORY, see `tm-capabilities`'s
+`references/agents.md`; the categories themselves are declared in the
+bundled `framework-manifest.toml` (#4760).
 
-**Core**: `engineer`, `research`, `qa`, `ops`, `security`, `documentation`,
-`ticketing`, `code-analyzer`, `data-engineer`, `version-control`
+**Not every bundled agent deploys to every project.** `universal` agents
+always do; `language`, `framework`, and `platform` agents deploy only when
+the project shows a matching marker. Ask for the roster the CURRENT project
+actually received rather than assuming this whole list is available.
 
-**Language engineers**: `rust-engineer`, `python-engineer`,
-`typescript-engineer`, `javascript-engineer`, `golang-engineer`,
-`java-engineer`, `php-engineer`, `ruby-engineer`, `dart-engineer`,
-`dotnet-engineer`
+**Core** (universal): `engineer`, `research`, `qa`, `security`,
+`documentation`, `ticketing`, `code-analyzer`, `data-engineer`,
+`version-control`
 
-**Framework specialists**: `react-engineer`, `nextjs-engineer`,
-`svelte-engineer`, `tauri-engineer`, `phoenix-engineer`, `web-ui-engineer`
+**Language engineers** (deploy on a language marker): `rust-engineer`,
+`python-engineer`, `typescript-engineer`, `javascript-engineer`,
+`golang-engineer`, `java-engineer`, `php-engineer`, `ruby-engineer`,
+`dart-engineer`, `dotnet-engineer`, `elixir-engineer`
 
-**QA**: `web-qa`, `api-qa`, `code-critic`
+**Framework specialists** (deploy on a framework marker):
+`react-engineer`, `nextjs-engineer`, `svelte-engineer`, `tauri-engineer`,
+`phoenix-engineer`
 
-**Ops**: `local-ops`, `vercel-ops`, `gcp-ops`
+**QA** (universal): `web-qa`, `api-qa`, `code-critic`
 
-**Specialized**: `refactoring-engineer`, `prompt-engineer`,
-`memory-manager`, `mpm-agent-manager`, `mpm-skills-manager`
+**Ops**: `local-ops` (universal); `vercel-ops` and `gcp-ops` deploy only on
+a Vercel or GCP marker
+
+**Specialized** (universal): `refactoring-engineer`, `prompt-engineer`,
+`web-ui-engineer`, `memory-manager`, `mpm-agent-manager`,
+`mpm-skills-manager`
 
 See `tm-agent-architecture` for how these are built (the `extends:` compose
 chain) and how to update one safely.
