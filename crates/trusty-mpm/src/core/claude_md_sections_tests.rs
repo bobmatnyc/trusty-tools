@@ -1274,3 +1274,58 @@ fn seeded_claude_md_declares_no_overrides() {
         "the bundled workflow section must survive a freshly seeded CLAUDE.md"
     );
 }
+
+// --- LOCATOR: the projection the writer splices against (#4754) -------------
+
+/// One span per well-formed block, in file order, with the inclusive line
+/// indices the writer needs.
+#[test]
+fn locate_blocks_finds_one_span_per_block() {
+    let token = section_token(SectionId::Workflow);
+    let text = format!(
+        "intro\n\
+         <!-- TRUSTY-MPM: {token} START v=1 -->\nfirst\n<!-- TRUSTY-MPM: {token} END -->\n\
+         middle\n\
+         <!-- TRUSTY-MPM: {token} START v=1 -->\nsecond\n<!-- TRUSTY-MPM: {token} END -->\n"
+    );
+
+    let located = locate_blocks(&text, SectionId::Workflow);
+
+    assert_eq!(located.spans, vec![(1, 3), (5, 7)]);
+    assert!(!located.unclosed);
+    // The spans must really delimit the blocks: the named lines are the markers.
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[1].contains("START") && lines[3].contains("END"));
+}
+
+/// An unpaired `START` is surfaced, because it means the file's block extents
+/// are unknown and the writer must decline to splice.
+#[test]
+fn locate_blocks_flags_an_unclosed_marker() {
+    let token = section_token(SectionId::Memory);
+    let text = format!("<!-- TRUSTY-MPM: {token} START v=1 -->\nno end marker\n");
+
+    let located = locate_blocks(&text, SectionId::Memory);
+
+    assert!(located.unclosed, "an unpaired START must be reported");
+    assert!(located.spans.is_empty(), "and yield no span to splice over");
+}
+
+/// Blocks belonging to other sections are not returned — a writer targeting one
+/// section must never splice over another's block.
+#[test]
+fn locate_blocks_ignores_other_sections() {
+    let text = format!(
+        "{}{}",
+        block(SectionId::Memory, "memory body"),
+        block(SectionId::Workflow, "workflow body")
+    );
+
+    let located = locate_blocks(&text, SectionId::Workflow);
+
+    assert_eq!(located.spans.len(), 1, "only the WORKFLOW block");
+    let lines: Vec<&str> = text.lines().collect();
+    let (start, end) = located.spans[0];
+    assert!(lines[start].contains(section_token(SectionId::Workflow)));
+    assert!(lines[end].contains(section_token(SectionId::Workflow)));
+}
