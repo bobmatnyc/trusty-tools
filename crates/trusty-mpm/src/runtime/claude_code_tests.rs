@@ -915,12 +915,12 @@ fn build_prompt_file_refreshes_the_compiled_prompt() {
     // can. Equality with the prompt file is what makes the artifact the same
     // text the session runs with.
     let _home = HomeGuard::set();
-    let compiled = crate::core::paths::FrameworkPaths::default().instructions_compiled();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path());
     std::fs::create_dir_all(compiled.parent().unwrap()).expect("create framework dir");
     const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
     std::fs::write(&compiled, STALE).expect("seed stale compiled prompt");
 
-    let tmp = tempfile::tempdir().expect("tempdir");
     let path = build_prompt_file(tmp.path()).expect("prompt file written");
 
     let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt readable");
@@ -951,10 +951,10 @@ fn build_prompt_file_compiled_write_failure_does_not_block_the_spawn() {
     // fails; the prompt file itself must still be produced and still carry the
     // real PM prompt.
     let _home = HomeGuard::set();
-    let compiled = crate::core::paths::FrameworkPaths::default().instructions_compiled();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path());
     std::fs::create_dir_all(&compiled).expect("plant a directory at the compiled path");
 
-    let tmp = tempfile::tempdir().expect("tempdir");
     let path =
         build_prompt_file(tmp.path()).expect("spawn must still get its prompt file (non-fatal)");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");

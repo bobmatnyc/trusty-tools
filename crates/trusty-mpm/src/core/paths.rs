@@ -322,24 +322,13 @@ impl FrameworkPaths {
         self.instructions.join("INSTRUCTIONS.md")
     }
 
-    /// Path of the COMPILED PM system prompt (`INSTRUCTIONS-COMPILED.md`).
-    ///
-    /// Why (#4752): the compiled prompt used to be written to
-    /// [`framework_instructions`](Self::framework_instructions) — the same
-    /// `instructions/INSTRUCTIONS.md` path a bundled stub also targeted and that
-    /// [`crate::core::instruction_pipeline::build_instructions`] reads back as a
-    /// pipeline INPUT. One path with two writers and a reader is
-    /// non-deterministic by construction (#383 regressed on exactly this), so
-    /// the compiled output gets a path of its own that nothing else writes.
-    /// What: `INSTRUCTIONS-COMPILED.md` directly under the framework root —
-    /// deliberately NOT under `framework/instructions/`, which stays the
-    /// bundled-input directory.
-    /// Test: `instructions_compiled_is_directly_under_framework`,
-    /// `instructions_compiled_is_not_the_framework_instructions_path`.
-    pub fn instructions_compiled(&self) -> PathBuf {
-        self.framework
-            .join(crate::core::instruction_pipeline::COMPILED_PROMPT_FILE)
-    }
+    // #4752: there is deliberately NO `instructions_compiled()` accessor here.
+    // The compiled PM prompt is PER-PROJECT session state, not part of the
+    // global framework install this type models, so it is resolved by
+    // `instruction_pipeline::compiled_prompt_path(project_dir)` instead. An
+    // accessor on this type would have to pick between the shared managed root
+    // and the real `$HOME` — the ambiguity that made the file collide across
+    // concurrent sessions in the first place.
 
     /// Path of the framework launch instructions — explicit-name alias.
     ///
@@ -885,29 +874,6 @@ mod tests {
         assert_eq!(
             paths.framework_instructions(),
             PathBuf::from("/base/.trusty-mpm/framework/instructions/INSTRUCTIONS.md")
-        );
-    }
-
-    #[test]
-    fn instructions_compiled_is_directly_under_framework() {
-        // #4752: `framework/INSTRUCTIONS-COMPILED.md`, NOT
-        // `framework/instructions/…`. FAILS BEFORE THIS CHANGE — the accessor
-        // did not exist and the compiled prompt shared the bundled path.
-        let paths = FrameworkPaths::under("/base");
-        assert_eq!(
-            paths.instructions_compiled(),
-            PathBuf::from("/base/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md")
-        );
-    }
-
-    #[test]
-    fn instructions_compiled_is_not_the_framework_instructions_path() {
-        // The whole point of #4752: the compiled OUTPUT and the bundled INPUT
-        // are different files, so neither can clobber the other.
-        let paths = FrameworkPaths::under("/base");
-        assert_ne!(
-            paths.instructions_compiled(),
-            paths.framework_instructions_path()
         );
     }
 

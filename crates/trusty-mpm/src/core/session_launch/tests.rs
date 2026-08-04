@@ -266,6 +266,40 @@ fn prepare_session_writes_claude_md_and_stash() {
 // ── #4752: INSTRUCTIONS-COMPILED.md must be current BEFORE the spawn ────────
 
 #[test]
+fn compiled_prompt_failure_is_fatal() {
+    // Why (#4752 ruling 2026-08-04): exactly one preparation failure refuses a
+    // launch. `is_fatal` is the single discriminator the seven spawning call
+    // sites consult, so it is pinned directly.
+    let err = PrepError::CompiledPrompt {
+        path: PathBuf::from("/p/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md"),
+        source: std::io::Error::other("boom"),
+    };
+    assert!(err.is_fatal());
+    // The Display must be the operator-facing message, not a bare io error.
+    let shown = err.to_string();
+    assert!(shown.contains("/p/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md"));
+    assert!(shown.contains("was NOT started"));
+}
+
+#[test]
+fn deploy_and_io_failures_stay_non_fatal() {
+    // Why (#4752): #2149 deliberately made preparation non-fatal so a roster or
+    // skill deploy hiccup could not stop a session launching. Only the compiled
+    // write was ruled fatal — a blanket "all prep errors abort" would have
+    // reversed #2149 wholesale. This pins that the other variants did NOT
+    // silently inherit the new policy.
+    assert!(!PrepError::Deploy("agents".into()).is_fatal());
+    assert!(!PrepError::SkillDeploy("skills".into()).is_fatal());
+    assert!(
+        !PrepError::Io {
+            path: PathBuf::from("/p/.trusty-mpm/last-instructions.md"),
+            source: std::io::Error::other("boom"),
+        }
+        .is_fatal()
+    );
+}
+
+#[test]
 #[serial_test::serial]
 fn prepare_session_writes_the_compiled_prompt_before_returning() {
     // Why (#4752, owner ruling 2026-08-04): the framework-level compiled prompt
@@ -288,7 +322,7 @@ fn prepare_session_writes_the_compiled_prompt_before_returning() {
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     const STALE: &str = "STALE-FROM-A-PREVIOUS-INSTALL";
-    let compiled = fw.instructions_compiled();
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project);
     std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
     std::fs::write(&compiled, STALE).unwrap();
 
@@ -334,18 +368,44 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    std::fs::create_dir_all(fw.instructions_compiled()).unwrap();
+    std::fs::create_dir_all(crate::core::instruction_pipeline::compiled_prompt_path(
+        project,
+    ))
+    .unwrap();
 
     let err = prepare_session(&fw, project)
         .expect_err("a failed compiled-prompt write must abort the launch preparation");
-    match err {
-        PrepError::Io { path, .. } => assert_eq!(
-            path,
-            fw.instructions_compiled(),
+    // #4752 ruling: this is the ONE fatal preparation error — the seven
+    // spawning call sites refuse to launch on it.
+    assert!(
+        err.is_fatal(),
+        "a compiled-prompt write failure must be classified fatal, got {err:?}"
+    );
+    match &err {
+        PrepError::CompiledPrompt { path, .. } => assert_eq!(
+            *path,
+            crate::core::instruction_pipeline::compiled_prompt_path(project),
             "the error must name the compiled prompt path"
         ),
-        other => panic!("expected PrepError::Io for the compiled prompt, got {other:?}"),
+        other => panic!("expected PrepError::CompiledPrompt, got {other:?}"),
     }
+    // Ruling follow-up 1: the operator must see why, and where.
+    let shown = err.to_string();
+    assert!(
+        shown.contains("was NOT started"),
+        "must tell the operator the session did not start: {shown}"
+    );
+    assert!(
+        shown.contains(&compiled_display(project)),
+        "must name the path: {shown}"
+    );
+}
+
+/// The compiled-prompt path as it appears in an operator-facing message.
+fn compiled_display(project: &std::path::Path) -> String {
+    crate::core::instruction_pipeline::compiled_prompt_path(project)
+        .display()
+        .to_string()
 }
 
 #[test]
@@ -369,7 +429,10 @@ fn compiled_write_failure_does_not_skip_the_mcp_injectors() {
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    std::fs::create_dir_all(fw.instructions_compiled()).unwrap();
+    std::fs::create_dir_all(crate::core::instruction_pipeline::compiled_prompt_path(
+        project,
+    ))
+    .unwrap();
 
     // The compiled write fails, so preparation reports Err …
     prepare_session(&fw, project).expect_err("compiled write is expected to fail here");

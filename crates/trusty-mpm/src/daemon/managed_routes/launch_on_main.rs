@@ -136,7 +136,7 @@ pub(super) async fn spawn_managed_on_main(
 
     let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
-    prepare_inproject_session(&fw, session_id, local_path, &synthetic_repo_url);
+    prepare_inproject_session(&fw, session_id, local_path, &synthetic_repo_url)?;
 
     emit(ProvisioningStage::CreatingTmuxSession);
     let record = mgr

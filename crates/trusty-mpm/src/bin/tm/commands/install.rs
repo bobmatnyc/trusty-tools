@@ -77,19 +77,12 @@ pub(crate) async fn install(
         println!("  {line}");
     }
 
-    // #4752: the assembled PM prompt lands on its OWN path — nothing else
-    // writes `framework/INSTRUCTIONS-COMPILED.md`. It used to overwrite
-    // `instructions/INSTRUCTIONS.md`, which a bundled stub also targeted (#383)
-    // and which `build_instructions` reads back as a pipeline INPUT. A session
-    // launch rewrites this same file with the project-RESOLVED prompt before
-    // spawning `claude` (see `session_launch::prepare_session`); this install
-    // write is the bundled compilation, current until the next launch.
-    match trusty_mpm::core::instruction_pipeline::install_system_prompt_to(
-        &paths.instructions_compiled(),
-    ) {
-        Ok(()) => println!("  \u{2713} INSTRUCTIONS-COMPILED.md (assembled)"),
-        Err(e) => eprintln!("warning: failed to assemble system prompt: {e:#}"),
-    }
+    // #4752: `tm install` no longer writes a compiled PM prompt at all. The
+    // compiled prompt is the text ONE project's session runs with, and install
+    // has no project — writing the bundled assembly to a global path is exactly
+    // the "wrong content kind on a shared path" collision this issue closes.
+    // Each launch writes its own project's copy (see
+    // `instruction_pipeline::compiled_prompt_path`).
 
     // #4752: a pre-#4752 install left the compiled prompt at
     // `instructions/INSTRUCTIONS.md`. Nothing writes that path now, but
