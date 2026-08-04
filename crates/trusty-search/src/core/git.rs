@@ -159,10 +159,16 @@ pub enum WorkTree {
 /// `.git` needs only the parent's search bit, so it is a witness git does not
 /// use; a disagreement between the two IS the "cannot be asked" state.
 /// What: [`WorkTree::NoRepo`] only when the message matches AND no ancestor
-/// carries a `.git` entry; [`WorkTree::Unknown`] otherwise. The path is
-/// canonicalised first — a relative `root_path` would walk a truncated ancestor
-/// chain, miss the project's `.git`, and land back on the permissive answer.
-/// Test: `classify_probe_failure_corroborates_the_no_repo_message`.
+/// carries a `.git` entry; [`WorkTree::Unknown`] otherwise.
+///
+/// 🔴 The `.canonicalize()` is load-bearing, not tidiness. `Path::ancestors`
+/// walks the path LEXICALLY, so an uncanonicalised relative path (`.`) or one
+/// reached through a symlink yields a chain that is not the real one — the
+/// project's `.git` is never visited and the permissive answer wins. Canonicalising
+/// first makes the walk follow the actual filesystem parentage, and a
+/// canonicalisation failure is itself [`WorkTree::Unknown`].
+/// Test: `classify_probe_failure_corroborates_the_no_repo_message`,
+/// `classify_probe_failure_canonicalises_before_walking_ancestors`.
 fn classify_probe_failure(root_path: &Path, stderr: &str) -> WorkTree {
     if !stderr.contains(NO_REPO_STDERR) {
         return WorkTree::Unknown;
@@ -200,9 +206,22 @@ fn classify_probe_failure(root_path: &Path, stderr: &str) -> WorkTree {
 /// and called only on reconcile's cold fallback path.
 /// Test: `probe_work_tree_finds_a_real_repo`,
 /// `probe_work_tree_reports_no_repo_for_a_plain_directory`,
-/// `probe_work_tree_is_unknown_for_a_stale_worktree_pointer`.
+/// `probe_work_tree_is_unknown_for_a_stale_worktree_pointer`,
+/// `probe_work_tree_is_unknown_when_the_git_binary_is_missing`.
 pub fn probe_work_tree(root_path: &Path) -> WorkTree {
-    let out = Command::new("git")
+    probe_work_tree_with(root_path, "git")
+}
+
+/// [`probe_work_tree`] with an injectable git program name.
+///
+/// Why: the spawn-failure arm (no `git` on `PATH`) is a real, security-relevant
+/// branch, and the only alternatives for reaching it are mutating `PATH` —
+/// process-global and racy under a parallel test runner. A program-name
+/// parameter makes it reachable hermetically.
+/// What: identical to [`probe_work_tree`]; `git_bin` names the program to spawn.
+/// Test: `probe_work_tree_is_unknown_when_the_git_binary_is_missing`.
+fn probe_work_tree_with(root_path: &Path, git_bin: &str) -> WorkTree {
+    let out = Command::new(git_bin)
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(root_path)
         .output();
@@ -280,6 +299,46 @@ mod tests {
         std::fs::write(tmp.path().join(".git"), "gitdir: /nonexistent/xyz-4733\n")
             .expect("write gitlink");
         assert_eq!(probe_work_tree(tmp.path()), WorkTree::Unknown);
+    }
+
+    /// Why: git is not always on `PATH` — a stripped container, a broken shim,
+    /// a daemon started with a sanitised environment. A spawn failure tells us
+    /// nothing about whether a repository exists, so it must refuse.
+    #[test]
+    fn probe_work_tree_is_unknown_when_the_git_binary_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A plain directory: with a REAL git this is the permissive `NoRepo`.
+        assert_eq!(probe_work_tree(tmp.path()), WorkTree::NoRepo);
+        // With no git binary at all, the same directory must refuse instead.
+        assert_eq!(
+            probe_work_tree_with(tmp.path(), "trusty-no-such-git-binary-4733"),
+            WorkTree::Unknown,
+            "an unspawnable git answers nothing — it must not be read as 'no repository'"
+        );
+    }
+
+    /// Why: `Path::ancestors` walks LEXICALLY. Without `.canonicalize()` a path
+    /// reached through a symlink (or a relative one like `.`) yields a chain
+    /// that is not its real parentage, so the project's `.git` is never visited
+    /// and the permissive `NoRepo` wins. Dropping the call passes every other
+    /// test in this suite — this is the one that fails.
+    /// What: `link -> repo/sub`, with `.git` on `repo` only. The lexical
+    /// ancestors of `link` never include `repo`; the canonicalised ones do.
+    #[test]
+    fn classify_probe_failure_canonicalises_before_walking_ancestors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("sub")).expect("mkdir repo/sub");
+        std::fs::write(repo.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(repo.join("sub"), &link).expect("symlink");
+
+        let msg = format!("fatal: {NO_REPO_STDERR}: .git");
+        assert_eq!(
+            classify_probe_failure(&link, &msg),
+            WorkTree::Unknown,
+            "the real parent carries a .git — only a canonicalised ancestor walk sees it"
+        );
     }
 
     /// Why: git prints the "no repository" text for an unreadable `.git` just

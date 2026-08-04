@@ -12,7 +12,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{Corpus, NO_REPO_STDERR, classify_ls_files_failure, list_tracked_files, scan_repo};
+use super::{
+    Corpus, NO_REPO_STDERR, classify_ls_files_failure, git_ls_files_with, list_tracked_files,
+    scan_repo,
+};
 
 /// Initialise a git repo at `dir` and stage everything, best-effort.
 fn git_init_add(dir: &Path) {
@@ -242,4 +245,54 @@ fn classify_ls_files_failure_rejects_near_miss_and_unknown_wordings() {
             "unrecognised failure must refuse, not walk: {stderr:?}"
         );
     }
+}
+
+/// Why: git is not always on `PATH` — a stripped container, a broken shim, a
+/// service started with a sanitised environment. A spawn failure tells us
+/// nothing about whether a repository exists, so it must refuse rather than
+/// hand the LLM a `.gitignore`-blind directory walk.
+/// What: a real git repo (so the only variable is the binary) probed with a
+/// program name that cannot be spawned. Asserts `Refused`, not `NoRepo`.
+/// Test: this test itself.
+#[test]
+fn git_ls_files_refuses_when_the_git_binary_is_missing() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    let init = Command::new("git").arg("-C").arg(dir).arg("init").output();
+    assert!(init.expect("git init").status.success(), "git init failed");
+
+    assert!(
+        matches!(
+            git_ls_files_with(dir, "trusty-no-such-git-binary-4733"),
+            Corpus::Refused
+        ),
+        "an unspawnable git answers nothing — it must never be read as 'no repository'"
+    );
+}
+
+/// Why: `Path::ancestors` walks LEXICALLY. Without `.canonicalize()` a path
+/// reached through a symlink (or a relative one like `.`, which `scan_repo`
+/// genuinely receives from operators) yields a chain that is not its real
+/// parentage, so the project's `.git` is never visited and the permissive
+/// `NoRepo` wins. Dropping the call passes every other test in this file —
+/// this is the one that fails.
+/// What: `link -> repo/sub`, with `.git` on `repo` only. The lexical ancestors
+/// of `link` never include `repo`; the canonicalised ones do.
+/// Test: this test itself.
+#[test]
+fn classify_ls_files_failure_canonicalises_before_walking_ancestors() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).expect("mkdir repo/sub");
+    std::fs::write(repo.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(repo.join("sub"), &link).expect("symlink");
+
+    assert!(
+        matches!(
+            classify_ls_files_failure(&link, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            Corpus::Refused
+        ),
+        "the real parent carries a .git — only a canonicalised ancestor walk sees it"
+    );
 }

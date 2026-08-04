@@ -210,12 +210,19 @@ enum Corpus {
 /// `.git` is a witness git does not use; if the two disagree, that disagreement
 /// IS the "cannot be asked" state.
 /// What: [`Corpus::NoRepo`] only when the message matches AND no ancestor
-/// carries a `.git` entry; [`Corpus::Refused`] otherwise. The path is
-/// canonicalised first — a relative `root` would walk a truncated ancestor chain,
-/// miss the project's `.git`, and land back on the permissive answer.
+/// carries a `.git` entry; [`Corpus::Refused`] otherwise.
+///
+/// 🔴 The `.canonicalize()` is load-bearing, not tidiness. `Path::ancestors`
+/// walks the path LEXICALLY, so an uncanonicalised relative path or one reached
+/// through a symlink yields a chain that is not the real one — the project's
+/// `.git` is never visited and the permissive answer wins. That is not
+/// hypothetical here: [`scan_repo`] takes an OPERATOR-SUPPLIED path, which may
+/// well be `.` or a relative checkout path. A canonicalisation failure is itself
+/// [`Corpus::Refused`].
 /// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`,
 /// `scan_tests.rs::classify_ls_files_failure_corroborates_the_no_repo_message`,
-/// `scan_tests.rs::classify_ls_files_failure_rejects_near_miss_and_unknown_wordings`.
+/// `scan_tests.rs::classify_ls_files_failure_rejects_near_miss_and_unknown_wordings`,
+/// `scan_tests.rs::classify_ls_files_failure_canonicalises_before_walking_ancestors`.
 fn classify_ls_files_failure(root: &Path, stderr: &str) -> Corpus {
     if !stderr.contains(NO_REPO_STDERR) {
         return Corpus::Refused;
@@ -279,9 +286,22 @@ fn list_files(root: &Path) -> Vec<PathBuf> {
 /// 🔴 An empty successful listing is `Tracked(vec![])`, NOT a walk trigger. A
 /// repository with nothing committed yet has an empty tracked corpus and a live
 /// `.gitignore`; walking it is precisely the leak (#4733).
-/// Test: `scan_tests.rs::scan_empty_git_repo_does_not_walk_untracked_files`.
+/// Test: `scan_tests.rs::scan_empty_git_repo_does_not_walk_untracked_files`,
+/// `scan_tests.rs::git_ls_files_refuses_when_the_git_binary_is_missing`.
 fn git_ls_files(root: &Path) -> Corpus {
-    let Ok(output) = Command::new("git")
+    git_ls_files_with(root, "git")
+}
+
+/// [`git_ls_files`] with an injectable git program name.
+///
+/// Why: the spawn-failure arm (no `git` on `PATH`) is a real, security-relevant
+/// branch — it must refuse, not walk — and the only alternative for reaching it
+/// is mutating `PATH`, which is process-global and racy under a parallel test
+/// runner. A program-name parameter makes it reachable hermetically.
+/// What: identical to [`git_ls_files`]; `git_bin` names the program to spawn.
+/// Test: `scan_tests.rs::git_ls_files_refuses_when_the_git_binary_is_missing`.
+fn git_ls_files_with(root: &Path, git_bin: &str) -> Corpus {
+    let Ok(output) = Command::new(git_bin)
         .arg("-C")
         .arg(root)
         .arg("ls-files")

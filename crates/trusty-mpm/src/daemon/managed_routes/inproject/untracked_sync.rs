@@ -390,11 +390,24 @@ const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directo
 /// exit is delegated to [`classify_rev_parse_failure`]; success resolves a
 /// relative result (plain repo) against `dest_worktree` and uses an absolute one
 /// (linked worktree, pointing at the shared common dir) as-is.
-/// Test: `tests::append_to_git_exclude_resolves_shared_worktree_path`,
+/// Test: `tests::copied_files_are_added_to_shared_worktree_exclude`,
 /// `tests::broken_repo_copies_nothing`,
-/// `tests::plain_directory_destination_still_copies`.
+/// `tests::plain_directory_destination_still_copies`,
+/// `tests::missing_git_binary_copies_nothing`.
 fn resolve_git_exclude(dest_worktree: &Path) -> ExcludeTarget {
-    let out = match std::process::Command::new("git")
+    resolve_git_exclude_with(dest_worktree, "git")
+}
+
+/// [`resolve_git_exclude`] with an injectable git program name.
+///
+/// Why: the spawn-failure arm (no `git` on `PATH`) is a real, security-relevant
+/// branch — it must refuse to copy — and the only alternative for reaching it is
+/// mutating `PATH`, which is process-global and racy under a parallel test
+/// runner. A program-name parameter makes it reachable hermetically.
+/// What: identical to [`resolve_git_exclude`]; `git_bin` names the program.
+/// Test: `tests::missing_git_binary_copies_nothing`.
+fn resolve_git_exclude_with(dest_worktree: &Path, git_bin: &str) -> ExcludeTarget {
+    let out = match std::process::Command::new(git_bin)
         .arg("-C")
         .arg(dest_worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])
@@ -437,11 +450,16 @@ fn resolve_git_exclude(dest_worktree: &Path) -> ExcludeTarget {
 /// so it is a witness git does not use; a disagreement between the two IS the
 /// "cannot be asked" state.
 /// What: [`ExcludeTarget::NoRepo`] only when the message matches AND no ancestor
-/// carries a `.git` entry; [`ExcludeTarget::Unknown`] otherwise. The path is
-/// canonicalised first — a relative `dest_worktree` would walk a truncated
-/// ancestor chain, miss the project's `.git`, and land back on the permissive
-/// answer.
+/// carries a `.git` entry; [`ExcludeTarget::Unknown`] otherwise.
+///
+/// 🔴 The `.canonicalize()` is load-bearing, not tidiness. `Path::ancestors`
+/// walks the path LEXICALLY, so an uncanonicalised relative path or one reached
+/// through a symlink yields a chain that is not the real one — the project's
+/// `.git` is never visited and the permissive answer wins, putting a secret in a
+/// live worktree. A canonicalisation failure is itself
+/// [`ExcludeTarget::Unknown`].
 /// Test: `tests::classify_rev_parse_failure_corroborates_the_no_repo_message`,
+/// `tests::classify_rev_parse_failure_canonicalises_before_walking_ancestors`,
 /// `tests::broken_repo_copies_nothing`.
 fn classify_rev_parse_failure(dest_worktree: &Path, stderr: &str) -> ExcludeTarget {
     if !stderr.contains(NO_REPO_STDERR) {

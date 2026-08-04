@@ -551,3 +551,67 @@ fn broken_exclude_file_still_refuses_unignored_paths() {
         ".env.local must be refused for the same reason (#4733)"
     );
 }
+
+/// Why: git is not always on `PATH` — a stripped container, a broken shim, a
+/// daemon started with a sanitised environment. A spawn failure tells us
+/// nothing about whether the destination is a repository, so it must refuse.
+/// This gate runs BEFORE any copy and before `is_path_git_ignored`, so an
+/// unspawnable git means nothing is written at all.
+/// What: a real linked worktree (so the only variable is the binary) resolved
+/// with a program name that cannot be spawned. Asserts `Unknown` — which
+/// `broken_repo_copies_nothing` separately pins as "copy nothing".
+/// Test: this test itself.
+#[test]
+fn missing_git_binary_copies_nothing() {
+    let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
+    let base = base_tmp.path();
+    init_base_repo(base);
+    let worktree = super::super::create_session_worktree(
+        base,
+        "untracked-sync-missing-git-test",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
+
+    // Sanity: with a real git this worktree resolves its exclude file.
+    assert!(
+        matches!(resolve_git_exclude(&worktree), ExcludeTarget::Registered(_)),
+        "sanity: a real linked worktree resolves with a working git"
+    );
+
+    assert!(
+        matches!(
+            resolve_git_exclude_with(&worktree, "trusty-no-such-git-binary-4733"),
+            ExcludeTarget::Unknown(_)
+        ),
+        "an unspawnable git answers nothing — it must never be read as 'no repository', \
+         which would let a secret be copied into a live worktree (#4733)"
+    );
+}
+
+/// Why: `Path::ancestors` walks LEXICALLY. Without `.canonicalize()` a path
+/// reached through a symlink (or a relative one) yields a chain that is not its
+/// real parentage, so the destination's `.git` is never visited and the
+/// permissive `NoRepo` wins — which copies the operator's `.env` into a live
+/// repository unregistered. Dropping the call passes every other test in this
+/// file; this is the one that fails.
+/// What: `link -> repo/sub`, with `.git` on `repo` only. The lexical ancestors
+/// of `link` never include `repo`; the canonicalised ones do.
+/// Test: this test itself.
+#[test]
+fn classify_rev_parse_failure_canonicalises_before_walking_ancestors() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).expect("mkdir repo/sub");
+    std::fs::write(repo.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(repo.join("sub"), &link).expect("symlink");
+
+    assert!(
+        matches!(
+            classify_rev_parse_failure(&link, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            ExcludeTarget::Unknown(_)
+        ),
+        "the real parent carries a .git — only a canonicalised ancestor walk sees it"
+    );
+}

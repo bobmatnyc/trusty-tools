@@ -1195,17 +1195,18 @@ fn mtime_walk_does_not_honour_gitignore() {
 /// Why: `head_sha` returns `None` for a repo git merely declined to read —
 /// a stale worktree gitlink, `detected dubious ownership`, an unreadable
 /// `.git`. Before this fix that dropped straight into `reconcile_mtime_path`,
-/// whose walk (pinned above) ignores `.gitignore`, so previously-excluded files
-/// entered the corpus and became retrievable through the `search` and `grep`
-/// MCP tools. Against the pre-fix implementation this test fails on its first
-/// assertion (`skipped_no_data` is 1, not 0).
+/// whose walk (pinned above) ignores `.gitignore`, so previously-excluded
+/// files entered the corpus and became retrievable through the `search` and
+/// `grep` MCP tools. Against the pre-fix implementation this test fails on its
+/// first assertion (`skipped_no_data` is 1, not 0).
 /// What: a directory whose `.git` is a gitlink pointing nowhere — git 2.54.0
 /// answers `fatal: not a git repository: (null)`, which contains the shorter
 /// phrase `not a git repository` while meaning the opposite. Asserts reconcile
-/// takes the gitignore-honouring full reindex instead of the mtime walk.
+/// refuses outright rather than mtime-walking, and — because no HEAD exists to
+/// stamp — does not queue a reindex that could never converge.
 /// Test: this test itself.
 #[tokio::test]
-async fn broken_git_repo_full_reindexes_instead_of_mtime_walking() {
+async fn broken_git_repo_refuses_rather_than_mtime_walking() {
     use crate::service::server::ReconcileSummary;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1218,7 +1219,7 @@ async fn broken_git_repo_full_reindexes_instead_of_mtime_walking() {
     // paths, which is where the #4733 defect lives.
     {
         let mut diag = handle.walk_diagnostics.write().await;
-        diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
+        diag.last_walk_started_at = Some("2026-08-04T00:00:00Z".to_owned());
     }
 
     let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
@@ -1234,10 +1235,106 @@ async fn broken_git_repo_full_reindexes_instead_of_mtime_walking() {
         "a broken repo must never apply an mtime delta (#4733)"
     );
     assert_eq!(
-        s.fell_back_to_full, 1,
-        "an unreadable repository gets the gitignore-honouring full reindex (#4733)"
+        s.skipped_unresolvable_git, 1,
+        "the refusal must report itself distinctly, not as ordinary emptiness (#4733)"
+    );
+    assert_eq!(
+        s.fell_back_to_full, 0,
+        "with no HEAD to stamp, a reindex could not converge — it must not be queued"
     );
     assert_eq!(s.up_to_date, 0, "must not be marked up-to-date");
+}
+
+/// Regression guard for the #4733 review round: an unborn-HEAD repo must not
+/// full-reindex on EVERY boot.
+///
+/// Why: a `git init` with nothing committed is a healthy, ordinary repo whose
+/// `git rev-parse HEAD` exits 128, so `head_sha` is `None`. The first #4733 fix
+/// routed it to `trigger_full_reindex`, but `finish_reindex` re-stamps
+/// `indexed_head_sha` from that same `None` — so `stored` never becomes `Some`,
+/// the next boot re-enters the identical arm, and the whole tree is re-walked
+/// forever. Measured against `origin/main` this was a REGRESSION, not a
+/// pre-existing property: main reported `skipped_no_data = 1` and queued
+/// nothing. Against the intermediate fix this test fails on `fell_back_to_full`
+/// (1, not 0).
+/// What: a real `git init` repo with no commits and a gitignored `.env`.
+/// Asserts reconcile neither mtime-walks it nor queues a non-converging
+/// reindex.
+/// Test: this test itself.
+#[tokio::test]
+async fn unborn_head_repo_is_refused_once_not_reindexed_every_boot() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let init = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.path().join(".env"), "AWS_SECRET_ACCESS_KEY=hunter2\n").expect("env");
+    std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").expect("rs");
+
+    let handle = stuck_unwalked_handle("unborn-head-4733", dir.path(), None);
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-04T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.fell_back_to_full, 0,
+        "a reindex here cannot stamp a SHA, so it would repeat on every boot \
+         without ever converging (#4733 review round)"
+    );
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "an unborn-HEAD repo must not reach the gitignore-blind mtime path (#4733)"
+    );
+    assert_eq!(
+        s.skipped_unresolvable_git, 1,
+        "it is refused, and the refusal is reported distinctly (#4733)"
+    );
+}
+
+/// Why: the convergence guard must not over-refuse. A work tree that HAS
+/// commits but was never stamped is exactly the case a full reindex fixes —
+/// `finish_reindex` stamps the live HEAD and the next boot takes the ordinary
+/// git path. Refusing it too would strand a real index.
+/// What: a committed git repo with `indexed_head_sha = None`. Asserts the full
+/// reindex is queued rather than refused.
+/// Test: this test itself.
+#[tokio::test]
+async fn never_stamped_git_repo_with_commits_full_reindexes_and_converges() {
+    use crate::service::server::ReconcileSummary;
+
+    let (_dir, _head_sha, root) = init_git_repo_with_file("hello.rs", "fn hello() {}");
+    let handle = stuck_unwalked_handle("never-stamped-4733", &root, None);
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-04T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.fell_back_to_full, 1,
+        "a live HEAD means one reindex stamps it and the next boot converges"
+    );
+    assert_eq!(
+        s.skipped_unresolvable_git, 0,
+        "this case is resolvable — refusing it would strand a real index"
+    );
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "and it must still never reach the gitignore-blind mtime path (#4733)"
+    );
 }
 
 /// Why: the gate must not over-refuse. A genuinely non-git root is the case the
