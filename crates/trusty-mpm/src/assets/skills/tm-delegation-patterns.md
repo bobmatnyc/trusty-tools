@@ -87,34 +87,32 @@ Language-specific Engineer selection follows `Cargo.toml` (rust-engineer),
 (`assets/instructions/sections/agent-delegation.md`) for the full table; when
 unknown, Research is mandatory (never default to a guess).
 
-## Long-Wait Delegation (chunked-repoll — issue #2833)
+## Long-Wait Delegation (issues #2833, #4792)
 
-Any delegation that ends in a wait longer than the bash tool's 10-minute
-per-invocation ceiling — `gh pr checks` (CI ~10-20 min), a release cut, or
-`cargo test --workspace` (~16 min) — is where subagents strand: they background
-the wait and end their turn (a **park**), or degenerate into a 30-second blind
-poll loop (**spam**). Both come from not sizing the wait to its real duration.
-Make the wait first-class in the delegation prompt instead of hoping the agent
-improvises it:
+A delegated agent's own gate (`cargo test -p <crate>`, a release build) blocks in
+its foreground; **CI does not**. Agents push, take a one-shot status read, report,
+and stop — the PM re-engages when checks settle. Make both halves explicit in the
+delegation prompt instead of hoping the agent improvises:
 
 1. **Keep the gate under the ceiling.** Ask for **crate-scoped** gates
    (`cargo test -p <crate>`, `cargo clippy -p <crate>`), never
-   `cargo test --workspace` — the scoped run finishes inside one invocation.
-2. **Name the blocking primitive.** For CI, instruct: "wait with
-   `gh pr checks <pr> --watch --fail-fast` in the foreground; it blocks silently
-   and prints once. Re-issue it verbatim if the 10-min ceiling cuts it off. Do
-   NOT background it, do NOT sleep-poll it, do NOT end your turn to monitor it."
-3. **Forbid both failure modes explicitly.** "Parking (ending your turn to wait)
-   and spamming (a tight `still pending` poll loop) are both wrong. Block quietly
-   in the foreground; message only when state changes."
-4. **PM back-stop.** If the subagent parks anyway, `SendMessage` the SAME agent a
-   resume nudge (see PM_INSTRUCTIONS "Parked-Subagent Detection & Nudge") — never
-   a fresh delegation.
+   `cargo test --workspace` — the scoped run finishes inside one invocation and
+   its raw output is the evidence you collect.
+2. **Forbid the CI block.** "Do NOT use `gh pr checks --watch` — it streams check
+   output into your context (546k tokens over 54 minutes on one PR). Push, take a
+   one-shot `gh pr checks <pr>` read, report it, and end your turn."
+3. **Forbid parking too.** "Do not background your gate and end the turn
+   expecting a notification, and do not sleep-poll. Block quietly in the
+   foreground on your own commands; hand back an observation, not a promise to
+   report."
+4. **PM re-engagement.** When the agent hands back with CI pending, re-read the
+   status yourself and `SendMessage` the SAME agent the outcome — never a fresh
+   delegation, and never a nudge back into a blocking wait (see PM_INSTRUCTIONS
+   "Parked-Subagent Re-Engagement").
 
-This is prevention (steps 1-3, in the delegation prompt) plus a PM-side
-detect-and-nudge back-stop (step 4). The daemon idle-nudge (#2621) does NOT
-cover in-conversation subagents — they have no tmux pane — so this protocol is
-the only mitigation below the managed-session layer.
+The daemon idle-nudge (#2621) does NOT cover in-conversation subagents — they
+have no tmux pane — so PM-side re-engagement is the only mechanism below the
+managed-session layer.
 
 ## Delegation Best Practices
 
