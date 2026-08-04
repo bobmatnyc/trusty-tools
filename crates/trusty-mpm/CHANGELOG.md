@@ -6,6 +6,216 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.5] — 2026-08-04
+
+### Added
+
+- `BASE-AGENT.md` (synced to `trusty-code`) adds a "Never Directly Monitor a
+  Declarative Process" rule: run gates in their quiet/filtered form
+  (`--quiet`, `tail`/`grep` for the summary line, or `tm compress --tool
+  "<tool-name>"`), re-run only the failing case with full output, and never
+  `gh pr checks --watch`. Prompted by two agents burning 415k and 546k tokens
+  streaming per-test and per-check-poll output directly. States explicitly
+  that filtered output is still raw output — the evidence rule is unchanged
+- `BASE-AGENT.md` (synced to `trusty-code`) now states a "No Subagent
+  Fan-Out" rule: a delegated agent does its own work or reports back to its
+  dispatcher — it never spawns its own subagents. The Agent/Task tool is
+  reserved for the top-level PM/orchestrator. Prompted by a `rust-engineer`
+  spawning an untyped child agent that bypassed the roster entirely for
+  routine documentation work
+- `BASE-AGENT.md` (synced to `trusty-code`) adds "Agent-Authored Prose",
+  extending the PM's "Write Plainly" register (`core.md`,
+  [#4757](https://github.com/bobmatnyc/trusty-tools/issues/4757)) to the
+  agent side: review verdicts, reports back to the PM, ticket/PR body text,
+  and generated documentation — lead with the concrete referent, state cause
+  then effect, show before-and-after, cut hedges and process narration, end
+  options as a bare enumeration. Governs how, never whether: the evidence
+  rule is unchanged
+- `BASE-AGENT.md` (synced to `trusty-code`) Agent-Authored Prose adds "never
+  announce the register you're writing in" — no heading or preamble that
+  labels the writing as plain, honest, direct, candid, blunt, or unvarnished
+  (e.g. "What remains unknown, stated plainly:"); state the fact in place
+  instead. Same family as the banned word "honest" — the label is forbidden,
+  not the disclosure
+- `core::claude_md_writer` — the single owner of `CLAUDE.md` section-override
+  writes, the write-side counterpart to the reader-only
+  `core::claude_md_sections` (refs [#4754](https://github.com/bobmatnyc/trusty-tools/issues/4754))
+  - `write_section_override` is idempotent by construction: a repeat write
+    replaces its block in place and collapses any pre-existing duplicate, so a
+    section can never accumulate a stacked second copy
+  - `core` is refused because the shipped package declares it `fixed` — the
+    writer asks `CustomizationTier::permits`, it does not carry its own list
+  - every refusal (protected section, empty body, a marker line inside the body,
+    an unpaired marker in the host, an unreadable host) leaves the file
+    byte-identical and the bundled section in force
+  - written blocks adopt the host's dominant line ending, so splicing into a
+    CRLF `CLAUDE.md` does not leave a mixed-ending file
+  - `ensure_compiled_pointer` records where the composed PM prompt lands, using
+    delimiters deliberately outside the `TRUSTY-MPM:` grammar so the reader sees
+    no override and raises no diagnostic; it collapses duplicate pointer blocks
+    the same way section writes do
+- bundled `framework-manifest.toml` — the framework tier of the existing
+  `manifest.toml` format — now declares which agents deploy, replacing the
+  computed "everything not in `LANGUAGE_ENGINEERS`" rule
+  (closes [#4760](https://github.com/bobmatnyc/trusty-tools/issues/4760))
+  - four deployment categories: `universal` (no detection), `language`,
+    `framework`, and `platform` (marker-gated), plus `deprecated`
+  - a missing, malformed, or non-exhaustive framework manifest fails loudly
+    rather than falling back to deploying everything or nothing
+  - `tm generate capabilities` now sources the agent reference's deployment
+    category from the manifest
+- new `elixir-engineer` agent, gated on `mix.exs`, covering general Elixir and
+  OTP work — supervision trees, GenServer processes, Ecto, ExUnit
+- New bundled `tm-slack` skill folding `tm-slack-canvas-delivery` into general Slack delivery guidance — routes through the native `mcp__slack-mcp__*` connector per ADR-0014, enumerates the verified 22-tool surface, and generalizes the "creation is not delivery" completion rule to every delivery shape (message, canvas, scheduled) (closes [#4761](https://github.com/bobmatnyc/trusty-tools/issues/4761))
+  - registration into `bundle_all.rs`'s `ALL` table is a separate, sequenced follow-up (that file was held by a concurrent PR); the skill does not ship until that line lands
+- `tm hook --pm-guard` now denies `Task`/`Agent` dispatch when the calling session is itself a subagent (closes [#4784](https://github.com/bobmatnyc/trusty-tools/issues/4784))
+  - the PM keeps dispatching; only fan-out from within a subagent is blocked
+  - `SendMessage` is never denied, so a blocked agent can always report back
+  - fails OPEN — an indeterminate caller context allows the dispatch rather than risking a false deny against the PM
+
+### Fixed
+
+- `code-review-standards` and the `code-critic` agent (both synced to
+  `trusty-code`) no longer let `Promote` act as a filing engine. The default
+  is now stated explicitly: a review finding is fixed in the surfacing PR, or
+  dropped. `Promote` is reserved for defects that are genuinely separable,
+  schedulable work — not every LOW/MEDIUM finding — and the critic never
+  files an issue itself or instructs anyone to; it only recommends, and the
+  PM or user decides. Prompted by nine issues filed in a single review leg
+  against one merged PR, several forwarded straight from an unqualified
+  `Promote` disposition
+- `agent-delegation.md` no longer claims code-critic is a "universal qa-tier
+  agent" for "any engineer dispatch" or design critique — both were owner
+  rulings against the actual standard. Added a "code-critic Dispatch
+  Standard" keyed to the project's test-ladder rung (never on rungs 1–3,
+  conditional on rung 4, required on rungs 5–6), plus explicit escalations
+  and non-reasons to dispatch
+- `code-production-process` (and its `stage-architect.md`/`stage-critic.md`
+  references, synced to `trusty-code`) no longer describes an "optional
+  Phase 2 design critic pass" at the Architect stage — that contradicted the
+  standard; early interface review routes to `code-analyzer` instead
+- a stale project-tier agent file that shadows a bundled agent is now quarantined on session launch and on `tm sessions sync-assets`, instead of silently winning the resolution race forever (closes [#4448](https://github.com/bobmatnyc/trusty-tools/issues/4448))
+  - `retract_framework_agents` (#4409) can only delete what its ownership ledger names, so a copy written before that ledger existed survived it, outranked the canonical user tier, and was never refreshed again — [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408) made permanent
+  - the sweep runs AFTER retraction, against the workspace's OWN `.claude/agents` — never `fw.claude_agents_dir()`, which is the operator's real `~/.claude/agents` on the non-git `tm session start` and TUI `/connect` paths
+  - a file moves only on a POSITIVE answer from every gate: it resolves to a bundled name, the ownership ledger does not record it as the operator's, git gives a definitive answer that nothing claims it — either a readable work tree that does not track it, or no repository at all — and its frontmatter and body are trusty-mpm's own composer output. Anything less — a tracked file, an unreadable or ceiling-blocked repository, a bare repo, a stale worktree pointer, git absent, a claude-mpm artifact, a hand-authored file — is left alone and recorded in the receipt with the reason
+  - it never deletes: each moved file keeps a verified byte-identical backup under `.trusty-mpm/agent-quarantine/` plus an inert `.md.disabled` sibling, and a receipt records how to restore it
+  - the bundled-name roster moved to `core::bundled_roster`, so `tm doctor`'s `asset_tier` probe and the quarantine resolve it from one place and cannot drift on what counts as canonical
+- `research`'s deployed `skills:` list now matches its source asset — `tm-capabilities` was inherited from `BASE-AGENT` and silently appeared only in the deployed copy (closes [#4643](https://github.com/bobmatnyc/trusty-tools/issues/4643))
+  - DOC-42 now documents that `skills:` unions base-first across the `extends:` chain, so a foundation template's declaration is paid for by every descendant
+- `tm ls` auto-prune no longer misses stopped sessions or non-TTY invocations, so dead records stop accumulating (closes [#4702](https://github.com/bobmatnyc/trusty-tools/issues/4702))
+  - every listing surface prunes now — piped, scripted, `--json`, `tm session ls`, and bare `tm` — not just the interactive TTY picker
+  - a `stopped`/`errored` record whose workspace the CLI independently verifies is gone is cleared, closing the gap where a display-reconciled zombie (persisted `active`, tmux pane gone) never got the daemon's `unresumable` probe
+  - a stopped record whose workspace still exists on disk is never cleared, and `decommissioned` records, `attached` records, and any record naming a live tmux session are untouched
+  - a workspace is only "gone" when its parent directory still exists, so an unmounted volume no longer reads as every session on it being dead
+  - confirmation requires 10 minutes of real elapsed age since the FIRST sighting; an intervening listing no longer resets that clock, which would otherwise leave auto-prune inert under any `tm ls` cadence tighter than the window
+  - when tmux cannot be enumerated at all, nothing is pruned — without a liveness signal an `errored` record with a live pane could be tombstoned into a terminal state
+  - the prune clears registry records only: never a git worktree, a branch, a file on disk, a live runtime, or a search index
+- the delegation roster no longer admits prompt fragments as delegatable agents (closes [#4711](https://github.com/bobmatnyc/trusty-tools/issues/4711))
+  - `is_foundation_file` now matches a bare `base.md`, not only `base-*.md`
+  - a file with no `name:` frontmatter is excluded outright — Claude Code dispatches by `name:`, so the old file-stem fallback advertised targets the harness could never resolve
+- Worktree teardown no longer deletes worktrees git refused to delete (closes [#4732](https://github.com/bobmatnyc/trusty-tools/issues/4732))
+  - `remove_session_worktree` fell through to `std::fs::remove_dir_all` on ANY non-zero `git worktree remove --force` exit. Git exits 128 for every fatal condition, so `git worktree lock` — the operator's only "do not remove this" — was exactly what caused deletion. A stale worktree pointer, an unreadable `.git`, and a repository git merely declined to read all produced the same outcome, with uncommitted work in the worktree.
+  - Every git failure is now classified into three states — git holds state here / git positively holds nothing here / git could not be asked — and only the middle one permits a raw removal. Locked, stale-pointer, broken-`.git`, and unrecognized-message cases are refused. Reachable from `tm session decommission`, `tm sessions prune --state stopped`, the age-based reaper, `prune_orphaned_worktrees`, and the `--merged-prs` reclaim pass.
+  - The refusal reason is now returned to the caller instead of buried in a log line: `tm session prune-worktrees --merged-prs` reports `removal_failed` entries as `"<path>: <reason>"`.
+- the compiled PM prompt is now refreshed at the spawn seam, so resume, guided-resume and crash-recovery launches no longer run a prompt that never reached `INSTRUCTIONS-COMPILED.md` (refs [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - the compiled write is the last step of session preparation, so a failure can no longer skip the MCP content-pinning injectors that defend against the #3918/#3950 name-squatting class
+- compiled PM system prompt now writes to its own `INSTRUCTIONS-COMPILED.md` instead of colliding with the bundled `instructions/INSTRUCTIONS.md` stub that the pipeline reads as input (closes [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - the compiled prompt is refreshed at every session launch, before `claude` is spawned; a failed write now aborts the launch rather than leaving a stale prompt on disk
+  - `tm install` removes a stale pre-#4752 `framework/instructions/INSTRUCTIONS.md`, which no writer could refresh but the pipeline still read
+- PM instruction section `non-overridable-rules.md` no longer describes section overrides as "override files" — the live mechanism is marked blocks in the project's `CLAUDE.md`, and the section now points at the spec of record (refs [#4753](https://github.com/bobmatnyc/trusty-tools/issues/4753))
+- a session whose instructions cannot be written no longer starts (refs [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - `build_instructions` returned a non-fatal error, so every launch path logged it and started the session anyway — with no instructions established and no `.mcp.json` written. Reachable whenever the project's `CLAUDE.md` or the framework instructions path cannot be read, for example when something has left a directory at `CLAUDE.md`
+  - it is now the same fatal condition as the compiled-prompt write, reported as one error rather than two classes
+- bare `tm` in a managed pane now refreshes the project's compiled prompt before relaunching, and refuses the relaunch if that write fails (refs [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - this path calls neither session preparation nor the daemon resume route, so it was the one way to start a session on a stale or missing compiled prompt where a fresh launch would have refused
+  - the two resume-shaped paths now share one `refresh_compiled_prompt` entry point; session preparation keeps its own composition because it must apply the operator's resolved output style
+- an unwritable `.trusty-mpm/` no longer causes a session to start without its instructions recorded (refs [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - the `last-instructions.md` stash write degraded the whole preparation to an early non-fatal error, so callers launched the session having skipped the fatal write below it
+  - the stash is an inspection copy; it now logs and continues instead of short-circuiting
+- the `CLAUDE.md` compiled-instructions pointer no longer names the retired global path (refs [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - it pointed at `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`, which nothing writes since the compiled prompt became project-local; it is now the project-relative path, pinned against the pipeline that writes the file
+
+### Performance
+
+- bundled agents no longer carry boilerplate `skills:` frontmatter, cutting the skill bodies the harness renders into every dispatch by 78% (2,602,763 → 560,654 bytes across the 37-agent roster) (closes [#4642](https://github.com/bobmatnyc/trusty-tools/issues/4642))
+  - worst case `qa` 84,343 → 21,170 bytes (~21,085 → ~5,292 tokens); `research` 55,894 → 0
+  - an omitted skill is unchanged on disk and still invokable on demand via the Skill tool
+  - a new regression gate caps any bundled agent's resident skill bodies at 24,000 bytes (34,000 for the rust family, which keeps `rust-build-performance` per the standing 2026-07-17 directive)
+
+### Changed
+
+- the compiled PM prompt is now written per project, to `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`, and a failure to write it refuses the launch (refs [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752))
+  - removes the cross-project collision by construction: concurrent sessions no longer share one global file
+  - the resume path writes it too, so resumed sessions can no longer run against a prompt that was never recorded
+  - `tm install` no longer writes a compiled prompt — install has no project, so it has nothing to compile
+  - a refused launch names the path and the remedy instead of surfacing a bare I/O error
+- the prose rules in `sections/core.md` ("Write Plainly" and clickable references) now govern every artifact the PM authors — dispatch briefs and ticket/PR body text, not only its own responses — and add the six concrete-referent/cause-effect/before-after rules the owner ratified for framework prose (closes [#4757](https://github.com/bobmatnyc/trusty-tools/issues/4757))
+- framework engineers now gate on framework evidence instead of language
+  evidence ([#4760](https://github.com/bobmatnyc/trusty-tools/issues/4760))
+  - `react-engineer`, `nextjs-engineer`, and `svelte-engineer` no longer deploy
+    to a JavaScript project that does not declare the framework as a
+    dependency; `phoenix-engineer` no longer deploys to a non-Phoenix Elixir
+    project, which `elixir-engineer` now covers instead
+  - `gcp-ops` and `vercel-ops` are platform-gated and no longer deploy to
+    projects with no GCP or Vercel marker
+  - project marker matching gained a bounded content-probe form
+    (`<path>::<needle>`) for React and Phoenix, which ship no config file that
+    distinguishes them from plain JavaScript and plain Elixir
+  - markers are now evaluated at the project root AND at every workspace member
+    the root manifest declares (npm/yarn `workspaces`, `pnpm-workspace.yaml`,
+    Elixir umbrella `apps_path:`), so a monorepo that keeps its framework in a
+    member package keeps its framework engineers; the walk is bounded to one
+    glob level, 256 members, and 16 MiB per detection call, and fails closed
+- `framework-manifest.toml` is now the single authority for agent AND skill
+  bundling ([#4765](https://github.com/bobmatnyc/trusty-tools/issues/4765))
+  - each gated agent declares its own `markers` in the manifest; the
+    `LANGUAGE_ENGINEERS` and `PLATFORM_AGENTS` Rust tables are gone, so an
+    entry's category and the condition that deploys it are one declaration
+  - a new `[skill_categories]` section declares the bundled skill roster; a
+    bundled skill nobody declares is a hard error, matching the agent side
+  - a gated entry declaring no markers is rejected rather than silently
+    becoming undeployable
+  - stack and platform detection now share one probe budget and one
+    workspace-member resolution per call instead of one of each
+  - `references/agents.md` gains a **Deploys When** column rendered from the
+    manifest, and `references/skills.md` renders the declared skill roster
+  - the bundled `tm`, `tm-delegation-patterns`, and `agent-delegation`
+    documents no longer restate the roster or its gates — they point at the
+    manifest and at the generated reference
+- Retired the blocking-CI-wait doctrine across every bundled instruction copy: agents now push, take a ONE-SHOT `gh pr view` / `gh pr checks` status read, report, and end their turn; the PM owns re-engagement when CI settles ([#4792](https://github.com/bobmatnyc/trusty-tools/issues/4792))
+  - `gh pr checks --watch` is now forbidden — it streams check output into the agent's context (546k tokens over 54 minutes on one PR). The retirement is about context cost, not runnability
+  - `BASE-AGENT.md` "Foreground Execution — NEVER End Your Turn To Wait" is replaced by "Finishing Work — Push, Report, Stop"; own-gate commands still block in the foreground
+  - `version-control.md`, `local-ops.md`, `BASE-ENGINEER.md`, `tm-delegation-patterns.md`, and the `trusty-code` asset mirror updated to match
+  - PM instructions section renamed "Parked-Subagent Re-Engagement": a hand-back with CI pending is correct behavior, not a park, and must not be nudged back into a blocking wait
+  - `idle_nudge::DEFAULT_NUDGE_MESSAGE` no longer tells a stalled pane to run `gh pr checks --watch`
+  - The one-shot read now documents two traps: `bucket` can report a false DONE under GitHub API eventual-consistency lag (cross-check `state`), and repeated `gh pr update-branch` is a treadmill that mints a new untested head each time (BEHIND is not a correctness gate)
+
+### Removed
+
+- the deprecated `ops` agent is deleted from the bundle; it was superseded by
+  `local-ops` and still reached every roster
+  ([#4760](https://github.com/bobmatnyc/trusty-tools/issues/4760))
+  - an `ops.md` already deployed to a machine is NOT retracted — orphan
+    retraction is [#391](https://github.com/bobmatnyc/trusty-tools/issues/391)
+    and has not shipped
+  - trusty-code's embedded mirror of the agent catalog drops `ops.md` and gains
+    `elixir-engineer.md`, keeping `scripts/check_agent_assets.sh` green
+  - the bundled `tm` skill and `agent-delegation.md` no longer name `ops` in
+    their rosters, and now say which agents are marker-gated rather than
+    implying every bundled agent reaches every project
+
+### Security
+
+- auto-prune can no longer destroy anything outside the session registry: `decommission_record_only` is now a dedicated single-effect function rather than a flag on the destructive teardown (closes [#4728](https://github.com/bobmatnyc/trusty-tools/issues/4728))
+  - as a flag it left two destructive effects ungated — a runtime SIGTERM plus `kill_session` against any live pane sharing the record's name, and a cross-daemon `DELETE /indexes/{id}` whose target resolved to the PARENT PROJECT's search index once the workspace was gone
+  - both were reachable from `tm ls` in 1.3.3 and 1.3.4; neither required a name collision
+  - `decommission_with_root` keeps every effect, no longer takes a `record_only` parameter, and now documents its side effects as an explicit table
+- allowlisted untracked files (default `.env*`) are no longer copied into a session worktree until git confirms they will be ignored there (closes [#4733](https://github.com/bobmatnyc/trusty-tools/issues/4733))
+  - the `info/exclude` registration ran AFTER the copy and a failure was only a `warn!`, so a worktree whose `git rev-parse` merely failed — a stale gitlink, `detected dubious ownership`, an unreadable `.git` — was left holding the operator's `.env` unregistered, where a later `git add -A && git commit` stages it into history
+  - the order is inverted: register first, then re-verify each path with `git check-ignore` (git's own authority, mirroring `native_mcp::is_env_local_actually_ignored`) and copy only what it confirms
+  - this also stops a secret overwriting a path the repo already TRACKS — git reports tracked paths as not-ignored no matter what `info/exclude` says, and `git add -A` would stage the change
+  - a destination with a corroborated absence of any repository has no history to leak into and is still copied to freely, so non-git destinations are unaffected
+
 ## [1.3.4] — 2026-08-03
 
 ### Added
