@@ -129,7 +129,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm.md",
         "skills/tm-issues-prune.md",
         "skills/tm-cli-operations.md",
-        "skills/tm-slack-canvas-delivery.md",
+        "skills/tm-slack.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -204,7 +204,7 @@ fn tm_skills_have_frontmatter() {
         ("tm", TM_OVERVIEW),
         ("tm-issues-prune", TM_ISSUES_PRUNE),
         ("tm-cli-operations", TM_CLI_OPERATIONS),
-        ("tm-slack-canvas-delivery", TM_SLACK_CANVAS_DELIVERY),
+        ("tm-slack", TM_SLACK),
     ];
     for (name, content) in skills {
         assert!(
@@ -404,6 +404,9 @@ fn bundle_table_is_complete() {
     //   that same on-disk path with the assembled system prompt in the same
     //   call, so the stub's content never reached a live session; the
     //   `FRAMEWORK_INSTRUCTIONS` constant it backed is gone too. 179 - 1 = 178.
+    // Issue #4761 (+/-0): tm-slack-canvas-delivery's entry (#4447) is swapped
+    //   1-for-1 for tm-slack — same flat-file shape, general Slack delivery
+    //   coverage replacing canvas-only scope. Count unchanged at 178.
     assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
@@ -802,16 +805,18 @@ fn code_critic_declared_skills_are_in_bundle() {
 
 #[test]
 fn code_critic_declares_batch1_skills() {
-    // Issue #2903: code-critic's upstream counterpart declares 5 skills
-    // (code-review-standards, code-production-process, software-patterns,
-    // systematic-debugging, verification-before-completion); #2890 ported
-    // only the first, this issue ports the remaining 4 — extend the
-    // declaration to the full upstream-matched set (plus the net-new
-    // `contract-driven-testing`, which has no upstream counterpart).
-    assert!(CODE_CRITIC_AGENT.contains(
-        "skills: [code-review-standards, contract-driven-testing, code-production-process, \
-         software-patterns, systematic-debugging, verification-before-completion]"
-    ));
+    // Issue #2903 ported the full upstream six-skill set. #4642 cuts it back to
+    // the two that code-critic's own body tells it to load on turn one: the
+    // harness renders every listed skill's FULL body into the prompt at
+    // dispatch, so the other four (code-production-process, software-patterns,
+    // systematic-debugging, verification-before-completion) were 30 KB of
+    // reference material paid on every review. They remain bundled and
+    // invokable via the Skill tool; only the resident declaration shrank.
+    assert!(
+        CODE_CRITIC_AGENT.contains("skills: [code-review-standards, contract-driven-testing]"),
+        "code-critic's resident skills are its rubric and its contract-test \
+         reference, nothing else (#4642)"
+    );
 }
 
 #[test]

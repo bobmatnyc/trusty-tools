@@ -259,8 +259,37 @@ fn install_then_deploy_composes_agents() {
         &paths.claude_agents_dir(),
     )
     .unwrap();
-    // All six bundled agents deploy on a fresh target.
-    assert_eq!(result.deployed.len(), 6);
+    // #4724: EVERY bundled agent deploys on a fresh target — derived from the
+    // bundle manifest `install_to` just wrote, never a literal. The old
+    // `assert_eq!(result.deployed.len(), 6)` was accurate when six agents
+    // shipped and has been stale ever since (the roster is 42); a second
+    // literal would go stale the next time anyone adds an agent, which is
+    // exactly how this got here.
+    //
+    // Comparing the SETS, not just the counts, is what makes this a real gate:
+    // an equal count with different membership would mean the deployer silently
+    // dropped one bundled agent and picked up something else, and a length-only
+    // assertion cannot see that.
+    let mut expected_agents: Vec<String> = trusty_mpm::core::bundle::ALL
+        .iter()
+        .filter_map(|a| a.rel_path.strip_prefix("agents/"))
+        .filter(|name| name.ends_with(".md"))
+        .map(str::to_string)
+        .collect();
+    expected_agents.sort();
+    assert!(
+        expected_agents.len() > 20,
+        "the bundle manifest yielded {} agent artifact(s) — the filter broke, \
+         and a gate that examined nothing is not a passing gate",
+        expected_agents.len()
+    );
+
+    let mut deployed_agents: Vec<String> = result.deployed.clone();
+    deployed_agents.sort();
+    assert_eq!(
+        deployed_agents, expected_agents,
+        "every bundled agent artifact must deploy on a fresh target (#4724)"
+    );
     assert!(result.skipped.is_empty());
 
     // The composed engineer carries inherited base content and no
@@ -307,12 +336,12 @@ fn install_then_deploy_deploys_skills() {
     // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
     // tm-delegation-patterns, tm-session-management, tm-session-pause,
     // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations,
-    // tm-slack-canvas-delivery) + tm-doctor + the tm overview skill
+    // tm-slack) + tm-doctor + the tm overview skill
     // (tm-skills-portfolio epic: the `example-skill.md` placeholder and the
     // 11 mpm-* guidance skills no longer ship; the previously-orphaned
     // tm-doctor.md is now wired in; issue #2185 added tm-issues-prune; issue
     // #2321 added tm-cli-operations; issue #4447 added
-    // tm-slack-canvas-delivery) + 2 (issue
+    // tm-slack-canvas-delivery, replaced 1-for-1 by tm-slack, issue #4761) + 2 (issue
     // #2890: code-review-standards, contract-driven-testing — code-critic's
     // declared `skills:` dependencies; see
     // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions

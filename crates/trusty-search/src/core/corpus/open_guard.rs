@@ -83,6 +83,42 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex as AsyncMutex;
 
+/// Typed marker: this caller gave up waiting for an in-flight corpus open
+/// (issue #4333, on top of #3659's timeout).
+///
+/// Why: the timeout path produces no redb error at all — the open never
+/// returned — so downstream classification had nothing to match on and every
+/// timeout collapsed into the generic "incompatible or corrupted format"
+/// wording that prescribes a destructive rebuild. A typed error survives
+/// `anyhow` context wrapping and cannot be broken by rewording.
+/// What: carries the path and the deadline that elapsed; `Display` reproduces
+/// the pre-#4333 message verbatim so log/output consumers are unaffected.
+/// Test: `open_failure::tests::classify_timeout_marker_is_transient`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "corpus open timed out after {timeout:?} for {path} — an opener is still running; \
+     retry shortly (issue #3659)"
+)]
+pub(crate) struct CorpusOpenTimeout {
+    pub(crate) path: String,
+    pub(crate) timeout: std::time::Duration,
+}
+
+/// Typed marker: the per-path wedge latch is set, so this caller was refused
+/// without attempting an open (issue #4333, on top of #3659's latch).
+///
+/// Why/What/Test: see [`CorpusOpenTimeout`]; this is the sibling marker for
+/// the fail-fast branch, classified as [`crate::core::corpus::CorpusOpenFailure::Contention`].
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "corpus opener previously wedged for {path} (issue #3659) — refusing to race a \
+     possibly still-running blocking open; restart the daemon once the underlying \
+     volume/I-O issue is resolved"
+)]
+pub(crate) struct CorpusOpenWedged {
+    pub(crate) path: String,
+}
+
 /// Per-path serialization gate: an async mutex plus a "wedged" latch.
 ///
 /// Why: split out of a bare `Arc<AsyncMutex<()>>` (issue #3659 review finding
@@ -279,11 +315,10 @@ where
     let path_display = path.display().to_string();
 
     if gate.wedged.load(Ordering::Acquire) {
-        return Err(anyhow!(
-            "corpus opener previously wedged for {path_display} (issue #3659) — refusing \
-             to race a possibly still-running blocking open; restart the daemon once the \
-             underlying volume/I-O issue is resolved"
-        ));
+        // #4333: return the TYPED wedge marker, not a bare string, so
+        // `CorpusOpenFailure::classify` can recognise contention by downcast
+        // and never mislabel it as a corrupted on-disk format.
+        return Err(anyhow::Error::new(CorpusOpenWedged { path: path_display }));
     }
 
     let timeout_dur = corpus_open_timeout();
@@ -360,9 +395,12 @@ where
                  this path is refused for new callers until the in-flight attempt finishes \
                  (issue #3659)"
             );
-            Err(anyhow!(
-                "corpus open timed out after {timeout_dur:?} for {path_display} — an opener \
-                 is still running; retry shortly (issue #3659)"
+            // #4333: return the TYPED timeout marker so the failure is
+            // classified as transient rather than collapsing into the generic
+            // "incompatible or corrupted format" wording that invites a
+            // destructive `--force` rebuild of an untouched, intact corpus.
+            Err(anyhow::Error::new(
+                crate::core::corpus::open_failure::timeout_marker(path_display, timeout_dur),
             ))
         }
     }

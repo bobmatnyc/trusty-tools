@@ -642,4 +642,37 @@ pub struct ReconcileSummary {
     /// `true` when at least one index encountered an error during reconciliation
     /// (the error was logged; the index may still be partially usable).
     pub degraded: bool,
+    /// Issue #4680: count of indexes that were re-driven because they had never
+    /// been walked in this daemon's lifetime while still owing lexical work —
+    /// the "stuck at `chunk_count = 0`" case that both staleness markers
+    /// classify as needing nothing.
+    ///
+    /// Why: these indexes previously landed in `up_to_date` (git path) or
+    /// `skipped_no_data` (mtime path), which made a total indexing outage read
+    /// as a clean reconcile. Counting them separately is what lets an operator
+    /// tell "nothing needed doing" from "221 indexes had no data at all".
+    /// What: incremented by `reconcile_one_index` immediately before it spawns
+    /// the recovery reindex.
+    /// Test: `stuck_unwalked_git_index_is_retried_not_marked_up_to_date` and
+    /// `stuck_unwalked_non_git_index_is_retried_not_skipped` in
+    /// `service/reconcile_tests.rs`.
+    pub stuck_retried: usize,
+    /// Issue #4733: count of indexes left untouched because git could not be
+    /// asked whether the mtime catch-up walk would be safe.
+    ///
+    /// Why: that walk honours `SKIP_DIRS` but NOT `.gitignore`, so it may only
+    /// run on a root with a corroborated absence of any repository. When the
+    /// probe says otherwise — a work tree with no HEAD to compare against
+    /// (unborn HEAD), or a repository git declined to read — reconcile has no
+    /// safe, cheap signal and does nothing. This is a distinct fact from
+    /// `skipped_no_data`, which means "there is a baseline mechanism, it just
+    /// has no data yet"; folding the two would report a security refusal as
+    /// ordinary emptiness and hide it from the operator.
+    /// What: incremented by `reconcile_one_index` on the refuse branch. These
+    /// indexes still serve (with `results_may_be_stale`), the live watcher
+    /// still tracks them, and the #4680 never-walked guard still re-drives them.
+    /// Test: `broken_git_repo_refuses_rather_than_mtime_walking` and
+    /// `unborn_head_repo_is_refused_once_not_reindexed_every_boot` in
+    /// `service/reconcile_tests.rs`.
+    pub skipped_unresolvable_git: usize,
 }

@@ -22,6 +22,7 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
 use super::workspace_guard::is_safe_to_remove;
+use super::worktree_protection;
 use super::worktree_safety::{DirtyWorktree, inspect_dirt};
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
@@ -98,6 +99,42 @@ pub(crate) fn is_session_worktree(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// What happened to a worktree the removal path was asked to delete (#4732).
+///
+/// Why: the caller has to be able to tell "gone" from "still on disk, and here
+/// is why" — and it has to be told the reason, not left to find it in a `warn!`
+/// nobody reads. The previous `bool` could express neither: `false` conflated a
+/// deliberate refusal, an I/O error, and a timeout, and the reason existed only
+/// as a log line inside the function.
+/// What: [`Removed`](Self::Removed) — the directory is gone;
+/// [`Kept`](Self::Kept) — it is still on disk, carrying an operator-facing
+/// reason.
+/// Test: `remove_session_worktree_refuses_a_git_locked_worktree`,
+/// `remove_cleans_up_a_directory_no_repository_claims`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WorktreeRemoval {
+    /// The directory is gone — git removed it, it was already absent, or an
+    /// unclaimed trusty-mpm-owned directory was removed directly.
+    Removed,
+    /// The directory is still on disk. The string says why, for the operator.
+    Kept(String),
+}
+
+impl WorktreeRemoval {
+    /// `true` only when the directory is gone.
+    pub(super) fn removed(&self) -> bool {
+        matches!(self, Self::Removed)
+    }
+
+    /// The operator-facing reason the directory was kept, if it was.
+    pub(super) fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Removed => None,
+            Self::Kept(reason) => Some(reason),
+        }
+    }
+}
+
 /// Remove an in-project per-session git worktree via `git worktree remove --force`.
 ///
 /// Why (#1840): `remove_dir_all` alone leaves the git ref (`session/<id>`) and
@@ -120,17 +157,49 @@ pub(crate) fn is_session_worktree(path: &Path) -> bool {
 /// convention. Branch deletion is best-effort — "not found" is silently
 /// ignored since older sessions may not have a branch. OsStr-safe path args
 /// avoid lossy UTF-8 coercion (#1840).
-/// Idempotent: if `path` is already absent, returns `true` (already removed).
-/// On git failure, best-effort falls back to `remove_dir_all` and logs WARN.
-/// Returns `true` when the workspace was removed (either via git or fallback)
-/// or was already absent; `false` only when all removal attempts failed.
-/// Test: `is_session_worktree_absent_path_is_noop`; integration coverage via
-/// the decommission round-trip tests that set up real git worktrees.
-pub(super) fn remove_session_worktree(path: &Path) -> bool {
+/// Idempotent: if `path` is already absent, returns
+/// [`Removed`](WorktreeRemoval::Removed).
+///
+/// # 🔴 Git declining is a REFUSAL, not a failure (#4732)
+///
+/// This function used to fall through to `std::fs::remove_dir_all` on ANY
+/// non-zero exit, and on any failure to resolve the owning checkout. Git exits
+/// 128 for every fatal condition, so that fall-through deleted the exact things
+/// git was protecting — most sharply, `git worktree lock`, whose only mechanism
+/// for saying "leave this alone" is a 128 exit. Locking a worktree to protect
+/// it was what got it deleted. A stale worktree pointer and an unreadable
+/// `.git` produced the same outcome while their working trees, uncommitted work
+/// included, were entirely intact.
+///
+/// Every git failure is now classified by
+/// [`super::worktree_protection`], which answers three states and refuses on
+/// two of them. The `remove_dir_all` fallback survives for EXACTLY ONE case:
+///
+/// > `path` has passed the trusty-mpm ownership gate above, and git has
+/// > POSITIVELY established that it holds no state there — the path carries no
+/// > `.git` entry, and either no repository exists above it at all, or the
+/// > owning repository's `git worktree list` does not name it.
+///
+/// That is a leftover directory: a worktree git already pruned, or one whose
+/// creation never completed registration. There is no ref to prune and nothing
+/// for git to protect, so a direct removal is the only way to clean it up.
+/// Every other outcome — including "git could not be asked" — keeps the
+/// directory and returns [`Kept`](WorktreeRemoval::Kept) with the reason.
+///
+/// Test: `is_session_worktree_absent_path_is_noop`,
+/// `remove_session_worktree_refuses_a_git_locked_worktree`,
+/// `remove_refuses_a_stale_worktree_pointer`,
+/// `remove_refuses_an_unreadable_git_entry`,
+/// `remove_refuses_a_worktree_with_a_broken_git_file`,
+/// `remove_cleans_up_a_directory_no_repository_claims`,
+/// `remove_cleans_up_an_unregistered_leftover_inside_a_repo`,
+/// `remove_still_removes_a_healthy_worktree`; integration coverage via the
+/// decommission round-trip tests that set up real git worktrees.
+pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
     if !path.exists() {
         // Already gone — either removed by a concurrent decommission or by a
         // previous partial run. Treat as success (idempotent removal).
-        return true;
+        return WorktreeRemoval::Removed;
     }
 
     // Data-safety gate (#1845 item 5): prefer the SM ownership sentinel over the
@@ -150,7 +219,10 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
                 "decommission: refusing worktree removal — no SM ownership sentinel \
                  and path is not under .worktrees/; skipping conservatively"
             );
-            return false;
+            return WorktreeRemoval::Kept(format!(
+                "no trusty-mpm ownership sentinel ({WORKTREE_SENTINEL_FILE}) and the path \
+                 is not under {WORKTREES_DIRNAME}/"
+            ));
         }
         warn!(
             path = %path.display(),
@@ -168,19 +240,26 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
     let repo_root = match super::worktree_registry::registry_root_for(path) {
         Some(r) => r,
         None => {
-            // No git registry claims this path — it is a plain directory, not a
-            // worktree. The sentinel gate above already established trusty-mpm
-            // owns it, so remove the directory directly rather than refusing.
+            // #4732: a `None` here is NOT "no git repository owns this path".
+            // `registry_root_for` also returns `None` when git could not
+            // resolve one — which is exactly what a worktree with a stale or
+            // unreadable `.git` pointer answers, while its working tree and
+            // uncommitted work are entirely intact. Classify before deleting.
+            let verdict = worktree_protection::protection_without_registry_root(path);
+            if let Some(reason) = verdict.refusal() {
+                warn!(
+                    path = %path.display(),
+                    "decommission: refusing worktree removal — {reason} (#4732)"
+                );
+                return WorktreeRemoval::Kept(reason.to_string());
+            }
+            // The one surviving fallback case — see this function's doc.
             warn!(
                 path = %path.display(),
-                "decommission: no git repository owns this path — removing the \
+                "decommission: no git repository claims this path — removing the \
                  directory directly (no worktree ref to prune)"
             );
-            if let Err(e) = std::fs::remove_dir_all(path) {
-                warn!(path = %path.display(), "decommission: remove_dir_all failed: {e}");
-                return false;
-            }
-            return true;
+            return remove_unclaimed_directory(path);
         }
     };
     let repo_root = repo_root.as_path();
@@ -192,39 +271,84 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
         .args(["worktree", "remove", "--force"])
         .arg(path)
         .output();
-    let git_success = match out {
+    match out {
         Ok(o) if o.status.success() => {
             info!(path = %path.display(), "decommission: git worktree removed (incl. ref)");
-            true
+            prune_refs_after_removal(repo_root, path);
+            WorktreeRemoval::Removed
         }
         Ok(o) => {
+            // #4732: git exits 128 for every fatal condition, and `git worktree
+            // lock` uses that exit to REFUSE. Classify the reason instead of
+            // reading every non-zero exit as permission to delete by hand.
             let stderr = String::from_utf8_lossy(&o.stderr);
+            let verdict =
+                worktree_protection::protection_after_failed_removal(path, repo_root, &stderr);
+            if let Some(reason) = verdict.refusal() {
+                warn!(
+                    path = %path.display(),
+                    "decommission: git worktree remove --force declined ({}) and the \
+                     directory must be preserved — {reason} (#4732)",
+                    o.status
+                );
+                return WorktreeRemoval::Kept(reason.to_string());
+            }
+            // The one surviving fallback case — see this function's doc.
             warn!(
                 path = %path.display(),
-                "decommission: git worktree remove --force failed ({}): {stderr}; \
-                 falling back to remove_dir_all",
+                "decommission: git holds no worktree state at this path ({}: {stderr}); \
+                 removing the leftover directory directly",
                 o.status
             );
-            if let Err(e) = std::fs::remove_dir_all(path) {
-                warn!(path = %path.display(), "decommission: fallback remove_dir_all failed: {e}");
-                return false;
-            }
-            false // git remove failed, but dir removal succeeded
+            remove_unclaimed_directory(path)
         }
         Err(e) => {
+            // #4732: git could not be run at all, so nothing is known about
+            // what it may be protecting. An unanswerable probe is never a
+            // licence to delete.
+            let reason = format!("git could not be run to remove the worktree: {e}");
             warn!(
                 path = %path.display(),
-                "decommission: failed to spawn git for worktree removal: {e}; \
-                 falling back to remove_dir_all"
+                "decommission: refusing worktree removal — {reason} (#4732)"
             );
-            if let Err(e2) = std::fs::remove_dir_all(path) {
-                warn!(path = %path.display(), "decommission: fallback remove_dir_all also failed: {e2}");
-                return false;
-            }
-            false
+            WorktreeRemoval::Kept(reason)
         }
-    };
-    if git_success {
+    }
+}
+
+/// Remove a directory git has POSITIVELY disclaimed (#4732).
+///
+/// Why: named so the one legitimate `remove_dir_all` in this module has exactly
+/// one call shape and is greppable. Reaching it requires a
+/// [`worktree_protection`] verdict of "no git state at or claiming this path" —
+/// never a bare non-zero exit, and never an unanswerable probe. See
+/// [`remove_session_worktree`]'s doc for the full statement of that case.
+/// What: `std::fs::remove_dir_all`, mapped onto [`WorktreeRemoval`].
+/// Test: `remove_cleans_up_a_directory_no_repository_claims`,
+/// `remove_cleans_up_an_unregistered_leftover_inside_a_repo`.
+fn remove_unclaimed_directory(path: &Path) -> WorktreeRemoval {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => WorktreeRemoval::Removed,
+        Err(e) => {
+            warn!(path = %path.display(), "decommission: remove_dir_all failed: {e}");
+            WorktreeRemoval::Kept(format!("removing the directory failed: {e}"))
+        }
+    }
+}
+
+/// Clear the git refs a successful `git worktree remove` leaves behind (#1840,
+/// #2032).
+///
+/// Why: split out of [`remove_session_worktree`] when #4732 turned that
+/// function's tail into a three-way classification — the ref cleanup is
+/// best-effort bookkeeping that runs only after git itself removed the
+/// worktree, and interleaving it with the safety classification made both
+/// harder to read.
+/// What: `git worktree prune`, then `git branch -D session/<leaf>`. Both are
+/// best-effort; a failure leaves a stale ref in git's output, never data loss.
+/// Test: `manager_decommission_removes_real_git_worktree` asserts both effects.
+fn prune_refs_after_removal(repo_root: &Path, path: &Path) {
+    {
         // Step 2: git worktree prune to clear any stale git worktree refs.
         // Best-effort: a failure here is a minor annoyance (stale ref in git output),
         // not a correctness failure.
@@ -286,7 +410,6 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
             }
         }
     }
-    true // workspace was removed (either via git or fallback)
 }
 
 impl SessionManager {
@@ -341,36 +464,105 @@ impl SessionManager {
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
         let managed_root = workspace_root(&config);
-        self.decommission_with_root(id, &managed_root, caller, false)
-            .await
+        self.decommission_with_root(id, &managed_root, caller).await
     }
 
-    /// Tombstone a record WITHOUT ever touching the filesystem (owner request
-    /// 2026-07-29, critic HIGH finding #1).
+    /// Tombstone a record and do NOTHING else — a dedicated, single-effect path,
+    /// not a flag threaded through [`decommission_with_root`](Self::decommission_with_root)
+    /// (owner request 2026-07-29; rebuilt as a separate function per PR #4725
+    /// review round 2).
     ///
-    /// Why: `tm ls`/bare `tm`'s auto-prune sweep only knows a workspace was
-    /// ABSENT at listing time — a remount (network/removable volume) between
-    /// that probe and a real `decommission()` call could otherwise reach
-    /// `remove_dir_all` with live content back in place. This wrapper skips
-    /// BOTH removal branches entirely (never the worktree path, never the
-    /// owned-directory path) — there is no re-check to race, because there is
-    /// no removal attempt at all. If the workspace is genuinely gone there is
-    /// nothing to remove; if it reappeared, nothing is deleted. `caller: None`
-    /// — this is a daemon-internal sweep, never a session acting on its own
-    /// behalf.
-    /// What: [`decommission_with_root`](Self::decommission_with_root) with
-    /// `record_only = true`. The returned `bool` is always `false` (nothing is
-    /// ever removed by this path).
-    /// Test: `decommission_record_only_never_removes_existing_workspace`
-    /// (remount-race stand-in — a REAL, populated directory survives the call).
+    /// Why: this exists for the `tm ls` auto-prune sweep, which runs unattended
+    /// on every listing and knows only that a workspace was ABSENT at listing
+    /// time. It must therefore be incapable of destroying anything, including on
+    /// a remount race. It was originally built as `decommission_with_root(…,
+    /// record_only: true)`, and that shape failed twice in review — each time
+    /// because a destructive effect in that function was not behind the flag:
+    ///
+    ///   * round 1 (#4728): `graceful_terminate_runtime` ran above the guard,
+    ///     SIGTERMing and `kill_session`ing any live pane whose NAME matched the
+    ///     record's;
+    ///   * round 2: `delete_search_index_best_effort` ran below every guard,
+    ///     issuing a cross-daemon `DELETE /indexes/{id}?delete_data=true`. Worse,
+    ///     its target id comes from `disposable_workspace_index_id`, which walks
+    ///     UP from the workspace path for a `.git` marker and is documented as
+    ///     requiring the workspace to still exist. Auto-prune fires only once the
+    ///     workspace is GONE, so that contract is violated by construction and
+    ///     the walk resolves to the PARENT PROJECT's index.
+    ///
+    /// Two rounds, two ungated effects, each found only by executing the path.
+    /// A boolean parameter cannot make a multi-effect function safe — it can
+    /// only be audited by exercising every branch, and it silently acquires new
+    /// effects whenever someone adds one to the shared function. This function
+    /// is auditable by reading: its entire body is record mutation plus one
+    /// store write. There is no filesystem call, no subprocess, no network
+    /// request, and no tmux interaction to gate, so none can be forgotten.
+    ///
+    /// What: applies the #3649 owner gate (via
+    /// [`check_worktree_owner`](Self::check_worktree_owner)), clears
+    /// `workspace_path`/`workspace_owned` only when nothing is left on disk
+    /// (#4344 — a retained directory must keep its pointer), clears the #4400
+    /// pending-decision fields, sets `Decommissioned`, and persists. Returns
+    /// `(record, false)` — the `false` is a type-level constant, not a computed
+    /// result, because nothing here can remove anything.
+    /// Test: `decommission_record_only_never_removes_existing_workspace`,
+    /// `decommission_record_only_never_touches_the_runtime`,
+    /// `decommission_record_only_has_no_side_effects_beyond_the_store`;
+    /// `disposable_index_id_for_a_removed_worktree_resolves_to_the_parent_project`
+    /// pins why the shared teardown's index cleanup must not be reused here.
     pub async fn decommission_record_only(
         &self,
         id: &ManagedSessionId,
     ) -> Result<(SessionRecord, bool), ManagedError> {
-        let config = TrustyToolsConfig::load();
-        let managed_root = workspace_root(&config);
-        self.decommission_with_root(id, &managed_root, None, true)
-            .await
+        let mut record = self.get(id).await?;
+        // Daemon-internal sweep: `caller = None` preserves full pre-#3649
+        // authority, exactly as before. Kept so this path can never be a wider
+        // authority than the teardown it replaces.
+        self.check_worktree_owner(&record, None, id).await?;
+
+        // #4344: only blank the pointer when the directory really is gone —
+        // otherwise a retained workspace is stranded with no trail back to it.
+        let workspace_still_on_disk = record.workspace_path.as_deref().is_some_and(|p| p.exists());
+        if !workspace_still_on_disk {
+            record.workspace_path = None;
+            record.workspace_owned = false;
+        }
+        // #4400: a decommissioned session is terminal — a pending decision on it
+        // would sit in the human-confirmation queue forever.
+        record.pending_decision = None;
+        record.proposed_default = None;
+        record.state = ManagedSessionState::Decommissioned;
+        self.store.write().await.upsert(record.clone()).await?;
+        info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
+        Ok((record, false))
+    }
+
+    /// The #3649 worktree-owner gate, shared by the full teardown and the
+    /// record-only tombstone.
+    ///
+    /// Why: extracted so [`decommission_record_only`](Self::decommission_record_only)
+    /// can apply the identical authority check without depending on
+    /// `decommission_with_root` — the whole point of that function is that it
+    /// shares no code path with the destructive one.
+    /// What: `None` (operator/daemon-internal) always passes. `Some(id)` is
+    /// refused with [`ManagedError::WorktreeOwnerMismatch`] when the target's
+    /// worktree has a known owner that disagrees and is not provably ownerless.
+    /// Test: `decommission_owner_gate_refuses_foreign_caller`,
+    /// `decommission_owner_gate_allows_terminal_owner`.
+    async fn check_worktree_owner(
+        &self,
+        record: &SessionRecord,
+        caller: Option<ManagedSessionId>,
+        id: &ManagedSessionId,
+    ) -> Result<(), ManagedError> {
+        if let Some(caller_id) = caller
+            && let Some(owner) = self.known_owner_of(record)
+            && owner != caller_id
+            && !self.resolve_ownerless(owner).await
+        {
+            return Err(ManagedError::WorktreeOwnerMismatch(caller_id, owner, *id));
+        }
+        Ok(())
     }
 
     /// Internal: decommission with an explicit managed root (test seam).
@@ -381,34 +573,47 @@ impl SessionManager {
     /// parallel tests; injecting the root avoids that entirely.
     /// What: identical teardown logic as the public `decommission` but resolves the
     /// managed root from the caller-supplied `managed_root` instead of the config.
-    /// `record_only` (owner request 2026-07-29): when `true`, BOTH removal
-    /// branches below are skipped unconditionally — see
-    /// [`decommission_record_only`](Self::decommission_record_only)'s doc.
+    ///
+    /// 🔴 THIS FUNCTION IS UNCONDITIONALLY DESTRUCTIVE and has no "safe mode".
+    /// The `record_only` flag it used to carry is GONE (PR #4725 review round 2);
+    /// [`decommission_record_only`](Self::decommission_record_only) is now a
+    /// separate function that shares no code path with this one. Read that
+    /// function's doc for why. Its side effects, in order, are:
+    ///
+    /// | # | Effect | Reversible? |
+    /// |---|---|---|
+    /// | 1 | `graceful_terminate_runtime` — SIGTERM + `kill_session` the pane | no |
+    /// | 2 | `remove_session_worktree` — `git worktree remove --force`, `fs::remove_dir_all` fallback, `git worktree prune`, `git branch -D` (dirty-gated, #4344) | no |
+    /// | 3 | `fs::remove_dir_all` on an SM-owned workspace (containment-gated) | no |
+    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` | no |
+    /// | 5 | clears `workspace_path`/`workspace_owned` when nothing is on disk | store-only |
+    /// | 6 | clears `pending_decision`/`proposed_default` (#4400) | store-only |
+    /// | 7 | writes state `Decommissioned` | store-only |
+    ///
+    /// Effects 1–4 destroy state outside the record store. Any new effect added
+    /// here belongs in that table. If a caller needs a subset, give it its own
+    /// function rather than a flag — that is the lesson of this PR's two review
+    /// rounds, each of which found a different ungated effect.
+    ///
     /// Returns `(SessionRecord, workspace_removed)` where `workspace_removed` is
     /// `true` ONLY when `remove_dir_all` actually ran — callers must not infer this
     /// from a post-call filesystem check (TOCTOU: owned workspace already absent
     /// before decommission would give a false-positive filesystem result).
     /// Test: called by `manager_decommission_removes_workspace` (which passes a
-    /// TempDir as the managed root, removing the need for `set_var`).
+    /// TempDir as the managed root, removing the need for `set_var`);
+    /// `decommission_full_still_terminates_the_runtime`.
     pub(crate) async fn decommission_with_root(
         &self,
         id: &ManagedSessionId,
         managed_root: &Path,
         caller: Option<ManagedSessionId>,
-        record_only: bool,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
         // #3649 owner gate: only applies when a SESSION identifies itself as
         // the caller. `None` (operator/daemon-internal) preserves full
         // pre-#3649 authority unconditionally — see the doc above.
-        if let Some(caller_id) = caller
-            && let Some(owner) = self.known_owner_of(&record)
-            && owner != caller_id
-            && !self.resolve_ownerless(owner).await
-        {
-            return Err(ManagedError::WorktreeOwnerMismatch(caller_id, owner, *id));
-        }
+        self.check_worktree_owner(&record, caller, id).await?;
 
         // #2033: derive the trusty-search index id for a disposable workspace
         // (SM-owned clone or in-project worktree — see
@@ -432,16 +637,20 @@ impl SessionManager {
         // then reclaim the pane — instead of an abrupt `kill_session`. Best-effort:
         // a session whose runtime is already gone still decommissions cleanly —
         // the helper self-guards and is a no-op when the pane is already gone.
+        //
+        // Effect 1 of the table above. `graceful_terminate_runtime` self-guards
+        // on `session_exists(name)` — LIVE-TMUX NAME MEMBERSHIP, not the record's
+        // captured `pane_id` (#4728) — so it kills whatever live session carries
+        // this name. Acceptable here, where teardown is the caller's stated
+        // intent; never acceptable on a listing sweep, which is why the
+        // record-only path is a separate function rather than a flag.
         self.graceful_terminate_runtime(&record.tmux_name).await;
 
-        // Guard: only remove the workspace directory if the SM provisioned it.
-        // Track whether remove_dir_all ACTUALLY RAN (not inferred from filesystem).
-        // `record_only` (owner request 2026-07-29): skip BOTH removal branches
-        // below unconditionally — see `decommission_record_only`'s doc. The
-        // `workspace_still_on_disk` re-check further down still runs, so a
-        // genuinely-absent workspace is still cleared from the tombstone.
+        // Effects 2–3. Guard: only remove the workspace directory if the SM
+        // provisioned it. Track whether remove_dir_all ACTUALLY RAN (not
+        // inferred from filesystem).
         let mut workspace_removed = false;
-        if !record_only && let Some(ref ws) = record.workspace_path {
+        if let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
                 // Unowned workspace (local-path spawn or adopt): never bulk-delete.
                 // #1840: EXCEPTION — in-project per-session worktrees live under
@@ -491,28 +700,28 @@ impl SessionManager {
                         let ws_clone = ws.clone();
                         let join =
                             tokio::task::spawn_blocking(move || remove_session_worktree(&ws_clone));
-                        workspace_removed =
+                        let outcome =
                             match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
-                                Ok(Ok(removed)) => removed,
+                                Ok(Ok(outcome)) => outcome,
                                 Ok(Err(e)) => {
-                                    warn!(
-                                        id = %id,
-                                        workspace = %ws.display(),
-                                        "decommission: remove_session_worktree task panicked: {e}"
-                                    );
-                                    false
+                                    WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
                                 }
-                                Err(_elapsed) => {
-                                    warn!(
-                                        id = %id,
-                                        workspace = %ws.display(),
-                                        timeout_secs = GIT_WORKTREE_REMOVE_TIMEOUT.as_secs(),
-                                        "decommission: git worktree remove timed out; \
-                                         worktree may require manual cleanup"
-                                    );
-                                    false
-                                }
+                                Err(_elapsed) => WorktreeRemoval::Kept(format!(
+                                    "git worktree remove did not finish within {}s; the \
+                                     worktree may require manual cleanup",
+                                    GIT_WORKTREE_REMOVE_TIMEOUT.as_secs()
+                                )),
                             };
+                        // #4732: the reason now comes back FROM the remover
+                        // rather than being buried in a log line inside it.
+                        workspace_removed = outcome.removed();
+                        if let Some(reason) = outcome.reason() {
+                            warn!(
+                                id = %id,
+                                workspace = %ws.display(),
+                                "decommission: worktree left on disk — {reason}"
+                            );
+                        }
                     }
                 } else {
                     warn!(
@@ -567,11 +776,19 @@ impl SessionManager {
             }
         }
 
-        // #2033: best-effort remove the trusty-search index for a disposed
-        // workspace, alongside the worktree/clone directory. Fail-soft: an
-        // unreachable/erroring search daemon must never block or fail session
+        // Effect 4. #2033: best-effort remove the trusty-search index for a
+        // disposed workspace, alongside the worktree/clone directory. Fail-soft:
+        // an unreachable/erroring search daemon must never block or fail session
         // teardown — `delete_search_index_best_effort` logs and swallows every
         // failure mode itself.
+        //
+        // Note the ordering contract that makes this correct ONLY here:
+        // `search_index_id` was derived at the top of this function, BEFORE any
+        // removal, because `resolve_project_root` walks up for a `.git` marker
+        // and would otherwise resolve to the parent project's index. A caller
+        // that runs against an already-absent workspace cannot satisfy that
+        // contract, which is precisely why the record-only path does not reuse
+        // this function (PR #4725 review round 2).
         if let Some(index_id) = search_index_id {
             search_gc::delete_search_index_best_effort(&index_id).await;
         }

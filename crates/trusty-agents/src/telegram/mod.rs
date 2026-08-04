@@ -269,6 +269,15 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
         "Starting Telegram bot in long-polling mode"
     );
 
+    // #4703: resolve the attendance root ONCE at startup, then inject it into
+    // every handler branch below. Both `handle_command` and `handle_message`
+    // used to resolve it inline, which made their attendance hooks impossible
+    // to assert on from a test.
+    let attendance_root: crate::attendance::AttendanceRoot =
+        crate::attendance::default_attendance_root()
+            .ok()
+            .map(Arc::new);
+
     let sessions_for_cmd = Arc::clone(&sessions);
     let project_for_cmd = Arc::clone(&project_path);
     let paired_for_cmd = Arc::clone(&paired);
@@ -277,6 +286,9 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
     let sessions_for_slash = Arc::clone(&sessions);
     let project_for_slash = Arc::clone(&project_path);
     let paired_for_slash = Arc::clone(&paired);
+    let attendance_for_cmd = attendance_root.clone();
+    let attendance_for_slash = attendance_root.clone();
+    let attendance_for_msg = attendance_root.clone();
     let sessions_for_msg = Arc::clone(&sessions);
     let project_for_msg = Arc::clone(&project_path);
     let paired_for_msg = Arc::clone(&paired);
@@ -291,6 +303,7 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                     let paired = Arc::clone(&paired_for_cmd);
                     let paired_path = Arc::clone(&paired_path_for_cmd);
                     let pending = Arc::clone(&pending_for_cmd);
+                    let attendance_root = attendance_for_cmd.clone();
                     async move {
                         handle_command(
                             bot,
@@ -301,6 +314,7 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                             paired,
                             paired_path,
                             pending,
+                            attendance_root,
                         )
                         .await
                     }
@@ -321,7 +335,10 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                     let sessions = Arc::clone(&sessions_for_slash);
                     let project = Arc::clone(&project_for_slash);
                     let paired = Arc::clone(&paired_for_slash);
-                    async move { handle_message(bot, msg, sessions, project, paired).await }
+                    let attendance_root = attendance_for_slash.clone();
+                    async move {
+                        handle_message(bot, msg, sessions, project, paired, attendance_root).await
+                    }
                 }),
         )
         .branch(
@@ -331,7 +348,10 @@ pub async fn run_telegram_bot(project_path: PathBuf, pending: PendingPairs) -> R
                     let sessions = Arc::clone(&sessions_for_msg);
                     let project = Arc::clone(&project_for_msg);
                     let paired = Arc::clone(&paired_for_msg);
-                    async move { handle_message(bot, msg, sessions, project, paired).await }
+                    let attendance_root = attendance_for_msg.clone();
+                    async move {
+                        handle_message(bot, msg, sessions, project, paired, attendance_root).await
+                    }
                 }),
         );
 

@@ -147,10 +147,19 @@ pub(crate) fn filter_live_sessions(
 /// grammar) apply ONLY to the table path; `--json` stays a raw, unfiltered,
 /// unsorted passthrough, matching `--all`'s existing "no effect on --json"
 /// precedent.
+///
+/// #4702: this path — every piped, scripted, and `--json` listing — now runs
+/// the same dead-record auto-prune the interactive picker runs. It previously
+/// ran none, which is why dead records accumulated without bound for anyone not
+/// using the TTY picker. See
+/// [`session_picker_prune::prune_and_report`](crate::commands::session_picker_prune::prune_and_report)
+/// for why doing this unconditionally is safe.
 /// Test: HTTP path covered by the integration test; filter logic unit-tested by
 /// `ls_source_id_filter_selects_correct_slug`,
 /// `picker_filter_excludes_decommissioned_keeps_active`; sort/filter logic by
-/// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`.
+/// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`; the
+/// prune coverage by `session_ls_prunes_dead_records_on_piped_invocation` and
+/// `session_ls_json_passthrough_prunes_dead_records`.
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
@@ -160,18 +169,62 @@ pub(crate) async fn session_ls(
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<String>,
 ) -> anyhow::Result<()> {
+    let ctx = crate::commands::session_picker_prune::PruneContext::production();
+    session_ls_at(client, url, json, source_id, all, sort, term, &ctx).await
+}
+
+/// [`session_ls`] with an injected auto-prune context — the testable core
+/// (#4702).
+///
+/// Why: a test must never write the operator's real
+/// `~/.trusty-mpm/auto-prune-seen.json`, and must never depend on whether the
+/// machine running it has tmux. Passing a
+/// [`PruneContext`](crate::commands::session_picker_prune::PruneContext) injects
+/// both — CI caught the second half when these tests, reaching the real tmux
+/// enumeration, passed locally and failed on a runner with no tmux.
+/// What: see [`session_ls`]. The `--json` branch echoes the ORIGINAL response
+/// body and never re-GETs (PR #4725 review). A re-GET looked like it kept the
+/// output fresh but did neither job well: the raw passthrough is unfiltered, so
+/// a just-pruned row came back with `state` flipped to `"decommissioned"` rather
+/// than absent, and the second fetch's `?` could fail the command AFTER the
+/// registry had already been mutated — the caller would see an error and have no
+/// idea the prune landed. `--json` is a point-in-time snapshot of the fleet;
+/// a prune triggered by this invocation shows up on the next one. A response the
+/// client cannot parse degrades to a plain passthrough with no prune: the raw
+/// echo is the contract there, the prune is a best-effort side task.
+/// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
+/// `session_ls_json_passthrough_prunes_dead_records`,
+/// `session_ls_json_never_refetches_after_pruning`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn session_ls_at(
+    client: &reqwest::Client,
+    url: &str,
+    json: bool,
+    source_id: Option<&str>,
+    all: bool,
+    sort: crate::commands::session_picker::SessionSortArg,
+    term: Option<String>,
+    ctx: &crate::commands::session_picker_prune::PruneContext,
+) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
     // that raw text verbatim (byte-for-byte — preserving exact field
     // order/whitespace for scripts); the table path deserializes the SAME text
     // rather than issuing a second GET.
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
+    let parsed = crate::commands::session_picker::parse_scoped_sessions(&raw, all);
     if json {
         // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
-        // byte-for-byte.
+        // byte-for-byte. #4702: prune as a side effect, then echo the body we
+        // ALREADY have. No re-GET — see this function's doc.
+        if let Ok(sessions) = parsed {
+            crate::commands::session_picker_prune::prune_and_report_at(client, url, sessions, ctx)
+                .await;
+        }
         println!("{raw}");
         return Ok(());
     }
-    let sessions = crate::commands::session_picker::parse_scoped_sessions(&raw, all)?;
+    let sessions =
+        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx).await;
     let mut sessions =
         crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);

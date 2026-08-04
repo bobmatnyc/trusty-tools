@@ -21,16 +21,37 @@
 #    scripts/check-pr-version-bump.sh's header for why this option was chosen
 #    over running the full parity check on PRs.
 #
-# 2. `version-parity` (PUSH TO MAIN) — unchanged, and still the authority. It
-#    diffs the real published tarball against the real merged tree and fails
-#    CLOSED, including when the registry is unreachable. The PR-time guard is
-#    an early warning, not a replacement: it warns rather than fails on a
-#    registry outage precisely because this job is still behind it.
+# 2. `version-parity` (PUSH TO MAIN **AND ON A SCHEDULE**, #4688) — still the
+#    authority. It diffs the real published tarball against the real merged
+#    tree and fails CLOSED, including when the registry is unreachable. The
+#    PR-time guard is an early warning, not a replacement: it warns rather than
+#    fails on a registry outage precisely because this job is still behind it.
+#
+#    WHY IT ALSO RUNS ON A SCHEDULE (#4688). This job answers a question about
+#    TWO moving parts — main's tree and crates.io — but only ever fired when
+#    ONE of them moved. `cargo publish` happens out of band from a maintainer's
+#    machine, so a green main can go drifted with no commit to trigger anything.
+#    That is exactly the 2026-08-03 sequence: the run at 1ec38321 passed at
+#    17:13Z, `trusty-common 0.27.0` went live at 17:21:48Z, and main was not
+#    re-evaluated until the next unrelated push. A cron re-asks the question on
+#    the registry's clock instead of the repo's, so a publish cannot open a
+#    silent window.
+#
+# 3. `notify-main-drift` (#4688) — files/refreshes a tracking issue when the
+#    main-side job does not come out green, mirroring ci.yml's
+#    `notify-main-failure` (#4179). Drift on main is everyone's problem the
+#    moment it exists; a red square on a scheduled run nobody is watching is
+#    not "loudly".
 name: Version parity
 
 on:
   push:
     branches: [main]
+  # Every three hours. Fine-grained enough that a publish is caught in one
+  # working session, coarse enough to stay well inside crates.io's API-usage
+  # policy (~21 sparse-index GETs + a tarball per published crate, per run).
+  schedule:
+    - cron: "17 */3 * * *"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -75,9 +96,23 @@ jobs:
       - name: Scan-floor selftest (must refuse an empty scan)
         run: bash scripts/check_scan_floor_selftest.sh pr_version_bump
 
+      # #4688: diff against the base branch AS IT IS NOW, not the frozen
+      # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
+      # whatever it fetched; re-fetching pins it to the live tip so the merge
+      # base cannot lag behind the merge ref's own first parent. See the
+      # ATTRIBUTION note in scripts/check-pr-version-bump.sh for the failure
+      # this removes (PR #4666 / run 30839255128).
+      - name: Refresh the base branch ref
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
       - name: Check PR version bumps against crates.io
         env:
-          PR_VERSION_BUMP_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_VERSION_BUMP_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: bash scripts/check-pr-version-bump.sh
 
   # Post-merge authority (#3366). Quoted `name:` — an unquoted ` #` opens a
@@ -102,3 +137,69 @@ jobs:
 
       - name: Run version-parity guard
         run: bash scripts/check-version-parity.sh
+
+  # Loudness (#4688). Without this, drift discovered by a SCHEDULED run is a red
+  # square on a workflow nobody opened — the exact failure mode #4179 fixed for
+  # ci.yml. `always()` so the job still reports when `version-parity` fails,
+  # is cancelled, or is skipped; a non-green verdict is never silence.
+  notify-main-drift:
+    name: Notify on version drift on main
+    if: always() && github.event_name != 'pull_request'
+    needs: [version-parity]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: File or update tracking issue
+        if: needs.version-parity.result != 'success'
+        uses: actions/github-script@v7
+        env:
+          PARITY_RESULT: ${{ needs.version-parity.result }}
+        with:
+          script: |
+            const label = 'version-drift-main';
+            const title = 'Version-parity drift on main';
+            const result = process.env.PARITY_RESULT;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              result === 'failure'
+                ? `Version-parity FAILED on \`main\` at ${context.sha} (trigger: ${context.eventName}).`
+                : `Version parity did NOT conclude on \`main\` at ${context.sha} (result: ${result}, trigger: ${context.eventName}).`,
+              '',
+              'A publishable crate\'s `src/**` no longer matches the crates.io tarball for the',
+              'version its own Cargo.toml declares, or the check could not verify that it does.',
+              'Bump the affected crate before the next release; `cargo publish` will otherwise',
+              'fail, or ship source nobody reviewed under a version number that is already out.',
+              '',
+              'This can appear with NO new commit: publishing to crates.io moves the other half',
+              'of the comparison (issue #4688).',
+              '',
+              `Run: ${runUrl}`,
+            ].join('\n');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body,
+              });
+              core.notice(`Updated existing tracking issue #${existing.data[0].number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: [label],
+              });
+              core.notice(`Filed tracking issue #${created.data.number}`);
+            }

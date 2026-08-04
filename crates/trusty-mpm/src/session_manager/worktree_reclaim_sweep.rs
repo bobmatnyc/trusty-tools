@@ -15,11 +15,12 @@
 //! captured `in_use` slice is therefore asking a question that was answered
 //! more than ten minutes ago — a session that attached in the meantime is
 //! invisible, and a `git worktree lock` applied in the meantime is ignored
-//! (`Admission` was evaluated at survey time, and
-//! `remove_session_worktree`'s `remove_dir_all` fallback deletes a locked
-//! worktree regardless). The first cut of this feature made exactly that
-//! mistake, and its three "re-checks" all survived mutation testing because
-//! they re-asked stale inputs.
+//! (`Admission` was evaluated at survey time). The first cut of this feature
+//! made exactly that mistake, and its three "re-checks" all survived mutation
+//! testing because they re-asked stale inputs. Until #4732,
+//! `remove_session_worktree`'s `remove_dir_all` fallback then deleted the
+//! locked worktree regardless, so this re-check was the ONLY thing honouring
+//! the lock; it now refuses too, and this pass is the outer of two defences.
 //!
 //! So: [`reclaim_with_probes`] re-reads the live session set, git's own
 //! worktree registry, the ownership marker, the pull-request state, and the
@@ -223,11 +224,12 @@ pub(crate) fn survey(
 ///
 /// Why: `Admission` was decided during the survey. Ten minutes later the
 /// operator may have run `git worktree lock` — an explicit "do not remove
-/// this" — and the survey's verdict knows nothing about it. This matters more
-/// than it looks: git itself honours the lock (`git worktree remove --force`
-/// exits 128), but `remove_session_worktree` treats that as a git failure and
-/// falls back to `remove_dir_all`, which deletes the directory anyway. The lock
-/// can therefore only be honoured by re-checking it here.
+/// this" — and the survey's verdict knows nothing about it. Git itself honours
+/// the lock (`git worktree remove --force` exits 128); until #4732
+/// `remove_session_worktree` read that as a git failure and fell back to
+/// `remove_dir_all`, so this re-check was the only thing honouring it. The
+/// remover now refuses as well — this stays the OUTER defence, because a
+/// candidate proposed here and refused there is a reported near-miss.
 /// What: one `git -C <candidate> worktree list --porcelain`, resolved against
 /// the candidate's own repository. Refuses when git cannot be asked, when git
 /// no longer lists the path, and when the record is the main checkout, bare,
@@ -412,7 +414,8 @@ pub(crate) fn reclaim_with_probes(
                 .push(format!("{}: {reason}", path.display()));
             continue;
         }
-        if super::decommission::remove_session_worktree(&path) && !path.exists() {
+        let outcome = super::decommission::remove_session_worktree(&path);
+        if outcome.removed() && !path.exists() {
             tracing::info!(
                 path = %path.display(),
                 "worktree-reclaim: reclaimed a merged-PR worktree (#2919)"
@@ -422,7 +425,19 @@ pub(crate) fn reclaim_with_probes(
                 .saturating_add(candidate.bytes.unwrap_or(0));
             out.removed.push(path);
         } else {
-            out.removal_failed.push(path);
+            // #4732: report WHY it is still on disk. "removal failed" with no
+            // reason reads as a transient error, but the commonest reason is
+            // now a deliberate refusal — a `git worktree lock` the operator set
+            // precisely so this pass would leave the worktree alone.
+            let reason = outcome
+                .reason()
+                .unwrap_or("the directory is still present after a reported removal");
+            tracing::warn!(
+                path = %path.display(),
+                "worktree-reclaim: worktree kept — {reason}"
+            );
+            out.removal_failed
+                .push(format!("{}: {reason}", path.display()));
         }
     }
     out

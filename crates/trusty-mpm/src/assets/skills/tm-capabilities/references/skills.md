@@ -47,7 +47,7 @@ Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a s
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |
-| `tm-slack-canvas-delivery` | pm-workflow | no | Deliver a document to the user as a Slack canvas — create, bind to a destination, post the link, and verify — never treat canvas creation alone as delivery |
+| `tm-slack` | pm-workflow | no | Deliver messages, canvases, and files to the user via Slack — routes through the native slack-mcp connector, not claude.ai's hosted Slack connector; canvas creation alone is never delivery |
 | `tm-teaching-templates` | pm-workflow | no | Progressive-disclosure teaching templates for onboarding users to trusty-mpm concepts |
 | `tm-ticketing` | pm-workflow | yes | Ticket-driven development protocol and high-level ticketing orchestration for the trusty-mpm PM |
 | `tm-tool-usage-guide` | pm-reference | no | Detailed tool usage patterns and examples for the trusty-mpm PM agent |

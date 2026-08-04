@@ -62,10 +62,27 @@ mod tracker;
 #[path = "tests.rs"]
 mod tests;
 
+// #4703: `note_turn` is deliberately absent. Every recording helper exported
+// here takes its root as an argument, so no caller can record a turn without
+// naming a root a test can point at a tempdir. See `tracker.rs` for why the
+// $HOME-resolving wrapper was deleted rather than `cfg`-gated.
 pub use tracker::{
-    AttendanceTracker, attendance_root, default_attendance_root, note_command_turn_in, note_turn,
-    note_turn_in,
+    AttendanceTracker, attendance_root, default_attendance_root, note_command_turn_in, note_turn_in,
 };
+
+/// An attendance root injected into a long-lived transport's handlers (#4703).
+///
+/// Why: the chat transports fan every inbound update out into its own spawned
+/// task, so the root has to be cheap to clone — hence the `Arc`. Naming the
+/// shape once keeps the ~8 signatures that carry it readable, and gives the
+/// convention ("resolve at startup, inject downward, never inside a handler")
+/// one place to be documented.
+/// What: `None` when no home directory could be resolved. Every helper that
+/// accepts a root treats `None` as a documented no-op, so an unresolvable home
+/// degrades the signal rather than failing a turn.
+/// Test: `slack_handle_command_records_attendance_under_the_injected_root`,
+/// `telegram_handle_command_records_attendance_under_the_injected_root`.
+pub type AttendanceRoot = Option<std::sync::Arc<std::path::PathBuf>>;
 
 /// How long after the last human turn an instance counts as unattended.
 ///
@@ -108,7 +125,7 @@ pub const UNATTENDED_AFTER_ENV: &str = "TAGENT_UNATTENDED_AFTER_MINS";
 /// no-op, not an error — so a call site that is unsure has a correct default.
 ///
 /// #4685 pushed this argument OUT to every recording helper
-/// ([`note_turn`], [`note_turn_in`], [`note_command_turn_in`]), which had each
+/// ([`note_turn_in`], [`note_command_turn_in`]), which had each
 /// hardcoded [`Self::Human`] internally. That made the "automation cannot forge
 /// presence" property depend on which wrapper a caller happened to reach for
 /// rather than on the type system; now no human turn can be recorded without

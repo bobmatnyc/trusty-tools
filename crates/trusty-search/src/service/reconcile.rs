@@ -3,18 +3,45 @@
 //! Why: the live filesystem watcher catches changes made while the daemon is
 //! running, but there is no hook for changes made while the daemon was DOWN.
 //! After a warm-boot restore, every index may be stale. This module closes
-//! that gap via two complementary paths:
+//! that gap via three complementary paths:
+//!
+//! **Never-walked path** (issue #4680, checked first): an index whose lexical
+//! stage is still owed and which no walk has touched in this daemon's lifetime
+//! is stuck, not up-to-date — it gets a full (non-force, data-preserving)
+//! background reindex without consulting either staleness marker below, since
+//! both markers describe drift and neither can describe "was never populated".
 //!
 //! **Git path** (issue #1670): indexes whose `indexed_head_sha` is set are
 //! reconciled via `git diff --name-only <stored>..HEAD`. Per-file or full-reindex
 //! depending on delta size vs. `FULL_REINDEX_THRESHOLD`.
 //!
-//! **mtime path** (issue #1672): indexes whose root is not a git repo (or whose
-//! `indexed_head_sha` is None) are reconciled by walking the index root and
-//! collecting all files whose mtime exceeds the persisted `last_indexed_unix`
-//! timestamp from `indexes.toml`. Same threshold / full-reindex fallback applies.
-//! Non-git indexes with no `last_indexed_unix` AND no corpus are skipped (never
-//! indexed — nothing to catch up).
+//! **mtime path** (issue #1672): indexes whose root is CORROBORATED not to be a
+//! git repository are reconciled by walking the index root and collecting all
+//! files whose mtime exceeds the persisted `last_indexed_unix` timestamp from
+//! `indexes.toml`. Same threshold / full-reindex fallback applies. Non-git
+//! indexes with no `last_indexed_unix` AND no corpus are skipped (never indexed
+//! — nothing to catch up).
+//!
+//! 🔴 The mtime walk consults only `SKIP_DIRS` and the walker's skip predicates
+//! — it does NOT honour `.gitignore`, unlike the reindex walk. Reaching it
+//! because a git probe merely FAILED (issue #4733: a stale worktree gitlink,
+//! `detected dubious ownership`, an unreadable `.git`) indexed files the repo
+//! deliberately excludes and made them retrievable through the `search` and
+//! `grep` MCP tools. `reconcile_one_index` therefore gates it behind
+//! `core::git::probe_work_tree` and never takes it without a corroborated
+//! `NoRepo`.
+//!
+//! The full reindex is the safe alternative for a reason that does NOT depend on
+//! git working: `service::walker` drives the `ignore` crate with
+//! `require_git(false)`, so `.gitignore` is applied even when git itself cannot
+//! read the repository at all. That is what makes "reindex instead of
+//! mtime-walk" a real fix rather than a swap of one blind walk for another.
+//!
+//! It is not, however, always available: `finish_reindex` re-stamps
+//! `indexed_head_sha` from `git::head_sha`, so when THAT is `None` (an unborn
+//! HEAD, or a repo git declined to read) a reindex cannot converge — the next
+//! boot re-enters the same arm and re-walks the tree, forever. Those indexes are
+//! therefore left untouched and counted as `skipped_unresolvable_git`.
 //!
 //! Both paths reuse the walker's `path_in_skipped_dir` / `should_skip_path`
 //! predicates so exclusion rules are applied consistently.
@@ -30,10 +57,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::core::git::WorkTree;
 use crate::core::registry::IndexHandle;
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress};
 use crate::service::server::ReconcileSummary;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
+use crate::service::warm_boot::index_is_stuck_unwalked;
 use crate::service::SearchAppState;
 
 /// Maximum number of changed files before we fall back to a full reindex
@@ -300,16 +329,72 @@ pub async fn reconcile_stale_indexes(state: &SearchAppState) {
 /// Also called on the query-wake path (`server::search`) when an idle-suspended
 /// or lazily-restored index is served without a watcher, to catch edits missed
 /// while the watcher was off — hence `pub(crate)`.
-/// What: reads the stored + current HEAD SHAs (git path), or falls back to the
-/// mtime path for non-git / missing-SHA indexes. Updates `summary` with the
-/// outcome so `GET /health` reports reconcile progress.
-/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`
-/// in reconcile_tests.rs.
+/// What: first checks the never-walked guard (issue #4680) and re-drives the
+/// walk if it fires; otherwise reads the stored + current HEAD SHAs (git path).
+/// When either SHA is missing it asks `core::git::probe_work_tree` WHY, and
+/// takes the `.gitignore`-blind mtime path only for a corroborated
+/// [`WorkTree::NoRepo`] (issue #4733). Otherwise it splits on whether a full
+/// reindex could CONVERGE: with a live HEAD it reindexes (one run stamps the
+/// SHA); with no HEAD at all — unborn HEAD, or a repo git declined to read —
+/// it refuses, because `finish_reindex` would re-stamp the same `None` and
+/// re-walk every boot forever. Updates `summary` so `GET /health` reports
+/// reconcile progress.
+/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`,
+/// `stuck_unwalked_git_index_is_retried_not_marked_up_to_date`,
+/// `stuck_unwalked_non_git_index_is_retried_not_skipped`,
+/// `broken_git_repo_refuses_rather_than_mtime_walking`,
+/// `unborn_head_repo_is_refused_once_not_reindexed_every_boot`,
+/// `never_stamped_git_repo_with_commits_full_reindexes_and_converges` in
+/// reconcile_tests.rs.
 pub(crate) async fn reconcile_one_index(
     handle: Arc<IndexHandle>,
     summary: Arc<std::sync::Mutex<ReconcileSummary>>,
 ) {
     let index_id = handle.id.0.clone();
+
+    // #4680: a never-walked index is stuck, not up-to-date — re-drive the walk
+    // before any staleness marker is consulted.
+    //
+    // Why this must come FIRST: both marker paths below answer "has the source
+    // moved since we last looked?", and both answer "no" for an index that was
+    // never populated at all. The git path compares a HEAD SHA that restore
+    // re-derives from live git (#4391), so `stored == current` holds
+    // unconditionally → `up_to_date`. The mtime path reads `last_indexed_unix`,
+    // whose writer has no production callers (#4391), so it is always `None` →
+    // `skipped_no_data`. Either way the index is recorded as needing nothing,
+    // forever: 221 of 222 production indexes sat at `chunk_count = 0` for 44
+    // days behind exactly this. Emptiness has to be a reconcile INPUT, not a
+    // conclusion drawn from markers that only describe drift.
+    //
+    // Data safety: `trigger_full_reindex` runs with `force = false`, so the
+    // incremental hash cache and the staged-corpus carryover both apply — this
+    // re-walks and re-adds, it never clears or rebuilds a corpus from scratch.
+    // Recovery here is strictly additive.
+    //
+    // Bounded: the predicate keys off `last_walk_started_at`, which the reindex
+    // runner stamps before it walks, so an index gets at most ONE retry per
+    // daemon lifetime and a walk that legitimately finds zero indexable files
+    // (`last_walk_error` set, corpus still empty) is never re-driven in a loop.
+    if index_is_stuck_unwalked(
+        handle.stages.read().await.lexical.status,
+        handle
+            .walk_diagnostics
+            .read()
+            .await
+            .last_walk_started_at
+            .is_some(),
+    ) {
+        tracing::warn!(
+            "reconcile[{index_id}]: index has never been walked in this daemon's \
+             lifetime and its lexical stage is still owed — triggering a full \
+             background reindex instead of comparing staleness markers (issue #4680)"
+        );
+        trigger_full_reindex(&handle);
+        if let Ok(mut s) = summary.lock() {
+            s.stuck_retried += 1;
+        }
+        return;
+    }
 
     // Read the stored indexed SHA and the current HEAD.
     let stored_sha = handle.indexed_head_sha.read().await.clone();
@@ -319,10 +404,46 @@ pub(crate) async fn reconcile_one_index(
         (Some(stored), Some(current)) => {
             reconcile_git_path(&handle, &index_id, &stored, &current, &summary).await;
         }
-        _ => {
-            // Non-git root or missing stored SHA: fall back to mtime-based catch-up.
-            reconcile_mtime_path(&handle, &index_id, &summary).await;
-        }
+        // #4733: the mtime walk does not honour `.gitignore` — only take it once
+        // git has CORROBORATED that no repository exists here.
+        (_, current) => match crate::core::git::probe_work_tree(&handle.root_path) {
+            WorkTree::NoRepo => {
+                reconcile_mtime_path(&handle, &index_id, &summary).await;
+            }
+            // A work tree with commits but no stored SHA: one full reindex
+            // stamps `indexed_head_sha` and the next boot converges.
+            state if current.is_some() => {
+                tracing::warn!(
+                    "reconcile[{index_id}]: never stamped, but a git repository could \
+                     not be ruled out ({state:?}) — full background reindex (which \
+                     honours .gitignore) instead of the mtime walk (issue #4733)"
+                );
+                trigger_full_reindex(&handle);
+                if let Ok(mut s) = summary.lock() {
+                    s.fell_back_to_full += 1;
+                }
+            }
+            // #4733: NO HEAD to stamp — an unborn-HEAD repo, or one git declined
+            // to read. A full reindex here CANNOT converge: `finish_reindex`
+            // re-stamps `indexed_head_sha` from the same `head_sha` that just
+            // returned `None`, so the next boot re-enters this arm identically
+            // and re-walks the whole tree, forever. Refusing costs nothing the
+            // mtime path would have delivered — its only input,
+            // `last_indexed_unix`, has no production writer (#4391), so this
+            // case has always reported "skipped" in production.
+            state => {
+                tracing::warn!(
+                    "reconcile[{index_id}]: no HEAD SHA and a git repository could not \
+                     be ruled out ({state:?}) — leaving this index untouched. The mtime \
+                     walk does not honour .gitignore, and a full reindex could not stamp \
+                     a SHA so it would repeat every boot. The live watcher still tracks \
+                     this index; run `trusty-search index` to rebuild it (issue #4733)"
+                );
+                if let Ok(mut s) = summary.lock() {
+                    s.skipped_unresolvable_git += 1;
+                }
+            }
+        },
     }
 }
 

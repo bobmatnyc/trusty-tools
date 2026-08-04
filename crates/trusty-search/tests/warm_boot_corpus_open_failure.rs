@@ -37,7 +37,12 @@ fn corpus_open_failed_flag_emits_failed_stage() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
-        corpus_open_failed: true,
+        // #4333: the classifier now takes the CLASSIFIED failure kind. A
+        // genuine format incompatibility is the case that legitimately keeps
+        // the reindex hint asserted below.
+        corpus_open_failure: Some(
+            trusty_search::core::corpus::CorpusOpenFailure::FormatIncompatible,
+        ),
     });
     assert_eq!(
         stages.lexical.status,
@@ -137,7 +142,7 @@ async fn corpus_open_failure_propagates_to_failed_stage() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
-        corpus_open_failed: indexer.corpus_open_failed,
+        corpus_open_failure: indexer.corpus_open_failure,
     });
     assert_eq!(
         stages.lexical.status,

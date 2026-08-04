@@ -227,7 +227,7 @@ async fn mark_reactivated_refuses_when_workspace_removed_by_decommission() {
         .expect("create");
 
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path(), None, false)
+        .decommission_with_root(&record.id, managed_root.path(), None)
         .await
         .expect("decommission");
     assert!(

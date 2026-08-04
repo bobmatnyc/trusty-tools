@@ -562,6 +562,8 @@ async fn health_includes_reconcile_summary_when_started() {
             skipped_no_data: 1,
             files_reconciled: 3,
             degraded: false,
+            stuck_retried: 0,
+            skipped_unresolvable_git: 0,
         };
     }
 

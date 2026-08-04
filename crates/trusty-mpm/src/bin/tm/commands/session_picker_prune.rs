@@ -16,14 +16,20 @@
 //! hardenings close that gap:
 //!   1. **Record-only removal** — [`decommission_dead_record`] calls the
 //!      `/decommission` route with `record_only=true`
-//!      (`SessionManager::decommission_record_only`), which never touches
-//!      the filesystem. A remount between the listing-time probe and this
-//!      call can never lose data, because nothing is ever deleted here.
+//!      (`SessionManager::decommission_record_only`), which touches neither the
+//!      filesystem nor the runtime. A remount between the listing-time probe and
+//!      this call can never lose data, because nothing is ever deleted here.
+//!      (#4728: the "nor the runtime" half was NOT true until that fix — the
+//!      teardown call sat above the `record_only` guard, so this sweep could
+//!      SIGTERM and kill a live pane whose name matched the record's. Treat
+//!      "record-only" as a claim that must stay pinned by tests, never as a
+//!      property the name guarantees.)
 //!   2. **Two-sightings confirmation** — [`auto_prune_dead_records_at`] only
-//!      acts on a session id whose `unresumable` flag was ALSO seen on a
-//!      strictly earlier call, tracked via a small persisted marker file
-//!      ([`load_seen`]/[`save_seen`]). A single-shot blip (one bad listing)
-//!      never triggers a prune.
+//!      acts on a session id first seen dead at least
+//!      [`SIGHTING_MIN_AGE_SECS`] ago, tracked via a small persisted marker
+//!      file ([`load_seen`]/[`save_seen`]). A single-shot blip (one bad
+//!      listing) never triggers a prune, and neither does a tight loop of
+//!      them — the window is elapsed TIME, not a call count.
 //!   3. **Per-call cap** — at most [`AUTO_PRUNE_CAP`] confirmed records are
 //!      decommissioned per call; the rest are reported as "pending
 //!      confirmation" rather than acted on. A bad-mount day cannot
@@ -44,11 +50,24 @@
 //!      back by this gate fold into [`AutoPruneOutcome::pending`], never
 //!      silently disappearing from the reported count.
 //!
-//! What: [`auto_prune_dead_records`] is the production entry point (resolves
-//! the marker file under `~/.trusty-mpm`); [`auto_prune_dead_records_at`] is
-//! the testable core (explicit marker-file path); [`AutoPruneOutcome`] is the
-//! three-part result (`kept`, `pruned`, `pending`) `fetch_live_sessions`
-//! reports to the operator.
+//! What: [`prune_and_report`] is the production entry point (resolves the
+//! marker file under `~/.trusty-mpm` and prints the operator summary);
+//! [`auto_prune_dead_records_at`] is the testable core (explicit marker-file
+//! path); [`AutoPruneOutcome`] is the three-part result (`kept`, `pruned`,
+//! `pending`) it reports.
+//!
+//! Coverage (#4702) — this module used to fire from the interactive TTY picker
+//! ONLY, and to act on the daemon-computed `unresumable` flag ONLY. Both
+//! narrowings let dead records accumulate without bound:
+//!   * every piped / scripted / `--json` `tm ls` took `managed::session_ls`,
+//!     which never pruned — fixed by routing BOTH listing paths through
+//!     [`prune_and_report`];
+//!   * `unresumable` is computed daemon-side for records whose PERSISTED state
+//!     is `Stopped`/`Errored`. A zombie (persisted `Active`, tmux pane gone) is
+//!     DISPLAY-reconciled to `stopped` but never probed, so it reads
+//!     `unresumable == false` forever — fixed by
+//!     [`workspace_verified_gone`], a client-side probe of the same workdir
+//!     candidates the wire summary carries.
 //!
 //! Test: `auto_prune_dead_records_removes_confirmed_unresumable_records`,
 //! `auto_prune_dead_records_first_sighting_is_not_pruned`,
@@ -56,13 +75,18 @@
 //! `auto_prune_dead_records_is_noop_when_nothing_is_dead`,
 //! `auto_prune_dead_records_honors_the_cap`,
 //! `auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_removed`,
-//! `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`
+//! `auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl`,
+//! `auto_prune_clears_stopped_record_whose_workspace_is_gone`,
+//! `auto_prune_keeps_stopped_record_whose_workspace_still_exists`,
+//! `auto_prune_never_touches_a_running_record`,
+//! `auto_prune_never_touches_a_decommissioned_record`,
+//! `auto_prune_always_requests_record_only_never_full_teardown`
 //! in `tests_behavior_d_tests.rs`; the record-only server-side guarantee is
 //! pinned by `decommission_record_only_never_removes_existing_workspace`
 //! (`session_manager::tests`).
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use trusty_mpm::client::ManagedSessionSummary;
 
@@ -78,6 +102,18 @@ const AUTO_PRUNE_CAP: usize = 5;
 /// Basename of the two-sightings confirmation marker file, under the
 /// framework root (`~/.trusty-mpm/` by default).
 const SEEN_MARKER_FILENAME: &str = "auto-prune-seen.json";
+
+/// Minimum elapsed time between a record's FIRST sighting as dead and the call
+/// that may act on it: 10 minutes (#4702).
+///
+/// Why: "two sightings" is only a safeguard if the two are genuinely separated
+/// in time. Before #4702 the check was `seen.contains_key(id)` — presence, never
+/// age — so `tm ls; tm ls` confirmed instantly and [`AUTO_PRUNE_CAP`] degraded
+/// from a rate limit to a per-call batch size a loop could defeat. Ten minutes
+/// is long enough that no scripted or accidental double-listing clears anything,
+/// and short enough that an operator's ordinary session-to-session usage still
+/// reaps dead rows without ever running a manual command.
+const SIGHTING_MIN_AGE_SECS: i64 = 10 * 60;
 
 /// Reserved key inside the marker file recording "a stale daemon already
 /// proved it ignores `record_only`" (critic CRITICAL finding, 2026-07-30
@@ -144,27 +180,318 @@ pub(crate) struct AutoPruneOutcome {
     pub(crate) pending: usize,
 }
 
-/// Production entry point: resolve the confirmation marker file under the
-/// default framework root and delegate to [`auto_prune_dead_records_at`].
+/// Everything the prune needs from its environment, resolved once per
+/// invocation (#4702).
+///
+/// Why: both inputs — the confirmation marker file and the live-tmux name set —
+/// must be injectable, or a test silently depends on the developer's machine.
+/// CI caught exactly that: the `session_ls_*` tests reached
+/// [`live_tmux_session_names`] directly, so they passed locally (tmux present,
+/// enumeration succeeds) and failed on a runner with no tmux, where the
+/// fail-closed rule correctly pruned nothing. Bundling both into one value keeps
+/// the seam at every layer without growing an eighth positional parameter on
+/// `session_ls_at`.
+/// What: [`PruneContext::production`] resolves both for real use;
+/// [`PruneContext::hermetic`] takes explicit values for tests.
+pub(crate) struct PruneContext {
+    /// Where the two-sightings confirmation marker lives.
+    pub(crate) marker_path: PathBuf,
+    /// Live tmux session names, or `None` when tmux could not be enumerated at
+    /// all — which [`auto_prune_dead_records_at`] treats as "prune nothing".
+    pub(crate) live_tmux_names: Option<HashSet<String>>,
+}
+
+impl PruneContext {
+    /// Resolve both inputs for real use: the marker under `~/.trusty-mpm`, and a
+    /// live tmux enumeration.
+    pub(crate) fn production() -> Self {
+        Self {
+            marker_path: default_marker_path(),
+            live_tmux_names: live_tmux_session_names(),
+        }
+    }
+
+    /// Build a context with explicit values — the test seam.
+    ///
+    /// Why: a test must never write the operator's real marker file, and must
+    /// never depend on whether the machine running it happens to have tmux.
+    #[cfg(test)]
+    pub(crate) fn hermetic(marker_path: PathBuf, live_tmux_names: Option<HashSet<String>>) -> Self {
+        Self {
+            marker_path,
+            live_tmux_names,
+        }
+    }
+}
+
+/// Resolve the confirmation marker file under the default framework root.
 ///
 /// Why: the framework root (`~/.trusty-mpm`) is where every other piece of
-/// `tm`'s per-user state already lives (`FrameworkPaths::default`);
-/// resolving it here (rather than inside the testable core) keeps the core
-/// injectable for tests without touching the real home directory.
+/// `tm`'s per-user state already lives (`FrameworkPaths::default`); resolving
+/// it here (rather than inside the testable core) keeps the core injectable
+/// for tests without touching the real home directory. Exposed to `managed.rs`
+/// so `tm session ls`'s production wrapper resolves the SAME file the picker
+/// path uses — two marker files would mean two independent confirmation
+/// windows for one fleet (#4702).
 /// What: `FrameworkPaths::default().root` joined with
 /// [`SEEN_MARKER_FILENAME`].
-/// Test: covered transitively by every `fetch_live_sessions` call site; the
-/// decision logic itself is tested via [`auto_prune_dead_records_at`]
-/// directly.
-pub(crate) async fn auto_prune_dead_records(
+pub(crate) fn default_marker_path() -> PathBuf {
+    trusty_mpm::core::paths::FrameworkPaths::default()
+        .root
+        .join(SEEN_MARKER_FILENAME)
+}
+
+/// Production entry point for EVERY listing surface: prune, print the operator
+/// summary, and hand back the surviving sessions (#4702).
+///
+/// Why: before #4702 the prune fired only where a caller had explicitly opted
+/// in with `allow_auto_prune = true`, and the only callers that did were gated
+/// on `stdin.is_terminal() && stdout.is_terminal()`. Every piped, scripted, and
+/// `--json` invocation therefore accumulated dead records forever — 48 of 66
+/// records stale on the reporting machine. The opt-in existed because
+/// auto-prune was read as destructive; it is not, and cannot be: the ONLY
+/// mutation it performs is [`decommission_dead_record`]'s `record_only=true`
+/// call, verified against the response body, which never removes a git
+/// worktree, a branch, or any file on disk. Consistency across invocations is
+/// therefore strictly safer than an inconsistent opt-in that leaves the list
+/// unusable as a picker.
+/// What: [`auto_prune_dead_records_at`] against [`default_marker_path`], then
+/// the two operator-facing stderr lines (stdout stays clean for `--json` and
+/// for pipes), then `outcome.kept`.
+/// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
+/// `session_ls_json_passthrough_prunes_dead_records`; the decision logic
+/// itself via [`auto_prune_dead_records_at`] directly.
+pub(crate) async fn prune_and_report(
     client: &reqwest::Client,
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
-) -> AutoPruneOutcome {
-    let marker_path = trusty_mpm::core::paths::FrameworkPaths::default()
-        .root
-        .join(SEEN_MARKER_FILENAME);
-    auto_prune_dead_records_at(client, url, sessions, &marker_path).await
+) -> Vec<ManagedSessionSummary> {
+    prune_and_report_at(client, url, sessions, &PruneContext::production()).await
+}
+
+/// [`prune_and_report`] with an injected [`PruneContext`] — the testable core.
+///
+/// Why: a test must never write the operator's real
+/// `~/.trusty-mpm/auto-prune-seen.json`, and must never depend on whether the
+/// machine running it has tmux. See [`PruneContext`] for the CI failure that
+/// made the second half of that non-negotiable.
+/// What: see [`prune_and_report`].
+/// Test: `session_ls_prunes_dead_records_on_piped_invocation`.
+pub(crate) async fn prune_and_report_at(
+    client: &reqwest::Client,
+    url: &str,
+    sessions: Vec<ManagedSessionSummary>,
+    ctx: &PruneContext,
+) -> Vec<ManagedSessionSummary> {
+    let outcome = auto_prune_dead_records_at(
+        client,
+        url,
+        sessions,
+        &ctx.marker_path,
+        ctx.live_tmux_names.clone(),
+    )
+    .await;
+    if outcome.pruned > 0 {
+        eprintln!(
+            "tm: pruned {} dead record{} (workspace gone)",
+            outcome.pruned,
+            if outcome.pruned == 1 { "" } else { "s" }
+        );
+    }
+    if outcome.pending > 0 {
+        eprintln!(
+            "tm: {} more dead record{} pending confirmation",
+            outcome.pending,
+            if outcome.pending == 1 { "" } else { "s" }
+        );
+    }
+    outcome.kept
+}
+
+/// The workdir candidates a LISTED session carries on the wire (#4702).
+///
+/// Why: `session_manager::resume_workdir::workdir_candidates` probes
+/// `[last_cwd, workspace_path, cwd]` against the daemon's own `SessionRecord`.
+/// `last_cwd` is not part of `ManagedSessionSummary`, so the client can only
+/// see the other two — which is why [`workspace_verified_gone`] is deliberately
+/// a NARROWER predicate than the daemon's `is_unresumable`, never a wider one:
+/// a record this returns "gone" for would also be gone by the daemon's list.
+/// What: `[workspace_path, cwd]`, `None`-filtered by the caller.
+fn workdir_candidates(s: &ManagedSessionSummary) -> [Option<&str>; 2] {
+    [s.workspace_path.as_deref(), s.cwd.as_deref()]
+}
+
+/// Independently verify, from the CLI, that a listed session has no workdir
+/// left on disk (#4702).
+///
+/// Why: the daemon's `unresumable` flag is computed only for records whose
+/// PERSISTED state is `Stopped`/`Errored`. The list endpoint then
+/// DISPLAY-reconciles state against live tmux, so a zombie record (persisted
+/// `Active`, its pane long gone) shows as `stopped` while its `unresumable`
+/// flag was never computed at all — it reads `false` forever and no prune ever
+/// touched it. That class is exactly what the reporter saw accumulating. This
+/// probe closes the gap client-side rather than changing the daemon, so the fix
+/// works against an ALREADY-RUNNING older daemon (a CLI upgrade never bounces
+/// it).
+///
+/// 🔴 This predicate is the ONLY thing standing between a still-recoverable
+/// stopped session and a tombstone, so it is deliberately FAIL-CLOSED-TOWARD-
+/// KEEPING. `true` requires ALL of:
+///   * at least one candidate path was present on the wire (a record carrying
+///     none is unverifiable, and is kept);
+///   * every candidate's probe came back a definitive `Ok(false)`. A probe
+///     `Err` (permission denied, transient I/O) counts as "possibly present";
+///   * every candidate's PARENT DIRECTORY exists — see below.
+///
+/// 🔴 The parent check is not defensive padding, it is the whole point of the
+/// word "verified". `try_exists("/Volumes/Unplugged/work/proj")` returns
+/// `Ok(false)`, NOT `Err`, when the volume is not mounted — ENOENT on an
+/// intermediate component is indistinguishable from ENOENT on the leaf. Without
+/// this check, unplugging an external drive reads as "verified gone" for every
+/// session on it, and one `tm ls` tombstones the lot. Requiring the parent to
+/// exist means the only thing we ever call gone is a leaf missing from a
+/// directory we can still see. This errs toward keeping — a workspace whose
+/// whole parent tree was deleted is kept rather than cleared, which costs one
+/// stale row and risks nothing. Measured 2026-08-03: 4 of 5 spot-checked
+/// stopped workspaces still existed on disk.
+///
+/// What: for each of [`workdir_candidates`], `tokio::fs::try_exists` on the path
+/// itself and on `Path::parent()`.
+/// Test: `auto_prune_clears_stopped_record_whose_workspace_is_gone`,
+/// `auto_prune_keeps_stopped_record_whose_workspace_still_exists`,
+/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
+async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
+    let mut probed_any = false;
+    for candidate in workdir_candidates(s).into_iter().flatten() {
+        probed_any = true;
+        match tokio::fs::try_exists(candidate).await {
+            // Definitively present, or the probe could not tell — either way,
+            // never treat this workspace as gone.
+            Ok(true) | Err(_) => return false,
+            Ok(false) => {}
+        }
+        // #4702: the leaf is absent — but is its directory even reachable? An
+        // unmounted volume answers `Ok(false)` for every path under it.
+        let Some(parent) = std::path::Path::new(candidate).parent() else {
+            // No parent (a bare relative name, or the filesystem root itself) —
+            // nothing to corroborate against, so refuse to call it gone.
+            return false;
+        };
+        if !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+            return false;
+        }
+    }
+    probed_any
+}
+
+/// Whether a record's lifecycle state makes it eligible for a record-only
+/// clear at all (#4702).
+///
+/// Why: the auto-prune must stay strictly inside the "session is over" class.
+/// `decommissioned` records (35 on the reporting machine) are explicitly out of
+/// scope — nobody has assessed what discarding them costs — and a `deleted`
+/// slot tombstone is a rendering placeholder, not a session. Anything running
+/// (`active`, `provisioning`) is untouchable by construction, because the list
+/// endpoint reconciles a live tmux pane back to `active` before the CLI ever
+/// sees the row.
+///
+/// 🔴 `errored` records escape that reconciliation entirely:
+/// `reconcile_live_state` only rewrites `state` for records persisted
+/// `Active`/`Stopped`, so an `Errored` row is served with its persisted state
+/// verbatim and a live pane never turns it back into `active`. Tombstoning such
+/// a record is not cosmetic — `Decommissioned` is TERMINAL, so a running agent
+/// silently becomes unreachable through `tm`: no resume, no reattach, hidden
+/// from the picker.
+///
+/// `attached` alone does not close that: it proves a client is attached, not
+/// that no pane exists, so a live-but-DETACHED errored session would still be
+/// cleared. `live_tmux_names` closes it (PR #4725 review round 2) — the CLI
+/// enumerates live tmux sessions itself and never clears a record whose name is
+/// among them. Name membership is a weak signal, but here it is used to KEEP,
+/// never to act: a name collision costs one stale row, whereas the same weak
+/// signal used to KILL is exactly what made #4728 destructive. When the caller
+/// could not enumerate tmux at all it passes an empty set only if it also
+/// declines to prune — see [`auto_prune_dead_records_at`].
+///
+/// What: the DISPLAY state must be `stopped`/`errored`; the row must not be a
+/// slot tombstone, must not be `attached`, and must not name a live tmux
+/// session; and the PERSISTED state (when the daemon sends it) must not already
+/// be terminal.
+/// Test: `auto_prune_never_touches_a_running_record`,
+/// `auto_prune_never_touches_a_decommissioned_record`,
+/// `auto_prune_never_touches_an_attached_record`,
+/// `auto_prune_never_touches_an_errored_record_with_a_live_detached_pane`.
+fn is_clearable_state(s: &ManagedSessionSummary, live_tmux_names: &HashSet<String>) -> bool {
+    if s.deleted || s.attached || !matches!(s.state.as_str(), "stopped" | "errored") {
+        return false;
+    }
+    if live_tmux_names.contains(&s.name) {
+        return false;
+    }
+    !matches!(
+        s.persisted_state.as_deref(),
+        Some("decommissioned" | "deleted")
+    )
+}
+
+/// Enumerate live tmux session names from the CLI (#4702, PR #4725 review).
+///
+/// Why: the wire summary carries no "this errored record's pane is alive but
+/// detached" signal, and adding one would need a daemon change — which this fix
+/// deliberately avoids, since a CLI upgrade never bounces the long-lived daemon.
+/// Enumerating client-side gives the second liveness signal with no protocol
+/// change at all.
+/// What: routes through the crate's single tmux spawn point
+/// (`core::tmux::run_tmux`, which owns the macOS TCC-disclaim wrapper) with the
+/// shared `TmuxCommand::ListSessions` argv, and parses `SESSION_LIST_FORMAT`'s
+/// `name:created:attached` rows. Returns `None` when tmux could not be
+/// enumerated (not installed, no server, non-zero exit) — the caller treats
+/// that as "cannot determine liveness" and prunes nothing, mirroring
+/// `reconcile_against_tmux`'s fail-closed contract on the daemon side.
+/// Test: `auto_prune_never_touches_an_errored_record_with_a_live_detached_pane`
+/// covers the consuming predicate with an injected set; this thin adapter needs
+/// a live tmux binary and is exercised in normal operation.
+fn live_tmux_session_names() -> Option<HashSet<String>> {
+    let out = trusty_mpm::core::tmux::run_tmux(&trusty_mpm::core::tmux::TmuxCommand::ListSessions)
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.split(':').next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// The full "this record is definitively dead" predicate (#4702).
+///
+/// Why: `unresumable` alone missed the majority of what operators see as dead
+/// (see [`workspace_verified_gone`]). Widening it is half the fix; the other
+/// half is that the daemon's verdict is no longer trusted ON ITS OWN.
+///
+/// 🔴 There is deliberately NO `if s.unresumable { return true }` short-circuit
+/// (PR #4725 review). `is_unresumable` probes with a bare `try_exists`, which
+/// answers `Ok(false)` for every path on an unmounted volume — so a daemon can
+/// and will flag an entire unplugged external drive's worth of sessions dead. A
+/// short-circuit on that flag would hand exactly the scenario
+/// [`workspace_verified_gone`]'s parent check exists to prevent straight past
+/// the check. Requiring the CLI's own confirmation for EVERY record closes that.
+///
+/// Dropping the short-circuit costs nothing in coverage: `is_unresumable`
+/// requires all three of `last_cwd`/`workspace_path`/`cwd` absent, so any record
+/// it flags is one this predicate also finds gone — provided the record carries
+/// a path on the wire. A legacy record with neither `workspace_path` nor `cwd`
+/// serialized is now kept rather than cleared; unverifiable is not dead.
+///
+/// What: `is_clearable_state(s, live) && workspace_verified_gone(s)`.
+/// Test: the `auto_prune_*` suite in `tests_behavior_d_tests.rs`, in particular
+/// `auto_prune_ignores_daemon_unresumable_when_parent_is_unreachable`.
+async fn is_dead_record(s: &ManagedSessionSummary, live_tmux_names: &HashSet<String>) -> bool {
+    is_clearable_state(s, live_tmux_names) && workspace_verified_gone(s).await
 }
 
 /// Auto-prune definitively-dead (`unresumable`) session records at listing
@@ -186,8 +513,10 @@ pub(crate) async fn auto_prune_dead_records(
 /// dirty-retained record can never read `unresumable == true` in the first
 /// place, and never enters this function's `dead` partition at all.
 ///
-/// What: partitions `sessions` into `(keep, dead)` by `s.unresumable`. Any
-/// `keep` session that still has a confirmation-marker entry has recovered
+/// What: partitions `sessions` into `(keep, dead)` by [`is_dead_record`] —
+/// the daemon's `unresumable` verdict OR (#4702) a stopped/errored record whose
+/// every wire-visible workdir candidate the CLI independently confirmed absent.
+/// Any `keep` session that still has a confirmation-marker entry has recovered
 /// (its workspace reappeared) — that entry is dropped so a later
 /// re-appearance starts a fresh confirmation window. Each `dead` record is
 /// then classified against the persisted marker file ([`load_seen`]): a
@@ -209,8 +538,32 @@ pub(crate) async fn auto_prune_dead_records_at(
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
     marker_path: &Path,
+    live_tmux_names: Option<HashSet<String>>,
 ) -> AutoPruneOutcome {
-    let (dead, mut kept): (Vec<_>, Vec<_>) = sessions.into_iter().partition(|s| s.unresumable);
+    // #4702 (PR #4725 review round 2): a `None` live-set means tmux could not be
+    // enumerated at all. Without it there is no liveness signal for `errored`
+    // records — which the daemon never display-reconciles — so clearing anything
+    // could tombstone a running agent into a terminal state. Prune nothing;
+    // mirrors `reconcile_against_tmux`'s fail-closed contract.
+    let Some(live_tmux_names) = live_tmux_names else {
+        return AutoPruneOutcome {
+            kept: sessions,
+            pruned: 0,
+            pending: 0,
+        };
+    };
+
+    // #4702: the partition predicate is now async (it probes the filesystem for
+    // the stopped-record case), so this cannot be `Iterator::partition`.
+    let mut dead: Vec<ManagedSessionSummary> = Vec::new();
+    let mut kept: Vec<ManagedSessionSummary> = Vec::new();
+    for s in sessions {
+        if is_dead_record(&s, &live_tmux_names).await {
+            dead.push(s);
+        } else {
+            kept.push(s);
+        }
+    }
 
     let mut seen = load_seen(marker_path);
     let mut changed = false;
@@ -238,12 +591,23 @@ pub(crate) async fn auto_prune_dead_records_at(
     let mut confirmed = Vec::new();
     let mut first_sighting = Vec::new();
     for s in dead {
-        if seen.contains_key(&s.id) {
-            confirmed.push(s);
-        } else {
-            seen.insert(s.id.clone(), now.clone());
-            changed = true;
-            first_sighting.push(s);
+        // #4702: the stored first-sighting timestamp must actually be COMPARED,
+        // and — equally important — NOT rewritten while the window is running.
+        // Presence-only checking let two calls milliseconds apart confirm;
+        // unconditional restamping then made the window measure the gap between
+        // consecutive listings instead of age since first sighting, so a
+        // frequent `tm ls` kept auto-prune permanently inert.
+        match classify_sighting(seen.get(&s.id)) {
+            Sighting::Confirmed => confirmed.push(s),
+            Sighting::TooRecent => {
+                // Leave the stamp alone — this is the whole fix.
+                first_sighting.push(s);
+            }
+            Sighting::Absent => {
+                seen.insert(s.id.clone(), now.clone());
+                changed = true;
+                first_sighting.push(s);
+            }
         }
     }
 
@@ -317,6 +681,51 @@ pub(crate) async fn auto_prune_dead_records_at(
         kept,
         pruned,
         pending,
+    }
+}
+
+/// What the persisted marker says about one record's first sighting (#4702).
+///
+/// Why: the caller must distinguish three cases, not two. Collapsing "no usable
+/// stamp" and "stamp present but too recent" into one `false` is what made the
+/// window measure the gap between CONSECUTIVE LISTINGS instead of age since
+/// first sighting (PR #4725 review): a too-recent entry was restamped with
+/// `now` on every call, so any `tm ls` cadence tighter than
+/// [`SIGHTING_MIN_AGE_SECS`] reset the clock forever and auto-prune could never
+/// fire. On the machine #4702 was filed from, `tm ls` runs far more often than
+/// every ten minutes — the feature would have been permanently inert.
+enum Sighting {
+    /// No entry, or one that does not parse — stamp it and start the window.
+    Absent,
+    /// A valid stamp, still inside the window. Leave it EXACTLY as it is; any
+    /// rewrite here restarts the clock and is the defect described above.
+    TooRecent,
+    /// A valid stamp at least [`SIGHTING_MIN_AGE_SECS`] old.
+    Confirmed,
+}
+
+/// Classify a stored first-sighting timestamp (#4702).
+///
+/// Why: see [`Sighting`]. The confirmation rule is "first seen dead at least
+/// [`SIGHTING_MIN_AGE_SECS`] ago", which only holds if the ORIGINAL stamp
+/// survives every intervening listing.
+/// What: parses `ts` as RFC 3339 and compares its age. A missing or unparseable
+/// value is [`Sighting::Absent`] — a corrupt marker must restart the window,
+/// never satisfy it.
+/// Test: `auto_prune_does_not_confirm_two_calls_in_quick_succession`,
+/// `auto_prune_does_not_restamp_a_sighting_still_inside_the_window`,
+/// `auto_prune_confirms_once_the_sighting_window_has_elapsed`,
+/// `auto_prune_treats_an_unparseable_sighting_as_a_fresh_one`.
+fn classify_sighting(ts: Option<&String>) -> Sighting {
+    let Some(first) = ts.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok()) else {
+        return Sighting::Absent;
+    };
+    if chrono::Utc::now().signed_duration_since(first)
+        >= chrono::Duration::seconds(SIGHTING_MIN_AGE_SECS)
+    {
+        Sighting::Confirmed
+    } else {
+        Sighting::TooRecent
     }
 }
 

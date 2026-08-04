@@ -19,6 +19,7 @@ use usearch::{Index, IndexOptions, MetricKind};
 
 use super::super::store_config::{MmapServeMode, VectorQuant};
 use super::types::StoreKeyMap;
+use super::usearch_recover::SaveVerdict;
 
 /// Initial reserved capacity for a new HNSW index. Grows geometrically on demand.
 ///
@@ -438,6 +439,16 @@ impl UsearchStore {
     /// close the full window; the shutdown path's exact protection is
     /// `service::shutdown_flush::flush_one_index_on_shutdown`'s
     /// `ReindexStatus::Running` check.
+    ///
+    /// Recovery (issue #4707): the #1711 refusal above is not the end of the
+    /// story. An empty in-memory index paired with a populated on-disk
+    /// snapshot means the snapshot is strictly authoritative, so after
+    /// refusing the write this method adopts it via
+    /// [`Self::adopt_on_disk_snapshot`] — the vector lane recovers without a
+    /// reindex instead of serving zero vectors forever. The guard itself is
+    /// unchanged and nothing is ever written on that path. The #1717 shrink
+    /// refusal deliberately does NOT recover this way: a partial in-memory
+    /// index may hold vectors disk does not.
     /// Test: `tests::test_save_load_roundtrip` saves then loads into a fresh
     /// store and asserts a search still returns the original chunk_ids;
     /// `tests::test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
@@ -538,7 +549,7 @@ impl UsearchStore {
             let index_guard = self.index.clone().write_owned().await;
             let hnsw_path_owned = hnsw_path.to_path_buf();
             let removed_since_save = self.removed_since_save.clone();
-            let saved = tokio::task::spawn_blocking(move || -> Result<bool> {
+            let saved = tokio::task::spawn_blocking(move || -> Result<SaveVerdict> {
                 // Guard: check size under the write lock so there is no
                 // window between the check and the save call.
                 if index_guard.size() == 0 {
@@ -552,7 +563,7 @@ impl UsearchStore {
                                 hnsw_path_owned.display(),
                                 meta.len()
                             );
-                            return Ok(false);
+                            return Ok(SaveVerdict::RefusedEmptyOverPopulated);
                         }
                     }
                 }
@@ -587,7 +598,7 @@ impl UsearchStore {
                                 removed,
                                 explained_floor,
                             );
-                            return Ok(false);
+                            return Ok(SaveVerdict::RefusedShrink);
                         }
                     }
                 }
@@ -599,12 +610,39 @@ impl UsearchStore {
                 // clear the counter so future shrink checks only weigh
                 // removals that happen after this save.
                 removed_since_save.store(0, Ordering::Release);
-                Ok(true)
+                Ok(SaveVerdict::Saved)
             })
             .await
             .map_err(|e| anyhow!("usearch save task panicked: {e}"))??;
-            if !saved {
-                return Ok(());
+            match saved {
+                SaveVerdict::Saved => {}
+                // #1717: a partial in-memory index may hold vectors the
+                // on-disk snapshot lacks — adopting disk here could discard
+                // live state, so this refusal stays terminal.
+                SaveVerdict::RefusedShrink => return Ok(()),
+                // #4707: the empty-over-populated refusal above proves the
+                // on-disk snapshot is strictly better than what we hold. Take
+                // it, so the vector lane recovers without a reindex instead of
+                // serving zero vectors forever. The refusal itself stands —
+                // nothing was written — and adoption only ever moves in-memory
+                // state towards disk (see `adopt_on_disk_snapshot`).
+                SaveVerdict::RefusedEmptyOverPopulated => {
+                    match self.adopt_on_disk_snapshot(hnsw_path).await {
+                        Ok(true) => {}
+                        Ok(false) => tracing::error!(
+                            "usearch: index at {} is EMPTY in memory and its on-disk snapshot \
+                             could not be adopted — the vector lane is unrecoverable without a \
+                             reindex (issue #4707). Run `trusty-search index <path> --force`.",
+                            hnsw_path.display()
+                        ),
+                        Err(e) => tracing::error!(
+                            "usearch: recovery from on-disk snapshot {} failed ({e}) — the \
+                             vector lane is unrecoverable without a reindex (issue #4707)",
+                            hnsw_path.display()
+                        ),
+                    }
+                    return Ok(());
+                }
             }
         }
         std::fs::rename(&tmp_hnsw, hnsw_path).map_err(|e| anyhow!("rename hnsw snapshot: {e}"))?;

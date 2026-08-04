@@ -453,7 +453,7 @@ fn the_remover_really_refuses_what_tm_provisioned_rejects() {
         "precondition: the classifier rejects this shape"
     );
     let removed = crate::session_manager::decommission::remove_session_worktree(&path);
-    assert!(!removed, "the remover must refuse it too");
+    assert!(!removed.removed(), "the remover must refuse it too");
     assert!(
         path.exists(),
         "and must leave the directory on disk — which is exactly why \

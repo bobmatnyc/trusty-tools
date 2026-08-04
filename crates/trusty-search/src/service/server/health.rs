@@ -109,6 +109,31 @@ pub(super) struct HealthResponse {
     /// Test: `health_surfaces_indexes_without_embed_pool` in
     /// `tests_components`.
     pub(super) indexes_embed_pool_missing: usize,
+    /// Issue #4680: count of registered indexes that are STUCK — their lexical
+    /// stage still owes work (`Pending`/`InProgress`, which
+    /// `lifecycle_status` renders as `"created"`/`"walking"`) yet no walk has
+    /// ever been driven for them in this daemon's lifetime.
+    ///
+    /// Why: this is the gap that let a production deployment serve nothing from
+    /// 221 of its 222 indexes for 44 days while `/health` reported
+    /// `status: ok`, `warm_boot_degraded: false`, `indexes_loaded: 222/222`.
+    /// Every existing health signal was structurally blind to it:
+    /// `indexes` and `warmboot_summary.indexes_loaded` count registered SLOTS,
+    /// not populated ones; `indexes_corpus_failed` only fires on
+    /// `stages.any_failed()`, and a stuck index has no `Failed` lane at all —
+    /// it is indefinitely, falsely, "walking". Operators had no signal to poll.
+    /// What: computed live in the same single registry scan as
+    /// `indexes_kg_disabled`, from
+    /// [`crate::service::warm_boot::index_is_stuck_unwalked`] — the identical
+    /// predicate boot reconcile uses to decide what to re-drive, so the count
+    /// and the recovery can never disagree. Non-zero forces the top-level
+    /// `status` to `"degraded"`. Converges to `0` on a healthy daemon as boot
+    /// reconcile walks each index (the walk stamps `last_walk_started_at`);
+    /// stays non-zero exactly when indexes really are stuck.
+    /// Test: `health_reports_degraded_for_a_stuck_never_walked_index` and
+    /// `health_does_not_flag_a_walked_index_as_stuck` in
+    /// `tests_health_degraded`.
+    pub(super) indexes_stuck_empty: usize,
     /// Boot-time reconcile summary (issue #1672).
     ///
     /// Why: boot-reconcile catches stale indexes (git-delta path since #1670,
@@ -150,7 +175,13 @@ pub(super) struct HealthResponse {
     /// no [`SwitchableEmbedder`] handle is installed yet (the same
     /// deferred-init gap `embedder_info` falls back for — see
     /// `current_switchable_embedder`'s ordering note).
-    /// Test: `health_reports_embedder_bootstrap_state`.
+    ///
+    /// #4125: `"failed"` and `"fell_back_to_ort"` also force the top-level
+    /// `status` to `"degraded"` — both are permanent for this daemon's
+    /// lifetime, so search runs on a backend the operator did not configure
+    /// until someone restarts it.
+    /// Test: `health_reports_embedder_bootstrap_state`,
+    /// `health_is_degraded_when_the_embedder_backend_permanently_downgraded`.
     pub(super) embedder_bootstrap: &'static str,
 }
 
@@ -391,6 +422,28 @@ pub(super) async fn health_handler(
         .as_ref()
         .map(|sw| bootstrap_state_str(sw.active().bootstrap))
         .unwrap_or("n/a");
+    // #4125: a permanent embedder capability downgrade must reach `status`.
+    //
+    // Why: `embedder_bootstrap` was reported and then aggregated nowhere, so
+    // `BootstrapState::Failed` (the graceful python bootstrap gave up for this
+    // daemon's lifetime) and `FellBackToOrt` (the swap-back watchdog abandoned a
+    // dead python/MPS sidecar) sat next to `status: "ok"` forever. Note that
+    // `embedder: "ready"` alongside them is not wrong — it reports the
+    // CURRENTLY-ACTIVE backend, which genuinely is ready. What nothing reported
+    // was "we did not get the backend we asked for": search silently runs on
+    // CPU/ort instead of MPS/python, a real and permanent performance
+    // regression, on the one field monitors gate on.
+    // What: `Failed` and `FellBackToOrt` are terminal for this daemon (neither
+    // path ever re-attempts), so both are degraded. `Bootstrapping` is
+    // transient and deliberately excluded — flagging it would make every
+    // Apple-Silicon boot report degraded for its first few seconds.
+    // `NotApplicable`/`Ready` are the healthy states.
+    let embedder_capability_degraded = switchable.as_ref().is_some_and(|sw| {
+        matches!(
+            sw.active().bootstrap,
+            BootstrapState::Failed | BootstrapState::FellBackToOrt
+        )
+    });
     // Issue #282: sample the sidecar's current RSS (None when not running).
     let embedderd_rss_mb = state
         .current_embedderd_pid()
@@ -468,6 +521,9 @@ pub(super) async fn health_handler(
     // persistently-poolless index self-corrects to 0 the moment it makes its
     // first embed call, so an undercount here is never permanently lost).
     let mut indexes_embed_pool_missing = 0usize;
+    // #4680: count indexes whose lexical stage still owes work but that no walk
+    // has ever touched — the state every other health signal was blind to.
+    let mut indexes_stuck_empty = 0usize;
     let indexes_corpus_failed = state
         .registry
         .list_handles()
@@ -493,6 +549,17 @@ pub(super) async fn health_handler(
                                 == crate::core::registry::StageStatus::InProgress)
                     {
                         indexes_component_catch_up_in_progress += 1;
+                    }
+                    // #4680: same fail-open discipline as the stages lock above
+                    // — a contended walk-diagnostics read undercounts this poll
+                    // only, and the next 2 s poll re-scans.
+                    if let Ok(diag) = handle.walk_diagnostics.try_read() {
+                        if crate::service::warm_boot::index_is_stuck_unwalked(
+                            stages.lexical.status,
+                            diag.last_walk_started_at.is_some(),
+                        ) {
+                            indexes_stuck_empty += 1;
+                        }
                     }
                     stages.any_failed()
                 }
@@ -532,7 +599,10 @@ pub(super) async fn health_handler(
                 || s.up_to_date > 0
                 || s.delta_reindexed > 0
                 || s.fell_back_to_full > 0
-                || s.skipped_no_data > 0;
+                || s.skipped_no_data > 0
+                // #4680: a boot whose ONLY outcome was stuck-index recovery
+                // must still surface its summary.
+                || s.stuck_retried > 0;
             if started {
                 Some(s)
             } else {
@@ -569,12 +639,22 @@ pub(super) async fn health_handler(
     // (and by `recompute_warm_boot_degraded`), checking `warm_boot_degraded`
     // alone is a strict superset of the old condition — no case that used to
     // report `"degraded"` stops doing so.
-    let overall_status =
-        if warmboot_summary.warm_boot_degraded || indexes_watcher_network_degraded > 0 {
-            "degraded"
-        } else {
-            "ok"
-        };
+    // #4680: a daemon holding indexes that owe lexical work but have never been
+    // walked is not healthy — that is a silent, total search outage for every
+    // such index and it was previously invisible on every field of this
+    // response. Same `status != "ok"` channel as #1870 / #3408.
+    // #4125: an embedder that permanently failed to reach the backend it was
+    // configured for (or fell back off it) is the same class of capability gap
+    // as #3408's refused watcher — see `embedder_capability_degraded` above.
+    let overall_status = if warmboot_summary.warm_boot_degraded
+        || indexes_watcher_network_degraded > 0
+        || indexes_stuck_empty > 0
+        || embedder_capability_degraded
+    {
+        "degraded"
+    } else {
+        "ok"
+    };
 
     Json(HealthResponse {
         status: overall_status,
@@ -600,6 +680,7 @@ pub(super) async fn health_handler(
         indexes_vector_disabled,
         indexes_component_catch_up_in_progress,
         indexes_embed_pool_missing,
+        indexes_stuck_empty,
         warmboot_summary,
         boot_reconcile,
         indexes_watcher_network_degraded,

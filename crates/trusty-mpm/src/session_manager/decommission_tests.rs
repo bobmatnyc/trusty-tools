@@ -54,11 +54,11 @@ fn is_session_worktree_absent_path_is_noop() {
     let absent = std::path::Path::new("/nonexistent/.worktrees/session-abc");
     // is_session_worktree: true (immediate parent is `.worktrees`)
     assert!(is_session_worktree(absent));
-    // remove_session_worktree: returns true idempotently (path already absent)
+    // remove_session_worktree: reports Removed idempotently (path already absent)
     let result = remove_session_worktree(absent);
     assert!(
-        result,
-        "absent path should return true (idempotently removed)"
+        result.removed(),
+        "absent path should report Removed (idempotently removed)"
     );
 }
 
@@ -82,8 +82,12 @@ fn sentinel_gates_worktree_removal_refuses_non_worktrees_dir_without_sentinel() 
     );
     let result = remove_session_worktree(&wt_path);
     assert!(
-        !result,
-        "remove_session_worktree must return false for non-worktrees dir without sentinel"
+        !result.removed(),
+        "remove_session_worktree must refuse a non-worktrees dir without a sentinel"
+    );
+    assert!(
+        result.reason().is_some_and(|r| r.contains("sentinel")),
+        "#4732: and must say WHY, so the caller can report it: {result:?}"
     );
     // The directory must NOT have been deleted.
     assert!(
@@ -177,7 +181,7 @@ async fn decommission_owner_gate_refuses_foreign_caller() {
     let session_a = ManagedSessionId::new();
     let managed_root = crate::test_support::hermetic_temp_dir();
     let err = mgr
-        .decommission_with_root(&session_b, managed_root.path(), Some(session_a), false)
+        .decommission_with_root(&session_b, managed_root.path(), Some(session_a))
         .await
         .expect_err("session A must be refused decommissioning session B's live worktree");
     match err {
@@ -216,7 +220,7 @@ async fn decommission_owner_gate_allows_self() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (record, _workspace_removed) = mgr
-        .decommission_with_root(&session_id, managed_root.path(), Some(session_id), false)
+        .decommission_with_root(&session_id, managed_root.path(), Some(session_id))
         .await
         .expect("self-decommission must be allowed");
     assert_eq!(record.state, ManagedSessionState::Decommissioned);
@@ -249,7 +253,7 @@ async fn decommission_owner_gate_allows_terminal_owner() {
 
     let caller = ManagedSessionId::new();
     let managed_root = crate::test_support::hermetic_temp_dir();
-    mgr.decommission_with_root(&target, managed_root.path(), Some(caller), false)
+    mgr.decommission_with_root(&target, managed_root.path(), Some(caller))
         .await
         .expect("decommissioning an already-terminal, provably-ownerless target must be allowed");
 }
@@ -276,7 +280,7 @@ async fn decommission_owner_gate_bypassed_for_none_caller() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (record, _workspace_removed) = mgr
-        .decommission_with_root(&session_id, managed_root.path(), None, false)
+        .decommission_with_root(&session_id, managed_root.path(), None)
         .await
         .expect("operator (caller=None) decommission must never be gated");
     assert_eq!(record.state, ManagedSessionState::Decommissioned);
@@ -310,7 +314,7 @@ async fn decommission_clears_pending_decision() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (after, _workspace_removed) = mgr
-        .decommission_with_root(&session_id, managed_root.path(), None, false)
+        .decommission_with_root(&session_id, managed_root.path(), None)
         .await
         .expect("decommission");
     assert_eq!(after.state, ManagedSessionState::Decommissioned);

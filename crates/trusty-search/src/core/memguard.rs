@@ -758,18 +758,43 @@ mod tests {
     /// giant contiguous allocation, which glibc already `munmap`s on free
     /// regardless of `malloc_trim` once it crosses `M_MMAP_THRESHOLD`).
     /// What: allocate then drop ~200k small `Vec<u8>` buffers, sample RSS,
-    /// call `trim_heap()`, sample again. Asserts only the deterministic,
-    /// platform-safe invariant (`after <= before` — trim can only release
-    /// memory, never grow RSS) rather than a specific MB delta, which would
-    /// be flaky across CI kernels/glibc versions with different heap tuning.
-    /// The actual before/after numbers are printed so a real run's log shows
-    /// the genuine reclaim in practice.
+    /// call `trim_heap()`, sample again, and assert the sampled numbers are
+    /// sane and that trim did not grow RSS beyond a concurrency-noise budget.
+    ///
+    /// Why the budget rather than a bare `after <= before` (issue #3954):
+    /// `current_rss_mb()` reads `/proc/self/status` for the WHOLE test-binary
+    /// process, so the two samples bracket a wall-clock window in which every
+    /// sibling test in the binary is allocating and freeing concurrently
+    /// (`cargo test` defaults `--test-threads` to the CPU count). The bare
+    /// bound therefore asserted "no other thread grew the process between two
+    /// samples", not "`malloc_trim` released memory" — and CI observed it
+    /// failing at 181 MB → 194 MB on PR #3944, a trusty-code-only PR. A C
+    /// program of the same shape violates the bare bound in 35% of trials
+    /// under 8 concurrent allocation churners while `malloc_trim` behaves
+    /// perfectly, so this is a bad measurement, not a memory-management
+    /// defect. `#[serial]` was rejected as the fix: it only excludes other
+    /// `#[serial]` tests, leaving every non-serial sibling free to churn the
+    /// heap inside the sampling window (that mis-assumption is exactly issue
+    /// #4213). The budget follows #3705's precedent on
+    /// `test_rss_for_self_pid`: a sanity band plus a *relative* bound, wide
+    /// enough to absorb observed churn (worst measured drift: 26 MB) while
+    /// still failing loudly if `trim_heap` ever grows the heap for real.
+    /// The before/after numbers are printed unconditionally so a genuine
+    /// regression stays visible in the log even inside the budget.
     /// Test: this test (Linux-only — `malloc_trim` doesn't exist on macOS,
     /// whose allocator already returns freed pages far more eagerly, so there
     /// is no platform-specific behaviour to prove there).
     #[test]
     #[cfg(target_os = "linux")]
     fn test_trim_heap_never_increases_rss_after_bulk_free() {
+        /// Floor for the concurrency-noise budget, in MB. Comfortably above
+        /// the worst drift measured between two sequential whole-process RSS
+        /// samples under heavy sibling churn (26 MB over 25 Debian 12 /
+        /// glibc 2.36 trials with 8 churner threads at 4 CPUs, in which the
+        /// bare `after <= before` bound failed 5 times and this one never
+        /// did), and far below any plausible real growth from `malloc_trim`.
+        const NOISE_FLOOR_MB: u64 = 64;
+
         // Vary allocation size across a small range so allocations land in
         // several glibc size-classes, matching real chunk-content variability
         // instead of one uniform, easily-coalesced size.
@@ -785,17 +810,32 @@ mod tests {
         trim_heap();
         let rss_after_trim = current_rss_mb();
 
-        if let (Some(before), Some(after)) = (rss_before_trim, rss_after_trim) {
-            assert!(
-                after <= before,
-                "trim_heap() must never increase RSS: {before} MB before trim, \
-                 {after} MB after trim"
-            );
-        }
         eprintln!(
             "trim_heap RSS smoke: peak={rss_peak:?}MB before_trim={rss_before_trim:?}MB \
              after_trim={rss_after_trim:?}MB"
         );
+
+        if let (Some(before), Some(after)) = (rss_before_trim, rss_after_trim) {
+            // Sanity band: catches a sampler regression that returns 0 or a
+            // wrong-unit value, independent of the trim comparison. This test
+            // has just touched ~40 MB of buffers, so a live reading below
+            // 1 MB (or above 1 TB) is broken, not merely noisy.
+            assert!(
+                (1..=1_048_576).contains(&before) && (1..=1_048_576).contains(&after),
+                "RSS samples must be live, unit-correct MB readings: \
+                 {before} MB before trim, {after} MB after trim"
+            );
+            // #3954: budget the sibling-test allocation churn that lands
+            // between the two whole-process samples; a bare `after <= before`
+            // measures the process, not trim_heap().
+            let budget = NOISE_FLOOR_MB.max(before / 4);
+            assert!(
+                after <= before + budget,
+                "trim_heap() must never increase RSS beyond concurrent-test \
+                 noise: {before} MB before trim, {after} MB after trim \
+                 (budget {budget} MB)"
+            );
+        }
     }
 
     #[test]

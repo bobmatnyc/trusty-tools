@@ -140,9 +140,74 @@ fn bootstrap_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Bound on the FULL import recheck (see [`verify_full_import_smoke`]) — the
-/// eager, once-per-daemon-start path only.
+/// FIRST-attempt bound on the FULL import recheck (see
+/// [`verify_full_import_smoke`]) — the eager, once-per-daemon-start path only.
+/// A recheck that outlives this is retried once with
+/// [`FULL_RECHECK_RETRY_TIMEOUT`], never failed outright (#4125).
 const FULL_RECHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on the ONE retry of the full import recheck (#4125).
+///
+/// Why: the eager recheck runs while trusty-search's daemon is simultaneously
+/// warm-booting hundreds of indexes, so torch's import routinely outlives the
+/// first, deliberately-short budget under purely self-inflicted startup
+/// contention. Retrying with a budget several times larger — rather than
+/// raising the first one, which would just move the same fixed-budget cliff —
+/// lets an intact-but-starved venv finish and prove itself, and it costs the
+/// extra wait only on the rare boot that needs it. The killed first attempt
+/// also leaves the interpreter and torch's shared objects warm in the page
+/// cache, so the retry is typically far faster than the attempt it follows.
+const FULL_RECHECK_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What a bounded venv recheck actually established (#4125).
+///
+/// Why: the recheck helpers used to return a bare `bool`, which forced a
+/// timeout to be reported as `false` — i.e. as PROOF the venv is broken. It is
+/// not proof of anything: it means the check ran out of time. Under the
+/// daemon's own warm-boot contention that misreading fired on nearly every
+/// start, condemning a perfectly intact venv to a full rebuild (which then hard
+/// -failed on `uv` discovery and pinned the daemon on ort for its lifetime).
+/// This is the same "slow is not broken" conflation #4333 fixed for a corpus
+/// open timeout being reported as a corrupt corpus; the fix is the same shape —
+/// make the transient outcome a distinct, named third state that callers must
+/// handle deliberately.
+/// What: [`Passed`](Self::Passed) and [`Failed`](Self::Failed) are real
+/// evidence (the check ran to completion); [`Indeterminate`](Self::Indeterminate)
+/// is the absence of evidence and is produced only by a timeout.
+/// Test: `bounded_python_check_classifies_timeout_apart_from_failure`,
+/// `ensure_venv_does_not_rebuild_on_an_indeterminate_recheck`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecheckOutcome {
+    /// The check completed and the venv proved itself.
+    Passed,
+    /// The check completed and the venv failed it — a spawn error, a poll
+    /// error, or a non-zero exit. Real evidence of a broken venv.
+    Failed,
+    /// The check did not complete within its budget. Evidence of nothing: the
+    /// venv may be perfectly intact and merely starved of CPU/IO.
+    Indeterminate,
+}
+
+impl RecheckOutcome {
+    /// May the already-`.ready` venv be reused on this outcome?
+    ///
+    /// Why (#4125): only [`Failed`](Self::Failed) is evidence against the venv.
+    /// An [`Indeterminate`](Self::Indeterminate) result must NOT trigger a
+    /// rebuild — the `.ready` sentinel was written only after a real
+    /// import+embed smoke test passed, and a timed-out recheck adds no
+    /// information that contradicts it. The residual risk (trusting a venv that
+    /// is genuinely broken AND slow) is already covered downstream and
+    /// unchanged: the caller's readiness probe forces a real embed through the
+    /// supervisor before anything hot-swaps to python, and a failure there
+    /// leaves search on ort exactly as a failed rebuild would — but without
+    /// destroying a working venv on the way.
+    /// What: `true` for `Passed` and `Indeterminate`, `false` for `Failed`.
+    /// Test: `ensure_venv_does_not_rebuild_on_an_indeterminate_recheck`,
+    /// `ensure_venv_eager_rebuilds_when_full_recheck_fails`.
+    fn trusts_venv(self) -> bool {
+        !matches!(self, RecheckOutcome::Failed)
+    }
+}
 
 /// Bound on the cheap, torch-free liveness recheck (see [`verify_venv_alive`])
 /// — the per-respawn hot-path check. Shorter than [`FULL_RECHECK_TIMEOUT`]
@@ -194,7 +259,7 @@ enum RecheckDepth {
 }
 
 impl RecheckDepth {
-    fn verify(self, layout: &VenvLayout) -> bool {
+    fn verify(self, layout: &VenvLayout) -> RecheckOutcome {
         match self {
             RecheckDepth::Liveness => verify_venv_alive(layout),
             RecheckDepth::FullImport => verify_full_import_smoke(layout),
@@ -203,6 +268,19 @@ impl RecheckDepth {
 }
 
 fn ensure_venv_checked(depth: RecheckDepth) -> Result<VenvLayout> {
+    ensure_venv_verified(&|layout| depth.verify(layout))
+}
+
+/// [`ensure_venv_checked`] with the recheck itself injected (#4125).
+///
+/// Why: the behaviour that matters — an [`RecheckOutcome::Indeterminate`]
+/// recheck must NOT trigger a rebuild — is otherwise only reachable by actually
+/// exhausting the production budgets (70 s of real waiting). The seam lets a
+/// test assert the decision directly, in milliseconds, for every outcome.
+/// What: identical to [`ensure_venv_checked`]; `verify` replaces
+/// `depth.verify`.
+/// Test: `ensure_venv_does_not_rebuild_on_an_indeterminate_recheck`.
+fn ensure_venv_verified(verify: &dyn Fn(&VenvLayout) -> RecheckOutcome) -> Result<VenvLayout> {
     let layout = resolve_layout()?;
 
     // Fast path — already built for this lock.
@@ -215,15 +293,28 @@ fn ensure_venv_checked(depth: RecheckDepth) -> Result<VenvLayout> {
     // of falling back to the Rust ort path. `depth` controls how thoroughly
     // that recheck looks (see `RecheckDepth`).
     if is_ready(&layout) {
-        if depth.verify(&layout) {
-            tracing::debug!(venv = %layout.venv_dir.display(), "py-embedder venv already ready");
-            return Ok(layout);
+        match verify(&layout) {
+            RecheckOutcome::Passed => {
+                tracing::debug!(venv = %layout.venv_dir.display(), "py-embedder venv already ready");
+                return Ok(layout);
+            }
+            // #4125: a recheck that ran out of time is not evidence the venv is
+            // broken — reuse it instead of rebuilding on a timeout.
+            RecheckOutcome::Indeterminate => {
+                tracing::warn!(
+                    venv = %layout.venv_dir.display(),
+                    "py-embedder: `.ready` recheck did not finish in time (startup \
+                     contention, not a failed import) — reusing the venv; a genuinely \
+                     broken venv is still caught by the caller's readiness probe (#4125)"
+                );
+                return Ok(layout);
+            }
+            RecheckOutcome::Failed => tracing::warn!(
+                venv = %layout.venv_dir.display(),
+                "py-embedder: `.ready` sentinel present but the venv failed its \
+                 recheck (possibly corrupted) — rebuilding"
+            ),
         }
-        tracing::warn!(
-            venv = %layout.venv_dir.display(),
-            "py-embedder: `.ready` sentinel present but the venv failed its \
-             recheck (possibly corrupted) — rebuilding"
-        );
     }
 
     fs::create_dir_all(&layout.base)
@@ -243,7 +334,10 @@ fn ensure_venv_checked(depth: RecheckDepth) -> Result<VenvLayout> {
 
     // Double-checked: another process may have finished while we waited.
     let result = (|| {
-        if is_ready(&layout) && depth.verify(&layout) {
+        // #4125: `trusts_venv()` (not a bare bool) so a timed-out re-verify of a
+        // venv another process just finished building reuses it rather than
+        // starting a second, redundant rebuild.
+        if is_ready(&layout) && verify(&layout).trusts_venv() {
             tracing::info!("py-embedder: venv became ready while awaiting lock — reusing");
             return Ok(());
         }
@@ -299,15 +393,16 @@ fn site_packages_dir(layout: &VenvLayout) -> PathBuf {
 /// exist as a directory (a cheap `Path::is_dir`, no process spawn); (2)
 /// `<venv>/bin/python -c "import sys; sys.exit(0)"` must exit 0 within
 /// [`LIVENESS_CHECK_TIMEOUT`] — proves the interpreter starts and runs
-/// without touching torch.
+/// without touching torch. A timeout yields
+/// [`RecheckOutcome::Indeterminate`], never `Failed` (#4125).
 /// Test: `verify_venv_alive_*` in `bootstrap_tests.rs`.
-fn verify_venv_alive(layout: &VenvLayout) -> bool {
+fn verify_venv_alive(layout: &VenvLayout) -> RecheckOutcome {
     if !site_packages_dir(layout)
         .join("sentence_transformers")
         .is_dir()
     {
         tracing::warn!("py-embedder: liveness-recheck: sentence_transformers marker missing from site-packages");
-        return false;
+        return RecheckOutcome::Failed;
     }
     run_bounded_python_check(
         &layout.venv_python,
@@ -322,32 +417,80 @@ fn verify_venv_alive(layout: &VenvLayout) -> bool {
 ///
 /// What: runs `<venv>/bin/python -c "import sentence_transformers"` — an
 /// import only, NOT a full embed (no model download/load, no torch device
-/// init) — bounded by [`FULL_RECHECK_TIMEOUT`]. Returns `true` only on a
-/// clean, successful exit; any spawn failure, non-zero exit, or timeout
-/// returns `false` so the caller treats the venv as not-ready and rebuilds
-/// (and if the rebuild itself fails, that error propagates so
-/// `commands/start/embedder.rs`'s fall-back-to-ort path fires — the venv is
-/// never trusted on a failed recheck).
+/// init) — bounded by [`FULL_RECHECK_TIMEOUT`]. A spawn failure or non-zero
+/// exit is [`RecheckOutcome::Failed`] (the caller rebuilds; if the rebuild
+/// itself fails that error propagates so `commands/start/embedder.rs`'s
+/// fall-back-to-ort path fires — the venv is never trusted on a failed
+/// recheck).
+///
+/// #4125: a timeout is NOT such a failure. This check runs while
+/// trusty-search's daemon warm-boots hundreds of indexes, and torch's import
+/// routinely outlives a short fixed budget under that self-inflicted
+/// contention. So an over-budget first attempt is retried ONCE with
+/// [`FULL_RECHECK_RETRY_TIMEOUT`], and a second over-budget attempt reports
+/// [`RecheckOutcome::Indeterminate`] rather than `Failed` — see
+/// [`RecheckOutcome::trusts_venv`] for what the caller then does and why that
+/// is safe.
 ///
 /// Deliberately does NOT set `current_dir`/`PYTHONPATH` to `project_dir` (unlike
 /// [`smoke_test`], which imports our own bundled `trusty_embed_sidecar`
 /// package): this only imports the venv's own installed `sentence_transformers`
 /// from site-packages, so it stays correct even if `project_dir` were ever
 /// missing (e.g. manually deleted) while the venv itself is intact.
-fn verify_full_import_smoke(layout: &VenvLayout) -> bool {
-    run_bounded_python_check(
-        &layout.venv_python,
-        &["-c", "import sentence_transformers"],
-        FULL_RECHECK_TIMEOUT,
-        "full-import-recheck",
-    )
+/// Test: `verify_full_import_smoke_false_when_stub_exits_nonzero`,
+/// `full_import_recheck_retries_once_before_reporting_indeterminate`,
+/// `full_import_recheck_retry_lets_a_starved_venv_prove_itself`.
+fn verify_full_import_smoke(layout: &VenvLayout) -> RecheckOutcome {
+    verify_full_import_smoke_bounded(layout, FULL_RECHECK_TIMEOUT, FULL_RECHECK_RETRY_TIMEOUT)
+}
+
+/// [`verify_full_import_smoke`] with both budgets supplied by the caller, so
+/// tests can drive the timeout/retry path in milliseconds instead of the 70 s
+/// the production budgets would take (#4125).
+fn verify_full_import_smoke_bounded(
+    layout: &VenvLayout,
+    first: Duration,
+    retry: Duration,
+) -> RecheckOutcome {
+    let args = ["-c", "import sentence_transformers"];
+    match run_bounded_python_check(&layout.venv_python, &args, first, "full-import-recheck") {
+        // #4125: over budget once means "slow", not "broken" — give it a
+        // materially larger budget before drawing any conclusion at all.
+        RecheckOutcome::Indeterminate => {
+            tracing::info!(
+                "py-embedder: full-import-recheck exceeded {:?} (daemon startup \
+                 contention) — retrying once with {:?} before concluding anything",
+                first,
+                retry
+            );
+            run_bounded_python_check(
+                &layout.venv_python,
+                &args,
+                retry,
+                "full-import-recheck (retry)",
+            )
+        }
+        decided => decided,
+    }
 }
 
 /// Shared bounded spawn-and-poll helper for [`verify_venv_alive`] and
 /// [`verify_full_import_smoke`]: run `python <args>` to completion, killing it
-/// (and returning `false`) if it outlives `timeout`. `label` only tags the
-/// warn-log lines so the two call sites stay distinguishable in output.
-fn run_bounded_python_check(python: &Path, args: &[&str], timeout: Duration, label: &str) -> bool {
+/// if it outlives `timeout`. `label` only tags the log lines so the call sites
+/// stay distinguishable in output.
+///
+/// #4125: returns a three-state [`RecheckOutcome`] rather than a bool. A
+/// completed run maps to `Passed`/`Failed` by exit status; a spawn or poll
+/// error is `Failed` (the venv genuinely could not be exercised); running out
+/// of budget is `Indeterminate` and is deliberately NOT reported as a failed
+/// check — it says nothing about the venv, only about how much time it was
+/// given.
+fn run_bounded_python_check(
+    python: &Path,
+    args: &[&str],
+    timeout: Duration,
+    label: &str,
+) -> RecheckOutcome {
     let mut cmd = Command::new(python);
     cmd.args(args)
         .stdout(std::process::Stdio::null())
@@ -357,29 +500,36 @@ fn run_bounded_python_check(python: &Path, args: &[&str], timeout: Duration, lab
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("py-embedder: {label} failed to spawn venv python: {e}");
-            return false;
+            return RecheckOutcome::Failed;
         }
     };
 
     let start = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                return if status.success() {
+                    RecheckOutcome::Passed
+                } else {
+                    RecheckOutcome::Failed
+                }
+            }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    tracing::warn!(
-                        "py-embedder: {label} timed out after {}s",
+                    tracing::debug!(
+                        "py-embedder: {label} did not finish within {}s — indeterminate, \
+                         not a failed check (#4125)",
                         timeout.as_secs()
                     );
-                    return false;
+                    return RecheckOutcome::Indeterminate;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
                 tracing::warn!("py-embedder: {label} poll failed: {e}");
-                return false;
+                return RecheckOutcome::Failed;
             }
         }
     }
@@ -497,9 +647,26 @@ fn human_bytes(n: u64) -> String {
     format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-/// Locate `uv`: `TRUSTY_UV_BIN` → PATH. (Vendored/download-with-SHA256 is a
-/// slice-5/6 follow-up; until then a missing uv is an actionable bootstrap
-/// error that triggers the ort fallback.)
+/// Locate `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known daemon bin dirs.
+/// (Vendored/download-with-SHA256 is a slice-5/6 follow-up; until then a
+/// missing uv is an actionable bootstrap error that triggers the ort fallback.)
+///
+/// Why (#4125): this used to be a bare `which::which("uv")`, i.e. live-`PATH`
+/// only. trusty-search's daemon runs under launchd, whose plist sets no `PATH`
+/// and whose default omits `/opt/homebrew/bin` — where `uv` is installed. So on
+/// the daemon (and ONLY on the daemon; an interactive `trusty-search start`
+/// inherits a login shell's `PATH` and works fine) every bootstrap that reached
+/// this function hard-failed with "`uv` not found on PATH", and the daemon
+/// stayed on ort for the rest of its lifetime. This is the exact bug class
+/// #1298 already fixed for `tmux`/`claude` lookups — which is what
+/// [`trusty_common::bin_resolve::resolve_binary`] exists for, complete with the
+/// `/opt/homebrew/bin` fallback. It was simply never wired up here.
+/// What: delegates to that shared resolver, which tries the live `PATH` first
+/// and then the well-known daemon bin dirs (Homebrew, `~/.local/bin`,
+/// `~/.cargo/bin`, the system dirs).
+/// Test: `locate_uv_rejects_bad_explicit_override` (env-override arm). The
+/// fallback this now depends on is covered by trusty-common's own
+/// resolve_binary_finds_a_binary_outside_the_process_path.
 pub fn locate_uv() -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var("TRUSTY_UV_BIN") {
         let p = PathBuf::from(&explicit);
@@ -508,11 +675,14 @@ pub fn locate_uv() -> Result<PathBuf> {
         }
         bail!("TRUSTY_UV_BIN={explicit:?} does not point to an existing file");
     }
-    which::which("uv").map_err(|_| {
+    // #4125: PATH-only lookup misses Homebrew under launchd's minimal PATH.
+    trusty_common::bin_resolve::resolve_binary("uv").ok_or_else(|| {
         anyhow!(
-            "`uv` not found on PATH and TRUSTY_UV_BIN is unset. Install uv \
-             (https://docs.astral.sh/uv/) or set TRUSTY_UV_BIN=/path/to/uv. \
-             Until then trusty-search falls back to the Rust ort embedder."
+            "`uv` not found on PATH or in the well-known install dirs \
+             (/opt/homebrew/bin, /usr/local/bin, ~/.local/bin, ~/.cargo/bin) and \
+             TRUSTY_UV_BIN is unset. Install uv (https://docs.astral.sh/uv/) or set \
+             TRUSTY_UV_BIN=/path/to/uv. Until then trusty-search falls back to the \
+             Rust ort embedder."
         )
     })
 }

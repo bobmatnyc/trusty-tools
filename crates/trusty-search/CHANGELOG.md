@@ -6,22 +6,212 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [0.40.0] — 2026-07-27
+## [0.42.0] — 2026-08-04
 
-MINOR, not patch: `service::lazy_loader::store`'s public
-`register_cold_entries` changed its return type from `()` to
-`Vec<Arc<()>>` (it now hands back the per-entry residency tokens that
-`mark_loaded_if` needs to detect a reindex that raced a cold restore). In
-0.x, MINOR is the breaking axis.
+### Added
+
+- An interrupted reindex now resumes from where it stopped instead of redoing
+  the entire walk/parse/embed. Every non-`force` reindex stamps a versioned
+  checkpoint record into the staging corpus it is building; after a crash the
+  next reindex validates that record and adopts the staged corpus, so the
+  batches already committed — and the hours of embedding they represent on a
+  large index — survive
+  ([#3979](https://github.com/bobmatnyc/trusty-tools/issues/3979)).
+  - The resume unit is the file, and the skip stays content-verified: an adopted
+    file is still re-read and re-hashed against its current bytes before it can
+    be skipped, so a file edited, deleted, or created during the interruption is
+    handled exactly as on a clean run.
+  - Every ambiguous case falls back to a full reindex, never a partial one — an
+    unopenable staging corpus, a missing or corrupt record, a schema-version
+    bump, a different index id, a moved walk root, a daemon upgrade, a changed
+    walk config, or a record past its adoption window. The live corpus is never
+    read, written, or deleted by the resume path.
+  - New optional knobs: `TRUSTY_REINDEX_RESUME` (set to `0` to restore the
+    previous always-rebuild behaviour) and
+    `TRUSTY_REINDEX_CHECKPOINT_MAX_AGE_SECS` (default `86400`; `0` disables the
+    age gate).
+  - `--force` reindexes deliberately neither write nor consume a checkpoint, and
+    a resumed run always runs the vector catch-up pass so semantic search is not
+    short the chunks it inherited.
 
 ### Changed
 
+- **BREAKING (HTTP API): `DELETE /indexes/:id` no longer destroys on-disk data
+  by default** ([#4123](https://github.com/bobmatnyc/trusty-tools/issues/4123)).
+  The handler hardcoded `delete_data=true`, so every `DELETE` destroyed the
+  index's data directory and the HTTP surface offered NO way to merely
+  deregister. Registry hygiene was therefore impossible through the API: an
+  operator clearing 49 stale entries had to stop the daemon and hand-edit
+  `indexes.toml`, because one mis-typed id would have destroyed a real corpus.
+  A bare `DELETE` now deregisters only (the same safe path the orphan-reaper
+  has always used); destroying data requires an explicit
+  `?delete_data=true`. The response gained a `data_deleted` field so callers
+  can confirm which semantics ran. An unparseable `delete_data` value is
+  rejected with `400` rather than guessed at.
+
+  This also makes three long-standing pieces of documentation true rather than
+  false — all of them already promised the preserving behaviour that did not
+  exist: the API reference (`crates/trusty-search/CLAUDE.md`, "On-disk redb data
+  is preserved"), `trusty-search index remove`'s `--help` ("The on-disk redb /
+  HNSW snapshot is preserved — re-registering with the same path reuses it"),
+  and the UI's delete confirmation ("On-disk data is preserved.").
+
+  **Action required for callers that relied on `DELETE` reclaiming disk** —
+  they will silently stop reclaiming it and leave orphaned data behind. The
+  in-tree ones are updated in this change to pass `?delete_data=true`: the
+  `delete_index` MCP tool (its descriptor promises "and all its data"),
+  `trusty-search cleanup`, trusty-mpm's decommission + orphan-sweep index GC,
+  and the benchmark harnesses that require a clean slate. `trusty-search index
+  remove` and the UI are deliberately left on the new preserving default,
+  because that is what they already told users they did.
+- Credential resolution now imports from `trusty_common::credentials` instead of
+  `trusty_common::inference::credentials`, which was deprecated in the same
+  change (see [#4564](https://github.com/bobmatnyc/trusty-tools/issues/4564)).
+  Import-path churn only — no behaviour, precedence, or credential surface
+  changes in this crate.
+
+- **BREAKING:** `service::lazy_loader::store`'s public `register_cold_entries` changed its return type from `()` to `Vec<Arc<()>>` (it now hands back the per-entry residency tokens that `mark_loaded_if` needs to detect a reindex that raced a cold restore).
 - `trusty-common` requirement raised to `^0.27` (was `^0.26`): 0.27.0 makes
   `ChatEvent` `#[non_exhaustive]`, which a `^0.26` requirement cannot express.
   `service::ui`'s `ChatEvent` match gained a wildcard arm accordingly.
 
 ### Fixed
 
+- The generated LaunchAgent plist now sets `KeepAlive` to `true` instead of
+  `{ SuccessfulExit: false }`, so launchd restarts the daemon after a **clean**
+  (exit 0) shutdown as well as a crash. Previously a plain SIGTERM or orderly
+  drain left trusty-search down indefinitely with no automatic recovery and no
+  alarm, silently degrading every search-backed consumer
+  ([#4113](https://github.com/bobmatnyc/trusty-tools/issues/4113)).
+  - Deliberate "stop it and leave it stopped" is now expressed through launchd's
+    unload path — `launchctl bootout gui/$(id -u)/com.trusty.trusty-search` or
+    `trusty-search service uninstall` — which removes the job and therefore
+    outranks any `KeepAlive` setting.
+  - `trusty-search stop` now says so: on a host where the LaunchAgent is loaded
+    it prints that launchd will restart the daemon shortly and names the
+    `bootout` command that keeps it stopped.
+  - An already-installed plist keeps the old policy until it is regenerated —
+    re-run `trusty-search service install` to pick up the change.
+- Test integrity: four test-only defects that let the suite report green
+  without proving what it claims.
+  - The `#2178` P0 root-hijack data-loss guard
+    (`reindex_refuses_untrusted_root_move_and_preserves_corpus`) no longer
+    isolates `indexes.toml` with a process-global
+    `std::env::set_var("TRUSTY_DATA_DIR", …)` behind `#[serial]`. `#[serial]`
+    excludes only other serial tests, so a non-serial sibling could still
+    clobber the variable mid-test; `load_index_registry` then found no
+    persisted entry, the gate trusted the hijacked root, and the assertion
+    flipped `Failed` → `Complete`. Both tests in that file now run alone in a
+    child process whose data dir is supplied at spawn time — deterministic
+    isolation with the assertions unchanged
+    ([#4213](https://github.com/bobmatnyc/trusty-tools/issues/4213)).
+  - Unit tests no longer register index entries in the developer's real
+    daemon registry. `data_dir()`'s un-overridden fallback resolves to an
+    isolated per-process directory in test builds, so a test that forgets to
+    set `TRUSTY_DATA_DIR` can no longer write throwaway fixtures pointing at
+    `~/.trusty-search-test-roots/…` into the live `indexes.toml` — the debris
+    that kept `search_health` reporting `degraded`
+    ([#4094](https://github.com/bobmatnyc/trusty-tools/issues/4094)).
+  - `test_trim_heap_never_increases_rss_after_bulk_free` no longer asserts an
+    invariant that concurrent test execution can break. It sampled
+    whole-process RSS either side of `trim_heap()`, so any sibling test
+    allocating in that window failed the bound with `malloc_trim` behaving
+    perfectly (observed 181 MB → 194 MB on an unrelated PR). Following the
+    `#3705` precedent, the bound is now a sanity band plus a calibrated
+    concurrency-noise budget, and the raw before/after MB numbers are always
+    printed ([#3954](https://github.com/bobmatnyc/trusty-tools/issues/3954)).
+  - The `#2847` legacy-path regression tests now force their failure at
+    `index_data_dir()`'s own `create_dir_all` (`ENOTDIR`) rather than one
+    layer above at `data_dir()`'s, matching the precision of their colocated
+    counterpart, which blocks the immediate dispatch target
+    ([#3963](https://github.com/bobmatnyc/trusty-tools/issues/3963)).
+- **An index whose durable corpus failed to open kept accepting watcher
+  writes, permanently destroying the corpus (issue #4122, P0 data loss).**
+  When `CorpusStore::open` failed at load time the loader set
+  `corpus_open_failed` but left the handle fully live, watcher included, so
+  ordinary unrelated file saves rebuilt a fresh PARTIAL corpus over the
+  never-opened original — in production `chunk_count` climbed `0 → 68 → 1334`
+  and the index came back "healthy" on the next restart holding the wrong
+  content. A `corpus_open_failed` index is now **write-quarantined**: every
+  incremental write path (`service::watch_loop`, `service::reconcile`, and
+  `POST /indexes/{id}/index-file`) is refused at the shared
+  `CodeIndexer::index_file` choke point, and the watcher additionally bails
+  before it reads and chunks the saved file. Refusals are emitted at ERROR
+  (the only level `trusty_common::error_capture` persists to `errors.jsonl` /
+  `list_recent_errors` / `tm doctor`), throttled to the 1st and every 100th,
+  and counted on `CodeIndexer::refused_incremental_writes`. **Recovery is a
+  daemon restart** — only a successful `CorpusStore::open` lifts the
+  quarantine and it is attempted solely at load time, so the ERROR text says
+  so explicitly and warns that a reindex neither clears the state nor
+  persists anything (with no corpus wired it skips staging entirely). The
+  clean-restart path (the incident's `cto-duetto`, restored at its full
+  200,090 chunks) is unaffected. Bulk reindex is deliberately not gated,
+  which is safe because a quarantined index holds no `CorpusStore` — an
+  invariant now documented and pinned by `debug_assert!`s, since boot
+  reconcile auto-fires reindexes with no quarantine check. Reads are
+  unchanged; corpus-failed indexes still return empty results (that is issue
+  #4087, not fixed here).
+
+- **`POST /indexes` reported every stage `Pending` even when a colocated corpus
+  restore succeeded** ([#4110](https://github.com/bobmatnyc/trusty-tools/issues/4110)).
+  `create_index_handler` doubles as the "adopt an existing colocated corpus"
+  door — `build_indexer_from_entry` synchronously restores the redb corpus, the
+  HNSW snapshot and the symbol graph — but the handler then set
+  `lexical: pending(), semantic: pending()` unconditionally and threw that
+  outcome away. Since `search_capabilities` is derived from `stages`, a fully
+  intact index came up advertising no vector lane: semantic search hard-errored
+  with "requires Stage 2 (embeddings), which is not yet ready" and `search_all`
+  silently degraded to BM25-only, every hit reporting `match_reason="bm25"` —
+  indistinguishable from a genuinely dead vector lane. Only a daemon restart
+  cleared it, because the warm-boot path already classified correctly from the
+  same signals. The registration path now derives stages with
+  `derive_warm_boot_stages`, the same pure classifier warm-boot and
+  lazy-restore use, over the same signals read the same way, so the two can no
+  longer disagree about an identical on-disk state. A genuinely new index still
+  reports `created` (lexical `Pending`), not warm-boot's `walking`.
+
+---
+- **An index that was never populated was recorded as needing nothing, forever
+  — 221 of 222 production indexes served zero results for 44 days while
+  `/health` reported fully healthy (issue
+  [#4680](https://github.com/bobmatnyc/trusty-tools/issues/4680)).** Boot
+  reconcile only ever asked "has the source drifted?", never "does this index
+  hold any data at all?". Both of its staleness markers answer "no drift" for
+  an empty index: the git path compares a HEAD SHA that restore re-derives from
+  live git (so `stored == current` unconditionally — issue
+  [#4391](https://github.com/bobmatnyc/trusty-tools/issues/4391)) and counted
+  the index `up_to_date`; the mtime path reads `last_indexed_unix`, whose
+  writer has no production callers, got `None`, and counted the index
+  `skipped_no_data`. Neither branch ever re-drove the walk, on that boot or any
+  later one.
+  - `reconcile_one_index` now checks, *before* consulting either marker,
+    whether an index claims lexical work is underway (`lexical: in_progress`,
+    which the warm-boot classifier stamps for every restored empty corpus)
+    while no walk has ever been driven for it in this daemon's lifetime. Such
+    an index is stuck, not current, and gets a full **non-force** background
+    reindex — the incremental hash cache and staged-corpus carryover both
+    apply, so recovery re-walks and re-adds and never clears or rebuilds a
+    corpus from scratch.
+  - The retry is bounded to at most one walk per index per daemon lifetime (it
+    keys off `last_walk_started_at`), so a walk that legitimately finds zero
+    indexable files — everything gitignored or filtered out — is never
+    re-driven in a loop. "Walk found nothing" and "walk never completed" are
+    now distinguishable rather than both presenting as `chunk_count: 0`.
+  - New `boot_reconcile.stuck_retried` counter on `GET /health` reports how
+    many indexes were recovered this way, instead of the recovery hiding inside
+    `up_to_date` / `skipped_no_data`.
+- **`GET /health` reported `status: "ok"` while indexes were stuck at zero
+  chunks (issue [#4680](https://github.com/bobmatnyc/trusty-tools/issues/4680)).**
+  Every existing signal was structurally blind to this: `indexes` and
+  `warmboot_summary.indexes_loaded` count registered index *slots*, not
+  populated ones, and `indexes_corpus_failed` keys off `stages.any_failed()` —
+  which a stuck index never trips, because it reports no failed lane at all,
+  only an indefinite, false `"walking"`. A new `indexes_stuck_empty` field
+  counts registered indexes whose lexical stage claims a walk is underway that
+  has never been driven, and a non-zero count forces the top-level `status` to
+  `"degraded"` so existing `status != "ok"` monitors catch it. The count is
+  derived from the same predicate boot reconcile uses to decide what to
+  recover, so the reported number and the recovery can never disagree.
 - **Two more index-registration paths had no `root_path` collision guard —
   fourth occurrence of the #2305/#2336 `DatabaseAlreadyOpen` class (issue
   #3993).** An audit prompted by #3929 found `find_root_path_collision`
@@ -299,6 +489,73 @@ MINOR, not patch: `service::lazy_loader::store`'s public
   old `indexes_corpus_failed > 0` check, since that count is already
   folded into `warm_boot_degraded`), so all four conditions now flip the
   top-level status.
+- Corpus-open failures are now classified rather than collapsed into one string.
+  A transient open timeout or lock contention no longer reports "incompatible or
+  corrupted format" and no longer prescribes `trusty-search index <path> --force`
+  — wording that had already cost one healthy 200k-chunk index to a destructive
+  rebuild. Transient states say the on-disk corpus is presumed intact and
+  explicitly forbid a reindex; only a redb-reported format incompatibility or
+  corruption keeps the rebuild instruction. `GET /indexes/:id/status` gains a
+  `corpus_open_failure` object (`kind`, `transient`, `reason`) and reports
+  `chunk_count: null` instead of a partial-looking in-memory count while the
+  corpus is unopened (see
+  [#4333](https://github.com/bobmatnyc/trusty-tools/issues/4333)).
+- An index whose durable corpus failed to open no longer answers searches with
+  `HTTP 200` and an empty result set — a total per-index outage that was
+  indistinguishable from "no matches". `POST /indexes/:id/search` now returns
+  `503 index_corpus_unavailable` carrying the failure classification, and
+  `POST /search` excludes such indexes from the fan-out and reports them in a new
+  `corpus_failed_indexes_skipped` field. An index whose eager warm-boot restore
+  **times out** is now parked in the cold store — recoverable by lazy load on the
+  next query — instead of being dropped from both the registry and the cold store
+  for the rest of the boot. A restore that **panics** is deliberately not parked:
+  it is broken rather than slow, so it keeps failing loudly instead of being
+  reported as lazy/recoverable, and panics are now counted separately from
+  timeouts in the warm-boot summary (see
+  [#4087](https://github.com/bobmatnyc/trusty-tools/issues/4087)).
+- The orphan reaper no longer defers indefinitely on ambiguous relocation
+  candidates. The first ambiguous observation is stamped and logged at ERROR (so
+  it reaches `errors.jsonl` / `tm doctor` rather than only the log file), and
+  after a grace period — 7 days by default, tunable via
+  `TRUSTY_AMBIGUOUS_ROOT_GRACE_SECS`, disabled with `0` — the stale *registration*
+  is removed with a logged warning. On-disk index data is never deleted, so the
+  entry stays recoverable with `trusty-search index <path>` (see
+  [#4095](https://github.com/bobmatnyc/trusty-tools/issues/4095)).
+- An index whose vector layer warm-booted empty is no longer left permanently
+  broken while still self-reporting `ready`. Two defects combined: the vector
+  layer never recovered, and the status surface never admitted it
+  ([#4707](https://github.com/bobmatnyc/trusty-tools/issues/4707)).
+  - **Recovery.** When warm-boot's `UsearchStore::load_from` discards a snapshot
+    (the `#2922` size floor, a corrupt sidecar, the `#3970` torn-pairing guard)
+    the store falls back to a fresh empty one. Every later save of that empty
+    store was then correctly refused by the `#1711` data-loss guard — and
+    nothing further happened, so the index served zero vectors forever with an
+    intact snapshot sitting on disk. After refusing the write, `save()` now
+    adopts that on-disk snapshot, so the vector lane recovers without a reindex.
+    The `#1711` guard is unchanged and nothing is ever written on that path;
+    adoption only moves in-memory state towards what is already durable, and
+    reuses `load_from`, so a truncated or torn snapshot is rejected by exactly
+    the code that rejects it at warm-boot. The `#1717` shrink refusal
+    deliberately does not recover this way — a partial in-memory index may hold
+    vectors disk does not.
+  - **Honest health.** The semantic stage is no longer published as `ready`
+    when the live vector store holds zero vectors, a corpus exists, and an
+    embedder is wired. An all-hash-skipped incremental reindex legitimately
+    embeds nothing (`#868`), and both the fast pass and the deferred-embed pass
+    marked `ready` on that basis without ever consulting the store they were
+    vouching for. The stage now reports `failed` with an actionable reason, so
+    `search_capabilities` stops advertising `vector` and the search handler
+    keeps down-shifting queries to the working lexical lane instead of routing
+    them through a query-embed step whose failure surfaced as
+    `500 internal search error` on every query.
+
+### Security
+
+- boot reconcile no longer indexes gitignored files when a git probe fails (closes [#4733](https://github.com/bobmatnyc/trusty-tools/issues/4733))
+  - `head_sha()` returns `None` for a repo git merely declined to read — a stale worktree gitlink, `detected dubious ownership`, an unreadable `.git` — and reconcile dropped into the mtime catch-up walk meant for genuinely non-git roots. That walk honours `SKIP_DIRS` but not `.gitignore`, so previously-excluded files entered the corpus and became retrievable through the `search` and `grep` MCP tools
+  - a new three-state `core::git::probe_work_tree` gates it: the mtime path now requires a CORROBORATED "no repository here". A work tree that has commits but was never stamped gets a full background reindex instead — safe regardless of git's health, because the reindex walk drives the `ignore` crate with `require_git(false)` and so applies `.gitignore` even when git cannot read the repository
+  - a work tree with NO usable HEAD (an unborn `git init`, or a repo git declined to read) is left untouched and counted under a new `skipped_unresolvable_git` field on `GET /health`'s reconcile summary. A reindex there could not converge — `finish_reindex` re-stamps `indexed_head_sha` from the same `head_sha` that returned `None`, so it would re-walk the whole tree on every boot forever. Reporting it distinctly keeps a security refusal from reading as ordinary emptiness
+  - the exit code is not a classifier (git exits 128 for every fatal, and a bare repo exits 0 printing `false`), so the probe matches only the parenthesised `not a git repository (or any of the parent directories)` stderr and corroborates it against an ancestor `.git` witness on a canonicalised path
 
 ---
 ## [0.39.1] — 2026-07-26

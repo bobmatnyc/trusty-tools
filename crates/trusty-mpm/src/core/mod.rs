@@ -26,6 +26,9 @@ pub mod bundle;
 // `instruction_package`. Byte-identical to the legacy assembly it replaces; the
 // override configurations stay on that legacy path by design.
 pub mod bundled_pm_package;
+// #4442/#4448: the ONE bundled-agent name roster, shared by `tm doctor`'s
+// asset_tier probe (which reports) and the quarantine (which moves).
+pub mod bundled_roster;
 // DOC-28 cutover bridge: incremental catch-up runtime — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod catchup;
 pub mod circuit;
@@ -39,6 +42,10 @@ pub mod claude_env_scrub;
 // overrides. Ships before the floor text that advertises the mechanism —
 // advertising an override no code reads is issue #381 verbatim.
 pub mod claude_md_sections;
+// Issue #4754: the WRITER counterpart to `claude_md_sections` — the single
+// owner of `CLAUDE.md` section-override edits. Idempotent by construction, and
+// it borrows the reader's grammar rather than spelling a second one.
+pub mod claude_md_writer;
 // Issue #4072: one process-wide lock every `~/.claude.json` read-modify-write
 // seeder holds, so concurrent daemon provisioning cannot lose a trust entry.
 pub mod claude_json_guard;

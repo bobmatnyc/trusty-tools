@@ -9,6 +9,7 @@
 //! Test: `app_state_*` and `session_e2e_*` in `super::tests`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -58,6 +59,19 @@ pub struct AppState {
     /// `/api/tm/*` routes return 503 in that case so the UI can degrade
     /// gracefully without crashing the server.
     pub(super) tm_manager: Option<Arc<Mutex<TmManager>>>,
+    /// #4703: where `submit_task` records attendance, resolved ONCE here
+    /// rather than per-request inside the handler.
+    ///
+    /// Why: the handler used to call the `$HOME`-resolving `note_turn`, which
+    /// made "submitting a task records attendance" untestable — the natural
+    /// test wrote into the developer's real `~/.trusty-agents` and had nothing
+    /// to assert against, so it passed whether or not the hook worked. Held on
+    /// the state — the shape `Repl::attendance_root` already uses — a test
+    /// overwrites it with a tempdir exactly as `repl::tests` does.
+    /// `None` means no home directory could be resolved; recording is then a
+    /// documented no-op, never an error.
+    /// Test: `submit_task_records_attendance_under_the_injected_root`.
+    pub(super) attendance_root: Option<PathBuf>,
 }
 
 impl Default for AppState {
@@ -67,6 +81,7 @@ impl Default for AppState {
             docs_index: None,
             recap_tracker: Arc::new(Mutex::new(RecapTracker::new(RecapConfig::default()))),
             tm_manager: None,
+            attendance_root: crate::attendance::default_attendance_root().ok(),
         }
     }
 }
@@ -81,11 +96,11 @@ impl AppState {
     /// What: Same as `Default` but with `docs_index = Some(index)`.
     /// Test: `docs_search_*` in `super::tests`.
     pub fn with_docs_index(index: Arc<crate::docs_index::DocsIndex>) -> Self {
+        // #4703: built ON `Default` rather than re-listing every field, so a
+        // field added later cannot be silently dropped from this constructor.
         Self {
-            inner: Arc::default(),
             docs_index: Some(index),
-            recap_tracker: Arc::new(Mutex::new(RecapTracker::new(RecapConfig::default()))),
-            tm_manager: None,
+            ..Self::default()
         }
     }
 
@@ -118,8 +133,8 @@ impl AppState {
         Self {
             inner: Arc::new(Mutex::new(store)),
             docs_index: index,
-            recap_tracker: Arc::new(Mutex::new(RecapTracker::new(RecapConfig::default()))),
             tm_manager,
+            ..Self::default()
         }
     }
 

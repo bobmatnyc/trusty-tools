@@ -245,6 +245,24 @@ pub struct PersistedIndex {
     /// covered by `prune_orphans::tests`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_identity: Option<String>,
+
+    /// #4095: unix timestamp when this entry's root was FIRST found missing
+    /// with multiple ambiguous relocation candidates; `None` while it resolves
+    /// cleanly.
+    ///
+    /// Why: the relocation scan defers on ambiguity and, before this field,
+    /// never revisited — so a deferral was permanent registry debris that kept
+    /// `search_health` reporting `degraded` forever. A live daemon carried 11
+    /// such entries deferred continuously since 2026-06-03. The deferral clock
+    /// must survive daemon restarts (the incident spanned many), so it lives in
+    /// `indexes.toml` rather than in memory.
+    /// What: stamped on the first ambiguous observation and cleared whenever
+    /// the entry resolves again; the reaper compares it against
+    /// `orphan_reaper::ambiguous_root_grace_secs()` to decide when to drop the
+    /// *registration* (never the on-disk data).
+    /// Test: `classify_ambiguous_root_*` in `service::orphan_reaper`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguous_root_since_unix: Option<u64>,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -342,6 +360,7 @@ impl Default for PersistedIndex {
             last_queried_unix: None,
             last_indexed_unix: None,
             repo_identity: None,
+            ambiguous_root_since_unix: None,
         }
     }
 }
@@ -367,9 +386,14 @@ pub struct IndexRegistryFile {
 /// `dirs::data_local_dir()` (NSFileManager-backed) can return None on macOS 26:
 /// (1) `TRUSTY_DATA_DIR` env var, (2) `dirs::data_local_dir()`,
 /// (3) `$HOME`-relative path via `service::data_dir::data_dir_home_fallback`.
+/// Issue #4094: in test builds the un-overridden fallback resolves to an
+/// isolated per-process directory instead of the developer's live data dir,
+/// so a test that never sets `TRUSTY_DATA_DIR` cannot register indexes in the
+/// real `indexes.toml` (see [`default_data_dir`]).
 /// What: returns an absolute path, creating the directory if missing.
 /// Test: `data_dir_respects_trusty_data_dir_env_var`, `data_dir_override_yields_absolute_path`,
-/// `data_dir_home_fallback_path_is_absolute`.
+/// `data_dir_home_fallback_path_is_absolute`,
+/// `unit_test_data_dir_is_isolated_from_real_user_data_dir`.
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
         let dir = PathBuf::from(&override_dir);
@@ -382,6 +406,24 @@ pub fn data_dir() -> Result<PathBuf> {
         tracing::debug!("data_dir: TRUSTY_DATA_DIR override: {}", dir.display());
         return Ok(dir);
     }
+    // #4094: the fallback is cfg-split so test builds can never reach the
+    // developer's live data dir and register fixture indexes there.
+    default_data_dir()
+}
+
+/// The un-overridden data-dir fallback: the real, well-known user data
+/// location.
+///
+/// Why: split out of [`data_dir`] so the test build can substitute an
+/// isolated location without any `cfg!` branching inside the hot resolver
+/// (issue #4094).
+/// What: `dirs::data_local_dir()/trusty-search`, or the `$HOME`-relative
+/// fallback when `NSFileManager` is unavailable (issue #718: launchd
+/// posix_spawn, macOS 26).
+/// Test: exercised by every production caller; not reachable from the crate's
+/// own unit tests by construction (see the `cfg(test)` sibling below).
+#[cfg(not(test))]
+pub(super) fn default_data_dir() -> Result<PathBuf> {
     if let Some(base) = dirs::data_local_dir() {
         let dir = base.join("trusty-search");
         std::fs::create_dir_all(&dir).context("create trusty-search data dir")?;
@@ -390,6 +432,32 @@ pub fn data_dir() -> Result<PathBuf> {
     }
     // Issue #718: NSFileManager unavailable (launchd posix_spawn, macOS 26).
     super::data_dir::data_dir_home_fallback()
+}
+
+/// Test-build replacement for the un-overridden data-dir fallback.
+///
+/// Why (issue #4094): server handler tests drive `create_index` /
+/// `relocate_index` end to end, and those handlers persist through
+/// [`indexes_toml_path`] → [`data_dir`]. A test that does not set
+/// `TRUSTY_DATA_DIR` therefore wrote real entries into the developer's live
+/// `~/Library/Application Support/trusty-search/indexes.toml`, pointing at
+/// `~/.trusty-search-test-roots/…` fixtures that vanish when the test's
+/// `TempDir` drops. A live machine was found carrying 11 such stale entries,
+/// which kept `search_health` reporting `degraded` indefinitely. Remembering
+/// to set the env var in each test is exactly the discipline that failed;
+/// making the fallback unreachable at compile time in test builds cannot be
+/// forgotten, and — unlike a process-global env var — cannot be raced by a
+/// concurrently-running sibling test (the failure mode of issue #4213).
+/// What: a per-process directory under the system temp dir. Tests that DO set
+/// `TRUSTY_DATA_DIR` are unaffected — that branch still wins in [`data_dir`].
+/// Test: `unit_test_data_dir_is_isolated_from_real_user_data_dir`.
+///
+/// Scope note: `cfg(test)` covers this crate's unit tests (the whole of the
+/// documented pollution). Integration tests under `tests/` link the library
+/// built WITHOUT `cfg(test)` and must still set `TRUSTY_DATA_DIR` themselves.
+#[cfg(test)]
+pub(super) fn default_data_dir() -> Result<PathBuf> {
+    super::data_dir::unit_test_data_dir()
 }
 
 /// Path to the registry TOML file.

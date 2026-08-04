@@ -90,6 +90,18 @@ pub struct SyncAssetsReport {
     /// — e.g. a corrupt ownership ledger, which it refuses to act on.
     /// Test: `sync_assets_reports_retraction_failure_on_corrupt_manifest`.
     pub retraction_error: Option<String>,
+    /// What the #4448 shadowing-agent quarantine did, if anything.
+    ///
+    /// Why: this sweep RENAMES files in the operator's working tree. Reporting
+    /// a bare count would be worse than silence — the operator needs the
+    /// receipt path to see what moved and how to put it back. `None` on a clean
+    /// sweep so a project with nothing to fix reports nothing.
+    /// What: [`super::quarantine_shadows::summarize`]'s line on a sweep that
+    /// moved or failed on something; a refusal message when the sweep declined
+    /// to run at all (corrupt ledger, empty roster).
+    /// Test: `sync_assets_quarantines_a_shadowing_workspace_agent`,
+    /// `sync_assets_is_silent_when_nothing_shadows`.
+    pub quarantine_summary: Option<String>,
 }
 
 /// Re-run the roster + output-style deploy against an EXISTING session's
@@ -159,6 +171,23 @@ pub fn sync_session_assets(
             }
         };
 
+    // #4448: retraction's blind spot — an untracked copy written before the
+    // ownership ledger existed. Same wiring `prepare_session_inner` uses (one
+    // entry point, so the two paths cannot aim differently), same
+    // after-retraction ordering, same four-gate refusal set. Never deletes.
+    // Test: `sync_assets_quarantines_a_shadowing_workspace_agent`.
+    let quarantine_summary =
+        match super::quarantine_shadows::quarantine_workspace_shadows(fw, project_dir) {
+            Ok(report) => super::quarantine_shadows::summarize(&report),
+            Err(err) => {
+                tracing::warn!(
+                    project_dir = %project_dir.display(),
+                    "shadowing-agent quarantine refused to run during sync-assets: {err}"
+                );
+                Some(format!("agent quarantine refused: {err}"))
+            }
+        };
+
     let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
     let skill_deploy: DeployStats = deploy_all_skill_tiers(
         &plan.skill_source,
@@ -179,6 +208,7 @@ pub fn sync_session_assets(
         skills_skipped: skill_deploy.skipped,
         output_style_synced,
         retraction_error,
+        quarantine_summary,
     })
 }
 

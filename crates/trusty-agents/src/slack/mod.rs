@@ -164,6 +164,14 @@ pub async fn run_slack_bot(
     let paired: PairedChannels = Arc::new(RwLock::new(HashMap::new()));
     let dedup: Arc<Mutex<VecDeque<String>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(ENVELOPE_DEDUP_CAP)));
+    // #4703: resolve the attendance root ONCE here, then inject it down to
+    // both inbound handlers. Resolving it inside `handle_command` /
+    // `handle_message` (as those two did) made every attendance assertion on
+    // this transport land in the developer's real `~/.trusty-agents`.
+    let attendance_root: crate::attendance::AttendanceRoot =
+        crate::attendance::default_attendance_root()
+            .ok()
+            .map(Arc::new);
 
     info!(
         project = %project_path.display(),
@@ -184,6 +192,7 @@ pub async fn run_slack_bot(
             Arc::clone(&pending),
             Arc::clone(&dedup),
             Arc::clone(&rbac),
+            attendance_root.clone(),
         )
         .await
         {
@@ -211,6 +220,7 @@ async fn open_socket_and_run(
     pending: PendingPairs,
     dedup: Arc<Mutex<VecDeque<String>>>,
     rbac: Arc<SlackRbacConfig>,
+    attendance_root: crate::attendance::AttendanceRoot,
 ) -> Result<()> {
     let wss_url = open_connection(http, app_token).await?;
     info!("Slack Socket Mode connected");
@@ -272,6 +282,7 @@ async fn open_socket_and_run(
                 let paired = Arc::clone(&paired);
                 let pending = Arc::clone(&pending);
                 let rbac = Arc::clone(&rbac);
+                let attendance_root = attendance_root.clone();
                 tokio::spawn(async move {
                     if let Err(e) = dispatch_envelope(
                         value,
@@ -281,6 +292,7 @@ async fn open_socket_and_run(
                         paired,
                         pending,
                         rbac,
+                        attendance_root,
                     )
                     .await
                     {
@@ -354,6 +366,7 @@ async fn dispatch_envelope(
     paired: PairedChannels,
     pending: PendingPairs,
     rbac: Arc<SlackRbacConfig>,
+    attendance_root: crate::attendance::AttendanceRoot,
 ) -> Result<()> {
     let env_type = envelope.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -425,6 +438,7 @@ async fn dispatch_envelope(
                 project_path,
                 paired,
                 rbac,
+                attendance_root,
             )
             .await
         }
@@ -462,6 +476,7 @@ async fn dispatch_envelope(
                 paired,
                 pending,
                 rbac,
+                attendance_root,
             )
             .await
         }

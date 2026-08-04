@@ -412,9 +412,9 @@ fn mask_git_shas(s: &str) -> String {
         .join(" ")
 }
 
-/// Scan `content` for the first whitespace token that looks like a genuine
-/// high-entropy secret (API key, access token, long base64/JWT-ish blob),
-/// explicitly allowlisting git-SHA-shaped hex tokens.
+/// Scan `content` for the first token that looks like a genuine high-entropy
+/// secret (API key, access token, long base64/JWT-ish blob), explicitly
+/// allowlisting git-SHA-shaped hex tokens.
 ///
 /// Why (issue #1481): credentials must never be stored, but git SHAs (the most
 /// common "high-entropy-looking" token in engineering prose) must be. A pure
@@ -422,14 +422,43 @@ fn mask_git_shas(s: &str) -> String {
 /// the SHA allowlist and keys "secret" on the character-class mix that real
 /// credentials exhibit (mixed upper+lower+digit, or known credential prefixes,
 /// or symbol-bearing base64) which a SHA never does.
-/// What: returns `Some(<redacted preview>)` for the first secret-looking token,
-/// else `None`. The preview shows the leading characters and masks the tail so
-/// the secret itself is not echoed back verbatim. Tokens are stripped of
-/// surrounding punctuation before classification.
+///
+/// Why the backtick is a delimiter (issue #4312, the FOURTH recurrence of one
+/// false-positive shape after #1667, #2800, #4216): splitting on whitespace
+/// alone made two adjacent Markdown inline-code spans joined by a bare `/` —
+/// `` `foo`/`bar` `` — arrive as ONE token. This function trims punctuation
+/// only from the OUTER boundary of each token, so the interior backticks
+/// survived, every `/`-segment failed `is_word_segment`, and the token fell to
+/// the base64 branch of [`looks_like_secret`] and was flagged. Splitting on the
+/// backtick removes that whole class, and strictly tightens detection for a
+/// credential written flush against a backtick, which previously polluted the
+/// token and defeated [`is_plausible_credential_charset`].
+///
+/// Bound on the safety of that split, stated precisely because a reader will
+/// rely on it: a backtick occurs in no *machine-generated* credential — not
+/// base64, base64url, hex or base32, and not in any provider key format
+/// (`sk-`, `ghp_`, `AKIA`, `xoxb-`, JWT). Verified exhaustively in
+/// `real_secrets_still_blocked_after_4312_backtick_split`. It is NOT true of a
+/// *user-chosen* password inside a connection-string URL, where the charset is
+/// unbounded and a literal backtick is legal: `mongodb://user:pa` + backtick +
+/// `ss@host` splits into two fragments and is missed. The adversarial delta is
+/// nil — the detector has always split on whitespace, so deliberate evasion
+/// costs a space either way — but this is an accidental-storage hygiene gate,
+/// not an adversarial control, and the limitation is real.
+///
+/// What: returns `Some(<redacted preview>)` for the first secret-looking
+/// token, else `None`. Tokens are delimited by whitespace or a backtick, then
+/// stripped of surrounding punctuation before classification. The preview
+/// shows the leading characters and masks the tail so the secret itself is not
+/// echoed back verbatim.
 /// Test: `secret_token_is_blocked`, `git_sha_prose_is_accepted`,
-/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`.
+/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`,
+/// `backtick_joined_spans_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_backtick_split`.
 pub fn find_secret_token(content: &str) -> Option<String> {
-    for raw in content.split_whitespace() {
+    // #4312: backticks delimit Markdown inline-code spans and occur in no
+    // machine-generated credential, so split on them alongside whitespace.
+    for raw in content.split(|c: char| c.is_whitespace() || c == '`') {
         let tok =
             raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
         if looks_like_secret(tok) {
@@ -492,55 +521,141 @@ const SECRET_PREFIXES: &[&str] = &[
     "asia",
 ];
 
-/// True when `seg` is a "uniform-case word segment": non-empty, consists only
-/// of ASCII alphanumeric chars (no punctuation), and every alphabetic char is
-/// either all-lowercase or all-uppercase (no internal mixed case within the
-/// segment). Digits count as case-neutral.
+/// Characters that separate the words of a human-readable compound identifier.
+///
+/// Why (issue #4739): [`is_segmented_identifier`] split on `-` alone, so an
+/// ordinary dotted filename (`Agents.app.bak-20260729-000028`) was segmented
+/// into `["Agents.app.bak", "20260729", "000028"]` — and the first segment,
+/// carrying two case runs across its dots, could not be a word. `.` and `_`
+/// delimit identifier words exactly as `-` does; treating them as delimiters is
+/// what lets the per-segment predicate see words instead of a blob.
+///
+/// Why this does not widen the base64 branch: [`is_structural_token`] returns
+/// before reaching its segmented-identifier branch whenever the token contains
+/// `+`, `=`, or `/` — which is precisely the `has_b64_sym` set. The segmented
+/// branch is therefore reachable only for tokens the base64 branch can never
+/// fire on, so this delimiter set is confined to the mixed-case branch.
+/// What: the delimiter set `-`, `_`, `.` used by both `contains` and `split`.
+/// Test: `dotted_capitalised_filenames_are_not_flagged`.
+const IDENTIFIER_DELIMITERS: [char; 3] = ['-', '_', '.'];
+
+/// True when `seg` reads as a single human-readable word: all-lowercase,
+/// ALL-UPPERCASE, or Capitalized. Digits are case-neutral, so a digit-only
+/// segment (`20260729`) qualifies.
 ///
 /// Why: this is the per-segment predicate used by [`is_segmented_identifier`]
-/// to determine whether a hyphen-delimited token reads like a compound
-/// human-readable identifier (`2-medium->REQUEST_CHANGES`) vs. a random
-/// mixed-case credential blob (`AbCd1234-EfGh5678`).
-/// What: strips leading/trailing non-alnum chars (from arrow punctuation like
-/// `>`, `<`), then checks all-lowercase-or-digit or all-uppercase-or-digit.
-/// Test: `structural_tokens_are_not_flagged`.
-fn is_uniform_word_segment(seg: &str) -> bool {
+/// to tell a compound human-readable identifier (`2-medium->REQUEST_CHANGES`,
+/// `Agents.app.bak-20260729-000028`) from a random mixed-case credential blob
+/// (`AbCd1234-EfGh5678`).
+///
+/// Why Capitalized was added (issue #4739, the FIFTH recurrence in this
+/// detector after #1667, #2800, #4216 and #4312): admitting only all-lower and
+/// all-upper meant a leading capital — the single most ordinary thing about an
+/// English word or a macOS app bundle name — read as internal mixed case, so
+/// `Agents.app.bak-20260729-000028` fell through to the credential heuristic.
+///
+/// The bound this predicate actually holds, stated exactly because a reader
+/// will rely on it and because #4723 shipped an absolute here that a
+/// measurement disproved: a segment that is not uniformly uppercase admits **at
+/// most one uppercase letter, and only as its first letter**. That is what
+/// keeps the run-of-two case alternation of an encoded blob (`AbCd`, `EfGh`)
+/// out — two uppercase letters in a non-uppercase segment is disqualifying.
+///
+/// The ACCEPTED side of that bound, stated because the rejected side alone
+/// would read as a stronger guarantee than this predicate gives: what
+/// [`is_segmented_identifier`] admits is a token whose **every segment is
+/// independently case-uniform**. At short segment lengths that includes shapes
+/// which are not human words at all —
+/// `Xy7-Kp2-Qm9-Rt4-Vw8-Nz3-Bc6-Fj0` and `A1b2-C3d4-E5f6-G7h8-I9j0-K1l2` are
+/// both admitted, and neither is a filename. They are a real, measured miss,
+/// not a hypothetical.
+///
+/// Why that is an acceptable price rather than a hole: a *generated* credential
+/// essentially never satisfies per-segment case uniformity, because it is not
+/// segmented into short groups in the first place, and if it is, every group
+/// must independently land in one of three case shapes. Treating a short
+/// alphanumeric segment as case-uniform with probability roughly ¼ (an
+/// estimate, assuming uniform draws from a mixed alphabet — not a measured
+/// constant), an eight-segment token clears the bar about `(1/4)^8` of the
+/// time, order 1 in 10^4–10^5. Everything **generated** rather than
+/// **composed** — bare blobs, base64, base64url, JWTs, provider-prefixed keys —
+/// carries no such segmentation and still flags. The exposure is to a
+/// credential a human deliberately composed to look like an identifier, which
+/// is the accidental-storage hygiene threat model this module has always had,
+/// not an adversarial one.
+///
+/// The earlier revision of this doc illustrated the accepted side with
+/// `Abcd-1234-Efgh-5678`. That example was wrong: at 19 characters it is below
+/// `looks_like_secret`'s own 20-char floor, so it never reaches this branch and
+/// could not demonstrate anything about it. `Abcd-1234-Efgh-5678-Ijkl` (24) is
+/// the corrected form and is genuinely admitted here.
+///
+/// Known bound, deliberately not fixed: CamelCase (`TrustyMemory`,
+/// `MyDocument`) has two capitalized runs and is still not a word here, so
+/// `TrustyMemory.app.bak-20260801-120000` remains a false positive. Admitting
+/// it would require accepting multi-uppercase segments, which is the exact
+/// signature of `AbCdEfGhIjKlMnOpQrSt-1234` — a credential miss. Measured, not
+/// assumed; see the residue assertion in the test below.
+/// What: strips leading/trailing non-alnum chars (arrow punctuation like `>`,
+/// `<`), then accepts when the alphabetic characters are all-lowercase,
+/// all-uppercase, or a single leading uppercase followed by lowercase. Interior
+/// non-alphanumeric characters are ignored rather than rejected — this
+/// predicate constrains case, not charset.
+/// Test: `structural_tokens_are_not_flagged`,
+/// `dotted_capitalised_filenames_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4739_capitalised_segments`,
+/// `per_segment_case_uniformity_is_a_known_accepted_bound`.
+fn is_human_word_segment(seg: &str) -> bool {
     let s = seg.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     if s.is_empty() {
         return false;
     }
-    // All alphabetic chars in segment must share a single case.
-    let all_lower = s
-        .chars()
-        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase());
-    let all_upper = s
-        .chars()
-        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
-    all_lower || all_upper
+    let alphas: Vec<char> = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    // Digit-only segments are case-neutral (`20260729`, `000028`).
+    let Some((first, rest)) = alphas.split_first() else {
+        return true;
+    };
+    let rest_all_lower = rest.iter().all(|c| c.is_ascii_lowercase());
+    let rest_all_upper = rest.iter().all(|c| c.is_ascii_uppercase());
+    // #4739: `lowercase` | `UPPERCASE` | `Capitalized`. A leading uppercase may
+    // be followed by either case run (Capitalized or ALL-UPPERCASE); a leading
+    // lowercase may only be followed by lowercase.
+    if first.is_ascii_uppercase() {
+        rest_all_lower || rest_all_upper
+    } else {
+        rest_all_lower
+    }
 }
 
-/// True when `token` looks like a compound identifier whose hyphen-separated
-/// segments are each uniform-case words (e.g. `2-medium->REQUEST_CHANGES`,
-/// `trusty-review-v0.6.0`, `snake-case-value`).
+/// True when `token` looks like a compound identifier whose delimiter-separated
+/// segments are each human-readable words (e.g. `2-medium->REQUEST_CHANGES`,
+/// `trusty-review-v0.6.0`, `Agents.app.bak-20260729-000028`).
 ///
 /// Why (issue #1667): the mixed-case-plus-digit heuristic in
 /// [`looks_like_secret`] fires on `2-medium->REQUEST_CHANGES` because the
 /// compound token contains lower (`medium`), upper (`REQUEST_CHANGES`), and
-/// digit (`2`) when considered as a whole. But each segment is internally
-/// uniform-case, which is the hallmark of a human-readable compound
-/// identifier, not a random credential blob.
-/// What: requires at least two non-empty segments after splitting on `-`,
-/// with each segment passing [`is_uniform_word_segment`].
-/// Test: `structural_tokens_are_not_flagged`.
+/// digit (`2`) when considered as a whole. But each segment is internally a
+/// single word, which is the hallmark of a human-readable compound identifier,
+/// not a random credential blob.
+///
+/// Why the delimiter set widened (issue #4739): splitting on `-` alone left
+/// every dot- and underscore-joined filename as one unsplittable segment. See
+/// [`IDENTIFIER_DELIMITERS`] for why that widening cannot reach the base64
+/// branch.
+/// What: requires at least two segments after splitting on
+/// [`IDENTIFIER_DELIMITERS`], each passing [`is_human_word_segment`] (which
+/// rejects the empty segment a trailing delimiter produces).
+/// Test: `structural_tokens_are_not_flagged`,
+/// `dotted_capitalised_filenames_are_not_flagged`.
 fn is_segmented_identifier(token: &str) -> bool {
-    if !token.contains('-') {
+    if !token.contains(IDENTIFIER_DELIMITERS) {
         return false;
     }
-    let segments: Vec<&str> = token.split('-').collect();
+    let segments: Vec<&str> = token.split(IDENTIFIER_DELIMITERS).collect();
     if segments.len() < 2 {
         return false;
     }
-    segments.iter().all(|s| is_uniform_word_segment(s))
+    segments.iter().all(|s| is_human_word_segment(s))
 }
 
 /// True when `token` is a structured path/slug/key=value/compound-identifier
@@ -556,15 +671,24 @@ fn is_segmented_identifier(token: &str) -> bool {
 /// causing a false positive (#1676).
 /// This function recognises those structural shapes and short-circuits the
 /// two dangerous branches in `looks_like_secret`.
+///
+/// How the three branches divide the work (issue #4739): branches (a) and (b)
+/// fire only on tokens carrying `=` or `/`, and branch (a)'s `+` guard returns
+/// first — so (a) and (b) are the ones that can rescue a token from the base64
+/// branch. Branch (c) is reachable only after all of `+`, `=` and `/` are ruled
+/// out, i.e. only for tokens on which `has_b64_sym` is false, so it serves the
+/// mixed-case branch exclusively. That partition is why a fix to (c) cannot
+/// loosen base64 detection.
 /// What: returns `true` for (a) `=`-containing tokens where the LHS is a
 /// word segment and the RHS is itself structural (a word segment OR a
 /// slash-path), checked before the slash-path branch so that tokens like
 /// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens
-/// where every `/`-segment is word-like; or (c) hyphen-segmented compound
-/// identifiers where each segment is uniform-case. A token with `+` is
-/// never structural (`+` never appears in identifiers).
+/// where every `/`-segment is word-like; or (c) `-`/`_`/`.`-segmented compound
+/// identifiers where each segment is a single human-readable word. A token with
+/// `+` is never structural (`+` never appears in identifiers).
 /// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`,
-/// `key_equals_slashpath_not_flagged` (issue #1676 regression tests).
+/// `key_equals_slashpath_not_flagged` (issue #1676 regression tests),
+/// `dotted_capitalised_filenames_are_not_flagged` (issue #4739).
 fn is_structural_token(token: &str) -> bool {
     // `+` is unambiguously base64 — no structural pattern uses it.
     if token.contains('+') {
@@ -697,7 +821,19 @@ fn looks_like_secret(token: &str) -> bool {
     let has_digit = token.chars().any(|c| c.is_ascii_digit());
     let has_b64_sym = token.chars().any(|c| matches!(c, '+' | '/' | '='));
     // base64/url-safe blob: long, not structural, and carries a base64 symbol.
-    if has_b64_sym && (has_lower || has_upper || has_digit) {
+    //
+    // #4312: two gates, both narrowing an ≥20-char-plus-a-slash rule that four
+    // rounds of false positives (#1667, #2800, #4216, #4312) all bottomed out
+    // in. (1) [`is_plausible_b64_charset`] — the same treatment #2442 gave the
+    // mixed-case branch below. (2) an entropy floor: base64 encodes bytes, so a
+    // ≥20-char encoded run all but certainly carries an uppercase letter or a
+    // digit; an all-lowercase run is English. URL-shaped credentials are
+    // structured, not encoded, so they are exempted by shape — see
+    // [`is_url_credential_shaped`].
+    if has_b64_sym
+        && is_plausible_b64_charset(token)
+        && (is_url_credential_shaped(token) || has_upper || has_digit)
+    {
         return true;
     }
     // Mixed-case alphanumeric of credential length: SHAs are single-case hex,
@@ -715,6 +851,12 @@ fn looks_like_secret(token: &str) -> bool {
     // Gate the fallback on [`is_plausible_credential_charset`] so it only
     // fires for tokens shaped like an actual bare credential (alphanumeric
     // plus the `-`/`_`/`.` separators used by JWTs and slug-style API keys).
+    //
+    // #4739: that charset gate is necessary but not sufficient — an ordinary
+    // dotted filename is built from exactly this charset. The shape gate is
+    // `is_structural_token` branch (c), widened there rather than here so the
+    // two branches keep sharing one notion of "human-readable token" instead of
+    // each growing its own allowlist for the fifth time.
     has_lower && has_upper && has_digit && is_plausible_credential_charset(token)
 }
 
@@ -754,6 +896,100 @@ fn is_issue_number_list(token: &str) -> bool {
         && token
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'#' | b'/'))
+}
+
+/// True when every character in `token` could plausibly appear in a base64,
+/// base64url, or URL-embedded credential: ASCII alphanumeric, the base64
+/// symbols `+` `/` `=`, the base64url symbols `-` `_`, and the `.` `:` `@` that
+/// connection-string credentials (`postgres://user:pass@host/db`) carry.
+///
+/// Why (issue #4312): the base64 branch of [`looks_like_secret`] fired on ANY
+/// ≥20-char token containing a `/` plus one letter that [`is_structural_token`]
+/// declined to rescue. That is the root cause of four rounds of false positives
+/// — #1667 (slash paths), #2800 / #4216 (issue-number lists), #4312 (backtick
+/// spans) — each previously patched with another allowlist for one token shape.
+/// The shapes kept recurring because `is_word_segment`'s charset is deliberately
+/// narrow, and every character outside it (backtick, `*`, `"`, `'`, `[`, `(`,
+/// `|`, `%`, `,`) routes an ordinary piece of Markdown prose into a credential
+/// verdict. Gating the branch on the charset a real blob is *made of* attacks
+/// the cause instead of enumerating the symptoms.
+///
+/// Why this is safe: every machine-generated credential format this module
+/// targets is drawn from this charset by construction — standard base64
+/// (`A–Za–z0–9+/=`), base64url (`A–Za–z0–9-_=`), JWTs (base64url plus `.`),
+/// and connection-string URLs (`scheme://user:pass@host/db`). Prose punctuation
+/// is what the gate excludes, and prose punctuation is exactly what no encoder
+/// emits. The known-prefix layer (`sk-`, `ghp_`, `AKIA`, …) is checked earlier
+/// and is unaffected, so provider keys never depend on this branch at all.
+///
+/// Known bound: a token built only from this charset still reaches the branch,
+/// so a hyphen/plus-joined English phrase such as `ticker+shutdown-channel`
+/// remains a false positive. The second gate is what resolves it — the
+/// `has_upper || has_digit` entropy floor in [`looks_like_secret`], with
+/// [`is_url_credential_shaped`] exempting connection strings from that floor.
+/// What: returns `true` iff every char is ASCII alphanumeric or in
+/// `{'+', '/', '=', '-', '_', '.', ':', '@'}`.
+/// Test: `four_4312_acceptance_cases_are_not_flagged`,
+/// `markdown_decorated_paths_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
+fn is_plausible_b64_charset(token: &str) -> bool {
+    token.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_' | '.' | ':' | '@')
+    })
+}
+
+/// True when `token` is a URL that actually carries credentials — a `://`
+/// scheme separator followed by a colon-bearing userinfo before the first `@`,
+/// i.e. the `scheme://user:pass@host` shape.
+///
+/// Why (issue #4312, repro 4): the entropy floor added alongside this
+/// (`has_upper || has_digit` in [`looks_like_secret`]'s base64 branch) is what
+/// finally excludes `ticker+shutdown-channel` — a lowercase English phrase
+/// whose every character is individually credential-plausible. That floor
+/// would also drop an all-lowercase connection string
+/// (`postgres://user:password@host/database`), which is a genuine credential
+/// this module has always caught. A connection string is not a blob: it is a
+/// structured URL whose password sits inside it, so it is exempted by shape
+/// rather than by entropy.
+///
+/// Why the predicate is this narrow: the first cut exempted any token
+/// containing `://` OR `@`, which held open 14 URL-shaped prose false
+/// positives the floor would otherwise have fixed — bare `https://` doc links,
+/// `git@github.com:…` remotes, plain `mailto`-ish addresses. Requiring the
+/// `user:pass@` userinfo keeps every real connection string.
+///
+/// Cost of that narrowing, stated exactly because this is a security module:
+/// this predicate is an OR term inside the branch's conjunction, so widening it
+/// widens flagging and **narrowing it narrows flagging** — narrowing therefore
+/// CAN turn a caught credential into a miss. The exposure is bounded to tokens
+/// that reach this branch, pass the charset gate, and carry neither an
+/// uppercase letter nor a digit, i.e. a userinfo-free URL whose path secret is
+/// all-lowercase:
+///
+/// ```text
+/// https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij
+///     origin/main: flagged  ->  here: missed
+/// ```
+///
+/// That is the entropy floor's already-accepted bound (an all-lowercase run is
+/// read as English), not a new class of hole — the broad predicate shielded
+/// these incidentally, never by design. Real webhook tokens are near-universally
+/// mixed-case or digit-bearing and stay caught; see the known-miss assertion in
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
+/// What: returns `true` iff `token` contains `://` and the text between it and
+/// the first following `@` contains a `:`.
+/// Test: `four_4312_acceptance_cases_are_not_flagged`,
+/// `url_shaped_prose_is_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
+fn is_url_credential_shaped(token: &str) -> bool {
+    // #4312: `scheme://user:pass@host` only — a bare URL carries no userinfo.
+    let Some((_, after_scheme)) = token.split_once("://") else {
+        return false;
+    };
+    let Some((userinfo, _)) = after_scheme.split_once('@') else {
+        return false;
+    };
+    userinfo.contains(':')
 }
 
 /// True when every character in `token` could plausibly appear in a bare

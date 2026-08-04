@@ -79,12 +79,11 @@ fn recheck_refuses_a_worktree_a_session_claims_now() {
 
 #[test]
 fn recheck_refuses_a_worktree_locked_after_the_survey() {
-    // `git worktree lock` is the operator's explicit "do not remove this". git
-    // honours it (`worktree remove --force` exits 128) but
-    // `remove_session_worktree` treats that as a git failure and falls back to
-    // `remove_dir_all`, which deletes the directory anyway — so the lock can
-    // ONLY be honoured by this re-check. The survey's `Admission` was computed
-    // before the lock existed.
+    // `git worktree lock` is the operator's explicit "do not remove this". The
+    // survey's `Admission` was computed before the lock existed, so this
+    // re-check is what notices it. Since #4732 the remover ALSO refuses a
+    // locked worktree, but that is a second line of defence: this pass must
+    // never propose the candidate in the first place.
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("locked-2919");
     land(&path);
@@ -374,9 +373,9 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
 #[test]
 fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
     // The operator runs `git worktree lock` mid-sweep. This fails if the git
-    // re-check is removed — and note `remove_session_worktree` would delete it
-    // regardless via its `remove_dir_all` fallback, so this re-check is the
-    // ONLY thing honouring the lock.
+    // re-check is removed. Since #4732 the remover would also refuse, but the
+    // sweep must not get that far — a candidate it proposes and then cannot
+    // remove is a reported near-miss, not a clean pass.
     let fx = GitWorktreeFixture::new();
     let path = fx.add_worktree("lock-race-2919");
     land(&path);
@@ -670,34 +669,42 @@ fn survey_discloses_a_partially_measured_reclaimable_set() {
     );
 }
 
-/// Pins what `remove_session_worktree` ACTUALLY returns when git's own removal
-/// fails and the `remove_dir_all` fallback succeeds (#2919).
+/// `remove_session_worktree` must REFUSE a git-locked worktree, not delete it
+/// (#4732 — this test asserted the opposite until #4732 fixed the remover).
 ///
-/// Why: round-3 review read `decommission.rs` as returning `false` on that
-/// path, which would route a genuinely-deleted worktree into `removal_failed`.
-/// It does not — those `false` values bind `git_success` for the prune/branch-D
-/// step and the function still falls through to its final `true`. Rather than
-/// argue from a reading, this test forces the exact condition with a REAL
-/// git-locked worktree (`git worktree remove --force` exits 128) and asserts
-/// both the return value and that the directory is gone, so the `&&` in the
-/// reclaim loop is pinned against either reading drifting.
+/// Why: `git worktree lock` is the only mechanism an operator has to say "leave
+/// this alone", and git enforces it by exiting 128. The remover read every
+/// non-zero exit as licence to run `std::fs::remove_dir_all` by hand, so
+/// locking a worktree to protect it was precisely what got it deleted. That
+/// behaviour was pinned HERE, by a #2919 test written to settle a different
+/// question (what the return value means when the fallback succeeds) — which is
+/// why the defect survived a round of review that read this file.
+///
+/// The return-value question that test was settling still matters, so it is
+/// kept: a refusal must report NOT-removed, or the reclaim loop's
+/// `outcome.removed() && !path.exists()` would count a surviving worktree as
+/// reclaimed.
 #[test]
-fn remove_session_worktree_reports_success_when_the_fallback_removes_it() {
+fn remove_session_worktree_refuses_a_git_locked_worktree() {
     let fx = GitWorktreeFixture::new();
-    let path = fx.add_worktree("fallback-removal-2919");
+    let path = fx.add_worktree("locked-refusal-4732");
     land(&path);
+    std::fs::write(path.join("precious.txt"), "operator work\n").expect("write precious file");
     fx.lock_worktree(&path);
 
-    let reported = crate::session_manager::decommission::remove_session_worktree(&path);
+    let outcome = crate::session_manager::decommission::remove_session_worktree(&path);
     assert!(
-        !path.exists(),
-        "precondition: the fallback really did remove the directory"
+        path.exists() && path.join("precious.txt").exists(),
+        "a locked worktree must survive — git declined, and declining is a \
+         refusal, not a failure to work around"
     );
     assert!(
-        reported,
-        "a worktree that is genuinely gone must be reported as removed, not as \
-         `removal_failed` — the reclaim loop's `remove_session_worktree(..) && \
-         !path.exists()` depends on this"
+        !outcome.removed(),
+        "and the refusal must be reported as NOT removed: {outcome:?}"
+    );
+    assert!(
+        outcome.reason().is_some(),
+        "with a reason the caller can surface: {outcome:?}"
     );
 }
 

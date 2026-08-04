@@ -115,7 +115,7 @@ async fn stamp_handle_produces_valid_rfc3339_date() {
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -310,7 +310,7 @@ async fn reconcile_stamps_head_sha_after_delta() {
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -413,13 +413,19 @@ async fn reconcile_up_to_date_index_is_noop() {
         skip_vector: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-            chunk_count: 0,
+            // #4680: this premise is a POPULATED index. Reconcile now checks
+            // "has this index ever been walked?" before it consults any
+            // staleness marker, so a `chunk_count: 0` handle (lexical =
+            // InProgress) is classified as stuck and re-driven — it never
+            // reaches the git/mtime path this test is about. `1` restores the
+            // intended subject: an index that HAS data and may have drifted.
+            chunk_count: 1,
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -483,13 +489,19 @@ async fn reconcile_stale_index_stamps_new_sha() {
         skip_vector: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-            chunk_count: 0,
+            // #4680: this premise is a POPULATED index. Reconcile now checks
+            // "has this index ever been walked?" before it consults any
+            // staleness marker, so a `chunk_count: 0` handle (lexical =
+            // InProgress) is classified as stuck and re-driven — it never
+            // reaches the git/mtime path this test is about. `1` restores the
+            // intended subject: an index that HAS data and may have drifted.
+            chunk_count: 1,
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -567,7 +579,7 @@ async fn apply_delta_total_failure_does_not_stamp() {
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -732,11 +744,20 @@ fn mtime_walk_caps_at_threshold_plus_one() {
     );
 }
 
-/// Why: a non-git index with no `last_indexed_unix` must be skipped (not
-/// full-reindexed) so boot does not thrash on first-run indexes.
-/// Test: build a minimal non-git handle with `indexed_head_sha = None`;
-/// call `reconcile_one_index`; assert `delta_reindexed`, `fell_back_to_full`,
-/// and `up_to_date` all remain 0 and `skipped_no_data` becomes 1.
+/// Why: a POPULATED non-git index with no `last_indexed_unix` baseline must be
+/// skipped (not full-reindexed) so boot does not thrash re-walking every
+/// non-git index that predates timestamp persistence.
+///
+/// Scope note (#4680): `skipped_no_data` is now only correct for an index that
+/// already holds data — an EMPTY non-git index reaching this branch was the
+/// production defect (it owes an initial walk, and skipping it left it at
+/// `chunk_count = 0` indefinitely). That case is covered by
+/// `stuck_unwalked_non_git_index_is_retried_not_skipped`; this test pins the
+/// remaining, still-correct half of the branch.
+/// Test: build a minimal non-git handle with `indexed_head_sha = None` and a
+/// non-empty corpus; call `reconcile_one_index`; assert `delta_reindexed`,
+/// `fell_back_to_full`, `stuck_retried`, and `up_to_date` all remain 0 and
+/// `skipped_no_data` becomes 1.
 #[tokio::test]
 async fn mtime_reconcile_skips_never_indexed_non_git_index() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
@@ -774,13 +795,19 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
         skip_vector: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-            chunk_count: 0,
+            // #4680: this premise is a POPULATED index. Reconcile now checks
+            // "has this index ever been walked?" before it consults any
+            // staleness marker, so a `chunk_count: 0` handle (lexical =
+            // InProgress) is classified as stuck and re-driven — it never
+            // reaches the git/mtime path this test is about. `1` restores the
+            // intended subject: an index that HAS data and may have drifted.
+            chunk_count: 1,
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -797,6 +824,10 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
     assert_eq!(s.delta_reindexed, 0, "must not be delta-reindexed");
     assert_eq!(s.fell_back_to_full, 0, "must not fall back to full");
     assert_eq!(s.up_to_date, 0, "must not be marked up-to-date");
+    assert_eq!(
+        s.stuck_retried, 0,
+        "a populated index must not trip the #4680 never-walked guard"
+    );
 }
 
 /// Why: `InProgressGuard` must ensure `in_progress` is `false` after all
@@ -840,13 +871,19 @@ async fn reconcile_in_progress_clears_after_tasks_complete() {
         skip_vector: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-            chunk_count: 0,
+            // #4680: this premise is a POPULATED index. Reconcile now checks
+            // "has this index ever been walked?" before it consults any
+            // staleness marker, so a `chunk_count: 0` handle (lexical =
+            // InProgress) is classified as stuck and re-driven — it never
+            // reaches the git/mtime path this test is about. `1` restores the
+            // intended subject: an index that HAS data and may have drifted.
+            chunk_count: 1,
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -922,13 +959,19 @@ async fn reconcile_summary_counts_up_to_date() {
         skip_vector: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-            chunk_count: 0,
+            // #4680: this premise is a POPULATED index. Reconcile now checks
+            // "has this index ever been walked?" before it consults any
+            // staleness marker, so a `chunk_count: 0` handle (lexical =
+            // InProgress) is classified as stuck and re-driven — it never
+            // reaches the git/mtime path this test is about. `1` restores the
+            // intended subject: an index that HAS data and may have drifted.
+            chunk_count: 1,
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
-            corpus_open_failed: false,
+            corpus_open_failure: None,
         }))),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
@@ -944,4 +987,386 @@ async fn reconcile_summary_counts_up_to_date() {
     );
     assert_eq!(s.delta_reindexed, 0);
     assert_eq!(s.fell_back_to_full, 0);
+}
+
+// ── #4680: stuck (never-walked) index recovery ───────────────────────────────
+
+/// Build a handle in the exact production-stuck shape reported in #4680:
+/// an empty durable corpus (so `derive_warm_boot_stages` classifies
+/// `lexical = InProgress`, which `lifecycle_status` renders as `"walking"`) and
+/// a default `WalkDiagnostics` (`last_walk_started_at = None`,
+/// `last_walk_files_seen = 0`, `last_walk_error = None`) — i.e. no walk has
+/// ever touched this handle.
+///
+/// Why: this is byte-for-byte what a warm-boot restore produces for an index
+/// whose corpus never got populated, and it is exactly what 221 of 222
+/// production indexes reported across 7.6 days of uptime.
+fn stuck_unwalked_handle(
+    id: &str,
+    root: &std::path::Path,
+    stored_sha: Option<String>,
+) -> Arc<crate::core::registry::IndexHandle> {
+    use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
+    use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
+
+    Arc::new(IndexHandle {
+        id: IndexId::new(id),
+        indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(id, root))),
+        root_path: root.to_path_buf(),
+        include_paths: vec![],
+        exclude_globs: vec![],
+        extensions: vec![],
+        domain_terms: vec![],
+        include_docs: true,
+        respect_gitignore: true,
+        follow_links: true,
+        extra_skip_dirs: vec![],
+        data_file_max_bytes: 0,
+        path_filter: vec![],
+        context_embedding: Arc::new(RwLock::new(None)),
+        context_summary: Arc::new(RwLock::new(None)),
+        indexed_head_sha: Arc::new(RwLock::new(stored_sha)),
+        last_indexed_at: Arc::new(RwLock::new(None)),
+        lexical_only: false,
+        skip_kg: false,
+        skip_vector: false,
+        defer_embed: false,
+        stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
+            chunk_count: 0,
+            hnsw_snapshot_ready: false,
+            graph_node_count: 0,
+            lexical_only: false,
+            skip_kg: false,
+            skip_vector: false,
+            corpus_open_failure: None,
+        }))),
+        search_pressure: Arc::new(tokio::sync::Notify::new()),
+        walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+    })
+}
+
+/// Regression guard for #4680, git path.
+///
+/// Why: restore re-derives `indexed_head_sha` from live git (#4391), so a
+/// git-backed index always presents `stored == current` on the first boot
+/// reconcile after a restart. Before this fix `reconcile_git_path` therefore
+/// counted an index holding ZERO chunks as `up_to_date` and returned — the
+/// index was never re-driven by that boot, nor by any later one, which is how
+/// 221 production indexes stayed at `chunk_count = 0` across ~106 restarts.
+/// Against the pre-fix implementation this test fails on its first assertion
+/// (`up_to_date` is 1, not 0).
+/// What: a real git repo, a handle whose stored SHA equals live HEAD, an empty
+/// corpus, and no walk ever run. Asserts reconcile classified it as stuck and
+/// re-drove it rather than declaring it current.
+#[tokio::test]
+async fn stuck_unwalked_git_index_is_retried_not_marked_up_to_date() {
+    use crate::service::server::ReconcileSummary;
+
+    let (_dir, head_sha, root) = init_git_repo_with_file("hello.rs", "fn hello() {}");
+    // Exactly what `start_restore.rs` does: stamp the handle from live git.
+    let handle = stuck_unwalked_handle("stuck-git", &root, Some(head_sha));
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.up_to_date, 0,
+        "an index with zero chunks that has never been walked must NOT be \
+         counted up-to-date just because its HEAD SHA matches (#4680)"
+    );
+    assert_eq!(
+        s.stuck_retried, 1,
+        "the stuck index must be re-driven exactly once (#4680)"
+    );
+    assert_eq!(
+        s.delta_reindexed, 0,
+        "no per-file delta applies to an index that was never populated"
+    );
+    assert!(
+        !s.degraded,
+        "re-driving a stuck index is a recovery, not a degraded outcome"
+    );
+}
+
+/// Regression guard for #4680, mtime (non-git) path.
+///
+/// Why: the production `apex` corpus lives at a non-git root
+/// (`/mnt/data/knowledge/apex`), so it never reaches the SHA comparison at all
+/// — `reconcile_mtime_path` reads `last_indexed_unix`, whose writer has no
+/// production callers (#4391), gets `None`, and files the index under
+/// `skipped_no_data`. "Never indexed ⇒ nothing to catch up" is precisely
+/// backwards for an index that owes an INITIAL walk. Against the pre-fix
+/// implementation this test fails on its first assertion (`skipped_no_data`
+/// is 1, not 0).
+/// What: a non-git tempdir holding a source file, `indexed_head_sha = None`,
+/// empty corpus, no walk ever run. Asserts the index is re-driven, not skipped.
+#[tokio::test]
+async fn stuck_unwalked_non_git_index_is_retried_not_skipped() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("doc.md"), "# knowledge corpus\n").expect("write");
+    let handle = stuck_unwalked_handle("stuck-non-git", dir.path(), None);
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "an empty, never-walked non-git index must NOT be skipped as \
+         'nothing to catch up' — it owes an initial walk (#4680)"
+    );
+    assert_eq!(
+        s.stuck_retried, 1,
+        "the stuck non-git index must be re-driven exactly once (#4680)"
+    );
+    assert_eq!(s.up_to_date, 0, "must not be marked up-to-date");
+}
+
+/// Why: the #4680 retry must be bounded to one walk per index per daemon
+/// lifetime, so an index that HAS been walked — including one whose walk
+/// legitimately found zero indexable files and therefore still reports
+/// `chunk_count = 0` — must fall through to the ordinary marker paths rather
+/// than be re-driven again. Without this bound, an index that can never
+/// produce chunks (everything gitignored or filtered out) would be re-walked
+/// on every query-wake reconcile. This is the distinction the issue reporter
+/// asked for: "walk found nothing" is not "walk never completed".
+/// What: the same stuck-shaped handle, but with `last_walk_started_at` /
+/// `last_walk_error` set the way the reindex runner sets them after a
+/// zero-file walk. Asserts the git marker path runs normally and nothing is
+/// re-driven.
+#[tokio::test]
+async fn already_walked_empty_index_is_not_re_driven() {
+    use crate::service::server::ReconcileSummary;
+
+    let (_dir, head_sha, root) = init_git_repo_with_file("hello.rs", "fn hello() {}");
+    let handle = stuck_unwalked_handle("walked-empty", &root, Some(head_sha));
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
+        diag.last_walk_files_seen = 0;
+        diag.last_walk_error = Some("walk produced zero files".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.stuck_retried, 0,
+        "an index whose walk already ran must not be re-driven, even at zero \
+         chunks — that is a legitimately-empty corpus, not a stuck one (#4680)"
+    );
+    assert_eq!(
+        s.up_to_date, 1,
+        "with the walk already done, the ordinary git marker path applies"
+    );
+}
+
+// ── #4733: a failed git probe must not downgrade to a gitignore-blind walk ──
+
+/// Premise test for the #4733 gate: the mtime walk is `.gitignore`-BLIND.
+///
+/// Why: `collect_stale_files_by_mtime` consults `SKIP_DIRS` and the walker's
+/// skip predicates only — never the repo's ignore rules, unlike the reindex
+/// walk (`respect_gitignore`). That is fine for the non-git roots the path was
+/// built for, and it is exactly why reaching it on a git root leaks. This test
+/// pins the premise so the gate below cannot be removed as "redundant".
+/// What: a `.env` that `.gitignore` excludes is nonetheless collected.
+/// Test: this test itself.
+#[test]
+fn mtime_walk_does_not_honour_gitignore() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.path().join(".env"), "AWS_SECRET_ACCESS_KEY=hunter2\n").expect("env");
+
+    let stale = collect_stale_files_by_mtime(dir.path(), 0);
+    assert!(
+        stale.iter().any(|p| p == ".env"),
+        "the mtime walk is gitignore-blind by construction — this is the hazard \
+         `probe_work_tree` gates (#4733): {stale:?}"
+    );
+}
+
+/// Regression guard for #4733, search-index leg.
+///
+/// Why: `head_sha` returns `None` for a repo git merely declined to read —
+/// a stale worktree gitlink, `detected dubious ownership`, an unreadable
+/// `.git`. Before this fix that dropped straight into `reconcile_mtime_path`,
+/// whose walk (pinned above) ignores `.gitignore`, so previously-excluded
+/// files entered the corpus and became retrievable through the `search` and
+/// `grep` MCP tools. Against the pre-fix implementation this test fails on its
+/// first assertion (`skipped_no_data` is 1, not 0).
+/// What: a directory whose `.git` is a gitlink pointing nowhere — git 2.54.0
+/// answers `fatal: not a git repository: (null)`, which contains the shorter
+/// phrase `not a git repository` while meaning the opposite. Asserts reconcile
+/// refuses outright rather than mtime-walking, and — because no HEAD exists to
+/// stamp — does not queue a reindex that could never converge.
+/// Test: this test itself.
+#[tokio::test]
+async fn broken_git_repo_refuses_rather_than_mtime_walking() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-live\n").expect("env");
+    std::fs::write(dir.path().join(".git"), "gitdir: /nonexistent/xyz-4733\n").expect("gitlink");
+
+    let handle = stuck_unwalked_handle("broken-git-4733", dir.path(), None);
+    // Defuse the #4680 never-walked guard so this test exercises the marker
+    // paths, which is where the #4733 defect lives.
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-04T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "a broken repo must never reach the mtime path (#4733)"
+    );
+    assert_eq!(
+        s.delta_reindexed, 0,
+        "a broken repo must never apply an mtime delta (#4733)"
+    );
+    assert_eq!(
+        s.skipped_unresolvable_git, 1,
+        "the refusal must report itself distinctly, not as ordinary emptiness (#4733)"
+    );
+    assert_eq!(
+        s.fell_back_to_full, 0,
+        "with no HEAD to stamp, a reindex could not converge — it must not be queued"
+    );
+    assert_eq!(s.up_to_date, 0, "must not be marked up-to-date");
+}
+
+/// Regression guard for the #4733 review round: an unborn-HEAD repo must not
+/// full-reindex on EVERY boot.
+///
+/// Why: a `git init` with nothing committed is a healthy, ordinary repo whose
+/// `git rev-parse HEAD` exits 128, so `head_sha` is `None`. The first #4733 fix
+/// routed it to `trigger_full_reindex`, but `finish_reindex` re-stamps
+/// `indexed_head_sha` from that same `None` — so `stored` never becomes `Some`,
+/// the next boot re-enters the identical arm, and the whole tree is re-walked
+/// forever. Measured against `origin/main` this was a REGRESSION, not a
+/// pre-existing property: main reported `skipped_no_data = 1` and queued
+/// nothing. Against the intermediate fix this test fails on `fell_back_to_full`
+/// (1, not 0).
+/// What: a real `git init` repo with no commits and a gitignored `.env`.
+/// Asserts reconcile neither mtime-walks it nor queues a non-converging
+/// reindex.
+/// Test: this test itself.
+#[tokio::test]
+async fn unborn_head_repo_is_refused_once_not_reindexed_every_boot() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let init = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.path().join(".env"), "AWS_SECRET_ACCESS_KEY=hunter2\n").expect("env");
+    std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").expect("rs");
+
+    let handle = stuck_unwalked_handle("unborn-head-4733", dir.path(), None);
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-04T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.fell_back_to_full, 0,
+        "a reindex here cannot stamp a SHA, so it would repeat on every boot \
+         without ever converging (#4733 review round)"
+    );
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "an unborn-HEAD repo must not reach the gitignore-blind mtime path (#4733)"
+    );
+    assert_eq!(
+        s.skipped_unresolvable_git, 1,
+        "it is refused, and the refusal is reported distinctly (#4733)"
+    );
+}
+
+/// Why: the convergence guard must not over-refuse. A work tree that HAS
+/// commits but was never stamped is exactly the case a full reindex fixes —
+/// `finish_reindex` stamps the live HEAD and the next boot takes the ordinary
+/// git path. Refusing it too would strand a real index.
+/// What: a committed git repo with `indexed_head_sha = None`. Asserts the full
+/// reindex is queued rather than refused.
+/// Test: this test itself.
+#[tokio::test]
+async fn never_stamped_git_repo_with_commits_full_reindexes_and_converges() {
+    use crate::service::server::ReconcileSummary;
+
+    let (_dir, _head_sha, root) = init_git_repo_with_file("hello.rs", "fn hello() {}");
+    let handle = stuck_unwalked_handle("never-stamped-4733", &root, None);
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-04T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.fell_back_to_full, 1,
+        "a live HEAD means one reindex stamps it and the next boot converges"
+    );
+    assert_eq!(
+        s.skipped_unresolvable_git, 0,
+        "this case is resolvable — refusing it would strand a real index"
+    );
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "and it must still never reach the gitignore-blind mtime path (#4733)"
+    );
+}
+
+/// Why: the gate must not over-refuse. A genuinely non-git root is the case the
+/// mtime path exists for; routing it to a full reindex on every boot would be a
+/// real regression for archived tarballs and mounted docs trees.
+/// What: a plain tempdir with no repository anywhere above it still reaches
+/// `reconcile_mtime_path`, which reports `skipped_no_data` (no
+/// `last_indexed_unix`) rather than `fell_back_to_full`.
+/// Test: this test itself.
+#[tokio::test]
+async fn genuinely_non_git_root_still_takes_the_mtime_path() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("doc.md"), "# docs\n").expect("write");
+
+    let handle = stuck_unwalked_handle("plain-dir-4733", dir.path(), None);
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.skipped_no_data, 1,
+        "a corroborated non-git root keeps the mtime path (#4733 must not over-refuse)"
+    );
+    assert_eq!(
+        s.fell_back_to_full, 0,
+        "no full reindex for a plain directory"
+    );
 }
