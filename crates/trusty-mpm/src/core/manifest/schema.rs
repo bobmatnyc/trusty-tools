@@ -51,6 +51,21 @@ pub struct HarnessManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentSet>,
 
+    /// `[agent_categories]` — the FRAMEWORK-TIER catalog declaration (#4760).
+    ///
+    /// Set only by the bundled `framework-manifest.toml`; no project, user, or
+    /// catalog layer is expected to carry it. See [`AgentCategories`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_categories: Option<AgentCategories>,
+
+    /// `[skill_categories]` — the FRAMEWORK-TIER skill catalog declaration
+    /// (#4765).
+    ///
+    /// Set only by the bundled `framework-manifest.toml`, like
+    /// [`Self::agent_categories`]. See [`SkillCategories`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_categories: Option<SkillCategories>,
+
     /// `[skills]` — which skills the harness deploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<SkillSet>,
@@ -116,6 +131,93 @@ pub struct AgentSet {
     /// Where the agent source files are read from.
     #[serde(default)]
     pub source: ContentSource,
+}
+
+/// `[agent_categories]` — the framework tier's catalog declaration (#4760).
+///
+/// Why: [`AgentSet`] carries exactly one flat, un-categorised selection list
+/// (`include`). It can say "deploy these names", but it cannot say "deploy these
+/// unconditionally, gate THESE on a detected language, gate THESE on a detected
+/// framework, gate THESE on a detected platform, and never deploy THESE" —
+/// four of the five buckets need a *gating rule* bound to the name, and no
+/// existing field carries a rule dimension. This is the additive extension that
+/// closes that gap. It is a separate section rather than extra keys on
+/// `[agents]` for a second reason: `[agents]` merges by WHOLE-SECTION
+/// REPLACEMENT ([`HarnessManifest::merge`]), so a project manifest that set
+/// `[agents]` at all would silently erase the framework catalog declaration.
+/// What: the five disjoint lists that partition the bundled agent catalog.
+/// `universal` deploys everywhere; `language`/`framework`/`platform` deploy only
+/// when the entry's own declared [`GatedAgent::markers`] are detected;
+/// `deprecated` never deploys and exists so a retired agent stays accounted for
+/// rather than becoming an unexplained omission. `core::manifest::framework`
+/// validates that the five lists exactly partition the bundled catalog and
+/// composes them into an [`AgentSet`].
+/// Test: `agent_categories_roundtrip` here;
+/// `core::manifest::framework_tests` for validation and composition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentCategories {
+    /// Stems deployed to every project, with no detection at all.
+    #[serde(default)]
+    pub universal: Vec<String>,
+    /// Entries deployed only when their LANGUAGE markers are detected.
+    #[serde(default)]
+    pub language: Vec<GatedAgent>,
+    /// Entries deployed only when their FRAMEWORK markers are detected.
+    #[serde(default)]
+    pub framework: Vec<GatedAgent>,
+    /// Entries deployed only when their PLATFORM markers are detected.
+    #[serde(default)]
+    pub platform: Vec<GatedAgent>,
+    /// Stems that are still bundled but are never deployed.
+    #[serde(default)]
+    pub deprecated: Vec<String>,
+}
+
+/// One marker-gated agent: the stem AND the condition that deploys it (#4765).
+///
+/// Why: declaring the category alone left the *condition* — the actual gate —
+/// in a Rust table (`project_lang.rs::LANGUAGE_ENGINEERS` / `PLATFORM_AGENTS`),
+/// so a reader asking "why did this project get `react-engineer`?" had two
+/// places to look and two places to drift. The owner ruling of 2026-08-04
+/// ("authoritative agent/skill bundling should be in framework-manifest.toml or
+/// project manifest.toml") makes the gate a manifest field: membership and
+/// condition are one declaration.
+/// What: `stem` is the agent filename without `.md`; `markers` are the paths
+/// (relative to the project root, or to any declared workspace member) whose
+/// presence selects it. The three marker forms — exact path, `*.<ext>` glob, and
+/// `<path>::<needle>` content probe — are evaluated by
+/// `core::manifest::project_lang::marker_present`, which owns the probing
+/// mechanics; this struct owns the declaration.
+/// Test: `agent_categories_roundtrip`,
+/// `core::manifest::framework_tests::gated_entry_without_markers_is_an_error`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GatedAgent {
+    /// Agent stem (filename without `.md`), e.g. `rust-engineer`.
+    pub stem: String,
+    /// Marker paths whose presence selects this agent. Must be non-empty.
+    #[serde(default)]
+    pub markers: Vec<String>,
+}
+
+/// `[skill_categories]` — the framework tier's SKILL catalog declaration (#4765).
+///
+/// Why: the same owner ruling that made the agent roster a declaration covers
+/// skills. Before this section the bundled skill roster existed only as
+/// `include_str!` rows in `bundle_all.rs`, and the human-facing list of it lived
+/// as prose in `assets/skills/tm.md` — which drifted, exactly as the agent
+/// roster did. Declaring skills here gives them the agent side's guarantee: a
+/// bundled skill nobody declared is a hard error, not a silent default.
+/// What: skills carry ONE deploy rule today — every bundled skill deploys to
+/// every project — so `universal` is the only list. No gated list is declared
+/// speculatively: when a skill first needs a marker gate, it gets a list of
+/// [`GatedAgent`]-shaped entries, exactly as the agent side has.
+/// Test: `skill_categories_roundtrip` here;
+/// `core::manifest::framework_tests::bundled_skill_roster_is_valid`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SkillCategories {
+    /// Skill stems deployed to every project, with no detection at all.
+    #[serde(default)]
+    pub universal: Vec<String>,
 }
 
 /// `[skills]` — the skill set a harness deploys.
@@ -389,7 +491,8 @@ impl HarnessManifest {
     ///   partial override like `[mcp] trusty_search = false` no longer resets the
     ///   other toggle (e.g. `trusty_memory`) back to `None` (see [`McpServers::merge`],
     ///   [`InstructionLayers::merge`]).
-    /// - **Whole-section replacement** (`[agents]`, `[skills]`, `[style]`,
+    /// - **Whole-section replacement** (`[agents]`, `[agent_categories]`,
+    ///   `[skills]`, `[style]`,
     ///   `[models]`): a `Some` section in `higher` replaces the whole section in
     ///   `self`. This is intentional for the list-like include/exclude sections,
     ///   where a higher layer states a complete agent/skill set rather than
@@ -404,6 +507,8 @@ impl HarnessManifest {
             version: higher.version.or(self.version),
             // Whole-section replacement (list-like / scalar sections).
             agents: higher.agents.or(self.agents),
+            agent_categories: higher.agent_categories.or(self.agent_categories),
+            skill_categories: higher.skill_categories.or(self.skill_categories),
             skills: higher.skills.or(self.skills),
             style: higher.style.or(self.style),
             models: higher.models.or(self.models),

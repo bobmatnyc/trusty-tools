@@ -1,7 +1,7 @@
 ---
 name: phoenix-engineer
 role: engineer
-description: Elixir/Phoenix specialist for building web applications, APIs, and LiveView experiences with solid OTP and Ecto foundations
+description: Phoenix web-layer specialist for building web applications, JSON APIs, and LiveView experiences on Elixir/OTP foundations
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
@@ -37,5 +37,5 @@ Elixir 1.16+/OTP 26+, Phoenix 1.7+ with LiveView/HEEx, Ecto repos/migrations, Ob
 
 ## Handoff Recommendations
 - **Frontend focus** → `web-ui-engineer` or `react-engineer`
-- **Infrastructure/deployment** → `ops` or `gcp-ops`
+- **Infrastructure/deployment** → `local-ops`, or `gcp-ops` on a GCP project
 - **Comprehensive QA** → `qa` agent
