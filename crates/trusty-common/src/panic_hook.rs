@@ -42,43 +42,79 @@ pub fn install_panic_logger() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
         let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let payload = info
-                .payload_as_str()
-                .unwrap_or("<non-string panic payload>");
-            let location = info.location().map_or_else(
-                || "<unknown>".to_string(),
-                |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
-            );
-            let thread = std::thread::current();
-            let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            tracing::error!(
-                panic_payload = payload,
-                panic_location = %location,
-                panic_thread = %thread_name,
-                "PANIC in thread '{thread_name}' at {location}: {payload}\n\
-                 backtrace:\n{backtrace}"
-            );
-            previous(info);
-        }));
+        std::panic::set_hook(wrap_hook(previous));
     });
+}
+
+/// A boxed panic hook, matching the signature `std::panic::set_hook` takes.
+type Hook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+/// Wrap `previous` in a hook that logs the panic through `tracing` first.
+///
+/// Why: factored out of [`install_panic_logger`] so the delegation contract is
+/// testable without mutating the process-global hook. `install_panic_logger`
+/// is `Once`-guarded, so a test cannot re-drive it to observe the wrapping;
+/// reaching for the global hook instead made the tests order-dependent against
+/// each other, which is a defect in its own right.
+/// What: returns a hook that emits one `tracing::error!` — payload, location,
+/// thread, backtrace — and then calls `previous`.
+/// Test: `logger_preserves_previous_hook` drives this directly.
+fn wrap_hook(previous: Hook) -> Hook {
+    Box::new(move |info| {
+        let payload = info
+            .payload_as_str()
+            .unwrap_or("<non-string panic payload>");
+        let location = info.location().map_or_else(
+            || "<unknown>".to_string(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(
+            panic_payload = payload,
+            panic_location = %location,
+            panic_thread = %thread_name,
+            "PANIC in thread '{thread_name}' at {location}: {payload}\n\
+             backtrace:\n{backtrace}"
+        );
+        previous(info);
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Serialises every test that touches the process-global panic hook.
+    ///
+    /// Why: the panic hook is one process-wide slot. `cargo test` runs tests
+    /// on parallel threads, so a test that swaps the hook out is visible to
+    /// every other test that panics in the same window. That is exactly how
+    /// `panic_payload_reaches_the_tracing_subscriber` first went red — it
+    /// passed alone and failed in the full suite. Order-dependence between
+    /// tests is a defect in the tests, not a reason to run them serially by
+    /// hand, so the dependency is made explicit here.
+    /// What: a process-wide mutex; poisoning is ignored because these tests
+    /// deliberately panic inside the guarded region.
+    fn hook_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Installing twice must not stack hooks.
     ///
-    /// Why: `main` may call this alongside a test harness that already did;
-    /// stacking would emit N duplicate log lines per panic and grow unbounded.
-    /// What: call twice, assert the process still panics normally afterwards
-    /// (a stacked-hook regression manifests as recursion, not a return value,
-    /// so the observable assertion is that a caught panic still round-trips).
+    /// Why: `init_tracing*` may run more than once in a process (each uses
+    /// `try_init`), and a test harness may install as well; stacking would
+    /// emit N duplicate log lines per panic and grow without bound.
+    /// What: call twice, then assert a panic still round-trips through
+    /// `catch_unwind` — a stacked-hook regression manifests as repeated hook
+    /// invocation, not a changed return value, so this is the observable
+    /// property available without capturing output.
     /// Test: this test.
     #[test]
     fn logger_install_is_idempotent() {
+        let _guard = hook_lock();
         install_panic_logger();
         install_panic_logger();
         let caught = std::panic::catch_unwind(|| panic!("idempotence probe"));
@@ -97,14 +133,15 @@ mod tests {
     /// gap exactly as it was, while looking fixed.
     /// What: installs the hook, then panics inside a thread-local
     /// `with_default` subscriber wired to a `LogBuffer`, and asserts the
-    /// buffered output contains the payload string, the source location, and
-    /// the `PANIC` marker. A thread-local subscriber is used deliberately: the
-    /// global one is `try_init`-once per process and would race other tests.
+    /// buffered output carries the payload, the `PANIC` marker, and the source
+    /// location. A thread-local subscriber is used deliberately: the global one
+    /// is `try_init`-once per process and would race the rest of the suite.
     /// Test: this test.
     #[test]
     fn panic_payload_reaches_the_tracing_subscriber() {
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _guard = hook_lock();
         let buffer = crate::log_buffer::LogBuffer::new(32);
         let subscriber = tracing_subscriber::registry()
             .with(crate::log_buffer::LogBufferLayer::new(buffer.clone()));
@@ -132,27 +169,26 @@ mod tests {
     /// The wrapper must delegate to the hook it replaced.
     ///
     /// Why: replacing rather than wrapping the previous hook would silently
-    /// drop the default stderr rendering that operators and the macOS crash
-    /// reporter rely on.
-    /// What: install a sentinel hook that flips a flag, install the logger on
-    /// top, panic inside `catch_unwind`, assert the sentinel ran. Restores the
-    /// prior hook state on the way out so the rest of the suite is unaffected.
+    /// drop the default stderr rendering that operators — and the macOS crash
+    /// reporter — rely on, trading one blind spot for another.
+    /// What: drives `wrap_hook` directly (not `install_panic_logger`, whose
+    /// `Once` cannot be re-driven) around a sentinel hook, panics inside
+    /// `catch_unwind`, and asserts the sentinel ran. The global hook is
+    /// restored to exactly what it was before returning.
     /// Test: this test.
     #[test]
     fn logger_preserves_previous_hook() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        let _guard = hook_lock();
         let ran = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&ran);
+
         let saved = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |_| flag.store(true, Ordering::SeqCst)));
-
-        // Wrap the sentinel directly rather than via `install_panic_logger`,
-        // whose `Once` may already have fired in another test in this binary.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| previous(info)));
-
+        std::panic::set_hook(wrap_hook(Box::new(move |_| {
+            flag.store(true, Ordering::SeqCst);
+        })));
         let _ = std::panic::catch_unwind(|| panic!("delegation probe"));
         std::panic::set_hook(saved);
 
