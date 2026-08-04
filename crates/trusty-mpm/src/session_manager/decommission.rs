@@ -341,48 +341,105 @@ impl SessionManager {
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
         let managed_root = workspace_root(&config);
-        self.decommission_with_root(id, &managed_root, caller, false)
-            .await
+        self.decommission_with_root(id, &managed_root, caller).await
     }
 
-    /// Tombstone a record WITHOUT ever touching the filesystem (owner request
-    /// 2026-07-29, critic HIGH finding #1).
+    /// Tombstone a record and do NOTHING else — a dedicated, single-effect path,
+    /// not a flag threaded through [`decommission_with_root`](Self::decommission_with_root)
+    /// (owner request 2026-07-29; rebuilt as a separate function per PR #4725
+    /// review round 2).
     ///
-    /// Why: `tm ls`/bare `tm`'s auto-prune sweep only knows a workspace was
-    /// ABSENT at listing time — a remount (network/removable volume) between
-    /// that probe and a real `decommission()` call could otherwise reach
-    /// `remove_dir_all` with live content back in place. This wrapper skips
-    /// BOTH removal branches entirely (never the worktree path, never the
-    /// owned-directory path) — there is no re-check to race, because there is
-    /// no removal attempt at all. If the workspace is genuinely gone there is
-    /// nothing to remove; if it reappeared, nothing is deleted. `caller: None`
-    /// — this is a daemon-internal sweep, never a session acting on its own
-    /// behalf.
+    /// Why: this exists for the `tm ls` auto-prune sweep, which runs unattended
+    /// on every listing and knows only that a workspace was ABSENT at listing
+    /// time. It must therefore be incapable of destroying anything, including on
+    /// a remount race. It was originally built as `decommission_with_root(…,
+    /// record_only: true)`, and that shape failed twice in review — each time
+    /// because a destructive effect in that function was not behind the flag:
     ///
-    /// #4702: "record-only" also means NO RUNTIME TEARDOWN. Until #4702 the
-    /// `graceful_terminate_runtime` call sat ABOVE the `record_only` guard and
-    /// ran unconditionally, so this path SIGTERMed the claude process and
-    /// `kill_session`ed the pane of any live tmux session whose NAME matched the
-    /// record's — the self-guard is `session_exists(name)`, plain name
-    /// membership, never the record's captured `pane_id`. Callers reading
-    /// "record-only" as "safe to run on every listing" were therefore relying on
-    /// a guarantee the code did not provide.
+    ///   * round 1 (#4728): `graceful_terminate_runtime` ran above the guard,
+    ///     SIGTERMing and `kill_session`ing any live pane whose NAME matched the
+    ///     record's;
+    ///   * round 2: `delete_search_index_best_effort` ran below every guard,
+    ///     issuing a cross-daemon `DELETE /indexes/{id}?delete_data=true`. Worse,
+    ///     its target id comes from `disposable_workspace_index_id`, which walks
+    ///     UP from the workspace path for a `.git` marker and is documented as
+    ///     requiring the workspace to still exist. Auto-prune fires only once the
+    ///     workspace is GONE, so that contract is violated by construction and
+    ///     the walk resolves to the PARENT PROJECT's index.
     ///
-    /// What: [`decommission_with_root`](Self::decommission_with_root) with
-    /// `record_only = true`. The returned `bool` is always `false` (nothing is
-    /// ever removed by this path).
-    /// Test: `decommission_record_only_never_removes_existing_workspace`
-    /// (remount-race stand-in — a REAL, populated directory survives the call);
-    /// `decommission_record_only_never_touches_the_runtime` (a LIVE tmux session
-    /// carrying the record's name is neither signalled nor killed).
+    /// Two rounds, two ungated effects, each found only by executing the path.
+    /// A boolean parameter cannot make a multi-effect function safe — it can
+    /// only be audited by exercising every branch, and it silently acquires new
+    /// effects whenever someone adds one to the shared function. This function
+    /// is auditable by reading: its entire body is record mutation plus one
+    /// store write. There is no filesystem call, no subprocess, no network
+    /// request, and no tmux interaction to gate, so none can be forgotten.
+    ///
+    /// What: applies the #3649 owner gate (via
+    /// [`check_worktree_owner`](Self::check_worktree_owner)), clears
+    /// `workspace_path`/`workspace_owned` only when nothing is left on disk
+    /// (#4344 — a retained directory must keep its pointer), clears the #4400
+    /// pending-decision fields, sets `Decommissioned`, and persists. Returns
+    /// `(record, false)` — the `false` is a type-level constant, not a computed
+    /// result, because nothing here can remove anything.
+    /// Test: `decommission_record_only_never_removes_existing_workspace`,
+    /// `decommission_record_only_never_touches_the_runtime`,
+    /// `decommission_record_only_has_no_side_effects_beyond_the_store`;
+    /// `disposable_index_id_for_a_removed_worktree_resolves_to_the_parent_project`
+    /// pins why the shared teardown's index cleanup must not be reused here.
     pub async fn decommission_record_only(
         &self,
         id: &ManagedSessionId,
     ) -> Result<(SessionRecord, bool), ManagedError> {
-        let config = TrustyToolsConfig::load();
-        let managed_root = workspace_root(&config);
-        self.decommission_with_root(id, &managed_root, None, true)
-            .await
+        let mut record = self.get(id).await?;
+        // Daemon-internal sweep: `caller = None` preserves full pre-#3649
+        // authority, exactly as before. Kept so this path can never be a wider
+        // authority than the teardown it replaces.
+        self.check_worktree_owner(&record, None, id).await?;
+
+        // #4344: only blank the pointer when the directory really is gone —
+        // otherwise a retained workspace is stranded with no trail back to it.
+        let workspace_still_on_disk = record.workspace_path.as_deref().is_some_and(|p| p.exists());
+        if !workspace_still_on_disk {
+            record.workspace_path = None;
+            record.workspace_owned = false;
+        }
+        // #4400: a decommissioned session is terminal — a pending decision on it
+        // would sit in the human-confirmation queue forever.
+        record.pending_decision = None;
+        record.proposed_default = None;
+        record.state = ManagedSessionState::Decommissioned;
+        self.store.write().await.upsert(record.clone()).await?;
+        info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
+        Ok((record, false))
+    }
+
+    /// The #3649 worktree-owner gate, shared by the full teardown and the
+    /// record-only tombstone.
+    ///
+    /// Why: extracted so [`decommission_record_only`](Self::decommission_record_only)
+    /// can apply the identical authority check without depending on
+    /// `decommission_with_root` — the whole point of that function is that it
+    /// shares no code path with the destructive one.
+    /// What: `None` (operator/daemon-internal) always passes. `Some(id)` is
+    /// refused with [`ManagedError::WorktreeOwnerMismatch`] when the target's
+    /// worktree has a known owner that disagrees and is not provably ownerless.
+    /// Test: `decommission_owner_gate_refuses_foreign_caller`,
+    /// `decommission_owner_gate_allows_terminal_owner`.
+    async fn check_worktree_owner(
+        &self,
+        record: &SessionRecord,
+        caller: Option<ManagedSessionId>,
+        id: &ManagedSessionId,
+    ) -> Result<(), ManagedError> {
+        if let Some(caller_id) = caller
+            && let Some(owner) = self.known_owner_of(record)
+            && owner != caller_id
+            && !self.resolve_ownerless(owner).await
+        {
+            return Err(ManagedError::WorktreeOwnerMismatch(caller_id, owner, *id));
+        }
+        Ok(())
     }
 
     /// Internal: decommission with an explicit managed root (test seam).
@@ -393,34 +450,47 @@ impl SessionManager {
     /// parallel tests; injecting the root avoids that entirely.
     /// What: identical teardown logic as the public `decommission` but resolves the
     /// managed root from the caller-supplied `managed_root` instead of the config.
-    /// `record_only` (owner request 2026-07-29): when `true`, BOTH removal
-    /// branches below are skipped unconditionally — see
-    /// [`decommission_record_only`](Self::decommission_record_only)'s doc.
+    ///
+    /// 🔴 THIS FUNCTION IS UNCONDITIONALLY DESTRUCTIVE and has no "safe mode".
+    /// The `record_only` flag it used to carry is GONE (PR #4725 review round 2);
+    /// [`decommission_record_only`](Self::decommission_record_only) is now a
+    /// separate function that shares no code path with this one. Read that
+    /// function's doc for why. Its side effects, in order, are:
+    ///
+    /// | # | Effect | Reversible? |
+    /// |---|---|---|
+    /// | 1 | `graceful_terminate_runtime` — SIGTERM + `kill_session` the pane | no |
+    /// | 2 | `remove_session_worktree` — `git worktree remove --force`, `fs::remove_dir_all` fallback, `git worktree prune`, `git branch -D` (dirty-gated, #4344) | no |
+    /// | 3 | `fs::remove_dir_all` on an SM-owned workspace (containment-gated) | no |
+    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` | no |
+    /// | 5 | clears `workspace_path`/`workspace_owned` when nothing is on disk | store-only |
+    /// | 6 | clears `pending_decision`/`proposed_default` (#4400) | store-only |
+    /// | 7 | writes state `Decommissioned` | store-only |
+    ///
+    /// Effects 1–4 destroy state outside the record store. Any new effect added
+    /// here belongs in that table. If a caller needs a subset, give it its own
+    /// function rather than a flag — that is the lesson of this PR's two review
+    /// rounds, each of which found a different ungated effect.
+    ///
     /// Returns `(SessionRecord, workspace_removed)` where `workspace_removed` is
     /// `true` ONLY when `remove_dir_all` actually ran — callers must not infer this
     /// from a post-call filesystem check (TOCTOU: owned workspace already absent
     /// before decommission would give a false-positive filesystem result).
     /// Test: called by `manager_decommission_removes_workspace` (which passes a
-    /// TempDir as the managed root, removing the need for `set_var`).
+    /// TempDir as the managed root, removing the need for `set_var`);
+    /// `decommission_full_still_terminates_the_runtime`.
     pub(crate) async fn decommission_with_root(
         &self,
         id: &ManagedSessionId,
         managed_root: &Path,
         caller: Option<ManagedSessionId>,
-        record_only: bool,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
         // #3649 owner gate: only applies when a SESSION identifies itself as
         // the caller. `None` (operator/daemon-internal) preserves full
         // pre-#3649 authority unconditionally — see the doc above.
-        if let Some(caller_id) = caller
-            && let Some(owner) = self.known_owner_of(&record)
-            && owner != caller_id
-            && !self.resolve_ownerless(owner).await
-        {
-            return Err(ManagedError::WorktreeOwnerMismatch(caller_id, owner, *id));
-        }
+        self.check_worktree_owner(&record, caller, id).await?;
 
         // #2033: derive the trusty-search index id for a disposable workspace
         // (SM-owned clone or in-project worktree — see
@@ -445,28 +515,19 @@ impl SessionManager {
         // a session whose runtime is already gone still decommissions cleanly —
         // the helper self-guards and is a no-op when the pane is already gone.
         //
-        // #4702: this MUST be inside the `record_only` gate. Until this fix it sat
-        // above it and ran unconditionally, so a "record-only" decommission still
-        // SIGTERMed and `kill_session`ed a live pane. `graceful_terminate_runtime`
-        // self-guards on `session_exists(name)` — LIVE-TMUX NAME MEMBERSHIP, not
-        // the record's captured `pane_id` — so any live session that happens to
-        // carry this record's `tmux_name` was killed, including one owned by a
-        // DIFFERENT, healthy record under the #3692 duplicate-name condition. That
-        // routed straight around the pane-scoped containment #3714 added for
-        // display. Record-only means the registry row and nothing else: no
-        // filesystem, and no runtime.
-        if !record_only {
-            self.graceful_terminate_runtime(&record.tmux_name).await;
-        }
+        // Effect 1 of the table above. `graceful_terminate_runtime` self-guards
+        // on `session_exists(name)` — LIVE-TMUX NAME MEMBERSHIP, not the record's
+        // captured `pane_id` (#4728) — so it kills whatever live session carries
+        // this name. Acceptable here, where teardown is the caller's stated
+        // intent; never acceptable on a listing sweep, which is why the
+        // record-only path is a separate function rather than a flag.
+        self.graceful_terminate_runtime(&record.tmux_name).await;
 
-        // Guard: only remove the workspace directory if the SM provisioned it.
-        // Track whether remove_dir_all ACTUALLY RAN (not inferred from filesystem).
-        // `record_only` (owner request 2026-07-29): skip BOTH removal branches
-        // below unconditionally — see `decommission_record_only`'s doc. The
-        // `workspace_still_on_disk` re-check further down still runs, so a
-        // genuinely-absent workspace is still cleared from the tombstone.
+        // Effects 2–3. Guard: only remove the workspace directory if the SM
+        // provisioned it. Track whether remove_dir_all ACTUALLY RAN (not
+        // inferred from filesystem).
         let mut workspace_removed = false;
-        if !record_only && let Some(ref ws) = record.workspace_path {
+        if let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
                 // Unowned workspace (local-path spawn or adopt): never bulk-delete.
                 // #1840: EXCEPTION — in-project per-session worktrees live under
@@ -592,11 +653,19 @@ impl SessionManager {
             }
         }
 
-        // #2033: best-effort remove the trusty-search index for a disposed
-        // workspace, alongside the worktree/clone directory. Fail-soft: an
-        // unreachable/erroring search daemon must never block or fail session
+        // Effect 4. #2033: best-effort remove the trusty-search index for a
+        // disposed workspace, alongside the worktree/clone directory. Fail-soft:
+        // an unreachable/erroring search daemon must never block or fail session
         // teardown — `delete_search_index_best_effort` logs and swallows every
         // failure mode itself.
+        //
+        // Note the ordering contract that makes this correct ONLY here:
+        // `search_index_id` was derived at the top of this function, BEFORE any
+        // removal, because `resolve_project_root` walks up for a `.git` marker
+        // and would otherwise resolve to the parent project's index. A caller
+        // that runs against an already-absent workspace cannot satisfy that
+        // contract, which is precisely why the record-only path does not reuse
+        // this function (PR #4725 review round 2).
         if let Some(index_id) = search_index_id {
             search_gc::delete_search_index_best_effort(&index_id).await;
         }

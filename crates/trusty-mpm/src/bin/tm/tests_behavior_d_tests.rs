@@ -1726,6 +1726,8 @@ fn local_session_needs_force_active_and_others_true() {
 // production `auto_prune_dead_records` wrapper, which resolves the real
 // `~/.trusty-mpm` — tests must never touch the developer's real home dir.
 
+use std::collections::HashSet;
+
 use crate::commands::session_picker_prune::auto_prune_dead_records_at;
 
 /// Seed one managed session whose workspace path is NEVER created on disk —
@@ -1759,23 +1761,46 @@ async fn seed_dead_session(
     id
 }
 
-/// Age every RECORD sighting in the marker file by `minutes`, leaving the
-/// stale-daemon sentinel untouched (#4702).
+/// Set every RECORD sighting to exactly `minutes` ago, leaving the stale-daemon
+/// sentinel untouched (#4702).
 ///
-/// Why: confirmation now requires a real elapsed interval
-/// (`SIGHTING_MIN_AGE_SECS`, 10 minutes), not merely a second call — that is
-/// the guard PR #4725's review restored. Tests must therefore simulate the
-/// passage of time rather than sleeping through it. Backdating the persisted
-/// first-sighting timestamp is the honest simulation: it exercises the real
-/// comparison against the real constant, instead of weakening either.
+/// Why: confirmation requires a real elapsed interval (`SIGHTING_MIN_AGE_SECS`,
+/// 10 minutes). Tests simulate that rather than sleeping through it, exercising
+/// the real comparison against the real constant instead of weakening either.
+///
+/// 🔴 This OVERWRITES the stamp, so it also masks a restamp bug: a test that
+/// calls it between every listing cannot observe the clock being reset (PR #4725
+/// review round 2). Use it only to establish a starting age. To simulate time
+/// passing ACROSS listings, use [`age_sightings_by`], which is relative.
 fn backdate_sightings(marker_path: &std::path::Path, minutes: i64) {
-    let raw = std::fs::read_to_string(marker_path).expect("marker file must exist to backdate");
+    let backdated = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+    rewrite_sightings(marker_path, |_| backdated.clone());
+}
+
+/// Move every RECORD sighting `minutes` FURTHER into the past, relative to
+/// whatever is currently persisted (PR #4725 review round 2).
+///
+/// Why: this is how a test simulates wall-clock advance without destroying the
+/// evidence. Because it is relative, a restamp performed by an intervening
+/// listing survives into the next assertion — so a test using this catches the
+/// "window resets on every listing" defect that an absolute overwrite hides.
+fn age_sightings_by(marker_path: &std::path::Path, minutes: i64) {
+    rewrite_sightings(marker_path, |current| {
+        let parsed = chrono::DateTime::parse_from_rfc3339(current)
+            .expect("a persisted sighting must be valid RFC 3339 to age it");
+        (parsed - chrono::Duration::minutes(minutes)).to_rfc3339()
+    });
+}
+
+/// Shared marker-file rewrite used by [`backdate_sightings`] and
+/// [`age_sightings_by`]; never touches the stale-daemon sentinel.
+fn rewrite_sightings(marker_path: &std::path::Path, f: impl Fn(&str) -> String) {
+    let raw = std::fs::read_to_string(marker_path).expect("marker file must exist");
     let mut seen: std::collections::HashMap<String, String> =
         serde_json::from_str(&raw).expect("marker file must parse");
-    let backdated = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
     for (key, value) in seen.iter_mut() {
         if key != "__stale_daemon_detected__" {
-            *value = backdated.clone();
+            *value = f(value);
         }
     }
     std::fs::write(marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
@@ -1818,7 +1843,14 @@ async fn auto_prune_dead_records_first_sighting_is_not_pruned() {
         .expect("dead session must still surface on the raw fetch");
     assert!(target.unresumable, "seeded session must be unresumable");
 
-    let outcome = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 0, "a first sighting must never be pruned");
     assert_eq!(outcome.pending, 1, "a first sighting is reported pending");
     assert!(
@@ -1855,13 +1887,27 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
 
     // First call: first sighting, not yet acted on.
     let sessions = fetch_raw_live(&client, &server.url).await;
-    let first = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let first = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(first.pruned, 0);
 
     // #4702: an immediate second call must NOT confirm — the sighting window
     // is time-based, not call-count-based.
     let sessions = fetch_raw_live(&client, &server.url).await;
-    let immediate = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let immediate = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         immediate.pruned, 0,
         "a second call in the same instant must not confirm — the window is elapsed TIME"
@@ -1870,7 +1916,14 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
     // Second call after the window has genuinely elapsed: now CONFIRMED.
     backdate_sightings(&marker_path, 11);
     let sessions = fetch_raw_live(&client, &server.url).await;
-    let second = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let second = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         second.pruned, 1,
         "confirmed on a second listing must be pruned"
@@ -1941,7 +1994,14 @@ async fn auto_prune_dead_records_keeps_workspace_present_records() {
          be flagged unresumable"
     );
 
-    let outcome = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         outcome.pruned, 0,
         "a record with an existing workspace must never be pruned"
@@ -1965,8 +2025,14 @@ async fn auto_prune_dead_records_is_noop_when_nothing_is_dead() {
         .join("seen.json");
     let sessions = vec![ls_test_session("healthy", "active", None, None, None, None)];
 
-    let outcome =
-        auto_prune_dead_records_at(&client, "http://127.0.0.1:1", sessions, &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        "http://127.0.0.1:1",
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 0);
     assert_eq!(outcome.pending, 0);
     assert_eq!(outcome.kept.len(), 1);
@@ -1994,7 +2060,14 @@ async fn auto_prune_dead_records_honors_the_cap() {
     // First call: all 6 are first sightings — nothing pruned yet.
     let sessions = fetch_raw_live(&client, &server.url).await;
     assert_eq!(sessions.len(), 6);
-    let first = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let first = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(first.pruned, 0);
     assert_eq!(first.pending, 6);
 
@@ -2003,7 +2076,14 @@ async fn auto_prune_dead_records_honors_the_cap() {
     backdate_sightings(&marker_path, 11);
     let sessions = fetch_raw_live(&client, &server.url).await;
     assert_eq!(sessions.len(), 6);
-    let second = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let second = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(second.pruned, 5, "the cap must limit a single call to 5");
     assert_eq!(
         second.pending, 1,
@@ -2073,7 +2153,14 @@ async fn auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_remov
     b.state = "errored".to_string();
     b.unresumable = true;
 
-    let outcome = auto_prune_dead_records_at(&client, &url, vec![a, b], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![a, b],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         outcome.pruned, 0,
         "a stale daemon's workspace_removed=true must never count as pruned"
@@ -2142,8 +2229,14 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     );
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
-    let outcome =
-        auto_prune_dead_records_at(&client, &url, vec![confirmed_session()], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![confirmed_session()],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 0, "a fresh sentinel must still block");
     assert_eq!(outcome.kept.len(), 1);
     assert_eq!(outcome.pending, 1, "held record must fold into pending");
@@ -2160,8 +2253,14 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     );
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
-    let outcome =
-        auto_prune_dead_records_at(&client, &url, vec![confirmed_session()], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![confirmed_session()],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         outcome.pruned, 0,
         "the stub is still stale, so the retry must not count as pruned"
@@ -2272,6 +2371,7 @@ async fn auto_prune_clears_stopped_record_whose_workspace_is_gone() {
         &url,
         vec![stopped_session_at("z1", &gone)],
         &marker_path,
+        Some(HashSet::new()),
     )
     .await;
     assert_eq!(first.pruned, 0, "a first sighting must never be pruned");
@@ -2288,6 +2388,7 @@ async fn auto_prune_clears_stopped_record_whose_workspace_is_gone() {
         &url,
         vec![stopped_session_at("z1", &gone)],
         &marker_path,
+        Some(HashSet::new()),
     )
     .await;
     assert_eq!(
@@ -2319,6 +2420,7 @@ async fn auto_prune_keeps_stopped_record_whose_workspace_still_exists() {
             &url,
             vec![stopped_session_at("keeper", &present)],
             &marker_path,
+            Some(HashSet::new()),
         )
         .await;
         assert_eq!(
@@ -2355,8 +2457,14 @@ async fn auto_prune_never_touches_a_running_record() {
     live.state = "active".to_string();
 
     for _ in 0..2 {
-        let outcome =
-            auto_prune_dead_records_at(&client, &url, vec![live.clone()], &marker_path).await;
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![live.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
         assert_eq!(outcome.pruned, 0, "a running record must never be pruned");
         assert_eq!(outcome.kept.len(), 1);
     }
@@ -2389,6 +2497,7 @@ async fn auto_prune_never_touches_a_decommissioned_record() {
             &url,
             vec![tombstone.clone(), persisted_terminal.clone()],
             &marker_path,
+            Some(HashSet::new()),
         )
         .await;
         assert_eq!(outcome.pruned, 0);
@@ -2429,10 +2538,16 @@ async fn auto_prune_always_requests_record_only_never_full_teardown() {
     let probed = stopped_session_at("probed", &gone);
 
     let sessions = vec![flagged.clone(), probed.clone()];
-    auto_prune_dead_records_at(&client, &url, sessions, &marker_path).await;
+    auto_prune_dead_records_at(&client, &url, sessions, &marker_path, Some(HashSet::new())).await;
     backdate_sightings(&marker_path, 11);
-    let outcome =
-        auto_prune_dead_records_at(&client, &url, vec![flagged, probed], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![flagged, probed],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 2, "both dead records must be cleared");
 
     let calls = captured.lock().expect("capture lock").clone();
@@ -2576,6 +2691,7 @@ async fn auto_prune_keeps_record_whose_parent_directory_is_unreachable() {
             &url,
             vec![stopped_session_at("on-the-volume", &unreachable)],
             &marker_path,
+            Some(HashSet::new()),
         )
         .await;
         assert_eq!(
@@ -2613,8 +2729,14 @@ async fn auto_prune_ignores_daemon_unresumable_when_parent_is_unreachable() {
     flagged.unresumable = true; // the daemon's (mistaken) verdict
 
     for _ in 0..3 {
-        let outcome =
-            auto_prune_dead_records_at(&client, &url, vec![flagged.clone()], &marker_path).await;
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![flagged.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
         assert_eq!(
             outcome.pruned, 0,
             "the daemon's unresumable flag must not override the client's own verification"
@@ -2646,6 +2768,7 @@ async fn auto_prune_does_not_confirm_two_calls_in_quick_succession() {
             &url,
             vec![stopped_session_at("hasty", &gone)],
             &marker_path,
+            Some(HashSet::new()),
         )
         .await;
         assert_eq!(
@@ -2657,6 +2780,203 @@ async fn auto_prune_does_not_confirm_two_calls_in_quick_succession() {
         captured.lock().expect("capture lock").is_empty(),
         "a tight loop must not be able to drive any decommission at all"
     );
+
+    handle.abort();
+}
+
+/// 🔴 PR #4725 review round 2, HIGH: a listing inside the window must NOT
+/// restamp the sighting.
+///
+/// Why: the fix restored a time bound but rewrote the stamp with `now` on every
+/// call that did not confirm. That made the window measure the gap between
+/// CONSECUTIVE LISTINGS rather than age since first sighting, so any `tm ls`
+/// cadence tighter than `SIGHTING_MIN_AGE_SECS` reset the clock forever and
+/// auto-prune could never fire — permanently inert on the very machine #4702
+/// was filed from. No test caught it because the `backdate_sightings` helper
+/// overwrites the stamp after each call, masking the restamp.
+///
+/// What: seeds a sighting 6 minutes old (inside the 10-minute window), runs a
+/// listing, and asserts the PERSISTED STAMP IS UNCHANGED — the mechanism, not
+/// just the "not pruned" outcome, which the buggy code also satisfied. Uses no
+/// backdating helper for exactly that reason.
+#[tokio::test]
+async fn auto_prune_does_not_restamp_a_sighting_still_inside_the_window() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let seeded = (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("midwindow".to_string(), seeded.clone());
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    // A listing at T+6: too recent to confirm, and it must leave the clock alone.
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("midwindow", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "6 minutes is inside the 10-minute window"
+    );
+
+    let raw = std::fs::read_to_string(&marker_path).expect("read marker");
+    let persisted: std::collections::HashMap<String, String> =
+        serde_json::from_str(&raw).expect("parse marker");
+    assert_eq!(
+        persisted.get("midwindow"),
+        Some(&seeded),
+        "the ORIGINAL first-sighting stamp must survive an intervening listing — \
+         restamping makes the window measure listing cadence, not age, and any \
+         `tm ls` more often than every 10 minutes then leaves auto-prune inert"
+    );
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// The behavioral consequence of the restamp bug: a record dead longer than the
+/// window still confirms even though it was listed repeatedly in between (PR
+/// #4725 review round 2).
+///
+/// What: reproduces the real cadence. A record is first sighted, listed again
+/// 6 minutes later (inside the window), and only then reaches 11 minutes of
+/// AGE. Wall-clock advance is simulated by aging the stamp RELATIVE TO WHATEVER
+/// IS PERSISTED — never by overwriting it with a fixed value — so a restamp
+/// during the intervening listing carries through and the record never confirms,
+/// exactly as it would on a real machine.
+#[tokio::test]
+async fn auto_prune_confirms_despite_frequent_intervening_listings() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, _captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let listing = async |marker: &std::path::Path| {
+        auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("patient", &gone)],
+            marker,
+            Some(HashSet::new()),
+        )
+        .await
+        .pruned
+    };
+
+    // T+0: first sighting.
+    assert_eq!(listing(&marker_path).await, 0);
+    // Simulate 6 minutes passing, then a listing at T+6 (inside the window).
+    age_sightings_by(&marker_path, 6);
+    assert_eq!(
+        listing(&marker_path).await,
+        0,
+        "a listing 6 minutes in must not confirm"
+    );
+    // Simulate 5 more minutes. The record is now 11 minutes old — UNLESS the
+    // intervening listing restamped it, which is the defect.
+    age_sightings_by(&marker_path, 5);
+    assert_eq!(
+        listing(&marker_path).await,
+        1,
+        "at 11 minutes of real age the record must confirm — a listing at T+6 \
+         must not have reset the clock"
+    );
+
+    handle.abort();
+}
+
+/// 🔴 PR #4725 review round 2, HIGH: an `errored` record whose pane is LIVE but
+/// DETACHED must never be tombstoned.
+///
+/// Why: `reconcile_live_state` only rewrites `state` for records persisted
+/// `Active`/`Stopped`, so an errored row keeps its persisted state even with a
+/// live pane, and `attached` is false when no client is attached — leaving a
+/// running agent eligible for a TERMINAL `Decommissioned` tombstone that removes
+/// it from resume, reattach, and the picker. Client-side tmux enumeration gives
+/// the missing signal with no daemon change.
+///
+/// What: an errored, unresumable record with a vanished workspace — every other
+/// condition for clearing is met — whose tmux name appears in the injected live
+/// set. It must survive every listing.
+#[tokio::test]
+async fn auto_prune_never_touches_an_errored_record_with_a_live_detached_pane() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut errored = stopped_session_at("tm-live-agent-01", &gone);
+    errored.state = "errored".to_string();
+    errored.unresumable = true;
+    errored.attached = false; // live but DETACHED — the hole `attached` missed
+
+    let live: HashSet<String> = ["tm-live-agent-01".to_string()].into_iter().collect();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![errored.clone()],
+            &marker_path,
+            Some(live.clone()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: a live tmux session must never be tombstoned into a \
+             terminal state, detached or not"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// When tmux cannot be enumerated at all, prune nothing (PR #4725 review round
+/// 2) — mirrors `reconcile_against_tmux`'s fail-closed contract. Without a
+/// liveness signal, clearing an `errored` record could tombstone a running
+/// agent.
+#[tokio::test]
+async fn auto_prune_prunes_nothing_when_tmux_cannot_be_enumerated() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut seen = std::collections::HashMap::new();
+    seen.insert(
+        "confirmed-but-blind".to_string(),
+        (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339(),
+    );
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("confirmed-but-blind", &gone)],
+        &marker_path,
+        None, // tmux enumeration failed
+    )
+    .await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "no liveness signal means no clearing, even for a long-confirmed record"
+    );
+    assert_eq!(outcome.kept.len(), 1);
+    assert!(captured.lock().expect("capture lock").is_empty());
 
     handle.abort();
 }
@@ -2676,6 +2996,7 @@ async fn auto_prune_confirms_once_the_sighting_window_has_elapsed() {
         &url,
         vec![stopped_session_at("patient", &gone)],
         &marker_path,
+        Some(HashSet::new()),
     )
     .await;
     backdate_sightings(&marker_path, 11);
@@ -2684,6 +3005,7 @@ async fn auto_prune_confirms_once_the_sighting_window_has_elapsed() {
         &url,
         vec![stopped_session_at("patient", &gone)],
         &marker_path,
+        Some(HashSet::new()),
     )
     .await;
     assert_eq!(
@@ -2713,6 +3035,7 @@ async fn auto_prune_treats_an_unparseable_sighting_as_a_fresh_one() {
         &url,
         vec![stopped_session_at("corrupt", &gone)],
         &marker_path,
+        Some(HashSet::new()),
     )
     .await;
     assert_eq!(
@@ -2753,8 +3076,14 @@ async fn auto_prune_never_touches_an_attached_record() {
     attached.attached = true;
 
     for _ in 0..3 {
-        let outcome =
-            auto_prune_dead_records_at(&client, &url, vec![attached.clone()], &marker_path).await;
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![attached.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
         assert_eq!(
             outcome.pruned, 0,
             "an attached session must never be cleared"
@@ -2777,12 +3106,18 @@ async fn auto_prune_never_touches_an_attached_record() {
 /// been mutated — the caller would see an error with no idea the prune landed.
 /// What: counts GETs against a stub that also honours the decommission, across a
 /// call that genuinely prunes. Exactly one GET per invocation.
+///
+/// PR #4725 review round 2 (MEDIUM): this test also asserts a decommission POST
+/// actually fired. Without that it passed with `is_dead_record` stubbed to
+/// always-false — proving only "one GET when nothing happens", which is not the
+/// claim. The POST count is the precondition that makes the GET count meaningful.
 #[tokio::test]
 async fn session_ls_json_never_refetches_after_pruning() {
     let root = tempfile::TempDir::new().expect("tempdir");
     let marker_path = root.path().join("seen.json");
     let gone = root.path().join("gone");
     let gets = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deletes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let body = serde_json::json!({
         "sessions": [{
@@ -2813,11 +3148,16 @@ async fn session_ls_json_never_refetches_after_pruning() {
         )
         .route(
             "/api/v1/sessions/managed/{id}/decommission",
-            axum::routing::post(
-                async |axum::extract::Path(_id): axum::extract::Path<String>| {
-                    axum::Json(serde_json::json!({ "workspace_removed": false }))
-                },
-            ),
+            axum::routing::post({
+                let delete_sink = deletes.clone();
+                move |axum::extract::Path(_id): axum::extract::Path<String>| {
+                    let delete_sink = delete_sink.clone();
+                    async move {
+                        delete_sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        axum::Json(serde_json::json!({ "workspace_removed": false }))
+                    }
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -2851,6 +3191,15 @@ async fn session_ls_json_never_refetches_after_pruning() {
     .await
     .expect("session_ls --json");
 
+    // PRECONDITION: a prune must actually have happened, or the GET count below
+    // proves nothing. This is the assertion whose absence let the test pass
+    // against an always-false `is_dead_record`.
+    assert_eq!(
+        deletes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "precondition: this invocation must genuinely prune a record — otherwise \
+         'exactly one GET' is vacuous"
+    );
     assert_eq!(
         gets.load(std::sync::atomic::Ordering::SeqCst),
         1,

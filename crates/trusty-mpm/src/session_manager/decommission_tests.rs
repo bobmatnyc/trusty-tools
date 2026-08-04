@@ -177,7 +177,7 @@ async fn decommission_owner_gate_refuses_foreign_caller() {
     let session_a = ManagedSessionId::new();
     let managed_root = crate::test_support::hermetic_temp_dir();
     let err = mgr
-        .decommission_with_root(&session_b, managed_root.path(), Some(session_a), false)
+        .decommission_with_root(&session_b, managed_root.path(), Some(session_a))
         .await
         .expect_err("session A must be refused decommissioning session B's live worktree");
     match err {
@@ -216,7 +216,7 @@ async fn decommission_owner_gate_allows_self() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (record, _workspace_removed) = mgr
-        .decommission_with_root(&session_id, managed_root.path(), Some(session_id), false)
+        .decommission_with_root(&session_id, managed_root.path(), Some(session_id))
         .await
         .expect("self-decommission must be allowed");
     assert_eq!(record.state, ManagedSessionState::Decommissioned);
@@ -249,7 +249,7 @@ async fn decommission_owner_gate_allows_terminal_owner() {
 
     let caller = ManagedSessionId::new();
     let managed_root = crate::test_support::hermetic_temp_dir();
-    mgr.decommission_with_root(&target, managed_root.path(), Some(caller), false)
+    mgr.decommission_with_root(&target, managed_root.path(), Some(caller))
         .await
         .expect("decommissioning an already-terminal, provably-ownerless target must be allowed");
 }
@@ -276,7 +276,7 @@ async fn decommission_owner_gate_bypassed_for_none_caller() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (record, _workspace_removed) = mgr
-        .decommission_with_root(&session_id, managed_root.path(), None, false)
+        .decommission_with_root(&session_id, managed_root.path(), None)
         .await
         .expect("operator (caller=None) decommission must never be gated");
     assert_eq!(record.state, ManagedSessionState::Decommissioned);
@@ -310,7 +310,7 @@ async fn decommission_clears_pending_decision() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (after, _workspace_removed) = mgr
-        .decommission_with_root(&session_id, managed_root.path(), None, false)
+        .decommission_with_root(&session_id, managed_root.path(), None)
         .await
         .expect("decommission");
     assert_eq!(after.state, ManagedSessionState::Decommissioned);

@@ -85,7 +85,7 @@
 //! pinned by `decommission_record_only_never_removes_existing_workspace`
 //! (`session_manager::tests`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::client::ManagedSessionSummary;
@@ -239,7 +239,10 @@ pub(crate) async fn prune_and_report_at(
     sessions: Vec<ManagedSessionSummary>,
     marker_path: &Path,
 ) -> Vec<ManagedSessionSummary> {
-    let outcome = auto_prune_dead_records_at(client, url, sessions, marker_path).await;
+    // #4702: enumerate live tmux ONCE per call. `None` = could not determine,
+    // which `auto_prune_dead_records_at` treats as "prune nothing".
+    let live = live_tmux_session_names();
+    let outcome = auto_prune_dead_records_at(client, url, sessions, marker_path, live).await;
     if outcome.pruned > 0 {
         eprintln!(
             "tm: pruned {} dead record{} (workspace gone)",
@@ -344,32 +347,75 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
 /// endpoint reconciles a live tmux pane back to `active` before the CLI ever
 /// sees the row.
 ///
-/// The `attached` guard covers the one hole in that reconciliation (PR #4725
-/// review): `reconcile_live_state` only rewrites `state` for records persisted
-/// `Active`/`Stopped`, so an `Errored` record is served with its persisted state
-/// verbatim and a live pane never turns it back into `active`. `attached` IS
-/// set for every record regardless of state, so it is the only wire-visible
-/// liveness signal an errored row carries. It is a partial signal — it proves a
-/// client is attached, not that no pane exists — so an errored record whose pane
-/// is live but DETACHED can still be cleared. That residue is bounded: clearing
-/// is record-only (it cannot kill the pane — see
-/// `SessionManager::decommission_record_only`) and still requires
-/// [`workspace_verified_gone`], so the session it tombstones has already lost
-/// its workspace.
+/// 🔴 `errored` records escape that reconciliation entirely:
+/// `reconcile_live_state` only rewrites `state` for records persisted
+/// `Active`/`Stopped`, so an `Errored` row is served with its persisted state
+/// verbatim and a live pane never turns it back into `active`. Tombstoning such
+/// a record is not cosmetic — `Decommissioned` is TERMINAL, so a running agent
+/// silently becomes unreachable through `tm`: no resume, no reattach, hidden
+/// from the picker.
 ///
-/// What: the DISPLAY state must be `stopped`/`errored`, the row must not be a
-/// slot tombstone, must not be `attached`, and the PERSISTED state (when the
-/// daemon sends it) must not already be terminal.
+/// `attached` alone does not close that: it proves a client is attached, not
+/// that no pane exists, so a live-but-DETACHED errored session would still be
+/// cleared. `live_tmux_names` closes it (PR #4725 review round 2) — the CLI
+/// enumerates live tmux sessions itself and never clears a record whose name is
+/// among them. Name membership is a weak signal, but here it is used to KEEP,
+/// never to act: a name collision costs one stale row, whereas the same weak
+/// signal used to KILL is exactly what made #4728 destructive. When the caller
+/// could not enumerate tmux at all it passes an empty set only if it also
+/// declines to prune — see [`auto_prune_dead_records_at`].
+///
+/// What: the DISPLAY state must be `stopped`/`errored`; the row must not be a
+/// slot tombstone, must not be `attached`, and must not name a live tmux
+/// session; and the PERSISTED state (when the daemon sends it) must not already
+/// be terminal.
 /// Test: `auto_prune_never_touches_a_running_record`,
 /// `auto_prune_never_touches_a_decommissioned_record`,
-/// `auto_prune_never_touches_an_attached_record`.
-fn is_clearable_state(s: &ManagedSessionSummary) -> bool {
+/// `auto_prune_never_touches_an_attached_record`,
+/// `auto_prune_never_touches_an_errored_record_with_a_live_detached_pane`.
+fn is_clearable_state(s: &ManagedSessionSummary, live_tmux_names: &HashSet<String>) -> bool {
     if s.deleted || s.attached || !matches!(s.state.as_str(), "stopped" | "errored") {
+        return false;
+    }
+    if live_tmux_names.contains(&s.name) {
         return false;
     }
     !matches!(
         s.persisted_state.as_deref(),
         Some("decommissioned" | "deleted")
+    )
+}
+
+/// Enumerate live tmux session names from the CLI (#4702, PR #4725 review).
+///
+/// Why: the wire summary carries no "this errored record's pane is alive but
+/// detached" signal, and adding one would need a daemon change — which this fix
+/// deliberately avoids, since a CLI upgrade never bounces the long-lived daemon.
+/// Enumerating client-side gives the second liveness signal with no protocol
+/// change at all.
+/// What: routes through the crate's single tmux spawn point
+/// (`core::tmux::run_tmux`, which owns the macOS TCC-disclaim wrapper) with the
+/// shared `TmuxCommand::ListSessions` argv, and parses `SESSION_LIST_FORMAT`'s
+/// `name:created:attached` rows. Returns `None` when tmux could not be
+/// enumerated (not installed, no server, non-zero exit) — the caller treats
+/// that as "cannot determine liveness" and prunes nothing, mirroring
+/// `reconcile_against_tmux`'s fail-closed contract on the daemon side.
+/// Test: `auto_prune_never_touches_an_errored_record_with_a_live_detached_pane`
+/// covers the consuming predicate with an injected set; this thin adapter needs
+/// a live tmux binary and is exercised in normal operation.
+fn live_tmux_session_names() -> Option<HashSet<String>> {
+    let out = trusty_mpm::core::tmux::run_tmux(&trusty_mpm::core::tmux::TmuxCommand::ListSessions)
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.split(':').next())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
     )
 }
 
@@ -393,11 +439,11 @@ fn is_clearable_state(s: &ManagedSessionSummary) -> bool {
 /// a path on the wire. A legacy record with neither `workspace_path` nor `cwd`
 /// serialized is now kept rather than cleared; unverifiable is not dead.
 ///
-/// What: `is_clearable_state(s) && workspace_verified_gone(s)`.
+/// What: `is_clearable_state(s, live) && workspace_verified_gone(s)`.
 /// Test: the `auto_prune_*` suite in `tests_behavior_d_tests.rs`, in particular
 /// `auto_prune_ignores_daemon_unresumable_when_parent_is_unreachable`.
-async fn is_dead_record(s: &ManagedSessionSummary) -> bool {
-    is_clearable_state(s) && workspace_verified_gone(s).await
+async fn is_dead_record(s: &ManagedSessionSummary, live_tmux_names: &HashSet<String>) -> bool {
+    is_clearable_state(s, live_tmux_names) && workspace_verified_gone(s).await
 }
 
 /// Auto-prune definitively-dead (`unresumable`) session records at listing
@@ -444,13 +490,27 @@ pub(crate) async fn auto_prune_dead_records_at(
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
     marker_path: &Path,
+    live_tmux_names: Option<HashSet<String>>,
 ) -> AutoPruneOutcome {
+    // #4702 (PR #4725 review round 2): a `None` live-set means tmux could not be
+    // enumerated at all. Without it there is no liveness signal for `errored`
+    // records — which the daemon never display-reconciles — so clearing anything
+    // could tombstone a running agent into a terminal state. Prune nothing;
+    // mirrors `reconcile_against_tmux`'s fail-closed contract.
+    let Some(live_tmux_names) = live_tmux_names else {
+        return AutoPruneOutcome {
+            kept: sessions,
+            pruned: 0,
+            pending: 0,
+        };
+    };
+
     // #4702: the partition predicate is now async (it probes the filesystem for
     // the stopped-record case), so this cannot be `Iterator::partition`.
     let mut dead: Vec<ManagedSessionSummary> = Vec::new();
     let mut kept: Vec<ManagedSessionSummary> = Vec::new();
     for s in sessions {
-        if is_dead_record(&s).await {
+        if is_dead_record(&s, &live_tmux_names).await {
             dead.push(s);
         } else {
             kept.push(s);
@@ -483,20 +543,23 @@ pub(crate) async fn auto_prune_dead_records_at(
     let mut confirmed = Vec::new();
     let mut first_sighting = Vec::new();
     for s in dead {
-        // #4702: the stored first-sighting timestamp must actually be COMPARED.
-        // The pre-#4702 code tested `seen.contains_key(&s.id)`, i.e. presence
-        // only, so two `tm ls` calls milliseconds apart satisfied the
-        // "two sightings" rule and `AUTO_PRUNE_CAP` stopped being a rate limit —
-        // a script could clear the fleet in a tight loop.
-        if sighting_is_confirmed(seen.get(&s.id)) {
-            confirmed.push(s);
-        } else {
-            // Fresh id, OR an entry too recent / unparseable to count: (re)stamp
-            // it and wait. Rewriting an unparseable entry is deliberate — a
-            // corrupt marker must restart the window, never satisfy it.
-            seen.insert(s.id.clone(), now.clone());
-            changed = true;
-            first_sighting.push(s);
+        // #4702: the stored first-sighting timestamp must actually be COMPARED,
+        // and — equally important — NOT rewritten while the window is running.
+        // Presence-only checking let two calls milliseconds apart confirm;
+        // unconditional restamping then made the window measure the gap between
+        // consecutive listings instead of age since first sighting, so a
+        // frequent `tm ls` kept auto-prune permanently inert.
+        match classify_sighting(seen.get(&s.id)) {
+            Sighting::Confirmed => confirmed.push(s),
+            Sighting::TooRecent => {
+                // Leave the stamp alone — this is the whole fix.
+                first_sighting.push(s);
+            }
+            Sighting::Absent => {
+                seen.insert(s.id.clone(), now.clone());
+                changed = true;
+                first_sighting.push(s);
+            }
         }
     }
 
@@ -573,25 +636,49 @@ pub(crate) async fn auto_prune_dead_records_at(
     }
 }
 
-/// Whether a stored first-sighting timestamp is old enough to CONFIRM a record
-/// for pruning (#4702).
+/// What the persisted marker says about one record's first sighting (#4702).
 ///
-/// Why: the confirmation rule is "seen dead on two separate occasions," and
-/// only a real elapsed interval makes it that. Presence alone made it "seen
-/// dead twice," which two back-to-back `tm ls` calls satisfy in milliseconds —
-/// collapsing both the two-sightings guard AND [`AUTO_PRUNE_CAP`] (which only
-/// rate-limits if the caller cannot immediately retry) into no guard at all.
-/// What: `true` only when `ts` parses as RFC 3339 and is at least
-/// [`SIGHTING_MIN_AGE_SECS`] old. `None`, an unparseable value, or a
-/// too-recent one all return `false` — the caller restamps and waits.
+/// Why: the caller must distinguish three cases, not two. Collapsing "no usable
+/// stamp" and "stamp present but too recent" into one `false` is what made the
+/// window measure the gap between CONSECUTIVE LISTINGS instead of age since
+/// first sighting (PR #4725 review): a too-recent entry was restamped with
+/// `now` on every call, so any `tm ls` cadence tighter than
+/// [`SIGHTING_MIN_AGE_SECS`] reset the clock forever and auto-prune could never
+/// fire. On the machine #4702 was filed from, `tm ls` runs far more often than
+/// every ten minutes — the feature would have been permanently inert.
+enum Sighting {
+    /// No entry, or one that does not parse — stamp it and start the window.
+    Absent,
+    /// A valid stamp, still inside the window. Leave it EXACTLY as it is; any
+    /// rewrite here restarts the clock and is the defect described above.
+    TooRecent,
+    /// A valid stamp at least [`SIGHTING_MIN_AGE_SECS`] old.
+    Confirmed,
+}
+
+/// Classify a stored first-sighting timestamp (#4702).
+///
+/// Why: see [`Sighting`]. The confirmation rule is "first seen dead at least
+/// [`SIGHTING_MIN_AGE_SECS`] ago", which only holds if the ORIGINAL stamp
+/// survives every intervening listing.
+/// What: parses `ts` as RFC 3339 and compares its age. A missing or unparseable
+/// value is [`Sighting::Absent`] — a corrupt marker must restart the window,
+/// never satisfy it.
 /// Test: `auto_prune_does_not_confirm_two_calls_in_quick_succession`,
-/// `auto_prune_confirms_once_the_sighting_window_has_elapsed`.
-fn sighting_is_confirmed(ts: Option<&String>) -> bool {
-    ts.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .is_some_and(|first| {
-            chrono::Utc::now().signed_duration_since(first)
-                >= chrono::Duration::seconds(SIGHTING_MIN_AGE_SECS)
-        })
+/// `auto_prune_does_not_restamp_a_sighting_still_inside_the_window`,
+/// `auto_prune_confirms_once_the_sighting_window_has_elapsed`,
+/// `auto_prune_treats_an_unparseable_sighting_as_a_fresh_one`.
+fn classify_sighting(ts: Option<&String>) -> Sighting {
+    let Some(first) = ts.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok()) else {
+        return Sighting::Absent;
+    };
+    if chrono::Utc::now().signed_duration_since(first)
+        >= chrono::Duration::seconds(SIGHTING_MIN_AGE_SECS)
+    {
+        Sighting::Confirmed
+    } else {
+        Sighting::TooRecent
+    }
 }
 
 /// Whether the persisted `STALE_DAEMON_MARKER_KEY` sentinel is still within
