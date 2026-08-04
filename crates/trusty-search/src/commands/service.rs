@@ -31,7 +31,7 @@ pub enum ServiceAction {
 /// Reverse-DNS label for the LaunchAgent. Used as the plist filename and the
 /// `Label` key — both must match for `launchctl` lookups to work.
 #[cfg(target_os = "macos")]
-const LAUNCHD_LABEL: &str = "com.trusty.trusty-search";
+pub(crate) const LAUNCHD_LABEL: &str = "com.trusty.trusty-search";
 
 /// Dispatch a `trusty-search service <action>` invocation.
 pub fn handle_service(action: &ServiceAction) -> Result<()> {
@@ -110,13 +110,29 @@ fn launchd_env_vars() -> Vec<(String, String)> {
 /// trusty-memory convention, so the limit is permanent and survives
 /// `service install` regeneration instead of requiring hand-patching.
 ///
+/// 🔴 restart policy: [`KeepAlive::Always`], not `OnSuccess`. Under
+/// `OnSuccess` (`SuccessfulExit: false`) launchd restarts the daemon *only*
+/// after a non-zero exit, so any clean exit — a plain SIGTERM, an orderly
+/// drain, `trusty-search stop` — left search down indefinitely with no
+/// recovery and no alarm (issue #4113: a 2026-07-27 outage ran from 13:27:22Z
+/// until an operator hand-ran `launchctl kickstart`). Every consumer silently
+/// degraded rather than erroring. `Always` is a strict superset of the old
+/// policy — the non-zero-exit restarts it already performed still happen —
+/// so the only behavioural delta is that a clean exit now comes back too.
+/// Deliberate "stop it and leave it stopped" stays expressible through
+/// launchd's own unload path (`launchctl bootout gui/$(id -u)/<label>`, or
+/// `trusty-search service uninstall`), which removes the job entirely and
+/// therefore outranks any `KeepAlive` setting.
+///
 /// What: assembles a [`trusty_common::launchd::LaunchdConfig`] using
-/// `start --foreground` as the entry point and `KeepAlive::OnSuccess` so the
-/// daemon's idempotent `start` exit isn't crash-looped.
+/// `start --foreground` as the entry point and `KeepAlive::Always` so a clean
+/// shutdown is recovered from automatically.
 /// Test: `build_launchd_config_sets_fd_limit` and
 /// `build_launchd_config_plist_includes_fd_limit` assert the fd ceiling is
 /// wired into both the config struct and the rendered plist XML (issue
-/// #2947 regression guard). Also exercised via service install/uninstall.
+/// #2947 regression guard); `build_launchd_config_keeps_alive_after_clean_exit`
+/// and `build_launchd_config_plist_has_unconditional_keepalive` pin the #4113
+/// restart policy. Also exercised via service install/uninstall.
 #[cfg(target_os = "macos")]
 fn build_launchd_config(
     exe: std::path::PathBuf,
@@ -128,7 +144,9 @@ fn build_launchd_config(
         exe_path: exe,
         args: vec!["start".to_string(), "--foreground".to_string()],
         log_dir,
-        keep_alive: KeepAlive::OnSuccess,
+        // #4113: unconditional restart — `OnSuccess` left the daemon down
+        // permanently after any clean (exit 0) shutdown.
+        keep_alive: KeepAlive::Always,
         throttle_interval: 30,
         env_vars: launchd_env_vars(),
         // Fix fd exhaustion during large-fleet warm-boot (issue #2947):
@@ -136,6 +154,35 @@ fn build_launchd_config(
         // thousands of open index files before hitting EMFILE.
         fd_limit: Some(LAUNCHD_FD_LIMIT),
     }
+}
+
+/// Report whether the trusty-search LaunchAgent is currently loaded.
+///
+/// Why: #4113 moved the agent to `KeepAlive::Always`, so a launchd-supervised
+/// daemon comes back roughly `throttle_interval` seconds after
+/// `trusty-search stop`'s SIGTERM. `stop` uses this to tell the operator that
+/// its stop is temporary and to name the command that is not.
+/// What: builds a label-only [`trusty_common::launchd::LaunchdConfig`] — every
+/// other field is inert for `is_loaded`, which only runs
+/// `launchctl print gui/<uid>/<label>` — and returns its `is_loaded()`. Never
+/// errors: an unqueryable launchd reads as "not loaded" so `stop` stays quiet
+/// rather than printing a hint it cannot justify.
+/// Test: side-effecting `launchctl` call; the message it gates is covered by
+/// `stop::tests::launchd_restart_notice_*`.
+#[cfg(target_os = "macos")]
+pub(crate) fn launchd_agent_loaded() -> bool {
+    use trusty_common::launchd::{KeepAlive, LaunchdConfig};
+    LaunchdConfig {
+        label: LAUNCHD_LABEL.to_string(),
+        exe_path: std::path::PathBuf::new(),
+        args: Vec::new(),
+        log_dir: std::path::PathBuf::new(),
+        keep_alive: KeepAlive::Always,
+        throttle_interval: 0,
+        env_vars: Vec::new(),
+        fd_limit: None,
+    }
+    .is_loaded()
 }
 
 #[cfg(target_os = "macos")]
@@ -345,6 +392,64 @@ mod tests {
         assert!(
             xml.contains(&fd_str),
             "plist NumberOfFiles must equal {LAUNCHD_FD_LIMIT}, got xml: {xml}"
+        );
+    }
+
+    /// Why: issue #4113 — `KeepAlive::OnSuccess` (`SuccessfulExit: false`)
+    /// restarts the daemon only after a NON-zero exit, so a clean SIGTERM /
+    /// orderly drain left search down indefinitely with no recovery and no
+    /// alarm. Reverting this field to `OnSuccess` silently reintroduces a
+    /// permanent-outage class of bug that no other test would catch.
+    /// What: builds the config with dummy paths and asserts `keep_alive` is
+    /// `KeepAlive::Always`.
+    /// Test: pure construction, no fs side effects.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_launchd_config_keeps_alive_after_clean_exit() {
+        use std::path::PathBuf;
+        use trusty_common::launchd::KeepAlive;
+
+        let cfg = build_launchd_config(
+            PathBuf::from("/usr/local/bin/trusty-search"),
+            PathBuf::from("/tmp/trusty-search/logs"),
+        );
+        assert_eq!(
+            cfg.keep_alive,
+            KeepAlive::Always,
+            "keep_alive must be KeepAlive::Always so launchd restarts the \
+             daemon after a CLEAN (exit 0) shutdown too — KeepAlive::OnSuccess \
+             leaves it down permanently (issue #4113). Deliberate stops go \
+             through `launchctl bootout` / `trusty-search service uninstall`."
+        );
+    }
+
+    /// Why: the config struct can be right while the renderer emits the wrong
+    /// plist fragment — launchd reads the XML, not the struct. This asserts on
+    /// what actually lands in `~/Library/LaunchAgents`.
+    /// What: renders the plist and requires an unconditional
+    /// `<key>KeepAlive</key><true/>` with no `SuccessfulExit` dictionary
+    /// anywhere in the document.
+    /// Test: pure string generation, no fs side effects.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_launchd_config_plist_has_unconditional_keepalive() {
+        use std::path::PathBuf;
+
+        let cfg = build_launchd_config(
+            PathBuf::from("/usr/local/bin/trusty-search"),
+            PathBuf::from("/tmp/trusty-search/logs"),
+        );
+        let xml = cfg.render_plist().expect("render_plist must succeed");
+
+        assert!(
+            xml.contains("<key>KeepAlive</key>\n  <true/>"),
+            "plist must set KeepAlive unconditionally true (issue #4113), got \
+             xml: {xml}"
+        );
+        assert!(
+            !xml.contains("SuccessfulExit"),
+            "plist must NOT carry a SuccessfulExit dict — that is the \
+             restart-only-on-failure policy #4113 removed, got xml: {xml}"
         );
     }
 }

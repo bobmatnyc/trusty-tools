@@ -149,3 +149,46 @@ pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
         graph,
     }
 }
+
+/// Issue #4680: `true` when an index's stage surface claims lexical work is
+/// still owed but no walk has ever been driven for it in this daemon's
+/// lifetime — i.e. the index is STUCK, not working.
+///
+/// Why: [`derive_warm_boot_stages`] rule 3 stamps `lexical = InProgress` for
+/// every restored index whose durable corpus is empty, and `IndexStages::
+/// lifecycle_status` renders that as `"walking"`. Nothing in the restore path
+/// actually schedules a walk, so the label is a claim the daemon never backs
+/// up: a production deployment ran 7.6 days with 221 of 222 indexes reporting
+/// `lexical: in_progress` / `last_walk_files_seen: 0` / `last_walk_error:
+/// null` — the exact byte-for-byte signature of `WalkDiagnostics::default()`
+/// on a handle no walk ever touched. Boot reconcile then classified those
+/// indexes as `up_to_date` (git path: the HEAD SHA is re-derived from live git
+/// at restore, so `stored == current` always — issue #4391) or
+/// `skipped_no_data` (mtime path: `last_indexed_unix` has no production
+/// writer), so they were never re-driven either. This predicate is the shared
+/// definition of that state, consumed by boot reconcile (to retry the walk)
+/// and by `GET /health` (to stop reporting such a daemon as healthy).
+///
+/// What: pure two-signal test.
+///   - `lexical == InProgress` — the index CLAIMS a walk is underway. `Ready`
+///     means the corpus has chunks; `Failed` means a real failure is already
+///     surfaced with an actionable reason (retrying it would loop); `Skipped`
+///     is an explicit config choice. `Pending` is deliberately excluded: it is
+///     what `create_index` stamps for a brand-new empty index (issue #4110,
+///     "at registration nothing has started yet"), a legitimate state whose
+///     owner is the API caller about to POST a reindex — and it is also
+///     `IndexStages::default()`, so treating it as stuck would flag every
+///     bare handle. Only a restore-derived `InProgress` claims work that is
+///     not happening, which is the whole defect.
+///   - `walk_started == false` — `WalkDiagnostics::last_walk_started_at` is
+///     `None`, so no reindex has walked this root since the daemon started.
+///     This is what distinguishes "never walked" from "walked and legitimately
+///     found zero indexable files" (the latter sets both `last_walk_started_at`
+///     and `last_walk_error`), and it bounds the reconcile retry to at most one
+///     walk per index per daemon lifetime.
+///
+/// Test: `stuck_unwalked_matches_only_a_never_walked_in_progress_lane` and
+/// `stuck_unwalked_clears_once_a_walk_has_started` in `warm_boot_tests.rs`.
+pub fn index_is_stuck_unwalked(lexical: StageStatus, walk_started: bool) -> bool {
+    !walk_started && matches!(lexical, StageStatus::InProgress)
+}

@@ -5,7 +5,6 @@ description: Code analysis specialist. Reviews code for correctness, quality, se
 model: sonnet
 extends: base-research
 tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
-skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
 ---
 
 # Code Analyzer Agent

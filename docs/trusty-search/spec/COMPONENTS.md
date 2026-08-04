@@ -44,10 +44,48 @@ The CLI renders a 4-phase MultiProgress UI (Crawl / Chunk / Loading model… /
 Embed / KG) with progress-aware foreground wait — the `--timeout` flag is now
 optional, and the stall detector resets on each forward-progress SSE event.
 
+**Resume from checkpoint (#3979).** Every non-`force` reindex with a durable
+corpus stages its rebuild in `index.redb.tmp` (#603) and stamps that file's own
+`_meta` table with a versioned `reindex_checkpoint` record — index id, canonical
+walk root, crate version, config fingerprint, timestamp. If the daemon is killed
+mid-run, the next reindex reads that record back and, only when every field
+matches the current run, ADOPTS the staging corpus instead of deleting it. The
+committed batches (and the carryover rows the interrupted run copied in) survive,
+so a large corpus does not re-embed from zero after an interruption.
+
+The resume unit is the **file**, and the skip is content-verified: the adopted
+done-set is the staging corpus's `file_hashes` table, but the batch loop still
+re-reads and re-hashes each file's current bytes before skipping it. A file
+edited after the crash is therefore re-indexed, a file deleted after the crash is
+removed by the ordinary prune pass, and a file created after the crash is picked
+up by the full re-walk (resume never shortens the walk).
+
+Every ambiguity resolves to a full reindex, never to a partial one: an
+unreadable staging file, a missing or corrupt record, a schema-version bump, a
+different index id, a moved root, a daemon upgrade, a changed walk config, or a
+record older than the adoption window all discard the staging corpus and rebuild.
+The live `index.redb` is never read, written, or deleted by any branch of the
+resume path.
+
+Two knobs, both optional:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `TRUSTY_REINDEX_RESUME` | enabled | Set to `0`/`false`/`no`/`off` to restore the pre-#3979 always-rebuild behaviour. |
+| `TRUSTY_REINDEX_CHECKPOINT_MAX_AGE_SECS` | `86400` | Maximum age of an adoptable checkpoint. `0` disables the age gate. |
+
+Deliberate non-goals: `force` reindexes neither write nor consume a checkpoint
+(a force run stages an empty corpus and skips the prune pass, so a resumed one
+could keep chunks for files deleted since the crash), and the staged HNSW
+snapshot (#3970) is not adopted — instead a resumed run always runs the vector
+catch-up pass, which embeds exactly the chunks the live snapshot is missing.
+
 **Known gaps.**
 - 🟡 Build-file grammars (`.gradle`, `.groovy`) fall back to sliding-window.
 - 🔵 SCIP-quality cross-file entities (FR-KG-5 / #105).
 - 🔵 `reindex_engine.rs` exceeds the 500-line cap (1 438 lines, #571 open).
+- 🔵 A `--force` reindex is still restart-from-zero after an interruption (#3979
+  scoped it out; needs a prune pass on the force path first).
 
 ---
 

@@ -4,7 +4,7 @@ role: engineer
 description: 'Vanilla JavaScript specialist: Node.js backend (Express, Fastify, Koa), browser extensions, Web Components, modern ESM patterns, build tooling'
 model: sonnet
 extends: base-engineer
-skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, security-scanning, test-driven-development, api-design-patterns]
+skills: [systematic-debugging, test-driven-development]
 ---
 
 # JavaScript Engineer — Vanilla JavaScript Specialist

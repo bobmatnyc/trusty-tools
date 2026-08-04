@@ -697,3 +697,56 @@ fn dedup_verbose_does_not_merge_exclude_globs() {
          silently narrow the survivor's indexing scope"
     );
 }
+
+// ── #4680: stuck (never-walked) index classifier ─────────────────────────────
+
+/// Why: `index_is_stuck_unwalked` is the single shared definition of "this
+/// index owes lexical work and no walk has ever been driven for it" that boot
+/// reconcile (recovery) and `GET /health` (reporting) both consume — if the two
+/// ever disagreed, health could report clean while indexes sat unrecovered, or
+/// the reverse. Pinning the truth table here keeps them in lockstep.
+/// What: only `InProgress` — a claim that a walk is underway — is stuck when
+/// unwalked. `Ready` (corpus has chunks), `Failed` (a real failure already
+/// carries an actionable reason — retrying would loop), `Skipped` (explicit
+/// config), and `Pending` (`create_index`'s deliberate "registered, nothing
+/// started yet" per #4110, and also `IndexStages::default()`) never are.
+/// Test: this test.
+#[test]
+fn stuck_unwalked_matches_only_a_never_walked_in_progress_lane() {
+    use crate::core::registry::StageStatus;
+    use crate::service::warm_boot::index_is_stuck_unwalked;
+
+    assert!(
+        index_is_stuck_unwalked(StageStatus::InProgress, false),
+        "InProgress with no walk is the production #4680 signature"
+    );
+    for other in [
+        StageStatus::Ready,
+        StageStatus::Failed,
+        StageStatus::Skipped,
+        StageStatus::Pending,
+    ] {
+        assert!(
+            !index_is_stuck_unwalked(other, false),
+            "{other:?} must never be classified stuck — it claims no walk is underway"
+        );
+    }
+}
+
+/// Why: the retry has to be bounded to one walk per index per daemon lifetime,
+/// otherwise an index whose walk legitimately finds zero indexable files
+/// (everything gitignored / filtered out) would be re-driven on every reconcile
+/// forever. `last_walk_started_at` being set is what draws that line.
+/// What: the owing lane, with `walk_started = true`.
+/// Test: this test.
+#[test]
+fn stuck_unwalked_clears_once_a_walk_has_started() {
+    use crate::core::registry::StageStatus;
+    use crate::service::warm_boot::index_is_stuck_unwalked;
+
+    assert!(
+        !index_is_stuck_unwalked(StageStatus::InProgress, true),
+        "InProgress must not be stuck once a walk has run — a completed walk \
+         that found nothing is an empty corpus, not a stuck one"
+    );
+}

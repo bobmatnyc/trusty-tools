@@ -189,7 +189,11 @@ fn scan_ignores_manifest_and_non_md() {
 
 #[test]
 fn scan_handles_no_frontmatter() {
-    // An agent file with no frontmatter falls back to the file stem.
+    // #4711 INVERTS this assertion. It previously read "an agent file with no
+    // frontmatter falls back to the file stem" — that fallback is what minted
+    // `base` as a delegatable agent from a prompt fragment. Claude Code
+    // dispatches a subagent by its frontmatter `name:`, so a file without one
+    // could never have been delegated to; advertising it was always wrong.
     let tmp = TempDir::new().unwrap();
     write_agent(
         tmp.path(),
@@ -197,10 +201,105 @@ fn scan_handles_no_frontmatter() {
         "# Plain agent\n\nNo frontmatter here.\n",
     );
     let agents = scan_agents(tmp.path());
-    assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0].name, "plain");
-    assert_eq!(agents[0].role, "plain");
-    assert_eq!(agents[0].extends_chain, vec!["plain".to_string()]);
+    assert!(
+        agents.is_empty(),
+        "a file with no frontmatter has no `name:`, so it is not dispatchable \
+         and must not enter the roster (#4711)"
+    );
+}
+
+#[test]
+fn bare_base_md_is_excluded_from_the_roster() {
+    // #4711: `is_foundation_file` matched `base-` (hyphen) only, so the
+    // hyphen-less `~/.claude/agents/base.md` — a "Base QA Instructions…
+    // Appended to all QA agents" prompt fragment — became a delegatable agent
+    // named `base`. Pinned WITH a `name:` so this test isolates the file-name
+    // rule rather than passing incidentally via the `name:`-required rule.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base",
+        "---\nname: base\nrole: base\n---\n\n# Base QA Instructions\n\n\
+         Appended to all QA agents.\n",
+    );
+    write_agent(
+        tmp.path(),
+        "Base",
+        "---\nname: Base\n---\n\n# Mixed-case spelling of the same convention\n",
+    );
+    write_agent(
+        tmp.path(),
+        "engineer",
+        "---\nname: engineer\nrole: engineer\n---\n\n# Engineer\n",
+    );
+
+    let names: Vec<String> = scan_agents(tmp.path())
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["engineer".to_string()],
+        "a bare `base.md` is a foundation file in every spelling (#4711)"
+    );
+    assert!(is_foundation_file("base"));
+    assert!(is_foundation_file("BASE"));
+}
+
+#[test]
+fn base_prefixed_near_misses_survive_the_bare_base_rule() {
+    // #4711 must not re-open #4589: matching the WHOLE stem `base` (not a
+    // `base` PREFIX) is what keeps these real names in the roster.
+    for stem in [
+        "baseline-analyzer",
+        "base64-decoder",
+        "basecamp-sync",
+        "based-reviewer",
+    ] {
+        assert!(
+            !is_foundation_file(stem),
+            "`{stem}` is an ordinary agent name, not a foundation template (#4589)"
+        );
+    }
+    // …while the original `base-*` convention still excludes.
+    for stem in ["BASE-AGENT", "base-custom", "Base-Custom-Two"] {
+        assert!(
+            is_foundation_file(stem),
+            "`{stem}` is a foundation template"
+        );
+    }
+}
+
+#[test]
+fn file_without_name_frontmatter_is_excluded_from_the_roster() {
+    // #4711, the durable half: a content-less prompt fragment can carry any
+    // file name at all. Requiring `name:` — the field Claude Code dispatches
+    // by — is what stops the NEXT `base.md`-shaped file from becoming an
+    // agent, whatever it is called.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "shared-qa-preamble",
+        "---\nrole: qa\ndescription: Appended to all QA agents.\n---\n\n# Preamble\n",
+    );
+    write_agent(
+        tmp.path(),
+        "real-agent",
+        "---\nname: real-agent\ndescription: Does real work.\n---\n\n# Real\n",
+    );
+
+    let agents = scan_agents(tmp.path());
+    assert_eq!(
+        agents.len(),
+        1,
+        "only the file declaring `name:` is a dispatchable agent (#4711)"
+    );
+    assert_eq!(agents[0].name, "real-agent");
+    assert_eq!(
+        agents[0].description.as_deref(),
+        Some("Does real work."),
+        "a real agent with `name:` frontmatter is still admitted unchanged"
+    );
 }
 
 #[test]

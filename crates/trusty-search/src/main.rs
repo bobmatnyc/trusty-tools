@@ -970,7 +970,7 @@ enum Commands {
     /// With `--yes`: skip the confirmation prompt.
     ///
     /// After a successful install the daemon restarts automatically when
-    /// running under launchd (`KeepAlive::OnSuccess`). When not supervised,
+    /// running under launchd (`KeepAlive::Always`, #4113). When not supervised,
     /// a restart hint is printed instead.
     ///
     /// Examples:
