@@ -1761,6 +1761,22 @@ async fn seed_dead_session(
     id
 }
 
+/// A `PruneContext` bound to a tempdir marker with NO live tmux sessions.
+///
+/// Why: `session_ls_at` must never reach the real tmux enumeration in a test.
+/// CI proved why: the `session_ls_*` tests did exactly that, so they passed on a
+/// developer machine (tmux present) and failed on a runner with no tmux, where
+/// the fail-closed rule correctly pruned nothing. An explicit empty set makes
+/// the test say what it means — "no session is live" — on every machine.
+fn hermetic_prune_ctx(
+    marker_path: &std::path::Path,
+) -> crate::commands::session_picker_prune::PruneContext {
+    crate::commands::session_picker_prune::PruneContext::hermetic(
+        marker_path.to_path_buf(),
+        Some(HashSet::new()),
+    )
+}
+
 /// Set every RECORD sighting to exactly `minutes` ago, leaving the stale-daemon
 /// sentinel untouched (#4702).
 ///
@@ -2587,7 +2603,7 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
     // First listing records the sighting; the sighting window then elapses; the
     // second clears. The two-sightings guard applies to non-interactive callers
     // exactly as it does to the picker.
-    let ls = async |marker: &std::path::Path| {
+    let ls = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
         crate::commands::managed::session_ls_at(
             &client,
             &server.url,
@@ -2596,13 +2612,14 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
             false,
             crate::commands::session_picker::SessionSortArg::Recent,
             None,
-            marker,
+            ctx,
         )
         .await
         .expect("session_ls");
     };
 
-    ls(&marker_path).await;
+    let ctx = hermetic_prune_ctx(&marker_path);
+    ls(&ctx).await;
     assert!(
         fetch_raw_live(&client, &server.url)
             .await
@@ -2612,7 +2629,8 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
     );
 
     backdate_sightings(&marker_path, 11);
-    ls(&marker_path).await;
+    let ctx = hermetic_prune_ctx(&marker_path);
+    ls(&ctx).await;
 
     let live = fetch_raw_live(&client, &server.url).await;
     assert!(
@@ -2635,7 +2653,7 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
     let server = LocalTestServer::spawn(state).await;
     let client = reqwest::Client::new();
 
-    let ls_json = async |marker: &std::path::Path| {
+    let ls_json = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
         crate::commands::managed::session_ls_at(
             &client,
             &server.url,
@@ -2644,15 +2662,15 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
             false,
             crate::commands::session_picker::SessionSortArg::Recent,
             None,
-            marker,
+            ctx,
         )
         .await
         .expect("session_ls --json");
     };
 
-    ls_json(&marker_path).await;
+    ls_json(&hermetic_prune_ctx(&marker_path)).await;
     backdate_sightings(&marker_path, 11);
-    ls_json(&marker_path).await;
+    ls_json(&hermetic_prune_ctx(&marker_path)).await;
 
     let live = fetch_raw_live(&client, &server.url).await;
     assert!(
@@ -3186,7 +3204,7 @@ async fn session_ls_json_never_refetches_after_pruning() {
         false,
         crate::commands::session_picker::SessionSortArg::Recent,
         None,
-        &marker_path,
+        &hermetic_prune_ctx(&marker_path),
     )
     .await
     .expect("session_ls --json");

@@ -180,6 +180,50 @@ pub(crate) struct AutoPruneOutcome {
     pub(crate) pending: usize,
 }
 
+/// Everything the prune needs from its environment, resolved once per
+/// invocation (#4702).
+///
+/// Why: both inputs — the confirmation marker file and the live-tmux name set —
+/// must be injectable, or a test silently depends on the developer's machine.
+/// CI caught exactly that: the `session_ls_*` tests reached
+/// [`live_tmux_session_names`] directly, so they passed locally (tmux present,
+/// enumeration succeeds) and failed on a runner with no tmux, where the
+/// fail-closed rule correctly pruned nothing. Bundling both into one value keeps
+/// the seam at every layer without growing an eighth positional parameter on
+/// `session_ls_at`.
+/// What: [`PruneContext::production`] resolves both for real use;
+/// [`PruneContext::hermetic`] takes explicit values for tests.
+pub(crate) struct PruneContext {
+    /// Where the two-sightings confirmation marker lives.
+    pub(crate) marker_path: PathBuf,
+    /// Live tmux session names, or `None` when tmux could not be enumerated at
+    /// all — which [`auto_prune_dead_records_at`] treats as "prune nothing".
+    pub(crate) live_tmux_names: Option<HashSet<String>>,
+}
+
+impl PruneContext {
+    /// Resolve both inputs for real use: the marker under `~/.trusty-mpm`, and a
+    /// live tmux enumeration.
+    pub(crate) fn production() -> Self {
+        Self {
+            marker_path: default_marker_path(),
+            live_tmux_names: live_tmux_session_names(),
+        }
+    }
+
+    /// Build a context with explicit values — the test seam.
+    ///
+    /// Why: a test must never write the operator's real marker file, and must
+    /// never depend on whether the machine running it happens to have tmux.
+    #[cfg(test)]
+    pub(crate) fn hermetic(marker_path: PathBuf, live_tmux_names: Option<HashSet<String>>) -> Self {
+        Self {
+            marker_path,
+            live_tmux_names,
+        }
+    }
+}
+
 /// Resolve the confirmation marker file under the default framework root.
 ///
 /// Why: the framework root (`~/.trusty-mpm`) is where every other piece of
@@ -222,27 +266,31 @@ pub(crate) async fn prune_and_report(
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
 ) -> Vec<ManagedSessionSummary> {
-    prune_and_report_at(client, url, sessions, &default_marker_path()).await
+    prune_and_report_at(client, url, sessions, &PruneContext::production()).await
 }
 
-/// [`prune_and_report`] with an explicit marker-file path — the testable core.
+/// [`prune_and_report`] with an injected [`PruneContext`] — the testable core.
 ///
 /// Why: a test must never write the operator's real
-/// `~/.trusty-mpm/auto-prune-seen.json`; injecting the path keeps every test
-/// hermetic in its own tempdir (the same seam [`auto_prune_dead_records_at`]
-/// already provides one level down).
+/// `~/.trusty-mpm/auto-prune-seen.json`, and must never depend on whether the
+/// machine running it has tmux. See [`PruneContext`] for the CI failure that
+/// made the second half of that non-negotiable.
 /// What: see [`prune_and_report`].
 /// Test: `session_ls_prunes_dead_records_on_piped_invocation`.
 pub(crate) async fn prune_and_report_at(
     client: &reqwest::Client,
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
-    marker_path: &Path,
+    ctx: &PruneContext,
 ) -> Vec<ManagedSessionSummary> {
-    // #4702: enumerate live tmux ONCE per call. `None` = could not determine,
-    // which `auto_prune_dead_records_at` treats as "prune nothing".
-    let live = live_tmux_session_names();
-    let outcome = auto_prune_dead_records_at(client, url, sessions, marker_path, live).await;
+    let outcome = auto_prune_dead_records_at(
+        client,
+        url,
+        sessions,
+        &ctx.marker_path,
+        ctx.live_tmux_names.clone(),
+    )
+    .await;
     if outcome.pruned > 0 {
         eprintln!(
             "tm: pruned {} dead record{} (workspace gone)",

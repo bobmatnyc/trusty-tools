@@ -169,16 +169,19 @@ pub(crate) async fn session_ls(
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<String>,
 ) -> anyhow::Result<()> {
-    let marker = crate::commands::session_picker_prune::default_marker_path();
-    session_ls_at(client, url, json, source_id, all, sort, term, &marker).await
+    let ctx = crate::commands::session_picker_prune::PruneContext::production();
+    session_ls_at(client, url, json, source_id, all, sort, term, &ctx).await
 }
 
-/// [`session_ls`] with an explicit auto-prune marker-file path — the testable
-/// core (#4702).
+/// [`session_ls`] with an injected auto-prune context — the testable core
+/// (#4702).
 ///
 /// Why: a test must never write the operator's real
-/// `~/.trusty-mpm/auto-prune-seen.json`; injecting the path is the same seam
-/// `auto_prune_dead_records_at` already provides one level down.
+/// `~/.trusty-mpm/auto-prune-seen.json`, and must never depend on whether the
+/// machine running it has tmux. Passing a
+/// [`PruneContext`](crate::commands::session_picker_prune::PruneContext) injects
+/// both — CI caught the second half when these tests, reaching the real tmux
+/// enumeration, passed locally and failed on a runner with no tmux.
 /// What: see [`session_ls`]. The `--json` branch echoes the ORIGINAL response
 /// body and never re-GETs (PR #4725 review). A re-GET looked like it kept the
 /// output fresh but did neither job well: the raw passthrough is unfiltered, so
@@ -201,7 +204,7 @@ pub(crate) async fn session_ls_at(
     all: bool,
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<String>,
-    marker_path: &std::path::Path,
+    ctx: &crate::commands::session_picker_prune::PruneContext,
 ) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
     // that raw text verbatim (byte-for-byte — preserving exact field
@@ -214,24 +217,14 @@ pub(crate) async fn session_ls_at(
         // byte-for-byte. #4702: prune as a side effect, then echo the body we
         // ALREADY have. No re-GET — see this function's doc.
         if let Ok(sessions) = parsed {
-            crate::commands::session_picker_prune::prune_and_report_at(
-                client,
-                url,
-                sessions,
-                marker_path,
-            )
-            .await;
+            crate::commands::session_picker_prune::prune_and_report_at(client, url, sessions, ctx)
+                .await;
         }
         println!("{raw}");
         return Ok(());
     }
-    let sessions = crate::commands::session_picker_prune::prune_and_report_at(
-        client,
-        url,
-        parsed?,
-        marker_path,
-    )
-    .await;
+    let sessions =
+        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx).await;
     let mut sessions =
         crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);
