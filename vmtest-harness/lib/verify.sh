@@ -318,7 +318,7 @@ negative_probe_n2() {
     #     `InstallGate::Refuse` arm) returns 3 whenever `--yes` is absent and
     #     stdin is not a TTY — and the guest exec channel is not a TTY. The
     #     cargo guard at
-    #     install.rs:826 sits inside `install_one`, which the refusal returns
+    #     install.rs:829 sits inside `install_one`, which the refusal returns
     #     before ever calling. The observed 3 is the CONSENT-GATE code, not the
     #     cargo-absent code. It is non-zero and distinct from 1, but it is not
     #     RC-2's code and recording it as such would be false precision of
@@ -350,7 +350,7 @@ negative_probe_n2() {
     log '*** N2 BLOCKED (RC-2 / DOC-2 §6.2) — NOT A PASS. ***'
     log "*** N2 observed a guide-and-abort (exit ${rc}, stdout clean, guidance on stderr) but NOT the CARGO-ABSENT one: stderr carries no cargo-related token. ***"
     log "*** first stderr line: ${first_err} ***"
-    log '*** Cause (read from crates/trusty-installer, confirmed by observation): the non-interactive consent gate returns before install_one, so the cargo guard at install.rs:826 is unreachable; and `--yes` would reach a prebuilt-first install path that could overwrite the source-built binaries under test (DOC-1 §6.5). ***'
+    log '*** Cause (read from crates/trusty-installer, confirmed by observation): the non-interactive consent gate returns before install_one, so the cargo guard at install.rs:829 is unreachable; and `--yes` would reach a prebuilt-first install path that could overwrite the source-built binaries under test (DOC-1 §6.5). ***'
     log '*** RC-2 is NOT pinned and remains OPEN. Recorded in MANIFEST Phase 5, Deviations. The harness adapts to the product, never the reverse: no crates/* source was changed. ***'
     return 0
 }
@@ -936,6 +936,60 @@ verify_versions() {
 # function is affected. THAT CONTAINMENT IS WHY RC-1 IS SCOPED AROUND RATHER
 # THAN WAITED ON.
 #
+# ===========================================================================
+# THE 2026-08-04 CORRECTION — THE STATUS CODE IS NOT THE SIGNAL; THE BODY IS.
+#
+# THIS ORACLE CARRIED A RULE THE PRODUCT HAD ALREADY FIXED. It hard-failed on any
+# HTTP code other than 200. `trusty-analyze` answers **503** with
+# `{"status":"degraded"}` when `trusty-search` is unreachable
+# (`crates/trusty-analyze/src/service/routes.rs:188-201`, struct at :176), while
+# `trusty-review` answers **200** with the SAME `status:"degraded"` for the
+# identical condition. A 2xx-only rule therefore reads one healthy daemon as
+# `degraded` and the other as `down` FOR THE SAME UNDERLYING STATE.
+#
+# That is not this harness's inference. It is the product's recorded conclusion
+# after #4246, at `crates/trusty-installer/src/commands/probe_http.rs:396-406`:
+#   "trusty-analyze answers 503 + status:"degraded" when trusty-search is
+#    unreachable; trusty-review answers 200 + the same status:"degraded". A
+#    2xx-only liveness check (`ensure::daemon::health_ok`) therefore reads one
+#    healthy daemon as `degraded` and the other as `down` for the identical
+#    condition […] The body is the signal; the status code is not."
+# `classify_response` implements exactly that: a JSON body with a string `status`
+# field is `Serving` REGARDLESS of `status_code`.
+#
+# THE TWO FIXES ARE COUPLED AND CANNOT BE SEPARATED. Adding `trusty-analyze` to
+# the loop (below) under the OLD 200-only rule would have FAILED EVERY RUN in
+# which search was not yet answering — which, per §1.1a, is the normal state of a
+# source-installed stack for as long as it takes search to come up. The harness
+# would have reported a packaging defect where the product reports a healthy
+# daemon with a degraded dependency.
+#
+# THIS IS NOT "ACCEPT ANYTHING". What was a code check is now an ENVELOPE check,
+# which is the product's own `classify_response` discipline. STILL REJECTED, each
+# failing the run: no address discovered inside the budget; no HTTP response at
+# all (curl `000` — refused, timed out, or unreachable); a body that does not
+# parse as JSON; an absent or empty `.status`; and `.status` in
+# {down, error, unhealthy}. The ONLY thing that moved is that a NON-2xx CODE NO
+# LONGER OVERRIDES A WELL-FORMED BODY. A non-2xx code carrying no parseable
+# envelope still fails — that is the product's `HttpError` -> `down`.
+#
+# WHY THIS IS NOT DELEGATED TO `tctl stack health --json`, having run it
+# (2026-08-04, host stack): it emits
+# `{"command","members":[{"member","health"}],"verdict":"ready"|"degraded"}`,
+# exit 0/2, over `stable_set()` filtered to `m.daemon` (stack/health.rs:96),
+# body-classified and 503-tolerant through the same `probe_member_health` this
+# correction is modelled on. It is tempting AND IT WOULD LOSE AN ASSERTION THIS
+# ORACLE ALREADY MAKES: `trusty-mpm` is DELIBERATELY LEFT UNPROBED by
+# `probe_member_health` (`ManageStrategy::OwnVerb` -> `Unprobeable` ->
+# `unknown`, #4246), so delegating would downgrade a daemon this loop PROVES is
+# serving on 7880 into a verdict nothing can assert on. It also drops `version`
+# and carries no `service` discriminator, so it closes nothing RC-1 opens. The
+# product's CLASSIFICATION RULE is adopted here; the product's COMMAND is not
+# substituted for the probe. (§1.1's warning against swapping `stack health` in
+# for `stack doctor` is a different question and is untouched — `verify_stack_doctor`
+# still uses `stack doctor`.)
+# ===========================================================================
+#
 # §F-7 — DAEMON START AND PORT DISCOVERY, RESOLVED BY OBSERVATION (step 2, not
 # the BLOCKED branch). §F-7 requires reading `commands/port.rs` and
 # `commands/lifecycle.rs` and determining whether a machine-readable start
@@ -962,25 +1016,30 @@ verify_daemon_liveness() {
     local daemons d addr code body status bad='' checked=0 rc start_out
 
     log "--- verify_daemon_liveness (pattern ${pattern}; DOC-2 §1.3 INTERIM, pending RC-1) ---"
-    log 'ASSERTS LIVENESS ONLY: HTTP 200 + parseable JSON + non-empty .status outside {down,error,unhealthy}. Nothing stronger, because no shared health type exists (RC-1).'
+    log 'ASSERTS LIVENESS ONLY: an address, a response, parseable JSON, non-empty .status outside {down,error,unhealthy} — ON THE BODY, NOT THE STATUS CODE. Nothing stronger, because no shared health type exists (RC-1).'
 
-    # WHICH daemons. §1.3's table is the contract's OWN enumeration of the
-    # daemons whose `/health` shapes it has read, intersected with the
-    # expectation table's in-scope packages so the set stays DERIVED from scope
-    # rather than listed twice. The TSV's `in_scope` column marks BINARIES, not
-    # daemons (§F-7), so it cannot supply this set by itself.
-    daemons=''
-    for d in trusty-search trusty-memory trusty-mpm trusty-review; do
-        if tsv_scope_packages | grep -q -x -F "$d"; then daemons="${daemons} ${d}"; fi
-    done
-    daemons=${daemons# }
-    log "in-scope daemons per §1.3's table: ${daemons}"
-    # Recorded rather than glossed: `trusty-analyze` is an in-scope package and
-    # trusty-installer's `stable_set` marks it a daemon, but §1.3's four-shape
-    # table does not carry it — so this oracle has no described shape for it and
-    # does not probe it. That is a gap in §1.3's enumeration, not a decision
-    # taken here, and it is logged every run rather than left implicit.
-    log 'NOTE: trusty-analyze is in scope and is a daemon in stable_set, but §1.3 does not enumerate it — NOT probed here. Recorded as a §1.3 gap.'
+    # WHICH daemons — DERIVED FROM THE PRODUCT, NOT TRANSCRIBED FROM A DOCUMENT.
+    # `stack doctor`'s member table IS `stable_set()` filtered to `m.daemon`
+    # (doctor.rs:151) — the product's own answer to "which members are daemons" —
+    # intersected with the expectation table's in-scope packages so the set stays
+    # derived from scope rather than listed twice. The TSV's `in_scope` column
+    # marks BINARIES, not daemons (§F-7), so it cannot supply this set alone.
+    #
+    # THIS IS WHAT BRINGS `trusty-analyze` IN. It was never absent from any
+    # product surface: it is an in-scope package, `stable_set` marks it a daemon,
+    # and `stack doctor` has reported it on every run. It was absent from a
+    # HARDCODED FOUR-NAME LIST in this function, transcribed from §1.3's
+    # four-shape table. Deriving the set removes the transcription and the drift
+    # with it — `trusty-console` is a `stable_set` daemon too and is correctly
+    # excluded here, by the intersection, because the TSV marks it out of scope.
+    daemons=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
+        | grep -x -F -f <(tsv_scope_packages) | tr '\n' ' ') || :
+    daemons=${daemons% }
+    # FAILS CLOSED. An empty set would make every assertion below vacuous and
+    # still print a PASS line — the false pass this whole oracle exists to avoid.
+    [ -n "$daemons" ] \
+        || die 60 'verify_daemon_liveness: the derived daemon set is EMPTY. `tctl stack doctor --json` reported no member that the expectation table also carries as in-scope, so there is nothing to probe and a PASS here would assert nothing. Either doctor produced no parseable member table or the expectation table and `stable_set()` have diverged.'
+    log "in-scope daemons (stack doctor's stable_set daemons ∩ expectation table): ${daemons}"
 
     # START, via the machine-readable lifecycle command (§F-7 step 2). Its output
     # is logged whatever it says: on a source-only install there are no launchd
@@ -1009,20 +1068,36 @@ verify_daemon_liveness() {
         code=$(vm_exec "$vm" "curl -s -o /tmp/vmtest-health-${d}.json -w '%{http_code}' --max-time 10 http://${addr}/health" 2>/dev/null) || :
         body=$(vm_exec "$vm" "cat /tmp/vmtest-health-${d}.json" 2>/dev/null) || :
 
-        if [ "$code" != '200' ]; then
+        # NO RESPONSE AT ALL still fails. curl writes `000` for a refused
+        # connection, a timeout, or an unresolvable host — nothing answered, so
+        # there is no body to be the signal. This is the product's `Refused` /
+        # `Timeout`, and it is the branch that keeps an unreachable daemon
+        # failing the run. Every OTHER code is carried to the envelope check
+        # below rather than rejected here (see this function's header).
+        if [ "$code" = '000' ] || [ -z "$code" ]; then
             bad="${bad}
-    ${d}: GET http://${addr}/health returned HTTP '${code}', expected 200"
+    ${d}: GET http://${addr}/health got NO HTTP RESPONSE (curl code '${code}') — refused, timed out, or unreachable"
             continue
         fi
+        [ "$code" = '200' ] \
+            || log "  ${d}: HTTP ${code} (NOT 2xx) — carried to the envelope check, not rejected on the code. trusty-analyze answers 503 + status='degraded' when search is unreachable; probe_http.rs:396-406 records that the body is the signal."
         if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
             bad="${bad}
     ${d}: /health body does not parse as JSON: ${body}"
             continue
         fi
-        status=$(printf '%s' "$body" | jq -r '.status // ""')
+        # A STRING `.status`, exactly as `classify_response` requires. This is the
+        # ENVELOPE CHECK that replaces the code check: it is what stops a stale
+        # `http_addr` plus an unrelated squatter on a loopback port reading as
+        # healthy. It is NOT a complete defence — a squatter emitting a generic
+        # `{"status":"ok"}` still passes, the #3364 collision class — and closing
+        # that needs a `service` discriminator in each daemon's payload, which no
+        # daemon emits and which `stack health --json` does not carry either. So
+        # it stays open, and RC-1 remains the thing that would close it.
+        status=$(printf '%s' "$body" | jq -r 'if (.status | type) == "string" then .status else "" end')
         if [ -z "$status" ]; then
             bad="${bad}
-    ${d}: .status is empty or absent"
+    ${d}: /health body parses as JSON but carries no non-empty STRING .status — not a health envelope (the product's \`BadEnvelope\`, probe_http.rs). Body: ${body}"
             continue
         fi
         case "$status" in
@@ -1030,14 +1105,14 @@ verify_daemon_liveness() {
                 bad="${bad}
     ${d}: .status='${status}', which §1.3's INTERIM predicate rejects" ;;
             *)
-                log "  ${d}: LIVE — HTTP 200, JSON parses, .status='${status}'" ;;
+                log "  ${d}: LIVE — HTTP ${code}, JSON parses, .status='${status}'" ;;
         esac
     done
 
     [ -z "$bad" ] \
         || die 60 "verify_daemon_liveness FAILED under pattern ${pattern} — §1.3's INTERIM predicate (liveness only) does not hold:${bad}"
 
-    log "verify_daemon_liveness PASS: ${checked} in-scope daemon(s) live (HTTP 200 + parseable JSON + acceptable .status). LIVENESS ONLY — see RC-1."
+    log "verify_daemon_liveness PASS: ${checked} in-scope daemon(s) live (a response + parseable JSON + a string .status outside {down,error,unhealthy}; the status CODE is logged, not asserted). That is EVERY daemon \`stack doctor\` reports which the expectation table carries — no in-scope daemon is skipped. LIVENESS ONLY — see RC-1."
 }
 
 # _verify_wait_for_addr <vm_name> <member>
@@ -1131,10 +1206,25 @@ verify_snapshot_inputs() {
     # so it belongs in a snapshot that must not change a verdict. The START half
     # (`tctl start --json`) DOES have side effects and is therefore left where it
     # belongs, inside `verify_daemon_liveness`.
-    for d in trusty-search trusty-memory trusty-mpm trusty-review; do
+    for d in $(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null); do
         j=$(vm_exec "$vm" "tctl port ${d} --json-port" 2>&1) || :
         log "  tctl port ${d} --json-port -> ${j}"
     done
+
+    # `tctl stack health --json` — RECORDED, NEVER ASSERTED ON, and deliberately
+    # not the liveness probe (see `verify_daemon_liveness`'s header for why:
+    # `trusty-mpm` is `Unprobeable` -> `unknown` there, which would LOSE an
+    # assertion this harness already makes). It is logged because it is the
+    # product's own body-based rollup over the same member set, so a divergence
+    # between it and the oracle's own probe is the single most informative thing
+    # a reader of a failed run could have. Read at snapshot time, i.e. BEFORE
+    # `verify_daemon_liveness` runs `tctl start --json`, so `down` here is the
+    # expected pre-start reading — the same ordering that makes §1.1a's `down`
+    # acceptance correct.
+    j=$(vm_exec "$vm" 'tctl stack health --json' 2>&1) || :
+    log 'raw `tctl stack health --json` (pre-start; LOGGED, NOT ASSERTED):'
+    printf '%s' "$j" | jq -c '{verdict, members: [.members[] | "\(.member)=\(.health)"]}' 2>/dev/null | sed 's/^/    | /' >&2 \
+        || printf '%s\n' "$j" | sed 's/^/    | /' >&2
 
     j=$(vm_exec "$vm" 'tctl status --json' 2>/dev/null) || :
     log 'raw `tctl status --json` (context only; not one of §1'\''s three oracle inputs):'

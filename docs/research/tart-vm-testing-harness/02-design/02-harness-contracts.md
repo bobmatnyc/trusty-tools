@@ -275,6 +275,38 @@ bootstrap step — and neither causes the other.
 > **LIVE — HTTP 200** by `verify_daemon_liveness` a few steps later in the same
 > run. That transition is this correction's mechanism demonstrated end to end:
 > **what changes `health` is the start, not a plist.**
+>
+> > **REFINED 2026-08-04 BY READING `tctl start --json`'s ACTUAL OUTPUT — the
+> > last sentence is true but its implication is not, and the difference makes
+> > the ordering qualifier load-bearing for a SECOND assertion.** `tctl start`
+> > does not merely start; it reaches a **service-install** path and **writes the
+> > plists**. Observed verbatim in the pattern (c) run of 2026-08-04:
+> >
+> > ```
+> > { "member": "trusty-search",  "ok": true, "detail": "installed + bootstrapped com.trusty.trusty-search" }
+> > { "member": "trusty-memory",  "ok": true, "detail": "installed + bootstrapped com.trusty.memory" }
+> > { "member": "trusty-analyze", "ok": true, "detail": "installed + bootstrapped com.trusty.analyze" }
+> > { "member": "trusty-review",  "ok": true, "detail": "installed + bootstrapped com.trusty.trusty-review" }
+> > { "member": "trusty-mpm",     "ok": true, "detail": "trusty-mpm start ok" }
+> > ```
+> >
+> > It remains correct that a plist does not *cause* `health` to change — the
+> > daemon running is what does. But it is **not** correct to picture the plists
+> > as still absent afterwards. **They are written, by the harness's own liveness
+> > step.**
+> >
+> > **CONSEQUENCE — §1.1a Decision 2's plist invariant is ORDERING-DEPENDENT, and
+> > nothing enforces the ordering.** Since 2026-08-04 `verify_stack_doctor`
+> > asserts `plist_installed == false` **directly** for every in-scope launchd
+> > member. That assertion holds only because `verify_stack_doctor` runs
+> > **before** `verify_daemon_liveness` in all three scenarios. **Reorder those
+> > two calls and the plist invariant fails on every run** — not because anything
+> > regressed, but because the harness itself bootstrapped the services one step
+> > earlier. This is recorded rather than fixed: the ordering is correct today in
+> > all three scenarios (`install-local.sh:93,95`, `install-branch.sh:131,133`,
+> > `install-released.sh:114,116`), and inventing a guard for a hazard no
+> > scenario currently exhibits would add a mechanism nobody has needed. **A
+> > future editor moving these calls must read this note first.**
 
 **Consequence 1 — the fail-closed branch this bullet promises is INERT under the
 very patterns it is gated to.** The original text justified requiring
@@ -460,16 +492,33 @@ PASS  iff  tool_version is a non-empty string
 This is the one DOC-1 §7.1 source that does not exist as a contract.
 
 Every daemon does expose `GET /health`, and it returns JSON. But there is **no
-shared type in `trusty-common`** and no unified schema. There are four
+shared type in `trusty-common`** and no unified schema. There are **five**
 independently-evolved shapes, with no field in common beyond `status` and
 `version`:
 
 | Daemon | Route | Response struct |
 |---|---|---|
 | `trusty-search` | `crates/trusty-search/src/service/server/mod.rs:245` | `HealthResponse`, `crates/trusty-search/src/service/server/health.rs:22-` — ~22 fields, several `skip_serializing_if = "Option::is_none"` (**absent, not null**) |
-| `trusty-memory` | `crates/trusty-memory/src/web/mod.rs:190` | `crates/trusty-memory/src/web/health.rs:103-` — `status`, `version`, `daemon_state`, `worker{in_flight,oldest_age_secs?,wedged}`, resource fields |
+| `trusty-memory` | `crates/trusty-memory/src/web/mod.rs:199` | `crates/trusty-memory/src/web/health.rs:103-` — `status`, `version`, `daemon_state`, `worker{in_flight,oldest_age_secs?,wedged}`, resource fields |
+| `trusty-analyze` | `crates/trusty-analyze/src/service/routes.rs:75` | `crates/trusty-analyze/src/service/routes.rs:176-180` — `status`, `version`, `search_reachable`. Handler at `routes.rs:188-201`. **The only daemon here that signals through the HTTP STATUS CODE**: 200 + `status:"ok"` when trusty-search is reachable, **503** + `status:"degraded"` when it is not. |
 | `trusty-mpm` | `crates/trusty-mpm/src/daemon/api.rs:181` | `crates/trusty-mpm/src/daemon/api/types.rs:41-87` — `status`, `catalog_stale`, `catalog_unknown`, `catalog_changes`, `supervised`, `version` |
 | `trusty-review` | `crates/trusty-review/src/service/mod.rs:130` | `crates/trusty-review/src/service/handlers.rs:171-186` — `status`, `version`, `dry_run`, `reviewer_model`, `inference`, `deps{…}` |
+
+> **`trusty-analyze` WAS MISSING FROM THIS TABLE, AND THE OMISSION PROPAGATED**
+> *(added 2026-08-04)*. It is an in-scope package, `stable_set()` marks it a
+> daemon, and `stack doctor` has reported it on every run this harness has ever
+> made — but this table did not carry it, so `verify_daemon_liveness` transcribed
+> a **four-name** list from it and never probed the fifth. The harness no longer
+> transcribes this table at all: it **derives** the set from `stack doctor`'s
+> member table (`stable_set()` filtered to `m.daemon`, `doctor.rs:151`)
+> intersected with the expectation table's in-scope packages, so a table like
+> this one cannot silently narrow the oracle again. **This table is now
+> documentation, not the contract's iteration set.**
+>
+> **The two citations corrected here were both off by a few lines and both were
+> real drift**: `trusty-memory`'s route is at `web/mod.rs:**199**` (190 is a
+> comment line about issue #99), not 190. `trusty-search:245`, `trusty-mpm:181`
+> and `trusty-review:130` were re-checked and are correct.
 
 Additional hazards a spec must not paper over:
 
@@ -505,12 +554,85 @@ interim contract is narrower and honest, and it is what an implementer should
 build today:
 
 ```
-INTERIM: for each in-scope daemon d expected present under pattern P:
-           GET /health returns HTTP 200
+INTERIM (as amended 2026-08-04 — see below; the status CODE is not the signal):
+         for each in-scope daemon d expected present under pattern P:
+           an address is discovered inside the budget   (`tctl port d --json-port`)
+           GET /health produces an HTTP RESPONSE AT ALL  (curl code != 000)
            the body parses as JSON  (`jq -e . >/dev/null`)
-           .status is a non-empty string
+           .status is a non-empty STRING
            .status is not one of {"down", "error", "unhealthy"}
+         The HTTP status code is LOGGED, NOT ASSERTED.
 ```
+
+> **THE ORIGINAL FIRST LINE READ `GET /health returns HTTP 200`, AND IT WAS
+> WRONG — the product had already settled this and the harness was carrying the
+> rule the product fixed.** *(Amended 2026-08-04.)*
+>
+> `trusty-analyze` answers **503** with `{"status":"degraded"}` when
+> `trusty-search` is unreachable; `trusty-review` answers **200** with the *same*
+> `status:"degraded"` for the identical condition. The product's conclusion,
+> recorded at `crates/trusty-installer/src/commands/probe_http.rs:396-406` after
+> #4246:
+>
+> > "A 2xx-only liveness check (`ensure::daemon::health_ok`) therefore reads one
+> > healthy daemon as `degraded` and the other as `down` for the identical
+> > condition — and pre-gate, would have kickstarted analyze every time search was
+> > slow. **The body is the signal; the status code is not.**"
+>
+> `classify_response` implements exactly that: a JSON body carrying a string
+> `status` field is `Serving` **regardless of `status_code`**.
+>
+> **THE TWO 2026-08-04 AMENDMENTS ARE COUPLED AND CANNOT BE SEPARATED.** Adding
+> `trusty-analyze` to the table above under the *old* 200-only rule would have
+> **failed every run in which trusty-search was not yet answering** — which, per
+> §1.1a, is the normal state of a source-installed stack for as long as search
+> takes to come up. The harness would have reported a packaging defect where the
+> product reports a healthy daemon with a degraded dependency.
+>
+> **THIS IS A NARROWER CHECK ON ONE AXIS, NOT A WEAKER PREDICATE.** What was a
+> *code* check is now an *envelope* check, which is `classify_response`'s own
+> discipline. **Still rejected, each failing the run:** no address discovered
+> inside the budget; **no HTTP response at all** (curl `000` — refused, timed out,
+> unreachable: the product's `Refused`/`Timeout`); a body that does not parse as
+> JSON; an absent, empty or non-string `.status` (the product's `BadEnvelope`);
+> and `.status` in `{down, error, unhealthy}`. A non-2xx code carrying **no**
+> parseable envelope still fails — that is the product's `HttpError` → `down`.
+> **An unreachable or genuinely failed daemon still fails the run.** The only
+> thing that moved is that a non-2xx code no longer overrides a well-formed body.
+>
+> **The envelope check is not a complete defence and is not claimed as one.** A
+> squatter on a stale `http_addr` emitting a generic `{"status":"ok"}` still
+> passes — the **#3364 collision class**. Closing it needs a `service`
+> discriminator in each daemon's payload, which **no daemon emits today** and
+> which `tctl stack health --json` does **not** carry either. It stays open, and
+> **RC-1 is what would close it.**
+>
+> **WHY THIS IS NOT DELEGATED TO `tctl stack health --json`** *(evaluated by
+> running it, 2026-08-04)*. It emits
+> `{"command","members":[{"member","health"}],"verdict":"ready"|"degraded"}`
+> (exit 0 ready / 2 degraded) over `stable_set()` filtered to `m.daemon`
+> (`stack/health.rs:96`), classified on the body through the same
+> `probe_member_health` this amendment is modelled on — so it is genuinely
+> product-maintained, body-based, 503-tolerant, and sweeps the whole stable set.
+> **It would nonetheless LOSE an assertion this oracle already makes.**
+> `trusty-mpm` is *deliberately* left unprobed by `probe_member_health`
+> (`ManageStrategy::OwnVerb` → `Unprobeable` → `unknown`, #4246) **even though it
+> does answer `/health` on 7880** — which the oracle's own probe reaches and
+> proves. Delegating would downgrade a daemon this harness demonstrates is serving
+> into a verdict nothing can assert on. It also drops `version`, drops each
+> daemon's raw body, and carries no `service` discriminator.
+>
+> **So the product's CLASSIFICATION RULE is adopted; the product's COMMAND is not
+> substituted for the probe.** `stack health --json` is recorded verbatim in the
+> oracle's input snapshot (logged, never asserted on) precisely so a divergence
+> between it and the oracle's own probe is visible in any failed run.
+>
+> **This is NOT the swap §1.1 warns against, and §1.1 is untouched.** That warning
+> is about substituting `stack health` **for `stack doctor`** in §1.1a's
+> per-member predicate, whose verdict vocabularies differ (`ready|degraded` vs
+> `ok|degraded`). `verify_stack_doctor` still uses `stack doctor`. This section
+> considered `stack health` as an *additional* surface for the liveness probe
+> specifically, and **declined it** for the `trusty-mpm` reason above.
 
 > **`trusty-review` is now one of the daemons this covers.** *(Amended 2026-07-31,
 > D3 widened to eight crates.)* It was previously in this section's four-shape table
@@ -527,9 +649,11 @@ INTERIM: for each in-scope daemon d expected present under pattern P:
 >    field cannot affect a result either way. The drift stays a real hazard for MCP
 >    consumers; it is simply not this oracle's hazard.
 > 2. **The predicate touches only fields all four shapes agree on.** It asserts
->    HTTP 200, parseable JSON, and a non-empty `.status` outside
->    `{down, error, unhealthy}`. `status` is one of the two fields §1.3 opens by
->    naming as common to all four daemons; `trusty-review`'s struct carries it.
+>    a response, parseable JSON, and a non-empty string `.status` outside
+>    `{down, error, unhealthy}` *(the "HTTP 200" this originally read was amended
+>    away on 2026-08-04 — see the status-code correction below)*. `status` is one
+>    of the two fields §1.3 opens by
+>    naming as common to every daemon here; `trusty-review`'s struct carries it.
 >    Nothing in its `dry_run` / `reviewer_model` / `inference` / `deps{…}` tail is
 >    read, so bringing it in scope adds a daemon to the loop and **no new field
 >    dependency**. RC-1 is what would let the oracle assert more, and RC-1's status
@@ -901,9 +1025,20 @@ This is not a wording problem; it is a circularity in the design, and it needs
 resolving rather than restating.
 
 The relevant code does exist and does guard on cargo — `which::which("cargo")` at
-`crates/trusty-installer/src/commands/install.rs:826`, with the same guard in
+`crates/trusty-installer/src/commands/install.rs:829`, with the same guard in
 `upgrade.rs:502` and `self_update.rs:295` — so the *behaviour* DOC-1 wants to test
 is real. It simply cannot be reached before provisioning.
+
+> **CITATION CORRECTED 2026-08-04: the guard is at `install.rs:829`, not
+> `install.rs:826`.** Every occurrence in this document, in the plan and in the
+> MANIFEST said **826**, which is the `Outcome::Fallback { reason }` match arm
+> three lines above — the arm the guard lives *inside*, not the guard. The
+> `which::which("cargo")` call is at **829**. The two sibling citations were
+> re-checked against the same source and are **correct as written**:
+> `upgrade.rs:502` and `self_update.rs:295`. Nothing about RC-2's substance
+> changes — the guard is still unreachable from a guest, N2 is still `BLOCKED`,
+> and the exit code and message are still unpinned by any test. Only the line
+> number was wrong, and it was wrong in sixteen places.
 
 #### 6.2 Resolution — split the probe in two
 
@@ -1052,7 +1187,7 @@ precisely *because* it is not on the PATH that step 2 constructs. An empty
 installed — that is a harness error to be raised as such, not an RC-2 observation.
 
 *Expected exit code and output shape:* **REQUIRED-CONTRACT RC-2, not yet
-pinned.** `install.rs:826` maps the `which::which("cargo")` failure through
+pinned.** `install.rs:829` maps the `which::which("cargo")` failure through
 `map_err`, but this document does not assert what code that produces or what the
 message says, because that was not read out to a verified value and guessing it
 would be inventing a contract. What the harness needs from `trusty-installer` is:
@@ -1085,7 +1220,7 @@ the situation worse:
 `InstallGate::Refuse` whenever `--yes` is absent and stdin is not a TTY — **and the
 guest exec channel is not a TTY**. Its arm in `install.rs:266-278` prints the
 refusal to stderr and **`return 3`**, before `install_all` on line 295. The cargo
-guard at **`install.rs:826`** lives inside `install_one`, which that refusal never
+guard at **`install.rs:829`** lives inside `install_one`, which that refusal never
 reaches. Observed, identically, three times:
 
 ```
@@ -1114,7 +1249,7 @@ outstanding.** The distinction matters. RC-2 is not a request `trusty-installer`
 has failed to answer — it is a request that **cannot be exercised through this
 entry point at all**, so leaving it open would leave a permanently unresolvable
 item on the register and imply work that would never be done. The behaviour it
-describes is real (`which::which("cargo")` at `install.rs:826`, and the same guard
+describes is real (`which::which("cargo")` at `install.rs:829`, and the same guard
 in `upgrade.rs:502` and `self_update.rs:295`); what is unreachable is **N2's route
 to it**. Anything that wants to assert it must reach the guard by a route that does
 not run `tctl install` on a networked guest — a unit test in
@@ -2594,17 +2729,33 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
   the oracle asserts liveness only, and DOC-1 §7.1's third JSON source is aspirational.
   **STILL OPEN at plan close-out, 2026-08-04, and deliberately so** — P8-T4's
   instruction is *"leave RC-1 open; it is not this plan's to close"*. Confirmed
-  against the shipped oracle: `verify_daemon_liveness` probes **four** daemons and
-  gets **four different `/health` body shapes**, so it asserts only HTTP 200 +
-  parseable JSON + a `.status` that is not `down`/`error`/`unhealthy`, and it says
-  `LIVENESS ONLY — see RC-1` in its own PASS line every run. Anyone reading a green
-  run must not read it as "the daemons are healthy".
+  against the shipped oracle: `verify_daemon_liveness` probes **five** daemons and
+  gets **five different `/health` body shapes**, so it asserts only that each
+  answered, that the body parses as JSON, and that `.status` is a string outside
+  `{down, error, unhealthy}` — **the status code is logged, not asserted**
+  *(amended 2026-08-04, §1.3)*. It says `LIVENESS ONLY — see RC-1` in its own PASS
+  line every run. Anyone reading a green run must not read it as "the daemons are
+  healthy".
+
+  > **`tctl stack health --json` WAS EVALUATED AS A CHEAP SUBSTITUTE FOR RC-1 AND
+  > DECLINED AS THE PROBE** *(2026-08-04, by running it — see §1.3)*. It recovers
+  > the part of RC-1 that is about **uniform classification**: one
+  > product-maintained, body-based, 503-tolerant verdict vocabulary applied to the
+  > whole stable set, so the harness need not invent a health rule. **It recovers
+  > none of the envelope itself** — no `version`, no per-daemon body, and **no
+  > `service` discriminator**, so the **#3364** squatter-collision class stays
+  > open; that class is closable only by a product change RC-1 would carry. It
+  > also reports `trusty-mpm` as `unknown` (`OwnVerb` → `Unprobeable`, #4246),
+  > which is why substituting it for the probe would **lose** an assertion the
+  > oracle already makes. The harness therefore adopted the product's
+  > **classification rule** and declined its **command**. **RC-1's status is
+  > unchanged by this evaluation** — it neither becomes more urgent nor less.
 - ~~**RC-2 — `tctl install` cargo-absent exit code and message** (§6.2). Not pinned
   to a verified value. N2's predicate is deliberately weak until it is.~~
   **CLOSED 2026-08-03 as *unreachable-by-design*** (§6.2's RC-2 closure). Not
   satisfied and not outstanding: `decide_install_gate`'s `Refuse` arm returns **3**
   before `install_one` is called whenever `--yes` is absent and stdin is not a TTY,
-  so the cargo guard at `install.rs:826` cannot be reached from a guest; and `--yes`
+  so the cargo guard at `install.rs:829` cannot be reached from a guest; and `--yes`
   would reach a prebuilt-tarball-first path that installs **released** binaries over
   the source-built ones under test, the exact false pass DOC-1 §6.5 exists to
   prevent. N2 records **BLOCKED** and prints it every run; every other failure shape
@@ -2621,7 +2772,7 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
   >   `tctl install` from a guest, the reason is structural rather than incidental,
   >   and no further harness work will change that. Nothing here is outstanding.
   > - **The PRODUCT-side item is OPEN.** `crates/trusty-installer/src/commands/
-  >   install.rs:826`'s cargo-absent exit code and message are **still unpinned by
+  >   install.rs:829`'s cargo-absent exit code and message are **still unpinned by
   >   any test**, and P5-T2 did not pin them. The observed **3** is
   >   `decide_install_gate`'s consent-gate code, observed identically twice
   >   (in-guest source-built `tctl` 0.5.0, and host released `tctl` 0.4.10 with

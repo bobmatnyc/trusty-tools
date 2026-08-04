@@ -164,23 +164,57 @@ tart 2.32.1. Guest: 8 vCPU / 16 GiB / 100 GiB, shared `CARGO_TARGET_DIR`,
 green run means.** Anyone using this harness needs all six.
 
 1. **RC-1 — no unified daemon health envelope. OPEN, and not this plan's to close.**
-   Four daemons, four different `/health` body shapes. The oracle asserts
-   **liveness only**: HTTP 200 + parseable JSON + a `.status` that is not
-   `down`/`error`/`unhealthy`. It says `LIVENESS ONLY — see RC-1` in its own PASS
-   line. **A green run does not mean the daemons work.**
+   ~~Four daemons, four different `/health` body shapes.~~ **Five** daemons, five
+   different `/health` body shapes *(count corrected 2026-08-04; `trusty-analyze`
+   was always the fifth)*. The oracle asserts **liveness only**: a response +
+   parseable JSON + a string `.status` that is not `down`/`error`/`unhealthy`.
+   ~~HTTP 200~~ — **the status code is logged, not asserted** *(amended 2026-08-04;
+   see item 7 below)*. It says `LIVENESS ONLY — see RC-1` in its own PASS line.
+   **A green run does not mean the daemons work.**
+
+   > **`tctl stack health --json` was evaluated as a cheap substitute and
+   > DECLINED as the probe** (2026-08-04, by running it). **What it recovers of
+   > RC-1:** the *uniform classification* half — one product-maintained,
+   > body-based, 503-tolerant vocabulary over the whole stable set, so the harness
+   > does not invent a health rule. **What it cannot give:** the envelope itself —
+   > no `version`, no per-daemon body, and **no `service` discriminator**, so the
+   > **#3364** squatter-collision class stays open and is closable only by the
+   > product change RC-1 would carry. It also reports `trusty-mpm` as `unknown`
+   > (`OwnVerb` → `Unprobeable`, #4246), so substituting it would **lose** an
+   > assertion the oracle already makes. The **classification rule** was adopted;
+   > the **command** was not. **RC-1's status is unchanged.**
 2. **RC-2 — the `tctl install` cargo-absent exit code is still unpinned. OPEN on
    the product side.** The **harness** half is closed as *unreachable-by-design*:
    the non-interactive consent gate returns **3** before the guard at
-   `install.rs:826`, and `--yes` would install released binaries over the
+   `install.rs:829`, and `--yes` would install released binaries over the
    source-built ones under test. **N2 therefore reports `BLOCKED` on every run and
    is not a pass.** Pinning it needs a route that is not `tctl install` on a
    networked guest — a `crates/trusty-installer` unit test, or an offline-network
    scenario. **Do not re-run the same probe.**
-3. **`trusty-analyze` is a daemon the oracle does NOT probe.** DOC-2 §1.3 does not
-   enumerate it, so the harness has no described health shape for it and skips it,
-   logging the gap by name on every run since Phase 3.
-   `verify_daemon_liveness PASS: 4 in-scope daemon(s) live` means **four of five**.
-   Its binaries are still asserted present.
+3. ~~**`trusty-analyze` is a daemon the oracle does NOT probe.**~~ **CLOSED
+   2026-08-04.** The liveness probe now covers all five in-scope daemons, and the
+   set is **derived** from `stack doctor`'s member table (`stable_set()` filtered
+   to `m.daemon`) intersected with the expectation table rather than transcribed
+   from §1.3, so a stale document cannot narrow the oracle again. An empty derived
+   set now dies 60 instead of printing a vacuous PASS.
+
+   > **This was a REAL COVERAGE GAP, not the log-line inaccuracy it was first
+   > taken for — recorded because the weaker reading was the tempting one.** The
+   > argument for "cosmetic" is that `verify_stack_doctor` already covers
+   > `trusty-analyze`. It partly does: `on_path == true`, a non-null `version` and
+   > `plist_installed == false` **are** asserted for it. **But doctor's health term
+   > is vacuous for it.** §1.1a cause (c) accepts `down` for any launchd member
+   > with `plist_installed == false`, and `down` is precisely what every in-scope
+   > daemon reports at the point doctor runs — nothing has started them yet. The
+   > other four were then proven live by `verify_daemon_liveness`; `trusty-analyze`
+   > was not. **So before 2026-08-04, no assertion anywhere in this harness
+   > established that `trusty-analyze` could serve.** The `4 in-scope daemon(s)
+   > live` line was honest about the count and misleading about the coverage.
+   >
+   > **It could not have been fixed alone.** `trusty-analyze` answers **503**
+   > whenever `trusty-search` is not yet reachable, so adding it to the loop under
+   > the old 200-only rule would have failed runs in which nothing was wrong. Item
+   > 7 below is the other half.
 4. **Daemon time-to-ready is wholly unmeasured.** `health_timeout` 60 s is labelled
    `judgment call` in `vmtest.defaults`. Closing it needs instrumentation.
 5. **`install.sh` is out of scope (D1) and `--dir` mounts were never measured.**
@@ -193,6 +227,69 @@ green run means.** Anyone using this harness needs all six.
    job or different terminal is a **different responsible process and may prompt**.
    **The harness cannot promise unattended operation in a launch context that has
    not previously been granted.**
+7. **The liveness probe's 200-only rule was a latent defect and is CORRECTED
+   2026-08-04.** `verify_daemon_liveness` hard-failed (`die 60`) on any status code
+   other than 200. **The product had already settled this and the harness was
+   carrying the rule the product fixed**: `trusty-analyze` answers **503** with
+   `status:"degraded"` when `trusty-search` is unreachable while `trusty-review`
+   answers **200** with the same `status:"degraded"` for the identical condition,
+   and `probe_http.rs:396-406` records the conclusion — *"the body is the signal;
+   the status code is not"*. The code check is now an **envelope** check, which is
+   `classify_response`'s own discipline.
+
+   **What the predicate now ACCEPTS that it did not:** a non-2xx code carrying a
+   well-formed body — and nothing else. **What it still REJECTS, each failing the
+   run:** no address discovered inside the budget; **no HTTP response at all**
+   (curl `000`); a body that does not parse as JSON; an absent, empty or non-string
+   `.status`; `.status` in `{down, error, unhealthy}`. A non-2xx code with no
+   parseable envelope still fails (the product's `HttpError` → `down`). **An
+   unreachable or genuinely failed daemon still fails the run.** The `.status`
+   check was also tightened to require a **string**, matching `classify_response`.
+
+   **This was never latent-in-theory.** It had simply never fired, because the four
+   daemons the old list probed all answer 200 — and the one that answers 503 was
+   the one the list omitted. The two defects were hiding each other.
+8. **Citation drift found and corrected 2026-08-04, all verified against source.**
+   `trusty-memory`'s `/health` route is `web/mod.rs:**199**`, not 190 — 190 is a
+   comment line about issue #99. The cargo guard is `install.rs:**829**`, not 826 —
+   826 is the `Outcome::Fallback { reason }` match arm the guard sits *inside*; it
+   was wrong in **16 places** across DOC-2, the plan, this MANIFEST and
+   `verify.sh`. Re-checked and **correct as written**: `trusty-search`'s route at
+   `service/server/mod.rs:245`, `trusty-mpm`'s at `daemon/api.rs:181`,
+   `trusty-review`'s at `service/mod.rs:130`, and the sibling cargo guards at
+   `upgrade.rs:502` and `self_update.rs:295`. **No substance changed** — RC-2 is
+   still closed-as-unreachable and N2 still reports `BLOCKED`.
+
+9. **`tctl start --json` WRITES THE PLISTS, and that makes §1.1a Decision 2's
+   plist invariant ORDERING-DEPENDENT. Recorded 2026-08-04, not fixed.** The
+   harness's own `verify_daemon_liveness` step runs `tctl start --json`, which
+   reaches a service-install path: the pattern (c) run of 2026-08-04 reported
+   `"detail": "installed + bootstrapped com.trusty.analyze"` (and the same for
+   search, memory and review). `verify_stack_doctor` asserts
+   `plist_installed == false` **directly** for every in-scope launchd member —
+   an assertion that holds **only because doctor runs before liveness** in all
+   three scenarios. **Reorder those two calls and the invariant fails every run**,
+   with nothing wrong: the harness would have bootstrapped the services one step
+   earlier. Left as a recorded hazard because the ordering is correct in all three
+   scenarios today and guarding a hazard no scenario exhibits would add a
+   mechanism nobody needs. **A future editor moving those calls must read this
+   first.**
+10. **The 503 branch of the amended predicate is UNEXERCISED BY ANY RUN SO FAR.**
+   Item 7's fix is what makes `trusty-analyze` safe to probe, but in the pattern
+   (c) run of 2026-08-04 `trusty-search` was already answering by the time analyze
+   was probed, so analyze returned **HTTP 200 / `status='ok'`** and the non-2xx
+   path never executed. The fix is therefore **correct-by-construction and
+   validated only in its 200 path**; `trusty-review` did exercise the
+   `status='degraded'` acceptance (at 200). Stated so nobody reads a green run as
+   evidence the 503 tolerance was observed working. Exercising it needs a run in
+   which search is slow or absent when analyze is probed.
+
+> **Items 3, 7, 8, 9 and 10 are FOLLOW-UP WORK, not a ninth phase.** The plan closed at
+> Phase 8. These were found by re-reading the shipped oracle against the product
+> after close-out, and are recorded here in the same register as everything above
+> rather than in a new phase section. **Nothing under `crates/` was changed** —
+> every one of them is a harness-side or document-side correction, and in each case
+> the product was already right.
 
 ### What the harness proves — and what it does not
 
@@ -307,7 +404,7 @@ predicates nobody had run before.**
 > **(ii) DOC-2 §6.2's N2 probe cannot reach the behaviour RC-2 describes.**
 > `tctl install` with no cargo on PATH exits **3** with **no cargo-related token**:
 > the non-interactive consent gate returns before `install_one`, so the guard at
-> `install.rs:826` is unreachable — and `--yes` would be worse, reaching a
+> `install.rs:829` is unreachable — and `--yes` would be worse, reaching a
 > prebuilt-first path that could overwrite the source-built binaries under test.
 > **RC-2 is NOT pinned and remains open**; `3` is the consent-gate code, not the
 > cargo guard's. N2 is recorded **BLOCKED** using §F-7's own remedy, narrowly:
@@ -414,7 +511,7 @@ detected before. See Phase 7 Deviations items 1 and 2.
 - **RC-1 — unified daemon health envelope.** Does not exist. **Scoped around, not
   a blocker**: the oracle asserts **liveness only** for daemon health (plan P5-T7).
 - **RC-2 — `tctl install` cargo-absent exit code.** Unpinned at
-  `crates/trusty-installer/src/commands/install.rs:826`. **Pinned by plan P5-T2**;
+  `crates/trusty-installer/src/commands/install.rs:829`. **Pinned by plan P5-T2**;
   N2's predicate stays deliberately weak until then.
 - **Full base-image digest.** ~~Placeholder.~~ **CLOSED 2026-07-31 by P1-T3.**
   `sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c`,
@@ -2904,7 +3001,7 @@ detected before. See Phase 7 Deviations items 1 and 2.
 
   **N2's predicate was NOT tightened**, and P5-T2's branch that applies is the
   second one: `3` is non-zero and distinct from 1, **but it is the consent-gate
-  code, not the cargo guard's** — the guard at `install.rs:826` was never reached.
+  code, not the cargo guard's** — the guard at `install.rs:829` was never reached.
   Recording `3` as RC-2's code would be precisely the false precision DOC-2 §6.2
   refuses. **RC-2 remains OPEN.** `lib/verify.sh` carries DOC-2's weak predicate
   verbatim plus a cited comment block explaining why it stands. **No `crates/*`
@@ -3015,7 +3112,7 @@ detected before. See Phase 7 Deviations items 1 and 2.
      - `decide_install_gate`'s `InstallGate::Refuse` arm returns **3** whenever
        `--yes` is absent and stdin is not a TTY — the guest exec channel is not a
        TTY — and it returns **before `install_one` is ever called**, so the cargo
-       guard at `install.rs:826` is unreachable.
+       guard at `install.rs:829` is unreachable.
      - Adding `--yes` would be **worse, not better**: `install_one` is
        **prebuilt-tarball-first**, and the cargo guard sits in the
        `Outcome::Fallback` arm reached only when the prebuilt download *fails*. On
@@ -3084,6 +3181,14 @@ detected before. See Phase 7 Deviations items 1 and 2.
      default `http-server` feature, but §1.3's four-shape table does not carry it,
      so `verify_daemon_liveness` has no described shape for it and does not probe
      it. Logged loudly every run rather than silently decided.
+
+     > **SUPERSEDED 2026-08-04 — retained as the record of what Phase 5 saw.**
+     > `trusty-analyze` **is** probed now; §1.3's table carries it and, more to the
+     > point, the oracle no longer transcribes that table at all. This entry's
+     > *reasoning* is corrected too: the missing shape was never the real obstacle
+     > — the predicate only ever reads `.status`, which analyze carries — and the
+     > real cost was that **nothing asserted analyze could serve**. See open items
+     > 3 and 7.
 
   9. **Two implementation defects found by running, both fixed in `298a02c7`:**
      `install_from_path` joined `guest_src_dir` to `crate_dir` directly, but §9.1
@@ -4169,6 +4274,11 @@ detected before. See Phase 7 Deviations items 1 and 2.
      means **four of five**). The plan's P8-T3 contract list does not mention the
      last one; it has been logged on every run since Phase 3 and belongs in front
      of anyone who reads a PASS line.
+
+     > **SUPERSEDED 2026-08-04.** The third item is **closed** — all five in-scope
+     > daemons are probed and the README says so. Phase 8 was right that it
+     > belonged in front of a reader; it under-read the severity, treating it as a
+     > count when it was a coverage gap. See open items 3, 7 and 8.
 - **Tasks:** P8-T1 … P8-T6 complete
 
 ---

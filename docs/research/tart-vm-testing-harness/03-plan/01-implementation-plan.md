@@ -1340,7 +1340,7 @@ measurement.
 ### P5-T2 — **Pin RC-2**: the `tctl install` cargo-absent exit code
 
 DOC-2 §6.2 deliberately leaves N2's predicate weak because the code at
-`install.rs:826` was never read out to a verified value. This task closes that.
+`install.rs:829` was never read out to a verified value. This task closes that.
 
 - **Files:** modify MANIFEST (Measurements); modify `vmtest-harness/lib/verify.sh`
   (predicate).
@@ -1350,7 +1350,7 @@ DOC-2 §6.2 deliberately leaves N2's predicate weak because the code at
   stdout empty, stderr non-empty and containing a cargo-related token. That weaker
   predicate is stated as weak on purpose."), §2 (exit-code table).
 - **Do:** three steps, in order, no decision required at any of them.
-  1. **Read the guard.** `crates/trusty-installer/src/commands/install.rs:826` —
+  1. **Read the guard.** `crates/trusty-installer/src/commands/install.rs:829` —
      `which::which("cargo").map_err(...)` inside the `Outcome::Fallback` arm,
      producing `anyhow!("no Rust toolchain found on PATH (cargo not available);
      cannot fall back to \`cargo install {}\`")`. The same guard exists at
@@ -1387,7 +1387,7 @@ DOC-2 §6.2 deliberately leaves N2's predicate weak because the code at
 > practice; tighten N2 to assert that **exact** code". **Doing that would have been
 > a defect.** `3` is `decide_install_gate`'s **consent-gate** code
 > (`install_gate.rs:77-85` → `install.rs:266-278`), returned before `install_one`
-> is ever called; the cargo guard at `install.rs:826` was never reached, so
+> is ever called; the cargo guard at `install.rs:829` was never reached, so
 > pinning `3` would have recorded a *different guard's* code as RC-2's and made
 > N2 assert something it had not tested. Step 2 asked which path the cargo-absent
 > error takes and assumed one of them was taken; **none was.**

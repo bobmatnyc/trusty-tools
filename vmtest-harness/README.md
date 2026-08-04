@@ -237,10 +237,26 @@ It does **not** prove the following, and each of these is a known, recorded gap
 rather than an oversight:
 
 - **Daemon health is LIVENESS ONLY.** There is no unified health envelope in the
-  product: four daemons, four different `/health` body shapes. The oracle therefore
-  asserts HTTP 200 + parseable JSON + a `.status` that is not `down`/`error`/
-  `unhealthy`, and its own PASS line says `LIVENESS ONLY`. It does not assert that a
-  daemon is *working*. *(Tracked as RC-1; open.)*
+  product: five daemons, five different `/health` body shapes. The oracle therefore
+  asserts only that each one answered, that the body parses as JSON, and that
+  `.status` is a string outside `{down, error, unhealthy}`. Its own PASS line says
+  `LIVENESS ONLY`. It does not assert that a daemon is *working*.
+  *(Tracked as RC-1; open.)*
+
+  **The HTTP status code is logged, not asserted** *(since 2026-08-04)*. It has to
+  be: `trusty-analyze` answers **503** with `status:"degraded"` when
+  `trusty-search` is unreachable, while `trusty-review` answers **200** with the
+  same `status:"degraded"` for the identical condition. The product settled this
+  after #4246 — *"the body is the signal; the status code is not"*
+  (`probe_http.rs:396-406`) — and the harness had been carrying the rule the
+  product fixed. **A daemon that answers nothing at all still fails the run**, as
+  does one whose body is not JSON, carries no string `.status`, or reports
+  `down`/`error`/`unhealthy`.
+
+  **A squatter emitting a generic `{"status":"ok"}` on a stale port would still
+  pass.** That is the **#3364** collision class and it is open. Closing it needs a
+  `service` discriminator in each daemon's payload; no daemon emits one, and
+  `tctl stack health --json` does not carry one either. RC-1 is what would close it.
 - **The guide-and-abort probe (N2) is BLOCKED and reports so on every run.** It was
   meant to prove that `tctl install` refuses helpfully when cargo is absent. It
   cannot be reached that way from a guest: the non-interactive consent gate returns
@@ -254,19 +270,34 @@ rather than an oversight:
 - **`install.sh` is entirely out of scope**, by decision. The harness makes **no
   claim whatsoever** about that user path, and never has.
 - **`--dir` mounts were never measured**, in either direction. See rule 2 above.
-- **`trusty-analyze` is a daemon the oracle does NOT probe.** It is in the in-scope
-  crate set and `stable_set` marks it a daemon, but the design's daemon table does
-  not enumerate it, so the harness has no described `/health` shape for it and
-  **skips it**. Every run prints this by name:
+- ~~**`trusty-analyze` is a daemon the oracle does NOT probe.**~~ **CLOSED
+  2026-08-04 — and it was a real gap, not a cosmetic one.** The liveness probe now
+  covers **all five** in-scope daemons: `trusty-search`, `trusty-memory`,
+  `trusty-analyze`, `trusty-mpm`, `trusty-review`.
 
-  ```
-  NOTE: trusty-analyze is in scope and is a daemon in stable_set, but §1.3 does not
-  enumerate it — NOT probed here. Recorded as a §1.3 gap.
-  ```
+  **The earlier framing here understated it, and the correction is worth stating
+  plainly.** It was tempting to call this a logging inaccuracy on the grounds that
+  `stack doctor` already covers `trusty-analyze` — doctor *does* report it, and
+  `verify_stack_doctor` *does* assert `on_path == true`, a non-null `version`, and
+  `plist_installed == false` for it. **But doctor's health predicate accepts
+  `down`** for any launchd member with no plist (§1.1a cause (c)), **and `down` is
+  exactly what every in-scope daemon reports at the point doctor runs**, because
+  nothing has started them yet. So doctor's *health* term was vacuous for
+  `trusty-analyze` — as it is for the other four. The difference is that the other
+  four were then proven live by the liveness probe and `trusty-analyze` was not.
+  **Before this change, nothing in the harness asserted that `trusty-analyze` could
+  serve at all.** Its binaries were asserted present, and that was the whole of it.
 
-  So `verify_daemon_liveness PASS: 4 in-scope daemon(s) live` means **four of five**.
-  Its *binaries* are still asserted present by `verify_binaries`; it is only the
-  health probe that skips it.
+  The cause was a **hardcoded four-name list** in `verify_daemon_liveness`,
+  transcribed from a design table that had omitted `trusty-analyze`. The set is now
+  **derived** from `stack doctor`'s own member table (`stable_set()` filtered to
+  daemons) intersected with the expectation table, so a stale document cannot
+  silently narrow the oracle again, and an empty derived set fails the run instead
+  of printing a vacuous PASS.
+
+  This depended on the status-code fix above and could not have shipped without it:
+  `trusty-analyze` returns **503** whenever `trusty-search` is not yet answering, so
+  adding it under the old 200-only rule would have failed runs that were fine.
 - **One host, one user, one terminal.** Every timing figure and every TCC
   observation in this doc set came from one machine, run from iTerm2, by one user.
   Treat the numbers as this machine's, not as the harness's.
