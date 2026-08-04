@@ -119,7 +119,8 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
 /// matches, and nothing else plausibly does.
 /// Test: `scan_excludes_base_agents`,
 /// `near_miss_base_names_are_not_treated_as_foundation_files`,
-/// `bare_base_md_is_a_foundation_file`.
+/// `bare_base_md_is_excluded_from_the_roster`,
+/// `base_prefixed_near_misses_survive_the_bare_base_rule`.
 fn is_foundation_file(stem: &str) -> bool {
     // #4711: `base-` alone missed the hyphen-less `base.md`, whose body is a
     // "Base QA Instructions… Appended to all QA agents" prompt fragment. That
