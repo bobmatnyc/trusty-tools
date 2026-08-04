@@ -593,13 +593,19 @@ pub(super) async fn post_message(
     // #4703: refuse to issue a request that cannot succeed. `chat.postMessage`
     // without a bearer token always answers `not_authed`, and the client built
     // here carries NO timeout — so on a network that blackholes rather than
-    // refuses, a doomed request does not fail, it hangs, and it hangs holding
-    // whichever handler called it. Failing closed locally is strictly better
-    // than that, and it is what lets a test drive `handle_message` end to end
-    // without reaching for the network at all.
+    // refuses, a doomed request does not fail, it HANGS, holding whichever
+    // handler called it. Failing closed locally is strictly better.
+    //
+    // This is an ERROR, not a silent `Ok(())`. Reporting success for a message
+    // that was never sent is the worse bug: `handle_message` mirrors its reply
+    // to the GUI only `if send_result.is_ok()`, so a swallowed failure would
+    // show the operator a reply the Slack channel never received.
+    // Test: `post_message_without_a_token_errors_instead_of_requesting`.
     if bot_token.is_empty() {
-        warn!(channel, "chat.postMessage skipped: no bot token configured");
-        return Ok(());
+        warn!(channel, "chat.postMessage refused: no bot token configured");
+        return Err(anyhow!(
+            "chat.postMessage: no bot token configured; message not sent"
+        ));
     }
     let mut body = serde_json::Map::new();
     body.insert("channel".to_string(), Value::String(channel.to_string()));

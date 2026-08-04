@@ -5,3 +5,5 @@ Added
   confirmed to fail when its handler's hook is removed.
 - `attendance::AttendanceRoot`, the injected-root shape the chat transports
   thread through their handlers.
+- Coverage for the `post_message` empty-token guard
+  (`post_message_without_a_token_errors_instead_of_requesting`).

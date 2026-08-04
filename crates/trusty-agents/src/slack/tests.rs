@@ -684,3 +684,35 @@ async fn slack_handle_message_records_attendance_under_the_injected_root() {
          finding nothing here means the hook resolved $HOME again (#4703)"
     );
 }
+
+/// #4703: the empty-token guard on `post_message` is itself covered.
+///
+/// Why: the guard was added under this issue partly because it lets
+/// `handle_message` be driven without the network, and a guard added for
+/// testability that is not itself tested is the wrong shape. It also protects
+/// a real production failure mode: the client `post_message` builds carries no
+/// timeout, so a doomed request on a blackholing network hangs rather than
+/// fails, holding its caller.
+/// What: asserts an empty token yields an ERROR — not a silent `Ok(())`, which
+/// would tell `handle_message` a message was delivered when none was sent and
+/// let it mirror a phantom reply to the GUI — and that the error names the
+/// missing token rather than a transport failure, which is what distinguishes
+/// "refused locally" from "tried and could not reach Slack".
+#[tokio::test]
+async fn post_message_without_a_token_errors_instead_of_requesting() {
+    let err = super::handlers::post_message("", "C4703", "hello", None)
+        .await
+        .expect_err("an empty bot token must not report a successful send");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no bot token configured"),
+        "the error must name the missing token, so it is distinguishable from \
+         a transport failure; got: {msg}"
+    );
+    assert!(
+        !msg.contains("chat.postMessage failed"),
+        "that message means a request was actually attempted; the guard must \
+         refuse BEFORE building a client; got: {msg}"
+    );
+}
