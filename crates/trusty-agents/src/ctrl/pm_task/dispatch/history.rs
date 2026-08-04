@@ -38,6 +38,8 @@ use super::super::super::handlers::{
 };
 use super::super::super::state::ConversationTurn;
 use super::super::helpers::{extract_name_from_input, save_name_to_profile};
+// #3766: local-model failure recovery policy.
+use super::local_fallback::{LocalFailureAction, local_failure_action, retry_remote};
 
 /// Multi-turn variant of `run_pm_task_with_session` that prepends `history`
 /// as alternating user/assistant messages before the current `user_input`.
@@ -330,38 +332,35 @@ pub async fn run_pm_task_with_history(
         let mut used_remote_fallback = false;
         let (content, _usage) = match local_call {
             Ok(pair) => pair,
-            Err(e) if local_qualifies && local_cfg.fallback_on_error => {
-                tracing::warn!(
-                    error = %e,
-                    "local inference failed, falling back to remote: {e:#}"
-                );
-                used_remote_fallback = true;
-                let remote_adapter = llm::adapter::adapter_for_model(&pm_cfg.agent.model);
-                llm::chat_with_tools_gated(
-                    &client,
-                    &pm_cfg.agent.model,
-                    &*remote_adapter,
-                    initial_messages.clone(),
-                    Arc::new(ToolRegistry::new()),
-                    None,
-                    pm_cfg.llm.temperature,
-                    pm_cfg.llm.max_tokens,
-                    2,
-                    false,
-                    None,
-                    false,
-                    pm_cfg.llm.strict_tool_discipline(),
-                    pm_cfg.llm.use_anthropic_direct,
-                    &pm_cfg.llm.stop_sequences,
-                )
-                .await
-                .inspect_err(|e| {
-                    tracing::error!(error = %e, "ctrl::run_pm_task_with_history conversational fast-path remote fallback also failed")
-                })?
-            }
+            // #3766: recover from ANY failed LOCAL attempt, not just the
+            // `local_qualifies` route — and never retry the same local slug.
             Err(e) => {
-                tracing::error!(error = %e, "ctrl::run_pm_task_with_history conversational fast-path LLM call failed");
-                return Err(e);
+                let remote_model = match local_failure_action(
+                    &effective_model,
+                    &pm_cfg.agent.model,
+                    llm::is_transport_error(&e),
+                    &llm::adapter::ollama_host(),
+                ) {
+                    LocalFailureAction::RetryRemote(m) => m,
+                    // No remote model configured: a clear, actionable reply
+                    // beats a raw "Connection refused" as the assistant's answer.
+                    LocalFailureAction::Explain(msg) => {
+                        tracing::error!(error = %e, model = %effective_model, "local unreachable");
+                        let text = msg.clone();
+                        events::publish(Event::PmThinking {
+                            session_id: sid,
+                            text,
+                        });
+                        return Ok(msg);
+                    }
+                    LocalFailureAction::Propagate => {
+                        tracing::error!(error = %e, "ctrl conversational fast-path LLM call failed");
+                        return Err(e);
+                    }
+                };
+                tracing::warn!(error = %e, %remote_model, "local failed, retrying remote: {e:#}");
+                used_remote_fallback = true;
+                retry_remote(&client, &remote_model, initial_messages.clone(), &pm_cfg).await?
             }
         };
         let content = if used_remote_fallback {

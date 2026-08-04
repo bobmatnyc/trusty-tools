@@ -41,3 +41,5 @@ pub use single_turn::{chat, chat_adapter_aware};
 pub use tool_loop::{chat_with_tools, chat_with_tools_gated};
 
 pub(crate) use http::http_client;
+// #3766: transport-failure classifier for local-model fallback.
+pub(crate) use http::is_transport_error;
