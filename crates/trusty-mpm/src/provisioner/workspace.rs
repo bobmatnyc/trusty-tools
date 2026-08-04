@@ -935,6 +935,13 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
                     );
                 }
             }
+            // #4752: a compiled-prompt write failure fails the provision — a
+            // workspace whose session cannot record its own instructions is not
+            // successfully provisioned. Other prep failures stay best-effort
+            // (#2149).
+            Err(e) if e.is_fatal() => {
+                return Err(ProvisionError::PrepareSession(e.to_string()));
+            }
             Err(e) => {
                 tracing::warn!(
                     session = %session_id,

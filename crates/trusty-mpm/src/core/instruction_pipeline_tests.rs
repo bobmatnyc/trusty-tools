@@ -423,35 +423,77 @@ fn assemble_system_prompt_contains_all_sections() {
 // ── #4752: the compiled prompt owns a path nothing else writes ─────────────
 
 #[test]
-fn compiled_prompt_path_is_distinct_from_the_bundled_instructions_path() {
-    // Why (#4752): the compiled prompt used to be written to
-    // `framework/instructions/INSTRUCTIONS.md` — the SAME path a bundled stub
-    // targeted (#383) and that `build_instructions` reads back as a pipeline
-    // INPUT. FAILS BEFORE THIS CHANGE: `instructions_compiled()` did not exist,
-    // and the compiled write landed on `framework_instructions_path()`.
-    // What: pins the compiled path to `framework/INSTRUCTIONS-COMPILED.md`,
-    // directly under the framework root and NOT under `instructions/`, and
-    // asserts it is a different path from the bundled-input file.
+fn compiled_prompt_path_is_project_local() {
+    // Why (#4752, owner ruling 2026-08-04): the compiled prompt belongs to the
+    // PROJECT whose session runs it. FAILS BEFORE THIS CHANGE — the path was
+    // `FrameworkPaths::instructions_compiled()`, one global file under
+    // `~/.trusty-mpm/framework/`.
+    // What: pins `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`.
+    let project = Path::new("/some/project");
+    assert_eq!(
+        compiled_prompt_path(project),
+        Path::new("/some/project/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md")
+    );
+}
+
+#[test]
+fn compiled_prompt_path_is_beside_the_session_stash() {
+    // Why: the ruling put the file in the project's own `.trusty-mpm/` — the
+    // directory that already holds `last-instructions.md` and `sessions/` and
+    // that `tm` writes on every launch. That co-location is the whole basis for
+    // making the write fatal, so pin it.
+    let project = Path::new("/some/project");
+    let stash_dir = project.join(".trusty-mpm");
+    assert!(
+        compiled_prompt_path(project).starts_with(&stash_dir),
+        "the compiled prompt must live under the project's own .trusty-mpm/"
+    );
+}
+
+#[test]
+fn compiled_prompt_path_never_collides_across_projects() {
+    // Why (#4752 review, MEDIUM 4): the defect was that ONE global file served
+    // every project, so concurrent sessions overwrote each other. FAILS BEFORE
+    // THIS CHANGE — `FrameworkPaths::instructions_compiled()` returned the same
+    // path for both projects (it resolved from the shared managed root, and
+    // `for_managed_workspace` from the real `$HOME`).
+    let a = compiled_prompt_path(Path::new("/projects/alpha"));
+    let b = compiled_prompt_path(Path::new("/projects/beta"));
+    assert_ne!(
+        a, b,
+        "two projects must not share one compiled-prompt file — that was the collision"
+    );
+}
+
+#[test]
+fn compiled_prompt_path_is_not_the_bundled_instructions_path() {
+    // The original #4752 defect: the compiled OUTPUT must not share a path with
+    // the bundled INPUT `build_instructions` reads.
     let tmp = TempDir::new().unwrap();
     let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
-
-    let compiled = paths.instructions_compiled();
-    let bundled = paths.framework_instructions_path();
-
     assert_ne!(
-        compiled, bundled,
-        "the compiled prompt must not share a path with the bundled instructions input"
+        compiled_prompt_path(tmp.path()),
+        paths.framework_instructions_path()
     );
-    assert_eq!(
-        compiled,
-        paths.framework.join("INSTRUCTIONS-COMPILED.md"),
-        "the compiled prompt sits directly under framework/, not framework/instructions/"
+}
+
+#[test]
+fn compiled_prompt_failure_message_names_the_path_and_a_remedy() {
+    // Why (#4752 ruling follow-up 1): the write is fatal, so a refused launch
+    // must tell the operator what was refused, where, and what to do — not
+    // surface a bare io error.
+    let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    let msg = compiled_prompt_failure_message(Path::new("/p/.trusty-mpm/framework/X.md"), &err);
+    assert!(
+        msg.contains("/p/.trusty-mpm/framework/X.md"),
+        "must name the path: {msg}"
     );
-    assert_eq!(
-        compiled.parent(),
-        Some(paths.framework.as_path()),
-        "framework/ is the compiled prompt's parent — `instructions/` is not"
+    assert!(msg.contains("denied"), "must carry the cause: {msg}");
+    assert!(
+        msg.contains("was NOT started"),
+        "must say the session did not start: {msg}"
     );
+    assert!(msg.contains("permissions"), "must point at a remedy: {msg}");
 }
 
 #[test]
@@ -491,8 +533,8 @@ fn remove_stale_bundled_instructions_deletes_a_leftover() {
         "an existing leftover must be reported as removed"
     );
     assert!(!stale.exists(), "the stale leftover must be gone");
-    // The compiled prompt is a DIFFERENT file and must be untouched by this.
-    assert_ne!(stale, paths.instructions_compiled());
+    // The compiled prompt is a DIFFERENT, project-local file.
+    assert_ne!(stale, compiled_prompt_path(tmp.path()));
 }
 
 #[test]
@@ -521,90 +563,25 @@ fn write_compiled_prompt_to_creates_parent_dirs() {
     assert_eq!(fs::read_to_string(&dest).unwrap(), "COMPILED-BODY");
 }
 
-// Why serial + fake-HOME (extra sweep hit — review-gate report on top of
-// #2459/#2460/#2461): `install_system_prompt()` resolves `dirs::home_dir()`
-// internally and previously wrote straight into the REAL
-// `$HOME/.trusty-mpm/framework/instructions/` — both polluting the
-// developer's real home directory on every test run AND racing with any
-// other test in this binary that redirects `HOME` to a temp dir
-// concurrently (same class as `manifest_expands_tilde`, #2459). Redirect
-// `HOME` to an isolated temp dir for the duration of the test and join
-// the crate's shared `#[serial_test::serial]` lock so no other
-// HOME-mutating test can interleave.
-#[serial_test::serial]
 #[test]
-fn install_system_prompt_writes_file() {
-    // Why: `install_system_prompt` must regenerate the compiled prompt under
-    // the expected `~/.trusty-mpm/framework/` path. #4752 moved that target off
-    // `instructions/INSTRUCTIONS.md` — the shared, last-writer-wins path — onto
-    // `INSTRUCTIONS-COMPILED.md`, which nothing else writes.
-    let fake_home = TempDir::new().expect("create fake home");
-    let prev_home = std::env::var("HOME").ok();
-    // SAFETY: serialized via `#[serial_test::serial]`, so no other test
-    // thread observes or mutates HOME concurrently. Restored below
-    // regardless of panics via the `HomeGuard` drop impl.
-    unsafe { std::env::set_var("HOME", fake_home.path()) };
-    struct HomeGuard(Option<String>);
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(p) => unsafe { std::env::set_var("HOME", p) },
-                None => unsafe { std::env::remove_var("HOME") },
-            }
-        }
-    }
-    let _guard = HomeGuard(prev_home);
-
-    let out = install_system_prompt().expect("install succeeds");
-    assert!(out.starts_with(fake_home.path()));
-    assert_eq!(
-        out,
-        fake_home
-            .path()
-            .join(".trusty-mpm/framework")
-            .join(COMPILED_PROMPT_FILE),
-        "#4752: the compiled prompt lands directly under framework/, on its own path"
-    );
-    assert!(out.exists());
-    let on_disk = fs::read_to_string(&out).unwrap();
-    assert_eq!(on_disk, assemble_system_prompt());
-    assert!(!on_disk.is_empty());
-}
-
-#[test]
-fn install_system_prompt_to_writes_assembled() {
-    // Why: `tm install` calls `install_system_prompt_to` pointing at the
-    // framework path so the assembled prompt (not the 4-line stub) is on
-    // disk immediately after install — regression for issue #383.
-    // What: asserts the file written by the path-parameterised helper
-    // equals `assemble_system_prompt()` and contains key PM headings.
-    // Test: call the helper against a temp path; read back and verify content.
+fn compiled_prompt_write_is_the_full_assembled_prompt_never_a_stub() {
+    // Why (#383 regression guard, retained through #4752's path move): the
+    // compiled file must only ever hold a FULL composed prompt. #383 was a
+    // 4-line stub winning a last-writer race on the shared path; the path is
+    // now project-local and single-writer, but the content contract still
+    // needs pinning.
+    // What: writes the bundled assembly to a project's compiled path and
+    // asserts it is neither empty nor the historical stub.
     let tmp = TempDir::new().unwrap();
-    let dest = tmp.path().join("framework").join(COMPILED_PROMPT_FILE);
-    install_system_prompt_to(&dest).expect("write succeeds");
-    assert!(
-        dest.exists(),
-        "{COMPILED_PROMPT_FILE} must exist after install_system_prompt_to"
-    );
+    let dest = compiled_prompt_path(tmp.path());
+    write_compiled_prompt_to(&dest, &assemble_system_prompt()).expect("write succeeds");
+
     let on_disk = fs::read_to_string(&dest).unwrap();
-    assert_eq!(
-        on_disk,
-        assemble_system_prompt(),
-        "content must equal assembled prompt"
-    );
-    // The 4-line stub must NOT be present (regression guard for issue #383).
+    assert_eq!(on_disk, assemble_system_prompt());
+    assert!(!on_disk.trim().is_empty());
     assert!(
         !on_disk.trim().eq("# trusty-mpm Framework Instructions\n\nThis Claude Code instance is managed by trusty-mpm.\nDaemon endpoint: ${TRUSTY_MPM_URL:-http://localhost:7799}"),
-        "stub content must not be written — full assembled prompt required"
-    );
-    // Real PM sections must be present.
-    assert!(
-        on_disk.contains("# PM Agent -- Trusty MPM"),
-        "PM_INSTRUCTIONS section must be present"
-    );
-    assert!(
-        on_disk.contains("# Framework Instructions"),
-        "BASE_PM floor must be present"
+        "stub content must never be written — full assembled prompt required"
     );
 }
 

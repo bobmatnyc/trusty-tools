@@ -99,7 +99,7 @@ fn bundle_install_pass_never_touches_the_compiled_prompt() {
     // artifact did target that name.
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    let compiled = paths.instructions_compiled();
+    let compiled = trusty_mpm::core::instruction_pipeline::compiled_prompt_path(dir.path());
     std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
     const SENTINEL: &str = "SENTINEL-NOT-WRITTEN-BY-THE-BUNDLE-PASS";
     std::fs::write(&compiled, SENTINEL).unwrap();
@@ -115,7 +115,11 @@ fn bundle_install_pass_never_touches_the_compiled_prompt() {
 
     // And the explicit compiled write — the ONE writer — replaces it with the
     // full assembled prompt, never a stub (regression guard for #383).
-    trusty_mpm::core::instruction_pipeline::install_system_prompt_to(&compiled).unwrap();
+    trusty_mpm::core::instruction_pipeline::write_compiled_prompt_to(
+        &compiled,
+        &trusty_mpm::core::instruction_pipeline::assemble_system_prompt(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read_to_string(&compiled).unwrap(),
         trusty_mpm::core::instruction_pipeline::assemble_system_prompt()

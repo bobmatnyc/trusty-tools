@@ -45,6 +45,7 @@ mod reactivate;
 pub mod reconcile;
 pub mod rename;
 mod resume_error;
+mod session_prep;
 mod session_summary;
 mod summary;
 pub mod sync_assets;

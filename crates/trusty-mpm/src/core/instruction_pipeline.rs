@@ -292,67 +292,72 @@ pub fn assemble_system_prompt() -> String {
 /// and with the pipeline's own input file, so the on-disk answer to "what
 /// instructions is my session running?" depended on which writer ran last —
 /// the regression #383 already fixed once and #4752 closes structurally.
-/// What: `INSTRUCTIONS-COMPILED.md`, resolved directly under the framework root
-/// by [`crate::core::paths::FrameworkPaths::instructions_compiled`] — NOT under
-/// `framework/instructions/`.
-/// Test: `compiled_prompt_path_is_distinct_from_the_bundled_instructions_path`,
-/// `no_bundled_artifact_targets_the_compiled_prompt_path`.
+/// What: `INSTRUCTIONS-COMPILED.md`, resolved per PROJECT by
+/// [`compiled_prompt_path`] — never under the global framework root.
+/// Test: `compiled_prompt_path_is_project_local`,
+/// `compiled_prompt_path_is_not_the_bundled_instructions_path`.
 pub const COMPILED_PROMPT_FILE: &str = "INSTRUCTIONS-COMPILED.md";
 
-/// Write an already-composed prompt to the compiled-prompt path.
+/// Resolve a project's compiled-prompt path.
 ///
-/// Why (#4752): both writers of `INSTRUCTIONS-COMPILED.md` — `tm install`
-/// (bundled compilation) and the launch path (the project-resolved prompt the
-/// session actually receives) — must go through one function so the file can
-/// never hold anything but a full compiled prompt. This is also the seam that
-/// keeps the launch write cheap: it takes the prompt the composer ALREADY built
-/// for `--append-system-prompt-file` rather than recomposing it, so the launch
-/// cost is one `write`, not a second composition pass.
+/// Why (#4752, owner ruling 2026-08-04): the compiled prompt is the text ONE
+/// project's session runs with, so it belongs to that project. A single global
+/// file could not answer "what is MY session running" — `FrameworkPaths`
+/// deliberately keeps `framework` at the shared managed root
+/// (`for_managed_project_keeps_framework_source_at_managed_root`) and
+/// `for_managed_workspace` resolves it from the real `$HOME`, so concurrent
+/// sessions across projects overwrote each other. Project-local scoping removes
+/// that collision by construction rather than by slug disambiguation — there is
+/// no shared root to race on and no slug to collide.
+///
+/// This is why the accessor does NOT live on `FrameworkPaths`: that type models
+/// the global framework INSTALL layout, and this file is per-project session
+/// state. It sits beside `last-instructions.md` and `sessions/`, in the
+/// `.trusty-mpm/` directory `tm` already writes on every launch.
+/// What: `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`.
+/// Test: `compiled_prompt_path_is_project_local`,
+/// `compiled_prompt_path_is_beside_the_session_stash`.
+pub fn compiled_prompt_path(project_dir: &std::path::Path) -> std::path::PathBuf {
+    project_dir
+        .join(".trusty-mpm")
+        .join("framework")
+        .join(COMPILED_PROMPT_FILE)
+}
+
+/// The operator-facing explanation for a failed compiled-prompt write.
+///
+/// Why (#4752): the write is fatal — it refuses a launch — so the operator must
+/// be told what was refused, where, and why, not handed a bare `io::Error`. One
+/// formatter keeps that message identical whether the refusal surfaces from the
+/// CLI (`tm session start`), the daemon resume path, or the HTTP client.
+/// What: names the path, the underlying cause, and the remedy.
+/// Test: `compiled_prompt_failure_message_names_the_path_and_a_remedy`.
+pub fn compiled_prompt_failure_message(path: &std::path::Path, source: &std::io::Error) -> String {
+    format!(
+        "could not write the compiled PM prompt to {}: {source}\n\
+         The session was NOT started: it would have run against instructions that \
+         cannot be inspected, and a directory `tm` writes on every launch is \
+         unwritable. Check permissions and free space on that path, then retry.",
+        path.display()
+    )
+}
+
+/// Write an already-composed prompt to a project's compiled-prompt path.
+///
+/// Why (#4752): every writer of `INSTRUCTIONS-COMPILED.md` goes through one
+/// function so the file can never hold anything but a full compiled prompt. It
+/// takes the prompt the composer ALREADY built for
+/// `--append-system-prompt-file` rather than recomposing it, so the launch cost
+/// is one `write`, not a second composition pass.
 /// What: creates `dest`'s parent directory if absent, then writes `prompt`
-/// verbatim. Returns the underlying IO error unchanged — callers decide whether
-/// a failure is fatal (at launch it is; see
-/// `crate::core::session_launch::prepare_session`).
-/// Test: `write_compiled_prompt_to_creates_parent_dirs`,
-/// `install_system_prompt_to_writes_assembled`.
+/// verbatim. Returns the underlying IO error unchanged; pair it with
+/// [`compiled_prompt_failure_message`] when surfacing to an operator.
+/// Test: `write_compiled_prompt_to_creates_parent_dirs`.
 pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(dest, prompt)
-}
-
-/// Write the assembled system prompt to an explicit path.
-///
-/// Why: `tm install` must be testable against a temp directory rather than the
-/// real `~/.trusty-mpm`; extracting the path-parameterised write here lets both
-/// the production path ([`install_system_prompt`]) and the install handler use
-/// the same assembly logic without touching the real home during unit tests.
-/// What: composes [`assemble_system_prompt`] and hands it to
-/// [`write_compiled_prompt_to`]. Callers pass
-/// [`crate::core::paths::FrameworkPaths::instructions_compiled`].
-/// Test: `install_system_prompt_to_writes_assembled`, `install_writes_assembled_prompt`.
-pub fn install_system_prompt_to(dest: &std::path::Path) -> std::io::Result<()> {
-    write_compiled_prompt_to(dest, &assemble_system_prompt())
-}
-
-/// Write the assembled system prompt to the trusty-mpm framework directory.
-///
-/// Why: an operator inspecting `~/.trusty-mpm/framework/` must find the
-/// compiled prompt at one predictable place. #4752 moved that place off
-/// `instructions/INSTRUCTIONS.md` (shared with a bundled stub and with the
-/// pipeline's own input) and onto [`COMPILED_PROMPT_FILE`].
-/// What: creates `~/.trusty-mpm/framework/` if needed and writes the output of
-/// [`assemble_system_prompt`] to `INSTRUCTIONS-COMPILED.md`, returning the path
-/// it wrote. Delegates the write to [`install_system_prompt_to`].
-/// Test: `install_system_prompt_writes_file`.
-pub fn install_system_prompt() -> std::io::Result<std::path::PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir"))?;
-    let out_path = home
-        .join(".trusty-mpm/framework")
-        .join(COMPILED_PROMPT_FILE);
-    install_system_prompt_to(&out_path)?;
-    Ok(out_path)
 }
 
 /// Delete a stale `instructions/INSTRUCTIONS.md` left by a pre-#4752 install.

@@ -325,6 +325,45 @@ pub enum PrepError {
         /// The underlying IO error.
         source: std::io::Error,
     },
+    /// Writing the project's compiled PM prompt failed — the ONE fatal
+    /// preparation error (#4752, owner ruling 2026-08-04).
+    ///
+    /// Why it is its own variant rather than another [`Self::Io`]: #2149
+    /// deliberately made preparation failures non-fatal so a roster- or
+    /// skill-deploy hiccup could not stop a session launching, and every
+    /// production caller still logs-and-continues on those. This one is ruled
+    /// fatal — "if we can't write a simple file to this directory, we have a
+    /// bigger issue" — so callers need to tell it apart from the failures
+    /// #2149 was aimed at. [`PrepError::is_fatal`] is that discriminator; a
+    /// blanket "all prep errors are fatal" would have reversed #2149 wholesale
+    /// and regressed exactly what it protected.
+    /// Test: `compiled_prompt_failure_is_fatal`,
+    /// `deploy_and_io_failures_stay_non_fatal`.
+    #[error(
+        "{}",
+        crate::core::instruction_pipeline::compiled_prompt_failure_message(path, source)
+    )]
+    CompiledPrompt {
+        /// The compiled-prompt path the write targeted.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+}
+
+impl PrepError {
+    /// Whether this failure must abort the launch rather than be logged.
+    ///
+    /// Why (#4752): the seven spawning call sites treat preparation as
+    /// best-effort (#2149). Exactly one failure is ruled fatal, and this is the
+    /// single place that decides which — so a future variant does not silently
+    /// inherit either policy.
+    /// What: `true` only for [`Self::CompiledPrompt`].
+    /// Test: `compiled_prompt_failure_is_fatal`,
+    /// `deploy_and_io_failures_stay_non_fatal`.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Self::CompiledPrompt { .. })
+    }
 }
 
 /// Prepare a project directory for a fresh Claude Code session launch.
@@ -343,27 +382,26 @@ pub enum PrepError {
 /// matches the live launch prompt byte-for-byte (issue #1409), and returns a
 /// [`PrepReport`].
 ///
-/// COMPILED PROMPT (#4752): the same prompt is ALSO written to
-/// `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
-/// ([`crate::core::paths::FrameworkPaths::instructions_compiled`]) as this
-/// function's LAST step, and a failed write returns `Err`.
+/// ORDERING CONTRACT (#4752, owner ruling 2026-08-04): the same prompt is ALSO
+/// written to `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+/// ([`crate::core::instruction_pipeline::compiled_prompt_path`]) as this
+/// function's LAST step, and a failure returns [`PrepError::CompiledPrompt`],
+/// which every spawning caller treats as FATAL — the launch is refused. So a
+/// session that starts always has a compiled prompt on disk matching the text
+/// it received.
 ///
-/// That `Err` does NOT block any launch, and this doc deliberately does not
-/// claim otherwise. Since #2149 every production caller treats a prep failure
-/// as non-fatal and spawns anyway — `commands/launch.rs::connect`, the
-/// managed-clone block in `commands/launch.rs`, `commands/meta/launch.rs`,
-/// `commands/session/start.rs::start_session_in_place`,
-/// `client/http_client/session_connect.rs`,
-/// `daemon/managed_routes/lifecycle.rs::prepare_inproject_session`, and
-/// `provisioner/workspace.rs` all log and continue. The only caller that
-/// propagates, `core/standalone/load.rs::run_prepare_session`, spawns no
-/// `claude` at all, so the fatality's sole live effect is hard-failing
-/// `tm load <alias>`.
+/// This is the ONE preparation failure that blocks a launch. #2149's
+/// non-fatal-preparation design still governs every other variant (a roster or
+/// skill deploy failure is surfaced via [`PrepReport::roster_errors`] and the
+/// session still starts); [`PrepError::is_fatal`] is the discriminator.
 ///
-/// What actually keeps the artifact current at every launch is
-/// `runtime::claude_code::build_prompt_file`, which rewrites it from the exact
-/// bytes it hands to `--append-system-prompt-file` — including on the resume
-/// path, which never calls this function. See #4752 and spec §10.3.
+/// POSITION: the write is deliberately LAST, so a refusal cannot skip the MCP
+/// injectors or the trust pre-seed — see the inline comment at the call and
+/// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
+///
+/// The resume path never calls this function; it is covered by an equivalent
+/// fatal write in `daemon::managed_routes::lifecycle::resume_managed`. See
+/// spec §10.3.
 /// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
 /// `prepare_session_stash_reflects_override`,
 /// `prepare_session_writes_the_compiled_prompt_before_returning`,
@@ -1162,9 +1200,9 @@ fn prepare_session_inner(
     // function's doc comment), a failed compiled write would have SKIPPED those
     // injectors and let the session launch anyway. Nothing below this line may
     // depend on the write succeeding — keep it last.
-    let compiled = fw.instructions_compiled();
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir);
     crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
-        .map_err(|source| PrepError::Io {
+        .map_err(|source| PrepError::CompiledPrompt {
             path: compiled.clone(),
             source,
         })?;
@@ -1194,33 +1232,19 @@ fn prepare_session_inner(
 /// and passed to `claude --append-system-prompt-file`. This variant is kept for
 /// callers that do not know the project directory (e.g. tests); prefer
 /// [`build_system_prompt_for`] at launch sites so project-level overrides apply.
-/// What: reads `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`; if it is
-/// missing or empty (first run) it calls
-/// [`crate::core::instruction_pipeline::install_system_prompt`] to generate it from
-/// the bundled assets, then reads it back. Returns `None` only when the home
-/// directory cannot be resolved or the file cannot be written/read.
+/// What: returns [`crate::core::instruction_pipeline::assemble_system_prompt`],
+/// trimmed. `Option` is retained for API compatibility and is always `Some`.
+///
+/// #4752: this used to read `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
+/// and regenerate it on disk when missing. That file is retired — nothing writes
+/// it, `tm install` deletes a stale copy, and the compiled prompt is now
+/// per-project — so the round-trip could only ever have returned either bundled
+/// content it already had in memory, or a stale leftover. Composing directly
+/// removes the last dependency on the retired path and the home directory.
 /// Test: `build_system_prompt_includes_trusty_block`.
 pub fn build_system_prompt() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let path = home
-        .join(".trusty-mpm")
-        .join("framework")
-        .join("instructions")
-        .join("INSTRUCTIONS.md");
-
-    // Use the on-disk file when it is present and non-empty.
-    if let Ok(contents) = std::fs::read_to_string(&path) {
-        let trimmed = contents.trim_end();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    // First run (or empty file): generate it from the bundled assets, then
-    // read it back so the launch path always uses the same source of truth.
-    let generated = crate::core::instruction_pipeline::install_system_prompt().ok()?;
-    let contents = std::fs::read_to_string(&generated).ok()?;
-    let trimmed = contents.trim_end();
+    let composed = crate::core::instruction_pipeline::assemble_system_prompt();
+    let trimmed = composed.trim_end();
     if trimmed.is_empty() {
         None
     } else {

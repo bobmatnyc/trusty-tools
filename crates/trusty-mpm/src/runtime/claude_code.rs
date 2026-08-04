@@ -346,15 +346,24 @@ fn spawn_command(
 /// constraint, so a write failure here means the session runs without the
 /// injected PM system prompt rather than falling back to a different carrier.
 ///
-/// #4752: this is also where the framework-level compiled prompt
-/// (`INSTRUCTIONS-COMPILED.md`) is refreshed. This function is the ONE seam all
-/// three spawn paths share — `spawn`, the isolated-spawn variant, and
-/// `spawn_resume` — and it materializes the exact bytes handed to
-/// `--append-system-prompt-file`. `resume_managed` never calls
-/// `prepare_session*` on its healthy path, so writing the compiled file here is
-/// what covers resume, guided-resume and crash-recovery launches; writing it
-/// from `prompt` (rather than recomposing) is what makes the on-disk artifact
-/// the SAME text as the running session's prompt by construction.
+/// #4752: this is also where the project's compiled prompt
+/// (`<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`) is refreshed
+/// from the exact bytes handed to `--append-system-prompt-file`.
+///
+/// WHY THIS ONE IS BEST-EFFORT while the same write is FATAL in
+/// `prepare_session_inner` and `resume_managed` — the asymmetry is deliberate:
+/// those two are PROVISIONING steps, whose job is to establish the session's
+/// on-disk state before anything spawns; refusing there is coherent and is what
+/// the owner ruled. This call sits INSIDE the spawn, past that gate, and every
+/// path that reaches it has already had a fatal compiled write succeed
+/// (start → `prepare_session_inner`; resume → `resume_managed`). So it is a
+/// belt-and-braces refresh, never the sole guarantee.
+///
+/// Making it fatal here would also invert this function's own priority: a
+/// failure of the strictly MORE important write below (the actual system-prompt
+/// file) already degrades to spawning without it (#2173). Refusing to launch
+/// over the inspection copy while shrugging at the real prompt would be exactly
+/// backwards.
 /// Test: `build_prompt_file_writes_resolved_prompt_for_project`,
 /// `build_prompt_file_refreshes_the_compiled_prompt`,
 /// `build_prompt_file_compiled_write_failure_does_not_block_the_spawn`.
@@ -366,15 +375,11 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
         native,
     );
 
-    // #4752: refresh `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` from the
-    // very string about to be passed to `--append-system-prompt-file`.
-    //
-    // Best-effort ON PURPOSE, matching this function's existing contract: the
-    // spawn must not be blocked by an inspection-artifact write. Making it fatal
-    // here would trade a stale debugging aid for a session that fails to launch
-    // — the same inverted priority that put an earlier revision's `?` upstream
-    // of the MCP injectors in `prepare_session_inner`.
-    let compiled = crate::core::paths::FrameworkPaths::default().instructions_compiled();
+    // #4752: refresh this PROJECT's compiled prompt from the very string about
+    // to be passed to `--append-system-prompt-file`. Best-effort by design —
+    // see this function's doc comment for why the same write is fatal in the
+    // two provisioning steps and not here.
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir);
     if let Err(err) =
         crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &prompt)
     {

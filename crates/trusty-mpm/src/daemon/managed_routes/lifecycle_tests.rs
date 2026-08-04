@@ -270,7 +270,8 @@ fn prepare_inproject_session_writes_statusline() {
         &session_id,
         worktree.path(),
         "https://github.com/owner/repo",
-    );
+    )
+    .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
 
     let settings_path = worktree.path().join(".claude").join("settings.json");
     let content = std::fs::read_to_string(&settings_path).unwrap_or_else(|e| {
@@ -334,7 +335,8 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
             &session_id,
             worktree.path(),
             "https://github.com/owner/repo",
-        );
+        )
+        .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
     })
     .await;
 

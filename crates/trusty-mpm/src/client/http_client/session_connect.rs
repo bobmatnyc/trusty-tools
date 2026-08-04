@@ -34,8 +34,9 @@ impl DaemonClient {
     pub async fn launch_session(&self, workdir: &str) -> anyhow::Result<String> {
         // Prepare the custom instructions Claude Code reads at startup: deploy
         // composed agents to `~/.claude/agents/` and merge the project
-        // `CLAUDE.md`. A prep failure is logged but not fatal — the session can
-        // still launch with whatever instructions already exist on disk.
+        // `CLAUDE.md`. Most prep failures are logged but not fatal (#2149) —
+        // the session can still launch with whatever instructions already exist
+        // on disk. The exception is #4752's compiled-prompt write.
         let fw = crate::core::paths::FrameworkPaths::default();
         match crate::core::session_launch::prepare_session(&fw, std::path::Path::new(workdir)) {
             Ok(report) => {
@@ -44,6 +45,11 @@ impl DaemonClient {
                 for err in &report.roster_errors {
                     tracing::error!(%err, "roster provisioning gap (non-fatal)");
                 }
+            }
+            // #4752: fatal — refuse the launch rather than start a session
+            // whose compiled instructions could not be written.
+            Err(err) if err.is_fatal() => {
+                anyhow::bail!("{err}");
             }
             Err(err) => {
                 tracing::warn!(%err, "session pre-launch preparation failed");

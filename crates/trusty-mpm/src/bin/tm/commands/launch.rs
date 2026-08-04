@@ -207,6 +207,12 @@ pub(crate) async fn launch(
                     );
                 }
             }
+            // #4752: a compiled-prompt write failure is FATAL — refuse the
+            // launch rather than start a session whose instructions cannot be
+            // inspected. Every other prep failure stays non-fatal (#2149).
+            Err(e) if e.is_fatal() => {
+                anyhow::bail!("{e}");
+            }
             Err(e) => {
                 tracing::warn!(
                     "session prep failed for worktree {} (non-fatal): {e}",
@@ -275,16 +281,13 @@ pub(crate) async fn launch(
         }
     };
 
-    // 10. Regenerate `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` from
-    //     the bundled assets so the on-disk system prompt always reflects the
-    //     current trusty-mpm build.
-    let instructions_path = match trusty_mpm::core::instruction_pipeline::install_system_prompt() {
-        Ok(path) => Some(path),
-        Err(err) => {
-            eprintln!("warning: failed to install system prompt: {err}");
-            None
-        }
-    };
+    // 10. (#4752) The former regeneration of
+    //     `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` is gone. Its
+    //     result was assigned and then immediately discarded (`let _ =
+    //     instructions_path`), so it only ever wrote a file no launch read —
+    //     and that path is now retired: `tm install` deletes a stale copy and
+    //     the compiled prompt is per-project. The prompt this session actually
+    //     receives is built below and written by `prepare_isolated_session`.
 
     // Resolve the PM model (config > frontmatter > default).
     let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_default();
@@ -320,7 +323,6 @@ pub(crate) async fn launch(
         prompt_path.as_deref(),
         Some(&managed_path),
     );
-    let _ = instructions_path;
 
     // 12. Create a detached tmux session rooted at the MANAGED clone directory.
     //     #2398: routes through `core::tmux::create_managed_session`, the
@@ -462,6 +464,11 @@ pub(crate) async fn connect(
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());
             }
+        }
+        // #4752: fatal — refuse the connect rather than attach to a session
+        // whose compiled instructions could not be written.
+        Err(err) if err.is_fatal() => {
+            anyhow::bail!("{err}");
         }
         Err(err) => {
             tracing::warn!(
