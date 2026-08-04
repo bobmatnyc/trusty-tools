@@ -54,11 +54,11 @@ fn is_session_worktree_absent_path_is_noop() {
     let absent = std::path::Path::new("/nonexistent/.worktrees/session-abc");
     // is_session_worktree: true (immediate parent is `.worktrees`)
     assert!(is_session_worktree(absent));
-    // remove_session_worktree: returns true idempotently (path already absent)
+    // remove_session_worktree: reports Removed idempotently (path already absent)
     let result = remove_session_worktree(absent);
     assert!(
-        result,
-        "absent path should return true (idempotently removed)"
+        result.removed(),
+        "absent path should report Removed (idempotently removed)"
     );
 }
 
@@ -82,8 +82,12 @@ fn sentinel_gates_worktree_removal_refuses_non_worktrees_dir_without_sentinel() 
     );
     let result = remove_session_worktree(&wt_path);
     assert!(
-        !result,
-        "remove_session_worktree must return false for non-worktrees dir without sentinel"
+        !result.removed(),
+        "remove_session_worktree must refuse a non-worktrees dir without a sentinel"
+    );
+    assert!(
+        result.reason().is_some_and(|r| r.contains("sentinel")),
+        "#4732: and must say WHY, so the caller can report it: {result:?}"
     );
     // The directory must NOT have been deleted.
     assert!(

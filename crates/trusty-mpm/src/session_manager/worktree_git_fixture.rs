@@ -65,6 +65,42 @@ fn git_ok(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Restores a path's permission bits when it drops, pass or panic (#4732).
+///
+/// Why: the "git cannot read this" tests work by `chmod 000`-ing a real `.git`
+/// entry. A mode left behind survives the assertion that unwinds past it and
+/// can defeat `TempDir`'s own cleanup, so the restore has to be a `Drop`, not a
+/// line at the end of the test.
+/// What: captures the current mode on construction and re-applies it on drop.
+/// Test: `an_unreadable_git_entry_is_protected`,
+/// `remove_refuses_an_unreadable_git_entry`.
+pub(crate) struct RestoreMode {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+    }
+}
+
+/// `chmod 000 <path>`, restored when the returned guard drops (#4732).
+pub(crate) fn deny_all(path: &Path) -> RestoreMode {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::symlink_metadata(path)
+        .expect("fixture: stat before chmod")
+        .permissions()
+        .mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+        .expect("fixture: chmod 000");
+    RestoreMode {
+        path: path.to_path_buf(),
+        mode,
+    }
+}
+
 impl GitWorktreeFixture {
     /// Build a checkout on `main`, pushed to a bare remote in the same temp dir.
     ///
@@ -179,14 +215,16 @@ impl GitWorktreeFixture {
     /// this" (#4224 review).
     ///
     /// Why: git itself honours the lock — `git worktree remove --force` exits
-    /// 128 rather than removing it. But `decommission::remove_session_worktree`
-    /// treats that non-zero exit as a git failure and falls back to
-    /// `std::fs::remove_dir_all`, which deletes the directory regardless, so the
-    /// lock can only be honoured by never enumerating the worktree in the first
-    /// place. Proving that requires a really-locked worktree; setting the flag
-    /// on a parsed record instead would test the parser, not the filter.
+    /// 128 rather than removing it. Until #4732
+    /// `decommission::remove_session_worktree` treated that non-zero exit as a
+    /// git failure and fell back to `std::fs::remove_dir_all`, deleting the
+    /// directory regardless; both the enumeration filter and the remover now
+    /// honour it. Proving either requires a really-locked worktree; setting the
+    /// flag on a parsed record instead would test the parser, not the gate.
     /// What: `git -C <repo> worktree lock <wt>`.
-    /// Test: `enumerate_excludes_a_locked_worktree`.
+    /// Test: `enumerate_excludes_a_locked_worktree`,
+    /// `remove_session_worktree_refuses_a_git_locked_worktree`,
+    /// `a_locked_worktree_is_protected`.
     pub(crate) fn lock_worktree(&self, wt: &Path) {
         git_ok(
             &self.repo,

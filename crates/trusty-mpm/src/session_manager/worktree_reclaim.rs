@@ -861,8 +861,10 @@ pub(crate) struct ReclaimOutcome {
     pub removed_bytes: u64,
     /// Candidates the survey approved but the FRESH re-check refused.
     pub refused_at_recheck: Vec<String>,
-    /// Candidates the re-check approved but whose deletion failed.
-    pub removal_failed: Vec<PathBuf>,
+    /// Candidates the re-check approved but which are still on disk, each as
+    /// `"<path>: <reason>"` (#4732 — the reason used to be dropped, and a
+    /// deliberate `git worktree lock` refusal read as a transient error).
+    pub removal_failed: Vec<String>,
 }
 
 #[cfg(test)]

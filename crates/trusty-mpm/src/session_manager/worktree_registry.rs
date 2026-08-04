@@ -579,13 +579,14 @@ fn admission_for(
         // remove a locked working tree; use 'remove -f -f' to override or
         // unlock first", leaving the directory intact. Git respects the lock.
         //
-        // The danger is what `decommission::remove_session_worktree` does with
-        // that refusal: it treats ANY non-zero git exit as "git failed" and
-        // falls back to `std::fs::remove_dir_all`, which deletes the directory
-        // regardless — defeating the lock via the error path rather than the
-        // force flag, AND leaving git's now-dangling registry entry behind.
-        // Never enumerating a locked worktree is therefore the only place the
-        // operator's veto actually survives.
+        // The danger was what `decommission::remove_session_worktree` did with
+        // that refusal: until #4732 it treated ANY non-zero git exit as "git
+        // failed" and fell back to `std::fs::remove_dir_all`, deleting the
+        // directory regardless — defeating the lock via the error path rather
+        // than the force flag, AND leaving git's now-dangling registry entry
+        // behind. The remover refuses now, so this filter is no longer the ONLY
+        // place the veto survives; it is the first, and it is what keeps a
+        // locked worktree out of every candidate list an operator is shown.
         if wt.bare {
             return Admission::Bare;
         }
