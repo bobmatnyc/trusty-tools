@@ -59,10 +59,12 @@ Documentation.
 | Google Cloud | `gcp-ops` |
 | Local (PM2/Docker/localhost) | `local-ops` |
 
-**Not bundled in trusty-mpm** (do not delegate to these — they don't exist
-here): `railway-ops`, `clerk-ops`, `digitalocean-ops`. If a task needs one of
-these platforms, use the closest real agent (`local-ops` as the fallback) or
-tell the user no dedicated ops agent exists yet.
+`vercel-ops` and `gcp-ops` are platform-gated, so a project without the
+matching marker never receives them. Which agents exist at all is declared in
+`framework-manifest.toml` (rendered in `tm-capabilities`'s
+`references/agents.md`) — check there, or the project's generated roster,
+before routing. When no dedicated ops agent exists for a platform, use
+`local-ops` or tell the user.
 
 ## Agent Selection by Trigger Keyword
 
@@ -80,11 +82,11 @@ tell the user no dedicated ops agent exists yet.
 | code review, adversarial verdict | `code-critic` |
 | memory palace, cross-session recall | `memory-manager` |
 
-Language-specific Engineer selection follows `Cargo.toml` (rust-engineer),
-`tsconfig.json` (typescript-engineer), `pyproject.toml`/`setup.py`
-(python-engineer), `go.mod` (golang-engineer), `pom.xml`/`build.gradle`
-(java-engineer), `.csproj` — see the bundled agent-delegation section
-(`assets/instructions/sections/agent-delegation.md`) for the full table; when
+Language-specific Engineer selection follows the project's stack markers. The
+marker for each engineer is declared in `framework-manifest.toml` and rendered
+in the **Deploys When** column of `tm-capabilities`'s `references/agents.md` —
+read it there rather than from a prose copy. The launch prompt's **Detected
+Project Stack** section already states this project's answer. When the stack is
 unknown, Research is mandatory (never default to a guess).
 
 ## Long-Wait Delegation (issues #2833, #4792)

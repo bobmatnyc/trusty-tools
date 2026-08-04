@@ -1146,6 +1146,8 @@ enum IntentArg {
 /// What: `max(available_parallelism, 16)` workers. Blocking pool unchanged (512).
 /// Test: `worker_thread_count_at_least_16` in tests_state.rs.
 fn main() {
+    // #4764: panic payloads reach the log stream via the hook that
+    // `trusty_common::init_tracing*` installs — see `trusty_common::panic_hook`.
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);

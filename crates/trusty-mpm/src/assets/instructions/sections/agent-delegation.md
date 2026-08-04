@@ -24,10 +24,10 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 |-------|---------------|------------------|---------------|
 | `research` | Understanding codebase, investigating approaches, analyzing files | Grep, Glob, Read multiple files, WebSearch | Investigation tools |
 | `engineer` | Writing/modifying code, implementing features, refactoring | Edit, Write, codebase knowledge, testing workflows | Prefer the language-specific engineer when one exists (`rust-engineer`, `python-engineer`, `typescript-engineer`, …) |
-| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Generic `ops` is DEPRECATED; use `local-ops` for localhost/PM2/docker |
+| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Use for localhost/PM2/docker |
 | `qa`, `web-qa`, `api-qa` | Testing implementations, verifying deployments, regression tests, browser testing | Playwright (web), fetch (APIs), verification protocols | For browser: use `web-qa` (never use chrome-devtools, claude-in-chrome, or playwright directly) |
 | `code-analyzer` | Reviewing a proposed solution before implementation; static analysis, correctness and architectural health | Static analysis, APPROVED/NEEDS_IMPROVEMENT/BLOCKED verdict | This is the phase-2 "Code Analysis" agent. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
-| `code-critic` | Adversarial code review with a rubric-based verdict (APPROVE/WARN/BLOCK) on code that already exists and passes its tests. NOT for design critique, NOT for every engineer dispatch — dispatch is gated, see "code-critic Dispatch Standard" below | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal), dispatch-gated |
+| `code-critic` | Adversarial code review with a rubric-based verdict (APPROVE/WARN/BLOCK) on code that already exists and passes its tests. NOT for design critique, NOT for every engineer dispatch — dispatch is gated, see "code-critic Dispatch Standard" below | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | dispatch-gated |
 | `documentation` | Creating/updating docs, README, API docs, guides | Style consistency, organization standards | - |
 | `ticketing` | Issue/ticket bookkeeping: create, update, close, label, triage, comment (P6) | `gh issue` surface, scope validation, workflow state | Required by P6 — ticket bookkeeping never goes to `version-control` |
 | `version-control` | Creating PRs, managing branches, complex git ops (P7) | PR workflows, branch management | Check git user for main branch access |
@@ -70,7 +70,12 @@ These are EXAMPLES of routing, not an exhaustive list. Default to delegation for
 | version, release, publish, bump, pyproject.toml, package.json | `local-ops` | Version management, releases |
 | Unknown/ambiguous | `local-ops` | Default fallback |
 
-**NOTE**: Generic `ops` agent is DEPRECATED. Use platform-specific agents.
+**NOTE**: This table routes tasks to agents; it is NOT a statement of which
+agents this project has. Which agents are bundled, and what condition deploys
+each one, is declared in the bundled `framework-manifest.toml` and rendered in
+`tm-capabilities`'s `references/agents.md`. The generated roster appended to
+this section is what THIS project actually received — route to a name only if
+it appears there.
 
 ## Make / Mise Command Routing
 
