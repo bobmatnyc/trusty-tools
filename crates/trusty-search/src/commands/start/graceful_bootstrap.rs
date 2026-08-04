@@ -54,6 +54,31 @@ use crate::service::SearchAppState;
 /// is unset or malformed.
 const DEFAULT_BOOTSTRAP_RETRIES: u32 = 2;
 
+/// Ceiling on the per-attempt readiness-probe budget multiplier (#4125
+/// follow-up, review finding 1 on PR #4771).
+///
+/// Why 3, and why a multiplier rather than an absolute duration: the base is
+/// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` (default 30 s) — an operator's own
+/// knob. Capping the multiplier bounds only the amplification THIS module
+/// invented and leaves the operator's base authoritative; an absolute ceiling
+/// would silently override a deliberately-raised base on a slow machine.
+///
+/// 3 is generous enough for the failure this scaling exists to survive. The
+/// observed incident was a 30 s probe dying under a warm-boot storm of
+/// hundreds of index restores, and the very next daemon start — without that
+/// storm — succeeded on the same unchanged 30 s budget. The deficit is
+/// therefore startup contention, which ends, not a fundamentally larger cost:
+/// 90 s at the default is three times the budget that was observed to fail and
+/// comfortably outlasts the contention window.
+///
+/// And it keeps the worst case bounded. `TRUSTY_PY_BOOTSTRAP_RETRIES` is
+/// operator-settable with no upper bound, so an unbounded `base * attempt`
+/// grows without limit: attempt 100 would hold one live python child on a
+/// single probe for 50 minutes. Capped, every attempt is at most 3x the base
+/// no matter how many are configured, while the default 2-retry case is
+/// unchanged (30 s + 60 s).
+const MAX_PROBE_TIMEOUT_MULTIPLIER: u32 = 3;
+
 /// Abstracts "the thing that must be torn down if the readiness probe fails
 /// or times out after an adapter/handle has already been built" — real:
 /// `LazyEmbedderHandle::shutdown()`; fakes: a spy that records the call
@@ -171,6 +196,39 @@ impl PythonBootstrap for RealPythonBootstrap {
         Duration::from_secs(
             super::embedder::resolve_python_supervisor_config().startup_timeout_secs,
         )
+    }
+}
+
+/// The readiness-probe budget for one attempt, plus enough context for the
+/// timeout log line to say whether the ceiling was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProbeBudget {
+    /// The budget actually handed to `tokio::time::timeout`.
+    pub timeout: Duration,
+    /// The multiplier applied to the base — always in `1..=MAX_PROBE_TIMEOUT_MULTIPLIER`.
+    pub multiplier: u32,
+    /// True when `attempt` exceeded [`MAX_PROBE_TIMEOUT_MULTIPLIER`] and the
+    /// ceiling, rather than the attempt number, decided the budget.
+    pub capped: bool,
+}
+
+/// Scale the readiness-probe budget by attempt number, bounded by
+/// [`MAX_PROBE_TIMEOUT_MULTIPLIER`].
+///
+/// Why: see [`MAX_PROBE_TIMEOUT_MULTIPLIER`] for the ceiling's justification.
+/// What: multiplier = `attempt` clamped to `1..=MAX_PROBE_TIMEOUT_MULTIPLIER`;
+/// the product is computed with `checked_mul` so a pathologically large
+/// operator base cannot panic on `Duration` overflow (which `Duration * u32`
+/// does, in release as well as debug) — an un-multipliable base is already
+/// effectively unbounded, so it is used as-is.
+/// Test: `probe_budget_is_capped_at_the_multiplier_ceiling`,
+/// `probe_budget_saturates_instead_of_overflowing` in `start/tests.rs`.
+pub(super) fn probe_budget(base: Duration, attempt: u32) -> ProbeBudget {
+    let multiplier = attempt.clamp(1, MAX_PROBE_TIMEOUT_MULTIPLIER);
+    ProbeBudget {
+        timeout: base.checked_mul(multiplier).unwrap_or(base),
+        multiplier,
+        capped: attempt > MAX_PROBE_TIMEOUT_MULTIPLIER,
     }
 }
 
@@ -311,7 +369,8 @@ pub(super) async fn drive_bootstrap(
 /// succeeded unchanged). Unlike the venv recheck this timeout is NOT a
 /// misclassification — a sidecar that will not answer genuinely cannot serve
 /// this attempt — so the fix is not a new outcome but a budget that grows with
-/// the retry instead of failing the same way twice.
+/// the retry instead of failing the same way twice. That growth is bounded by
+/// [`MAX_PROBE_TIMEOUT_MULTIPLIER`]; see [`probe_budget`].
 async fn try_bootstrap_once(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
@@ -336,13 +395,15 @@ async fn try_bootstrap_once(
     // relying on `Drop`.
     let (adapter, pid_slot, teardown) = ops.build_adapter(launcher);
     // #4125: a fixed budget under variable startup load is wrong again as soon
-    // as the load changes — give attempt N N x the base budget.
-    let probe_timeout = ops.probe_timeout() * attempt.max(1);
+    // as the load changes — give attempt N N x the base budget, bounded by
+    // MAX_PROBE_TIMEOUT_MULTIPLIER so it cannot grow without limit.
+    let base = ops.probe_timeout();
+    let budget = probe_budget(base, attempt);
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
     // load + one real embed THROUGH the supervisor, bounded by a timeout.
     let probe = tokio::time::timeout(
-        probe_timeout,
+        budget.timeout,
         adapter.embed_batch(&["trusty readiness probe"]),
     )
     .await;
@@ -365,9 +426,19 @@ async fn try_bootstrap_once(
             // tear it down immediately rather than abandon it.
             teardown.teardown().await;
             drop(adapter);
+            // #4125: name the multiplier AND whether the ceiling decided it, so
+            // a capped probe is distinguishable from an uncapped one in the log.
             anyhow::bail!(
-                "python readiness probe timed out after {}s",
-                probe_timeout.as_secs()
+                "python readiness probe timed out after {}s (attempt {attempt}: {}x the {}s \
+                 base budget{})",
+                budget.timeout.as_secs(),
+                budget.multiplier,
+                base.as_secs(),
+                if budget.capped {
+                    format!(", capped at the {MAX_PROBE_TIMEOUT_MULTIPLIER}x ceiling")
+                } else {
+                    String::new()
+                }
             );
         }
     }

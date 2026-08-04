@@ -1097,6 +1097,68 @@ fn resolve_bootstrap_retries_malformed_or_zero_falls_back_to_default() {
     assert_eq!(resolve_bootstrap_retries(), 2);
 }
 
+// ── #4125 follow-up: the probe-budget multiplier has a ceiling ─────────────
+
+use super::graceful_bootstrap::probe_budget;
+
+/// Why (#4125 follow-up, review finding 1 on PR #4771): the per-attempt probe
+/// budget scaled by `attempt` with no upper bound, so an operator-raised
+/// `TRUSTY_PY_BOOTSTRAP_RETRIES` grew one probe's budget without limit —
+/// attempt 100 would have held a live python child on a single probe for 50
+/// minutes.
+/// What: pins the whole curve — attempts at and below the ceiling scale
+/// linearly and report `capped == false`, attempts above it are pinned at
+/// `MAX_PROBE_TIMEOUT_MULTIPLIER x base` and report `capped == true`. Against
+/// the uncapped `base * attempt.max(1)` the last two cases return 300 s and
+/// 3000 s instead of 90 s.
+/// Test: this test.
+#[test]
+fn probe_budget_is_capped_at_the_multiplier_ceiling() {
+    let base = std::time::Duration::from_secs(30);
+
+    for (attempt, want_secs) in [(0, 30), (1, 30), (2, 60), (3, 90)] {
+        let got = probe_budget(base, attempt);
+        assert_eq!(
+            got.timeout.as_secs(),
+            want_secs,
+            "attempt {attempt} must scale linearly below the ceiling"
+        );
+        assert!(!got.capped, "attempt {attempt} is at or below the ceiling");
+    }
+
+    for attempt in [4, 10, 100] {
+        let got = probe_budget(base, attempt);
+        assert_eq!(
+            got.timeout.as_secs(),
+            90,
+            "attempt {attempt} must be pinned at 3x the base, not {}x it",
+            attempt
+        );
+        assert_eq!(got.multiplier, 3);
+        assert!(
+            got.capped,
+            "attempt {attempt} exceeded the ceiling, so the log line must be \
+             able to say the ceiling decided the budget"
+        );
+    }
+}
+
+/// Why (#4125 follow-up): `Duration * u32` panics on overflow, so a
+/// pathological `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` could have taken the
+/// bootstrap task down instead of merely bounding it.
+/// What: a base no multiplier can scale comes back unchanged rather than
+/// panicking. Against `base * multiplier` this test panics instead of failing.
+/// Test: this test.
+#[test]
+fn probe_budget_saturates_instead_of_overflowing() {
+    let base = std::time::Duration::from_secs(u64::MAX);
+    let got = probe_budget(base, 3);
+    assert_eq!(
+        got.timeout, base,
+        "an un-multipliable base is already effectively unbounded — use it as-is"
+    );
+}
+
 // ── Background bootstrap→hot-swap orchestrator (epic #3524 slice 6, PR 3/5) ─
 //
 // These drive `graceful_bootstrap::drive_bootstrap` — the actual retry/probe/

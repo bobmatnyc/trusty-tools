@@ -107,6 +107,22 @@ pub fn lockfile_hash() -> String {
 pub fn resolve_layout() -> Result<VenvLayout> {
     let data = trusty_common::resolve_data_dir("trusty-search")
         .context("resolve trusty-search data dir for py-embedder venv")?;
+    Ok(resolve_layout_in(&data))
+}
+
+/// The pure half of [`resolve_layout`]: derive the layout under an explicit
+/// data dir. Creates no files, reads no environment.
+///
+/// Why (#4125 follow-up, review finding 2 on PR #4771): every test that merely
+/// needed a layout in a tempdir had to reach [`resolve_layout`] through
+/// `unsafe { std::env::set_var(TRUSTY_DATA_DIR_OVERRIDE) }` — a process-global
+/// mutation with concurrent readers. Splitting the env lookup off lets those
+/// tests state the directory directly, which removes the race rather than
+/// isolating it.
+/// Test: `resolve_layout_derives_paths_under_the_given_data_dir` (derivation),
+/// `resolve_layout_places_venv_under_data_dir_and_hash` (that
+/// [`resolve_layout`] feeds it the override-honouring data dir).
+pub(crate) fn resolve_layout_in(data: &Path) -> VenvLayout {
     let base = data.join("py-embedder").join(lockfile_hash());
     let project_dir = base.join("project");
     let venv_dir = base.join("venv");
@@ -115,12 +131,12 @@ pub fn resolve_layout() -> Result<VenvLayout> {
     } else {
         venv_dir.join("bin").join("python")
     };
-    Ok(VenvLayout {
+    VenvLayout {
         base,
         project_dir,
         venv_dir,
         venv_python,
-    })
+    }
 }
 
 /// Is this layout already fully bootstrapped for the current lock?
@@ -453,7 +469,34 @@ fn verify_full_import_smoke_bounded(
     retry: Duration,
 ) -> RecheckOutcome {
     let args = ["-c", "import sentence_transformers"];
-    match run_bounded_python_check(&layout.venv_python, &args, first, "full-import-recheck") {
+    recheck_with_one_retry(first, retry, &|budget, label| {
+        run_bounded_python_check(&layout.venv_python, &args, budget, label)
+    })
+}
+
+/// The retry POLICY behind [`verify_full_import_smoke_bounded`], with the check
+/// itself injected (#4125 follow-up, review finding 3 on PR #4771).
+///
+/// Why: the policy — "an over-budget first attempt buys a second, larger
+/// attempt; a decided outcome is returned as-is" — is about ORDERING and
+/// BUDGETS, not about elapsed time. Asserting it through a real sleeping
+/// subprocess forced the tests to bet that a stub could fork and record itself
+/// inside a wall-clock budget, which is a race on a loaded machine and had
+/// already been widened from 200 ms to 1500 ms once. With the check injected a
+/// test names the exact call count and the exact budget each call received,
+/// with no clock involved at all.
+/// What: runs `check(first, …)`; on [`RecheckOutcome::Indeterminate`] — and
+/// only then — runs `check(retry, …)` once and returns that. Any decided
+/// outcome short-circuits.
+/// Test: `full_import_recheck_retries_once_before_reporting_indeterminate`,
+/// `full_import_recheck_retry_lets_a_starved_venv_prove_itself`,
+/// `full_import_recheck_does_not_retry_a_decided_outcome`.
+fn recheck_with_one_retry(
+    first: Duration,
+    retry: Duration,
+    check: &dyn Fn(Duration, &str) -> RecheckOutcome,
+) -> RecheckOutcome {
+    match check(first, "full-import-recheck") {
         // #4125: over budget once means "slow", not "broken" — give it a
         // materially larger budget before drawing any conclusion at all.
         RecheckOutcome::Indeterminate => {
@@ -463,12 +506,7 @@ fn verify_full_import_smoke_bounded(
                 first,
                 retry
             );
-            run_bounded_python_check(
-                &layout.venv_python,
-                &args,
-                retry,
-                "full-import-recheck (retry)",
-            )
+            check(retry, "full-import-recheck (retry)")
         }
         decided => decided,
     }
