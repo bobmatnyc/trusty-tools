@@ -163,6 +163,13 @@ impl Default for SysMetrics {
 /// tree from turning a best-effort metric into an unbounded sweep. Real
 /// trusty-* data directories nest well under ten levels, so this only ever
 /// trips on something already wrong.
+///
+/// Boundary, stated exactly because it is easy to read either way: the walk
+/// opens directories from the root (level 0) down to and *including* level
+/// `MAX_WALK_DEPTH`. So a file whose parent sits exactly `MAX_WALK_DEPTH`
+/// levels below the root IS counted; a file one level deeper is NOT, because
+/// its parent is never opened.
+/// Test: `dir_size_depth_cap_boundary_is_exact` pins both sides.
 const MAX_WALK_DEPTH: usize = 64;
 
 /// Wall-clock budget for one size walk.
@@ -411,9 +418,13 @@ mod tests {
             })
             .collect();
 
-        let mut observed = 0u64;
+        // Assert on the WORST sample, not the last one: keeping only the final
+        // result would let 29 of 30 walks return a truncated total and still
+        // pass. Every walk must clear the floor, not just the one we happened
+        // to keep.
+        let mut min_observed = u64::MAX;
         for _ in 0..30 {
-            observed = dir_size_bytes(&root);
+            min_observed = min_observed.min(dir_size_bytes(&root));
         }
 
         stop.store(true, Ordering::Relaxed);
@@ -423,37 +434,62 @@ mod tests {
 
         let floor = BRANCHES * (LEAF_BYTES + TOP_BYTES);
         assert!(
-            observed >= floor,
-            "walk under concurrent mutation lost stable bytes: got {observed}, floor {floor}"
+            min_observed >= floor,
+            "a walk under concurrent mutation lost stable bytes: worst sample \
+             {min_observed}, floor {floor}"
         );
     }
 
-    /// The walk must refuse to descend past [`MAX_WALK_DEPTH`].
+    /// The depth cap must fire at exactly [`MAX_WALK_DEPTH`], not near it.
     ///
-    /// Why (issue #4764): the depth bound is one half of the blast-radius
-    /// limit on a best-effort metric; an unenforced constant is not a bound.
-    /// What: writes one file at the root and one below `MAX_WALK_DEPTH + 5`
-    /// nested directories, then asserts only the shallow file is counted.
+    /// Why (issue #4764): the depth bound is half the blast-radius limit on a
+    /// best-effort metric, and an unenforced constant is not a bound. Testing
+    /// only that something far below the cap is excluded is too loose — it
+    /// passes whether the cap fires at `MAX_WALK_DEPTH`, one level early, or
+    /// one level late, so it would not catch an off-by-one that silently
+    /// under-counts every deep tree.
+    /// What: pins both sides of the boundary in one tree. A file whose parent
+    /// sits exactly `MAX_WALK_DEPTH` levels below the root MUST be counted; a
+    /// file one level deeper MUST NOT be. A root-level file is included so the
+    /// cap is also shown not to disturb ordinary shallow counting.
     /// Test: this test.
     #[test]
-    fn dir_size_respects_depth_cap() {
+    fn dir_size_depth_cap_boundary_is_exact() {
         const TOP_BYTES: u64 = 7;
+        const AT_CAP_BYTES: u64 = 11;
+        const PAST_CAP_BYTES: u64 = 4096;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("top.bin"), vec![0u8; TOP_BYTES as usize])
             .expect("write top");
 
-        let mut deep = tmp.path().to_path_buf();
-        for _ in 0..(MAX_WALK_DEPTH + 5) {
-            deep.push("d");
+        // `at_cap` is the directory exactly MAX_WALK_DEPTH levels down.
+        let mut at_cap = tmp.path().to_path_buf();
+        for _ in 0..MAX_WALK_DEPTH {
+            at_cap.push("d");
         }
-        std::fs::create_dir_all(&deep).expect("create deep tree");
-        std::fs::write(deep.join("too-deep.bin"), vec![0u8; 4096]).expect("write deep file");
+        std::fs::create_dir_all(&at_cap).expect("create at-cap tree");
+        std::fs::write(at_cap.join("at-cap.bin"), vec![0u8; AT_CAP_BYTES as usize])
+            .expect("write at-cap file");
 
+        // One level deeper — the first directory the walk must refuse to open.
+        let past_cap = at_cap.join("d");
+        std::fs::create_dir(&past_cap).expect("create past-cap dir");
+        std::fs::write(
+            past_cap.join("past-cap.bin"),
+            vec![0u8; PAST_CAP_BYTES as usize],
+        )
+        .expect("write past-cap file");
+
+        let total = dir_size_bytes(tmp.path());
         assert_eq!(
-            dir_size_bytes(tmp.path()),
+            total,
+            TOP_BYTES + AT_CAP_BYTES,
+            "depth cap is off by one: {} means the cap fired a level early \
+             (the at-cap file was dropped); {} means it fired a level late \
+             (the past-cap file was counted)",
             TOP_BYTES,
-            "files below the depth cap must not be counted"
+            TOP_BYTES + AT_CAP_BYTES + PAST_CAP_BYTES
         );
     }
 
