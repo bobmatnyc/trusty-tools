@@ -25,7 +25,8 @@ Its `bundled-ort` feature is on by default and links a static ONNX Runtime
 build that requires glibc >= 2.38. On Amazon Linux 2023 (glibc 2.34) or any
 other glibc < 2.38 host, install trusty-search with
 `--no-default-features --features load-dynamic` instead (or use the prebuilt
-`x86_64-linux-al2023` GitHub Release tarball) — see
+AL2023 GitHub Release tarball for your architecture — `x86_64-linux-al2023`,
+or `aarch64-linux-al2023` on Graviton) — see
 `crates/trusty-search/README.md`'s "AL2023 / glibc < 2.38 hosts" section for
 the full instructions. On a mismatched host, startup now fails immediately
 with an explicit glibc-version error instead of hanging for up to

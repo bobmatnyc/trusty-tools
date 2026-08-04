@@ -54,14 +54,21 @@ FDA_DOCS_URL="${REPO_URL}/blob/main/CLAUDE.md"
 
 # Linux arm64 (aarch64) release target triple.
 #
-# NOTE (#2038 / #2037 coordination): the release workflow only publishes
-# x86_64-unknown-linux-gnu for Linux today. Companion issue #2037 adds a
-# Linux arm64 build but has not yet landed, so the exact published triple
-# is not final. This constant is the ONLY place that needs to change once
-# #2037 lands: set it to whatever `.github/workflows/release.yml` actually
-# publishes for aarch64 Linux (e.g. "aarch64-unknown-linux-gnu" to mirror
-# the existing "-gnu" x86_64 target, or "aarch64-unknown-linux-musl" if
-# #2037 chooses musl for portability instead).
+# RESOLVED (#2038 / #2037, confirmed blocking by PR #4822): the release
+# workflow now publishes `aarch64-unknown-linux-gnu` as a required leg, built
+# natively on `ubuntu-24.04-arm`. The value below matches what
+# `.github/workflows/release.yml` actually publishes; keep the two in sync.
+#
+# NOTE (#2533 follow-up to PR #4822): the release workflow ALSO publishes an
+# `aarch64-linux-al2023` asset now, but this script deliberately does NOT
+# select it. That asset exists only for the ONNX-Runtime crates
+# (trusty-search, trusty-analyze), whose native Linux assets carry a glibc
+# 2.39 floor. This script installs `trusty-installer`, which is not one of
+# them: its arm64 asset is the cargo-zigbuild glibc-2.17 build, so it already
+# runs on Amazon Linux 2023 arm64 (glibc 2.34) and on every other glibc Linux
+# in service. The glibc-aware AL2023 routing that DOES matter lives in
+# trusty-installer itself — `crates/trusty-installer/src/download/glibc.rs`,
+# `select_asset_suffix` — which is where the new suffix was taught.
 LINUX_ARM64_TARGET="aarch64-unknown-linux-gnu"
 
 # ---------------------------------------------------------------------------

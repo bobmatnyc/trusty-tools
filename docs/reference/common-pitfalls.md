@@ -70,8 +70,10 @@ worked examples of a clean split.
 🟡 **`cargo install trusty-search` / `trusty-analyze` on Amazon Linux 2023
 (or any glibc < 2.38 host)** — the default `bundled-ort` feature statically
 links an ONNX Runtime build that requires glibc >= 2.38; AL2023 ships glibc
-2.34. Either grab the prebuilt `x86_64-linux-al2023` GitHub Release tarball
-(already configured with `load-dynamic`), or reinstall with
+2.34. Either grab the prebuilt AL2023 GitHub Release tarball for your
+architecture — `x86_64-linux-al2023`, or `aarch64-linux-al2023` on Graviton
+(#2533 follow-up to PR #4822) — which is already configured with
+`load-dynamic`, or reinstall with
 `--no-default-features --features load-dynamic` (`trusty-search`) /
 `--no-default-features --features http-server,load-dynamic`
 (`trusty-analyze`) plus `ORT_DYLIB_PATH` pointing at a host-compatible

@@ -103,8 +103,21 @@
 #                                                 x86_64-unknown-linux-gnu,
 #                                                 aarch64-unknown-linux-gnu,
 #                                                 aarch64-apple-darwin)
-#   <crate>-<version>-x86_64-linux-al2023.tar.gz  (AL2023 load-dynamic variant)
+#   <crate>-<version>-x86_64-linux-al2023.tar.gz   (AL2023 load-dynamic, amd64)
+#   <crate>-<version>-aarch64-linux-al2023.tar.gz  (AL2023 load-dynamic, arm64
+#                                                 — 2533 follow-up to PR #4822)
 #   <crate>-<version>-<target>.tar.gz.sha256    (paired checksum)
+#
+# 2533 follow-up: WHY AN aarch64 AL2023 LEG EXISTS AT ALL.
+#   PR #4822 made the `aarch64-unknown-linux-gnu` leg build natively and turned
+#   it blocking, then verified by EXECUTION that the resulting trusty-search
+#   binary carries a glibc 2.39 floor and needs OpenSSL 3 — it runs on Ubuntu
+#   24.04 arm64 and exits 127 (`libmvec.so.1`) on `amazonlinux:2023` arm64.
+#   That is the same limitation the `x86_64-unknown-linux-gnu` asset has always
+#   had, and this workflow's existing answer on amd64 is the separate
+#   `x86_64-linux-al2023` load-dynamic asset built inside the AL2023 container.
+#   Amazon Linux 2023 on Graviton is a confirmed deployment target, so arm64
+#   now gets the symmetric answer rather than the deferral #4822 recorded.
 
 name: Binary Release
 
@@ -682,23 +695,53 @@ jobs:
               aarch64_entry,
           ]
 
+          # AL2023 load-dynamic legs — one per architecture.
+          #
+          # 2533 follow-up: the `aarch64-linux-al2023` entry is the arm64
+          # counterpart PR #4822 identified as the missing piece and explicitly
+          # deferred. Its `aarch64-unknown-linux-gnu` sibling above is built on
+          # Ubuntu 24.04 arm64 and therefore carries a glibc 2.39 floor plus an
+          # OpenSSL 3 runtime dependency — #4822 verified by execution that it
+          # exits 127 (`libmvec.so.1`) on `amazonlinux:2023` aarch64. Graviton
+          # on AL2023 is a confirmed deployment target, so it needs the same
+          # answer x86_64 already has: build inside the AL2023 container itself,
+          # against that distro's own glibc 2.34 and its own OpenSSL.
+          #
+          # Everything about the arm64 entry mirrors the x86_64 one except the
+          # runner (native `ubuntu-24.04-arm`, so the multi-arch
+          # `amazonlinux:2023` manifest resolves to the arm64 image and
+          # HOST == TARGET, exactly as #4822 established for the gnu leg).
+          #
+          # `best_effort: True` is deliberately mirrored too: AL2023's GCC 11 is
+          # the oldest toolchain in this matrix and the reason the x86_64 leg is
+          # non-blocking, so the arm64 leg inherits the same classification
+          # rather than inventing a stricter one. A drop is NOT silent — the
+          # `release-completeness-audit` job derives its expected asset name
+          # from this very matrix, so a missing arm64 AL2023 asset produces a
+          # `::warning` annotation and a `DROPPED` row automatically.
+          AL2023_RUNNERS = {
+              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",    "x86_64-linux-al2023"),
+              "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-al2023"),
+          }
+
           if al2023:
-              includes.append({
-                  **common,
-                  "runner": "ubuntu-latest",
-                  "host_multiarch": "",
-                  "target": "x86_64-unknown-linux-gnu",
-                  "variant": "al2023",
-                  "asset_suffix": "x86_64-linux-al2023",
-                  # Use the AL2023-specific build flags (load-dynamic, no bundled-ort)
-                  "cargo_features": al_feats,
-                  "no_default_features": al_no_def,
-                  "container": "amazonlinux:2023",
-                  "zig_target": "",
-                  "best_effort": True,
-                  "al2023_no_default": al_no_def,
-                  "al2023_features": al_feats,
-              })
+              for al_target, (al_runner, al_suffix) in AL2023_RUNNERS.items():
+                  includes.append({
+                      **common,
+                      "runner": al_runner,
+                      "host_multiarch": "",
+                      "target": al_target,
+                      "variant": "al2023",
+                      "asset_suffix": al_suffix,
+                      # Use the AL2023-specific build flags (load-dynamic, no bundled-ort)
+                      "cargo_features": al_feats,
+                      "no_default_features": al_no_def,
+                      "container": "amazonlinux:2023",
+                      "zig_target": "",
+                      "best_effort": True,
+                      "al2023_no_default": al_no_def,
+                      "al2023_features": al_feats,
+                  })
 
           matrix = {"include": includes}
           result = json.dumps(matrix)
@@ -864,8 +907,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     # Why: `best_effort` legs are allowed to fail without sinking the whole
-    # build matrix. 2533: the ONLY remaining `best_effort` leg is AL2023,
-    # whose GCC 11 rejects newer SIMD probe flags emitted by numkind (needs
+    # build matrix. 2533: the ONLY remaining `best_effort` legs are the two
+    # AL2023 ones (amd64 and, as of the #4822 follow-up, arm64), whose GCC 11
+    # rejects newer SIMD probe flags emitted by numkind (needs
     # GCC 12+); the aarch64-linux-gnu leg is now required like every other
     # target. AL2023 is not required for Homebrew (Tier-1: macOS arm64 + linux
     # x86_64-gnu, unchanged), and the release job is conditioned to run when
@@ -970,10 +1014,18 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: al2023-1.91-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          # 2533 follow-up: the cache key MUST carry the target. There are now
+          # two AL2023 legs (amd64 and arm64) whose only difference is
+          # architecture; without this they share one key, so whichever leg
+          # saves first hands the other its `target/` — including host-compiled
+          # build-script binaries of the wrong architecture. Keeping the old
+          # unqualified `al2023-1.91-` restore-key would reintroduce exactly
+          # that cross-arch restore through the fallback path, so the fallbacks
+          # are target-scoped too.
+          key: al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            al2023-1.91-${{ matrix.crate }}-
-            al2023-1.91-
+            al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-
+            al2023-1.91-${{ matrix.target }}-
 
       - name: Cache cargo registry + artefacts (standard + linux-zigbuild)
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
@@ -992,9 +1044,20 @@ jobs:
         shell: bash
         env:
           ORT_VERSION: "1.20.1"
+          TARGET: ${{ matrix.target }}
         run: |
+          # 2533 follow-up: the tarball name is architecture-specific. This step
+          # hardcoded `linux-x64` while the only AL2023 leg was x86_64; the new
+          # aarch64 AL2023 leg needs `linux-aarch64`, and a wrong-arch download
+          # would fail late and confusingly (ORT_DYLIB_PATH set to a library the
+          # loader rejects) rather than here. Upstream publishes both under the
+          # same v1.20.1 tag.
+          case "${TARGET}" in
+            aarch64-*) ORT_ARCH="aarch64" ;;
+            *)         ORT_ARCH="x64" ;;
+          esac
           ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
-          ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+          ORT_TARBALL="onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}.tgz"
           ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
 
           echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
@@ -1088,10 +1151,52 @@ jobs:
           # An empty string (non-al2023 legs) is treated by numkong's
           # build.rs as "no override" (falls through to normal probing), so
           # this is a no-op for every other variant.
+          #
+          # 2533 follow-up — SIMD on the aarch64 AL2023 leg, stated explicitly:
+          # these four names live in numkong's X86_PROBES table only, so on the
+          # aarch64 AL2023 leg build.rs never reads them and they are inert.
+          # AArch64 SIMD is NOT disabled there. numkong probes NEON by
+          # compiling `probes/arm_neon.c` with `-march=armv8-a+simd`, which
+          # AL2023's GCC 11 accepts — unlike the zig/clang path #4822 hit,
+          # where `__attribute__((target("neon")))` was rejected and would have
+          # forced the choice between a broken build and NK_TARGET_*=0 across
+          # the board (i.e. shipping a vector search engine with SIMD off).
+          # Using a real GCC in the container avoids that wholesale trade:
+          # baseline NEON stays ON, the ISA extensions GCC 11 genuinely
+          # predates (SVE2p1, SME*, fp8, bf16) probe false and compile out as
+          # the mechanism intends, and exactly ONE extension has to be forced
+          # off by hand — see NK_TARGET_NEONSDOT immediately below. Read from
+          # the build log's `cargo:warning=NK_TARGET_*` lines rather than
+          # assumed; the full enabled/disabled list is in the PR body.
           NK_TARGET_SAPPHIREAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_GRANITEAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_DIAMOND: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_SIERRA: ${{ matrix.variant == 'al2023' && '0' || '' }}
+          # 2533 follow-up — the ONE AArch64 counterpart of the same GCC-11
+          # probe/source desync, found by running the build, not by reasoning:
+          # numkong's NEONSDOT probe compiles cleanly with
+          # `-march=armv8.2-a+dotprod`, so NK_TARGET_NEONSDOT=1 — but
+          # `include/numkong/maxsim/neonsdot.h` is the single ARM header that
+          # gates its body with the BARE `#pragma GCC target("+dotprod")` form
+          # instead of the `arch=armv8.2-a+dotprod` form its five sibling
+          # neonsdot headers use. GCC 11 accepts that pragma without actually
+          # enabling the feature, so the `vdotq_s32` intrinsic then fails as
+          # `inlining failed in call to 'always_inline' 'vdotq_s32': target
+          # specific option mismatch` (observed: run 30948527782, job
+          # 92124822938, compiling c/dispatch_f32.c). GCC 13 on the Ubuntu
+          # runners handles it, which is why only the AL2023 arm64 leg needs
+          # this.
+          #
+          # SCOPE OF WHAT THIS COSTS, stated rather than buried: it disables
+          # the NEON int8 dot-product kernels only. Baseline NEON, NEONHALF,
+          # NEONFHM, SVE, SVEHALF, SVE2 and SVESDOT all still probe TRUE on
+          # this leg and stay enabled — this is not a scalar build. int8 work
+          # keeps an SVE dot-product path on SVE-capable Graviton; f32/f16
+          # (what trusty-search actually indexes with by default) is
+          # untouched. The alternative, raising the whole leg's baseline to
+          # `-march=armv8.2-a+dotprod`, was rejected: it would trade a
+          # narrow kernel loss for a SIGILL on any pre-Armv8.2 host.
+          NK_TARGET_NEONSDOT: ${{ (matrix.variant == 'al2023' && startsWith(matrix.target, 'aarch64')) && '0' || '' }}
         run: |
           CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 
@@ -1122,7 +1227,8 @@ jobs:
       #   macOS:        trusty-analyze-0.5.0-aarch64-apple-darwin.tar.gz
       #   Linux x86_64: trusty-analyze-0.5.0-x86_64-unknown-linux-gnu.tar.gz  (glibc 2.17 baseline)
       #   Linux arm64:  trusty-analyze-0.5.0-aarch64-unknown-linux-gnu.tar.gz (glibc 2.17 baseline, best-effort — issue #2037)
-      #   AL2023:       trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
+      #   AL2023 amd64: trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
+      #   AL2023 arm64: trusty-analyze-0.5.0-aarch64-linux-al2023.tar.gz  (2533 follow-up)
       - name: Strip, package, and checksum
         id: package
         shell: bash
@@ -1252,7 +1358,16 @@ jobs:
   #   "assets we got". The only way to notice was to open the release page and
   #   spot an absent file. #2533 makes the arm64 leg blocking; this job closes
   #   the general case, so no FUTURE leg can be dropped silently either —
-  #   including the AL2023 leg, which stays deliberately non-blocking.
+  #   including the AL2023 legs, which stay deliberately non-blocking.
+  #
+  #   2533 follow-up: this job needs NO change to cover the new
+  #   `aarch64-linux-al2023` leg. It derives each expected asset name from
+  #   `needs.setup.outputs.matrix` (`{crate}-{version}-{asset_suffix}.tar.gz`)
+  #   rather than from a hardcoded platform list, so adding a matrix entry
+  #   registers it with the audit automatically — a silent drop of the arm64
+  #   AL2023 asset produces a `::warning` + `DROPPED` row exactly as the amd64
+  #   one does — confirmed by the audit table in the follow-up's dry run, which
+  #   lists five legs where #4822's listed four.
   #
   # WHAT: re-derives the expected asset filename for every entry in the build
   #   matrix, checks it against the artifacts the build job actually produced,
