@@ -996,14 +996,25 @@ fn real_secrets_still_blocked_after_2800_exemption() {
 
     // 2. LOAD-BEARING: a token that is `#`/digit/slash-shaped EXCEPT for a
     //    smuggled alphabetic segment. One letter must take it out of the
-    //    exemption and back onto the normal heuristic path. If the exemption
-    //    were written as "contains only digits and separators, ignoring
-    //    letters" — or applied before the charset was fully checked — this is
-    //    the token that would slip through.
+    //    #2800 exemption. If the exemption were written as "contains only
+    //    digits and separators, ignoring letters" — or applied before the
+    //    charset was fully checked — this is the token that would slip through.
+    //
+    //    #4312 changed what this asserts against, and the change is
+    //    deliberate. The invariant has always been "the #2800 exemption is a
+    //    keyhole, not a hole"; the original assertion probed it INDIRECTLY via
+    //    `looks_like_secret == true`. That proxy stopped holding once the
+    //    base64 branch gained `is_plausible_b64_charset`, which declines any
+    //    `#`-bearing token — `#` appears in no credential format, so declining
+    //    it loses no real detection, and this token is prose in every reading.
+    //    So assert the invariant itself rather than a downstream verdict that
+    //    a second, stricter gate now also owns. Coverage is not reduced: the
+    //    same token is still tested, for the same property.
     let sneaky = "#2763/#2774/#abcd/#2782/#2790"; // pragma: allowlist secret
     assert!(
-        looks_like_secret(sneaky),
-        "a `#`/digit/slash token containing letters must NOT be exempted: {sneaky}"
+        !is_issue_number_list(sneaky),
+        "a `#`/digit/slash token containing letters must NOT be exempted by the \
+         #2800 issue-list allowlist: {sneaky}"
     );
 
     // 3. LOAD-BEARING: `+` is the unambiguous base64 indicator. It is outside
@@ -1130,5 +1141,202 @@ fn real_secrets_still_blocked_after_4312_backtick_split() {
     assert!(
         find_secret_token(adjacent).is_some(),
         "credential flush against a backtick must be flagged: {adjacent}"
+    );
+
+    // 4. LOAD-BEARING, and the ONE direction this change can regress: a
+    //    backtick INSIDE a credential-bearing token rather than adjacent to
+    //    it. Machine-generated credentials cannot contain one, but a
+    //    user-chosen password in a connection-string URL can — the charset
+    //    there is unbounded. The split divides it, the left fragment falls
+    //    under the 20-char floor, and the right fragment loses the `/` that
+    //    set `has_b64_sym`, so the credential is MISSED. That is a real
+    //    limitation, it is documented on `find_secret_token`, and it is
+    //    pinned here so a future reader meets the behaviour rather than the
+    //    paragraph. If this assertion ever starts failing, the limitation was
+    //    closed — update the doc comment, do not delete the test.
+    let interior = "mongodb://user:pa`ss@cluster0.mongodb.net"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(interior).is_none(),
+        "KNOWN LIMITATION (#4312): a backtick inside a connection-string \
+         password splits the token and the credential is missed. Got {:?}",
+        find_secret_token(interior)
+    );
+    // The same connection string WITHOUT the interior backtick must still be
+    // caught — this is what bounds the limitation to the split, and proves the
+    // detector has not simply stopped seeing connection strings.
+    let clean = "mongodb://user:passw0rdX@cluster0.mongodb.net"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(clean).is_some(),
+        "connection-string credential must still be flagged: {clean}"
+    );
+}
+
+// ---- Issue #4312: the base64-branch charset gate + entropy floor ----
+
+/// Why (issue #4312): the delimiter change alone closes the backtick shape but
+/// not its cause. The base64 branch of `looks_like_secret` fired on ANY ≥20-char
+/// token containing `/` plus one letter that `is_structural_token` declined to
+/// rescue — and `is_word_segment`'s charset is deliberately narrow, so EVERY
+/// Markdown decoration (backtick, `**`, `"`, `'`, `[`, `(`, `|`, `%`, `,`) put
+/// ordinary prose on the credential path. Backtick was simply the fourth
+/// character to be noticed. Gating the branch on the charset a real blob is made
+/// of, plus an entropy floor, attacks the cause instead of enumerating shapes.
+/// What: asserts all FOUR reproductions enumerated in #4312 comment 2 — which
+/// the issue explicitly asks to be presented as must-not-flag regression cases —
+/// plus the three backtick shapes and eleven further Markdown/prose shapes that
+/// reproduce the identical defect with different punctuation.
+/// Test: itself.
+#[test]
+fn four_4312_acceptance_cases_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    // The four reproductions from #4312 comment 2, verbatim.
+    let acceptance = [
+        ("file:line citation", "credentials/secret.rs:106,:118"),
+        (
+            "cargo feature list",
+            "--features credentials,inference-client",
+        ),
+        ("hyphenated English", "old-leaks/new-doesn't"),
+        ("plus-joined phrase", "ticker+shutdown-channel"),
+    ];
+    for (label, tok) in acceptance {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#4312 acceptance case ({label}) must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Checkpoint: noted {tok} during the pass");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "gate must ACCEPT #4312 acceptance case ({label}); got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4312): the same defect, with the backtick swapped for every
+/// other decoration a Markdown-shaped memory write actually contains. A
+/// Markdown link to a source file and a Markdown table row are not exotic —
+/// they are what these writes are made of, and each was a live false positive
+/// before the charset gate. Pinning them here is what makes the fix a fix
+/// rather than a fifth per-shape exemption.
+/// What: asserts eleven decorated path/issue-list shapes pass the token
+/// predicate.
+/// Test: itself.
+#[test]
+fn markdown_decorated_paths_are_not_flagged() {
+    for tok in [
+        "**stale_skills**/**doctor_staleness.rs**",
+        "\"stale_skills\"/\"doctor_staleness.rs\"",
+        "'stale_skills'/'doctor_staleness.rs'",
+        "[filter.rs](crates/trusty-common/src/filter.rs)",
+        "|crates/common|src/memory_core/filter.rs|",
+        "[stale_skills]/[doctor_staleness.rs]",
+        "(stale_skills)/(doctor_staleness.rs)",
+        "\"#4601\"/\"#4602\"/\"#4603\"",
+        "**#4601**/**#4602**/**#4603**",
+        "docs/my%20file/spec%20v2.md",
+        "82%-100%/idle-across-the-window",
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "Markdown-decorated path must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+    }
+}
+
+/// Why (issue #4312): the charset gate and the entropy floor both NARROW the
+/// base64 branch, which is the one direction that can lose detection. Over-
+/// blocking is the reported bug; under-blocking would be a security regression,
+/// so the narrowing has to be pinned against every credential family the branch
+/// is responsible for.
+///
+/// The entropy floor (`has_upper || has_digit`) is the riskier of the two: an
+/// all-lowercase, digit-free connection string is a genuine credential that the
+/// floor alone would drop. `is_url_credential_shaped` is what keeps it, and the
+/// lowercase connection strings below are what prove that exemption carries its
+/// weight rather than being decorative.
+///
+/// Known and deliberate: `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (a
+/// canonical AWS *secret access key*) is NOT caught — `is_structural_token`'s
+/// slash-path branch swallows it before either gate runs. That miss is
+/// pre-existing on `origin/main`, unchanged by #4312, and out of scope here; it
+/// is asserted so the baseline is explicit rather than assumed.
+/// What: asserts every provider-prefix, base64, base64url, JWT, bare-blob and
+/// connection-string shape stays flagged after the narrowing.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4312_charset_gate() {
+    for (label, tok) in [
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("OpenAI key", "sk-abcdefghijklmnopqrstuvwxyz01234567890123"), // pragma: allowlist secret
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"),                     // pragma: allowlist secret
+        ("AWS STS id", "ASIAY34FZKBOKMUTVV7A"),                     // pragma: allowlist secret
+        ("Slack token", "xoxb-1234-5678-abcdEFGH"),                 // pragma: allowlist secret
+        (
+            "padded base64",
+            "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=",
+        ), // pragma: allowlist secret
+        (
+            "base64 with +/",
+            "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NA==",
+        ), // pragma: allowlist secret
+        ("base64 with +", "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"), // pragma: allowlist secret
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"),       // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("digits/slash/plus", "1234/5678/9012+3456/7890/1234"),     // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        (
+            "postgres conn",
+            "postgres://user:pass@host/dbname12345678901234567890",
+        ), // pragma: allowlist secret
+        (
+            "hyphenated host conn",
+            "postgres://user:pass@db-primary.internal/appdb1234567890",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        ("mysql conn", "mysql://root:s3cr3tP4ss@127.0.0.1:3306/appdb"), // pragma: allowlist secret
+        // LOAD-BEARING for the `is_url_credential_shaped` exemption: these
+        // carry no uppercase and no digit, so the entropy floor alone would
+        // drop every one of them.
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+        (
+            "lowercase redis conn",
+            "redis://default:supersecretpass@cache.local/one",
+        ), // pragma: allowlist secret
+        (
+            "lowercase mongo srv",
+            "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+        ), // pragma: allowlist secret
+        (
+            "lowercase ftp conn",
+            "ftp://deployer:deploypassword@files.internal/pub",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must STILL be flagged after the #4312 narrowing: {tok}"
+        );
+    }
+
+    // Pre-existing baseline miss, asserted so it is explicit. NOT caused by
+    // #4312 — `origin/main` misses it identically via the slash-path bypass in
+    // `is_structural_token`, which runs before either new gate.
+    let aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(aws_secret).is_none(),
+        "baseline drift: this AWS secret-key miss is pre-existing on origin/main. \
+         If it now flags, the structural bypass changed — re-check scope. Got {:?}",
+        find_secret_token(aws_secret)
     );
 }
