@@ -25,6 +25,8 @@ pub mod room_plan;
 // ADR-0027 T1/T4/T6: room record shape, resolve-or-create, and the room surface.
 pub mod rooms;
 pub mod vector;
+// ADR-0027 T9: wing record shape, default-wing seeding, create/rename/list.
+pub mod wings;
 
 pub use chat_sessions::{ChatSession, ChatSessionMeta, ChatSessionStore};
 pub use concurrent_open::{OpenIntent, OpenMode};
@@ -43,3 +45,7 @@ pub use rooms::{
     resolve_room_filter_id, resolve_room_selector,
 };
 pub use vector::{VectorHit, VectorStore};
+pub use wings::{
+    WingRecord, WingSummary, ensure_default_wing, ensure_default_wing_fail_open, list_wings,
+    rename_wing, resolve_or_create_wing, resolve_wing_selector, rooms_in_wing,
+};

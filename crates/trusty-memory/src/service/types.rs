@@ -40,15 +40,19 @@ pub struct PalaceInfo {
     /// Test: `palace_list_includes_richer_counts`.
     #[serde(default)]
     pub room_count: usize,
-    /// DEPRECATED (#4811, ADR-0027 D2/C3.4): wings do not exist as entities
-    /// yet, so this is `1` for any open palace — every room lives in the one
-    /// `DEFAULT_WING_ID` — and `0` when `cached` is false (unknown).
+    /// Wings registered in this palace's `WINGS` table (ADR-0027 T9, #4809).
     ///
-    /// Why it is not simply removed: it is a wire field two shipped readers
-    /// consume. Until ADR-0027 T9 introduces the `WINGS` table and populates a
-    /// real count, it reports the truth about the model as shipped rather than
-    /// the room count it used to report under a wing label. Use `room_count`.
-    /// Test: `palace_list_includes_richer_counts`.
+    /// Why: this field reported a *room* count under a wing label until #4811
+    /// (ADR-0027 C3.4), then a hardcoded `1` while `DEFAULT_WING_ID` was the
+    /// only wing the model could hold. T9's `wing_create` made more than one
+    /// possible, so it is now read from the registry — the same source
+    /// `wing_list` uses, so the number and the tool surface cannot disagree.
+    /// `0` when `cached` is false means unknown, exactly like the other counts;
+    /// an open palace always reports at least `1` for its default wing.
+    ///
+    /// Note for readers: a wing is the scope/ownership axis. If you want "how
+    /// many topics does this palace have", that is `room_count`.
+    /// Test: `palace_list_includes_richer_counts`, `palace_info_reports_real_wings`.
     pub wing_count: usize,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_write_at: Option<chrono::DateTime<chrono::Utc>>,

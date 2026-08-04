@@ -170,11 +170,42 @@ pub fn resolve_room_filter_id(kg: &KnowledgeGraph, room: &RoomType) -> Uuid {
 /// Test: `resolve_or_create_is_idempotent`,
 /// `resolve_or_create_reuses_backfilled_legacy_id`.
 pub async fn resolve_or_create_room(kg: &KnowledgeGraph, room: &RoomType) -> Uuid {
+    resolve_or_create_room_in_wing(kg, room, DEFAULT_WING_ID).await
+}
+
+/// Resolve `room` **within `wing_id`**, creating its registry row when absent.
+///
+/// Why (ADR-0027 D2, pattern 3): the wing is part of the canonical room key, so
+/// `engineer`/`Planning` and `pm`/`Planning` mint different ids and are
+/// genuinely different rooms — without the `Custom("engineer-planning")` name
+/// mangling that gave the live palace twelve ad-hoc labels. This is the write
+/// half of the wing axis; [`resolve_or_create_room`] is this function pinned to
+/// the default wing, which is what every pre-T9 caller gets.
+/// What: as [`resolve_or_create_room`], but keyed on `wing_id`.
+///
+/// Fail-open on the DEFAULT wing only: the legacy fold is a default-wing id by
+/// construction, so falling back to it for a non-default wing would silently
+/// drop the drawer into the default scope — a scope leak. A non-default wing
+/// therefore falls back to a minted id, which keeps the write inside its wing
+/// even when the registry is unwritable.
+/// Test: `wing_scoped_recall_returns_only_that_wing`,
+/// `unscoped_write_still_lands_in_the_default_wing`.
+pub async fn resolve_or_create_room_in_wing(
+    kg: &KnowledgeGraph,
+    room: &RoomType,
+    wing_id: Uuid,
+) -> Uuid {
     let store = kg.store();
     let room = room.clone();
-    let fallback = room_to_uuid(&room);
-    let joined =
-        tokio::task::spawn_blocking(move || resolve_or_create_room_sync(&store, &room)).await;
+    let fallback = if wing_id == DEFAULT_WING_ID {
+        room_to_uuid(&room)
+    } else {
+        mint_room_id(&canonical_room_key(wing_id, &room_label(&room)))
+    };
+    let joined = tokio::task::spawn_blocking(move || {
+        resolve_or_create_room_in_wing_sync(&store, &room, wing_id)
+    })
+    .await;
     match joined {
         Ok(Ok(id)) => id,
         Ok(Err(e)) => {
@@ -199,12 +230,27 @@ pub async fn resolve_or_create_room(kg: &KnowledgeGraph, room: &RoomType) -> Uui
 /// id rather than our own.
 /// Test: `resolve_or_create_is_idempotent`.
 pub fn resolve_or_create_room_sync(store: &Arc<KgStoreRedb>, room: &RoomType) -> Result<Uuid> {
-    let key = default_wing_key(room);
+    resolve_or_create_room_in_wing_sync(store, room, DEFAULT_WING_ID)
+}
+
+/// Blocking half of [`resolve_or_create_room_in_wing`].
+///
+/// Why/What: as [`resolve_or_create_room_sync`], but the canonical key carries
+/// `wing_id` instead of the default wing, and the stored row records the same
+/// wing so `rooms_in_wing` can find it.
+/// Test: `wing_scoped_recall_returns_only_that_wing`.
+pub fn resolve_or_create_room_in_wing_sync(
+    store: &Arc<KgStoreRedb>,
+    room: &RoomType,
+    wing_id: Uuid,
+) -> Result<Uuid> {
+    let key = canonical_room_key(wing_id, &room_label(room));
     if let Some(id) = store.lookup_room_id(&key)? {
         return Ok(id);
     }
     let id = mint_room_id(&key);
-    let record = RoomRecord::new(room, chrono::Utc::now().timestamp_millis(), true);
+    let mut record = RoomRecord::new(room, chrono::Utc::now().timestamp_millis(), true);
+    record.wing_id = *wing_id.as_bytes();
     store
         .insert_room_if_absent(id, &key, &record)
         .with_context(|| format!("register room {:?}", record.label))?;

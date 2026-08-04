@@ -1448,3 +1448,300 @@ async fn recall_deep_in_room_scopes_l3_hits() {
         "an out-of-room drawer reached a room-scoped deep recall"
     );
 }
+
+// ── ADR-0027 T9: wing scoping ────────────────────────────────────────────
+//
+// These live here rather than beside `scope.rs` because the wing-scoped read
+// paths need a real `PalaceHandle` (vector store + KG), and `make_handle`
+// above is that harness. Duplicating it next to `scope.rs` would fork the
+// fixture.
+
+use crate::memory_core::room_identity::DEFAULT_WING_ID;
+use crate::memory_core::store::rooms::resolve_or_create_room_in_wing_sync;
+use crate::memory_core::store::wings::{ensure_default_wing, resolve_or_create_wing_sync};
+
+/// Seed the default wing plus a named one, and return `(wing_id, room_id)`
+/// for a room called `label` inside it.
+fn wing_with_room(handle: &PalaceHandle, wing: &str, label: &str) -> (Uuid, Uuid) {
+    ensure_default_wing(&handle.kg).expect("seed default wing");
+    let store = handle.kg.store();
+    let (wing_id, _) = resolve_or_create_wing_sync(&store, wing).expect("create wing");
+    let room = RoomType::parse(label);
+    let room_id = resolve_or_create_room_in_wing_sync(&store, &room, wing_id).expect("create room");
+    (wing_id, room_id)
+}
+
+#[test]
+fn scope_all_matches_everything() {
+    // `RecallScope::All` must resolve to NO filter — distinct from a filter
+    // that admits nothing. Collapsing the two would turn an unresolvable
+    // scope into an unfiltered read.
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    assert!(
+        RecallScope::All.allowed_room_ids(&handle.kg).is_none(),
+        "All must be 'no filter', not 'empty filter'"
+    );
+    assert!(scope_admits(&None, Uuid::new_v4()));
+}
+
+#[test]
+fn wing_scope_is_fail_closed() {
+    // A scope boundary that fails open is a leak (#3064's criterion), so an
+    // unknown wing admits NOTHING rather than everything.
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    ensure_default_wing(&handle.kg).expect("seed");
+    let allowed = RecallScope::Wing(Uuid::from_u128(999)).allowed_room_ids(&handle.kg);
+    assert_eq!(allowed, Some(std::collections::HashSet::new()));
+    assert!(!scope_admits(&allowed, Uuid::new_v4()));
+}
+
+#[test]
+fn wing_scope_returns_only_that_wings_drawers() {
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let (engineer, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (pm, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    let eng_drawer = Drawer::new(eng_room, "engineer planning note");
+    let eng_id = eng_drawer.id;
+    let pm_drawer = Drawer::new(pm_room, "pm planning note");
+    let pm_id = pm_drawer.id;
+    handle.add_drawer(eng_drawer);
+    handle.add_drawer(pm_drawer);
+
+    let eng_hits = list_drawers_in_wing(&handle, engineer, None, 50);
+    assert_eq!(eng_hits.len(), 1, "engineer wing sees only its own drawer");
+    assert_eq!(eng_hits[0].id, eng_id);
+
+    let pm_hits = list_drawers_in_wing(&handle, pm, None, 50);
+    assert_eq!(pm_hits.len(), 1);
+    assert_eq!(pm_hits[0].id, pm_id);
+
+    // The default wing owns neither of them.
+    assert!(list_drawers_in_wing(&handle, DEFAULT_WING_ID, None, 50).is_empty());
+}
+
+#[test]
+fn same_named_rooms_in_two_wings_stay_distinct() {
+    // ADR-0027 D2 pattern 3: `engineer/Planning` and `pm/Planning` coexist
+    // without `Custom("engineer-planning")` name mangling.
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let (_e, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_p, pm_room) = wing_with_room(&handle, "pm", "Planning");
+    assert_ne!(
+        eng_room, pm_room,
+        "one label in two wings must be two rooms"
+    );
+}
+
+#[tokio::test]
+async fn wing_scoped_recall_returns_only_that_wing() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (engineer, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_pm, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    // Deliberately DISTINCT content per wing. Near-identical vectors would
+    // make the targeted query's hit depend on approximate-index recall rather
+    // than on the wing filter, which is the thing under test here.
+    let eng = Drawer::new(eng_room, "Rust is a systems programming language");
+    let eng_id = eng.id;
+    let pm = Drawer::new(pm_room, "the launch review happens every quarter");
+    let pm_id = pm.id;
+    for d in [&eng, &pm] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+
+    let results = retrieve_l2_scoped(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        &RecallScope::Wing(engineer),
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !results.is_empty(),
+        "the engineer wing has a matching drawer"
+    );
+    assert!(
+        results.iter().all(|r| uuid_prefix_eq(r.drawer.id, eng_id)),
+        "wing scope must exclude the other wing, got: {:?}",
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !results.iter().any(|r| uuid_prefix_eq(r.drawer.id, pm_id)),
+        "a pm-wing drawer leaked through an engineer-wing scope"
+    );
+}
+
+#[tokio::test]
+async fn unscoped_recall_is_unchanged_by_wings() {
+    // The "wing is never required of a caller" guarantee at the read surface:
+    // an unscoped L2 over a palace that HAS wings must return exactly what an
+    // unfiltered L2 always returned — both drawers, neither hidden.
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (_e, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_p, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    let eng = Drawer::new(eng_room, "Rust is a systems programming language");
+    let pm = Drawer::new(pm_room, "the launch review happens every quarter");
+    let ids = [eng.id, pm.id];
+    let pm_id = pm.id;
+    for d in [&eng, &pm] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+
+    // "Nothing is hidden" is asserted on `list_drawers`, which reads the
+    // in-memory drawer table exactly. Asserting it on L2 instead would demand
+    // 100% recall from an APPROXIMATE HNSW index — a guarantee the vector
+    // store does not make and must not be tested for. That mistake made an
+    // earlier version of this test flaky.
+    let listed = handle.list_drawers(None, None, 50);
+    for id in ids {
+        assert!(
+            listed.iter().any(|d| d.id == id),
+            "an unscoped list must still see every wing's drawers"
+        );
+    }
+
+    // And an unscoped L2 is genuinely un-filtered by wings: a drawer living in
+    // a NON-default wing is reachable when no wing is named. One targeted
+    // query, one expected hit — no reliance on the index returning everything.
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "the launch review happens every quarter",
+        None,
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(
+        results.iter().any(|r| uuid_prefix_eq(r.drawer.id, pm_id)),
+        "an unscoped recall must not filter out a non-default wing's drawer"
+    );
+}
+
+#[tokio::test]
+async fn unscoped_write_still_lands_in_the_default_wing() {
+    // The write-side half of the same guarantee: a caller that never mentions
+    // a wing gets the default wing and the pre-T9 room id, unchanged.
+    // `remember` embeds, so the process-wide shared embedder must be seeded
+    // with the mock first (issue #850) — without this the real ONNX embedder
+    // can win the `OnceCell` race and change what every other test in this
+    // binary embeds with.
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    ensure_default_wing(&handle.kg).expect("seed");
+    let id = handle
+        .remember(
+            "a perfectly ordinary curated fact about the project".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .expect("remember");
+
+    let drawer = handle
+        .drawers
+        .read()
+        .iter()
+        .find(|d| d.id == id)
+        .cloned()
+        .expect("stored");
+    let scoped = crate::memory_core::store::wings::rooms_in_wing(&handle.kg, DEFAULT_WING_ID)
+        .expect("scope");
+    assert!(
+        scoped.contains(&drawer.room_id),
+        "a wing-less write must land in the default wing"
+    );
+    assert!(
+        list_drawers_in_wing(&handle, DEFAULT_WING_ID, None, 50)
+            .iter()
+            .any(|d| d.id == id)
+    );
+}
+
+#[tokio::test]
+async fn wing_scoped_deep_recall_returns_only_that_wing() {
+    // ADR-0027 T9: L3 must honour a wing exactly as L2 does. Without this,
+    // `recall_deep` would silently ignore a scope — the invisible-failure class
+    // the ADR exists to remove. Library-level so the guarantee is pinned where
+    // the filter lives, not only through the MCP surface.
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (engineer, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_pm, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    let eng = Drawer::new(eng_room, "Rust is a systems programming language");
+    let eng_id = eng.id;
+    let pm = Drawer::new(pm_room, "the launch review happens every quarter");
+    let pm_id = pm.id;
+    for d in [&eng, &pm] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+
+    let results = retrieve_l3_scoped(
+        &handle,
+        embedder.as_ref(),
+        "Rust systems programming",
+        &RecallScope::Wing(engineer),
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        results.iter().any(|r| uuid_prefix_eq(r.drawer.id, eng_id)),
+        "engineer-wing deep recall returned no matching drawer"
+    );
+    assert!(
+        !results.iter().any(|r| uuid_prefix_eq(r.drawer.id, pm_id)),
+        "a pm-wing drawer leaked through an engineer-wing deep recall"
+    );
+}

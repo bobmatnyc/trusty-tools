@@ -13,12 +13,12 @@
 
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
+use super::scope::{RecallScope, scope_admits};
 use super::types::{CrossPalaceResult, RecallResult};
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
-use crate::memory_core::store::rooms::resolve_room_filter_id;
 use crate::memory_core::store::vector::VectorStore;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -167,6 +167,38 @@ pub async fn retrieve_l2(
     room_filter: Option<RoomType>,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
+    // ADR-0027 T9: the room filter is one case of the general scope. Keeping
+    // this signature means no pre-wing call site changes — the "a caller who
+    // never mentions a wing behaves identically" guarantee is structural here,
+    // not a promise, because `RecallScope::All` / `Room` reach exactly the code
+    // that ran before.
+    retrieve_l2_scoped(
+        handle,
+        embedder,
+        query,
+        &RecallScope::from_room_filter(room_filter),
+        top_k,
+    )
+    .await
+}
+
+/// L2 retrieval under an explicit [`RecallScope`] (ADR-0027 T9).
+///
+/// Why: a wing cannot be expressed as an `Option<RoomType>`, and duplicating
+/// the L2 body to add one would leave two scoring paths to drift apart. This is
+/// the single implementation; [`retrieve_l2`] is a thin wrapper over it.
+/// What: as `retrieve_l2`, but the drawer filter compares `room_id` against the
+/// scope's resolved room-id set. `RecallScope::All` resolves to no filter at
+/// all, which is distinct from a scope that resolves to an empty set.
+/// Test: `wing_scope_returns_only_that_wings_drawers`,
+/// `l2_room_filter_excludes_other_rooms` (unchanged, via the wrapper).
+pub async fn retrieve_l2_scoped(
+    handle: &PalaceHandle,
+    embedder: &dyn Embedder,
+    query: &str,
+    scope: &RecallScope,
+    top_k: usize,
+) -> Result<Vec<RecallResult>> {
     if top_k == 0 {
         return Ok(Vec::new());
     }
@@ -186,12 +218,12 @@ pub async fn retrieve_l2(
     // every room minted after ADR-0027 (their ids are UUIDv5, which no fold can
     // reproduce); `resolve_room_filter_id` falls back to the legacy fold when
     // the room has no row, so an un-backfilled palace filters exactly as before.
+    // ADR-0027 T9: a wing scope resolves fail-CLOSED (see `scope`), because a
+    // scope boundary that fails open is a leak, not a wider result set.
     // Resolved BEFORE the guards below are taken: it is a redb read
     // transaction, and holding the drawer + closet locks across I/O would stall
     // every writer on this palace for its duration.
-    let target_room_id = room_filter
-        .as_ref()
-        .map(|r| resolve_room_filter_id(&handle.kg, r));
+    let allowed = scope.allowed_room_ids(&handle.kg);
 
     let drawers = handle.drawers.read();
     let closets = handle.closets.read();
@@ -205,9 +237,7 @@ pub async fn retrieve_l2(
             continue;
         };
 
-        if let Some(rid) = target_room_id
-            && drawer.room_id != rid
-        {
+        if !scope_admits(&allowed, drawer.room_id) {
             continue;
         }
 
@@ -270,6 +300,33 @@ pub async fn retrieve_l3(
     room_filter: Option<RoomType>,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
+    retrieve_l3_scoped(
+        handle,
+        embedder,
+        query,
+        &RecallScope::from_room_filter(room_filter),
+        top_k,
+    )
+    .await
+}
+
+/// L3 retrieval under an explicit [`RecallScope`] (ADR-0027 T9).
+///
+/// Why: a wing cannot be expressed as an `Option<RoomType>`, and leaving L3
+/// room-only would make `memory_recall_deep` silently ignore a `wing` argument
+/// — the invisible-failure class ADR-0027 D4.4 rejects. This is the single
+/// implementation; [`retrieve_l3`] is a thin wrapper over it.
+/// What: as `retrieve_l3`, but the drawer filter compares `room_id` against the
+/// scope's resolved room-id set.
+/// Test: `l3_room_filter_excludes_other_rooms`,
+/// `wing_scoped_deep_recall_returns_only_that_wing`.
+pub async fn retrieve_l3_scoped(
+    handle: &PalaceHandle,
+    embedder: &dyn Embedder,
+    query: &str,
+    scope: &RecallScope,
+    top_k: usize,
+) -> Result<Vec<RecallResult>> {
     if top_k == 0 {
         return Ok(Vec::new());
     }
@@ -281,10 +338,8 @@ pub async fn retrieve_l3(
     // Resolved BEFORE the drawer/closet guards are taken: it is a redb read
     // transaction, and holding those locks across I/O would stall every writer
     // on this palace for its duration (same ordering rule as `retrieve_l2`).
-    let target_room_id = room_filter
-        .as_ref()
-        .map(|r| resolve_room_filter_id(&handle.kg, r));
-    let fetch = if target_room_id.is_some() {
+    let allowed = scope.allowed_room_ids(&handle.kg);
+    let fetch = if allowed.is_some() {
         top_k.saturating_mul(3).max(top_k)
     } else {
         top_k
@@ -299,9 +354,7 @@ pub async fn retrieve_l3(
         let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {
             continue;
         };
-        if let Some(rid) = target_room_id
-            && drawer.room_id != rid
-        {
+        if !scope_admits(&allowed, drawer.room_id) {
             continue;
         }
         let age_days = DecayConfig::age_days(drawer.created_at);
@@ -400,7 +453,9 @@ pub async fn recall(
     query: &str,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
-    recall_in_room(handle, embedder, query, None, top_k).await
+    // ADR-0027 T9: unscoped recall is `RecallScope::All`, which reaches exactly
+    // the code path that ran before rooms or wings could scope it.
+    recall_scoped(handle, embedder, query, &RecallScope::All, top_k).await
 }
 
 /// Room-scoped `recall` — L0 + L1 + a `room`-filtered L2.
@@ -408,11 +463,9 @@ pub async fn recall(
 /// Why (ADR-0027 D6 / ticket T7): room filtering has worked in `retrieve_l2`
 /// since #3274, but no recall entry point exposed it, so the only way to read
 /// one room was `memory_list` or the HTTP `/recall` route. This is the door.
-/// What: identical to [`recall`] except the room filter is threaded into L2.
-/// L0/L1 are deliberately NOT filtered: they are the palace's identity and
-/// essential drawers, the always-on grounding every recall carries, and
-/// dropping them for a room-scoped query would silently change what "recall"
-/// means rather than narrowing it.
+/// What: [`recall_scoped`] with the room lifted into a [`RecallScope::Room`].
+/// Kept as its own entry point because a room is the axis most callers want and
+/// `Option<RoomType>` is the shape they already hold.
 /// Test: `recall_in_room_scopes_l2_hits`.
 pub async fn recall_in_room(
     handle: &PalaceHandle,
@@ -421,12 +474,43 @@ pub async fn recall_in_room(
     room: Option<RoomType>,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
+    recall_scoped(
+        handle,
+        embedder,
+        query,
+        &RecallScope::from_room_filter(room),
+        top_k,
+    )
+    .await
+}
+
+/// Standard recall restricted to a [`RecallScope`] (ADR-0027 T9).
+///
+/// Why: "recall everything the `engineer` wing has learned" is the access
+/// pattern a Wing exists to enable (ADR-0027 D2, pattern 1) — one query, with
+/// no requirement that the caller already know that scope's complete topic set.
+/// This is the one implementation [`recall`] and [`recall_in_room`] both run.
+/// What: L0 + L1 (never scoped) merged with an L2 leg run under `scope`.
+///
+/// L0/L1 are deliberately NOT scoped: they are the palace's identity and
+/// essential drawers — the always-on grounding every recall carries — and
+/// dropping them for a scoped query would silently change what "recall" means
+/// rather than narrowing it.
+/// Test: `wing_scoped_recall_returns_only_that_wing`,
+/// `recall_in_room_scopes_l2_hits`.
+pub async fn recall_scoped(
+    handle: &PalaceHandle,
+    embedder: &dyn Embedder,
+    query: &str,
+    scope: &RecallScope,
+    top_k: usize,
+) -> Result<Vec<RecallResult>> {
     // Idle-to-disk: a recall is a genuine user access — reset the idle clock
     // so the idle-evict ticker does not drop an actively-queried palace.
     handle.touch();
     let expanded = expand_query(query);
     let mut combined = retrieve_l0_l1(handle);
-    let l2 = retrieve_l2(handle, embedder, &expanded, room, top_k).await?;
+    let l2 = retrieve_l2_scoped(handle, embedder, &expanded, scope, top_k).await?;
 
     // Build similarity-score map from L2 results (drawer_id -> score) before
     // consuming the vec. This lets us re-score L1 entries that happen to be
@@ -489,11 +573,34 @@ pub async fn recall_deep_in_room(
     room: Option<RoomType>,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
+    recall_deep_scoped(
+        handle,
+        embedder,
+        query,
+        &RecallScope::from_room_filter(room),
+        top_k,
+    )
+    .await
+}
+
+/// Deep recall restricted to a [`RecallScope`] (ADR-0027 T9).
+///
+/// Why/What: the L3 counterpart of [`recall_scoped`], so `memory_recall_deep`
+/// honours a wing exactly as `memory_recall` does. L0/L1 stay unscoped for the
+/// same reason given there.
+/// Test: `wing_scoped_deep_recall_returns_only_that_wing`.
+pub async fn recall_deep_scoped(
+    handle: &PalaceHandle,
+    embedder: &dyn Embedder,
+    query: &str,
+    scope: &RecallScope,
+    top_k: usize,
+) -> Result<Vec<RecallResult>> {
     // Idle-to-disk: deep recall is also a genuine user access.
     handle.touch();
     let expanded = expand_query(query);
     let mut combined = retrieve_l0_l1(handle);
-    let l3 = retrieve_l3(handle, embedder, &expanded, room, top_k).await?;
+    let l3 = retrieve_l3_scoped(handle, embedder, &expanded, scope, top_k).await?;
 
     // Build similarity-score map from L3 results, then re-score L1 entries
     // so high-importance-but-irrelevant drawers don't dominate (issue #633).

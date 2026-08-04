@@ -15,10 +15,12 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::filter::{FilterReject, check_secret, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::memory_core::room_identity::DEFAULT_WING_ID;
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
+use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
 use crate::memory_core::store::vector::{UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
@@ -585,8 +587,11 @@ impl PalaceHandle {
         // lookup that creates the row when absent — never from hashing a
         // `Debug` string. Fail-open: a registry error falls back to the legacy
         // fold so a room problem can never fail a memory write.
-        let room_id =
-            crate::memory_core::store::rooms::resolve_or_create_room(&self.kg, &room).await;
+        // ADR-0027 T9: `opts.wing_id` is `None` for every caller that predates
+        // wings, which resolves in the default wing — byte-identically to the
+        // line this replaced.
+        let wing_id = opts.wing_id.unwrap_or(DEFAULT_WING_ID);
+        let room_id = resolve_or_create_room_in_wing(&self.kg, &room, wing_id).await;
 
         let mut drawer = Drawer::new(room_id, content.clone());
         drawer.tags = tags;
