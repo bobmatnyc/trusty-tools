@@ -458,6 +458,28 @@ fn block_colocated_storage_path(root: &Path) {
     std::fs::write(root.join(".trusty-search"), b"not a directory").unwrap();
 }
 
+/// Legacy (`colocated: false`) counterpart to [`block_colocated_storage_path`]:
+/// block per-index storage-path resolution under `data_dir` by placing a
+/// regular FILE at the exact `<data_dir>/indexes` location.
+///
+/// Why (issue #3963): the legacy regression tests used to force their `Err`
+/// by pointing `TRUSTY_DATA_DIR` at a path whose PARENT was a regular file,
+/// so `data_dir()`'s own `create_dir_all` (`service/persistence.rs`) failed.
+/// That is one layer ABOVE the dispatch target the tests name, and coarser
+/// than the colocated counterpart, which blocks the immediate target's own
+/// mkdir. Blocking `<data_dir>/indexes` instead lets `data_dir()` succeed and
+/// fails only `index_data_dir`'s own `create_dir_all` (`ENOTDIR`, because a
+/// path component is a regular file) — the exact legacy analogue of
+/// `colocated_storage_dir`'s failing mkdir.
+/// What: creates `data_dir` and writes an ordinary file at
+/// `<data_dir>/indexes`. Returns nothing; the caller points
+/// `TRUSTY_DATA_DIR` at `data_dir`.
+/// Test: used by the two legacy #2847 regression tests below.
+fn block_legacy_index_data_dir(data_dir: &Path) {
+    std::fs::create_dir_all(data_dir).unwrap();
+    std::fs::write(data_dir.join("indexes"), b"not a directory").unwrap();
+}
+
 /// THE failing-test-first regression for issue #2847: reproduces the
 /// production outage where a legacy/colocated index's shadow storage path
 /// could not be resolved at warm-boot, and the loader silently restored a
@@ -571,12 +593,14 @@ async fn build_store_for_entry_flags_load_failure_when_storage_path_unresolvable
 /// issue #2847, this PR's title, and its CHANGELOG entry name explicitly, so
 /// it needs its own failure-forcing coverage, not just the symmetric-code
 /// argument.
-/// What: points `TRUSTY_DATA_DIR` at a path whose PARENT is a regular file,
-/// so `data_dir()`'s own `create_dir_all` (persistence.rs:381) fails —
-/// exactly the technique already proven in
-/// `server::tests_index_config::patch_persist_failure_returns_500` — which
-/// makes every legacy path resolver built on `data_dir()` (`index_data_dir`,
-/// `hnsw_path`, `corpus_redb_path`) return `Err`. Builds a `colocated: false`
+/// What: points `TRUSTY_DATA_DIR` at a real tempdir whose `indexes`
+/// subdirectory is occupied by a regular file
+/// ([`block_legacy_index_data_dir`]), so `data_dir()` itself SUCCEEDS and
+/// only `index_data_dir`'s own `create_dir_all` fails with `ENOTDIR` —
+/// parity with `block_colocated_storage_path`, which likewise blocks the
+/// immediate dispatch target rather than a layer above it (issue #3963).
+/// That makes every legacy path resolver built on `index_data_dir`
+/// (`hnsw_path`, `corpus_redb_path`) return `Err`. Builds a `colocated: false`
 /// entry under that override, calls `build_indexer_from_entry`, and asserts
 /// `corpus_open_failed == true`. Against pre-fix code this fails with
 /// `corpus_open_failed == false` — reproducing the issue's headline path.
@@ -590,12 +614,13 @@ async fn build_store_for_entry_flags_load_failure_when_storage_path_unresolvable
 #[serial_test::serial]
 async fn build_indexer_from_entry_flags_corpus_open_failed_when_legacy_storage_path_unresolvable() {
     let tmp = tempdir().unwrap();
-    let blocker = tmp.path().join("not-a-dir");
-    std::fs::write(&blocker, b"x").unwrap();
-    let bad_data_dir = blocker.join("data"); // parent is a file -> mkdir fails
-                                             // SAFETY: test-only; #[serial_test::serial] (default group) excludes
-                                             // every other TRUSTY_DATA_DIR-mutating test in this binary from running
-                                             // concurrently with this one.
+    // #3963: fail at index_data_dir()'s own mkdir, not one layer up at
+    // data_dir()'s — parity with the colocated counterpart's blocking.
+    let bad_data_dir = tmp.path().join("data");
+    block_legacy_index_data_dir(&bad_data_dir);
+    // SAFETY: test-only; #[serial_test::serial] (default group) excludes
+    // every other TRUSTY_DATA_DIR-mutating test in this binary from running
+    // concurrently with this one.
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", &bad_data_dir) };
 
     let embedder = mock_embedder();
@@ -644,9 +669,9 @@ async fn build_indexer_from_entry_flags_corpus_open_failed_when_legacy_storage_p
 #[serial_test::serial]
 async fn build_store_for_entry_flags_load_failure_when_legacy_storage_path_unresolvable() {
     let tmp = tempdir().unwrap();
-    let blocker = tmp.path().join("not-a-dir");
-    std::fs::write(&blocker, b"x").unwrap();
-    let bad_data_dir = blocker.join("data");
+    // #3963: block index_data_dir()'s own mkdir — see the corpus counterpart.
+    let bad_data_dir = tmp.path().join("data");
+    block_legacy_index_data_dir(&bad_data_dir);
     // SAFETY: test-only; see the corpus counterpart above.
     unsafe { std::env::set_var("TRUSTY_DATA_DIR", &bad_data_dir) };
 
