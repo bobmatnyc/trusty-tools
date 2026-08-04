@@ -18,6 +18,8 @@
 
 use std::sync::Arc;
 
+pub(super) use super::session_prep::prepare_inproject_session;
+
 use tracing::{info, warn};
 
 use super::deployment_check::ensure_deployment_complete;
@@ -972,7 +974,7 @@ async fn spawn_managed_inproject(
     // must land in `<worktree>/.claude/{agents,skills}` (where Claude Code's
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
-    prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url);
+    prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url)?;
 
     // #1919: mirrors `spawn_managed_cloned`'s placement — announce the tmux
     // stage right before the record (and its tmux session name) is created.
@@ -1076,62 +1078,6 @@ async fn spawn_managed_inproject(
 
     emit(ProvisioningStage::Complete);
     Ok(mgr.get(&record.id).await.unwrap_or(record))
-}
-
-/// Run the session-preparation pipeline for an in-project worktree, logging
-/// (never propagating) any failure.
-///
-/// Why (#1913): [`spawn_managed_inproject`] has no clone step to wrap this call
-/// in — unlike `spawn_managed`'s clone branch and `spawn_managed_local`, which
-/// both get preparation "for free" as part of `WorkspaceProvisioner::provision_in`
-/// — so it must invoke [`crate::core::session_launch::prepare_session_with_repo_url`]
-/// directly. Extracted to a named, `fw`-parameterised function (rather than
-/// inlined) so it is unit-testable against a hermetic [`crate::core::paths::FrameworkPaths::under`]
-/// tempdir without touching the operator's real `~/.trusty-mpm`/`~/.claude`.
-/// What: calls `prepare_session_with_repo_url(fw, worktree, Some(repo_url))`.
-/// On success, logs the deployed-agent count AND the deployed-skill count
-/// (`report.skill_deploy.deployed.len()` — #1917; previously only the agent
-/// count was logged, so a skill-deploy no-op was invisible here too). On
-/// failure, logs a `tracing::warn!` and returns — mirroring
-/// `WorkspaceProvisioner::provision_in`'s non-fatal handling of the identical
-/// call, so a prep failure never blocks the session from spawning.
-/// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
-/// submodule.
-pub(super) fn prepare_inproject_session(
-    fw: &crate::core::paths::FrameworkPaths,
-    session_id: &ManagedSessionId,
-    worktree: &std::path::Path,
-    repo_url: &str,
-) {
-    match crate::core::session_launch::prepare_session_with_repo_url(fw, worktree, Some(repo_url)) {
-        Ok(report) => {
-            info!(
-                id = %session_id,
-                deployed = report.deploy.deployed.len(),
-                skills_deployed = report.skill_deploy.deployed.len(),
-                worktree = %worktree.display(),
-                "spawn_managed (inproject): session prepared"
-            );
-            // Issue #2149: a roster-deploy failure no longer aborts
-            // preparation, so surface it loudly here rather than letting it
-            // hide behind a low `deployed`/`skills_deployed` count.
-            for err in &report.roster_errors {
-                tracing::error!(
-                    id = %session_id,
-                    worktree = %worktree.display(),
-                    "spawn_managed (inproject): roster provisioning gap (session \
-                     still launches with its trusty-mpm identity): {err}"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(
-                id = %session_id,
-                worktree = %worktree.display(),
-                "spawn_managed (inproject): session prep failed (non-fatal): {e}"
-            );
-        }
-    }
 }
 
 /// Spawn a managed session rooted at a local directory, redirecting to a managed
@@ -1553,6 +1499,15 @@ pub async fn resume_managed(
         ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
     {
         warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
+    }
+
+    // #4752: the resume path never runs `prepare_session*`, so the compiled PM
+    // prompt is refreshed here — fatal, exactly as on the start path. See
+    // `session_prep::refresh_compiled_prompt_for_resume`.
+    if let Err(msg) = super::session_prep::refresh_compiled_prompt_for_resume(&workspace) {
+        warn!(id = %record.id, "resume_managed: refusing to resume: {msg}");
+        let _ = mgr.mark_errored(&record.id, &msg).await;
+        return Err(ResumeManagedError::Other(msg));
     }
 
     let tmux_arc = mgr.tmux_driver();

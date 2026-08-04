@@ -345,7 +345,38 @@ fn spawn_command(
 /// "trusty-mpm must never modify the target project's CLAUDE.md" a hard
 /// constraint, so a write failure here means the session runs without the
 /// injected PM system prompt rather than falling back to a different carrier.
-/// Test: `build_prompt_file_writes_resolved_prompt_for_project`.
+///
+/// #4752: this is also where the project's compiled prompt
+/// (`<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`) is refreshed
+/// from the exact bytes handed to `--append-system-prompt-file`.
+///
+/// WHY THIS ONE IS BEST-EFFORT while the same write is FATAL in the
+/// provisioning paths — the asymmetry is deliberate: those are PROVISIONING
+/// steps, whose job is to establish the session's on-disk state before anything
+/// spawns; refusing there is coherent and is what the owner ruled. This call
+/// sits INSIDE the spawn, past that gate.
+///
+/// That holds only because ALL THREE entry points that reach this function have
+/// already had a fatal compiled write succeed:
+///   * fresh start → `session_launch::prepare_session_inner`
+///   * daemon resume → `managed_routes::lifecycle::resume_managed`
+///   * bare-`tm` in-place relaunch → `guided_inplace::run_inplace_relaunch`,
+///     via `instruction_pipeline::refresh_compiled_prompt`
+///
+/// The third was missing until round 4 of #4752, which made the earlier version
+/// of this comment false: `run_inplace_relaunch` calls neither of the other two,
+/// so this best-effort write was its ONLY compiled write. Adding a call here
+/// without that fatal upstream write would resurrect the same hole — check the
+/// list above before adding a fourth spawn path.
+///
+/// Making it fatal here would also invert this function's own priority: a
+/// failure of the strictly MORE important write below (the actual system-prompt
+/// file) already degrades to spawning without it (#2173). Refusing to launch
+/// over the inspection copy while shrugging at the real prompt would be exactly
+/// backwards.
+/// Test: `build_prompt_file_writes_resolved_prompt_for_project`,
+/// `build_prompt_file_refreshes_the_compiled_prompt`,
+/// `build_prompt_file_compiled_write_failure_does_not_block_the_spawn`.
 fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
@@ -353,6 +384,23 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
         None,
         native,
     );
+
+    // #4752: refresh this PROJECT's compiled prompt from the very string about
+    // to be passed to `--append-system-prompt-file`. Best-effort by design —
+    // see this function's doc comment for why the same write is fatal in the
+    // two provisioning steps and not here.
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir);
+    if let Err(err) =
+        crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &prompt)
+    {
+        tracing::warn!(
+            project = %project_dir.display(),
+            path = %compiled.display(),
+            "failed to refresh the compiled PM prompt (non-fatal; the session still \
+             launches with the prompt file below): {err}"
+        );
+    }
+
     let file = crate::core::model_inject::write_prompt_file(&prompt);
     if file.is_none() {
         tracing::warn!(

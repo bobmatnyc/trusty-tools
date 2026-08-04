@@ -709,8 +709,9 @@ delete the file. `tm doctor` fails with `legacy_overrides` until it is gone.
 replaced by a named section in the project's `CLAUDE.md`. There is no framework
 floor: a project owns its own `CLAUDE.md`, so a floor would have been the
 appearance of a control rather than a control.
-Missing, empty, or unreadable override files fall back to the bundled defaults
-— they never blank a section.
+A missing, empty, unclosed, or unreadable marker block falls back to the bundled
+default — an override never blanks a section. Spec of record:
+`docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md`.
 
 ## Trusty Tool Priority (Non-Overridable)
 

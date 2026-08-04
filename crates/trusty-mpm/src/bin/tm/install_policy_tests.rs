@@ -85,3 +85,43 @@ fn seed_once_artifact_force_resets_to_shipped_default() {
         "shipped default content"
     );
 }
+
+#[test]
+fn bundle_install_pass_never_touches_the_compiled_prompt() {
+    // Why (#4752): the defect was two writers on one path — a bundled stub and
+    // the compiled prompt. This pins that the bundle-artifact pass (`install_to`,
+    // which walks `bundle::ALL`) cannot write the compiled prompt's file, so the
+    // only thing that ever puts bytes there is an explicit compiled write.
+    //
+    // FIXTURE NOTE: the compiled path is pre-seeded with a sentinel. Asserting
+    // the sentinel SURVIVES `install_to` is what exercises the guard — an
+    // absence check would pass trivially on a fresh temp dir even if a bundled
+    // artifact did target that name.
+    let dir = tempfile::tempdir().unwrap();
+    let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
+    let compiled = trusty_mpm::core::instruction_pipeline::compiled_prompt_path(dir.path());
+    std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
+    const SENTINEL: &str = "SENTINEL-NOT-WRITTEN-BY-THE-BUNDLE-PASS";
+    std::fs::write(&compiled, SENTINEL).unwrap();
+
+    install_to(&paths, true).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&compiled).unwrap(),
+        SENTINEL,
+        "no bundled artifact may write {}",
+        compiled.display()
+    );
+
+    // And the explicit compiled write — the ONE writer — replaces it with the
+    // full assembled prompt, never a stub (regression guard for #383).
+    trusty_mpm::core::instruction_pipeline::write_compiled_prompt_to(
+        &compiled,
+        &trusty_mpm::core::instruction_pipeline::assemble_system_prompt(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&compiled).unwrap(),
+        trusty_mpm::core::instruction_pipeline::assemble_system_prompt()
+    );
+}

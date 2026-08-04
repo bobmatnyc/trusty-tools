@@ -160,6 +160,10 @@ async fn start_session_in_place(
                 eprintln!("error: roster provisioning gap: {err}");
             }
         }
+        // #4752: fatal — refuse to start rather than run a session whose
+        // compiled instructions could not be written. Other prep failures stay
+        // non-fatal (#2149).
+        Err(err) if err.is_fatal() => anyhow::bail!("{err}"),
         Err(err) => eprintln!("warning: session preparation failed: {err}"),
     }
 

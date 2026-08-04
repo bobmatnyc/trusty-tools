@@ -1,8 +1,9 @@
 //! `install` command handler and framework-artifact helpers.
 //!
 //! Why: the install handler is self-contained — it writes bundled artifacts,
-//! assembles the PM prompt, deploys agents and skills, and wires Claude Code
-//! hooks — and benefits from its own file so it stays reviewable.
+//! deploys agents and skills, and wires Claude Code hooks — and benefits from
+//! its own file so it stays reviewable. (#4752: it no longer assembles a PM
+//! prompt; that is per-project and written at launch.)
 //! What: `install`, `install_claude_hooks` / `install_claude_hooks_at`,
 //! `mpm_hook_additions`, `install_to`, `install_one`, `deploy_report_lines`,
 //! `reset_report_lines`, `skill_report_lines`, `remove_global_trusty_mpm_hooks`,
@@ -22,10 +23,10 @@
 /// Why: a fresh machine has no `~/.trusty-mpm/framework/`; `trusty-mpm install`
 /// writes the compile-time-embedded artifacts (optimizer policy, framework
 /// instructions, placeholder agent/skill) so the daemon has a working policy
-/// and launchers have instructions to point sessions at. It also assembles
-/// the full PM system prompt (overwriting the bundle stub — fixes #383),
-/// deploys composed agents and skills, and wires MPM lifecycle hooks into
-/// every Claude Code settings file. All edits are idempotent.
+/// and launchers have a working framework tree. It deploys composed agents and
+/// skills and wires MPM lifecycle hooks into every Claude Code settings file.
+/// All edits are idempotent. #4752: it no longer assembles a PM system prompt —
+/// the compiled prompt is per-project and written by the launch path.
 ///
 /// `reset_agents` (issue #2504) is the explicit reconciliation path for
 /// composed agent files a normal deploy conservatively skips because they
@@ -50,17 +51,18 @@
 /// reset, each gated by that workspace's OWN resolved harness plan (so an
 /// agent one project's manifest excludes is never resurrected there — the
 /// #2462 cross-warning). Only takes effect when `reset_agents` is `Some`.
-/// What: resolves [`FrameworkPaths::default`], calls [`install_to`] then
-/// [`install_system_prompt_to`] to write the real assembled PM prompt,
-/// deploys agents and skills, optionally resets the requested agent scope
-/// (user-level, then every intact session workspace when requested), then
-/// calls [`install_claude_hooks`].
+/// What: resolves [`FrameworkPaths::default`], calls [`install_to`], removes a
+/// stale pre-#4752 `instructions/INSTRUCTIONS.md`, deploys agents and skills,
+/// optionally resets the requested agent scope (user-level, then every intact
+/// session workspace when requested), then calls [`install_claude_hooks`].
+/// #4752: it no longer writes a compiled PM prompt — that is per-project and
+/// written at launch (`instruction_pipeline::compiled_prompt_path`).
 /// Test: `install_writes_all_artifacts`,
 /// `overwrite_artifact_refreshes_modified_file_without_force`,
 /// `seed_once_artifact_is_not_clobbered_without_force`,
 /// `seed_once_artifact_force_resets_to_shipped_default`,
 /// `install_claude_hooks_is_idempotent`,
-/// `instruction_pipeline::install_system_prompt_to_writes_assembled`.
+/// `remove_stale_bundled_instructions_deletes_a_leftover`.
 pub(crate) async fn install(
     force: bool,
     reset_agents: Option<Vec<String>>,
@@ -77,12 +79,24 @@ pub(crate) async fn install(
         println!("  {line}");
     }
 
-    // Overwrite the bundle stub with the fully assembled PM prompt (#383).
-    match trusty_mpm::core::instruction_pipeline::install_system_prompt_to(
+    // #4752: `tm install` no longer writes a compiled PM prompt at all. The
+    // compiled prompt is the text ONE project's session runs with, and install
+    // has no project — writing the bundled assembly to a global path is exactly
+    // the "wrong content kind on a shared path" collision this issue closes.
+    // Each launch writes its own project's copy (see
+    // `instruction_pipeline::compiled_prompt_path`).
+
+    // #4752: a pre-#4752 install left the compiled prompt at
+    // `instructions/INSTRUCTIONS.md`. Nothing writes that path now, but
+    // `build_instructions` still READS it — so an upgraded machine would fold a
+    // frozen copy of an old prompt into the pipeline forever. Remove it here
+    // rather than leaving a stale input no writer can refresh.
+    match trusty_mpm::core::instruction_pipeline::remove_stale_bundled_instructions(
         &paths.framework_instructions_path(),
     ) {
-        Ok(()) => println!("  \u{2713} instructions/INSTRUCTIONS.md (assembled)"),
-        Err(e) => eprintln!("warning: failed to assemble system prompt: {e:#}"),
+        Ok(true) => println!("  \u{2717} instructions/INSTRUCTIONS.md (stale, removed)"),
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: failed to remove stale instructions/INSTRUCTIONS.md: {e:#}"),
     }
 
     // #4409: bundled agents deploy ONLY into the tm-managed config-dir tier.

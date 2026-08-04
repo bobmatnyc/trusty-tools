@@ -322,6 +322,14 @@ impl FrameworkPaths {
         self.instructions.join("INSTRUCTIONS.md")
     }
 
+    // #4752: there is deliberately NO `instructions_compiled()` accessor here.
+    // The compiled PM prompt is PER-PROJECT session state, not part of the
+    // global framework install this type models, so it is resolved by
+    // `instruction_pipeline::compiled_prompt_path(project_dir)` instead. An
+    // accessor on this type would have to pick between the shared managed root
+    // and the real `$HOME` — the ambiguity that made the file collide across
+    // concurrent sessions in the first place.
+
     /// Path of the framework launch instructions — explicit-name alias.
     ///
     /// Why: the instruction merge pipeline refers to this file as

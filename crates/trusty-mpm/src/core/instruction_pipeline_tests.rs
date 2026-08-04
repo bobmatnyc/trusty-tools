@@ -420,82 +420,168 @@ fn assemble_system_prompt_contains_all_sections() {
     assert!(!prompt.contains("ticketing_agent"));
 }
 
-// Why serial + fake-HOME (extra sweep hit — review-gate report on top of
-// #2459/#2460/#2461): `install_system_prompt()` resolves `dirs::home_dir()`
-// internally and previously wrote straight into the REAL
-// `$HOME/.trusty-mpm/framework/instructions/` — both polluting the
-// developer's real home directory on every test run AND racing with any
-// other test in this binary that redirects `HOME` to a temp dir
-// concurrently (same class as `manifest_expands_tilde`, #2459). Redirect
-// `HOME` to an isolated temp dir for the duration of the test and join
-// the crate's shared `#[serial_test::serial]` lock so no other
-// HOME-mutating test can interleave.
-#[serial_test::serial]
-#[test]
-fn install_system_prompt_writes_file() {
-    // Why: `tm launch` depends on `install_system_prompt` regenerating
-    // INSTRUCTIONS.md; this asserts it writes a non-empty file under the
-    // expected `~/.trusty-mpm/framework/instructions/` path.
-    let fake_home = TempDir::new().expect("create fake home");
-    let prev_home = std::env::var("HOME").ok();
-    // SAFETY: serialized via `#[serial_test::serial]`, so no other test
-    // thread observes or mutates HOME concurrently. Restored below
-    // regardless of panics via the `HomeGuard` drop impl.
-    unsafe { std::env::set_var("HOME", fake_home.path()) };
-    struct HomeGuard(Option<String>);
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(p) => unsafe { std::env::set_var("HOME", p) },
-                None => unsafe { std::env::remove_var("HOME") },
-            }
-        }
-    }
-    let _guard = HomeGuard(prev_home);
+// ── #4752: the compiled prompt owns a path nothing else writes ─────────────
 
-    let out = install_system_prompt().expect("install succeeds");
-    assert!(out.starts_with(fake_home.path()));
-    assert!(out.ends_with("INSTRUCTIONS.md"));
-    assert!(out.exists());
-    let on_disk = fs::read_to_string(&out).unwrap();
-    assert_eq!(on_disk, assemble_system_prompt());
-    assert!(!on_disk.is_empty());
+#[test]
+fn compiled_prompt_path_is_project_local() {
+    // Why (#4752, owner ruling 2026-08-04): the compiled prompt belongs to the
+    // PROJECT whose session runs it. FAILS BEFORE THIS CHANGE — the path was
+    // `FrameworkPaths::instructions_compiled()`, one global file under
+    // `~/.trusty-mpm/framework/`.
+    // What: pins `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`.
+    let project = Path::new("/some/project");
+    assert_eq!(
+        compiled_prompt_path(project),
+        Path::new("/some/project/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md")
+    );
 }
 
 #[test]
-fn install_system_prompt_to_writes_assembled() {
-    // Why: `tm install` calls `install_system_prompt_to` pointing at the
-    // framework path so the assembled prompt (not the 4-line stub) is on
-    // disk immediately after install — regression for issue #383.
-    // What: asserts the file written by the path-parameterised helper
-    // equals `assemble_system_prompt()` and contains key PM headings.
-    // Test: call the helper against a temp path; read back and verify content.
-    let tmp = TempDir::new().unwrap();
-    let dest = tmp.path().join("instructions").join("INSTRUCTIONS.md");
-    install_system_prompt_to(&dest).expect("write succeeds");
+fn compiled_prompt_path_is_beside_the_session_stash() {
+    // Why: the ruling put the file in the project's own `.trusty-mpm/` — the
+    // directory that already holds `last-instructions.md` and `sessions/` and
+    // that `tm` writes on every launch. That co-location is the whole basis for
+    // making the write fatal, so pin it.
+    let project = Path::new("/some/project");
+    let stash_dir = project.join(".trusty-mpm");
     assert!(
-        dest.exists(),
-        "INSTRUCTIONS.md must exist after install_system_prompt_to"
+        compiled_prompt_path(project).starts_with(&stash_dir),
+        "the compiled prompt must live under the project's own .trusty-mpm/"
     );
+}
+
+#[test]
+fn compiled_prompt_path_never_collides_across_projects() {
+    // Why (#4752 review, MEDIUM 4): the defect was that ONE global file served
+    // every project, so concurrent sessions overwrote each other. FAILS BEFORE
+    // THIS CHANGE — `FrameworkPaths::instructions_compiled()` returned the same
+    // path for both projects (it resolved from the shared managed root, and
+    // `for_managed_workspace` from the real `$HOME`).
+    let a = compiled_prompt_path(Path::new("/projects/alpha"));
+    let b = compiled_prompt_path(Path::new("/projects/beta"));
+    assert_ne!(
+        a, b,
+        "two projects must not share one compiled-prompt file — that was the collision"
+    );
+}
+
+#[test]
+fn compiled_prompt_path_is_not_the_bundled_instructions_path() {
+    // The original #4752 defect: the compiled OUTPUT must not share a path with
+    // the bundled INPUT `build_instructions` reads.
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+    assert_ne!(
+        compiled_prompt_path(tmp.path()),
+        paths.framework_instructions_path()
+    );
+}
+
+#[test]
+fn instructions_failure_message_names_the_path_and_a_remedy() {
+    // Why (#4752 ruling follow-up 1): the write is fatal, so a refused launch
+    // must tell the operator what was refused, where, and what to do — not
+    // surface a bare io error.
+    let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+    let msg = instructions_failure_message(Path::new("/p/.trusty-mpm/framework/X.md"), &err);
+    assert!(
+        msg.contains("/p/.trusty-mpm/framework/X.md"),
+        "must name the path: {msg}"
+    );
+    assert!(msg.contains("denied"), "must carry the cause: {msg}");
+    assert!(
+        msg.contains("was NOT started"),
+        "must say the session did not start: {msg}"
+    );
+    assert!(msg.contains("permissions"), "must point at a remedy: {msg}");
+}
+
+#[test]
+fn no_bundled_artifact_targets_the_compiled_prompt_path() {
+    // Why (#4752): the defect was two writers on one path. This pins the
+    // bundle-installer half — no entry in the canonical artifact table may
+    // resolve to the compiled prompt's filename, at any depth, so the
+    // `install_to` pass can never write there. A future artifact re-adding a
+    // stub under that name turns this red instead of silently reintroducing
+    // last-writer-wins.
+    // What: scans `bundle::ALL` for any `rel_path` whose file name is
+    // `COMPILED_PROMPT_FILE`.
+    let clashing: Vec<&str> = crate::core::bundle::ALL
+        .iter()
+        .map(|a| a.rel_path)
+        .filter(|p| Path::new(p).file_name().and_then(|n| n.to_str()) == Some(COMPILED_PROMPT_FILE))
+        .collect();
+    assert!(
+        clashing.is_empty(),
+        "no bundled artifact may target {COMPILED_PROMPT_FILE}; found {clashing:?}"
+    );
+}
+
+#[test]
+fn remove_stale_bundled_instructions_deletes_a_leftover() {
+    // Why (#4752): a pre-#4752 install left the compiled prompt at
+    // `instructions/INSTRUCTIONS.md`. Nothing writes it now but
+    // `build_instructions` still reads it, so an upgraded machine would fold a
+    // frozen old prompt into the pipeline forever. `tm install` removes it.
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+    let stale = paths.framework_instructions_path();
+    write_file(&stale, "# an old compiled prompt\n");
+
+    assert!(
+        remove_stale_bundled_instructions(&stale).expect("removal succeeds"),
+        "an existing leftover must be reported as removed"
+    );
+    assert!(!stale.exists(), "the stale leftover must be gone");
+    // The compiled prompt is a DIFFERENT, project-local file.
+    assert_ne!(stale, compiled_prompt_path(tmp.path()));
+}
+
+#[test]
+fn remove_stale_bundled_instructions_is_a_noop_when_absent() {
+    // Why: the common case is a fresh machine that never had the file. That
+    // must not be an error, and must not report a removal.
+    let tmp = TempDir::new().unwrap();
+    let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
+    assert!(
+        !remove_stale_bundled_instructions(&paths.framework_instructions_path())
+            .expect("absence is not an error"),
+        "nothing was removed, so the call must report false"
+    );
+}
+
+#[test]
+fn write_compiled_prompt_to_creates_parent_dirs() {
+    // Why: the launch path calls this against a framework root that may not
+    // exist yet on a machine that never ran `tm install`; a missing parent must
+    // not fail the launch.
+    // What: writes into a two-deep absent directory and reads the bytes back
+    // verbatim.
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("a").join("b").join(COMPILED_PROMPT_FILE);
+    write_compiled_prompt_to(&dest, "COMPILED-BODY").expect("write succeeds");
+    assert_eq!(fs::read_to_string(&dest).unwrap(), "COMPILED-BODY");
+}
+
+#[test]
+fn compiled_prompt_write_is_the_full_assembled_prompt_never_a_stub() {
+    // Why (#383 regression guard, retained through #4752's path move): the
+    // compiled file must only ever hold a FULL composed prompt. #383 was a
+    // 4-line stub winning a last-writer race on the shared path; the path is
+    // now project-local and single-writer, but the content contract still
+    // needs pinning.
+    // What: writes the bundled assembly to a project's compiled path and
+    // asserts it is neither empty nor the historical stub.
+    let tmp = TempDir::new().unwrap();
+    let dest = compiled_prompt_path(tmp.path());
+    write_compiled_prompt_to(&dest, &assemble_system_prompt()).expect("write succeeds");
+
     let on_disk = fs::read_to_string(&dest).unwrap();
-    assert_eq!(
-        on_disk,
-        assemble_system_prompt(),
-        "content must equal assembled prompt"
-    );
-    // The 4-line stub must NOT be present (regression guard for issue #383).
+    assert_eq!(on_disk, assemble_system_prompt());
+    assert!(!on_disk.trim().is_empty());
     assert!(
         !on_disk.trim().eq("# trusty-mpm Framework Instructions\n\nThis Claude Code instance is managed by trusty-mpm.\nDaemon endpoint: ${TRUSTY_MPM_URL:-http://localhost:7799}"),
-        "stub content must not be written — full assembled prompt required"
-    );
-    // Real PM sections must be present.
-    assert!(
-        on_disk.contains("# PM Agent -- Trusty MPM"),
-        "PM_INSTRUCTIONS section must be present"
-    );
-    assert!(
-        on_disk.contains("# Framework Instructions"),
-        "BASE_PM floor must be present"
+        "stub content must never be written — full assembled prompt required"
     );
 }
 
@@ -636,4 +722,65 @@ fn session_start_count_matches_the_delivered_delegation_roster() {
         out.agent_count, 4,
         "engineer + qa + writer + ticketing, with the cross-tier `qa` counted once"
     );
+}
+
+// ── #4752 round 4: the shared fatal compiled-prompt refresh ─────────────────
+
+#[test]
+fn refresh_compiled_prompt_writes_the_project_local_file() {
+    // Why (#4752 round 4): this is the single entry point all THREE pre-spawn
+    // paths now route through — fresh start, daemon resume, and the bare-`tm`
+    // in-place relaunch that round 3 missed entirely. Pinning it directly means
+    // the guarantee is asserted on the implementation, not only through the
+    // daemon's thin `refresh_compiled_prompt_for_resume` delegate.
+    //
+    // FIXTURE: a stale sentinel is pre-seeded so "the file exists" cannot pass;
+    // only a real refresh overwrites it.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = compiled_prompt_path(tmp.path());
+    fs::create_dir_all(dest.parent().expect("has a parent")).expect("create parent");
+    const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
+    fs::write(&dest, STALE).expect("seed stale");
+
+    refresh_compiled_prompt(tmp.path()).expect("refresh must succeed");
+
+    let on_disk = fs::read_to_string(&dest).expect("readable");
+    assert_ne!(
+        on_disk, STALE,
+        "a stale compiled prompt must be overwritten"
+    );
+    assert!(
+        on_disk.contains("# PM Agent -- Trusty MPM"),
+        "must hold the resolved PM prompt, not a fragment: {on_disk}"
+    );
+    assert!(
+        dest.starts_with(tmp.path()),
+        "the compiled prompt is PROJECT-LOCAL; a global path would restore the \
+         cross-project collision #4752 removed"
+    );
+}
+
+#[test]
+fn refresh_compiled_prompt_reports_an_actionable_failure() {
+    // Why (#4752): the write is fatal at all three call sites, so a refusal is
+    // operator-facing — it must name the path and say the session did not
+    // start, never surface a bare io error.
+    //
+    // FIXTURE: a directory planted at the exact destination, so only this write
+    // fails and nothing else in the compose path does.
+    let tmp = TempDir::new().expect("tempdir");
+    let dest = compiled_prompt_path(tmp.path());
+    fs::create_dir_all(&dest).expect("plant a directory at the compiled path");
+
+    let msg = refresh_compiled_prompt(tmp.path())
+        .expect_err("a failed compiled write must be reported as an error");
+    assert!(
+        msg.contains(&dest.display().to_string()),
+        "must name the path: {msg}"
+    );
+    assert!(
+        msg.contains("was NOT started"),
+        "must say the session did not start: {msg}"
+    );
+    assert!(msg.contains("permissions"), "must point at a remedy: {msg}");
 }

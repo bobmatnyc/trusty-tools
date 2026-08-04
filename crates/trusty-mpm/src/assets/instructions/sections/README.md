@@ -165,21 +165,14 @@ the findings below.
 Written against the actual code, these do not explain cleanly. Recorded rather
 than smoothed over.
 
-1. **Two writers target one path.** `bundle_all.rs` writes a 4-line stub to
-   `instructions/INSTRUCTIONS.md`, and `instruction_pipeline.rs`'s
-   `install_system_prompt` writes the *full composed prompt* to the same
-   `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`. Whichever runs last
-   wins. Neither is read by the launch path, which composes in memory. The
-   bundled-asset retirement is still open.
-
-2. **`base_pm()` is now a misnomer twice over.** It refers to a file that does
+1. **`base_pm()` is now a misnomer twice over.** It refers to a file that does
    not exist, and it hardcodes four section ids in one order to reconstitute a
    "floor" that no longer exists as a concept. It is still live — the
    roster-absent string assembly appends it — so it is a real function whose
    name describes nothing true. Renaming it is mechanical and was left out of
    #4286 to keep that change reviewable.
 
-3. **The `project-addendum` generator is declared but unfeedable.** Its only
+2. **The `project-addendum` generator is declared but unfeedable.** Its only
    production input was the retired `.trusty-mpm/INSTRUCTIONS.md`. The block
    stays declared in the manifest (marked `optional`, so it emits nothing) and
    the composer always passes `None`.
@@ -190,3 +183,21 @@ than smoothed over.
   Resolved by the ruling, not by a fix: **nothing** outside `core` is protected
   now, so this stopped being an anomaly and became the documented model. See
   "Why there is no framework floor" above.
+
+- *"Two writers target one path."* — `bundle_all.rs` wrote a 4-line stub to
+  `instructions/INSTRUCTIONS.md` while `install_system_prompt` wrote the full
+  composed prompt to the same path, last writer winning. Resolved by #4752, in
+  two parts. The stub half was already gone: #4286 split A removed the
+  `instructions/INSTRUCTIONS.md` entry from `bundle::ALL` and deleted the
+  `FRAMEWORK_INSTRUCTIONS` constant, so by the time this finding was acted on
+  only one writer remained. The surviving half — the compiled OUTPUT sharing a
+  path with the pipeline INPUT `build_instructions` reads — was fixed by giving
+  the compiled prompt its own file, written PER PROJECT to
+  `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+  (`instruction_pipeline::compiled_prompt_path`), which nothing else writes.
+  Project-local rather than global: one shared file under `~/.trusty-mpm/` would
+  simply have moved the collision from two writers on one path to every project
+  overwriting the same copy. `tm install` no longer writes a compiled prompt at
+  all — install has no project, so it has nothing to compile — and it now
+  deletes a stale pre-#4752 `instructions/INSTRUCTIONS.md`, since no writer
+  could refresh it but the pipeline still read it.
