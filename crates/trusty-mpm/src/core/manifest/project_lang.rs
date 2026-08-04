@@ -261,6 +261,63 @@ mod tests {
     }
 
     #[test]
+    fn js_project_detects_js_family() {
+        // A JS/TS project detects the whole LANGUAGE family — `package.json`
+        // selects javascript-engineer and (with tsconfig.json, or on its own)
+        // typescript-engineer. The framework engineers are a separate question,
+        // covered by `bare_js_project_detects_no_framework_engineer`.
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "package.json", &package_json(&["lodash"]));
+        touch(tmp.path(), "tsconfig.json");
+
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("javascript-engineer"));
+        assert!(detected.contains("typescript-engineer"));
+        assert!(
+            !detected.contains("rust-engineer"),
+            "a JS project must not detect a foreign language engineer"
+        );
+    }
+
+    #[test]
+    fn java_project_detects_java_engineer() {
+        // `java-engineer` declares FOUR markers; any ONE selects it. Maven and
+        // Gradle are checked independently so a regression that silently
+        // required all of them (an AND where the manifest means OR) is caught.
+        for marker in ["pom.xml", "build.gradle", "build.gradle.kts"] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            assert!(
+                detected_engineers(tmp.path()).contains("java-engineer"),
+                "`{marker}` alone must select java-engineer"
+            );
+        }
+    }
+
+    #[test]
+    fn dotnet_csproj_detects_dotnet_engineer() {
+        // The `*.<ext>` GLOB branch of `marker_present`, which no fixed-name
+        // marker exercises: .NET project files are named after the project, so
+        // the manifest declares `*.csproj` / `*.sln` / `*.vbproj`.
+        for marker in ["MyApp.csproj", "MyApp.sln", "Legacy.vbproj"] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            assert!(
+                detected_engineers(tmp.path()).contains("dotnet-engineer"),
+                "`{marker}` must match the extension glob and select dotnet-engineer"
+            );
+        }
+
+        // The glob must not fire on a same-stem file with a different extension.
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "MyApp.csproj.bak");
+        assert!(
+            !detected_engineers(tmp.path()).contains("dotnet-engineer"),
+            "`.csproj.bak` does not end in `.csproj` and must not match"
+        );
+    }
+
+    #[test]
     fn unknown_project_detects_nothing() {
         // A directory with no recognized language marker detects nothing — the
         // signal `framework::agent_scope_from` reads as "unknown project type".

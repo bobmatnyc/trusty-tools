@@ -327,6 +327,42 @@ markers = ["vercel.json"]
 // ---------------------------------------------------------------------------
 
 #[test]
+fn detected_stack_engineers_matches_the_manifest() {
+    // `core::stack_profile` primes the PM prompt from this entry point, and it
+    // must read the SAME declaration the deployer reads — a prompt naming an
+    // engineer the project never received is the drift #1971 exists to prevent.
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+
+    let detected = detected_stack_engineers(tmp.path());
+    assert!(
+        detected.contains("rust-engineer"),
+        "a Cargo project's stack profile names rust-engineer: {detected:?}"
+    );
+    assert!(
+        !detected.contains("python-engineer"),
+        "...and not a language the project shows no marker for: {detected:?}"
+    );
+
+    // Every stem it reports must be one the manifest actually declares as
+    // stack-gated, so the prompt can never name an agent the deploy filter
+    // would drop.
+    let categories = framework_agent_categories().expect("bundled manifest must validate");
+    let declared: BTreeSet<&str> = categories
+        .language
+        .iter()
+        .chain(categories.framework.iter())
+        .map(|entry| entry.stem.as_str())
+        .collect();
+    for stem in &detected {
+        assert!(
+            declared.contains(stem.as_str()),
+            "`{stem}` is reported to the prompt but is not a declared stack agent"
+        );
+    }
+}
+
+#[test]
 fn bundled_skill_roster_is_valid() {
     // The shipped `[skill_categories]` must exactly cover the bundled skills.
     let skills = framework_skill_categories().expect("bundled skill roster must validate");

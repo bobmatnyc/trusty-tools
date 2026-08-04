@@ -485,6 +485,31 @@ universal = ["tm"]
 }
 
 #[test]
+fn skill_categories_roundtrip() {
+    // #4765: the skill roster is a manifest section like any other — it parses
+    // through the shared parser and survives a serialize round-trip. Absent, it
+    // stays `None` so every non-framework layer is unaffected.
+    let raw = "[skill_categories]\nuniversal = [\"tm\", \"tm-doctor\"]\n";
+    let parsed = HarnessManifest::from_toml(raw).expect("parses");
+    let skills = parsed
+        .skill_categories
+        .clone()
+        .expect("section present")
+        .universal;
+    assert_eq!(skills, vec!["tm".to_string(), "tm-doctor".to_string()]);
+
+    let round =
+        HarnessManifest::from_toml(&parsed.to_toml().expect("serializes")).expect("re-parses");
+    assert_eq!(round, parsed);
+
+    let without = HarnessManifest::from_toml("[agents]\ninclude = [\"qa\"]\n").expect("parses");
+    assert!(
+        without.skill_categories.is_none(),
+        "the section is additive — every other layer omits it"
+    );
+}
+
+#[test]
 fn agent_categories_absent_parses_as_none() {
     // Every other manifest layer omits `[agent_categories]`; that must stay a
     // clean parse, not an error, so the new section is genuinely additive.
