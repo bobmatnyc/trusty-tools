@@ -1,0 +1,21 @@
+vmtest-harness dirty-worktree check — fixture 1 of 3 (TRACKED, and COMMITTED).
+
+This file exists to be MODIFIED IN THE WORKING TREE and left uncommitted while
+`source_deliver_local` streams the repo to a guest. Its purpose is to prove
+DOC-1 §6.1's positive claim: that `git ls-files -co --exclude-standard | tar`
+reads the WORKING TREE, not the index and not HEAD.
+
+It must stay committed. `git ls-files -c` only lists tracked paths, so an
+uncommitted fixture would make sentinel 1 vacuous rather than failing loudly.
+
+The assertion is on this file's WHOLE-FILE `cksum`, not on the presence of the
+appended sentinel line. That is deliberate: an implementation built on
+`git archive HEAD` would deliver this file, pass every file-count check, and
+deliver the committed content — the cksum is what catches it.
+
+The other two fixtures are created at run time and are not committed:
+  - vmtest-harness/tests/dirty-check-untracked.txt      (untracked, not ignored)
+  - vmtest-harness/tests/target/dirty-check-ignored.txt (gitignored via **/target/)
+
+Ported from vmtest-harness/spike/dirty-check-fixture.txt by plan P3-T4, which
+deleted the spike. See lib/source.sh, source_assert_dirty_delivery.

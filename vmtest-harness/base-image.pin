@@ -1,0 +1,8 @@
+# vmtest-harness base image pin
+# Roll this file deliberately — see DOC-2 §3.4. One line, one review.
+oci_ref	ghcr.io/cirruslabs/macos-tahoe-base
+digest	sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c
+local_name	tahoe-base
+pinned_on	2026-07-31
+pinned_by	vmtest-harness Phase 1 (P1-T3)
+note	tart v2.32.1; digest captured untruncated from `tart list --format json` (.[] | .Name for the OCI entry); research recorded it only truncated as sha256:a8e1... at 01-research/vm-install-probe-findings.md:652,:685
