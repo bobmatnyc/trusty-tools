@@ -6,6 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.42.2] — 2026-08-04
+
+### Fixed
+
+- The daemon no longer aborts from its disk-size metrics ticker. The shared
+  `trusty_common::sys_metrics::dir_size_bytes` walk could raise a non-unwinding
+  panic out of a directory-handle destructor, killing the process with no
+  graceful shutdown — 40 self-aborts (`SIGABRT`) in one week, roughly every
+  7 minutes under load, each relaunching via launchd `KeepAlive` into the same
+  full auto-discover sweep that recreated the condition. The walk is now
+  panic-safe; see the `trusty-common` entry for the mechanism (#4764)
+- `trusty-search` now installs a panic hook at startup that logs the panic
+  payload, location, thread, and backtrace through `tracing` before the default
+  hook runs. macOS `.ips` crash reports do not carry the panic message, so
+  daemon aborts previously reached the operator with the one datum that names
+  the cause missing (#4764)
+- **Issue #4823 — `service install` no longer discards a deliberate
+  `--no-auto-discover`.** `trusty-search service install` regenerated the
+  launchd unit from a fixed template, so an operator who disabled the
+  auto-discovery scan lost that setting on the next install and could not make
+  it durable by any supported means. Three changes:
+  - `service install` accepts `--no-auto-discover`, which writes the flag into
+    the generated unit's `ProgramArguments`. Re-running `service install`
+    **preserves** the setting and says so; re-enabling the scan now requires an
+    explicit `service install --auto-discover`, so a capability change is never
+    a silent side effect of reinstalling.
+  - Operator tunables (`TRUSTY_DEVICE`, `TRUSTY_MEMORY_LIMIT_MB`, and the rest
+    of `PERSISTED_ENV_VARS`) that the installed unit already carried now survive
+    regeneration instead of being blanked whenever `service install` runs from a
+    shell that exports none of them. An exported value still wins.
+  - `--no-auto-discover` / `TRUSTY_NO_AUTO_DISCOVER` accepts `1`/`true`/`yes`/
+    `on` and `0`/`false`/`no`/`off` (case-insensitive). Previously the env var
+    went through clap's strict `FromStr<bool>`, so the `=1` spelling documented
+    in the README and the #314 changelog — and already present in many
+    `daemon.env` files — was **rejected** and aborted daemon startup:
+
+        error: invalid value '1' for '--no-auto-discover': [possible values: true, false]
+
+    An unrecognised spelling is still an error rather than a silent `false`, so
+    a typo fails loudly instead of quietly re-enabling the scan. The suppression
+    itself travels as a CLI flag, never as a `TRUSTY_NO_AUTO_DISCOVER` entry in
+    the generated plist, so a generated unit can never carry a value the daemon
+    would refuse to parse.
+
+### Changed
+
+- The `disk_bytes` health metric is recomputed every 60 s instead of every 10 s.
+  Walking a multi-GB, actively-mutating data directory six times less often
+  cuts exposure to the reindex/prune race behind #4764 by the same factor, at
+  no user-visible cost for an at-a-glance footprint figure (#4764)
+
 ## [0.42.1] — 2026-08-04
 
 ### Fixed
