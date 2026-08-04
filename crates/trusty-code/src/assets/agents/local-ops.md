@@ -85,38 +85,33 @@ npm audit / cargo audit / bandit -r src/
 
 Surface failures with the failing command output and remediation steps — do not silently swallow errors.
 
-## Long Waits — Block In The Foreground, NEVER Park (issues #2501, #2610)
+## Long Waits — Block On Your Own Gates, Never On CI
 
-🔴 Release cuts, CI watches, `cargo build --release`, publish waits, and
-`gh pr checks --watch` are where ops/release agents strand tasks. **You must NEVER
-end your turn to "wait" for one — and NEVER spawn a background polling monitor and
-end your turn expecting it to notify you.** Nothing wakes a stopped agent; a
-self-created monitor/watcher fires into the void and the release hangs until a
-human manually resumes you. Ending a turn with "waiting for…", "monitoring in the
-background", "will report back once…", or "standing by" is a PROTOCOL VIOLATION.
-
-Wait ONLY by blocking in the foreground:
+🔴 A release cut, `cargo build --release`, or a publish wait is YOUR command: run
+it in the FOREGROUND with a long timeout and let it hold the turn until it exits.
+Do not background it and end your turn expecting a notification — nothing wakes a
+stopped agent, so a self-spawned monitor fires into the void and the release
+hangs until a human resumes you.
 
 ```bash
-gh pr checks <pr> --watch --fail-fast    # CI: blocks until checks settle
 cargo build --release -p <crate>         # long build: run it, wait for exit
 ```
 
-- Run long commands in the FOREGROUND with a long timeout and wait for them to
-  exit — do NOT background them (`&` / `run_in_background`).
-- If a command was already backgrounded, poll it to completion with blocking
-  status calls in the SAME turn; do not end the turn while it runs.
-- If an invocation hits the 10-min tool ceiling, RE-ISSUE the same blocking
-  command in the SAME turn and loop until it completes.
+**CI is the opposite.** Never wait on it and never use `gh pr checks --watch` —
+`--watch` streams check output into your context for the whole run (546k tokens
+over 54 minutes on one PR). Push, take a ONE-SHOT `gh pr checks <pr>` /
+`gh pr view <pr>` read, report it, and end your turn; the PM re-engages when CI
+settles. Trust `bucket` only after cross-checking `state` — GitHub API
+eventual-consistency lag can surface a check as bucketed-complete before it has
+settled.
+
+- If a foreground invocation hits the 10-min tool ceiling, RE-ISSUE it in the
+  SAME turn and loop until it completes.
 - On failure, capture the output and report it — do not retry-by-waiting.
-- Re-issuing is NOT tight blind polling. Don't loop a status check every ~30s
-  emitting "still building"/"still pending" — that is the opposite failure, spam
-  (#2833). Prefer the blocking form (`--watch`, or the build itself); if you must
-  sleep-poll, size the sleep to the real wall-clock (minutes) and print only when
-  the observed state changes.
-- **When your wait goal completes** (build finishes, publish succeeds, CI goes
-  green), immediately disarm any monitors, polls, or re-issue timers you armed.
-  Stale monitors re-fire after your goal is done, spuriously waking the agent.
+- Ending a turn with "monitoring in the background", "will report back once…",
+  or "standing by" is a PROTOCOL VIOLATION, not a status update.
+- **When your wait goal completes**, immediately disarm any monitors, polls, or
+  re-issue timers you armed. Stale monitors re-fire after the goal is done.
 
 ## GitHub Account Management
 

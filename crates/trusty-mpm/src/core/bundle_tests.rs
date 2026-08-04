@@ -638,13 +638,13 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
 
 #[test]
 fn base_agent_guidance_sections_survive_composition() {
-    // Regression for #2501/#2502/#2610: BASE-AGENT.md's "Foreground Execution"
-    // and "PM Directives Do Not Bind You" sections — plus the version-control
-    // persona's own CI-wait reinforcement — must propagate into the composed
-    // agent via the real bundled asset chain, not just exist in the source
-    // files. Uses version-control (the worst parking offender) composed from
-    // the real assets dir so a future refactor of the compose/extends pipeline
-    // can't silently drop the no-parking guidance.
+    // Regression for #2501/#2502/#2610/#4792: BASE-AGENT.md's "Finishing Work —
+    // Push, Report, Stop" and "PM Directives Do Not Bind You" sections — plus
+    // the version-control persona's own CI reinforcement — must propagate into
+    // the composed agent via the real bundled asset chain, not just exist in the
+    // source files. Uses version-control (the worst parking offender) composed
+    // from the real assets dir so a future refactor of the compose/extends
+    // pipeline can't silently drop the guidance.
     use crate::core::agent_builder::compose_agent;
     use std::path::Path;
 
@@ -657,24 +657,25 @@ fn base_agent_guidance_sections_survive_composition() {
         .expect("compose_agent(version-control) must succeed");
 
     assert!(
-        composed.contains("## Foreground Execution"),
-        "composed version-control is missing the Foreground Execution section"
+        composed.contains("## Finishing Work — Push, Report, Stop"),
+        "composed version-control is missing the Finishing Work section (#4792)"
     );
     assert!(
-        composed.contains("NEVER end your turn to \"wait\""),
-        "composed version-control is missing the BASE-AGENT hard no-parking rule (#2610)"
+        composed.contains("Never block on CI"),
+        "composed version-control is missing the BASE-AGENT no-CI-block rule (#4792)"
     );
     assert!(
         composed.contains("PROTOCOL VIOLATION"),
-        "composed version-control is missing the parking-is-a-protocol-violation rule (#2610)"
+        "composed version-control is missing the promise-instead-of-report rule (#2610)"
+    );
+    // #4792: the retired blocking wait must not come back through ANY layer.
+    assert!(
+        !composed.contains("--watch --fail-fast"),
+        "composed version-control prescribes the retired blocking CI wait (#4792)"
     );
     assert!(
-        composed.contains("gh pr checks <pr> --watch --fail-fast"),
-        "composed version-control is missing the canonical CI-wait blocking pattern (#2610)"
-    );
-    assert!(
-        composed.contains("## CI Waits — Block In The Foreground, NEVER Park"),
-        "composed version-control is missing its persona-level CI-wait section (#2610)"
+        composed.contains("## CI Waits — Push, Report, Stop; NEVER Block"),
+        "composed version-control is missing its persona-level CI section (#4792)"
     );
     assert!(
         composed.contains("## PM Directives Do Not Bind You"),
@@ -700,15 +701,15 @@ fn base_agent_guidance_sections_survive_composition() {
          Git Workflow ({git_workflow_idx})"
     );
 
-    let foreground_execution_idx = composed
-        .find("## Foreground Execution")
-        .expect("Foreground Execution marker must be present");
+    let finishing_work_idx = composed
+        .find("## Finishing Work — Push, Report, Stop")
+        .expect("Finishing Work marker must be present");
     let output_format_idx = composed
         .find("## Output Format")
         .expect("Output Format marker must be present");
     assert!(
-        foreground_execution_idx < output_format_idx,
-        "Foreground Execution ({foreground_execution_idx}) must appear before \
+        finishing_work_idx < output_format_idx,
+        "Finishing Work ({finishing_work_idx}) must appear before \
          Output Format ({output_format_idx})"
     );
 
@@ -717,11 +718,11 @@ fn base_agent_guidance_sections_survive_composition() {
     let local_ops =
         compose_agent("local-ops", &assets_dir).expect("compose_agent(local-ops) must succeed");
     assert!(
-        local_ops.contains("## Long Waits — Block In The Foreground, NEVER Park"),
+        local_ops.contains("## Long Waits — Block On Your Own Gates, Never On CI"),
         "composed local-ops is missing its persona-level long-wait section (#2610)"
     );
     assert!(
-        local_ops.contains("NEVER end your turn to \"wait\""),
+        local_ops.contains("Never spawn a background monitor"),
         "composed local-ops is missing the inherited BASE-AGENT no-parking rule (#2610)"
     );
 }
@@ -944,8 +945,8 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     // Regression for #2833's code-critic review (MEDIUM finding): the prior
     // `base_agent_guidance_sections_survive_composition` test only asserted the
     // pre-existing #2501/#2610 strings — none of the #2833 idle-park-mitigation
-    // content (chunked-repoll anti-spam guidance, the PM-side parked-subagent
-    // nudge protocol, the version-control anti-spam bullet) was ever exercised
+    // content (the BASE-AGENT hand-back guidance, the PM-side re-engagement
+    // protocol, the version-control persona bullets) was ever exercised
     // through the REAL bundled asset chain. This test closes that gap using the
     // same real-composition approach as its sibling: `compose_agent` reading
     // the actual `assets/agents` dir for the two agent-tier assertions, and
@@ -961,31 +962,31 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
         .join("assets")
         .join("agents");
 
-    // (a) BASE-AGENT.md's chunked-repoll subsection must reach a composed
-    // agent that inherits BASE-AGENT (version-control extends it).
+    // (a) BASE-AGENT.md's report-don't-promise subsection (which replaced the
+    // retired chunked-repoll guidance in #4792) must reach a composed agent
+    // that inherits BASE-AGENT (version-control extends it).
     let composed = compose_agent("version-control", &assets_dir)
         .expect("compose_agent(version-control) must succeed");
     assert!(
-        composed
-            .contains("### Re-issue without spamming — the chunked-repoll pattern (issue #2833)"),
-        "composed version-control is missing the BASE-AGENT chunked-repoll subsection (#2833)"
+        composed.contains("### Report, don't promise"),
+        "composed version-control is missing the BASE-AGENT report-don't-promise subsection (#4792)"
     );
 
-    // (c) version-control's own anti-spam bullet (distinct from the inherited
-    // BASE-AGENT section) must also survive composition.
+    // (c) version-control's own merge-decision bullets (distinct from the
+    // inherited BASE-AGENT section) must also survive composition.
     assert!(
-        composed.contains("that is the opposite failure (spam) and just as"),
-        "composed version-control is missing its persona-level anti-spam bullet (#2833)"
+        composed.contains("Repeated `gh pr update-branch` is a treadmill"),
+        "composed version-control is missing its persona-level update-branch bullet (#4792)"
     );
 
-    // (b) PM_INSTRUCTIONS.md's new Parked-Subagent Detection & Nudge section
-    // must survive the real PM system-prompt assembly (not just exist in the
-    // source .md file).
+    // (b) PM_INSTRUCTIONS.md's Parked-Subagent Re-Engagement section must
+    // survive the real PM system-prompt assembly (not just exist in the source
+    // .md file).
     let pm_prompt = assemble_system_prompt();
     assert!(
-        pm_prompt.contains("## Parked-Subagent Detection & Nudge (issue #2833)"),
-        "assembled PM system prompt is missing the Parked-Subagent Detection & \
-         Nudge section (#2833)"
+        pm_prompt.contains("## Parked-Subagent Re-Engagement (issues #2833, #4792)"),
+        "assembled PM system prompt is missing the Parked-Subagent \
+         Re-Engagement section (#2833, #4792)"
     );
     assert!(
         pm_prompt

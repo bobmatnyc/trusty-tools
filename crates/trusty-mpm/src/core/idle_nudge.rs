@@ -104,9 +104,11 @@ impl Default for IdleNudgeConfig {
 /// The default text injected into a parked pane, submitted with Enter.
 ///
 /// Why: the nudge must do more than say "you stalled" — it must correct the
-/// exact anti-pattern (#2501/#2610): the agent backgrounded a watch and ended
-/// its turn. The message tells it to block in the FOREGROUND and keep its turn
-/// open, which is the behavior the bundled agent guidance already prescribes.
+/// exact anti-pattern (#2501/#2610): the agent backgrounded a wait and ended its
+/// turn. It tells the agent to resume by blocking in the FOREGROUND on its OWN
+/// commands, which is what the bundled guidance prescribes. #4792: it must NOT
+/// push the agent onto `gh pr checks --watch` — blocking CI waits were retired
+/// for context cost, and the correct CI behavior is a one-shot read then stop.
 /// What: a `'static` instruction string citing #2621 so an operator reading the
 /// pane knows the message was machine-injected, not typed by a human.
 /// Test: `config_idle_nudge_section_parses` (in `core::config`) asserts the
@@ -114,8 +116,9 @@ impl Default for IdleNudgeConfig {
 /// below.
 pub const DEFAULT_NUDGE_MESSAGE: &str = "[trusty-mpm auto-nudge #2621] Your last turn ended with \
 language that parks the task waiting on a background monitor/notification, but a stopped agent \
-cannot be re-woken by the thing it is waiting on. Resume NOW: block in the FOREGROUND (re-run the \
-gate, or `gh pr checks <n> --watch`) and do not end your turn until it actually completes. If you \
+cannot be re-woken by the thing it is waiting on. Resume NOW: finish the work in this turn, \
+blocking in the FOREGROUND on your own commands (re-run the gate, the build). Do NOT block on CI \
+and do NOT use `gh pr checks --watch` — take a one-shot status read, report it, and stop. If you \
 are genuinely blocked on a human decision, say so explicitly instead.";
 
 /// Per-session record of how many nudges were sent and when the last one fired.

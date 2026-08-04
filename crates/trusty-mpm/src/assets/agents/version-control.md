@@ -35,35 +35,37 @@ the PM instead of freezing the pipeline.
 
 For most features, use main-based PRs (each PR from `main`). Use stacked PRs only when the user explicitly requests them.
 
-## CI Waits — Block In The Foreground, NEVER Park (issues #2501, #2610)
+## CI Waits — Push, Report, Stop; NEVER Block (issue #4792)
 
-🔴 Waiting on PR checks, a merge queue, or `gh run watch` is where version-control
-agents strand tasks. **You must NEVER end your turn to "monitor" checks or wait
-for a notification** — nothing wakes a stopped agent, so a self-spawned watcher or
-"background monitor" fires into the void and the merge hangs until a human resumes
-you. This is a protocol violation, not a status update.
+🔴 **Never block on CI and never use `gh pr checks --watch`.** `--watch` streams
+every check's output into your context for the whole run — one engineer burned
+546k tokens over 54 minutes on a single PR. Context cost, not runnability, is why
+blocking CI waits are retired; do not reintroduce one and do not substitute a
+manual poll loop.
 
-Wait ONLY by blocking in the foreground:
+When your work is pushed, take a ONE-SHOT status read, report it, and end your
+turn. The PM re-engages when CI settles.
 
 ```bash
-gh pr checks <pr> --watch --fail-fast    # blocks until checks settle; run it and wait
+gh pr view <pr> --json state,mergeable,statusCheckRollup   # one shot
+gh pr checks <pr>                                          # one shot
 ```
 
-- Run it as a plain foreground command — do NOT background it (`&` /
-  `run_in_background`) and do NOT stop to "monitor".
-- If the invocation times out (10-min tool ceiling), RE-ISSUE the same
-  `gh pr checks <pr> --watch` in the SAME turn and keep looping until it exits.
-- On a nonzero exit, capture the failing check output and report it — do not
-  retry-by-waiting.
-- Ending a turn with "monitoring the checks", "waiting for CI", "will report when
-  green", or "standing by" is FORBIDDEN.
-- Do NOT replace the blocking `--watch` with a tight manual poll loop that prints
-  "still N pending" every ~30s — that is the opposite failure (spam) and just as
-  wrong (#2833). `--watch` blocks silently and prints once; keep using it. If you
-  ever must sleep-poll, size the sleep to the CI wall-clock (minutes, not
-  seconds) and only print when a check's state actually changes.
-- **When checks settle**, immediately disarm any monitors or re-issue timers you
-  armed — do not let stale monitors re-fire after your goal is done.
+- **`bucket` can report a false DONE.** Under GitHub API eventual-consistency lag
+  a check surfaces as bucketed-complete before it has settled — cross-check the
+  `state` field before calling anything green, and never merge on a bucket alone.
+- **Repeated `gh pr update-branch` is a treadmill.** When main drifts faster than
+  CI completes, each update mints a new untested head and restarts the clock.
+  Merge the head that is actually green; BEHIND is not a correctness gate.
+- Hand back with an observation — "pushed `<sha>`; 3 checks pending — PM to
+  re-engage". Ending with "monitoring the checks", "waiting for CI", "will report
+  when green", or "standing by" is a PROTOCOL VIOLATION: nothing re-invokes a
+  stopped agent, so the promise strands the merge.
+- Never spawn a background monitor or watcher as a wake mechanism. If you armed
+  one and its goal completed, disarm it before reporting.
+
+Your own commands — a build, a test suite, a `gh pr merge` — still run in the
+FOREGROUND and hold the turn until they exit.
 
 ## Memory Management for Git Operations
 
