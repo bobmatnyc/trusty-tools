@@ -10,9 +10,11 @@ use super::*;
 use crate::agents::builder::compose_agent;
 use tempfile::TempDir;
 
-/// A composed trusty-mpm agent as `merge_frontmatter` actually emits it —
-/// `role:` present, `initialPrompt:` present, nothing foreign.
-const TRUSTY_MPM_QA: &str = "---\nname: qa\nrole: qa\ndescription: 'Expert quality assurance engineer.'\nmodel: sonnet\nskills: [test-driven-development, systematic-debugging]\ninitialPrompt: \"Begin verification.\"\n---\n\n# QA\n\nBody.\n";
+/// A composed trusty-mpm agent as `compose_agent` actually emits it — `role:`
+/// present, `initialPrompt:` present, nothing foreign, and the body opening
+/// with the base preamble the composer concatenates in front of every agent.
+/// Verified against the real deployed `rust-engineer.md` on this machine.
+const TRUSTY_MPM_QA: &str = "---\nname: qa\nrole: qa\ndescription: 'Expert quality assurance engineer.'\nmodel: sonnet\nskills: [test-driven-development, systematic-debugging]\ninitialPrompt: \"Begin verification.\"\n---\n\n# BASE-AGENT — Foundation for all trusty-mpm agents\n\nRoot-level instructions composed into every deployed agent.\n\n# QA\n\nBody.\n";
 
 /// A claude-mpm agent on the SAME name. Verbatim key shape from
 /// `.trusty-mpm/quarantine-backup-20260731/tm-writing-01/code-critic.md`:
@@ -87,8 +89,10 @@ fn the_two_vocabularies_do_not_overlap() {
 /// role-derived one. Treating it as foreign would exempt most of the roster.
 #[test]
 fn initial_prompt_alone_is_not_foreign() {
-    let doc = "---\nname: ops\nrole: ops\ninitialPrompt: \"Begin.\"\n---\n\nBody.\n";
-    assert_eq!(agent_schema(doc), AgentSchema::TrustyMpm);
+    let doc = format!(
+        "---\nname: ops\nrole: ops\ninitialPrompt: \"Begin.\"\n---\n\n{COMPOSED_BASE_MARKER}\n\nBody.\n"
+    );
+    assert_eq!(agent_schema(&doc), AgentSchema::TrustyMpm);
 }
 
 /// A hand-authored project agent that declares something outside the composer's
@@ -99,6 +103,51 @@ fn schema_of_a_hand_authored_file() {
     assert_eq!(agent_schema(doc), AgentSchema::Unrecognized);
 }
 
+/// #4448 review HIGH, reproduced then fixed. THIS is the shape that used to
+/// pass: a minimal hand-authored agent with NO exotic key at all — exactly
+/// `name`/`role`/`description`/`model`, every one of them inside the whitelist.
+///
+/// It was found on this machine, not invented: the operator's own
+/// `~/.claude/agents/writing-critic.md` has precisely this frontmatter, and it
+/// escaped the old gate only by accident — its folded `>` description happened
+/// to contain a colon that `parse_kv_line` read as a spurious key. Unwrapping
+/// that one line flipped it to movable.
+///
+/// A whitelist is satisfied by OMISSION, so the key check can never carry this
+/// on its own. The body marker is what refuses it now. Dropping the `composed`
+/// term from `agent_schema` fails this test.
+#[test]
+fn schema_of_a_minimal_hand_authored_file_with_no_exotic_key() {
+    let doc = "---\nname: code-critic\nrole: qa\n\
+               description: Adversarial outside review for Bob Matsuoka's articles.\n\
+               model: sonnet\n---\n\n# Writing Critic\n\nHand-written by the operator.\n";
+    let keys = frontmatter_keys(doc).expect("well-formed block");
+    assert!(
+        keys.iter().all(|k| TRUSTY_MPM_KEYS.contains(&k.as_str())),
+        "the fixture must declare NOTHING exotic, or it proves nothing: {keys:?}"
+    );
+    assert_eq!(
+        agent_schema(doc),
+        AgentSchema::Unrecognized,
+        "a minimal hand-authored agent is not tm's to move"
+    );
+}
+
+/// The body marker is doing the work, not the key set: the SAME frontmatter
+/// with a composed body IS tm's.
+#[test]
+fn the_body_marker_is_what_separates_composed_from_hand_authored() {
+    let front = "---\nname: code-critic\nrole: qa\nmodel: sonnet\n---\n\n";
+    assert_eq!(
+        agent_schema(&format!("{front}# Writing Critic\n\nMine.\n")),
+        AgentSchema::Unrecognized
+    );
+    assert_eq!(
+        agent_schema(&format!("{front}{COMPOSED_BASE_MARKER}\n\nComposed.\n")),
+        AgentSchema::TrustyMpm
+    );
+}
+
 /// A trusty-mpm SOURCE file still declares `extends:`; the composer strips it,
 /// so a file that still carries one was never a deploy artifact.
 #[test]
@@ -107,20 +156,36 @@ fn schema_of_a_source_file_with_extends() {
     assert_eq!(agent_schema(doc), AgentSchema::Unrecognized);
 }
 
-/// `role:` is required. A file declaring only `name:` is not a composed agent.
+/// `role:` is required. Stated with the body marker PRESENT so the composed-body
+/// term cannot carry the assertion — otherwise dropping `role` from the
+/// identity check would leave every test green (it did, on the first pass of
+/// the #4448 review fix).
 #[test]
 fn schema_requires_role() {
-    let doc = "---\nname: qa\ndescription: 'Something.'\n---\n\nBody.\n";
-    assert_eq!(agent_schema(doc), AgentSchema::Unrecognized);
+    let doc = format!(
+        "---\nname: qa\ndescription: 'Something.'\n---\n\n{COMPOSED_BASE_MARKER}\n\nBody.\n"
+    );
+    assert_eq!(agent_schema(&doc), AgentSchema::Unrecognized);
 }
 
-/// `name:` is required too — a bodiless fragment is not an agent.
+/// `name:` is required too. Same construction, same reason.
 #[test]
 fn schema_requires_name() {
-    assert_eq!(
-        agent_schema("---\nrole: qa\n---\n\nBody.\n"),
-        AgentSchema::Unrecognized
-    );
+    let doc = format!("---\nrole: qa\n---\n\n{COMPOSED_BASE_MARKER}\n\nBody.\n");
+    assert_eq!(agent_schema(&doc), AgentSchema::Unrecognized);
+}
+
+/// An unknown key disqualifies a file even when the body IS composed output.
+///
+/// Why this needs saying with the marker present: the three terms of the
+/// `TrustyMpm` decision must each be independently load-bearing. Without this,
+/// relaxing the whitelist to accept anything is invisible — a file carrying a
+/// pasted base preamble plus an exotic key would become movable.
+#[test]
+fn schema_rejects_an_unknown_key_even_with_a_composed_body() {
+    let doc =
+        format!("---\nname: qa\nrole: qa\ncolor: purple\n---\n\n{COMPOSED_BASE_MARKER}\n\nBody.\n");
+    assert_eq!(agent_schema(&doc), AgentSchema::Unrecognized);
 }
 
 #[test]
@@ -184,7 +249,10 @@ fn pinned_to_the_composer_emission() {
     let tmp = TempDir::new().expect("tempdir");
     std::fs::write(
         tmp.path().join("BASE-QA.md"),
-        "---\nname: base-qa\nrole: qa\nskills: [systematic-debugging]\n---\n\nBase body.\n",
+        format!(
+            "---\nname: base-qa\nrole: qa\nskills: [systematic-debugging]\n---\n\n\
+             {COMPOSED_BASE_MARKER}\n\nBase body.\n"
+        ),
     )
     .expect("write base");
     std::fs::write(
@@ -218,4 +286,35 @@ fn pinned_to_the_composer_emission() {
         !composed.contains("\nextends:"),
         "composed output must not carry `extends:` — the schema gate relies on it"
     );
+}
+
+/// THE COMPOSITION PIN. `compose_agent` concatenates the chain base-first, so a
+/// leaf agent inherits the base's body — which is the entire reason
+/// [`COMPOSED_BASE_MARKER`] identifies composer output at all. If composition
+/// ever stopped carrying the base body forward, the marker would vanish from
+/// every deployed leaf and the sweep would silently refuse everything.
+#[test]
+fn composed_marker_survives_composition() {
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("BASE-AGENT.md"),
+        format!("---\nname: base-agent\nrole: base\n---\n\n{COMPOSED_BASE_MARKER}\n\nBase.\n"),
+    )
+    .expect("write base");
+    std::fs::write(
+        tmp.path().join("leaf.md"),
+        "---\nname: leaf\nrole: qa\nextends: base-agent\n---\n\n# Leaf\n\nLeaf body.\n",
+    )
+    .expect("write leaf");
+
+    let composed = compose_agent("leaf", tmp.path()).expect("compose");
+    assert!(
+        composed.contains(COMPOSED_BASE_MARKER),
+        "composition must carry the base body into the leaf:\n{composed}"
+    );
+    assert_eq!(agent_schema(&composed), AgentSchema::TrustyMpm);
+
+    // And the SOURCE leaf — which never went through the composer — is not.
+    let source = std::fs::read_to_string(tmp.path().join("leaf.md")).expect("read");
+    assert_eq!(agent_schema(&source), AgentSchema::Unrecognized);
 }

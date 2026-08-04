@@ -85,6 +85,9 @@ const DISABLED_SUFFIX: &str = ".disabled";
 /// How many numbered fallbacks to try before giving up on a free name.
 const MAX_COLLISION_ATTEMPTS: u32 = 100;
 
+/// Filename of the per-run receipt, written beside that run's backups.
+const RECEIPT_FILE: &str = "RECEIPT.md";
+
 /// Why a whole sweep refused to run.
 ///
 /// Why: these are the conditions under which acting at all would be reckless,
@@ -210,12 +213,21 @@ fn sweep_locked(
     // Rendered from the report, after every file is accounted for — including
     // a run that failed part way. See `quarantine_receipt`'s module doc.
     if report.wrote_anything() {
-        let receipt_path = backup_dir.join("RECEIPT.md");
         let body = render_receipt(&report, tier_dir, run_id);
-        match std::fs::create_dir_all(&backup_dir)
-            .and_then(|()| std::fs::write(&receipt_path, body))
-        {
-            Ok(()) => report.receipt = Some(receipt_path),
+        // #4448: routed through `free_path` like the backups, not a bare write.
+        // `run_id` is second-resolution, so two sweeps inside one UTC second
+        // would otherwise truncate the first run's receipt — the only record of
+        // what that run moved.
+        let written = std::fs::create_dir_all(&backup_dir).and_then(|()| {
+            let path = free_path(&backup_dir.join(RECEIPT_FILE)).ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "no free receipt name after {MAX_COLLISION_ATTEMPTS} attempts"
+                ))
+            })?;
+            std::fs::write(&path, body).map(|()| path)
+        });
+        match written {
+            Ok(path) => report.receipt = Some(path),
             // Never an `Err`: the moves already happened and the caller must
             // still learn about them.
             Err(e) => report.receipt_error = Some(e.to_string()),

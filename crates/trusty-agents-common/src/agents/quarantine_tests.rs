@@ -12,11 +12,16 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 /// A composed trusty-mpm agent — what an older binary actually wrote into a
-/// project tier, and the only shape gate 4 accepts.
+/// project tier, and the only shape gate 4 accepts. The body opens with the
+/// base preamble `compose_agent` concatenates in front of every agent; that
+/// line is the POSITIVE half of gate 4, so a fixture without it is not composer
+/// output and (correctly) does not move.
 fn tm_agent(name: &str) -> String {
     format!(
         "---\nname: {name}\nrole: qa\ndescription: 'Composed by tm.'\nmodel: sonnet\n\
-         skills: [systematic-debugging]\ninitialPrompt: \"Begin.\"\n---\n\n# {name}\n\nBody.\n"
+         skills: [systematic-debugging]\ninitialPrompt: \"Begin.\"\n---\n\n\
+         # BASE-AGENT — Foundation for all trusty-mpm agents\n\n\
+         Root-level instructions composed into every deployed agent.\n\n# {name}\n\nBody.\n"
     )
 }
 
@@ -224,6 +229,64 @@ fn quarantine_never_moves_a_claude_mpm_file_on_a_colliding_name() {
     assert!(report.moved.is_empty(), "report: {report:?}");
     assert_eq!(report.skipped[0].reason, SkipReason::ClaudeMpmSchema);
     assert_eq!(std::fs::read_to_string(&path).expect("read"), content);
+}
+
+/// GATE 3, and the #4448 review CRITICAL reproduced end to end. A COMMITTED
+/// file in a repository git cannot read must be REFUSED, not swept.
+///
+/// This is the critic's own probe. Before the fix it asserted the opposite and
+/// passed: `report.moved.len() == 1`, `!original.exists()` — a tracked file
+/// moved out from under the operator, because any non-zero `git rev-parse` exit
+/// was read as "no repository here" instead of "git could not be asked".
+#[test]
+fn quarantine_refuses_a_tracked_file_when_git_cannot_be_read() {
+    let f = Fixture::new();
+    let content = tm_agent("qa");
+    let original = f.write("qa.md", &content);
+    f.git_add(".claude/agents/qa.md");
+
+    // A healthy repo already refuses — establishes the fixture is real.
+    let healthy = f.sweep(&roster(&["qa"])).expect("sweep");
+    assert!(healthy.moved.is_empty(), "report: {healthy:?}");
+    assert_eq!(healthy.skipped[0].reason, SkipReason::GitTracked);
+
+    // Same repo, same committed file — now git cannot read it.
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&f.project)
+        .args(["config", "core.repositoryformatversion", "99"])
+        .output()
+        .expect("spawn git config");
+    assert!(out.status.success(), "could not break the repo");
+
+    let report = f.sweep(&roster(&["qa"])).expect("sweep");
+
+    assert!(
+        report.moved.is_empty(),
+        "a COMMITTED file must never move because git failed to answer: {report:?}"
+    );
+    assert_eq!(report.skipped[0].reason, SkipReason::VcsUnknown);
+    assert!(original.exists(), "the committed file must still be there");
+    assert_eq!(std::fs::read_to_string(&original).expect("read"), content);
+    assert!(!f.tier.join("qa.md.disabled").exists());
+}
+
+/// GATE 4, and the #4448 review HIGH reproduced end to end. A MINIMAL
+/// hand-authored agent — no exotic key, every key inside the whitelist — is not
+/// tm's to move. Before the fix the key whitelist accepted it by omission.
+#[test]
+fn quarantine_never_moves_a_minimal_hand_authored_file() {
+    let f = Fixture::new();
+    let content = "---\nname: qa\nrole: qa\ndescription: Ours.\nmodel: sonnet\n---\n\n\
+                   # Our QA\n\nHand-written by the operator.\n";
+    let path = f.write("qa.md", content);
+
+    let report = f.sweep(&roster(&["qa"])).expect("sweep");
+
+    assert!(report.moved.is_empty(), "report: {report:?}");
+    assert_eq!(report.skipped[0].reason, SkipReason::UnrecognizedSchema);
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), content);
+    assert!(!f.tier.join("qa.md.disabled").exists());
 }
 
 /// GATE 4 again — the "unrecognized" half. A hand-authored override on a
@@ -513,6 +576,30 @@ fn a_failed_backup_leaves_the_original_in_place() {
     assert!(report.receipt_error.is_some(), "report: {report:?}");
 }
 
+/// Two sweeps in the same UTC second must not truncate the first run's receipt.
+/// `run_id` is second-resolution, so the receipt needs the same collision
+/// protection the backups already had (#4448 review LOW).
+#[test]
+fn a_same_second_rerun_does_not_overwrite_the_first_receipt() {
+    let f = Fixture::new();
+    f.write("qa.md", &tm_agent("qa"));
+    let first = f.sweep(&roster(&["qa"])).expect("first sweep");
+    let first_receipt = first.receipt.clone().expect("receipt");
+
+    // Same run id — `Fixture::sweep` always passes "run-1".
+    f.write("qa.md", &tm_agent("qa"));
+    let second = f.sweep(&roster(&["qa"])).expect("second sweep");
+    let second_receipt = second.receipt.clone().expect("receipt");
+
+    assert_ne!(first_receipt, second_receipt, "receipts must not collide");
+    assert!(first_receipt.exists(), "run 1's receipt must survive");
+    let body = std::fs::read_to_string(&first_receipt).expect("read");
+    assert!(
+        body.contains("## Moved (1)"),
+        "run 1's record intact:\n{body}"
+    );
+}
+
 /// A clean tier gains no files — no backup directory, no receipt.
 #[test]
 fn a_clean_tier_writes_no_receipt() {
@@ -580,7 +667,11 @@ fn a_second_run_does_not_overwrite_the_first_backup() {
     assert_eq!(first.moved.len(), 1);
 
     // A fresh stale copy lands, and the same run id is reused.
-    f.write("qa.md", "---\nname: qa\nrole: qa\n---\n\nSecond copy.\n");
+    f.write(
+        "qa.md",
+        "---\nname: qa\nrole: qa\n---\n\n\
+         # BASE-AGENT — Foundation for all trusty-mpm agents\n\nSecond copy.\n",
+    );
     let second = f.sweep(&roster(&["qa"])).expect("second sweep");
 
     assert_eq!(second.moved.len(), 1, "report: {second:?}");

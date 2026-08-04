@@ -15,12 +15,18 @@ use super::*;
 use tempfile::tempdir;
 
 /// A composed trusty-mpm agent — the only shape the sweep's schema gate accepts.
+/// The base preamble is the positive half of gate 4; without it the file reads
+/// as hand-authored and is (correctly) refused.
 fn tm_shadow(name: &str) -> String {
     format!(
         "---\nname: {name}\nrole: engineer\ndescription: 'Stale copy an older binary wrote.'\n\
-         model: sonnet\n---\n\n# {name}\n\nSTALE.\n"
+         model: sonnet\n---\n\n{BASE_MARKER}\n\nComposed preamble.\n\n# {name}\n\nSTALE.\n"
     )
 }
+
+/// The composition root a real deployed agent carries. Pinned against the
+/// bundled asset by `the_bundled_base_agent_carries_the_composition_marker`.
+const BASE_MARKER: &str = "# BASE-AGENT — Foundation for all trusty-mpm agents";
 
 /// Seed a minimal bundled source so the deploy half of `prepare_session` has
 /// something to do. The ROSTER the quarantine keys on additionally includes
@@ -325,4 +331,77 @@ fn walk(root: &std::path::Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// THE ASSET PIN for `agent_schema`'s `COMPOSED_BASE_MARKER`. That constant
+/// lives in `trusty-agents-common`, but the file it describes is shipped HERE,
+/// so this is where the two can actually be compared. If the heading is ever
+/// edited, the sweep stops recognising its own artifacts and silently becomes a
+/// no-op — this fails first.
+#[test]
+fn the_bundled_base_agent_carries_the_composition_marker() {
+    let base = include_str!("../../assets/agents/BASE-AGENT.md");
+    assert!(
+        base.contains(BASE_MARKER),
+        "crates/trusty-mpm/src/assets/agents/BASE-AGENT.md no longer carries `{BASE_MARKER}`. \
+         Update COMPOSED_BASE_MARKER in trusty-agents-common's agent_schema.rs to match, or the \
+         #4448 quarantine will refuse every file it exists to move."
+    );
+}
+
+/// Every bundled agent's `extends:` chain must root at `base-agent`, which is
+/// what makes the marker universal rather than incidental. A new agent that
+/// extends nothing would deploy without the preamble and become unsweepable.
+#[test]
+fn every_bundled_agent_roots_at_base_agent() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the bundled agent source directory must exist")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+        .collect();
+    assert!(
+        entries.len() > 20,
+        "roster looks truncated: {}",
+        entries.len()
+    );
+
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let body = std::fs::read_to_string(entry.path()).expect("read agent");
+        let declares_extends = body.lines().any(|l| l.starts_with("extends:"));
+        let is_root = name == "BASE-AGENT.md";
+        assert!(
+            declares_extends || is_root,
+            "`{name}` declares no `extends:` and is not BASE-AGENT.md, so its composed output \
+             would carry no base preamble and the #4448 quarantine could never recognise it"
+        );
+    }
+}
+
+/// The never-deletes pin, extended to the module that AIMS the sweep. #4448
+/// review noted `trusty-agents-common`'s own pin covers the four modules that
+/// perform the move but not this one, which chooses the target. It has no
+/// filesystem calls today; this is what keeps it that way.
+#[test]
+fn the_wiring_module_never_deletes() {
+    let source = include_str!("quarantine_shadows.rs");
+    for needle in [
+        concat!("remove_", "file"),
+        concat!("remove_", "dir"),
+        concat!("set_", "len"),
+    ] {
+        let calls: Vec<&str> = source
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                !t.starts_with("//") && line.contains(needle)
+            })
+            .collect();
+        assert!(
+            calls.is_empty(),
+            "quarantine_shadows.rs must never call `{needle}` — it aims the sweep, \
+             it does not destroy. Offending lines: {calls:?}"
+        );
+    }
 }

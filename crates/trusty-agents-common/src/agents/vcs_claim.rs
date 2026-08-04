@@ -27,6 +27,21 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
+/// The ONLY git stderr that means "there is genuinely no repository here".
+///
+/// Why: this literal is the whole safety margin of gate 3 — see
+/// [`VcsIndex::probe`]. The parenthesised clause is load-bearing: git emits
+/// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
+/// shorter phrase `not a git repository` matches a broken repo and a
+/// genuinely-absent one alike. Only the "searched the parents and found
+/// nothing" form is real absence.
+/// What: verified byte-identical against git's output for an empty temp
+/// directory. Any wording drift falls through to [`IndexState::Unavailable`],
+/// which refuses — the fail-closed direction.
+/// Test: `claim_outside_a_repo_is_unclaimed` (the match),
+/// `a_stale_worktree_pointer_is_unknown_not_no_repo` (the near-miss).
+const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+
 /// What the project's VCS says about one file.
 ///
 /// Why: [`Unknown`](Self::Unknown) is not a synonym for
@@ -82,16 +97,41 @@ impl VcsIndex {
     /// Why: the sweep needs one authoritative answer for the whole directory
     /// before it moves anything, and it must distinguish "not a repo" from
     /// "could not ask" — see [`VcsClaim`].
-    /// What: runs `git -C <dir> rev-parse --is-inside-work-tree`; a spawn
-    /// failure yields [`IndexState::Unavailable`] and a non-zero exit yields
-    /// [`IndexState::NoRepo`]. On success it runs `git -C <dir> ls-files -z`,
-    /// whose output is NUL-separated paths relative to `dir`; a spawn failure
-    /// or non-zero exit there also yields `Unavailable`, since a repo was
-    /// confirmed and the listing is the only thing that could clear a file.
-    /// Entries containing `/` are dropped — the agent tier is flat, and a
-    /// nested path can never name a file the sweep considers.
+    ///
+    /// What: runs `git -C <dir> rev-parse --is-inside-work-tree`, then
+    /// `git -C <dir> ls-files -z`, whose output is NUL-separated paths relative
+    /// to `dir`. Entries containing `/` are dropped — the agent tier is flat, so
+    /// a nested path can never name a file the sweep considers. Only ONE
+    /// outcome yields [`IndexState::NoRepo`]; every other non-success yields
+    /// [`IndexState::Unavailable`], which refuses.
+    ///
+    /// 🔴 THE EXIT CODE ALONE IS NOT A CLASSIFIER. Git has no dedicated exit
+    /// code for "this is not a repository" — it exits 128 for that AND for
+    /// every other fatal condition. Reading any non-zero exit as `NoRepo`
+    /// (which this did until #4448 review) sends a live work tree git merely
+    /// declined to read into the SWEEPABLE state, and its committed agent files
+    /// get moved. The triggers are ordinary, not exotic: `detected dubious
+    /// ownership` on a checkout owned by another uid, a `.git` file whose
+    /// worktree gitdir is gone, a broken `repositoryformatversion`, or any
+    /// failing `git` shim on `PATH`.
+    ///
+    /// So the branch is on the REASON, matched against
+    /// [`NO_REPO_STDERR`] — and note that a substring match on the shorter
+    /// `not a git repository` would NOT be safe: a stale worktree pointer emits
+    /// `fatal: not a git repository: (null)`, which contains that phrase while
+    /// meaning the opposite. Only the parenthesised "searched the parents and
+    /// found nothing" form is genuine absence. Any future git wording change
+    /// therefore falls through to `Unavailable` — the refusing side.
+    ///
+    /// Success is likewise not enough: a BARE repository exits 0 printing
+    /// `false`, so `stdout` must read exactly `true` before the listing is
+    /// trusted.
+    ///
     /// Test: `probe_finds_tracked_files`, `claim_outside_a_repo_is_unclaimed`,
-    /// `probe_drops_nested_entries`, `probe_of_a_missing_directory_does_not_panic`.
+    /// `probe_drops_nested_entries`, `probe_of_a_missing_directory_does_not_panic`,
+    /// `an_unreadable_repo_is_unknown_not_no_repo`,
+    /// `a_stale_worktree_pointer_is_unknown_not_no_repo`,
+    /// `a_bare_repo_is_unknown`.
     pub fn probe(dir: &Path) -> Self {
         let inside = Command::new("git")
             .arg("-C")
@@ -104,9 +144,22 @@ impl VcsIndex {
                     state: IndexState::Unavailable,
                 };
             }
+            // #4448: branch on WHY it failed, never on the bare exit code.
             Ok(out) if !out.status.success() => {
+                let why = String::from_utf8_lossy(&out.stderr);
                 return Self {
-                    state: IndexState::NoRepo,
+                    state: if why.contains(NO_REPO_STDERR) {
+                        IndexState::NoRepo
+                    } else {
+                        IndexState::Unavailable
+                    },
+                };
+            }
+            // #4448: a bare repo exits 0 printing `false`; it has no work tree,
+            // so nothing here can answer whether a file is claimed.
+            Ok(out) if String::from_utf8_lossy(&out.stdout).trim() != "true" => {
+                return Self {
+                    state: IndexState::Unavailable,
                 };
             }
             Ok(_) => {}

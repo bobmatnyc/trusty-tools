@@ -133,3 +133,92 @@ fn probe_of_a_missing_directory_does_not_panic() {
         "a directory that does not exist can hold no tracked file"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #4448 review CRITICAL — the exit code alone is not a classifier.
+//
+// Until this was fixed, ANY non-zero `rev-parse` exit mapped to `NoRepo`, i.e.
+// to `Unclaimed`, i.e. to SWEEPABLE. Git exits 128 for every fatal condition,
+// so a live work tree git merely declined to read reached the permissive state
+// and its committed files were movable. Each test below drives a real git
+// failure that is NOT "there is no repository here".
+// ---------------------------------------------------------------------------
+
+/// A real repository that git refuses to read. `repositoryformatversion` is the
+/// deterministic stand-in for the realistic triggers — `detected dubious
+/// ownership` on a checkout owned by another uid, and a `git` shim on `PATH`
+/// that fails — all of which exit 128 through this same branch.
+#[test]
+fn an_unreadable_repo_is_unknown_not_no_repo() {
+    let (tmp, tier) = repo_with_mixed_tier();
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Claimed,
+        "the fixture must start healthy, or this test proves nothing"
+    );
+
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(tmp.path())
+        .args(["config", "core.repositoryformatversion", "99"])
+        .output()
+        .expect("spawn git config");
+    assert!(out.status.success(), "could not break the repo");
+
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Unknown,
+        "a repository git cannot read must be UNKNOWN — `NoRepo` would make its \
+         committed files sweepable"
+    );
+}
+
+/// A `.git` file whose worktree gitdir is gone. This is the state the ~70
+/// worktrees orphaned by the 2026-07-21 `.base` incident were left in.
+///
+/// It is also the reason the fix cannot match the short phrase `not a git
+/// repository`: git emits `fatal: not a git repository: (null)` here, which
+/// contains that phrase while meaning the OPPOSITE of absence. Only the
+/// parenthesised "searched the parents" form is genuine.
+#[test]
+fn a_stale_worktree_pointer_is_unknown_not_no_repo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    std::fs::write(
+        tmp.path().join(".git"),
+        "gitdir: /nonexistent/parent/.git/worktrees/gone\n",
+    )
+    .expect("write stale pointer");
+
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("qa.md"),
+        VcsClaim::Unknown,
+        "a stale worktree pointer must be UNKNOWN, not NoRepo"
+    );
+}
+
+/// A bare repository exits 0 printing `false`. It has no work tree, so it can
+/// neither confirm nor clear a claim.
+#[test]
+fn a_bare_repo_is_unknown() {
+    let tmp = TempDir::new().expect("tempdir");
+    let bare = tmp.path().join("bare.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&bare)
+        .output()
+        .expect("spawn git init --bare");
+    assert!(out.status.success(), "could not create a bare repo");
+
+    assert_eq!(VcsIndex::probe(&bare).claim("qa.md"), VcsClaim::Unknown);
+}
+
+/// The healthy path still answers, so the fix did not simply freeze the gate.
+#[test]
+fn a_healthy_repo_still_answers_both_ways() {
+    let (_tmp, tier) = repo_with_mixed_tier();
+    let index = VcsIndex::probe(&tier);
+    assert_eq!(index.claim("tracked.md"), VcsClaim::Claimed);
+    assert_eq!(index.claim("loose.md"), VcsClaim::Unclaimed);
+}
