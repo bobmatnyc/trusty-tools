@@ -78,6 +78,14 @@
 //! in the file that pierces an automatic-marker exemption; see that call
 //! site's comment for why it must never be routed through [`evaluate_tool`]
 //! instead.
+//! **Subagent fan-out denial (issue #4784):** [`pm_guard`] calls
+//! [`crate::commands::pm_guard_fanout::evaluate_subagent_fanout`] DIRECTLY,
+//! before Guards 1 and 4, denying `Task`/`Agent` when the calling session is
+//! itself a subagent — the PM keeps dispatching, `SendMessage` is never
+//! denied, and an indeterminate caller context fails OPEN. It sits ahead of
+//! both exemptions for the same reason the worktree guard does: both return
+//! ALLOW exactly when the caller IS a subagent, the only case the rule fires
+//! on. See that module's doc for the two markers it trusts and why.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -96,6 +104,7 @@ use crate::commands::pm_guard_bash::{
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
+use crate::commands::pm_guard_fanout;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
@@ -271,6 +280,25 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         }
     }
 
+    // #4784: a subagent must never dispatch further subagents. Placed here,
+    // before Guards 1 and 4, for the same structural reason as the worktree
+    // guard above: both exemptions early-return ALLOW precisely when the
+    // caller IS a subagent, which is the only case this rule fires on — so a
+    // fan-out check placed after either one, or folded into `evaluate_tool`,
+    // would be a guaranteed no-op. Guards 2/3 stay ahead of it (they are
+    // human escape hatches, not automatic markers — see their comments).
+    // It fails OPEN: `caller_is_subagent` reports false whenever neither the
+    // payload's `agent_id` nor `CLAUDE_MPM_SUB_AGENT` is present, so an
+    // unrecognised context allows the dispatch rather than blocking the PM.
+    if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(
+        tool_name,
+        pm_guard_fanout::caller_is_subagent(&payload),
+    ) {
+        audit_denied_tool(url, session_id, tool_name, reason).await;
+        println!("{}", build_pretooluse_deny_response(reason));
+        return Ok(());
+    }
+
     // Guard 1: never block a nested MPM sub-agent for anything else — it is
     // doing the delegated work the PM is being steered toward. Moved here
     // (originally the first line of this function, short-circuiting before
@@ -402,7 +430,7 @@ fn pm_unrestricted() -> bool {
 /// `payload_is_subagent_dispatch_false_when_absent_or_empty`; exercised end to
 /// end via `pm_guard_native_subagent_dispatch_allows_edit` in
 /// `tests/tm_hook_pm_guard.rs`.
-fn payload_is_subagent_dispatch(payload: &serde_json::Value) -> bool {
+pub(crate) fn payload_is_subagent_dispatch(payload: &serde_json::Value) -> bool {
     payload
         .get("agent_id")
         .and_then(|v| v.as_str())
