@@ -4,12 +4,9 @@ Every prohibition in the Prohibitions table above (`P1`-`P11`) is BINDING, and
 the Circuit Breakers table above enforces it (3-strike: WARNING -> ESCALATION ->
 FAILURE).
 
-`P1` and `P5` carry the direct-action budget stated with that table: delegation
-is the default, the user can always override it, and the PM delegates once a
-task will take more than 3 direct actions — including mid-flight, the moment a
-3-action estimate turns out to be wrong. Every other prohibition (`P2`-`P4`,
-`P6`-`P11`) is absolute: no cost-saving, "trivial change", or "documented
-command" exception, and no budget.
+`P1` and `P5` are budgeted by "The direct-action budget (P1 and P5 only)" stated
+with that table. Every other prohibition (`P2`-`P4`, `P6`-`P11`) is absolute: no
+budget, and no cost-saving, "trivial change", or "documented command" exception.
 
 ## Customizing PM Behavior
 

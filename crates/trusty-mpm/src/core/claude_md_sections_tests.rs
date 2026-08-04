@@ -1044,7 +1044,18 @@ fn no_floor_text_points_at_content_outside_the_floor() {
 /// gets tests deleted. Normalising pins the SENTENCE while leaving the wrapping
 /// free.
 fn unwrapped(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Strip the blockquote continuation marker before flattening. The canonical
+    // budget statement in `enforcement.md` is a `>` quote, so a `>` lands
+    // mid-sentence at every line break; without this, a needle would silently
+    // depend on where the source happens to wrap — the exact fragility this
+    // helper exists to remove.
+    text.lines()
+        .map(|l| l.trim_start().trim_start_matches('>'))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Assert both halves of the direct-action budget survive into `prompt`.
@@ -1053,6 +1064,16 @@ fn unwrapped(text: &str) -> String {
 /// future edit: an implementation that keeps only the pre-task estimate reads
 /// complete and leaves the real failure mode — the PM that started in good faith
 /// and keeps going on action 4 — unaddressed.
+///
+/// Every needle below is drawn from `sections/enforcement.md`'s canonical
+/// "The direct-action budget (P1 and P5 only)" subsection, deliberately. The
+/// rule used to be restated verbatim in `identity.md`, `core.md` and
+/// `non-overridable-rules.md`, and two of these needles matched only
+/// `identity.md`'s wording — so the helper was gated on a RESTATEMENT that
+/// `the_budget_survives_every_override_configuration` itself proves is
+/// deletable by an `IDENTITY` block. Keying every needle to the canonical
+/// subsection asserts the same two halves against the copy that survives every
+/// override configuration.
 fn assert_budget_intact(prompt: &str, configuration: &str) {
     let flat = unwrapped(prompt);
     let needles: &[(&str, &str)] = &[
@@ -1065,12 +1086,16 @@ fn assert_budget_intact(prompt: &str, configuration: &str) {
             "the second clause of the owner's governing sentence",
         ),
         (
-            "MID-FLIGHT HANDOFF rule, not only a pre-task estimate",
+            "Anything you believe needs more than 3 direct actions is delegated, never begun",
+            "the up-front estimate stated as a rule, not only as the owner's sentence",
+        ),
+        (
+            "The estimate is not a licence to finish",
             "the MID-FLIGHT HANDOFF half — a PM whose 3-action estimate stops \
              holding must hand off the remainder",
         ),
         (
-            "never carried on to a fourth direct action",
+            "Do not take a fourth direct action to finish work you misjudged",
             "the action the mid-flight rule forbids",
         ),
         (
@@ -1328,4 +1353,227 @@ fn locate_blocks_ignores_other_sections() {
     let (start, end) = located.spans[0];
     assert!(lines[start].contains(section_token(SectionId::Workflow)));
     assert!(lines[end].contains(section_token(SectionId::Workflow)));
+}
+
+// ── routing-surface consolidation (instruction-prompt dedup) ─────────────
+
+/// Every routing mapping the collapsed tables used to carry, as
+/// (needle, what it routes) pairs.
+///
+/// Six surfaces answered "which agent handles what" for the same ~11 agents:
+/// `Agent Routing` (core), `When to Delegate to Each Agent`, `Ops Agent
+/// Routing`, `Make / Mise Command Routing`, `Common User Request Routing`, and
+/// the generated roster. Five were folded into one Routing Table. The mappings
+/// below existed ONLY in a deleted table, so a future edit that trims the
+/// surviving table would silently drop a real routing rule with nothing else
+/// asserting it — which is the failure this test exists to catch, not the
+/// wording of any one row.
+const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
+    // Make / Mise Command Routing — the whole table lived nowhere else. `mise`
+    // in particular is absent from the Prohibitions table, so this section is
+    // the ONLY statement that `mise run` targets are delegated at all.
+    (
+        "`make` and `mise run`",
+        "make and mise targets are delegated",
+    ),
+    (
+        "the PM never runs one directly",
+        "the PM-never-runs-them rule",
+    ),
+    (
+        "every `make` and `mise run` target",
+        "make/mise → local-ops",
+    ),
+    (
+        "build, dist, clean, install, setup",
+        "build/dist/clean/install/setup → local-ops",
+    ),
+    (
+        "version, bump, release, publish, deploy",
+        "version/release/publish → local-ops",
+    ),
+    (
+        "`pyproject.toml`, `package.json`",
+        "the manifest-file release triggers",
+    ),
+    (
+        "`test`, `lint`, `check` (or `engineer`)",
+        "make/mise test/lint/check → qa or engineer",
+    ),
+    // Ops Agent Routing.
+    (
+        "localhost, PM2, npm, docker",
+        "the local-ops trigger keywords",
+    ),
+    (
+        "including anything unknown or ambiguous",
+        "unknown/ambiguous → local-ops",
+    ),
+    (
+        "generic `ops` agent is DEPRECATED",
+        "the deprecated generic ops agent",
+    ),
+    (
+        "EXAMPLES of routing, not an exhaustive list",
+        "the not-exhaustive caveat",
+    ),
+    // Common User Request Routing.
+    (
+        "screenshot, click, navigate, DOM, console errors",
+        "browser triggers → web-qa",
+    ),
+    (
+        "never chrome-devtools, claude-in-chrome, or playwright",
+        "the browser-tool ban",
+    ),
+    (
+        "`research` → `engineer` → `local-ops` → `qa` → `documentation`",
+        "the \"just do it\" full pipeline",
+    ),
+    // When to Delegate to Each Agent — the per-agent facts.
+    (
+        "Prefer the language-specific engineer",
+        "the language-specific engineer preference",
+    ),
+    (
+        "APPROVED / NEEDS_IMPROVEMENT / BLOCKED",
+        "the code-analyzer verdict vocabulary",
+    ),
+    (
+        "not interchangeable",
+        "code-analyzer vs code-critic are distinct",
+    ),
+    (
+        "never goes to `version-control`",
+        "P6 — ticket bookkeeping stays with ticketing",
+    ),
+    (
+        "Check git user for main-branch access",
+        "the version-control git-user check",
+    ),
+    (
+        "Triggers: \"skill\", \"stack\", \"framework\"",
+        "the mpm-skills-manager triggers",
+    ),
+    (
+        "Secret scanning, attack-vector detection",
+        "the security capabilities",
+    ),
+    // core.md's Agent Routing — the per-agent default model column.
+    ("| sonnet |", "the per-agent default-model column"),
+    ("| opus |", "the per-agent default-model column"),
+    ("| haiku |", "the per-agent default-model column"),
+    // The verbatim-name rule, which gated both deleted tables.
+    (
+        "fails to dispatch (issue #4594)",
+        "the pass-the-name-verbatim rule",
+    ),
+];
+
+#[test]
+fn the_surviving_routing_table_covers_every_folded_mapping() {
+    let package = bundled_fallback_package().expect("manifest parses");
+    let delegation = package.authored_run(&[SectionId::AgentDelegation]);
+
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS {
+        assert!(
+            delegation.contains(needle),
+            "the collapsed routing tables lost {what}; missing {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn routing_lives_on_exactly_one_surface() {
+    // The point of the collapse: a reader asking "which agent handles what"
+    // must find one table, not six. `core.md` keeps a pointer, never a table.
+    let package = bundled_fallback_package().expect("manifest parses");
+    let core = package.authored_run(&[SectionId::Core]);
+
+    for retired in [
+        "## Ops Agent Routing",
+        "## Make / Mise Command Routing",
+        "## Common User Request Routing",
+        "## When to Delegate to Each Agent",
+    ] {
+        assert!(
+            !package
+                .authored_run(&[SectionId::AgentDelegation])
+                .contains(retired),
+            "{retired} was folded into the Routing Table and must not return"
+        );
+    }
+
+    assert!(
+        core.contains("## Agent Routing"),
+        "core keeps the heading as a pointer, so a reader is not left guessing"
+    );
+    // The retired table's exact header. Deliberately not a bare
+    // "| `subagent_type` |": core legitimately keys its 5-phase workflow table
+    // and its QA-target table on the same column, and neither is a routing
+    // surface — they say which agent gates a phase, not which triggers route
+    // to which agent.
+    assert!(
+        !core.contains("| `subagent_type` | Triggers | Default Model |"),
+        "core must point at the Routing Table, never carry a second copy of it"
+    );
+}
+
+#[test]
+fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
+    // The rule was stated four times. Only `enforcement.md` states it; the
+    // other three sections point at it by its exact subsection title, so the
+    // pointer cannot rot into a dangling reference unnoticed.
+    let package = bundled_fallback_package().expect("manifest parses");
+    const TITLE: &str = "The direct-action budget (P1 and P5 only)";
+
+    let enforcement = package.authored_run(&[SectionId::Enforcement]);
+    assert!(
+        enforcement.contains(&format!("### {TITLE}")),
+        "enforcement.md holds the canonical statement"
+    );
+
+    for section in [
+        SectionId::Core,
+        SectionId::Identity,
+        SectionId::NonOverridableRules,
+    ] {
+        let body = package.authored_run(&[section]);
+        assert!(
+            body.contains(TITLE),
+            "{section:?} must point at the canonical budget by title"
+        );
+        assert!(
+            !body.contains("One direct action = one PM-executed step"),
+            "{section:?} must point at the budget, not restate its mechanics"
+        );
+    }
+}
+
+#[test]
+fn the_prose_rules_ban_categories_not_phrase_lists() {
+    // Both new prose rules were added because a literal example list failed to
+    // generalize. Each must state the ban as a category or template AND mark
+    // its examples non-exhaustive; asserting only the examples would rebuild
+    // the exact failure they were written for.
+    let core = bundled_fallback_package()
+        .expect("manifest parses")
+        .authored_run(&[SectionId::Core]);
+
+    assert!(core.contains("**No praise for the user.**"));
+    assert!(
+        core.contains("bans the CATEGORY"),
+        "the sycophancy rule must ban the category, not four strings"
+    );
+    assert!(core.contains("Non-exhaustive examples:"));
+
+    assert!(core.contains("**Delete the framing opener; lead with the fact.**"));
+    assert!(
+        core.contains("`One <noun> that <its significance, or your relation to it>:`"),
+        "the framing-opener rule must state the TEMPLATE"
+    );
+    assert!(
+        core.contains("the rule is the template\nabove, never this list"),
+        "the observed instances must be marked as illustration only"
+    );
 }
