@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.42.1] — 2026-08-04
+
+### Fixed
+
+- `/health` now reports `status: "degraded"` when the embedder permanently
+  failed to reach its configured backend — `embedder_bootstrap: "failed"` (the
+  graceful Python/MPS bootstrap gave up for this daemon's lifetime) or
+  `"fell_back_to_ort"` (the swap-back watchdog abandoned a dead sidecar). Both
+  previously sat next to `status: "ok"` forever, so a silent MPS → CPU
+  performance regression was invisible to every monitor. `embedder: "ready"` is
+  unchanged and still describes the currently-active backend (#4125)
+- The graceful Python bootstrap's readiness probe now gets a larger budget on
+  each retry instead of the same flat `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`
+  twice. A cold torch import + model load, racing the daemon's own warm-boot,
+  could exceed the flat 30 s on both attempts and permanently abandon a healthy
+  sidecar (#4125)
+- Reindex resume-from-checkpoint (#3979, shipped in 0.42.0): four review findings on the live reindex data path.
+  - The checkpoint's config fingerprint concatenated fields without unambiguous framing, so distinct walk configurations could hash identically (`exclude_globs = ["a", "b"]` collided with `["a,b"]`) and a checkpoint could be adopted for a configuration it was not built under. Fields and list elements are now length-prefixed, and paths are hashed as raw `OsStr` bytes rather than a lossy UTF-8 rendering.
+  - `CHECKPOINT_SCHEMA_VERSION` bumped 1 → 2 so every checkpoint written by 0.42.0 invalidates on the version gate and falls back to a full reindex — never misread as valid under the new fingerprint.
+  - The staging corpus was opened twice (once to validate the checkpoint, once to adopt it). redb locks the file exclusively, so the second open could fail and silently abandon the resume; the probe now hands its open handle to the adoption, so the file is opened exactly once.
+  - "A promoted corpus never carries an in-progress checkpoint" was upheld only by the order two statements happened to appear in. Clearing the record and releasing the staging handle are now one operation that yields the token the promotion rename requires, with a fallback clear on the released file when the in-store clear cannot be confirmed.
+- The graceful Python bootstrap's per-retry readiness-probe budget is now
+  capped at 3x the configured `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` (90 s at
+  the default). It previously scaled by attempt number with no ceiling, so a
+  raised `TRUSTY_PY_BOOTSTRAP_RETRIES` grew a single probe's budget without
+  limit — attempt 100 would have held one live Python child on one probe for 50
+  minutes — and a pathologically large base could panic on `Duration` overflow.
+  A capped probe now says so in its timeout log line, so it is distinguishable
+  from an uncapped one (#4125)
+
 ## [0.42.0] — 2026-08-04
 
 ### Added
