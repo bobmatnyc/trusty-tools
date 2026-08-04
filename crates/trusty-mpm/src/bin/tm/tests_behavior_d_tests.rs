@@ -2145,44 +2145,347 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     handle.abort();
 }
 
-/// `fetch_live_sessions(allow_auto_prune = false)` is a pure read — a
-/// non-interactive listing (scripted/cron/CI bare `tm` or `tm ls`) must never
-/// trigger the destructive auto-prune sweep (critic HIGH finding #3).
+// ── #4702: prune coverage — every invocation, and stopped records ───────────
+//
+// Two independent narrowings let dead records accumulate without bound before
+// #4702, and each gets its own group below:
+//   1. the prune fired only from the TTY picker, so `managed::session_ls` (every
+//      piped / scripted / `--json` listing) never pruned at all;
+//   2. it acted only on the daemon-computed `unresumable` flag, which is
+//      computed ONLY for records whose PERSISTED state is `Stopped`/`Errored` —
+//      a zombie (persisted `Active`, pane gone) is display-reconciled to
+//      `stopped` and reads `unresumable == false` forever.
+//
+// Every test here injects a tempdir marker path, never the operator's real
+// `~/.trusty-mpm/auto-prune-seen.json`.
+
+/// Build a `stopped` summary whose two wire-visible workdir candidates
+/// (`workspace_path`, `cwd`) both point at `workdir`, with `unresumable`
+/// deliberately `false` — i.e. exactly the zombie shape the daemon never
+/// probes. `#4702`.
+fn stopped_session_at(
+    id: &str,
+    workdir: &std::path::Path,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = ls_test_session(id, "stopped", None, None, None, None);
+    s.id = id.to_string();
+    s.workspace_path = Some(workdir.to_string_lossy().to_string());
+    s.cwd = Some(workdir.to_string_lossy().to_string());
+    s.unresumable = false;
+    s
+}
+
+/// Spawn a stub daemon that answers every decommission POST honestly
+/// (`workspace_removed: false`, the record-only shape) and records the query
+/// string it was called with. Returns `(url, captured, task handle)`.
+async fn spawn_recording_decommission_stub() -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(
+            move |axum::extract::Path(id): axum::extract::Path<String>,
+                  axum::extract::RawQuery(q): axum::extract::RawQuery| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock()
+                        .expect("capture lock")
+                        .push(format!("{id}?{}", q.unwrap_or_default()));
+                    axum::Json(serde_json::json!({ "workspace_removed": false }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), captured, handle)
+}
+
+/// Defect 2 (#4702): a `stopped` record whose workspace is INDEPENDENTLY
+/// verified gone is cleared, even though the daemon never flagged it
+/// `unresumable` (that flag is computed only for records whose PERSISTED state
+/// is stopped/errored — a display-reconciled zombie never gets probed).
+///
+/// Fails before #4702: the partition keyed on `s.unresumable` alone, so this
+/// record was never even a candidate.
 #[tokio::test]
-async fn fetch_live_sessions_skips_auto_prune_when_disallowed() {
+async fn auto_prune_clears_stopped_record_whose_workspace_is_gone() {
     let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("workspace-that-never-existed");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    // First sighting records a candidate but never acts.
+    let first = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("z1", &gone)],
+        &marker_path,
+    )
+    .await;
+    assert_eq!(first.pruned, 0, "a first sighting must never be pruned");
+    assert_eq!(first.pending, 1);
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "a first sighting must issue no decommission call at all"
+    );
+
+    // Second sighting confirms and clears it.
+    let second = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("z1", &gone)],
+        &marker_path,
+    )
+    .await;
+    assert_eq!(
+        second.pruned, 1,
+        "a confirmed stopped record with a verifiably absent workspace must be cleared"
+    );
+    assert!(second.kept.is_empty());
+
+    handle.abort();
+}
+
+/// The safety half of defect 2 (#4702): a `stopped` record whose workspace
+/// STILL EXISTS is never cleared, no matter how many times it is listed. It may
+/// still be resumable, and the record may be the only thing making resumption
+/// possible — measured 2026-08-03, 4 of 5 spot-checked stopped workspaces were
+/// still on disk.
+#[tokio::test]
+async fn auto_prune_keeps_stopped_record_whose_workspace_still_exists() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let present = root.path().join("live-workspace");
+    std::fs::create_dir_all(&present).expect("create workspace");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("keeper", &present)],
+            &marker_path,
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: a stopped record with a workspace ON DISK must never be cleared"
+        );
+        assert_eq!(outcome.kept.len(), 1, "round {round}: it must stay listed");
+        assert_eq!(
+            outcome.pending, 0,
+            "round {round}: it is not even a pending candidate"
+        );
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "no decommission call may ever be issued for a live workspace"
+    );
+
+    handle.abort();
+}
+
+/// An `active` (running) record is never touched, even when its recorded
+/// workspace path is absent — liveness, not workspace presence, decides
+/// (#4702). `is_running()`'s real tmux probe upstream is what makes a
+/// persisted-`stopped`-but-actually-alive session read `active` here.
+#[tokio::test]
+async fn auto_prune_never_touches_a_running_record() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("nowhere");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut live = stopped_session_at("alive", &gone);
+    live.state = "active".to_string();
+
+    for _ in 0..2 {
+        let outcome =
+            auto_prune_dead_records_at(&client, &url, vec![live.clone()], &marker_path).await;
+        assert_eq!(outcome.pruned, 0, "a running record must never be pruned");
+        assert_eq!(outcome.kept.len(), 1);
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// `decommissioned` records are explicitly OUT of scope for #4702 — 35 exist on
+/// the reporting machine and nobody has assessed what discarding them costs.
+/// The state gate must exclude them even when their workspace is long gone.
+#[tokio::test]
+async fn auto_prune_never_touches_a_decommissioned_record() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("nowhere");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut tombstone = stopped_session_at("tombstone", &gone);
+    tombstone.state = "decommissioned".to_string();
+    // Also cover the display/persisted split: a row displayed `stopped` whose
+    // PERSISTED state is already terminal.
+    let mut persisted_terminal = stopped_session_at("terminal", &gone);
+    persisted_terminal.persisted_state = Some("decommissioned".to_string());
+
+    for _ in 0..2 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![tombstone.clone(), persisted_terminal.clone()],
+            &marker_path,
+        )
+        .await;
+        assert_eq!(outcome.pruned, 0);
+        assert_eq!(outcome.kept.len(), 2);
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "a decommissioned record must never be decommissioned again"
+    );
+
+    handle.abort();
+}
+
+/// 🔴 The load-bearing safety test (#4702): the prune path must never invoke a
+/// worktree removal. `prune_managed(PruneFilter::Stopped, …)` routes through the
+/// FULL `decommission()`, which runs `git worktree remove --force` /
+/// `fs::remove_dir_all` / `git branch -D`. Auto-prune must not inherit that.
+///
+/// This asserts on the PATH, not the end state: every decommission request the
+/// sweep issues must carry `record_only=true`, which is what routes the daemon
+/// to `SessionManager::decommission_record_only` (whose own never-removes
+/// guarantee is pinned server-side by
+/// `decommission_record_only_never_removes_existing_workspace`). A request
+/// without it would silently take the full-teardown branch.
+#[tokio::test]
+async fn auto_prune_always_requests_record_only_never_full_teardown() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    // One record dead via the daemon's `unresumable` verdict, one via #4702's
+    // client-side stopped-workspace-gone probe — both routes must be
+    // record-only.
+    let mut flagged = stopped_session_at("flagged", &gone);
+    flagged.unresumable = true;
+    let probed = stopped_session_at("probed", &gone);
+
+    let sessions = vec![flagged.clone(), probed.clone()];
+    auto_prune_dead_records_at(&client, &url, sessions, &marker_path).await;
+    let outcome =
+        auto_prune_dead_records_at(&client, &url, vec![flagged, probed], &marker_path).await;
+    assert_eq!(outcome.pruned, 2, "both dead records must be cleared");
+
+    let calls = captured.lock().expect("capture lock").clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "exactly two decommission calls, got {calls:?}"
+    );
+    for call in &calls {
+        assert!(
+            call.contains("record_only=true"),
+            "every decommission the sweep issues must be RECORD-ONLY — a call \
+             without it takes the full worktree-removal teardown: {call}"
+        );
+    }
+
+    handle.abort();
+}
+
+/// Defect 1 (#4702): a piped / scripted / non-TTY `tm ls` prunes. Before the
+/// fix this path (`managed::session_ls`) never called the prune at all, so
+/// anything not driving the interactive picker accumulated dead records
+/// forever.
+#[tokio::test]
+async fn session_ls_prunes_dead_records_on_piped_invocation() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
     );
     let mgr = state.session_manager().await;
-    let id = seed_dead_session(&mgr, root.path(), "non-tty").await;
+    let id = seed_dead_session(&mgr, root.path(), "piped").await;
 
     let server = LocalTestServer::spawn(state).await;
     let client = reqwest::Client::new();
 
-    let sessions = crate::commands::session_picker::fetch_live_sessions(
-        &client,
-        &server.url,
-        None,
-        false,
-        false, // allow_auto_prune = false: the non-interactive case
-    )
-    .await
-    .expect("fetch live sessions");
-    assert!(
-        sessions.iter().any(|s| s.id == id.to_string()),
-        "a non-interactive fetch must return the dead record unchanged"
-    );
+    // Two listings: the first confirms, the second clears (the two-sightings
+    // guard applies to non-interactive callers exactly as it does to the
+    // picker).
+    for _ in 0..2 {
+        crate::commands::managed::session_ls_at(
+            &client,
+            &server.url,
+            false, // json = false: the piped/scripted table path
+            None,
+            false,
+            crate::commands::session_picker::SessionSortArg::Recent,
+            None,
+            &marker_path,
+        )
+        .await
+        .expect("session_ls");
+    }
 
-    // The daemon-side record must be untouched — still Errored, never
-    // decommissioned, and no confirmation marker written.
-    let still_there = fetch_raw_live(&client, &server.url).await;
-    let record = still_there
-        .iter()
-        .find(|s| s.id == id.to_string())
-        .expect("record must still be live");
-    assert_eq!(
-        record.state, "errored",
-        "a non-interactive fetch must never decommission anything"
+    let live = fetch_raw_live(&client, &server.url).await;
+    assert!(
+        !live.iter().any(|s| s.id == id.to_string()),
+        "a non-TTY `tm ls` must clear a confirmed dead record from the registry"
+    );
+}
+
+/// Defect 1 (#4702), `--json` half: the raw passthrough path prunes too, and
+/// the bytes it echoes still reflect the post-prune fleet (a real daemon
+/// response, re-fetched only because the prune changed something).
+#[tokio::test]
+async fn session_ls_json_passthrough_prunes_dead_records() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    let id = seed_dead_session(&mgr, root.path(), "json").await;
+
+    let server = LocalTestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..2 {
+        crate::commands::managed::session_ls_at(
+            &client,
+            &server.url,
+            true, // json = true
+            None,
+            false,
+            crate::commands::session_picker::SessionSortArg::Recent,
+            None,
+            &marker_path,
+        )
+        .await
+        .expect("session_ls --json");
+    }
+
+    let live = fetch_raw_live(&client, &server.url).await;
+    assert!(
+        !live.iter().any(|s| s.id == id.to_string()),
+        "`tm ls --json` must clear a confirmed dead record from the registry"
     );
 }

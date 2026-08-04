@@ -363,24 +363,14 @@ async fn try_show_picker(
     repo_url: &str,
     cwd: &std::path::Path,
 ) -> Option<anyhow::Result<()>> {
-    // Critic HIGH finding #3 (PR #4384 review): this TTY check must be
-    // computed BEFORE the fetch below, not only at the `tty_gate` call after
-    // it — a scripted/piped/non-interactive bare `tm` invocation (cron,
-    // healthcheck, CI step) must never trigger the destructive auto-prune
-    // sweep `fetch_live_sessions` can run. Mirrors `run_ls_connector`'s own
-    // `stdin_tty && stdout_tty` gate (`session_picker.rs`).
-    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     // #1809: exclude decommissioned tombstones from the picker by default. The
     // shared fetch path returns the same live-only list the static renderer uses.
-    let sessions = super::session_picker::fetch_live_sessions(
-        client,
-        url,
-        Some(source_id),
-        false,
-        interactive,
-    )
-    .await
-    .ok()?;
+    // #4702: no TTY pre-gate here any more — the auto-prune this fetch runs is
+    // record-only and never touches disk, so a scripted bare `tm` prunes exactly
+    // like an interactive one instead of leaving dead records to accumulate.
+    let sessions = super::session_picker::fetch_live_sessions(client, url, Some(source_id), false)
+        .await
+        .ok()?;
     if !tty_gate(
         std::io::stdin().is_terminal(),
         source_id,

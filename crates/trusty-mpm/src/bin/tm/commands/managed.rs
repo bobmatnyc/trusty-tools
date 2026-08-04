@@ -147,10 +147,19 @@ pub(crate) fn filter_live_sessions(
 /// grammar) apply ONLY to the table path; `--json` stays a raw, unfiltered,
 /// unsorted passthrough, matching `--all`'s existing "no effect on --json"
 /// precedent.
+///
+/// #4702: this path — every piped, scripted, and `--json` listing — now runs
+/// the same dead-record auto-prune the interactive picker runs. It previously
+/// ran none, which is why dead records accumulated without bound for anyone not
+/// using the TTY picker. See
+/// [`session_picker_prune::prune_and_report`](crate::commands::session_picker_prune::prune_and_report)
+/// for why doing this unconditionally is safe.
 /// Test: HTTP path covered by the integration test; filter logic unit-tested by
 /// `ls_source_id_filter_selects_correct_slug`,
 /// `picker_filter_excludes_decommissioned_keeps_active`; sort/filter logic by
-/// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`.
+/// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`; the
+/// prune coverage by `session_ls_prunes_dead_records_on_piped_invocation` and
+/// `session_ls_json_passthrough_prunes_dead_records`.
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
@@ -160,18 +169,69 @@ pub(crate) async fn session_ls(
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<String>,
 ) -> anyhow::Result<()> {
+    let marker = crate::commands::session_picker_prune::default_marker_path();
+    session_ls_at(client, url, json, source_id, all, sort, term, &marker).await
+}
+
+/// [`session_ls`] with an explicit auto-prune marker-file path — the testable
+/// core (#4702).
+///
+/// Why: a test must never write the operator's real
+/// `~/.trusty-mpm/auto-prune-seen.json`; injecting the path is the same seam
+/// `auto_prune_dead_records_at` already provides one level down.
+/// What: see [`session_ls`]. The `--json` branch keeps its byte-for-byte
+/// passthrough contract by echoing a REAL daemon response — it re-GETs only
+/// when the prune actually removed something, so the printed bytes still
+/// reflect the post-prune fleet. A response the client cannot parse degrades to
+/// a plain passthrough (no prune) rather than failing the command: the raw echo
+/// is the contract there, the prune is a best-effort side task.
+/// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
+/// `session_ls_json_passthrough_prunes_dead_records`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn session_ls_at(
+    client: &reqwest::Client,
+    url: &str,
+    json: bool,
+    source_id: Option<&str>,
+    all: bool,
+    sort: crate::commands::session_picker::SessionSortArg,
+    term: Option<String>,
+    marker_path: &std::path::Path,
+) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
     // that raw text verbatim (byte-for-byte — preserving exact field
     // order/whitespace for scripts); the table path deserializes the SAME text
     // rather than issuing a second GET.
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
+    let parsed = crate::commands::session_picker::parse_scoped_sessions(&raw, all);
     if json {
         // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
         // byte-for-byte.
+        let mut raw = raw;
+        if let Ok(sessions) = parsed {
+            let before = sessions.len();
+            let kept = crate::commands::session_picker_prune::prune_and_report_at(
+                client,
+                url,
+                sessions,
+                marker_path,
+            )
+            .await;
+            if kept.len() != before {
+                raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id)
+                    .await?;
+            }
+        }
         println!("{raw}");
         return Ok(());
     }
-    let sessions = crate::commands::session_picker::parse_scoped_sessions(&raw, all)?;
+    let sessions = crate::commands::session_picker_prune::prune_and_report_at(
+        client,
+        url,
+        parsed?,
+        marker_path,
+    )
+    .await;
     let mut sessions =
         crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);
