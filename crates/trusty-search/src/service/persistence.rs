@@ -245,6 +245,24 @@ pub struct PersistedIndex {
     /// covered by `prune_orphans::tests`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_identity: Option<String>,
+
+    /// #4095: unix timestamp when this entry's root was FIRST found missing
+    /// with multiple ambiguous relocation candidates; `None` while it resolves
+    /// cleanly.
+    ///
+    /// Why: the relocation scan defers on ambiguity and, before this field,
+    /// never revisited — so a deferral was permanent registry debris that kept
+    /// `search_health` reporting `degraded` forever. A live daemon carried 11
+    /// such entries deferred continuously since 2026-06-03. The deferral clock
+    /// must survive daemon restarts (the incident spanned many), so it lives in
+    /// `indexes.toml` rather than in memory.
+    /// What: stamped on the first ambiguous observation and cleared whenever
+    /// the entry resolves again; the reaper compares it against
+    /// `orphan_reaper::ambiguous_root_grace_secs()` to decide when to drop the
+    /// *registration* (never the on-disk data).
+    /// Test: `classify_ambiguous_root_*` in `service::orphan_reaper`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguous_root_since_unix: Option<u64>,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -342,6 +360,7 @@ impl Default for PersistedIndex {
             last_queried_unix: None,
             last_indexed_unix: None,
             repo_identity: None,
+            ambiguous_root_since_unix: None,
         }
     }
 }

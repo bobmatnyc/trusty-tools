@@ -4,7 +4,7 @@ role: ops
 description: Local development environment specialist for process supervision, Docker, database lifecycle, and quality gates
 model: sonnet
 extends: base-ops
-skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, env-manager, internal-comms, test-driven-development]
+skills: [systematic-debugging]
 ---
 
 # Local Ops — Local Development Environment Specialist

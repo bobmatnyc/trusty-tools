@@ -29,8 +29,8 @@
 //! `Handle::block_on`, which is the standard pattern for async-in-blocking-thread.
 //!
 //! Test: `restore_bounded_runtime_stays_responsive_during_slow_blocking_restore`,
-//!       `restore_bounded_returns_false_for_slow_restore`,
-//!       `restore_bounded_returns_true_for_immediate_completion`.
+//!       `restore_bounded_returns_timed_out_for_slow_restore`,
+//!       `restore_bounded_returns_completed_for_immediate_completion`.
 
 use std::future::Future;
 use std::time::Duration;
@@ -39,6 +39,59 @@ use crate::service::persistence::PersistedIndex;
 
 use super::scan::is_likely_external_volume;
 use super::warmboot_index_timeout;
+
+/// Why a bounded restore did not register its index (#4087 review follow-up).
+///
+/// Why: [`restore_one_index_bounded`] used to return a bare `bool`, collapsing
+/// two entirely different failures into one `false` — a restore that was merely
+/// SLOW, and a restore that PANICKED. The #4087 cold-store parking then keyed
+/// off that `false` and parked both, so a genuinely broken index was reported as
+/// "lazy/recoverable" on `/health`. That is the same class of defect #4087
+/// exists to remove (a broken index masquerading as fine), reintroduced one
+/// layer up. The outcomes must be distinguishable at the type level so a caller
+/// physically cannot treat breakage as slowness.
+/// What: a three-state `Copy` outcome. Only [`Self::TimedOut`] is parkable —
+/// see the call sites in `commands::start::restore`.
+/// Test: `restore_bounded_returns_timed_out_for_slow_restore`,
+/// `restore_bounded_returns_completed_for_immediate_completion`,
+/// `restore_bounded_reports_panic_distinctly_from_timeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundedRestoreOutcome {
+    /// The restore ran to completion within the deadline.
+    Completed,
+    /// The restore did not finish within `warmboot_index_timeout()`. The work
+    /// was slow, not wrong — nothing is known to be broken, so this is the one
+    /// outcome that may be parked for lazy retry (#4087).
+    TimedOut,
+    /// The restore task panicked. Real breakage: the index must keep failing
+    /// loudly and must NOT be presented as recoverable.
+    Panicked,
+}
+
+impl BoundedRestoreOutcome {
+    /// `true` only when the restore actually finished.
+    ///
+    /// Why: preserves the old `bool` contract for callers that genuinely only
+    /// care whether the index came up (the lazy-load path, whose `Err` arm
+    /// already fails loudly with a 503).
+    /// Test: `restore_bounded_returns_completed_for_immediate_completion`.
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    /// `true` when the restore is safe to park cold for a later lazy retry
+    /// (#4087 review follow-up).
+    ///
+    /// Why: this predicate is the guard that keeps a panicked restore out of the
+    /// cold store. Naming it (rather than writing `!outcome.is_complete()` at
+    /// the call site) is the whole point — the negation is what shipped the bug.
+    /// What: `true` for [`Self::TimedOut`] ONLY. `Panicked` is deliberately
+    /// excluded: parking it would report real breakage as recoverable.
+    /// Test: `only_timed_out_is_parkable`.
+    pub fn is_parkable(self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
 
 /// Restore one index entry with a per-index deadline so warm-boot never hangs.
 ///
@@ -66,8 +119,11 @@ use super::warmboot_index_timeout;
 /// calling `restore_one_index`). Wraps the blocking execution in
 /// `tokio::time::timeout(warmboot_index_timeout())`. On timeout logs the
 /// actionable TCC hint and drops the `JoinHandle` (the blocking thread is
-/// abandoned — accepted). On join-error (panic) logs and skips. Returns `true`
-/// on success, `false` on timeout or panic.
+/// abandoned — accepted). On join-error (panic) logs and skips.
+///
+/// Returns a [`BoundedRestoreOutcome`] rather than a `bool` (#4087 review
+/// follow-up): timeout and panic are different failures and callers must be
+/// able to tell them apart — only the former is safe to park for a lazy retry.
 ///
 /// Note: uses a factory (not a pre-built Future) so ownership is clean — all
 /// captures are moved into the `spawn_blocking` closure.
@@ -75,10 +131,13 @@ use super::warmboot_index_timeout;
 /// Test: `restore_bounded_runtime_stays_responsive_during_slow_blocking_restore`
 ///       verifies that a slow blocking restore does NOT stall the async runtime
 ///       (other async tasks execute concurrently during the restore).
-///       `restore_bounded_returns_false_for_slow_restore` and
-///       `restore_bounded_returns_true_for_immediate_completion` verify the
+///       `restore_bounded_returns_timed_out_for_slow_restore` and
+///       `restore_bounded_returns_completed_for_immediate_completion` verify the
 ///       timeout/success protocol.
-pub async fn restore_one_index_bounded<F, Fut>(entry: PersistedIndex, restore_fn: F) -> bool
+pub async fn restore_one_index_bounded<F, Fut>(
+    entry: PersistedIndex,
+    restore_fn: F,
+) -> BoundedRestoreOutcome
 where
     F: FnOnce(PersistedIndex) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
@@ -100,15 +159,20 @@ where
     match tokio::time::timeout(deadline, task).await {
         Ok(Ok(())) => {
             // Restore completed within the deadline.
-            true
+            BoundedRestoreOutcome::Completed
         }
         Ok(Err(join_err)) => {
             // The spawned task panicked. Extremely rare but we must not propagate.
+            // #4087 review follow-up: reported DISTINCTLY from a timeout. A panic
+            // means the index is broken, not slow, so it must never be parked as
+            // "lazy/recoverable" — it keeps failing loudly.
             tracing::error!(
-                "warm-boot: index '{index_id}' restore task panicked — skipping (issue #718). \
+                "warm-boot: index '{index_id}' restore task PANICKED — this index is BROKEN, \
+                 not merely slow, so it is NOT parked for lazy retry and stays absent until \
+                 the underlying fault is fixed and the daemon restarts (issues #718, #4087). \
                  Error: {join_err}"
             );
-            false
+            BoundedRestoreOutcome::Panicked
         }
         Err(_elapsed) => {
             // Timeout: the restore did not complete within the deadline.
@@ -135,7 +199,7 @@ where
                     root_path.display(),
                 );
             }
-            false
+            BoundedRestoreOutcome::TimedOut
         }
     }
 }
@@ -171,14 +235,19 @@ mod tests {
         }
     }
 
-    /// Why: a restore that completes immediately must return `true`.
-    /// What: pass a factory that resolves instantly; assert `true`.
+    /// Why: a restore that completes immediately must report `Completed`.
+    /// What: pass a factory that resolves instantly; assert the outcome.
     /// Test: this test.
     #[tokio::test]
-    async fn restore_bounded_returns_true_for_immediate_completion() {
+    async fn restore_bounded_returns_completed_for_immediate_completion() {
         let entry = dummy_entry("test-ok", "/tmp/trusty-718-restore-ok");
         let result = restore_one_index_bounded(entry, |_e| async {}).await;
-        assert!(result, "an immediately-completing restore must return true");
+        assert_eq!(result, BoundedRestoreOutcome::Completed);
+        assert!(result.is_complete());
+        assert!(
+            !result.is_parkable(),
+            "a completed restore is registered, not parked"
+        );
     }
 
     /// Why: a restore that exceeds the timeout must be aborted and return `false`.
@@ -188,7 +257,7 @@ mod tests {
     /// Test: this test.
     #[tokio::test]
     #[serial_test::serial]
-    async fn restore_bounded_returns_false_for_slow_restore() {
+    async fn restore_bounded_returns_timed_out_for_slow_restore() {
         // Set a short timeout so the test completes quickly.
         unsafe { std::env::set_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS", "1") };
         let entry = dummy_entry(
@@ -200,10 +269,13 @@ mod tests {
         })
         .await;
         unsafe { std::env::remove_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS") };
-        assert!(
-            !result,
-            "a restore that exceeds the deadline must return false"
+        assert_eq!(
+            result,
+            BoundedRestoreOutcome::TimedOut,
+            "a restore that exceeds the deadline must report TimedOut — NOT a bare \
+             failure, which would be indistinguishable from a panic (#4087 review)"
         );
+        assert!(result.is_parkable(), "a timeout is the parkable outcome");
     }
 
     /// Why: warm-boot must never hang even when ALL entries time out. The sum
@@ -223,7 +295,11 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             })
             .await;
-            assert!(!result, "entry {i} must time out and return false");
+            assert_eq!(
+                result,
+                BoundedRestoreOutcome::TimedOut,
+                "entry {i} must time out"
+            );
         }
         unsafe { std::env::remove_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS") };
         // 3 entries × 1 s timeout = at most ~3 s; we allow generous 10 s.
@@ -295,10 +371,56 @@ mod tests {
             "async /health proxy task must complete while blocking restore is running; \
              if this fails, the blocking restore is freezing an async worker (issue #718)"
         );
-        // The restore timed out (1s timeout, 2s sleep) and returned false.
-        assert!(
-            !result,
-            "restore with a blocking sleep exceeding the timeout must return false"
+        // The restore timed out (1s timeout, 2s sleep).
+        assert_eq!(
+            result,
+            BoundedRestoreOutcome::TimedOut,
+            "restore with a blocking sleep exceeding the timeout must report TimedOut"
         );
+    }
+
+    /// Why (#4087 review BLOCK — the defect this pins): a panicking restore and
+    /// a slow one both used to return `false`. The #4087 cold-store parking keyed
+    /// off that `false`, so a genuinely BROKEN index was parked and then reported
+    /// as "lazy/recoverable" on `/health` — the same masquerade #4087 exists to
+    /// eliminate, reintroduced one layer up. The two outcomes must be
+    /// distinguishable, and only the timeout may be parkable.
+    /// What: drives a restore closure that panics; asserts the outcome is
+    /// `Panicked` (not `TimedOut`) and that it is NOT parkable. Against the
+    /// pre-fix code the return type was `bool` and this distinction did not
+    /// exist at all.
+    /// Test: this test.
+    #[tokio::test]
+    async fn restore_bounded_reports_panic_distinctly_from_timeout() {
+        let entry = dummy_entry("test-panic", "/tmp/trusty-4087-panic");
+        let result = restore_one_index_bounded(entry, |_e| async {
+            panic!("simulated restore panic");
+        })
+        .await;
+
+        assert_eq!(
+            result,
+            BoundedRestoreOutcome::Panicked,
+            "a panicking restore must be reported as Panicked, never conflated with a timeout"
+        );
+        assert!(!result.is_complete());
+        assert!(
+            !result.is_parkable(),
+            "a PANICKED restore must never be parked as recoverable — that is the #4087 \
+             review BLOCK: it reports real breakage as lazy/recoverable on /health"
+        );
+    }
+
+    /// Why (#4087 review): `is_parkable` is the guard the warm-boot loops call.
+    /// Naming the predicate — rather than writing `!is_complete()` at each call
+    /// site — is what prevents the bug; this pins its exact truth table so a
+    /// future edit cannot quietly widen it back to "any non-Ok outcome".
+    /// What: exhaustive assertion over all three outcomes.
+    /// Test: this test.
+    #[test]
+    fn only_timed_out_is_parkable() {
+        assert!(BoundedRestoreOutcome::TimedOut.is_parkable());
+        assert!(!BoundedRestoreOutcome::Panicked.is_parkable());
+        assert!(!BoundedRestoreOutcome::Completed.is_parkable());
     }
 }

@@ -4,7 +4,7 @@ role: engineer
 description: 'Python 3.12+ development specialist: type-safe, async-first, production-ready implementations with SOA and DI patterns'
 model: sonnet
 extends: base-engineer
-skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, database-migration, json-data-handling, xlsx, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, model-context-builder, security-scanning, test-driven-development, api-design-patterns]
+skills: [systematic-debugging, test-driven-development]
 ---
 
 # Python Engineer

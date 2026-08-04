@@ -332,6 +332,24 @@ pub struct CodeIndexer {
     /// quarantine is recoverable rather than terminal.
     pub corpus_open_failed: bool,
 
+    /// #4333: *why* [`Self::corpus_open_failed`] is set — `None` iff the flag
+    /// is `false`.
+    ///
+    /// Why: the bool alone cannot distinguish a 30 s open timeout under
+    /// warm-boot contention (transient, corpus intact, must NOT be rebuilt)
+    /// from a genuine format incompatibility (permanent, rebuild required).
+    /// Both reported the same "incompatible or corrupted format … run
+    /// `--force`" string, and that conflation destroyed a healthy index on
+    /// 2026-07-27. This field carries the classification through to
+    /// `/health`, `GET /indexes/:id/status`, and the warm-boot stage reason.
+    /// What: set alongside `corpus_open_failed` by
+    /// `service::persistence_loader::build_indexer_from_entry`; cleared by
+    /// [`Self::clear_corpus_open_failure`] in the same call that clears the
+    /// bool, so the two can never drift.
+    /// Test: `corpus_open_failure_kind_tracks_the_flag` in
+    /// `service::server::tests_4087`.
+    pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
+
     /// Issue #4122: monotonic count of incremental writes refused because
     /// [`Self::corpus_open_failed`] was set.
     ///
@@ -485,6 +503,7 @@ impl CodeIndexer {
             lane_degraded: Arc::new(AtomicBool::new(false)),
             last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
+            corpus_open_failure: None,
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,

@@ -25,7 +25,7 @@ fn inputs() -> WarmBootInputs {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
-        corpus_open_failed: false,
+        corpus_open_failure: None,
     }
 }
 
@@ -99,7 +99,7 @@ fn warm_boot_respects_lexical_only_flag() {
         lexical_only: true,
         skip_kg: false,
         skip_vector: false,
-        corpus_open_failed: false,
+        corpus_open_failure: None,
     });
     assert_eq!(stages.lexical.status, StageStatus::Ready);
     assert_eq!(stages.semantic.status, StageStatus::Skipped);
@@ -138,7 +138,7 @@ fn warm_boot_corpus_open_failure_fails_every_stage() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
-        corpus_open_failed: true,
+        corpus_open_failure: Some(crate::core::corpus::CorpusOpenFailure::FormatIncompatible),
     });
     assert_eq!(
         stages.lexical.status,
@@ -199,7 +199,7 @@ fn warm_boot_respects_skip_kg_flag() {
         lexical_only: false,
         skip_kg: true,
         skip_vector: false,
-        corpus_open_failed: false,
+        corpus_open_failure: None,
     });
     assert_eq!(
         stages.graph.status,
@@ -229,7 +229,7 @@ fn warm_boot_respects_skip_kg_flag() {
         lexical_only: true,
         skip_kg: true,
         skip_vector: false,
-        corpus_open_failed: false,
+        corpus_open_failure: None,
     });
     assert_eq!(stages_both.semantic.status, StageStatus::Skipped);
     assert_eq!(stages_both.graph.status, StageStatus::Skipped);

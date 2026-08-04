@@ -3,9 +3,9 @@
 **Status:** Draft
 **Subsystem:** trusty-mpm — agent composition / skill deployment
 **Owner:** Engineering (trusty-mpm)
-**Last-updated:** 2026-07-17
+**Last-updated:** 2026-08-03
 **Spec ID:** `SPEC-AGENTSKILLS-01~draft` (DOC-42)
-**Linked issues:** [#2889](https://github.com/bobmatnyc/trusty-tools/issues/2889) (agent-bundled skills mechanism); [#2890](https://github.com/bobmatnyc/trusty-tools/issues/2890) (code-critic content restoration)
+**Linked issues:** [#2889](https://github.com/bobmatnyc/trusty-tools/issues/2889) (agent-bundled skills mechanism); [#2890](https://github.com/bobmatnyc/trusty-tools/issues/2890) (code-critic content restoration); [#4642](https://github.com/bobmatnyc/trusty-tools/issues/4642) (`skills:` is a resident per-dispatch token cost); [#4643](https://github.com/bobmatnyc/trusty-tools/issues/4643) (`skills:` unions across the `extends:` chain)
 **Builds on:** DOC-31 — SYSTEM vs PROJECT Agents & Skills (`docs/specs/system-project-agents-skills.md`, the 3-tier skill precedence model and agent/skill deployment pipeline); DOC-29 — Primary trusty-mpm Harness Behaviors (`docs/specs/mpm-behavior-conformance.md`, the agent compose chain).
 **Cross-ref:** agent asset frontmatter parsing (`crates/trusty-mpm/src/core/agent_manifest.rs`, `crates/trusty-mpm/src/assets/agents/*.md`); agent composer (`crates/trusty-mpm/src/core/agent_deployer.rs`); skill deployer and tier resolver (`crates/trusty-mpm/src/core/skill_deployer.rs`, `crates/trusty-mpm/src/core/skill_tiers.rs`); session launcher (`crates/trusty-mpm/src/core/session_launch/mod.rs`); doctor/validation (`crates/trusty-mpm/src/bin/tm/commands/doctor.rs`); CLI agent list/show (`crates/trusty-mpm/src/bin/tm/commands/agent.rs`).
 
@@ -129,6 +129,12 @@ The skill deployer already understands the 3-tier precedence (DOC-31). Agent man
   - Skill names follow the same constraints as today: alphanumeric, hyphens, no special chars (already enforced by filesystem paths).
   - Order is preserved (YAML list order) but not semantically significant for validation.
   - An empty array (`skills: []`) is equivalent to omission.
+
+- **Composition (#4643):** `skills:` is a **base-first UNION across the `extends:` chain**, deduplicated, unlike `model:`/`tools:` which are child-wins overrides. The DEPLOYED agent file therefore declares its own list **plus every skill declared by any foundation template it extends** — a superset of what its source asset shows. This is intentional (a base template's skill must survive into its descendants) but it is not visible from the source file, and it was reported as source/deployed drift in [#4643](https://github.com/bobmatnyc/trusty-tools/issues/4643): `research.md` declared 11 skills while its deployed copy declared 12, the extra one being `tm-capabilities` inherited from `BASE-AGENT`. A skill declared on a foundation template is paid for by **every** descendant on every dispatch (see the resident-cost note below), so foundation templates declare `skills:` only when the skill genuinely applies to every agent beneath them.
+
+- **Resident cost (#4642):** the Claude Code harness renders each listed skill's **full SKILL.md body** into the agent's system prompt at dispatch, before the Skill tool is ever called. `skills:` is therefore a per-dispatch **token cost**, not merely a capability list. Omitting a skill does **not** make it unavailable — it stays invokable on demand via the Skill tool, and (under the default manifest) it still deploys to disk. Declare a skill only when it shapes how the agent approaches every task in its domain; leave references and subset-of-tasks material to on-demand invocation.
+
+  **Interaction with a FILTERED skill manifest — read before trimming further.** The "still invokable on demand" fallback holds only while the skill is actually ON DISK. Under the DEFAULT manifest it always is: `skill_include`/`skill_exclude` are empty, so `HarnessPlan::skill_selected` returns `true` for every stem and the whole bundled set deploys regardless of any `skills:` declaration. Under a manifest that DOES filter skills, the co-deploy union (§SPEC-AGENTSKILLS-02) is the only thing putting an unselected skill on disk — so removing a skill from `skills:` there removes it from `co_deploy_skills` too, and it is then neither resident NOR invokable. Trimming a declaration is safe by default and load-bearing under a filter; when a project filters its skill manifest, verify the skill is still selected before relying on on-demand invocation.
 
 - **Parsing:** frontmatter is parsed using the existing agent manifest parser (or extended inline). If `skills:` is present, extract the list; if absent or malformed, log a WARN and treat as empty.
 - **Preconditions:** the agent asset file is readable and syntactically valid YAML (frontmatter).

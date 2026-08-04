@@ -237,6 +237,10 @@ pub(super) async fn relocate_index_handler(
         repo_identity: trusty_common::repo_identity::RepoIdentity::derive(&new_root)
             .map(|r| r.canonical())
             .or_else(|| on_disk.as_ref().and_then(|e| e.repo_identity.clone())),
+        // #4095: an explicit relocation is exactly the resolution the
+        // ambiguity grace clock was waiting for — clear it, or a stale stamp
+        // would keep aging toward a reap of a now-healthy registration.
+        ambiguous_root_since_unix: None,
     };
 
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
