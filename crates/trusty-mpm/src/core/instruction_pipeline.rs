@@ -324,20 +324,25 @@ pub fn compiled_prompt_path(project_dir: &std::path::Path) -> std::path::PathBuf
         .join(COMPILED_PROMPT_FILE)
 }
 
-/// The operator-facing explanation for a failed compiled-prompt write.
+/// The operator-facing explanation for a failed instruction write.
 ///
-/// Why (#4752): the write is fatal — it refuses a launch — so the operator must
-/// be told what was refused, where, and why, not handed a bare `io::Error`. One
-/// formatter keeps that message identical whether the refusal surfaces from the
-/// CLI (`tm session start`), the daemon resume path, or the HTTP client.
+/// Why (#4752): establishing a session's instructions is fatal — it refuses a
+/// launch — so the operator must be told what was refused, where, and why, not
+/// handed a bare `io::Error`. One formatter keeps that message identical
+/// wherever the refusal surfaces: the CLI (`tm session start`), the daemon
+/// resume path, the bare-`tm` in-place relaunch, or the HTTP client.
+///
+/// Renamed from `instructions_failure_message` (round 4): it now also covers
+/// a [`build_instructions`] failure, so wording specific to the compiled prompt
+/// would have been wrong at half its call sites.
 /// What: names the path, the underlying cause, and the remedy.
-/// Test: `compiled_prompt_failure_message_names_the_path_and_a_remedy`.
-pub fn compiled_prompt_failure_message(path: &std::path::Path, source: &std::io::Error) -> String {
+/// Test: `instructions_failure_message_names_the_path_and_a_remedy`.
+pub fn instructions_failure_message(path: &std::path::Path, source: &std::io::Error) -> String {
     format!(
-        "could not write the compiled PM prompt to {}: {source}\n\
-         The session was NOT started: it would have run against instructions that \
-         cannot be inspected, and a directory `tm` writes on every launch is \
-         unwritable. Check permissions and free space on that path, then retry.",
+        "could not write the session instructions to {}: {source}\n\
+         The session was NOT started: it depends on those instructions, and a \
+         path `tm` must write on every launch is unavailable. Check permissions \
+         and free space on that path, then retry.",
         path.display()
     )
 }
@@ -351,7 +356,7 @@ pub fn compiled_prompt_failure_message(path: &std::path::Path, source: &std::io:
 /// is one `write`, not a second composition pass.
 /// What: creates `dest`'s parent directory if absent, then writes `prompt`
 /// verbatim. Returns the underlying IO error unchanged; pair it with
-/// [`compiled_prompt_failure_message`] when surfacing to an operator.
+/// [`instructions_failure_message`] when surfacing to an operator.
 /// Test: `write_compiled_prompt_to_creates_parent_dirs`.
 pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
@@ -370,12 +375,21 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
 /// this issue missed the third: it calls neither of the other two, so its only
 /// compiled write was `build_prompt_file`'s best-effort refresh. A resumed
 /// session could therefore run on a stale or missing compiled prompt exactly
-/// where a fresh launch would have refused. Consolidating the compose+write+
-/// message triple here keeps the three call sites from drifting apart.
+/// where a fresh launch would have refused.
+///
+/// SCOPE — this helper serves TWO of those three, not all three. The two
+/// resume-shaped paths (daemon resume, in-place relaunch) share it because
+/// neither has an explicit style to apply, so composing with `None` is right for
+/// both. `prepare_session` deliberately does NOT call it: it must compose with
+/// the `effective_style` it just resolved (flag > config > manifest), which this
+/// helper hardcodes to `None`, and routing it through here would silently drop
+/// the operator's chosen output style from the compiled copy. All three still
+/// share the actual write via [`write_compiled_prompt_to`] and the same fatal
+/// policy; what differs is only which text they compose.
 /// What: composes the project-resolved prompt through the same seam the launcher
-/// uses, writes it to [`compiled_prompt_path`], and on failure returns the
-/// operator-facing string from [`compiled_prompt_failure_message`] — callers
-/// refuse the launch with it.
+/// uses, with no explicit output style, writes it to [`compiled_prompt_path`],
+/// and on failure returns the operator-facing string from
+/// [`instructions_failure_message`] — callers refuse the launch with it.
 /// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
 /// `refresh_compiled_prompt_reports_an_actionable_failure`.
 pub fn refresh_compiled_prompt(project_dir: &std::path::Path) -> Result<(), String> {
@@ -387,7 +401,7 @@ pub fn refresh_compiled_prompt(project_dir: &std::path::Path) -> Result<(), Stri
     );
     let dest = compiled_prompt_path(project_dir);
     write_compiled_prompt_to(&dest, &prompt)
-        .map_err(|source| compiled_prompt_failure_message(&dest, &source))
+        .map_err(|source| instructions_failure_message(&dest, &source))
 }
 
 /// Delete a stale `instructions/INSTRUCTIONS.md` left by a pre-#4752 install.

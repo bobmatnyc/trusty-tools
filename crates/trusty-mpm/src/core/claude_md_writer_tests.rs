@@ -532,6 +532,28 @@ fn refusals_leave_the_file_byte_identical() {
 // Behaviour 6 — the compiled-instructions pointer
 // ---------------------------------------------------------------------------
 
+/// The pointer path must stay in step with the pipeline that writes the file.
+#[test]
+fn pointer_path_matches_the_instruction_pipeline() {
+    // Why (#4752): this constant is a SECOND spelling of a path only
+    // `instruction_pipeline::compiled_prompt_path` actually produces. It already
+    // went stale once — it named the global `~/.trusty-mpm/framework/...` after
+    // the compiled prompt went project-local, so the pointer spliced into a
+    // project's CLAUDE.md would have sent readers to a file nothing writes.
+    // Nothing else fails when these two drift, because `ensure_compiled_pointer`
+    // has no production caller yet (spec §10.5 defers wiring it).
+    let project = std::path::Path::new("/some/project");
+    let produced = crate::core::instruction_pipeline::compiled_prompt_path(project);
+    let relative = produced
+        .strip_prefix(project)
+        .expect("compiled_prompt_path must be project-local");
+    assert_eq!(
+        relative.to_string_lossy(),
+        COMPILED_INSTRUCTIONS_PATH,
+        "the pointer path and the pipeline that writes the file have drifted"
+    );
+}
+
 /// The pointer names the compiled prompt path, visibly.
 #[test]
 fn pointer_block_names_the_compiled_instructions_path() {

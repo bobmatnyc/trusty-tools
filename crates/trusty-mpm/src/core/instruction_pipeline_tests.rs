@@ -478,12 +478,12 @@ fn compiled_prompt_path_is_not_the_bundled_instructions_path() {
 }
 
 #[test]
-fn compiled_prompt_failure_message_names_the_path_and_a_remedy() {
+fn instructions_failure_message_names_the_path_and_a_remedy() {
     // Why (#4752 ruling follow-up 1): the write is fatal, so a refused launch
     // must tell the operator what was refused, where, and what to do — not
     // surface a bare io error.
     let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-    let msg = compiled_prompt_failure_message(Path::new("/p/.trusty-mpm/framework/X.md"), &err);
+    let msg = instructions_failure_message(Path::new("/p/.trusty-mpm/framework/X.md"), &err);
     assert!(
         msg.contains("/p/.trusty-mpm/framework/X.md"),
         "must name the path: {msg}"

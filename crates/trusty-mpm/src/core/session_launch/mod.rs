@@ -231,10 +231,18 @@ pub struct PrepReport {
     /// the session is about to receive, because the write is fatal and happens
     /// before this value is constructed.
     /// What: `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`, as
-    /// resolved by [`crate::core::instruction_pipeline::compiled_prompt_path`],
-    /// byte-identical to [`Self::stash`]. NOT the global
-    /// `~/.trusty-mpm/framework/` path — that shared location was the collision
-    /// #4752 removed, since every project would have overwritten the same file.
+    /// resolved by [`crate::core::instruction_pipeline::compiled_prompt_path`].
+    /// NOT the global `~/.trusty-mpm/framework/` path — that shared location was
+    /// the collision #4752 removed, since every project would have overwritten
+    /// the same file.
+    ///
+    /// It holds the same text as [`Self::stash`] AT RETURN, but is not
+    /// permanently byte-identical to it, so do not treat the two as
+    /// interchangeable: the stash write degrades to a warning (so `stash` may be
+    /// absent or stale), and for managed spawns
+    /// `runtime::claude_code::build_prompt_file` later refreshes this file with a
+    /// `None`-style composition that can differ from the `effective_style` text
+    /// written here.
     /// Test: `prepare_session_writes_the_compiled_prompt_before_returning`,
     /// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`.
     pub compiled_prompt: PathBuf,
@@ -317,9 +325,6 @@ pub enum PrepError {
     /// Deploying skill files to `~/.claude/skills/` failed.
     #[error("skill deploy failed: {0}")]
     SkillDeploy(String),
-    /// Composing or stashing the launch instructions failed.
-    #[error("instruction pipeline failed: {0}")]
-    Instructions(#[from] crate::core::instruction_pipeline::PipelineError),
     /// A filesystem operation on the inspection stash failed.
     #[error("io error for {path}: {source}")]
     Io {
@@ -328,26 +333,35 @@ pub enum PrepError {
         /// The underlying IO error.
         source: std::io::Error,
     },
-    /// Writing the project's compiled PM prompt failed — the ONE fatal
-    /// preparation error (#4752, owner ruling 2026-08-04).
+    /// The session's instructions could not be established — the ONE fatal
+    /// preparation condition (#4752, owner ruling 2026-08-04).
+    ///
+    /// Covers BOTH instruction failures, because they are the same condition
+    /// reaching two sites, not two error classes:
+    ///   * [`build_instructions`] failing to compose or write the merged
+    ///     instructions, and
+    ///   * the compiled prompt write failing.
     ///
     /// Why it is its own variant rather than another [`Self::Io`]: #2149
     /// deliberately made preparation failures non-fatal so a roster- or
     /// skill-deploy hiccup could not stop a session launching, and every
     /// production caller still logs-and-continues on those. This one is ruled
-    /// fatal — "if we can't write a simple file to this directory, we have a
-    /// bigger issue" — so callers need to tell it apart from the failures
-    /// #2149 was aimed at. [`PrepError::is_fatal`] is that discriminator; a
-    /// blanket "all prep errors are fatal" would have reversed #2149 wholesale
-    /// and regressed exactly what it protected.
-    /// Test: `compiled_prompt_failure_is_fatal`,
-    /// `deploy_and_io_failures_stay_non_fatal`.
+    /// fatal — the session depends on its instructions, so a session that
+    /// cannot get them must not start. [`PrepError::is_fatal`] is that
+    /// discriminator; a blanket "all prep errors are fatal" would have reversed
+    /// #2149 wholesale and regressed exactly what it protected.
+    ///
+    /// Renamed from `CompiledPrompt` (round 4): the variant no longer describes
+    /// only the compiled-prompt write.
+    /// Test: `instruction_failure_is_fatal`,
+    /// `deploy_and_io_failures_stay_non_fatal`,
+    /// `prepare_session_refuses_when_the_instructions_cannot_be_built`.
     #[error(
         "{}",
-        crate::core::instruction_pipeline::compiled_prompt_failure_message(path, source)
+        crate::core::instruction_pipeline::instructions_failure_message(path, source)
     )]
-    CompiledPrompt {
-        /// The compiled-prompt path the write targeted.
+    Instructions {
+        /// The instruction path the failed operation targeted.
         path: PathBuf,
         /// The underlying IO error.
         source: std::io::Error,
@@ -358,14 +372,15 @@ impl PrepError {
     /// Whether this failure must abort the launch rather than be logged.
     ///
     /// Why (#4752): the seven spawning call sites treat preparation as
-    /// best-effort (#2149). Exactly one failure is ruled fatal, and this is the
-    /// single place that decides which — so a future variant does not silently
-    /// inherit either policy.
-    /// What: `true` only for [`Self::CompiledPrompt`].
-    /// Test: `compiled_prompt_failure_is_fatal`,
+    /// best-effort (#2149). Exactly one CONDITION is ruled fatal — the session's
+    /// instructions could not be established — and this is the single place that
+    /// decides it, so a future variant does not silently inherit either policy.
+    /// What: `true` only for [`Self::Instructions`], whichever of the two
+    /// instruction sites raised it.
+    /// Test: `instruction_failure_is_fatal`,
     /// `deploy_and_io_failures_stay_non_fatal`.
     pub fn is_fatal(&self) -> bool {
-        matches!(self, Self::CompiledPrompt { .. })
+        matches!(self, Self::Instructions { .. })
     }
 }
 
@@ -385,41 +400,46 @@ impl PrepError {
 /// matches the live launch prompt byte-for-byte (issue #1409), and returns a
 /// [`PrepReport`].
 ///
-/// ORDERING CONTRACT (#4752, owner ruling 2026-08-04): the same prompt is ALSO
-/// written to `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
-/// ([`crate::core::instruction_pipeline::compiled_prompt_path`]) as this
-/// function's LAST step, and a failure returns [`PrepError::CompiledPrompt`],
-/// which every spawning caller treats as FATAL — the launch is refused.
+/// ORDERING CONTRACT (#4752, owner ruling 2026-08-04): **a session that starts
+/// always has its instructions on disk, matching the text it received.** A
+/// session depends on its instructions, so one that cannot get them must not
+/// start.
 ///
-/// This is the ONE preparation failure that blocks a launch. #2149's
-/// non-fatal-preparation design still governs every other variant (a roster or
-/// skill deploy failure is surfaced via [`PrepReport::roster_errors`] and the
-/// session still starts); [`PrepError::is_fatal`] is the discriminator.
+/// Two steps establish them, and BOTH are fatal — the same condition reaching
+/// two sites, reported as [`PrepError::Instructions`], which every spawning
+/// caller refuses to launch on:
+///   * [`build_instructions`] composes the merged instructions; and
+///   * the same resolved prompt is written to
+///     `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+///     ([`crate::core::instruction_pipeline::compiled_prompt_path`]) as this
+///     function's LAST step.
 ///
-/// POSITION: the write is deliberately LAST, so a refusal cannot skip the MCP
-/// injectors or the trust pre-seed — see the inline comment at the call and
-/// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
+/// There is no exception between them: nothing that can fail in between returns
+/// early. The `.trusty-mpm/last-instructions.md` stash is the one write that
+/// still degrades to a warning — it is an inspection copy, and letting it
+/// short-circuit would have skipped the fatal write below it and started a
+/// session whose instructions were never recorded, which is precisely what this
+/// contract forbids.
 ///
-/// WHAT THE CONTRACT DOES **NOT** SAY: it is not "every started session has a
-/// compiled prompt". Making the compiled write fatal while a neighbouring write
-/// under the same `.trusty-mpm/` stayed a short-circuiting non-fatal error would
-/// be incoherent, so the stash write above it now degrades to a warning instead
-/// of returning early — an unwritable `.trusty-mpm/` can no longer skip the
-/// injectors or this write. One early exit remains BEFORE it: a
-/// [`build_instructions`] failure, which returns a non-fatal error, so the
-/// caller still launches and no compiled prompt is refreshed. That is a
-/// different condition (the instruction pipeline itself, not a `.trusty-mpm/`
-/// write) and it predates this issue; it is left to #2149's policy rather than
-/// silently promoted to fatal here.
+/// This is the ONE preparation CONDITION that blocks a launch — one condition,
+/// two sites, not two error classes. #2149's non-fatal-preparation design still
+/// governs every other variant (a roster or skill deploy failure is surfaced via
+/// [`PrepReport::roster_errors`] and the session still starts);
+/// [`PrepError::is_fatal`] is the discriminator.
+///
+/// POSITION: the compiled write is deliberately LAST, so a refusal is not also a
+/// half-provisioned workspace — see the inline comment at the call.
 ///
 /// The resume path never calls this function. Both other entry points carry the
 /// same fatal write: `daemon::managed_routes::lifecycle::resume_managed` (daemon
-/// resume) and `runtime::refresh_compiled_prompt` as called from the bare-`tm`
-/// in-place relaunch in `tm::commands::guided_inplace`. See spec §10.3.
+/// resume) and `instruction_pipeline::refresh_compiled_prompt` as called from
+/// the bare-`tm` in-place relaunch in `tm::commands::guided_inplace`. See spec
+/// §10.3.
 /// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
 /// `prepare_session_stash_reflects_override`,
 /// `prepare_session_writes_the_compiled_prompt_before_returning`,
 /// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`,
+/// `prepare_session_refuses_when_the_instructions_cannot_be_built`,
 /// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
     prepare_session_with_style(fw, project_dir, None)
@@ -846,7 +866,18 @@ fn prepare_session_inner(
         project_dir: project_dir.to_path_buf(),
         claude_md_path: project_dir.join("CLAUDE.md"),
     };
-    let instructions = build_instructions(&input)?;
+    // #4752 (owner ruling, round 4): a session DEPENDS on its instructions, so
+    // failing to build them refuses the launch. This used to return the
+    // non-fatal `PrepError::Instructions(PipelineError)`, which every caller
+    // logged-and-continued past — starting a session whose instructions were
+    // never established, the one case the ordering contract could not promise.
+    // It is the SAME fatal condition as the compiled write below, not a second
+    // error class, so it maps onto the same variant.
+    let instructions = build_instructions(&input).map_err(|e| match e {
+        crate::core::instruction_pipeline::PipelineError::Io { path, source } => {
+            PrepError::Instructions { path, source }
+        }
+    })?;
 
     // Resolve the EFFECTIVE output style, folding the manifest's default in as
     // the lowest precedence below the existing HR-4 sources. Precedence:
@@ -883,14 +914,16 @@ fn prepare_session_inner(
     );
     // #4752: these two writes DEGRADE TO A WARNING; they must never short-circuit
     // this function. An unwritable `.trusty-mpm/` (disk full, bad perms) used to
-    // return `PrepError::Io` HERE — before the MCP injectors below — and because
-    // `Io` is non-fatal every caller then launched the session anyway, with the
-    // injectors skipped. That is the same security shape as the round-1 regression
-    // this issue already fixed for the compiled write, reached by a second route.
-    // The stash is an inspection artifact (`tm session instructions`); losing it
-    // is not worth skipping the MCP trust boundary or the compiled write.
+    // return `PrepError::Io` HERE, and because `Io` is non-fatal every caller
+    // launched the session anyway — having skipped the fatal compiled write
+    // below, so the session ran with instructions that were never recorded. That
+    // is exactly what the ordering contract forbids.
+    //
+    // The stash is an inspection copy (`tm session instructions`), not the text
+    // the session runs on, so losing it is not itself a reason to refuse a
+    // launch. What matters is that it cannot take the fatal write down with it.
     // See the ordering contract on `prepare_session`.
-    // Test: `stash_write_failure_does_not_skip_the_mcp_injectors`.
+    // Test: `stash_write_failure_does_not_skip_the_fatal_instruction_write`.
     let stash_dir = project_dir.join(".trusty-mpm");
     let stash = stash_dir.join("last-instructions.md");
     match std::fs::create_dir_all(&stash_dir)
@@ -1216,19 +1249,13 @@ fn prepare_session_inner(
     // text this session will actually receive (`resolved_prompt`, the same
     // string stashed to `.trusty-mpm/last-instructions.md` above).
     //
-    // POSITION IS LOAD-BEARING, and it is deliberately the LAST step. An earlier
-    // revision of this change put the write immediately after the stash, where
-    // its `?` sat upstream of `write_output_style`, `write_project_hooks`, the
-    // workspace trust pre-seed, and all four MCP injectors — including
-    // `inject_trusty_mpm_mcp`/`inject_trusty_review_mcp`, the content-pinning
-    // defense against the #3918/#3950 MCP name-squatting class. Because every
-    // production caller treats a prep failure as non-fatal (#2149, see this
-    // function's doc comment), a failed compiled write would have SKIPPED those
-    // injectors and let the session launch anyway. Nothing below this line may
-    // depend on the write succeeding — keep it last.
+    // It is deliberately the LAST step, so a refusal is not also a
+    // half-provisioned workspace: everything the session needs is already on
+    // disk by the time this can fail. Nothing below this line may depend on the
+    // write succeeding — keep it last.
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir);
     crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
-        .map_err(|source| PrepError::CompiledPrompt {
+        .map_err(|source| PrepError::Instructions {
             path: compiled.clone(),
             source,
         })?;
@@ -1253,11 +1280,13 @@ fn prepare_session_inner(
 /// Build the project-agnostic `--append-system-prompt` text (no overrides).
 ///
 /// Why: every `claude` session launched by trusty-mpm must be a configured PM
-/// instance. trusty-mpm owns its PM instructions: they are assembled from
-/// bundled assets into `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
-/// and passed to `claude --append-system-prompt-file`. This variant is kept for
-/// callers that do not know the project directory (e.g. tests); prefer
-/// [`build_system_prompt_for`] at launch sites so project-level overrides apply.
+/// instance. trusty-mpm owns its PM instructions: they are assembled IN MEMORY
+/// from the compile-time bundled sections and passed to
+/// `claude --append-system-prompt-file`. Nothing is read back from an installed
+/// `INSTRUCTIONS.md` to produce them (#4752 retired that path — see the note
+/// below). This variant is kept for callers that do not know the project
+/// directory (e.g. tests); prefer [`build_system_prompt_for`] at launch sites so
+/// project-level overrides apply.
 /// What: returns [`crate::core::instruction_pipeline::assemble_system_prompt`],
 /// trimmed. `Option` is retained for API compatibility and is always `Some`.
 ///

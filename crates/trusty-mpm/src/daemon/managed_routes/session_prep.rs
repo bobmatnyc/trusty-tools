@@ -96,7 +96,7 @@ pub(super) fn prepare_inproject_session(
 /// What: composes the project-resolved prompt, writes it to
 /// [`crate::core::instruction_pipeline::compiled_prompt_path`], and on failure
 /// returns the operator-facing message from
-/// [`crate::core::instruction_pipeline::compiled_prompt_failure_message`] —
+/// [`crate::core::instruction_pipeline::instructions_failure_message`] —
 /// the caller refuses the resume with it.
 /// Test: `refresh_compiled_prompt_for_resume_writes_the_project_local_file`,
 /// `refresh_compiled_prompt_for_resume_reports_an_actionable_failure`.

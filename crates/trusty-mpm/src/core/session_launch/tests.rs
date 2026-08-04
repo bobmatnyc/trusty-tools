@@ -266,11 +266,11 @@ fn prepare_session_writes_claude_md_and_stash() {
 // ── #4752: INSTRUCTIONS-COMPILED.md must be current BEFORE the spawn ────────
 
 #[test]
-fn compiled_prompt_failure_is_fatal() {
+fn instruction_failure_is_fatal() {
     // Why (#4752 ruling 2026-08-04): exactly one preparation failure refuses a
     // launch. `is_fatal` is the single discriminator the seven spawning call
     // sites consult, so it is pinned directly.
-    let err = PrepError::CompiledPrompt {
+    let err = PrepError::Instructions {
         path: PathBuf::from("/p/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md"),
         source: std::io::Error::other("boom"),
     };
@@ -284,10 +284,10 @@ fn compiled_prompt_failure_is_fatal() {
 #[test]
 fn deploy_and_io_failures_stay_non_fatal() {
     // Why (#4752): #2149 deliberately made preparation non-fatal so a roster or
-    // skill deploy hiccup could not stop a session launching. Only the compiled
-    // write was ruled fatal — a blanket "all prep errors abort" would have
-    // reversed #2149 wholesale. This pins that the other variants did NOT
-    // silently inherit the new policy.
+    // skill deploy hiccup could not stop a session launching. Only the
+    // instruction condition is ruled fatal — a blanket "all prep errors abort"
+    // would have reversed #2149 wholesale. This pins that the other variants
+    // did NOT silently inherit the new policy.
     assert!(!PrepError::Deploy("agents".into()).is_fatal());
     assert!(!PrepError::SkillDeploy("skills".into()).is_fatal());
     assert!(
@@ -382,12 +382,12 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
         "a compiled-prompt write failure must be classified fatal, got {err:?}"
     );
     match &err {
-        PrepError::CompiledPrompt { path, .. } => assert_eq!(
+        PrepError::Instructions { path, .. } => assert_eq!(
             *path,
             crate::core::instruction_pipeline::compiled_prompt_path(project),
             "the error must name the compiled prompt path"
         ),
-        other => panic!("expected PrepError::CompiledPrompt, got {other:?}"),
+        other => panic!("expected PrepError::Instructions, got {other:?}"),
     }
     // Ruling follow-up 1: the operator must see why, and where.
     let shown = err.to_string();
@@ -465,15 +465,64 @@ fn compiled_write_failure_does_not_skip_the_mcp_injectors() {
 
 #[test]
 #[serial_test::serial]
-fn stash_write_failure_does_not_skip_the_mcp_injectors() {
-    // Why (#4752 round 4, HIGH 3): making the compiled write fatal while the
-    // `last-instructions.md` stash — one directory up in the SAME
-    // `.trusty-mpm/` tree — stayed a short-circuiting non-fatal `PrepError::Io`
-    // was incoherent, and it left the round-1 security regression live by a
-    // second route. An unwritable `.trusty-mpm/` returned FIRST, upstream of
-    // `write_output_style`, `write_project_hooks`, the trust pre-seed and all
-    // four MCP injectors; because `Io` is non-fatal, every caller then launched
-    // the session anyway with the #3918/#3950 content-pinning defense skipped.
+fn prepare_session_refuses_when_the_instructions_cannot_be_built() {
+    // Why (#4752, owner ruling round 4): "If writing the instruction fails, we
+    // shouldn't start ... we depend on those instructions." `build_instructions`
+    // used to return the NON-fatal `PrepError::Instructions(PipelineError)`,
+    // which every spawning caller logged and continued past — starting a session
+    // whose instructions were never established. It is now the same fatal
+    // condition as the compiled write, so the launch is refused.
+    //
+    // FIXTURE: a directory planted at `<project>/CLAUDE.md`, so the pipeline's
+    // load-or-create step fails. This is the ONLY early exit upstream of the
+    // compiled write; if it ever returns non-fatally again, the ordering
+    // contract's promise stops being true and this test fails.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(project.join("CLAUDE.md"))
+        .expect("plant a directory where CLAUDE.md goes");
+
+    let err = prepare_session(&fw, project)
+        .expect_err("a session whose instructions cannot be built must NOT start");
+
+    assert!(
+        err.is_fatal(),
+        "an instruction-build failure must be classified fatal, got {err:?}"
+    );
+    match &err {
+        PrepError::Instructions { path, .. } => assert!(
+            path.starts_with(project),
+            "the error must name the offending project path, got {}",
+            path.display()
+        ),
+        other => panic!("expected PrepError::Instructions, got {other:?}"),
+    }
+    // Operator-facing, not a bare io error.
+    let shown = err.to_string();
+    assert!(
+        shown.contains("was NOT started"),
+        "must say the session did not start: {shown}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn stash_write_failure_does_not_skip_the_fatal_instruction_write() {
+    // Why (#4752 round 4): the ordering contract promises that a session which
+    // starts has its instructions on disk. An unwritable `.trusty-mpm/` used to
+    // return a short-circuiting non-fatal `PrepError::Io` from the
+    // `last-instructions.md` stash, which sits ABOVE the fatal compiled write.
+    // Because `Io` is non-fatal, every caller launched the session anyway —
+    // having skipped the write that records its instructions. That is the exact
+    // case the contract forbids.
+    //
+    // The stash is an inspection copy, so losing it is not itself grounds to
+    // refuse a launch; what matters is that it cannot take the fatal write down
+    // with it.
     //
     // FIXTURE: a directory planted at `.trusty-mpm/last-instructions.md`, so
     // `create_dir_all` on the parent succeeds and only the stash WRITE fails.
