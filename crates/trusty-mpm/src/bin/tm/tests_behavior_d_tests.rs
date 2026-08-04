@@ -1726,6 +1726,8 @@ fn local_session_needs_force_active_and_others_true() {
 // production `auto_prune_dead_records` wrapper, which resolves the real
 // `~/.trusty-mpm` — tests must never touch the developer's real home dir.
 
+use std::collections::HashSet;
+
 use crate::commands::session_picker_prune::auto_prune_dead_records_at;
 
 /// Seed one managed session whose workspace path is NEVER created on disk —
@@ -1757,6 +1759,67 @@ async fn seed_dead_session(
         .await
         .expect("mark errored");
     id
+}
+
+/// A `PruneContext` bound to a tempdir marker with NO live tmux sessions.
+///
+/// Why: `session_ls_at` must never reach the real tmux enumeration in a test.
+/// CI proved why: the `session_ls_*` tests did exactly that, so they passed on a
+/// developer machine (tmux present) and failed on a runner with no tmux, where
+/// the fail-closed rule correctly pruned nothing. An explicit empty set makes
+/// the test say what it means — "no session is live" — on every machine.
+fn hermetic_prune_ctx(
+    marker_path: &std::path::Path,
+) -> crate::commands::session_picker_prune::PruneContext {
+    crate::commands::session_picker_prune::PruneContext::hermetic(
+        marker_path.to_path_buf(),
+        Some(HashSet::new()),
+    )
+}
+
+/// Set every RECORD sighting to exactly `minutes` ago, leaving the stale-daemon
+/// sentinel untouched (#4702).
+///
+/// Why: confirmation requires a real elapsed interval (`SIGHTING_MIN_AGE_SECS`,
+/// 10 minutes). Tests simulate that rather than sleeping through it, exercising
+/// the real comparison against the real constant instead of weakening either.
+///
+/// 🔴 This OVERWRITES the stamp, so it also masks a restamp bug: a test that
+/// calls it between every listing cannot observe the clock being reset (PR #4725
+/// review round 2). Use it only to establish a starting age. To simulate time
+/// passing ACROSS listings, use [`age_sightings_by`], which is relative.
+fn backdate_sightings(marker_path: &std::path::Path, minutes: i64) {
+    let backdated = (chrono::Utc::now() - chrono::Duration::minutes(minutes)).to_rfc3339();
+    rewrite_sightings(marker_path, |_| backdated.clone());
+}
+
+/// Move every RECORD sighting `minutes` FURTHER into the past, relative to
+/// whatever is currently persisted (PR #4725 review round 2).
+///
+/// Why: this is how a test simulates wall-clock advance without destroying the
+/// evidence. Because it is relative, a restamp performed by an intervening
+/// listing survives into the next assertion — so a test using this catches the
+/// "window resets on every listing" defect that an absolute overwrite hides.
+fn age_sightings_by(marker_path: &std::path::Path, minutes: i64) {
+    rewrite_sightings(marker_path, |current| {
+        let parsed = chrono::DateTime::parse_from_rfc3339(current)
+            .expect("a persisted sighting must be valid RFC 3339 to age it");
+        (parsed - chrono::Duration::minutes(minutes)).to_rfc3339()
+    });
+}
+
+/// Shared marker-file rewrite used by [`backdate_sightings`] and
+/// [`age_sightings_by`]; never touches the stale-daemon sentinel.
+fn rewrite_sightings(marker_path: &std::path::Path, f: impl Fn(&str) -> String) {
+    let raw = std::fs::read_to_string(marker_path).expect("marker file must exist");
+    let mut seen: std::collections::HashMap<String, String> =
+        serde_json::from_str(&raw).expect("marker file must parse");
+    for (key, value) in seen.iter_mut() {
+        if key != "__stale_daemon_detected__" {
+            *value = f(value);
+        }
+    }
+    std::fs::write(marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 }
 
 /// Fetch the RAW (non-auto-pruning) live session list — bypasses
@@ -1796,7 +1859,14 @@ async fn auto_prune_dead_records_first_sighting_is_not_pruned() {
         .expect("dead session must still surface on the raw fetch");
     assert!(target.unresumable, "seeded session must be unresumable");
 
-    let outcome = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 0, "a first sighting must never be pruned");
     assert_eq!(outcome.pending, 1, "a first sighting is reported pending");
     assert!(
@@ -1833,12 +1903,43 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
 
     // First call: first sighting, not yet acted on.
     let sessions = fetch_raw_live(&client, &server.url).await;
-    let first = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let first = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(first.pruned, 0);
 
-    // Second call (a later, separate listing): now CONFIRMED — decommissioned.
+    // #4702: an immediate second call must NOT confirm — the sighting window
+    // is time-based, not call-count-based.
     let sessions = fetch_raw_live(&client, &server.url).await;
-    let second = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let immediate = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        immediate.pruned, 0,
+        "a second call in the same instant must not confirm — the window is elapsed TIME"
+    );
+
+    // Second call after the window has genuinely elapsed: now CONFIRMED.
+    backdate_sightings(&marker_path, 11);
+    let sessions = fetch_raw_live(&client, &server.url).await;
+    let second = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         second.pruned, 1,
         "confirmed on a second listing must be pruned"
@@ -1909,7 +2010,14 @@ async fn auto_prune_dead_records_keeps_workspace_present_records() {
          be flagged unresumable"
     );
 
-    let outcome = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         outcome.pruned, 0,
         "a record with an existing workspace must never be pruned"
@@ -1933,8 +2041,14 @@ async fn auto_prune_dead_records_is_noop_when_nothing_is_dead() {
         .join("seen.json");
     let sessions = vec![ls_test_session("healthy", "active", None, None, None, None)];
 
-    let outcome =
-        auto_prune_dead_records_at(&client, "http://127.0.0.1:1", sessions, &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        "http://127.0.0.1:1",
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 0);
     assert_eq!(outcome.pending, 0);
     assert_eq!(outcome.kept.len(), 1);
@@ -1962,14 +2076,30 @@ async fn auto_prune_dead_records_honors_the_cap() {
     // First call: all 6 are first sightings — nothing pruned yet.
     let sessions = fetch_raw_live(&client, &server.url).await;
     assert_eq!(sessions.len(), 6);
-    let first = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let first = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(first.pruned, 0);
     assert_eq!(first.pending, 6);
 
-    // Second call: all 6 are now CONFIRMED, but the cap limits this call to 5.
+    // Second call, once the sighting window has genuinely elapsed: all 6 are
+    // CONFIRMED, but the cap limits this call to 5.
+    backdate_sightings(&marker_path, 11);
     let sessions = fetch_raw_live(&client, &server.url).await;
     assert_eq!(sessions.len(), 6);
-    let second = auto_prune_dead_records_at(&client, &server.url, sessions, &marker_path).await;
+    let second = auto_prune_dead_records_at(
+        &client,
+        &server.url,
+        sessions,
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(second.pruned, 5, "the cap must limit a single call to 5");
     assert_eq!(
         second.pending, 1,
@@ -2029,14 +2159,24 @@ async fn auto_prune_dead_records_stops_sweep_when_daemon_reports_workspace_remov
     seen.insert("id-b".to_string(), "2020-01-01T00:00:00Z".to_string());
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
-    let mut a = ls_test_session("id-a", "errored", None, None, None, None);
-    a.id = "id-a".to_string();
+    // #4702: both must carry a genuinely-absent workspace under an EXISTING
+    // parent — the client's own verification is now required for every record,
+    // so a bare `unresumable: true` no longer makes one a candidate.
+    let mut a = stopped_session_at("id-a", &root.path().join("gone-a"));
+    a.state = "errored".to_string();
     a.unresumable = true;
-    let mut b = ls_test_session("id-b", "errored", None, None, None, None);
-    b.id = "id-b".to_string();
+    let mut b = stopped_session_at("id-b", &root.path().join("gone-b"));
+    b.state = "errored".to_string();
     b.unresumable = true;
 
-    let outcome = auto_prune_dead_records_at(&client, &url, vec![a, b], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![a, b],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         outcome.pruned, 0,
         "a stale daemon's workspace_removed=true must never count as pruned"
@@ -2086,9 +2226,12 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     let root = tempfile::TempDir::new().expect("tempdir");
     let marker_path = root.path().join("seen.json");
 
+    // #4702: a candidate needs a verifiably-absent workspace under an existing
+    // parent — `unresumable` alone is no longer sufficient.
+    let gone = root.path().join("gone-ttl");
     let confirmed_session = || {
-        let mut s = ls_test_session("id-a", "errored", None, None, None, None);
-        s.id = "id-a".to_string();
+        let mut s = stopped_session_at("id-a", &gone);
+        s.state = "errored".to_string();
         s.unresumable = true;
         s
     };
@@ -2102,8 +2245,14 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     );
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
-    let outcome =
-        auto_prune_dead_records_at(&client, &url, vec![confirmed_session()], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![confirmed_session()],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(outcome.pruned, 0, "a fresh sentinel must still block");
     assert_eq!(outcome.kept.len(), 1);
     assert_eq!(outcome.pending, 1, "held record must fold into pending");
@@ -2120,8 +2269,14 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     );
     std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
 
-    let outcome =
-        auto_prune_dead_records_at(&client, &url, vec![confirmed_session()], &marker_path).await;
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![confirmed_session()],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
     assert_eq!(
         outcome.pruned, 0,
         "the stub is still stale, so the retry must not count as pruned"
@@ -2145,44 +2300,929 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     handle.abort();
 }
 
-/// `fetch_live_sessions(allow_auto_prune = false)` is a pure read — a
-/// non-interactive listing (scripted/cron/CI bare `tm` or `tm ls`) must never
-/// trigger the destructive auto-prune sweep (critic HIGH finding #3).
+// ── #4702: prune coverage — every invocation, and stopped records ───────────
+//
+// Two independent narrowings let dead records accumulate without bound before
+// #4702, and each gets its own group below:
+//   1. the prune fired only from the TTY picker, so `managed::session_ls` (every
+//      piped / scripted / `--json` listing) never pruned at all;
+//   2. it acted only on the daemon-computed `unresumable` flag, which is
+//      computed ONLY for records whose PERSISTED state is `Stopped`/`Errored` —
+//      a zombie (persisted `Active`, pane gone) is display-reconciled to
+//      `stopped` and reads `unresumable == false` forever.
+//
+// Every test here injects a tempdir marker path, never the operator's real
+// `~/.trusty-mpm/auto-prune-seen.json`.
+
+/// Build a `stopped` summary whose two wire-visible workdir candidates
+/// (`workspace_path`, `cwd`) both point at `workdir`, with `unresumable`
+/// deliberately `false` — i.e. exactly the zombie shape the daemon never
+/// probes. `#4702`.
+fn stopped_session_at(
+    id: &str,
+    workdir: &std::path::Path,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = ls_test_session(id, "stopped", None, None, None, None);
+    s.id = id.to_string();
+    s.workspace_path = Some(workdir.to_string_lossy().to_string());
+    s.cwd = Some(workdir.to_string_lossy().to_string());
+    s.unresumable = false;
+    s
+}
+
+/// Spawn a stub daemon that answers every decommission POST honestly
+/// (`workspace_removed: false`, the record-only shape) and records the query
+/// string it was called with. Returns `(url, captured, task handle)`.
+async fn spawn_recording_decommission_stub() -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(
+            move |axum::extract::Path(id): axum::extract::Path<String>,
+                  axum::extract::RawQuery(q): axum::extract::RawQuery| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock()
+                        .expect("capture lock")
+                        .push(format!("{id}?{}", q.unwrap_or_default()));
+                    axum::Json(serde_json::json!({ "workspace_removed": false }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), captured, handle)
+}
+
+/// Defect 2 (#4702): a `stopped` record whose workspace is INDEPENDENTLY
+/// verified gone is cleared, even though the daemon never flagged it
+/// `unresumable` (that flag is computed only for records whose PERSISTED state
+/// is stopped/errored — a display-reconciled zombie never gets probed).
+///
+/// Fails before #4702: the partition keyed on `s.unresumable` alone, so this
+/// record was never even a candidate.
 #[tokio::test]
-async fn fetch_live_sessions_skips_auto_prune_when_disallowed() {
+async fn auto_prune_clears_stopped_record_whose_workspace_is_gone() {
     let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("workspace-that-never-existed");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    // First sighting records a candidate but never acts.
+    let first = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("z1", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(first.pruned, 0, "a first sighting must never be pruned");
+    assert_eq!(first.pending, 1);
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "a first sighting must issue no decommission call at all"
+    );
+
+    // Second sighting, once the sighting window has genuinely elapsed.
+    backdate_sightings(&marker_path, 11);
+    let second = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("z1", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        second.pruned, 1,
+        "a confirmed stopped record with a verifiably absent workspace must be cleared"
+    );
+    assert!(second.kept.is_empty());
+
+    handle.abort();
+}
+
+/// The safety half of defect 2 (#4702): a `stopped` record whose workspace
+/// STILL EXISTS is never cleared, no matter how many times it is listed. It may
+/// still be resumable, and the record may be the only thing making resumption
+/// possible — measured 2026-08-03, 4 of 5 spot-checked stopped workspaces were
+/// still on disk.
+#[tokio::test]
+async fn auto_prune_keeps_stopped_record_whose_workspace_still_exists() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let present = root.path().join("live-workspace");
+    std::fs::create_dir_all(&present).expect("create workspace");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("keeper", &present)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: a stopped record with a workspace ON DISK must never be cleared"
+        );
+        assert_eq!(outcome.kept.len(), 1, "round {round}: it must stay listed");
+        assert_eq!(
+            outcome.pending, 0,
+            "round {round}: it is not even a pending candidate"
+        );
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "no decommission call may ever be issued for a live workspace"
+    );
+
+    handle.abort();
+}
+
+/// An `active` (running) record is never touched, even when its recorded
+/// workspace path is absent — liveness, not workspace presence, decides
+/// (#4702). `is_running()`'s real tmux probe upstream is what makes a
+/// persisted-`stopped`-but-actually-alive session read `active` here.
+#[tokio::test]
+async fn auto_prune_never_touches_a_running_record() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("nowhere");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut live = stopped_session_at("alive", &gone);
+    live.state = "active".to_string();
+
+    for _ in 0..2 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![live.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(outcome.pruned, 0, "a running record must never be pruned");
+        assert_eq!(outcome.kept.len(), 1);
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// `decommissioned` records are explicitly OUT of scope for #4702 — 35 exist on
+/// the reporting machine and nobody has assessed what discarding them costs.
+/// The state gate must exclude them even when their workspace is long gone.
+#[tokio::test]
+async fn auto_prune_never_touches_a_decommissioned_record() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("nowhere");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut tombstone = stopped_session_at("tombstone", &gone);
+    tombstone.state = "decommissioned".to_string();
+    // Also cover the display/persisted split: a row displayed `stopped` whose
+    // PERSISTED state is already terminal.
+    let mut persisted_terminal = stopped_session_at("terminal", &gone);
+    persisted_terminal.persisted_state = Some("decommissioned".to_string());
+
+    for _ in 0..2 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![tombstone.clone(), persisted_terminal.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(outcome.pruned, 0);
+        assert_eq!(outcome.kept.len(), 2);
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "a decommissioned record must never be decommissioned again"
+    );
+
+    handle.abort();
+}
+
+/// 🔴 The load-bearing safety test (#4702): the prune path must never invoke a
+/// worktree removal. `prune_managed(PruneFilter::Stopped, …)` routes through the
+/// FULL `decommission()`, which runs `git worktree remove --force` /
+/// `fs::remove_dir_all` / `git branch -D`. Auto-prune must not inherit that.
+///
+/// This asserts on the PATH, not the end state: every decommission request the
+/// sweep issues must carry `record_only=true`, which is what routes the daemon
+/// to `SessionManager::decommission_record_only` (whose own never-removes
+/// guarantee is pinned server-side by
+/// `decommission_record_only_never_removes_existing_workspace`). A request
+/// without it would silently take the full-teardown branch.
+#[tokio::test]
+async fn auto_prune_always_requests_record_only_never_full_teardown() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    // One record dead via the daemon's `unresumable` verdict, one via #4702's
+    // client-side stopped-workspace-gone probe — both routes must be
+    // record-only.
+    let mut flagged = stopped_session_at("flagged", &gone);
+    flagged.unresumable = true;
+    let probed = stopped_session_at("probed", &gone);
+
+    let sessions = vec![flagged.clone(), probed.clone()];
+    auto_prune_dead_records_at(&client, &url, sessions, &marker_path, Some(HashSet::new())).await;
+    backdate_sightings(&marker_path, 11);
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![flagged, probed],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(outcome.pruned, 2, "both dead records must be cleared");
+
+    let calls = captured.lock().expect("capture lock").clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "exactly two decommission calls, got {calls:?}"
+    );
+    for call in &calls {
+        assert!(
+            call.contains("record_only=true"),
+            "every decommission the sweep issues must be RECORD-ONLY — a call \
+             without it takes the full worktree-removal teardown: {call}"
+        );
+    }
+
+    handle.abort();
+}
+
+/// Defect 1 (#4702): a piped / scripted / non-TTY `tm ls` prunes. Before the
+/// fix this path (`managed::session_ls`) never called the prune at all, so
+/// anything not driving the interactive picker accumulated dead records
+/// forever.
+#[tokio::test]
+async fn session_ls_prunes_dead_records_on_piped_invocation() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
     );
     let mgr = state.session_manager().await;
-    let id = seed_dead_session(&mgr, root.path(), "non-tty").await;
+    let id = seed_dead_session(&mgr, root.path(), "piped").await;
 
     let server = LocalTestServer::spawn(state).await;
     let client = reqwest::Client::new();
 
-    let sessions = crate::commands::session_picker::fetch_live_sessions(
-        &client,
-        &server.url,
-        None,
-        false,
-        false, // allow_auto_prune = false: the non-interactive case
-    )
-    .await
-    .expect("fetch live sessions");
+    // First listing records the sighting; the sighting window then elapses; the
+    // second clears. The two-sightings guard applies to non-interactive callers
+    // exactly as it does to the picker.
+    let ls = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
+        crate::commands::managed::session_ls_at(
+            &client,
+            &server.url,
+            false, // json = false: the piped/scripted table path
+            None,
+            false,
+            crate::commands::session_picker::SessionSortArg::Recent,
+            None,
+            ctx,
+        )
+        .await
+        .expect("session_ls");
+    };
+
+    let ctx = hermetic_prune_ctx(&marker_path);
+    ls(&ctx).await;
     assert!(
-        sessions.iter().any(|s| s.id == id.to_string()),
-        "a non-interactive fetch must return the dead record unchanged"
+        fetch_raw_live(&client, &server.url)
+            .await
+            .iter()
+            .any(|s| s.id == id.to_string()),
+        "a first sighting must leave the record in place"
     );
 
-    // The daemon-side record must be untouched — still Errored, never
-    // decommissioned, and no confirmation marker written.
-    let still_there = fetch_raw_live(&client, &server.url).await;
-    let record = still_there
-        .iter()
-        .find(|s| s.id == id.to_string())
-        .expect("record must still be live");
-    assert_eq!(
-        record.state, "errored",
-        "a non-interactive fetch must never decommission anything"
+    backdate_sightings(&marker_path, 11);
+    let ctx = hermetic_prune_ctx(&marker_path);
+    ls(&ctx).await;
+
+    let live = fetch_raw_live(&client, &server.url).await;
+    assert!(
+        !live.iter().any(|s| s.id == id.to_string()),
+        "a non-TTY `tm ls` must clear a confirmed dead record from the registry"
     );
+}
+
+/// Defect 1 (#4702), `--json` half: the raw passthrough path prunes too.
+#[tokio::test]
+async fn session_ls_json_passthrough_prunes_dead_records() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+    let id = seed_dead_session(&mgr, root.path(), "json").await;
+
+    let server = LocalTestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let ls_json = async |ctx: &crate::commands::session_picker_prune::PruneContext| {
+        crate::commands::managed::session_ls_at(
+            &client,
+            &server.url,
+            true, // json = true
+            None,
+            false,
+            crate::commands::session_picker::SessionSortArg::Recent,
+            None,
+            ctx,
+        )
+        .await
+        .expect("session_ls --json");
+    };
+
+    ls_json(&hermetic_prune_ctx(&marker_path)).await;
+    backdate_sightings(&marker_path, 11);
+    ls_json(&hermetic_prune_ctx(&marker_path)).await;
+
+    let live = fetch_raw_live(&client, &server.url).await;
+    assert!(
+        !live.iter().any(|s| s.id == id.to_string()),
+        "`tm ls --json` must clear a confirmed dead record from the registry"
+    );
+}
+
+// ── PR #4725 review — the five required changes ────────────────────────────
+
+/// Change 3 (PR #4725 review): an UNREACHABLE parent directory reads
+/// `Ok(false)` from `try_exists`, not `Err`. Without the parent check, unplugging
+/// an external volume makes every session on it "verified gone" and one `tm ls`
+/// tombstones the lot.
+///
+/// What: the record's workspace sits under a directory that does not exist —
+/// standing in for `/Volumes/<unmounted>` — so BOTH the leaf and its parent
+/// probe absent. Even across many listings with the sighting window fully
+/// elapsed, nothing may be pruned and no decommission call may be issued.
+#[tokio::test]
+async fn auto_prune_keeps_record_whose_parent_directory_is_unreachable() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    // Neither `unmounted-volume` nor the leaf below it exists.
+    let unreachable = root
+        .path()
+        .join("unmounted-volume")
+        .join("work")
+        .join("proj");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("on-the-volume", &unreachable)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: an unreachable parent is NOT proof the workspace is gone"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "no decommission may be issued for a path whose parent is unreachable"
+    );
+
+    handle.abort();
+}
+
+/// Change 3, second half (PR #4725 review): the daemon's `unresumable` verdict
+/// alone must NOT clear a record whose parent is unreachable.
+///
+/// Why: `is_unresumable` probes with a bare `try_exists`, so it flags an entire
+/// unmounted volume's sessions dead. A `if s.unresumable { return true }`
+/// short-circuit in `is_dead_record` would route exactly that past the parent
+/// check the sibling test above pins. This is why no such short-circuit exists.
+#[tokio::test]
+async fn auto_prune_ignores_daemon_unresumable_when_parent_is_unreachable() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let unreachable = root.path().join("unmounted-volume").join("proj");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut flagged = stopped_session_at("daemon-says-dead", &unreachable);
+    flagged.unresumable = true; // the daemon's (mistaken) verdict
+
+    for _ in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![flagged.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "the daemon's unresumable flag must not override the client's own verification"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// Change 4 (PR #4725 review): confirmation requires ELAPSED TIME, not merely a
+/// second call. `seen.contains_key(id)` was presence-only, so two `tm ls` calls
+/// milliseconds apart confirmed and `AUTO_PRUNE_CAP` stopped being a rate limit.
+#[tokio::test]
+async fn auto_prune_does_not_confirm_two_calls_in_quick_succession() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    // Ten back-to-back listings, standing in for a tight scripted loop.
+    for round in 0..10 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("hasty", &gone)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: repeated calls inside the sighting window must never confirm"
+        );
+    }
+    assert!(
+        captured.lock().expect("capture lock").is_empty(),
+        "a tight loop must not be able to drive any decommission at all"
+    );
+
+    handle.abort();
+}
+
+/// 🔴 PR #4725 review round 2, HIGH: a listing inside the window must NOT
+/// restamp the sighting.
+///
+/// Why: the fix restored a time bound but rewrote the stamp with `now` on every
+/// call that did not confirm. That made the window measure the gap between
+/// CONSECUTIVE LISTINGS rather than age since first sighting, so any `tm ls`
+/// cadence tighter than `SIGHTING_MIN_AGE_SECS` reset the clock forever and
+/// auto-prune could never fire — permanently inert on the very machine #4702
+/// was filed from. No test caught it because the `backdate_sightings` helper
+/// overwrites the stamp after each call, masking the restamp.
+///
+/// What: seeds a sighting 6 minutes old (inside the 10-minute window), runs a
+/// listing, and asserts the PERSISTED STAMP IS UNCHANGED — the mechanism, not
+/// just the "not pruned" outcome, which the buggy code also satisfied. Uses no
+/// backdating helper for exactly that reason.
+#[tokio::test]
+async fn auto_prune_does_not_restamp_a_sighting_still_inside_the_window() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let seeded = (chrono::Utc::now() - chrono::Duration::minutes(6)).to_rfc3339();
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("midwindow".to_string(), seeded.clone());
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    // A listing at T+6: too recent to confirm, and it must leave the clock alone.
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("midwindow", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "6 minutes is inside the 10-minute window"
+    );
+
+    let raw = std::fs::read_to_string(&marker_path).expect("read marker");
+    let persisted: std::collections::HashMap<String, String> =
+        serde_json::from_str(&raw).expect("parse marker");
+    assert_eq!(
+        persisted.get("midwindow"),
+        Some(&seeded),
+        "the ORIGINAL first-sighting stamp must survive an intervening listing — \
+         restamping makes the window measure listing cadence, not age, and any \
+         `tm ls` more often than every 10 minutes then leaves auto-prune inert"
+    );
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// The behavioral consequence of the restamp bug: a record dead longer than the
+/// window still confirms even though it was listed repeatedly in between (PR
+/// #4725 review round 2).
+///
+/// What: reproduces the real cadence. A record is first sighted, listed again
+/// 6 minutes later (inside the window), and only then reaches 11 minutes of
+/// AGE. Wall-clock advance is simulated by aging the stamp RELATIVE TO WHATEVER
+/// IS PERSISTED — never by overwriting it with a fixed value — so a restamp
+/// during the intervening listing carries through and the record never confirms,
+/// exactly as it would on a real machine.
+#[tokio::test]
+async fn auto_prune_confirms_despite_frequent_intervening_listings() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, _captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let listing = async |marker: &std::path::Path| {
+        auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("patient", &gone)],
+            marker,
+            Some(HashSet::new()),
+        )
+        .await
+        .pruned
+    };
+
+    // T+0: first sighting.
+    assert_eq!(listing(&marker_path).await, 0);
+    // Simulate 6 minutes passing, then a listing at T+6 (inside the window).
+    age_sightings_by(&marker_path, 6);
+    assert_eq!(
+        listing(&marker_path).await,
+        0,
+        "a listing 6 minutes in must not confirm"
+    );
+    // Simulate 5 more minutes. The record is now 11 minutes old — UNLESS the
+    // intervening listing restamped it, which is the defect.
+    age_sightings_by(&marker_path, 5);
+    assert_eq!(
+        listing(&marker_path).await,
+        1,
+        "at 11 minutes of real age the record must confirm — a listing at T+6 \
+         must not have reset the clock"
+    );
+
+    handle.abort();
+}
+
+/// 🔴 PR #4725 review round 2, HIGH: an `errored` record whose pane is LIVE but
+/// DETACHED must never be tombstoned.
+///
+/// Why: `reconcile_live_state` only rewrites `state` for records persisted
+/// `Active`/`Stopped`, so an errored row keeps its persisted state even with a
+/// live pane, and `attached` is false when no client is attached — leaving a
+/// running agent eligible for a TERMINAL `Decommissioned` tombstone that removes
+/// it from resume, reattach, and the picker. Client-side tmux enumeration gives
+/// the missing signal with no daemon change.
+///
+/// What: an errored, unresumable record with a vanished workspace — every other
+/// condition for clearing is met — whose tmux name appears in the injected live
+/// set. It must survive every listing.
+#[tokio::test]
+async fn auto_prune_never_touches_an_errored_record_with_a_live_detached_pane() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut errored = stopped_session_at("tm-live-agent-01", &gone);
+    errored.state = "errored".to_string();
+    errored.unresumable = true;
+    errored.attached = false; // live but DETACHED — the hole `attached` missed
+
+    let live: HashSet<String> = ["tm-live-agent-01".to_string()].into_iter().collect();
+
+    for round in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![errored.clone()],
+            &marker_path,
+            Some(live.clone()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "round {round}: a live tmux session must never be tombstoned into a \
+             terminal state, detached or not"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// When tmux cannot be enumerated at all, prune nothing (PR #4725 review round
+/// 2) — mirrors `reconcile_against_tmux`'s fail-closed contract. Without a
+/// liveness signal, clearing an `errored` record could tombstone a running
+/// agent.
+#[tokio::test]
+async fn auto_prune_prunes_nothing_when_tmux_cannot_be_enumerated() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut seen = std::collections::HashMap::new();
+    seen.insert(
+        "confirmed-but-blind".to_string(),
+        (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339(),
+    );
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("confirmed-but-blind", &gone)],
+        &marker_path,
+        None, // tmux enumeration failed
+    )
+    .await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "no liveness signal means no clearing, even for a long-confirmed record"
+    );
+    assert_eq!(outcome.kept.len(), 1);
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// Change 4, the other half: once the window HAS elapsed, confirmation works —
+/// the time bound must not wedge auto-prune off permanently.
+#[tokio::test]
+async fn auto_prune_confirms_once_the_sighting_window_has_elapsed() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, _captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("patient", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    backdate_sightings(&marker_path, 11);
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("patient", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        outcome.pruned, 1,
+        "an elapsed sighting window must confirm — the bound is a delay, not a lockout"
+    );
+
+    handle.abort();
+}
+
+/// A corrupt/unparseable first-sighting timestamp must RESTART the window, never
+/// satisfy it (PR #4725 review, change 4).
+#[tokio::test]
+async fn auto_prune_treats_an_unparseable_sighting_as_a_fresh_one() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("corrupt".to_string(), "not-a-timestamp".to_string());
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![stopped_session_at("corrupt", &gone)],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+    assert_eq!(
+        outcome.pruned, 0,
+        "an unparseable sighting must never count as confirmed"
+    );
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    // …and it must have been REWRITTEN with a parseable stamp, so the window
+    // actually restarts rather than staying permanently stuck.
+    let raw = std::fs::read_to_string(&marker_path).expect("read marker");
+    let persisted: std::collections::HashMap<String, String> =
+        serde_json::from_str(&raw).expect("parse marker");
+    let stamp = persisted.get("corrupt").expect("entry must survive");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(stamp).is_ok(),
+        "the corrupt entry must be restamped with a valid timestamp, got {stamp:?}"
+    );
+
+    handle.abort();
+}
+
+/// An ATTACHED record is never a candidate, whatever its state says (PR #4725
+/// review). `reconcile_live_state` only rewrites `state` for records persisted
+/// `Active`/`Stopped`, so an `errored` row keeps its persisted state even with a
+/// live pane; `attached` is the one liveness signal it does carry.
+#[tokio::test]
+async fn auto_prune_never_touches_an_attached_record() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let (url, captured, handle) = spawn_recording_decommission_stub().await;
+    let client = reqwest::Client::new();
+
+    let mut attached = stopped_session_at("attached-errored", &gone);
+    attached.state = "errored".to_string();
+    attached.unresumable = true;
+    attached.attached = true;
+
+    for _ in 0..3 {
+        let outcome = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![attached.clone()],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            outcome.pruned, 0,
+            "an attached session must never be cleared"
+        );
+        if marker_path.exists() {
+            backdate_sightings(&marker_path, 11);
+        }
+    }
+    assert!(captured.lock().expect("capture lock").is_empty());
+
+    handle.abort();
+}
+
+/// Change 5 (PR #4725 review): `--json` echoes the body it already fetched and
+/// never re-GETs after pruning.
+///
+/// Why: the re-GET returned the just-pruned row with `state` flipped to
+/// `"decommissioned"` (the raw passthrough is unfiltered, so it did not
+/// disappear), and its `?` could fail the command AFTER the registry had already
+/// been mutated — the caller would see an error with no idea the prune landed.
+/// What: counts GETs against a stub that also honours the decommission, across a
+/// call that genuinely prunes. Exactly one GET per invocation.
+///
+/// PR #4725 review round 2 (MEDIUM): this test also asserts a decommission POST
+/// actually fired. Without that it passed with `is_dead_record` stubbed to
+/// always-false — proving only "one GET when nothing happens", which is not the
+/// claim. The POST count is the precondition that makes the GET count meaningful.
+#[tokio::test]
+async fn session_ls_json_never_refetches_after_pruning() {
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+    let gone = root.path().join("gone");
+    let gets = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let deletes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let body = serde_json::json!({
+        "sessions": [{
+            "id": "j1",
+            "name": "j1",
+            "state": "stopped",
+            "persisted_state": "stopped",
+            "workspace_path": gone.to_string_lossy(),
+            "cwd": gone.to_string_lossy(),
+            "created_at": "2026-08-01T00:00:00Z",
+            "unresumable": false,
+            "slot": 1,
+            "deleted": false,
+        }]
+    });
+    let get_sink = gets.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/sessions/managed",
+            axum::routing::get(move || {
+                let get_sink = get_sink.clone();
+                let body = body.clone();
+                async move {
+                    get_sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::Json(body)
+                }
+            }),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/decommission",
+            axum::routing::post({
+                let delete_sink = deletes.clone();
+                move |axum::extract::Path(_id): axum::extract::Path<String>| {
+                    let delete_sink = delete_sink.clone();
+                    async move {
+                        delete_sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        axum::Json(serde_json::json!({ "workspace_removed": false }))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // First invocation records the sighting; after the window elapses the second
+    // genuinely prunes — the case that used to trigger the re-GET.
+    let mut seen = std::collections::HashMap::new();
+    seen.insert(
+        "j1".to_string(),
+        (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339(),
+    );
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    crate::commands::managed::session_ls_at(
+        &client,
+        &url,
+        true,
+        None,
+        false,
+        crate::commands::session_picker::SessionSortArg::Recent,
+        None,
+        &hermetic_prune_ctx(&marker_path),
+    )
+    .await
+    .expect("session_ls --json");
+
+    // PRECONDITION: a prune must actually have happened, or the GET count below
+    // proves nothing. This is the assertion whose absence let the test pass
+    // against an always-false `is_dead_record`.
+    assert_eq!(
+        deletes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "precondition: this invocation must genuinely prune a record — otherwise \
+         'exactly one GET' is vacuous"
+    );
+    assert_eq!(
+        gets.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "`--json` must issue exactly ONE GET even when the prune removed a record"
+    );
+
+    handle.abort();
 }

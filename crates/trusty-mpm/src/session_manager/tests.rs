@@ -743,7 +743,7 @@ async fn manager_decommission_removes_workspace() {
 
     // Decommission using the injectable root — no unsafe env mutation.
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path(), None, false)
+        .decommission_with_root(&record.id, managed_root.path(), None)
         .await
         .expect("decommission");
 
@@ -826,7 +826,7 @@ async fn decommission_record_only_never_removes_existing_workspace() {
         .expect("create");
 
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path(), None, true)
+        .decommission_record_only(&record.id)
         .await
         .expect("record-only decommission");
 
@@ -848,6 +848,257 @@ async fn decommission_record_only_never_removes_existing_workspace() {
         Some(workspace_path.as_path()),
         "workspace_path must be RETAINED (not nulled) since the directory is \
          still genuinely on disk — mirrors the #4344 dirty-retained boundary"
+    );
+}
+
+/// 🔴 A record-only decommission must not touch the RUNTIME either (#4702).
+///
+/// Why: `record_only` was named and documented as "never touches the
+/// filesystem," and every caller — including the shipped `tm ls` auto-prune
+/// (#4384) — read that as "safe to run unattended on every listing." It was
+/// only half true. `graceful_terminate_runtime` sat ABOVE the `record_only`
+/// guard in `decommission_with_root` and ran unconditionally: it SIGTERMed the
+/// claude process and `kill_session`ed the pane. Its self-guard is
+/// `session_exists(name)` — plain LIVE-TMUX NAME MEMBERSHIP, never the record's
+/// captured `pane_id` — so it killed whatever live session happened to carry
+/// this record's name, routing around the pane-scoped containment #3714 added
+/// for display. The sibling test above proves the filesystem half and passed
+/// throughout; it never seeded a live tmux session, so it could not see this.
+///
+/// What: seeds `FakeTmuxDriver::seeded_names` with the record's `tmux_name` so
+/// `session_exists` reports it LIVE — the exact precondition that made the old
+/// code signal and kill — then drives `decommission_with_root(…, record_only =
+/// true)`. Asserts on the DRIVER'S CALL LOG (`interrupt_calls`, `kill_calls`,
+/// `graceful_stop_calls` all empty), not on an observable outcome: a test that
+/// checked only "the record is tombstoned" would pass against the buggy code.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_record_only_never_touches_the_runtime() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("live");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true,
+        )
+        .await
+        .expect("create");
+
+    // Make the record's name resolve LIVE, so `graceful_terminate_runtime`'s
+    // `session_exists` fast-path does NOT short-circuit. Without this the test
+    // would pass vacuously against the buggy code.
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push(record.tmux_name.clone());
+    assert!(
+        fake.session_exists(&record.tmux_name),
+        "precondition: the driver must report this session LIVE, otherwise the \
+         helper's own fast-path makes this test vacuous"
+    );
+
+    mgr.decommission_record_only(&record.id)
+        .await
+        .expect("record-only decommission");
+
+    assert!(
+        fake.interrupt_calls.lock().unwrap().is_empty(),
+        "record-only must never signal the runtime; got {:?}",
+        fake.interrupt_calls.lock().unwrap()
+    );
+    assert!(
+        fake.kill_calls.lock().unwrap().is_empty(),
+        "record-only must never reclaim the pane — this is the call that killed \
+         a live session sharing the record's name; got {:?}",
+        fake.kill_calls.lock().unwrap()
+    );
+    assert!(
+        fake.graceful_stop_calls.lock().unwrap().is_empty(),
+        "record-only must never issue a graceful-stop; got {:?}",
+        fake.graceful_stop_calls.lock().unwrap()
+    );
+}
+
+/// 🔴 Why the record-only path may not reuse `decommission_with_root`'s
+/// search-index cleanup (PR #4725 review round 2).
+///
+/// Why: `decommission_with_root` derives its index id with
+/// `disposable_workspace_index_id`, whose own doc states it MUST run before any
+/// removal, because `resolve_project_root` walks UP for a `.git` marker — once
+/// the workspace is gone the walk keeps climbing and lands on an ancestor. The
+/// auto-prune sweep only ever fires for a workspace that is ALREADY gone, so it
+/// can never satisfy that precondition; reusing the shared teardown would issue
+/// a cross-daemon `DELETE /indexes/{id}` against the PARENT PROJECT's index.
+/// This test pins that hazard directly so nobody "simplifies" the record-only
+/// path back onto the shared function.
+///
+/// What: one git repo (the parent project) containing a `.worktrees/<leaf>`
+/// path that does NOT exist on disk — the exact shape of a GC'd session
+/// worktree. Asserts the derived id equals the id derived for the PARENT ROOT,
+/// i.e. deleting it would destroy the parent project's index.
+/// Test: this function IS the test.
+#[test]
+fn disposable_index_id_for_a_removed_worktree_resolves_to_the_parent_project() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let project_root = dir.path().join("my-project");
+    std::fs::create_dir_all(project_root.join(".git")).unwrap();
+
+    // The session worktree that auto-prune would be acting on: already gone.
+    let gone_worktree = project_root.join(".worktrees").join("tm-my-project-01");
+    assert!(
+        !gone_worktree.exists(),
+        "precondition: the worktree must be absent, which is when auto-prune fires"
+    );
+
+    let derived = super::search_gc::disposable_workspace_index_id(Some(&gone_worktree), true)
+        .expect("an owned workspace always derives some id");
+    let parent_id = trusty_common::derive_index_id(&project_root);
+
+    assert_eq!(
+        derived, parent_id,
+        "a removed worktree derives the PARENT project's index id — this is why \
+         the record-only path must never run the shared teardown's index cleanup"
+    );
+}
+
+/// 🔴 The enumeration test: `decommission_record_only` has NO side effect
+/// outside the record store (PR #4725 review round 2).
+///
+/// Why: two review rounds each found a different ungated destructive effect in
+/// `decommission_with_root` (#4728's runtime kill, then the search-index
+/// delete). The response was to stop threading a flag through a multi-effect
+/// function and give the sweep its own single-effect one. This test is the
+/// standing guard on that decision: it drives the record-only path against a
+/// fixture where EVERY effect in `decommission_with_root`'s side-effect table
+/// would be observable, and asserts none of them fired.
+///
+/// What: a real, populated, SM-owned workspace, plus a live tmux session
+/// carrying the record's name. Asserts the directory and its content survive
+/// (effects 2–3), no runtime signal or kill was issued (effect 1), and the
+/// record IS tombstoned with its pointer retained because the directory is
+/// still there (effects 5–7). Effect 4 (the cross-daemon index DELETE) is
+/// covered structurally — this function contains no `search_gc` call at all —
+/// and by the sibling test above, which pins why calling it here would be
+/// wrong. It is deliberately NOT exercised against the real resolver: on a
+/// machine with a live trusty-search daemon that would issue a genuine DELETE,
+/// which is the exact hazard under review.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_record_only_has_no_side_effects_beyond_the_store() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("sess");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    std::fs::write(workspace_path.join("uncommitted.txt"), "real work").unwrap();
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned — the full path WOULD remove_dir_all this
+        )
+        .await
+        .expect("create");
+
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push(record.tmux_name.clone());
+
+    let (tombstone, workspace_removed) = mgr
+        .decommission_record_only(&record.id)
+        .await
+        .expect("record-only");
+
+    assert!(!workspace_removed);
+    assert!(
+        workspace_path.join("uncommitted.txt").exists(),
+        "effects 2-3: real content must survive"
+    );
+    assert!(
+        fake.kill_calls.lock().unwrap().is_empty()
+            && fake.interrupt_calls.lock().unwrap().is_empty()
+            && fake.graceful_stop_calls.lock().unwrap().is_empty(),
+        "effect 1: the runtime must be untouched"
+    );
+    assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
+    assert_eq!(
+        tombstone.workspace_path.as_deref(),
+        Some(workspace_path.as_path()),
+        "effect 5: a workspace still on disk keeps its pointer (#4344)"
+    );
+}
+
+/// The full (non-record-only) decommission still tears the runtime down
+/// (#1975) — the #4702 gate must not silently disable it for everyone.
+///
+/// Why: gating `graceful_terminate_runtime` behind `!record_only` is only
+/// correct if the normal path is unaffected. Without this test the gate could
+/// be inverted or over-applied and nothing would notice.
+/// What: identical fixture to
+/// [`decommission_record_only_never_touches_the_runtime`], but `record_only =
+/// false`. Asserts the pane IS reclaimed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_full_still_terminates_the_runtime() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("full");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true,
+        )
+        .await
+        .expect("create");
+
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push(record.tmux_name.clone());
+
+    mgr.decommission_with_root(&record.id, managed_root.path(), None)
+        .await
+        .expect("full decommission");
+
+    assert_eq!(
+        *fake.kill_calls.lock().unwrap(),
+        vec![record.tmux_name.clone()],
+        "the FULL decommission path must still reclaim the pane (#1975)"
     );
 }
 

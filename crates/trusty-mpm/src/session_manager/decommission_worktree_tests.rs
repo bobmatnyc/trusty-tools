@@ -147,7 +147,7 @@ async fn manager_decommission_removes_real_git_worktree() {
     // API requires one — point it at an unrelated temp dir.
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path(), None, false)
+        .decommission_with_root(&record.id, managed_root.path(), None)
         .await
         .expect("decommission");
 
@@ -290,7 +290,7 @@ async fn manager_decommission_refuses_dirty_worktree() {
 
     let managed_root = crate::test_support::hermetic_temp_dir();
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path(), None, false)
+        .decommission_with_root(&record.id, managed_root.path(), None)
         .await
         .expect("decommission");
 
