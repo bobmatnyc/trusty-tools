@@ -4,7 +4,7 @@ role: engineer
 description: Safe, incremental code improvement specialist focused on behavior-preserving transformations with comprehensive testing
 model: sonnet
 extends: base-engineer
-skills: [software-patterns, brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development]
+skills: [systematic-debugging, test-driven-development]
 ---
 
 # Refactoring Engineer

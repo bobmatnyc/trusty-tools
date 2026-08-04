@@ -802,16 +802,18 @@ fn code_critic_declared_skills_are_in_bundle() {
 
 #[test]
 fn code_critic_declares_batch1_skills() {
-    // Issue #2903: code-critic's upstream counterpart declares 5 skills
-    // (code-review-standards, code-production-process, software-patterns,
-    // systematic-debugging, verification-before-completion); #2890 ported
-    // only the first, this issue ports the remaining 4 — extend the
-    // declaration to the full upstream-matched set (plus the net-new
-    // `contract-driven-testing`, which has no upstream counterpart).
-    assert!(CODE_CRITIC_AGENT.contains(
-        "skills: [code-review-standards, contract-driven-testing, code-production-process, \
-         software-patterns, systematic-debugging, verification-before-completion]"
-    ));
+    // Issue #2903 ported the full upstream six-skill set. #4642 cuts it back to
+    // the two that code-critic's own body tells it to load on turn one: the
+    // harness renders every listed skill's FULL body into the prompt at
+    // dispatch, so the other four (code-production-process, software-patterns,
+    // systematic-debugging, verification-before-completion) were 30 KB of
+    // reference material paid on every review. They remain bundled and
+    // invokable via the Skill tool; only the resident declaration shrank.
+    assert!(
+        CODE_CRITIC_AGENT.contains("skills: [code-review-standards, contract-driven-testing]"),
+        "code-critic's resident skills are its rubric and its contract-test \
+         reference, nothing else (#4642)"
+    );
 }
 
 #[test]

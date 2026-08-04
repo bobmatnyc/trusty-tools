@@ -259,8 +259,37 @@ fn install_then_deploy_composes_agents() {
         &paths.claude_agents_dir(),
     )
     .unwrap();
-    // All six bundled agents deploy on a fresh target.
-    assert_eq!(result.deployed.len(), 6);
+    // #4724: EVERY bundled agent deploys on a fresh target — derived from the
+    // bundle manifest `install_to` just wrote, never a literal. The old
+    // `assert_eq!(result.deployed.len(), 6)` was accurate when six agents
+    // shipped and has been stale ever since (the roster is 42); a second
+    // literal would go stale the next time anyone adds an agent, which is
+    // exactly how this got here.
+    //
+    // Comparing the SETS, not just the counts, is what makes this a real gate:
+    // an equal count with different membership would mean the deployer silently
+    // dropped one bundled agent and picked up something else, and a length-only
+    // assertion cannot see that.
+    let mut expected_agents: Vec<String> = trusty_mpm::core::bundle::ALL
+        .iter()
+        .filter_map(|a| a.rel_path.strip_prefix("agents/"))
+        .filter(|name| name.ends_with(".md"))
+        .map(str::to_string)
+        .collect();
+    expected_agents.sort();
+    assert!(
+        expected_agents.len() > 20,
+        "the bundle manifest yielded {} agent artifact(s) — the filter broke, \
+         and a gate that examined nothing is not a passing gate",
+        expected_agents.len()
+    );
+
+    let mut deployed_agents: Vec<String> = result.deployed.clone();
+    deployed_agents.sort();
+    assert_eq!(
+        deployed_agents, expected_agents,
+        "every bundled agent artifact must deploy on a fresh target (#4724)"
+    );
     assert!(result.skipped.is_empty());
 
     // The composed engineer carries inherited base content and no
