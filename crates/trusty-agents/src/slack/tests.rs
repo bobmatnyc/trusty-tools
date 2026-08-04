@@ -18,10 +18,11 @@ use super::format::{
 };
 use super::pairing::{
     PAIRING_CODE_TTL, PairOutcome, SENTINEL_PAIRING_CHANNEL_ID, generate_pairing_code,
-    issue_repl_pairing_code, new_pending_pairs, verify_pair_attempt,
+    issue_repl_pairing_code, load_paired_channels, new_pending_pairs, save_paired_channels,
+    should_auto_pair, verify_pair_attempt,
 };
 use super::rbac::{SlackRbacConfig, VIRTUAL_CTO_MESSAGE, default_rbac_users, parse_rbac_users};
-use super::{ENVELOPE_DEDUP_CAP, dedup_check_and_record};
+use super::{ENVELOPE_DEDUP_CAP, PairedChannels, dedup_check_and_record};
 
 #[test]
 fn split_message_short() {
@@ -632,6 +633,10 @@ async fn slack_handle_command_records_attendance_under_the_injected_root() {
         Arc::new(Mutex::new(std::collections::HashMap::new())),
         Arc::new(std::path::PathBuf::from(dir.path())),
         paired_with(channel).await,
+        // #4853: the state path the handler would persist to. `channel` is
+        // already paired, so nothing is written; it stays inside the tempdir
+        // regardless so no test can touch the real ~/.trusty-agents.
+        Arc::new(dir.path().join("slack-paired.json")),
         new_pending_pairs(),
         probe_rbac(),
         Some(Arc::clone(&root)),
@@ -673,6 +678,8 @@ async fn slack_handle_message_records_attendance_under_the_injected_root() {
         Arc::new(Mutex::new(std::collections::HashMap::new())),
         Arc::new(std::path::PathBuf::from(dir.path())),
         paired_with(channel).await,
+        // #4853: see the note in the handle_command probe above.
+        Arc::new(dir.path().join("slack-paired.json")),
         probe_rbac(),
         Some(Arc::clone(&root)),
     )
@@ -715,4 +722,131 @@ async fn post_message_without_a_token_errors_instead_of_requesting() {
         "that message means a request was actually attempted; the guard must \
          refuse BEFORE building a client; got: {msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #4853 — paired-channel persistence across a gateway restart.
+// ---------------------------------------------------------------------------
+
+/// A pairing survives a simulated service restart.
+///
+/// Why (#4853): `run_slack_bot` used to build a fresh empty `PairedChannels`
+/// on every call, so restarting the launchd gateway un-paired every channel.
+/// This is the regression test for that: it pairs, DROPS the in-memory map
+/// entirely (the restart), reloads from disk, and asserts the channel is still
+/// paired. Reverting `load_paired_channels`/`save_paired_channels` to the old
+/// "always empty" behavior turns this red.
+/// What: save -> drop -> load -> assert membership, in a tempdir.
+#[tokio::test]
+async fn slack_paired_state_round_trip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack-paired.json");
+
+    // --- process 1: pair two channels and persist ---
+    let paired: PairedChannels =
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    paired
+        .write()
+        .await
+        .insert("D0A6V2W1M2R".to_string(), Instant::now());
+    paired
+        .write()
+        .await
+        .insert("C0TEAMCHAN".to_string(), Instant::now());
+    save_paired_channels(&paired, &path).await.expect("save");
+
+    // --- the restart: nothing of the old map survives ---
+    drop(paired);
+
+    // --- process 2: boot from disk ---
+    let reloaded = load_paired_channels(&path).await;
+    let guard = reloaded.read().await;
+    assert_eq!(guard.len(), 2, "both pairings should survive the restart");
+    assert!(
+        guard.contains_key("D0A6V2W1M2R"),
+        "the DM pairing was lost across the restart"
+    );
+    assert!(
+        guard.contains_key("C0TEAMCHAN"),
+        "the channel pairing was lost across the restart"
+    );
+}
+
+/// A missing state file is a clean first run, not a failure.
+///
+/// Why: The gateway must boot on a host that has never paired anything.
+#[tokio::test]
+async fn slack_paired_state_missing_file_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("does-not-exist.json");
+    let loaded = load_paired_channels(&path).await;
+    assert!(loaded.read().await.is_empty());
+}
+
+/// A corrupt state file degrades to empty rather than killing the gateway.
+///
+/// Why: A truncated or hand-edited file must not make the service fail to
+/// boot; the worst acceptable outcome is that users re-pair.
+#[tokio::test]
+async fn slack_paired_state_corrupt_file_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack-paired.json");
+    tokio::fs::write(&path, b"{ not json").await.expect("write");
+    let loaded = load_paired_channels(&path).await;
+    assert!(loaded.read().await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// #4854 — headless auto-pair. These pin the SECURITY rule, so each rejection
+// case is asserted independently rather than folded into a table.
+// ---------------------------------------------------------------------------
+
+/// A DM from a user in the RBAC table pairs itself.
+///
+/// Why (#4854): This is the case that unblocks the launchd gateway, which has
+/// no REPL and therefore can never mint a pairing code. Reverting
+/// `should_auto_pair` to a constant `false` (the pre-fix behavior) turns this
+/// red.
+#[test]
+fn auto_pair_allows_known_user_dm() {
+    assert!(should_auto_pair("D0A6V2W1M2R", true));
+}
+
+/// A DM from a user NOT in the RBAC table must never pair itself.
+///
+/// Why (#4854): This is the security property the fix must not weaken — an
+/// unauthorized Slack user must not be able to pair themselves. Any "just drop
+/// the pairing gate" shortcut (a constant `true`) turns this red.
+#[test]
+fn auto_pair_rejects_unknown_user_dm() {
+    assert!(
+        !should_auto_pair("D0STRANGER", false),
+        "an unknown user must not be able to pair themselves"
+    );
+}
+
+/// A public channel never auto-pairs, even for a fully-authorized user.
+///
+/// Why (#4854): Auto-pair is justified ONLY because a DM is readable by one
+/// known user. A public channel has arbitrary readers, so `cto-assistant`
+/// output must not land there without an explicit pairing code.
+#[test]
+fn auto_pair_rejects_public_channel() {
+    assert!(
+        !should_auto_pair("C0TEAMCHAN", true),
+        "a public channel must still require an explicit pairing code"
+    );
+}
+
+/// A private channel / group DM never auto-pairs either.
+///
+/// Why: `G`-prefixed ids are private channels and multi-person DMs — more than
+/// one reader, so the DM argument does not apply.
+#[test]
+fn auto_pair_rejects_private_group() {
+    assert!(
+        !should_auto_pair("G0PRIVATE", true),
+        "a private group must still require an explicit pairing code"
+    );
+    assert!(!should_auto_pair("G0PRIVATE", false));
 }
