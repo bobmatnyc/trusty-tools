@@ -451,3 +451,103 @@ async fn health_status_stays_ok_when_no_warm_boot_degraded_condition_holds() {
          'degraded' when none of its inputs are set"
     );
 }
+
+/// Regression guard for the false-green half of issue #4680.
+///
+/// Why: a production daemon served nothing from 221 of its 222 indexes for 44
+/// days while `/health` reported `status: "ok"`, `warm_boot_degraded: false`,
+/// `indexes_loaded: 222/222`. Every existing signal was structurally blind to
+/// it — `indexes` and `indexes_loaded` count registered SLOTS, not populated
+/// ones, and `indexes_corpus_failed` keys off `stages.any_failed()`, which a
+/// stuck index never trips: it is indefinitely, falsely, `"walking"`. The
+/// operator had nothing to poll. Against the pre-fix implementation this test
+/// fails on both assertions (`status` is `"ok"`, and the field does not exist).
+/// What: registers one index in the exact production-stuck shape — lexical
+/// `InProgress` with `WalkDiagnostics` never touched — and asserts `/health`
+/// both counts it and downgrades the top-level status that `status != "ok"`
+/// monitors gate on.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_reports_degraded_for_a_stuck_never_walked_index() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new("stuck-4680"),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "stuck-4680",
+            "/tmp/stuck-4680",
+        ))),
+        "/tmp/stuck-4680".into(),
+    ));
+    {
+        // What `derive_warm_boot_stages` stamps for a restored, empty corpus.
+        let mut stages = handle.stages.write().await;
+        stages.lexical.status = StageStatus::InProgress;
+    }
+    // `walk_diagnostics` is left at its default — no walk has ever run.
+
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.indexes_stuck_empty, 1,
+        "#4680: an index claiming 'walking' with no walk ever driven must be counted"
+    );
+    assert_eq!(
+        resp.status, "degraded",
+        "#4680: /health must not self-certify as healthy while an index is \
+         stuck at zero chunks with a frozen stage surface"
+    );
+}
+
+/// Why: the #4680 stuck count must not fire for an index that has genuinely
+/// been walked — including one whose walk legitimately found zero indexable
+/// files. Without this, a corpus that is correctly empty would pin the daemon
+/// at `degraded` forever, and the signal would be worthless.
+/// What: the same `InProgress` lexical lane, but with `last_walk_started_at`
+/// set as the reindex runner sets it. Asserts the count stays 0 and the status
+/// stays `"ok"`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_does_not_flag_a_walked_index_as_stuck() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new("walking-4680"),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "walking-4680",
+            "/tmp/walking-4680",
+        ))),
+        "/tmp/walking-4680".into(),
+    ));
+    {
+        let mut stages = handle.stages.write().await;
+        stages.lexical.status = StageStatus::InProgress;
+    }
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.indexes_stuck_empty, 0,
+        "#4680: a genuinely in-flight walk is not a stuck index"
+    );
+    assert_eq!(
+        resp.status, "ok",
+        "#4680: an in-flight reindex must not degrade the daemon's status"
+    );
+}
