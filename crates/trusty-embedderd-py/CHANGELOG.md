@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.2] — 2026-08-04
+
+### Fixed
+
+- A `.ready` venv recheck that runs out of time is no longer treated as proof
+  the venv is broken. The eager, once-per-daemon-start `import
+  sentence_transformers` recheck ran under a flat 10 s budget while the daemon
+  warm-booted hundreds of indexes, so torch's import routinely exceeded it and
+  an intact venv was condemned to a full rebuild. A timeout is now a distinct
+  outcome (retried once with a much larger budget, then reported as
+  indeterminate and the venv reused) rather than a verification failure (#4125)
+- `uv` discovery no longer looks only at the live `PATH`. `uv` lives in
+  `/opt/homebrew/bin`, which launchd's minimal daemon `PATH` omits, so every
+  needless rebuild hard-failed with "`uv` not found on PATH" and pinned
+  trusty-search on the Rust ort embedder for the rest of the daemon's lifetime.
+  Discovery now goes through `trusty_common::bin_resolve::resolve_binary`, the
+  shared resolver added for the same bug class in #1298 (#4125)
+
+### Changed
+
+- Internal only, no behaviour change: the `.ready` full-import recheck's
+  retry policy and the venv-layout derivation are now separate, injectable
+  seams (`recheck_with_one_retry`, `resolve_layout_in`). This lets their tests
+  assert ordering and budgets directly instead of racing a sleeping subprocess
+  against a wall-clock budget, and removes the process-global
+  `TRUSTY_DATA_DIR_OVERRIDE` mutation from most of them entirely (#4125)
+
 ## [0.1.1] — 2026-07-21
 
 Patch release closing unpublished source drift under the already-published
