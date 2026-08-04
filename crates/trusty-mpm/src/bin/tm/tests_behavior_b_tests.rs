@@ -297,10 +297,9 @@ fn compose_session_instructions_display_matches_stash() {
     // on-disk stash to detect any future divergence.
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
-    let fw = trusty_mpm::core::paths::FrameworkPaths::default();
 
     let (display, _output, stash_path) =
-        compose_session_instructions(&fw, project).expect("compose succeeds");
+        compose_session_instructions(project).expect("compose succeeds");
 
     let on_disk =
         std::fs::read_to_string(&stash_path).expect("stash file must be readable after compose");
@@ -324,10 +323,9 @@ fn compose_session_instructions_display_matches_live_prompt() {
     // break this test immediately.
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
-    let fw = trusty_mpm::core::paths::FrameworkPaths::default();
 
     let (display, _output, _stash) =
-        compose_session_instructions(&fw, project).expect("compose succeeds");
+        compose_session_instructions(project).expect("compose succeeds");
 
     let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
 
@@ -350,7 +348,6 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     // display path, this test fails.
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path();
-    let fw = trusty_mpm::core::paths::FrameworkPaths::default();
 
     std::fs::write(
         project.join("CLAUDE.md"),
@@ -361,7 +358,7 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     .unwrap();
 
     let (display, _output, _stash) =
-        compose_session_instructions(&fw, project).expect("compose succeeds");
+        compose_session_instructions(project).expect("compose succeeds");
 
     let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
 

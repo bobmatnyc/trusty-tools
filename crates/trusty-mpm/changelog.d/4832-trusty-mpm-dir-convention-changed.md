@@ -1,0 +1,10 @@
+Changed
+
+- `.trusty-mpm/` now belongs to a project's MAIN CHECKOUT, never to a worktree (closes [#4832](https://github.com/bobmatnyc/trusty-tools/issues/4832))
+  - the compiled PM prompt moved to `<project>/.trusty-mpm/sessions/<session-id>/INSTRUCTIONS-COMPILED.md`; two concurrent MANAGED sessions in one project can no longer overwrite each other's. Launches with no session identity (in-place start, standalone load, `tm connect`) share a `sessions/local/` bucket and can still collide there — narrower than the single per-project file it replaces, not collision-free
+  - the project `manifest.toml` override moved to `<project>/.trusty-mpm/framework/manifest.toml`
+  - the `last-instructions.md` stash and `tm project init`'s scaffolding resolve against the same root, so a session launched from a worktree writes no `.trusty-mpm/` into it
+  - the root is resolved from git: a linked worktree maps to its main checkout and trusty-mpm's own bare `<project>/.base` provisioning clone maps to the project, while a submodule, a `--separate-git-dir` checkout and an ordinary repository merely *named* `.base` each own their own state
+- **Removed feature (owner ruling, not a bug fix):** the user-level `~/.trusty-mpm/manifest.toml` layer is gone. Instructions and their manifest are per-project and always deployed locally, so there is no user-level manifest surface. Move any home-level overrides into `<project>/.trusty-mpm/framework/manifest.toml`.
+- migration is automatic and best-effort: every launch deletes a pre-existing `<dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` (in the worktree and at the harness root) and removes the `framework/` directory only when it actually migrated a file and the directory is left empty, so neither an operator's `manifest.toml` nor a `tm project init` scaffold is disturbed
+- a pre-existing `<project>/.trusty-mpm/manifest.toml` is still deliberately not moved for you, but a launch that finds one with no manifest at the new path now warns and names both paths, so an override cannot go dark silently

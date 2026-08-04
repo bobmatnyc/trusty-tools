@@ -48,17 +48,33 @@ pub const SCAFFOLD_GITIGNORE_BEGIN: &str =
 /// Last line of the managed block.
 pub const SCAFFOLD_GITIGNORE_END: &str = "# <<< trusty-mpm harness scaffolding <<<";
 
-/// The exact harness-owned subdirectories tm writes into, and nothing else.
+/// The exact harness-owned paths tm writes into, and nothing else.
 ///
 /// Why: surgical by design — `.claude/settings.json` and the project
 /// `.mcp.json` are legitimately shared, tracked config (issue #3427's
 /// explicit "Important Note") and must never be swept up by this list.
-/// What: trailing-slash directory patterns so only the three harness-owned
-/// subtrees are ignored, not sibling files under `.claude/`.
+///
+/// #4832 added the `.trusty-mpm/` runtime-output paths. `tm` writes a
+/// per-session compiled prompt and a `last-instructions.md` inspection stash
+/// into the project's harness directory on every launch, and neither was
+/// covered here — a target project that ran `tm` grew untracked noise (or, if
+/// committed once, the same "your local changes would be overwritten" merge
+/// abort this module exists to prevent). Note what is deliberately NOT listed:
+/// `.trusty-mpm/framework/` holds the operator-authored `manifest.toml`
+/// override, and `.trusty-mpm/config.toml` is written by `tm project init` —
+/// both are project config an operator MAY want tracked, so ignoring them would
+/// repeat the over-broad `.claude/` mistake called out above.
+/// What: trailing-slash directory patterns plus the one stash FILE, so only the
+/// harness-owned subtrees are ignored, not sibling config.
+/// Test: `writes_block_to_fresh_gitignore`,
+/// `block_covers_session_output_but_not_project_config`.
 pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".claude/agents/",
     ".claude/skills/",
     ".claude/output-styles/",
+    ".trusty-mpm/sessions/",
+    ".trusty-mpm/logs/",
+    ".trusty-mpm/last-instructions.md",
 ];
 
 /// Ensure `<project_dir>/.gitignore` carries the tm-scaffolding managed
@@ -146,6 +162,38 @@ mod tests {
         // Never blanket-ignore `.claude/` itself — settings.json / .mcp.json
         // must remain trackable.
         assert!(!content.lines().any(|l| l.trim() == ".claude/"));
+    }
+
+    #[test]
+    fn block_covers_session_output_but_not_project_config() {
+        // #4832: `tm` writes per-session output into `.trusty-mpm/` on every
+        // launch, so the block must name it — but must NOT swallow the
+        // operator-authored `framework/manifest.toml` or `config.toml`.
+        let tmp = crate::test_support::hermetic_temp_dir();
+        init_git_repo(tmp.path());
+        ensure_scaffold_gitignored(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+
+        for covered in [
+            ".trusty-mpm/sessions/",
+            ".trusty-mpm/logs/",
+            ".trusty-mpm/last-instructions.md",
+        ] {
+            assert!(
+                content.lines().any(|l| l.trim() == covered),
+                "missing {covered} in:\n{content}"
+            );
+        }
+        for spared in [
+            ".trusty-mpm/",
+            ".trusty-mpm/framework/",
+            ".trusty-mpm/config.toml",
+        ] {
+            assert!(
+                !content.lines().any(|l| l.trim() == spared),
+                "{spared} is operator config and must stay trackable"
+            );
+        }
     }
 
     #[test]

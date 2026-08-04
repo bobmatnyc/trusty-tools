@@ -908,10 +908,14 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         // (issue #1605). Without it the injector would fall back to deriving the
         // palace from the throwaway `<session-id>` workspace basename — the
         // WRONG palace for a cloned session.
-        match crate::core::session_launch::prepare_session_with_repo_url(
+        // #4832: thread the session id so the compiled prompt lands in THIS
+        // session's `.trusty-mpm/sessions/<id>/` directory, matching what the
+        // spawn will refresh.
+        match crate::core::session_launch::prepare_session_for_managed(
             &fw,
             &workspace_path,
             Some(repo_url),
+            &session_id.to_string(),
         ) {
             Ok(report) => {
                 info!(

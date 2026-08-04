@@ -75,13 +75,19 @@ use crate::core::instruction_package::{CustomizationTier, OverrideTier, SectionI
 /// #4752: this was the global `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
 /// until the compiled prompt became project-local. Nothing writes the global
 /// path any more, so a pointer naming it would have sent every reader to a file
-/// that never exists. Kept in step with
-/// [`crate::core::instruction_pipeline::compiled_prompt_path`] by
+/// that never exists.
+///
+/// #4832 made the file per-SESSION, so the pointer names the DIRECTORY the
+/// per-session files live in rather than one file: a pointer written into a
+/// project's `CLAUDE.md` outlives any single session, and hard-coding one
+/// session's id would send every later reader to a stale path. Kept in step
+/// with [`crate::core::instruction_pipeline::compiled_prompt_path`] by
 /// `pointer_path_matches_the_instruction_pipeline`, which fails if either side
 /// moves.
 /// Test: `pointer_block_names_the_compiled_instructions_path`,
 /// `pointer_path_matches_the_instruction_pipeline`.
-pub const COMPILED_INSTRUCTIONS_PATH: &str = ".trusty-mpm/framework/INSTRUCTIONS-COMPILED.md";
+pub const COMPILED_INSTRUCTIONS_PATH: &str =
+    ".trusty-mpm/sessions/<session-id>/INSTRUCTIONS-COMPILED.md";
 
 /// First line of the managed compiled-instructions pointer block.
 ///

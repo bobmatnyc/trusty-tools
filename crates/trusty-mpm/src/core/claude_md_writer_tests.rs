@@ -542,14 +542,16 @@ fn pointer_path_matches_the_instruction_pipeline() {
     // project's CLAUDE.md would have sent readers to a file nothing writes.
     // Nothing else fails when these two drift, because `ensure_compiled_pointer`
     // has no production caller yet (spec §10.5 defers wiring it).
+    // #4832: the produced path carries a concrete session id where the pointer
+    // carries the `<session-id>` placeholder, so compare with that substituted.
     let project = std::path::Path::new("/some/project");
-    let produced = crate::core::instruction_pipeline::compiled_prompt_path(project);
+    let produced = crate::core::instruction_pipeline::compiled_prompt_path(project, "SID");
     let relative = produced
         .strip_prefix(project)
         .expect("compiled_prompt_path must be project-local");
     assert_eq!(
         relative.to_string_lossy(),
-        COMPILED_INSTRUCTIONS_PATH,
+        COMPILED_INSTRUCTIONS_PATH.replace("<session-id>", "SID"),
         "the pointer path and the pipeline that writes the file have drifted"
     );
 }

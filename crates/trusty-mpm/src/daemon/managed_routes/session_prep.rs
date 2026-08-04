@@ -6,12 +6,12 @@
 //! padding the lifecycle state machine.
 //! What: [`prepare_inproject_session`] (the #1913 preparation call the
 //! in-project spawn paths make directly) and
-//! [`refresh_compiled_prompt_for_resume`] (the #4752 fatal compiled-prompt
+//! [`refresh_resume_compiled_prompt`] (the #4752 fatal compiled-prompt
 //! write the resume path needs because it never runs `prepare_session*`).
 //! Test: `prepare_inproject_session_writes_statusline`,
 //! `prepare_inproject_session_emits_stage_events_in_order`,
-//! `refresh_compiled_prompt_for_resume_writes_the_project_local_file`,
-//! `refresh_compiled_prompt_for_resume_reports_an_actionable_failure`.
+//! `refresh_resume_compiled_prompt_writes_the_project_local_file`,
+//! `refresh_resume_compiled_prompt_reports_an_actionable_failure`.
 
 use tracing::{info, warn};
 
@@ -27,7 +27,9 @@ use crate::session_manager::ManagedSessionId;
 /// directly. Extracted to a named, `fw`-parameterised function (rather than
 /// inlined) so it is unit-testable against a hermetic [`crate::core::paths::FrameworkPaths::under`]
 /// tempdir without touching the operator's real `~/.trusty-mpm`/`~/.claude`.
-/// What: calls `prepare_session_with_repo_url(fw, worktree, Some(repo_url))`.
+/// What: calls `prepare_session_for_managed(fw, worktree, Some(repo_url),
+/// session_id)` — #4832 threads the id so the compiled prompt lands in this
+/// session's own directory rather than the unmanaged `local` bucket.
 /// On success, logs the deployed-agent count AND the deployed-skill count
 /// (`report.skill_deploy.deployed.len()` — #1917; previously only the agent
 /// count was logged, so a skill-deploy no-op was invisible here too). On
@@ -42,7 +44,12 @@ pub(super) fn prepare_inproject_session(
     worktree: &std::path::Path,
     repo_url: &str,
 ) -> Result<(), String> {
-    match crate::core::session_launch::prepare_session_with_repo_url(fw, worktree, Some(repo_url)) {
+    match crate::core::session_launch::prepare_session_for_managed(
+        fw,
+        worktree,
+        Some(repo_url),
+        &session_id.to_string(),
+    ) {
         Ok(report) => {
             info!(
                 id = %session_id,
@@ -98,14 +105,18 @@ pub(super) fn prepare_inproject_session(
 /// returns the operator-facing message from
 /// [`crate::core::instruction_pipeline::instructions_failure_message`] —
 /// the caller refuses the resume with it.
-/// Test: `refresh_compiled_prompt_for_resume_writes_the_project_local_file`,
-/// `refresh_compiled_prompt_for_resume_reports_an_actionable_failure`.
-pub(super) fn refresh_compiled_prompt_for_resume(
+/// Test: `refresh_resume_compiled_prompt_writes_the_project_local_file`,
+/// `refresh_resume_compiled_prompt_reports_an_actionable_failure`.
+pub(super) fn refresh_resume_compiled_prompt(
     workspace: &std::path::Path,
+    session_id: &ManagedSessionId,
 ) -> Result<(), String> {
     // #4752: delegates to the shared entry point so the daemon-resume,
     // fresh-start, and bare-`tm` in-place relaunch paths cannot drift apart.
-    crate::core::instruction_pipeline::refresh_compiled_prompt(workspace)
+    // #4832: the write is per-session, so the resumed session's own id selects
+    // the directory — a resume must refresh the file the spawn will read, not
+    // a sibling session's.
+    crate::core::instruction_pipeline::refresh_compiled_prompt(workspace, &session_id.to_string())
 }
 
 #[cfg(test)]

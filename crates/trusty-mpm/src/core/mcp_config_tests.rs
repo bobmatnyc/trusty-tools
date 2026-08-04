@@ -482,9 +482,13 @@ fn resolve_conditional_mcp_toggles_honors_project_manifest_toggle() {
     // the untouched trusty_search toggle.
     let tmp_home = TempDir::new().unwrap();
     let tmp_project = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp_project.path().join(".trusty-mpm")).unwrap();
+    std::fs::create_dir_all(tmp_project.path().join(".trusty-mpm").join("framework")).unwrap();
     std::fs::write(
-        tmp_project.path().join(".trusty-mpm").join("manifest.toml"),
+        tmp_project
+            .path()
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
         "[mcp]\ntrusty_memory = false\n",
     )
     .unwrap();

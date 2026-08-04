@@ -80,10 +80,49 @@ pub(crate) async fn start_session(
         return Ok(());
     }
 
-    // Not a recognized git repo (or no parseable remote): no live source tree
-    // to protect — preserve the original in-place deploy-and-start behavior.
+    // #4832: a directory that is not inside ANY git working tree has no project
+    // to own its harness state. `prepare_session` would write `.trusty-mpm/`
+    // wherever the operator's shell happened to be standing — the observed
+    // stray `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`. Refuse instead.
+    // A git repo with no parseable remote still falls through to the in-place
+    // path below: `derive_project` returned `None` for the REMOTE, not for the
+    // repo, and that project does have a root to write to.
+    refuse_outside_a_git_project(&path)?;
+
+    // Not a recognized GitHub-backed remote: no live source tree to protect —
+    // preserve the original in-place deploy-and-start behavior.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
     start_session_in_place(client, url, &path, &fw).await
+}
+
+/// Refuse a launch from a directory that belongs to no git project (#4832).
+///
+/// Why: harness state belongs to a project, and outside a repository there is
+/// no project to attach it to. The pre-#4832 behavior was to deploy anyway,
+/// scattering a `.trusty-mpm/` (plus a `CLAUDE.md` stub and a `.claude/` tier)
+/// into whatever directory the operator happened to be in. A clear refusal that
+/// names the directory and the remedy is strictly better than a launch that
+/// silently litters — and this is the routing point that decides it, so the
+/// check cannot be bypassed by a caller that forgets it.
+/// What: `Ok(())` when [`trusty_mpm::core::harness_root::harness_root_for`]
+/// resolves a checkout for `path`; otherwise an error naming the directory and
+/// telling the operator to run `git init` or `cd` into a repository. Split out
+/// as a named function so the refusal is unit-testable without a daemon.
+/// Test: `session_start_refuses_a_non_git_directory`,
+/// `session_start_accepts_a_git_directory`.
+pub(crate) fn refuse_outside_a_git_project(path: &std::path::Path) -> anyhow::Result<()> {
+    if trusty_mpm::core::harness_root::harness_root_for(path).is_some() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} is not inside a git repository, so there is no project to hold this \
+         session's state.\n\
+         `tm` writes a session's agents, instructions and compiled prompt under the \
+         project's `.trusty-mpm/`; starting here would scatter them into this \
+         directory instead. Run `git init` here, or `cd` into the repository you \
+         meant to work in, and retry.",
+        path.display()
+    )
 }
 
 /// The pre-#1916 `session start` behavior: deploy `prepare_session` directly

@@ -346,9 +346,14 @@ fn spawn_command(
 /// constraint, so a write failure here means the session runs without the
 /// injected PM system prompt rather than falling back to a different carrier.
 ///
-/// #4752: this is also where the project's compiled prompt
-/// (`<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`) is refreshed
-/// from the exact bytes handed to `--append-system-prompt-file`.
+/// #4752/#4832: this is also where the session's compiled prompt
+/// (`<harness-root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`) is
+/// refreshed from the exact bytes handed to `--append-system-prompt-file`.
+/// `session_id` selects that directory: `spawn`/`spawn_resume` pass the managed
+/// id they already hold, and the in-place relaunch passes `None` so
+/// [`crate::core::harness_root::session_scope`] falls back to the pane's
+/// `TM_MANAGED_SESSION_ID`. Passing `None` where an id IS known would refresh a
+/// different file from the one preparation wrote.
 ///
 /// WHY THIS ONE IS BEST-EFFORT while the same write is FATAL in the
 /// provisioning paths — the asymmetry is deliberate: those are PROVISIONING
@@ -377,7 +382,7 @@ fn spawn_command(
 /// Test: `build_prompt_file_writes_resolved_prompt_for_project`,
 /// `build_prompt_file_refreshes_the_compiled_prompt`,
 /// `build_prompt_file_compiled_write_failure_does_not_block_the_spawn`.
-fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
+fn build_prompt_file(project_dir: &Path, session_id: Option<&str>) -> Option<std::path::PathBuf> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
         project_dir,
@@ -389,7 +394,8 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
     // to be passed to `--append-system-prompt-file`. Best-effort by design —
     // see this function's doc comment for why the same write is fatal in the
     // two provisioning steps and not here.
-    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir);
+    let scope = crate::core::harness_root::session_scope(session_id);
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
     if let Err(err) =
         crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &prompt)
     {
@@ -940,7 +946,9 @@ pub fn build_inplace_resume_command(
         )
     })?;
     let config_dir = prepare_managed_config("in-place-relaunch", cwd);
-    let prompt_file = build_prompt_file(cwd);
+    // #4832: no explicit id here — this path runs INSIDE the managed pane, so
+    // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
+    let prompt_file = build_prompt_file(cwd, None);
     let args = compose_inplace_args(
         cwd,
         config_dir.as_deref(),
@@ -1094,7 +1102,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // the default daemon on-ramp, can no longer silently spawn vanilla
         // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
         // out a CLAUDE.md-carrier fallback, so there is no other carrier).
-        let prompt_file = build_prompt_file(cwd);
+        let prompt_file = build_prompt_file(cwd, Some(session_id));
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -1195,7 +1203,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // this fix only spawn() passed --append-system-prompt-file, so every
         // resumed/guided-resume/crash-recovery session silently ran vanilla
         // Claude Code. Non-fatal: a write failure omits the flag.
-        let prompt_file = build_prompt_file(cwd);
+        let prompt_file = build_prompt_file(cwd, Some(session_id));
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to

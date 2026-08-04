@@ -570,7 +570,13 @@ pub(crate) async fn run_inplace_relaunch(
     //
     // Ordered BEFORE `build_inplace_resume_command` so a refusal costs nothing
     // and, like the other two sites, cannot half-provision the pane.
-    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt(&cwd) {
+    //
+    // #4832: scoped to THIS session's id, so the refreshed file is the one
+    // `build_inplace_resume_command` is about to hand the runtime.
+    if let Err(msg) = trusty_mpm::core::instruction_pipeline::refresh_compiled_prompt(
+        &cwd,
+        &record.id.to_string(),
+    ) {
         return InPlaceOutcome::Result(Err(anyhow::anyhow!("{msg}")));
     }
 

@@ -66,7 +66,8 @@ fn seed_catalog_skill(catalog_root: &Path, stem: &str, body: &str) {
 
 /// Write a project manifest selecting the CATALOG source for agents and skills.
 fn write_catalog_manifest(project_dir: &Path) {
-    let dir = project_dir.join(".trusty-mpm");
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let dir = project_dir.join(".trusty-mpm").join("framework");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
         dir.join("manifest.toml"),
@@ -170,7 +171,11 @@ fn apply_prune_removes_deselected() {
 
     // Now narrow the manifest to exclude drop-me, and apply WITH prune.
     fs::write(
-        project.path().join(".trusty-mpm").join("manifest.toml"),
+        project
+            .path()
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
         "[agents]\nsource = \"catalog\"\nexclude = [\"drop-me\"]\n\n[skills]\nsource = \"catalog\"\n",
     )
     .unwrap();
@@ -230,8 +235,7 @@ fn apply_preserves_user_tier_override_deployed_via_launch_path() {
     // 1. Deploy via the LAUNCH path: the exact multi-tier orchestrator
     //    `session_launch::prepare_session_inner` calls, seeding the
     //    project's `.claude/skills/` the same way a real session start would.
-    let sources =
-        crate::core::manifest::ManifestSources::resolve(project.path(), &fw.root, &catalog_root);
+    let sources = crate::core::manifest::ManifestSources::resolve(project.path(), &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = HarnessPlan::from_manifest(&manifest, &fw, &catalog_root);
     crate::core::skill_tiers::deploy_all_skill_tiers(

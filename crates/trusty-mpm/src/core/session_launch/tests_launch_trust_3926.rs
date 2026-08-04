@@ -96,7 +96,7 @@ fn prepare_session_excludes_foreign_mcp_json_entry_from_trust_preseed() {
     .unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None)
+    prepare_session_inner(&fw, project, None, true, None, None)
         .expect("prep must succeed even against a hostile workspace");
 
     let enabled = read_enabled_mcp(tmp_home.path(), project);
@@ -145,7 +145,7 @@ fn prepare_session_trusts_operator_registered_server_end_to_end() {
     git_init(project);
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None).expect("prep succeeds");
+    prepare_session_inner(&fw, project, None, true, None, None).expect("prep succeeds");
 
     // Bridged into the workspace .mcp.json (session_launch::native_mcp).
     let mcp: serde_json::Value =
@@ -183,9 +183,13 @@ fn prepare_session_excludes_trusted_project_scope_custom_from_trust_preseed() {
     git_init(project);
 
     // Declare a project-scope custom MCP server via the manifest.
-    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    std::fs::create_dir_all(project.join(".trusty-mpm").join("framework")).unwrap();
     std::fs::write(
-        project.join(".trusty-mpm").join("manifest.toml"),
+        project
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
         r#"
 [mcp.custom.project-only]
 type = "stdio"
@@ -202,7 +206,7 @@ command = "project-tool"
     store.save().expect("save trust store");
 
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
-    prepare_session_inner(&fw, project, None, true, None).expect("prep succeeds");
+    prepare_session_inner(&fw, project, None, true, None, None).expect("prep succeeds");
 
     // The project-scope entry DID bridge into .mcp.json (trust was granted).
     let mcp: serde_json::Value =

@@ -63,8 +63,10 @@ fn read_enabled_mcp(home: &std::path::Path, workspace: &std::path::Path) -> Vec<
 }
 
 fn write_manifest(project: &std::path::Path, body: &str) {
-    std::fs::create_dir_all(project.join(".trusty-mpm")).unwrap();
-    std::fs::write(project.join(".trusty-mpm").join("manifest.toml"), body).unwrap();
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let dir = project.join(".trusty-mpm").join("framework");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("manifest.toml"), body).unwrap();
 }
 
 fn write_spoofed_mcp_json(project: &std::path::Path, name: &str, command: &str) {
@@ -104,7 +106,7 @@ fn prepare_session_excludes_spoofed_trusty_memory_when_injector_disabled() {
     write_spoofed_mcp_json(project, "trusty-memory", "/tmp/evil-memory");
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None)
+    prepare_session_inner(&fw, project, None, true, None, None)
         .expect("prep must succeed even against a hostile workspace");
 
     let enabled = read_enabled_mcp(tmp_home.path(), project);
@@ -143,7 +145,7 @@ fn prepare_session_excludes_spoofed_trusty_search_when_injector_disabled() {
     write_spoofed_mcp_json(project, "trusty-search", "/tmp/evil-search");
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None)
+    prepare_session_inner(&fw, project, None, true, None, None)
         .expect("prep must succeed even against a hostile workspace");
 
     let enabled = read_enabled_mcp(tmp_home.path(), project);
@@ -182,7 +184,7 @@ fn prepare_session_legitimate_toggle_disable_still_launches_cleanly() {
     );
 
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
-    let result = prepare_session_inner(&fw, project, None, true, None);
+    let result = prepare_session_inner(&fw, project, None, true, None, None);
     assert!(
         result.is_ok(),
         "a legitimate operator toggle must never break session prep: {result:?}"
@@ -215,7 +217,7 @@ fn prepare_session_default_manifest_still_trusts_both_conditional_builtins() {
     git_init(project);
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None).expect("prep succeeds");
+    prepare_session_inner(&fw, project, None, true, None, None).expect("prep succeeds");
 
     let enabled = read_enabled_mcp(tmp_home.path(), project);
     assert!(enabled.contains(&"trusty-memory".to_string()));

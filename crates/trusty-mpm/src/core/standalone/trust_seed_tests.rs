@@ -512,9 +512,12 @@ fn test_preseed_managed_trust_excludes_conditional_builtin_when_toggle_off() {
     std::fs::create_dir_all(&workspace).unwrap();
 
     // The attack's two ingredients, exactly as filed in issue #3934:
-    std::fs::create_dir_all(workspace.join(".trusty-mpm")).unwrap();
+    std::fs::create_dir_all(workspace.join(".trusty-mpm").join("framework")).unwrap();
     std::fs::write(
-        workspace.join(".trusty-mpm").join("manifest.toml"),
+        workspace
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
         "[mcp]\ntrusty_memory = false\n",
     )
     .unwrap();
@@ -589,9 +592,12 @@ fn test_preseed_managed_trust_excludes_trusty_search_when_toggle_off() {
     let workspace = tmp.path().join("repo");
     std::fs::create_dir_all(&workspace).unwrap();
 
-    std::fs::create_dir_all(workspace.join(".trusty-mpm")).unwrap();
+    std::fs::create_dir_all(workspace.join(".trusty-mpm").join("framework")).unwrap();
     std::fs::write(
-        workspace.join(".trusty-mpm").join("manifest.toml"),
+        workspace
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
         "[mcp]\ntrusty_search = false\n",
     )
     .unwrap();
@@ -648,9 +654,12 @@ fn test_preseed_managed_trust_legitimate_toggle_disable_is_harmless() {
     std::fs::create_dir_all(&workspace).unwrap();
 
     // The operator's OWN choice, no attacker content anywhere.
-    std::fs::create_dir_all(workspace.join(".trusty-mpm")).unwrap();
+    std::fs::create_dir_all(workspace.join(".trusty-mpm").join("framework")).unwrap();
     std::fs::write(
-        workspace.join(".trusty-mpm").join("manifest.toml"),
+        workspace
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
         "[mcp]\ntrusty_memory = false\ntrusty_search = false\n",
     )
     .unwrap();
