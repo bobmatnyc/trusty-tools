@@ -123,8 +123,18 @@ exists without already knowing the word.
 `room_to_uuid` XORs byte *i* into slot *i mod 16*. The `Debug` repr of a custom
 room is `Custom("<body>")` — 10 characters of overhead — so **any custom room
 name of 9 or more characters is in the wrap zone**. Demonstrated concretely: for
-a 20-character body, nine distinct bodies of the form `?bcdefghijklmnop?rst`
-hash to the identical UUID `3a0d0808-f2f1-abae-e0e0-e0e04f357577`. This is not
+a 20-character body, seven distinct bodies of the form `?bcdefghijklmnop?rst`
+— the varying character ranging over `'a'..='g'` — hash to one identical UUID.
+The repeated character lands in slot 8 twice, sixteen positions apart, so its
+two contributions differ by a constant and cancel. **Correction (2026-08-04,
+found while implementing T2):** an earlier draft of this paragraph claimed nine
+such bodies spanning `'a'..='i'`; that overstates the equivalence class. The
+cancellation holds only while adding 16 does not carry out of bit 4, which caps
+the varying character at `'g'`, and `\` (0x5C) — inside the wider `'X'..='g'`
+window where the arithmetic also works — must be excluded separately because
+`Debug` escapes it and changes the repr's length. The *defect* is exactly as
+severe as described; only the size of the demonstrated class was wrong. Pinned
+by `room_identity::tests::mint_room_id_avoids_fold_collisions`. This is not
 theoretical for this data — `Custom("decisions")` (9), `Custom("reference")` (9),
 `Custom("milestone")` (9) and `Custom("checkpoint")` (10) are all live in
 `trusty-tools` today and all sit in the wrap zone.
@@ -325,12 +335,22 @@ steps, highest confidence first:
    repr of the nine built-in `RoomType` variants and match. This is the exact
    function that produced the id, so a match is proof, not a guess. Covers
    `General` (779 drawers in `trusty-tools` alone), `Planning`, `Research`.
-2. **Direct fold inversion (certain, for short labels).** When the id's trailing
-   bytes are zero the input was shorter than 16 bytes and the fold is injective:
-   `label[i] = byte[i] - i`. Verified live: `43767577-7372-2e29-7f78-7c762e360000`
-   inverts to exactly `Custom("work")`.
+2. **Direct fold inversion (certain, for reprs of at most 16 bytes).** The fold
+   XORs byte *i* into slot *i mod 16*, so it only wraps from *i* = 16 onward:
+   for a `Debug` repr of **16 bytes or fewer** each slot receives at most one
+   byte and the fold is injective, inverting as `repr[i] = byte[i] - i`.
+   Verified live: `43767577-7372-2e29-7f78-7c762e360000` inverts to exactly
+   `Custom("work")` (14 bytes, two trailing zero slots). **Correction
+   (2026-08-04, found while implementing T2):** an earlier draft said "shorter
+   than 16 bytes", which is off by one and load-bearing —
+   `Custom("status")` is *exactly* 16 bytes and is 203 drawers in the live
+   `trusty-tools` palace, so a literal reading would have dumped all of them
+   into the `unresolved-*` bucket. A 16-byte repr has no trailing zero slots to
+   detect its length by, so the implementation tries each candidate length from
+   16 down to 1 and confirms by re-hashing; the re-hash is what makes any
+   accepted length certain rather than plausible.
 3. **KG `room:` dictionary match (high confidence, for wrapped labels).** For ids
-   that neither match a built-in nor invert cleanly (label ≥ 16 bytes, i.e. every
+   that neither match a built-in nor invert cleanly (repr ≥ 17 bytes, i.e. every
    custom room of 9+ characters), enumerate that palace's KG subjects carrying the
    `room:` prefix via `KnowledgeGraph::list_subjects`
    (`store/kg_redb/read_ops.rs:82`) and hash each candidate. This converts an

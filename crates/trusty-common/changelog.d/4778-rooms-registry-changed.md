@@ -10,3 +10,6 @@ Changed
 - The documented palace model is `Palace -> Wing -> Room -> Drawer`. A *closet*
   is not a hierarchy level — it is the many-to-many keyword -> drawer-ids
   inverted index on `PalaceHandle`, and the field keeps its name (ADR-0027 D3).
+- Room-filter resolution is performed before the drawer (and closet) read guards
+  are acquired on the `list_drawers` and `retrieve_l2` paths, so the redb read
+  transaction no longer runs while a palace lock is held.

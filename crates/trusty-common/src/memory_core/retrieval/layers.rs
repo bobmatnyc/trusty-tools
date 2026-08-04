@@ -178,11 +178,6 @@ pub async fn retrieve_l2(
     let overfetch = top_k.saturating_mul(3).max(top_k);
     let hits = handle.vector_store.search(&query_vec, overfetch).await?;
 
-    let drawers = handle.drawers.read();
-    let closets = handle.closets.read();
-    let query_tokens: Vec<String> = extract_keywords(query);
-    let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
-
     // Issue #3274: this used to be a silent no-op (empty if-body) — a
     // caller-supplied `room_filter` was accepted but never applied, so
     // results silently included every room.
@@ -191,9 +186,17 @@ pub async fn retrieve_l2(
     // every room minted after ADR-0027 (their ids are UUIDv5, which no fold can
     // reproduce); `resolve_room_filter_id` falls back to the legacy fold when
     // the room has no row, so an un-backfilled palace filters exactly as before.
+    // Resolved BEFORE the guards below are taken: it is a redb read
+    // transaction, and holding the drawer + closet locks across I/O would stall
+    // every writer on this palace for its duration.
     let target_room_id = room_filter
         .as_ref()
         .map(|r| resolve_room_filter_id(&handle.kg, r));
+
+    let drawers = handle.drawers.read();
+    let closets = handle.closets.read();
+    let query_tokens: Vec<String> = extract_keywords(query);
+    let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
 
     for hit in hits {
         let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {

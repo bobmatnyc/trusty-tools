@@ -853,11 +853,14 @@ impl PalaceHandle {
         tag: Option<String>,
         limit: usize,
     ) -> Vec<Drawer> {
-        let drawers = self.drawers.read();
         // ADR-0027 D1.3: ids are read from the ROOMS table, never recomputed.
+        // Resolved BEFORE the drawer read guard is taken: this is a redb read
+        // transaction, and holding a lock across I/O would stall every writer
+        // (`remember` / `forget` take `drawers.write()`) for its duration.
         let target_room_id = room
             .as_ref()
             .map(|r| crate::memory_core::store::rooms::resolve_room_filter_id(&self.kg, r));
+        let drawers = self.drawers.read();
         let mut filtered: Vec<Drawer> = drawers
             .iter()
             .filter(|d| match &target_room_id {

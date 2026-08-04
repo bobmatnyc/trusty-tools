@@ -214,6 +214,26 @@ mod tests {
     }
 
     #[test]
+    fn room_namespace_matches_its_documented_derivation() {
+        // The constants are hardcoded (this workspace forbids lazy globals), so
+        // nothing but this test ties them to the derivation their doc comments
+        // claim. A transcription slip would silently change every id minted
+        // from here on and no other test would fail — `mint_room_id_is_stable`
+        // proves stability across calls, not that the seed is the documented
+        // one. Recompute both from first principles and compare.
+        let ns = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            b"https://github.com/bobmatnyc/trusty-tools/adr-0027/room-namespace",
+        );
+        assert_eq!(ROOM_NAMESPACE, ns, "ROOM_NAMESPACE drifted from its doc");
+        assert_eq!(
+            DEFAULT_WING_ID,
+            Uuid::new_v5(&ns, b"default-wing"),
+            "DEFAULT_WING_ID drifted from its doc"
+        );
+    }
+
+    #[test]
     fn mint_room_id_is_stable() {
         let key = canonical_room_key(DEFAULT_WING_ID, "Planning");
         let a = mint_room_id(&key);
