@@ -250,6 +250,7 @@ context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
 |---|---|---|
 | `trusty-search` / `trusty-embedderd` | **off** (pre-PR hook behavior) | **on** (pre-PR script behavior) |
 | `trusty-mpm` | **on** | **on** |
+| `trusty-agents` (`tagent`) | N/A — not a `tctl install` member (#4277) | **on** |
 
 trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
 library-validation restriction has not yet been empirically verified safe for
@@ -359,6 +360,77 @@ identity makes that approval persist across every future reinstall.
 **tm needs NO Full Disk Access re-grant** — this fixes the distinct *App-Data /
 File-Provider* TCC category only; the FDA re-granting guidance above stays
 scoped to trusty-search and other external-volume daemons.
+
+### Signed Install: trusty-agents (#4277)
+
+`trusty-agents` ships TWO artifacts that both re-prompt on every ad-hoc rebuild:
+the `tagent` CLI/daemon binary and the `Trusty Agents.app` desktop shell
+(`crates/trusty-agents/ui/src-tauri`). Missing either is the same #2721-class
+gap — signing only one leaves the other ad-hoc and still re-prompting.
+
+On macOS the preferred local-source install path is
+`scripts/install-trusty-agents-signed.sh` (or `make install-agents-signed`):
+
+```bash
+# From the repo root (or any worktree) — installs tagent, signs it, and
+# best-effort (re-)signs Trusty Agents.app if already built
+scripts/install-trusty-agents-signed.sh
+# or
+make install-agents-signed
+# dry-run (prints every cargo/tctl/codesign command without executing):
+scripts/install-trusty-agents-signed.sh --dry-run
+```
+
+The script runs `cargo install --path crates/trusty-agents --locked`, then
+signs `tagent` by shelling out to `tctl sign trusty-agents` (`SIGNABLE_BINARIES`
+now carries `("tagent", AGENTS_SET, "com.trusty.tagent")` — the same
+single-source-of-truth table used by `trusty-search`/`trusty-mpm`, extended for
+#4277). If `Trusty Agents.app` is already built (under
+`target/{release,debug}/bundle/macos/`), the script also (re-)signs it directly
+with `codesign --deep --force --options runtime --timestamp --identifier
+com.trusty.assistant`.
+
+🟡 **`Trusty Agents.app` is signed differently from `trusty-mpm-gui`/
+`trusty-code-gui` — deliberately.** Those two hardcode
+`bundle.macOS.signingIdentity` directly in their `tauri.conf.json` (see
+`docs/reference/common-pitfalls.md`), which makes `cargo tauri build`
+**hard-fail** on any machine without that exact certificate — acceptable only
+because no CI workflow ever runs `cargo tauri build` for them.
+`crates/trusty-agents/ui/src-tauri/tauri.conf.json` deliberately carries **no**
+`signingIdentity`, so a bare `pnpm tauri build` / `cargo tauri build` always
+succeeds (falling back to Tauri's ad-hoc default). To get a Developer-ID-signed
+bundle, export `APPLE_SIGNING_IDENTITY` — Tauri's own env-var override, which
+"Overwrites `tauri.conf.json > bundle > macOS > signingIdentity`" per the
+[Tauri v2 environment-variables reference](https://v2.tauri.app/reference/environment-variables/):
+
+```bash
+cd crates/trusty-agents/ui && pnpm install && \
+  APPLE_SIGNING_IDENTITY="Developer ID Application: Bob Matsuoka (4JH68XUHC5)" \
+  pnpm tauri build
+# output: <repo root>/target/release/bundle/macos/Trusty Agents.app
+```
+
+Verified empirically (2026-07-29): the same build with no identity configured
+anywhere bundles successfully ad-hoc (`codesign -dv` shows
+`flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`); with
+`APPLE_SIGNING_IDENTITY` exported it produces `TeamIdentifier=4JH68XUHC5` and
+Hardened Runtime (`flags=0x10000(runtime)`), and `codesign --verify --deep
+--strict` passes on both the bundle and its single embedded Mach-O
+(`Contents/MacOS/trusty-agents-ui` — `tagent` itself is resolved as a sibling
+process via `$PATH`/well-known install dirs at runtime, see
+`crates/trusty-agents/ui/src-tauri/src/sidecar.rs`, and is never embedded
+inside the `.app`, so there is no separate sidecar binary to sign).
+
+**No Developer ID certificate present is never a hard failure** for either
+artifact — `tagent` stays ad-hoc signed with a clear warning, and
+`Trusty Agents.app` falls back to Tauri's ad-hoc default; both remain fully
+functional, they simply re-prompt for TCC access on the next rebuild.
+
+Already have `tagent` on PATH and just want to (re-)sign it? Skip straight to:
+
+```bash
+tctl sign trusty-agents
+```
 
 ### TRUSTY_SIGN_IDENTITY Override
 
