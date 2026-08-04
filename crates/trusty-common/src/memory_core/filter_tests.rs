@@ -1457,3 +1457,200 @@ fn real_secrets_still_blocked_after_4312_charset_gate() {
         );
     }
 }
+
+// ---- Issue #4739: the mixed-case branch, capitalised identifier segments ----
+
+/// Why (issue #4739, the FIFTH recurrence in this detector after #1667, #2800,
+/// #4216 and #4312): `Agents.app.bak-20260729-000028` — an ordinary macOS app
+/// bundle backup — was rejected as `Agen…(30 chars)`. It carries no `+`, `/` or
+/// `=`, so the base64 branch #4312 narrowed never runs; it reaches the mixed-case
+/// branch and `is_structural_token`'s segmented-identifier branch declines to
+/// rescue it, because that branch split on `-` alone and admitted only
+/// all-lowercase and ALL-UPPERCASE segments. A leading capital — the single most
+/// ordinary thing about an English word or an app bundle name — read as internal
+/// mixed case.
+///
+/// What this pins: the reproduction verbatim, plus fourteen further shapes of the
+/// same class (release artifacts, screenshots, plist backups, snapshots, branch
+/// and milestone labels) that reproduce the identical defect with different
+/// delimiters. Each is asserted at BOTH levels — the token predicate and the full
+/// `FilterConfig::apply` gate — because the gate is what a memory write actually
+/// hits.
+/// Test: itself.
+#[test]
+fn dotted_capitalised_filenames_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        // The #4739 reproduction, verbatim from the issue body.
+        ("4739 repro", "Agents.app.bak-20260729-000028"),
+        (
+            "4739 repro, full line",
+            "/Applications/Trusty Agents.app.bak-20260729-000028",
+        ),
+        ("release artifact", "Trusty-Agents-v1.3.5-darwin-arm64"),
+        ("macOS screenshot", "Screenshot-2026-08-04-at-10.31.22.png"),
+        ("lockfile backup", "Cargo.lock-backup-20260803-091500"),
+        ("draft doc", "README-Draft-20260804-final.md"),
+        ("instructions backup", "INSTRUCTIONS.md.bak-20260731-000028"),
+        ("session snapshot", "Session-Snapshot-20260804-093000.json"),
+        (
+            "reverse-dns plist backup",
+            "com.apple.Finder.plist.bak-20260101",
+        ),
+        ("app with build number", "Xcode.app-15.4.0-build-2026"),
+        (
+            "double-extension backup",
+            "Agents.app.bak-20260729-000028.zip",
+        ),
+        ("milestone label", "Milestone-1.3.5-Release-Candidate"),
+        ("person-dated note", "Bob.Matsuoka-20260804-notes.md"),
+        // Underscore is an identifier delimiter too (#4739): these were false
+        // positives on origin/main for the same reason, one delimiter over.
+        ("snake_case capitalised", "Trusty_Agents_20260804"),
+        ("dotted snake backup", "Session_Log.2026.08.04.txt"),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#4739 ({label}): a capitalised, delimiter-segmented filename must \
+             NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Checkpoint: rolled back to {tok} after the bounce");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#4739 ({label}): the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4739): widening `is_human_word_segment` widens
+/// `is_structural_token`, and `is_structural_token` returning `true` makes
+/// `looks_like_secret` return `false` — so this change NARROWS flagging and can
+/// only lose detection, never add it. #4723 shipped a doc claiming the opposite
+/// direction for a neighbouring predicate and a measurement disproved it, so the
+/// narrowing is pinned here against every credential family the mixed-case branch
+/// is responsible for.
+///
+/// The load-bearing cases are the delimiter-segmented MIXED-CASE blobs. A
+/// careless widening — anything that admits a segment with two uppercase letters
+/// — loses every one of them, because run-of-two case alternation (`AbCd`,
+/// `EfGh`) is exactly the signature of an encoded blob. The predicate admits at
+/// most ONE uppercase letter in a non-uppercase segment, and only as its first
+/// letter, which is what keeps these caught.
+/// What: asserts the mixed-case credential families stay flagged, then pins the
+/// CamelCase residue that this change deliberately did NOT fix.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4739_capitalised_segments() {
+    for (label, tok) in [
+        // LOAD-BEARING: delimiter-segmented mixed-case blobs. If the segment
+        // predicate ever admits two uppercase letters, every one of these is lost.
+        ("hyphenated mixed-case cred", "AbCd1234-EfGh5678-IjKl9012"), // pragma: allowlist secret
+        ("dotted mixed-case cred", "AbCd1234.EfGh5678.IjKl9012"),     // pragma: allowlist secret
+        ("underscored mixed-case cred", "AbCd1234_EfGh5678_IjKl9012"), // pragma: allowlist secret
+        ("camelCase blob segments", "xYzAbc123-qRsTuv456-mNoPqr789"), // pragma: allowlist secret
+        ("slug-prefixed api key", "apikey-Xy7Kp2Qm9Rt4Vw8Nz3Bc6Fj"),  // pragma: allowlist secret
+        ("capitalised head, blob tail", "Prod-AbCd1234EfGh5678IjKl"), // pragma: allowlist secret
+        (
+            "dotted capitalised head, blob tail",
+            "Prod.Key.AbCd1234EfGh5678",
+        ), // pragma: allowlist secret
+        // Unchanged families, re-asserted because the widened predicate sits on
+        // the path every one of them takes.
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"), // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("colon-bearing credential", "token:aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"),               // pragma: allowlist secret
+        (
+            "padded base64",
+            "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must STILL be flagged after the #4739 widening: {tok}"
+        );
+    }
+
+    // KNOWN RESIDUE, deliberately not fixed by #4739, asserted rather than left
+    // implicit. A CamelCase segment has TWO capitalised runs, so it is not a word
+    // under `is_human_word_segment` and these stay flagged. Admitting CamelCase
+    // would mean admitting multi-uppercase segments, which is the exact signature
+    // of `AbCdEfGhIjKlMnOpQrSt-1234` — i.e. it would buy two prose cases at the
+    // cost of a credential miss. Measured at both revisions: 17 -> 2 prose false
+    // positives with 0 -> 0 credential misses. If these start passing, the
+    // follow-up landed — move them into
+    // `dotted_capitalised_filenames_are_not_flagged`.
+    for residue in [
+        "TrustyMemory.app.bak-20260801-120000",
+        "MyDocument.Backup.2026.tar.gz",
+    ] {
+        assert!(
+            find_secret_token(residue).is_some(),
+            "KNOWN RESIDUE (#4739): CamelCase segments are still not words, so \
+             this is still flagged. If it now passes, update the bound stated on \
+             `is_human_word_segment`. Token: {residue}"
+        );
+    }
+}
+
+/// Why (issue #4739, review round 1): the battery above probes the REJECTED
+/// side of `is_human_word_segment`'s bound — shapes that must stay flagged.
+/// Nothing probed the ACCEPTED side at token scale, which left the widening
+/// reading as a stronger guarantee than it gives. What `is_segmented_identifier`
+/// actually admits is a token whose every segment is independently case-uniform,
+/// and at short segment lengths that includes shapes which are not human words
+/// at all. These moved FLAG -> pass in this PR; they are neither prose nor
+/// credentials the module is expected to catch, and they are accepted (see the
+/// bound stated on `is_human_word_segment`) rather than fixed.
+///
+/// This block is modelled on the #4312 known-miss pin it sits beside: that one
+/// is the reason the URL-path misses stayed visible across two PRs instead of
+/// being rediscovered. The accepted side of this bound gets the same treatment,
+/// so any future movement — in either direction — is caught rather than found.
+/// What: pins two of the admitted shapes, plus the corrected doc example.
+/// Test: itself.
+#[test]
+fn per_segment_case_uniformity_is_a_known_accepted_bound() {
+    for (label, tok) in [
+        (
+            "capitalised 3-char groups",
+            "Xy7-Kp2-Qm9-Rt4-Vw8-Nz3-Bc6-Fj0",
+        ),
+        ("capitalised 4-char groups", "A1b2-C3d4-E5f6-G7h8-I9j0-K1l2"),
+        // The corrected doc example. The earlier revision cited
+        // `Abcd-1234-Efgh-5678`, which at 19 chars is below the 20-char floor in
+        // `looks_like_secret` and so never reaches this branch at all — it could
+        // not illustrate the bound it was cited for. This form does.
+        ("corrected doc example", "Abcd-1234-Efgh-5678-Ijkl"),
+    ] {
+        assert!(
+            tok.len() >= 20,
+            "{label}: this pin is meaningless below the 20-char secret floor — \
+             the token would never reach the segmented-identifier branch. \
+             Token: {tok} ({} chars)",
+            tok.len()
+        );
+        assert!(
+            find_secret_token(tok).is_none(),
+            "KNOWN ACCEPTED BOUND (#4739, {label}): every segment is \
+             independently case-uniform, so this is admitted even though it is \
+             not a human-readable identifier. If it now FLAGS, the bound \
+             tightened — update the doc on `is_human_word_segment`. Token: {tok}"
+        );
+    }
+}
