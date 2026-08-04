@@ -52,8 +52,11 @@ pub const SESSIONS_DIR: &str = "sessions";
 /// project. This is not a path guess: it is the same directory name
 /// `provisioner::workspace::BASE_CHECKOUT_DIRNAME` writes and
 /// `session_manager::worktree_registry` interrogates.
-/// What: `.base`.
-/// Test: `harness_root_maps_a_base_clone_back_to_the_project`.
+/// What: `.base`. The name alone is never sufficient — see
+/// [`map_base_clone_to_project`], which also requires the directory to be a
+/// BARE repository before rewriting it.
+/// Test: `harness_root_maps_a_base_clone_back_to_the_project`,
+/// `harness_root_for_a_non_bare_repo_named_base_is_itself`.
 const BASE_CLONE_DIRNAME: &str = ".base";
 
 /// Environment variable carrying the managed session id inside a tm pane.
@@ -80,30 +83,71 @@ pub const UNMANAGED_SESSION_SCOPE: &str = "local";
 /// `dir` is not inside any git working tree, which is the condition
 /// `tm session start` refuses on rather than scattering `.trusty-mpm/` into an
 /// arbitrary shell directory (#4832 defect 5).
-/// What: reads `git rev-parse --path-format=absolute --git-common-dir` through
-/// the hardened [`git_command`] (which strips the environment variables that
-/// could point git at a different repository). A normal checkout — and every
-/// linked worktree of it — answers `<root>/.git`, so the root is its parent; a
-/// bare clone answers with the bare directory itself. A bare clone named
-/// [`BASE_CLONE_DIRNAME`] is trusty-mpm's own provisioning artifact, so its
-/// PARENT is the project. Any failed probe returns `None`, never a guess.
+/// What: probes git through the hardened [`git_command`] (which strips the
+/// environment variables that could point git at a different repository) and
+/// branches on the ONE distinction that matters — whether `dir` sits in a
+/// linked worktree, i.e. whether `--git-dir` differs from `--git-common-dir`.
+///
+/// - Not a linked worktree, not bare: `dir` is in a working tree that owns its
+///   own state, so the answer is `--show-toplevel`. This is deliberately NOT
+///   derived from the git directory, because for a submodule
+///   (`<super>/.git/modules/<name>`) and for a `--separate-git-dir` checkout
+///   (`<store>.git`) the git directory is not inside the working tree at all.
+/// - Not a linked worktree, bare: there is no working tree, so the repository
+///   directory is the root — modulo [`map_base_clone_to_project`].
+/// - A linked worktree: git's SHARED directory identifies the checkout it
+///   belongs to. `<main>/.git` → the main checkout; anything else is a
+///   repository directory, again modulo [`map_base_clone_to_project`].
+///
+/// Any failed probe returns `None`, never a guess.
 /// Test: `harness_root_is_the_main_checkout_for_a_worktree`,
 /// `harness_root_maps_a_base_clone_back_to_the_project`,
 /// `harness_root_for_is_none_outside_a_git_repo`,
-/// `harness_root_is_the_repo_root_from_a_subdirectory`.
+/// `harness_root_is_the_repo_root_from_a_subdirectory`,
+/// `harness_root_for_a_non_bare_repo_named_base_is_itself`,
+/// `harness_root_for_a_submodule_is_the_submodule_checkout`,
+/// `harness_root_for_a_separate_git_dir_checkout_is_the_working_tree`.
 pub fn harness_root_for(dir: &Path) -> Option<PathBuf> {
-    let common_dir = git_common_dir(dir)?;
-    let root = if common_dir.file_name().is_some_and(|n| n == ".git") {
-        common_dir.parent()?.to_path_buf()
-    } else {
-        common_dir
-    };
-    if root.file_name().is_some_and(|n| n == BASE_CLONE_DIRNAME)
-        && let Some(project) = root.parent()
-    {
-        return Some(project.to_path_buf());
+    let common_dir = git_rev_parse_path(dir, "--git-common-dir")?;
+    let git_dir = git_rev_parse_path(dir, "--git-dir")?;
+
+    if git_dir == common_dir {
+        if git_is_bare(dir).unwrap_or(false) {
+            return Some(map_base_clone_to_project(common_dir));
+        }
+        return git_rev_parse_path(dir, "--show-toplevel");
     }
-    Some(root)
+
+    if common_dir.file_name().is_some_and(|n| n == ".git") {
+        return Some(common_dir.parent()?.to_path_buf());
+    }
+    Some(map_base_clone_to_project(common_dir))
+}
+
+/// Rewrite a bare [`BASE_CLONE_DIRNAME`] clone to the project that contains it.
+///
+/// Why: `<project>/.base` is trusty-mpm's own provisioning artifact — a
+/// directory INSIDE the project, not the project — so harness state resolved
+/// through it belongs one level up. Bareness is part of the test, not an
+/// assumption: an ordinary checkout that merely happens to be named `.base`
+/// owns its own state and must resolve to ITSELF, or a plain repository would
+/// write its harness state outside itself and possibly into a different
+/// repository (#4841 review).
+/// What: returns `repo_dir`'s parent only when `repo_dir` is named `.base` AND
+/// `git rev-parse --is-bare-repository` confirms it is bare; otherwise
+/// `repo_dir` unchanged. An unobservable bareness probe does not remap.
+/// Test: `harness_root_maps_a_base_clone_back_to_the_project`,
+/// `harness_root_for_a_non_bare_repo_named_base_is_itself`.
+fn map_base_clone_to_project(repo_dir: PathBuf) -> PathBuf {
+    if repo_dir
+        .file_name()
+        .is_some_and(|n| n == BASE_CLONE_DIRNAME)
+        && git_is_bare(&repo_dir).unwrap_or(false)
+        && let Some(project) = repo_dir.parent()
+    {
+        return project.to_path_buf();
+    }
+    repo_dir
 }
 
 /// [`harness_root_for`], falling back to `dir` itself.
@@ -209,26 +253,47 @@ fn usable_scope(raw: &str) -> Option<String> {
         .then(|| trimmed.to_string())
 }
 
-/// One absolute path from `git rev-parse --git-common-dir`, or `None`.
+/// One absolute path from a `git rev-parse` path selector, or `None`.
 ///
 /// Why: an empty stdout, a non-zero exit, or a missing `git` must all read as
-/// "could not observe" rather than as a fact about `dir`.
-/// What: `git -C <dir> rev-parse --path-format=absolute --git-common-dir`
-/// through the hardened [`git_command`].
+/// "could not observe" rather than as a fact about `dir`. `--show-toplevel`
+/// legitimately fails inside a bare repository, which is exactly why the caller
+/// establishes bareness first.
+/// What: `git -C <dir> rev-parse --path-format=absolute <selector>` through the
+/// hardened [`git_command`].
 /// Test: covered by every `harness_root_*` test.
-fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    let out = git_command(
-        dir,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .output()
-    .ok()?;
+fn git_rev_parse_path(dir: &Path, selector: &str) -> Option<PathBuf> {
+    let out = git_command(dir, &["rev-parse", "--path-format=absolute", selector])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
     let raw = String::from_utf8_lossy(&out.stdout);
     let trimmed = raw.trim();
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+/// Is `dir` inside a bare repository? `None` when the probe is unobservable.
+///
+/// Why: bareness is what separates "no working tree owns this, so the
+/// repository directory is the root" from "a working tree owns this". Anything
+/// other than a clean `true`/`false` is `None` so a caller can refuse to guess.
+/// What: `git -C <dir> rev-parse --is-bare-repository` through [`git_command`].
+/// Test: `harness_root_maps_a_base_clone_back_to_the_project`,
+/// `harness_root_for_a_non_bare_repo_named_base_is_itself`.
+fn git_is_bare(dir: &Path) -> Option<bool> {
+    let out = git_command(dir, &["rev-parse", "--is-bare-repository"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

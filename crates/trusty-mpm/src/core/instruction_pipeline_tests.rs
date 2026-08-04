@@ -550,6 +550,28 @@ fn migrate_is_a_noop_when_absent() {
 }
 
 #[test]
+fn migrate_keeps_an_empty_framework_dir_when_nothing_migrated() {
+    // #4841 review: `tm project init` seeds an empty `framework/` and this
+    // migration runs on EVERY launch. Ungated, init created the directory and
+    // the next launch deleted it.
+    let tmp = TempDir::new().unwrap();
+    let framework = tmp
+        .path()
+        .join(crate::core::harness_root::HARNESS_DIR)
+        .join(crate::core::harness_root::FRAMEWORK_DIR);
+    std::fs::create_dir_all(&framework).unwrap();
+
+    assert!(
+        !remove_legacy_compiled_prompt(tmp.path()).expect("absence is not an error"),
+        "there was no legacy prompt to migrate"
+    );
+    assert!(
+        framework.is_dir(),
+        "a scaffolded, empty framework/ must survive a launch that migrated nothing"
+    );
+}
+
+#[test]
 fn instructions_failure_message_names_the_path_and_a_remedy() {
     // Why (#4752 ruling follow-up 1): the write is fatal, so a refused launch
     // must tell the operator what was refused, where, and what to do — not

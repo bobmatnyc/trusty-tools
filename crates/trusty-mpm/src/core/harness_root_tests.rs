@@ -3,10 +3,11 @@
 //! Why: the whole point of the module is that a WORKTREE never accumulates
 //! harness state, and that cannot be asserted against a plain temp directory —
 //! every test here builds a real git repository and a real linked worktree.
-//! What: covers the four shapes `harness_root_for` must distinguish (main
-//! checkout, linked worktree, subdirectory, `.base` bare clone), the non-git
-//! refusal, and the `session_scope` resolution order including the path-
-//! traversal rejection.
+//! What: covers the shapes `harness_root_for` must distinguish (main checkout,
+//! linked worktree, subdirectory, `.base` BARE clone vs. an ordinary repo that
+//! is merely NAMED `.base`, submodule, `--separate-git-dir` checkout), the
+//! non-git refusal, and the `session_scope` resolution order including the
+//! path-traversal rejection.
 //! Test: this file.
 
 use std::path::{Path, PathBuf};
@@ -134,6 +135,97 @@ fn harness_root_maps_a_base_clone_back_to_the_project() {
         canon(&resolved),
         canon(&repo),
         "a `.base`-registered worktree must resolve to the project, not the bare clone"
+    );
+}
+
+#[test]
+fn harness_root_for_a_non_bare_repo_named_base_is_itself() {
+    // #4841 review (HIGH): the `.base` rewrite is about trusty-mpm's own BARE
+    // provisioning clone. An ORDINARY repository that merely happens to be
+    // named `.base` owns its own harness state — rewriting it to the parent
+    // would write that state outside the repository, possibly into a different
+    // one, which is the exact scatter #4832 exists to stop.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let project = tmp.path().join("proj");
+    let repo = project.join(".base");
+    init_repo(&repo);
+
+    let resolved = harness_root_for(&repo).expect("a checkout named .base resolves");
+    assert_eq!(
+        canon(&resolved),
+        canon(&repo),
+        "a non-bare repo named `.base` must resolve to itself, not to its parent"
+    );
+    assert_ne!(canon(&resolved), canon(&project));
+}
+
+#[test]
+fn harness_root_for_a_submodule_is_the_submodule_checkout() {
+    // #4841 review (MEDIUM): a submodule's git common dir is
+    // `<super>/.git/modules/<name>` — outside the working tree entirely. Derived
+    // from the git directory, `tm project init` would have scaffolded INTO
+    // `.git/`, and the submodule's own `framework/manifest.toml` would never be
+    // read.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let upstream = tmp.path().join("upstream");
+    init_repo(&upstream);
+    let sup = tmp.path().join("super");
+    init_repo(&sup);
+    git(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            upstream.to_str().unwrap(),
+            "sm",
+        ],
+    );
+    let sm = sup.join("sm");
+
+    let resolved = harness_root_for(&sm).expect("a submodule resolves");
+    assert_eq!(
+        canon(&resolved),
+        canon(&sm),
+        "a submodule must resolve to its own checkout"
+    );
+    assert!(
+        !harness_dir(&sm)
+            .components()
+            .any(|c| c.as_os_str() == ".git"),
+        "harness state must never land inside a git directory: {}",
+        harness_dir(&sm).display()
+    );
+}
+
+#[test]
+fn harness_root_for_a_separate_git_dir_checkout_is_the_working_tree() {
+    // #4841 review (MEDIUM): `--separate-git-dir` puts the git directory at
+    // `<store>.git`, outside the tree. The working tree still owns the state.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let work = tmp.path().join("work");
+    let store = tmp.path().join("store.git");
+    std::fs::create_dir_all(&work).unwrap();
+    let out = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(format!("--separate-git-dir={}", store.display()))
+        .arg(&work)
+        .output()
+        .expect("git init --separate-git-dir spawns");
+    assert!(
+        out.status.success(),
+        "separate-git-dir init failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let resolved = harness_root_for(&work).expect("a separate-git-dir checkout resolves");
+    assert_eq!(
+        canon(&resolved),
+        canon(&work),
+        "a --separate-git-dir checkout must resolve to its working tree, not its store"
     );
 }
 

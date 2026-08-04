@@ -424,13 +424,17 @@ pub fn refresh_compiled_prompt(
 /// lives in `framework/` — is deliberately NOT touched: the directory is only
 /// removed when it is empty.
 /// What: removes `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
-/// if present, then removes the now-possibly-empty `framework/` directory
-/// (ignoring the not-empty error). Returns whether a file was removed. Resolves
-/// against `project_dir` VERBATIM, not the harness root: the point is to clean
-/// the worktree-local copies the old path created.
+/// if present, and ONLY THEN removes the now-possibly-empty `framework/`
+/// directory (ignoring the not-empty error). Returns whether a file was
+/// removed. The gate matters because this runs on every launch while
+/// `tm project init` seeds an empty `framework/`; ungated, init created the
+/// directory and the next launch deleted it. Resolves against `project_dir`
+/// VERBATIM, not the harness root: the point is to clean the worktree-local
+/// copies the old path created.
 /// Test: `migrate_removes_a_legacy_compiled_prompt`,
 /// `migrate_keeps_a_sibling_manifest`,
-/// `migrate_is_a_noop_when_absent`.
+/// `migrate_is_a_noop_when_absent`,
+/// `migrate_keeps_an_empty_framework_dir_when_nothing_migrated`.
 pub fn remove_legacy_compiled_prompt(project_dir: &std::path::Path) -> std::io::Result<bool> {
     let framework = project_dir
         .join(crate::core::harness_root::HARNESS_DIR)
@@ -440,9 +444,15 @@ pub fn remove_legacy_compiled_prompt(project_dir: &std::path::Path) -> std::io::
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => return Err(err),
     };
-    // Best-effort: `remove_dir` refuses a non-empty directory, which is exactly
-    // the guard that preserves a sibling `manifest.toml`.
-    let _ = std::fs::remove_dir(&framework);
+    // Only when this call actually migrated something. `remove_dir` refuses a
+    // non-empty directory, which preserves a sibling `manifest.toml` — but it
+    // does NOT distinguish "empty leftover" from "empty because `tm project
+    // init` just created it", and that scaffolding runs on init while this runs
+    // on every launch. Ungated, init created the directory and the next launch
+    // deleted it (#4841 review).
+    if removed {
+        let _ = std::fs::remove_dir(&framework);
+    }
     Ok(removed)
 }
 

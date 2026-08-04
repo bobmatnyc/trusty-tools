@@ -143,13 +143,48 @@ pub fn resolve_manifest(sources: &ManifestSources) -> HarnessManifest {
     {
         manifest = manifest.merge(layer);
     }
-    if let Some(path) = &sources.project
-        && let Some(layer) = read_layer(path, "project")
-    {
-        manifest = manifest.merge(layer);
+    if let Some(path) = &sources.project {
+        match read_layer(path, "project") {
+            Some(layer) => manifest = manifest.merge(layer),
+            None => {
+                if let Some(legacy) = stranded_legacy_manifest(path) {
+                    tracing::warn!(
+                        "{} is no longer read (#4832 moved the project manifest layer); \
+                         move it to {} for it to take effect",
+                        legacy.display(),
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     manifest
+}
+
+/// A pre-#4832 `manifest.toml` sitting unread beside the new location.
+///
+/// Why: #4832 moved the project layer from `<project>/.trusty-mpm/manifest.toml`
+/// into `framework/`, and the file is operator-authored — moving it silently is
+/// worse than leaving it, so it is deliberately NOT migrated. But a layer that
+/// simply stops being read is invisible: [`read_layer`] logs nothing for an
+/// absent file, so an operator's overrides would go dark with no signal at all
+/// (#4841 review). Detection is split from the logging so the condition is
+/// assertable without capturing a subscriber.
+/// What: `Some(legacy_path)` only when the new path is absent AND the legacy
+/// sibling (`<new>/../../manifest.toml`) is a file; `None` otherwise — a present
+/// new layer means nothing is stranded, whatever else exists.
+/// Test: `stranded_legacy_manifest_is_detected`,
+/// `stranded_legacy_manifest_is_silent_once_moved`.
+fn stranded_legacy_manifest(new_path: &Path) -> Option<PathBuf> {
+    if new_path.exists() {
+        return None;
+    }
+    let legacy = new_path
+        .parent()
+        .and_then(Path::parent)?
+        .join(MANIFEST_FILE);
+    legacy.is_file().then_some(legacy)
 }
 
 /// Read and parse one manifest layer file, tolerating absence and corruption.
@@ -213,6 +248,46 @@ mod tests {
             sources.catalog.unwrap(),
             PathBuf::from("/home/.trusty-mpm/catalog/repo/.claude/manifest.toml")
         );
+    }
+
+    #[test]
+    fn stranded_legacy_manifest_is_detected() {
+        // #4841 review: the operator's pre-#4832 file is deliberately not moved
+        // for them, so the ONE thing owed is a signal that it stopped being read.
+        let tmp = TempDir::new().unwrap();
+        let harness = tmp.path().join(".trusty-mpm");
+        let legacy = write(&harness, MANIFEST_FILE, "[agents]\n");
+        let new_path = harness.join("framework").join(MANIFEST_FILE);
+
+        assert_eq!(
+            stranded_legacy_manifest(&new_path),
+            Some(legacy),
+            "an unread legacy manifest must be detectable so it can be reported"
+        );
+    }
+
+    #[test]
+    fn stranded_legacy_manifest_is_silent_once_moved() {
+        // Once the file lives at the new path, the old one (if any) is history —
+        // warning on every launch forever would be noise, not a signal.
+        let tmp = TempDir::new().unwrap();
+        let harness = tmp.path().join(".trusty-mpm");
+        write(&harness, MANIFEST_FILE, "[agents]\n");
+        let new_path = write(&harness.join("framework"), MANIFEST_FILE, "[agents]\n");
+
+        assert_eq!(stranded_legacy_manifest(&new_path), None);
+    }
+
+    #[test]
+    fn stranded_legacy_manifest_is_silent_when_there_never_was_one() {
+        let tmp = TempDir::new().unwrap();
+        let new_path = tmp
+            .path()
+            .join(".trusty-mpm")
+            .join("framework")
+            .join(MANIFEST_FILE);
+
+        assert_eq!(stranded_legacy_manifest(&new_path), None);
     }
 
     #[test]
