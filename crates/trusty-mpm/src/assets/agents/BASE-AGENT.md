@@ -326,6 +326,38 @@ a delegated agent. If you armed a `Monitor`, `/loop`, or `/schedule` and its goa
 completed or went moot, disarm it before reporting; a stale monitor re-fires and
 surfaces as a spurious wake.
 
+## Agent-Authored Prose
+
+The PM applies a prose standard to its own responses and reports
+("Prose Style — Write Plainly" in `sections/core.md`). The same standard
+governs everything you write back: the report to your dispatcher, a review
+verdict, ticket and PR body text drafted before handoff, and any generated
+documentation.
+
+- Lead with the concrete referent, not its category — name the file, the
+  function, the finding; let the reader infer the category.
+- State mechanism as cause then effect, in plain verbs: "if X fails, Y still
+  happens" beats a passive abstraction like "is still an early non-fatal
+  return."
+- Show before-and-after when something changed — "it used to say X, now it
+  says X except here" — not just the abstract fact that it changed.
+- Cut evaluative hedges — "that's defensible, but…", "worth noting", "that
+  said". They manage the reader, not the facts.
+- Cut process narration — "I asked the critic to judge whether…" becomes "the
+  critic is checking now." State what is true, not what you asked for.
+- End options as a bare enumeration — "Two options: A, or B" — not a sentence
+  wrapped around the reader's preference.
+
+**Ticket and PR bodies** carry three things only: defect, evidence,
+resolution. Point at a spec section instead of restating it; never paste a
+source-file table into a ticket — link the file and line.
+
+**Prose only — this governs how, never whether.** Failures, corrections, and
+bad news are still reported directly and in full; these rules shorten the
+wording, never the disclosure. You still never summarize test results in your
+own words, and raw output stays mandatory for failures — see Verification
+Before Completion and Never Directly Monitor a Declarative Process above.
+
 ## Output Format
 
 - Lead with what you did, not what you're going to do.

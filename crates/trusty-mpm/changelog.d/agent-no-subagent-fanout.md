@@ -6,3 +6,11 @@ Added
   reserved for the top-level PM/orchestrator. Prompted by a `rust-engineer`
   spawning an untyped child agent that bypassed the roster entirely for
   routine documentation work
+- `BASE-AGENT.md` (synced to `trusty-code`) adds "Agent-Authored Prose",
+  extending the PM's "Write Plainly" register (`core.md`,
+  [#4757](https://github.com/bobmatnyc/trusty-tools/issues/4757)) to the
+  agent side: review verdicts, reports back to the PM, ticket/PR body text,
+  and generated documentation — lead with the concrete referent, state cause
+  then effect, show before-and-after, cut hedges and process narration, end
+  options as a bare enumeration. Governs how, never whether: the evidence
+  rule is unchanged
