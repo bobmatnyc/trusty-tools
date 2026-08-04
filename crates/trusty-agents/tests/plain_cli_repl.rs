@@ -99,6 +99,13 @@ fn run_piped_with_setup(
         // which would otherwise consume lines meant for the REPL loop.
         .env("TAGENT_NONINTERACTIVE", "1")
         .env("HOME", default_isolated_home.path())
+        // #4826: the child inherits the parent's env, and an explicit
+        // project-dir hint now outranks exe-path inference — so an ambient
+        // `TAGENT_PROJECT_DIR` would override the isolated cwd below and send
+        // this process's state writes into a real directory, with the test
+        // still passing. Clearing it is what makes the isolation above real.
+        .env_remove("TAGENT_PROJECT_DIR")
+        .env_remove("OPEN_MPM_PROJECT_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -264,6 +271,10 @@ fn run_piped_no_forced_noninteractive(
     cmd.args(extra_args)
         .current_dir(isolated_cwd.path())
         .env("HOME", default_isolated_home.path())
+        // #4826: see `run_piped_with_setup` — an inherited project-dir hint
+        // would defeat the cwd isolation above without failing anything.
+        .env_remove("TAGENT_PROJECT_DIR")
+        .env_remove("OPEN_MPM_PROJECT_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

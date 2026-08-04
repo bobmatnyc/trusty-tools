@@ -136,6 +136,7 @@ pub mod subprocess;
 pub mod system_status;
 pub mod telegram;
 pub mod ticketing;
+pub mod tls;
 pub mod tm;
 pub mod tmux;
 pub mod tools;

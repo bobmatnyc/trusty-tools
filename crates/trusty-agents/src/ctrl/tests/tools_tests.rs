@@ -34,12 +34,50 @@ fn detect_self_project_finds_via_env_var() {
     assert!(detected.is_some(), "expected detection via env var");
 }
 
-/// (#3398) See `detect_self_project_finds_via_env_var`'s doc comment.
+/// (#4826) An explicit hint outranks the `current_exe()` walk-up, even when
+/// the hint directory carries no `.trusty-agents/agents/pm.toml` marker.
+///
+/// Why: This is the exact shape of the Slack-gateway defect — the launchd job
+/// set the hint to a markerless project directory, the hint was dropped, and
+/// the exe walk-up resolved `$HOME` (which does carry the marker) instead. The
+/// assertion is on the returned path, not merely on `is_some`, because "some
+/// ancestor of the test binary" is precisely the wrong answer that shipped.
+/// Asserting equality fails whether the old code returned an inferred ancestor
+/// or `None`, so it is machine-independent.
 #[test]
-fn detect_self_project_returns_none_when_no_marker() {
+fn detect_self_project_hint_beats_exe_inference() {
     let tmp = tempfile::tempdir().unwrap();
-    let detected = detect_self_project_with_hint(Some(&tmp.path().to_string_lossy()));
-    let _ = detected;
+    let markerless = tmp.path().join("cto");
+    std::fs::create_dir(&markerless).unwrap();
+    assert!(
+        !markerless.join(".trusty-agents").join("agents").exists(),
+        "fixture must carry no self-project marker"
+    );
+
+    let detected = detect_self_project_with_hint(Some(&markerless.to_string_lossy()));
+
+    assert_eq!(
+        detected,
+        Some(markerless.canonicalize().unwrap()),
+        "an explicitly-set project-dir hint must win over exe-path inference"
+    );
+}
+
+/// (#4826) A hint naming nothing on disk is not a usable declaration, so
+/// detection still falls back to marker-based inference rather than returning
+/// a path that does not exist.
+#[test]
+fn detect_self_project_ignores_unresolvable_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+
+    let detected = detect_self_project_with_hint(Some(&missing.to_string_lossy()));
+
+    assert_ne!(
+        detected,
+        Some(missing),
+        "a hint that does not resolve must not be returned verbatim"
+    );
 }
 
 #[tokio::test]

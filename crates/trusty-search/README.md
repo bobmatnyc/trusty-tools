@@ -102,16 +102,24 @@ feature, which statically links an ONNX Runtime build that requires
 install trusty-search` on AL2023 (or any other glibc < 2.38 host) will fail
 to start the embedding daemon. Two working options, in order of preference:
 
-1. **Use the prebuilt `x86_64-linux-al2023` GitHub Release tarball** — it
-   ships the `load-dynamic` build already configured, no flags needed:
+1. **Use the prebuilt AL2023 GitHub Release tarball for your architecture** —
+   it ships the `load-dynamic` build already configured, no flags needed.
+   Both `x86_64-linux-al2023` (Intel/AMD) and `aarch64-linux-al2023`
+   (Graviton — added by the #2533 follow-up to PR #4822) are published:
    ```bash
-   curl -LO https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-search-v<version>/trusty-search-<version>-x86_64-linux-al2023.tar.gz
-   tar xzf trusty-search-*-x86_64-linux-al2023.tar.gz
+   # ARCH=x86_64 on Intel/AMD, aarch64 on Graviton
+   ARCH="$(uname -m)"
+   curl -LO https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-search-v<version>/trusty-search-<version>-${ARCH}-linux-al2023.tar.gz
+   tar xzf trusty-search-*-${ARCH}-linux-al2023.tar.gz
    ```
+   Do **not** substitute the `aarch64-unknown-linux-gnu` asset on AL2023
+   arm64: it is built on Ubuntu 24.04 and carries a glibc 2.39 floor, so it
+   fails to load on AL2023's glibc 2.34 (measured in PR #4822).
 2. **Build from source / crates.io with `load-dynamic`**, then point
    `ORT_DYLIB_PATH` at a host-compatible `libonnxruntime.so` (e.g. the
-   official ORT 1.20.1 linux-x64 release, built on Ubuntu 20.04 / glibc
-   2.31 — satisfies AL2023's glibc 2.34):
+   official ORT 1.20.1 `linux-x64` release — or `linux-aarch64` on Graviton
+   — built on Ubuntu 20.04 / glibc 2.31, which satisfies AL2023's glibc
+   2.34):
    ```bash
    cargo install trusty-search --no-default-features --features load-dynamic --locked
    export ORT_DYLIB_PATH=/path/to/libonnxruntime.so

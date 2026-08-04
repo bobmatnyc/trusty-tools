@@ -90,8 +90,10 @@ async fn l2_returns_relevant_drawer() {
 /// if-body in `retrieve_l2`), so a caller asking for one room's drawers
 /// silently got every room back. Asserts the filter is now enforced.
 /// What: Upserts two semantically-similar drawers stamped into different
-/// rooms (via `room_to_uuid`, the same deterministic hash `list_drawers`
-/// uses), queries with `room_filter` set to only one of them, and asserts
+/// rooms (via the legacy `room_to_uuid` fold — these drawers are never
+/// persisted, so the palace has no ROOMS row and `resolve_room_filter_id`
+/// falls back to exactly that fold), queries with `room_filter` set to only
+/// one of them, and asserts
 /// the non-matching drawer never appears in the results while the matching
 /// one does.
 /// Test: This test itself.
@@ -102,8 +104,8 @@ async fn l2_room_filter_excludes_other_rooms() {
     let handle = make_handle(dir.path());
     let embedder = shared_embedder().await.unwrap();
 
-    let backend_room_id = super::layers::room_to_uuid(&RoomType::Backend);
-    let frontend_room_id = super::layers::room_to_uuid(&RoomType::Frontend);
+    let backend_room_id = crate::memory_core::room_identity::room_to_uuid(&RoomType::Backend);
+    let frontend_room_id = crate::memory_core::room_identity::room_to_uuid(&RoomType::Frontend);
 
     let backend_drawer = Drawer::new(backend_room_id, "Rust is a systems programming language");
     let backend_id = backend_drawer.id;

@@ -2,7 +2,8 @@
 //!
 //! Why: Issue #379 — bring trusty-memory-core in as a path dependency so we can
 //! incrementally migrate trusty-agents's flat `MemoryStore` interface onto trusty's
-//! Palace/Wing/Room/Drawer hierarchy without touching the nine consumer files.
+//! Palace -> Wing -> Room -> Drawer hierarchy (a "closet" is a keyword index,
+//! not a level — ADR-0027 D3) without touching the nine consumer files.
 //! Existing call sites continue to use the `MemoryStore` trait; this adapter
 //! routes those calls through a per-`Segment` `PalaceHandle` (one Palace per
 //! segment, one Room of the corresponding `RoomType`).

@@ -81,8 +81,10 @@ Single-instance guard prevents launchd zombie herds (#464).
 ## 3. Palace Store & Data Model — `memory_core/palace.rs`, `registry.rs`, `store/`, `project_root.rs`
 
 **Responsibility.** Own the spatial memory data model (Palace → Wing → Room →
-Closet → Drawer), the concurrent multi-palace registry, durable per-palace storage,
-and the project-anchored naming rules.
+Drawer), the concurrent multi-palace registry, durable per-palace storage,
+and the project-anchored naming rules. A *closet* is not a hierarchy level: it is
+the cross-cutting keyword → drawer-ids inverted index held on `PalaceHandle`
+(ADR-0027 D3).
 
 **Key types/modules.**
 - `memory_core/palace.rs` — `PalaceId`, `Palace`, `Wing`, `RoomType`, `Room`, `Drawer`, `DrawerType`.

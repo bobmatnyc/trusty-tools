@@ -130,8 +130,9 @@ provisioned together, version-coordinated, ready to run.
     missing or stale** — they must be built, current, and published per release
     before the unified install is trustworthy.
   - **AL2023 build coverage** must be complete and green for every service that
-    ships a Linux load-dynamic variant (the `*-x86_64-linux-al2023.tar.gz`
-    asset, `.github/workflows/release.yml`).
+    ships a Linux load-dynamic variant, on **both architectures** (the
+    `*-x86_64-linux-al2023.tar.gz` and `*-aarch64-linux-al2023.tar.gz` assets,
+    `.github/workflows/release.yml`).
   - **The trusty-memory `BINARIES` list** (the set of `[[bin]]` targets the
     release matrix packages — e.g. `trusty-memory trusty-bm25-daemon`) must be
     correct so the published archive contains every binary the service needs.
