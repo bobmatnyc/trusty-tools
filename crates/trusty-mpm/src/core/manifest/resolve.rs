@@ -45,15 +45,20 @@ pub struct ManifestSources {
     pub user: Option<PathBuf>,
     /// `~/.trusty-mpm/catalog/repo/.claude/manifest.toml` — synced catalog.
     pub catalog: Option<PathBuf>,
-    /// Auto-detected per-project language agent scoping (#1941).
+    /// The framework tier's resolved agent selection (#1941, #4760).
     ///
-    /// Why: a Rust-only workspace should not receive the full polyglot roster.
-    /// [`ManifestSources::resolve`] fills this from
-    /// [`super::project_lang::language_agent_scope`]; [`resolve_manifest`] applies
+    /// Why: the bundled `framework-manifest.toml` declares WHICH agents always
+    /// deploy and which are gated on a detected language, framework, or
+    /// platform; composing that declaration with this project's detected markers
+    /// yields the explicit allowlist below every operator-authored layer.
+    /// [`ManifestSources::resolve`] ALWAYS fills this from
+    /// [`super::framework::framework_agent_scope`]; [`resolve_manifest`] applies
     /// it as the lowest override layer (above the compiled default, below the
-    /// catalog/user/project manifests) so an explicit `[agents]` override always
-    /// wins. `None` means "no recognized language" → deploy everything (unchanged).
-    pub language_scope: Option<AgentSet>,
+    /// catalog/user/project manifests) so an explicit `[agents]` override still
+    /// wins, per ADR-0025 clause 16. `None` is reachable only by constructing
+    /// this struct by hand — it exists so the merge-precedence unit tests below
+    /// can isolate a single layer, and means "no framework tier applied".
+    pub framework_scope: Option<AgentSet>,
 }
 
 impl ManifestSources {
@@ -84,7 +89,7 @@ impl ManifestSources {
                     .join(".claude")
                     .join(MANIFEST_FILE),
             ),
-            language_scope: super::project_lang::language_agent_scope(project_dir),
+            framework_scope: Some(super::framework::framework_agent_scope(project_dir)),
         }
     }
 }
@@ -105,11 +110,12 @@ impl ManifestSources {
 pub fn resolve_manifest(sources: &ManifestSources) -> HarnessManifest {
     let mut manifest = default_manifest();
 
-    // Per-project language scoping (#1941): the lowest override layer, applied on
+    // The framework tier (#1941, #4760): the lowest override layer, applied on
     // top of the compiled default but below the catalog/user/project manifests so
-    // an explicit `[agents]` override always wins. Absent (unknown project type)
-    // → no scoping, deploy everything (zero-regression).
-    if let Some(scope) = &sources.language_scope {
+    // an explicit `[agents]` override always wins. This is where the bundled
+    // `framework-manifest.toml`'s declared always-deploy set — composed with this
+    // project's detected language/framework/platform markers — enters resolution.
+    if let Some(scope) = &sources.framework_scope {
         manifest = manifest.merge(HarnessManifest {
             agents: Some(scope.clone()),
             ..HarnessManifest::default()
@@ -213,7 +219,7 @@ mod tests {
             project: Some(tmp.path().join("p").join("manifest.toml")),
             user: Some(tmp.path().join("u").join("manifest.toml")),
             catalog: Some(tmp.path().join("c").join("manifest.toml")),
-            language_scope: None,
+            framework_scope: None,
         };
         assert_eq!(resolve_manifest(&sources), default_manifest());
     }
@@ -242,7 +248,7 @@ mod tests {
             project: Some(project),
             user: Some(user),
             catalog: Some(catalog),
-            language_scope: None,
+            framework_scope: None,
         };
         let m = resolve_manifest(&sources);
         assert_eq!(
@@ -271,7 +277,7 @@ mod tests {
             project: Some(tmp.path().join("p").join("manifest.toml")), // absent
             user: Some(user),
             catalog: Some(catalog),
-            language_scope: None,
+            framework_scope: None,
         };
         let m = resolve_manifest(&sources);
         assert_eq!(
@@ -294,7 +300,7 @@ mod tests {
             project: None,
             user: None,
             catalog: Some(catalog),
-            language_scope: None,
+            framework_scope: None,
         };
         let m = resolve_manifest(&sources);
         // The catalog disables search. Because `[mcp]` now merges FIELD-BY-FIELD
@@ -324,7 +330,7 @@ mod tests {
             project: Some(project),
             user: None,
             catalog: None,
-            language_scope: None,
+            framework_scope: None,
         };
         let mcp = resolve_manifest(&sources).mcp.expect("mcp present");
         assert_eq!(mcp.trusty_search, Some(false));
@@ -349,17 +355,28 @@ mod tests {
             project: None,
             user: Some(user),
             catalog: None,
-            language_scope: None,
+            framework_scope: None,
         };
         // Malformed user layer skipped → result equals the default.
         assert_eq!(resolve_manifest(&sources), default_manifest());
     }
 
+    /// Selection outcome for `stem` under a fully resolved manifest.
+    ///
+    /// Why: since #4760 the framework tier states an explicit `include`
+    /// allowlist rather than an `exclude` complement, so asserting on list
+    /// SHAPE would pin the mechanism instead of the behaviour. These tests
+    /// assert the behaviour: is this agent selected for deploy?
+    fn selected(m: &HarnessManifest, stem: &str) -> bool {
+        let agents = m.agents.as_ref().expect("agents section present");
+        super::super::schema::selection_matches(stem, &agents.include, &agents.exclude)
+    }
+
     #[test]
     fn resolve_scopes_agents_for_rust_project() {
-        // #1941: a project whose root has a Cargo.toml (and no manifest overrides)
-        // must resolve to an agent set that excludes the foreign-language engineers
-        // while keeping rust-engineer — driven purely by auto-detection.
+        // #1941 / #4760: a project whose root has a Cargo.toml (and no manifest
+        // overrides) selects rust-engineer, drops the foreign-language engineers,
+        // keeps every universal agent, and never selects the deprecated `ops`.
         let proj = TempDir::new().unwrap();
         std::fs::write(proj.path().join("Cargo.toml"), "[package]\n").unwrap();
         let fw = TempDir::new().unwrap();
@@ -367,39 +384,97 @@ mod tests {
 
         let sources = ManifestSources::resolve(proj.path(), fw.path(), catalog.path());
         assert!(
-            sources.language_scope.is_some(),
-            "a Cargo project must be language-scoped"
+            sources.framework_scope.is_some(),
+            "resolve always applies the framework tier"
         );
 
         let m = resolve_manifest(&sources);
-        let agents = m.agents.expect("agents section present");
+        assert!(selected(&m, "rust-engineer"), "rust-engineer must survive");
         assert!(
-            !agents.exclude.contains(&"rust-engineer".to_string()),
-            "rust-engineer must survive scoping"
+            !selected(&m, "python-engineer"),
+            "python-engineer must be dropped from a Rust-only project"
+        );
+        assert!(selected(&m, "qa"), "universal agents are never stack-gated");
+        assert!(
+            !selected(&m, "ops"),
+            "the deprecated agent must not be selected"
         );
         assert!(
-            agents.exclude.contains(&"python-engineer".to_string()),
-            "python-engineer must be excluded from a Rust-only project: {:?}",
-            agents.exclude
+            !selected(&m, "vercel-ops"),
+            "a project with no Vercel marker gets no platform agent"
         );
     }
 
     #[test]
-    fn resolve_unknown_project_deploys_everything() {
-        // A project with no recognized language marker must NOT be scoped — the
-        // resolved manifest keeps the default's empty include/exclude (deploy all).
+    fn resolve_unknown_project_keeps_every_stack_engineer() {
+        // Zero-regression: a project with no recognized stack marker keeps every
+        // language and framework engineer, as before #4760. Platform agents have
+        // no such fallback, and the deprecated agent stays out either way.
         let proj = TempDir::new().unwrap();
         std::fs::write(proj.path().join("README.md"), "# hi\n").unwrap();
         let fw = TempDir::new().unwrap();
         let catalog = TempDir::new().unwrap();
 
         let sources = ManifestSources::resolve(proj.path(), fw.path(), catalog.path());
-        assert!(sources.language_scope.is_none());
-        let agents = resolve_manifest(&sources).agents.expect("agents present");
-        assert!(
-            agents.exclude.is_empty(),
-            "unknown project excludes nothing"
+        let m = resolve_manifest(&sources);
+        for stem in [
+            "rust-engineer",
+            "python-engineer",
+            "react-engineer",
+            "tauri-engineer",
+            "engineer",
+            "qa",
+        ] {
+            assert!(
+                selected(&m, stem),
+                "{stem} must deploy to an unknown project"
+            );
+        }
+        assert!(!selected(&m, "gcp-ops"));
+        assert!(!selected(&m, "ops"));
+    }
+
+    #[test]
+    fn resolve_selects_platform_agent_on_marker() {
+        // #4760: a Vercel marker adds vercel-ops, and only vercel-ops.
+        let proj = TempDir::new().unwrap();
+        std::fs::write(proj.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(proj.path().join("vercel.json"), "{}\n").unwrap();
+        let fw = TempDir::new().unwrap();
+        let catalog = TempDir::new().unwrap();
+
+        let m = resolve_manifest(&ManifestSources::resolve(
+            proj.path(),
+            fw.path(),
+            catalog.path(),
+        ));
+        assert!(selected(&m, "vercel-ops"));
+        assert!(!selected(&m, "gcp-ops"));
+    }
+
+    #[test]
+    fn project_manifest_agents_override_still_wins() {
+        // ADR-0025 clause 16 is preserved: the framework tier is the LOWEST
+        // override layer, so a project `[agents]` section still replaces it.
+        let tmp = TempDir::new().unwrap();
+        let proj_dir = tmp.path().join("p");
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\n").ok();
+        let project = write(
+            &proj_dir.join(".trusty-mpm"),
+            "manifest.toml",
+            "[agents]\ninclude = [\"engineer\"]\n",
         );
-        assert!(agents.include.is_empty(), "unknown project includes all");
+        let sources = ManifestSources {
+            project: Some(project),
+            user: None,
+            catalog: None,
+            framework_scope: Some(super::super::schema::AgentSet {
+                include: vec!["qa".to_string()],
+                ..Default::default()
+            }),
+        };
+        let m = resolve_manifest(&sources);
+        assert!(selected(&m, "engineer"), "project include wins");
+        assert!(!selected(&m, "qa"), "framework tier is fully replaced");
     }
 }

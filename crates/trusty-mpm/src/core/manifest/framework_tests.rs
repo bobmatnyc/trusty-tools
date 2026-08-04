@@ -1,0 +1,397 @@
+//! Tests for the bundled framework-tier manifest (#4760).
+//!
+//! Why: this module is the one place "which agents always deploy" is decided, so
+//! its two properties must be pinned independently — the SHIPPED asset validates
+//! (a build-integrity guard), and the composition rule behaves correctly against
+//! SYNTHETIC categories (so a behaviour test cannot pass by accident of what the
+//! real manifest happens to contain).
+//! What: validation-failure coverage for every [`FrameworkManifestError`]
+//! variant, composition coverage for each of the four deployment categories, and
+//! the "no marker detected" vs "manifest is broken" distinction.
+//! Test: this file.
+
+use super::*;
+use std::fs;
+use tempfile::TempDir;
+
+/// A synthetic catalog whose names are deliberately NOT real bundled agents, so
+/// a composition test can never pass because of what the shipped manifest says.
+fn fake_catalog() -> BTreeSet<String> {
+    ["rust-engineer", "react-engineer", "vercel-ops", "qa", "ops"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// A synthetic manifest over [`fake_catalog`], exercising all five categories.
+fn fake_manifest() -> String {
+    r#"
+version = 1
+
+[agent_categories]
+universal = ["qa"]
+language = ["rust-engineer"]
+framework = ["react-engineer"]
+platform = ["vercel-ops"]
+deprecated = ["ops"]
+"#
+    .to_string()
+}
+
+fn parsed_fake() -> AgentCategories {
+    parse_framework_manifest(&fake_manifest(), &fake_catalog()).expect("fixture is valid")
+}
+
+fn touch(dir: &Path, name: &str) {
+    let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, "").unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The shipped asset
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bundled_framework_manifest_is_valid() {
+    // The build-integrity guard `framework_agent_scope`'s panic branch relies
+    // on. If this fails, the shipped asset is corrupt and the panic is live.
+    let categories = framework_agent_categories().expect("bundled manifest must validate");
+    assert!(!categories.universal.is_empty());
+    assert!(
+        categories.deprecated.contains(&"ops".to_string()),
+        "`ops` must be declared deprecated, not merely omitted"
+    );
+    assert_eq!(
+        categories.platform,
+        vec!["gcp-ops".to_string(), "vercel-ops".to_string()],
+        "the two platform-ops agents are platform-gated"
+    );
+}
+
+#[test]
+fn bundled_agent_stems_excludes_foundations() {
+    let stems = bundled_agent_stems();
+    assert!(
+        stems.contains("engineer"),
+        "dispatchable agents are included"
+    );
+    assert!(stems.contains("ops"), "a deprecated agent is still bundled");
+    for base in [
+        "BASE-AGENT",
+        "BASE-ENGINEER",
+        "BASE-OPS",
+        "BASE-QA",
+        "BASE-RESEARCH",
+    ] {
+        assert!(
+            !stems.contains(base),
+            "{base} is an inheritance fragment, not a dispatchable agent"
+        );
+    }
+}
+
+#[test]
+fn bundled_manifest_partitions_the_whole_catalog() {
+    // Every bundled agent is declared exactly once — the invariant that makes a
+    // newly added agent fail loudly instead of quietly never deploying.
+    let categories = framework_agent_categories().expect("valid");
+    let mut declared: Vec<String> = Vec::new();
+    for (_, list) in labelled_lists(&categories) {
+        declared.extend(list.iter().cloned());
+    }
+    let mut sorted = declared.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), declared.len(), "no stem declared twice");
+    assert_eq!(
+        sorted,
+        bundled_agent_stems().into_iter().collect::<Vec<_>>(),
+        "the five categories must exactly cover the bundled catalog"
+    );
+}
+
+/// Whether `stem` deploys under `scope`, by the same rule the deployer applies.
+///
+/// Why: the composition states its gate as an `exclude` list, so asserting on
+/// list membership would pin the mechanism. These tests assert the behaviour the
+/// deployer actually consults — `HarnessPlan::agent_selected`'s rule.
+fn deploys(scope: &AgentSet, stem: &str) -> bool {
+    super::super::schema::selection_matches(stem, &scope.include, &scope.exclude)
+}
+
+#[test]
+fn framework_agent_scope_selects_universal_agents() {
+    // The real entry point over the real asset: a bare directory still gets the
+    // universal roster, and never the deprecated agent.
+    let tmp = TempDir::new().unwrap();
+    let scope = framework_agent_scope(tmp.path());
+    assert!(deploys(&scope, "engineer"));
+    assert!(deploys(&scope, "qa"));
+    assert!(
+        !deploys(&scope, "ops"),
+        "the deprecated agent must never be selected"
+    );
+    assert_eq!(scope.source, ContentSource::Bundled);
+}
+
+#[test]
+fn undeclared_source_agents_still_deploy() {
+    // The gate is an exclusion, not an allowlist: a source-directory agent the
+    // manifest never names — a `BASE-*` inheritance fragment, or an agent a
+    // catalog checkout adds — must still deploy. Silently deploying LESS than
+    // the source carries is the failure class this work removes.
+    let tmp = TempDir::new().unwrap();
+    let scope = framework_agent_scope(tmp.path());
+    assert!(deploys(&scope, "base-engineer"));
+    assert!(deploys(&scope, "some-catalog-only-agent"));
+}
+
+// ---------------------------------------------------------------------------
+// Loud failure — every variant, none reachable from "no marker detected"
+// ---------------------------------------------------------------------------
+
+#[test]
+fn malformed_manifest_is_an_error() {
+    let err = parse_framework_manifest("this is not toml {{{", &fake_catalog())
+        .expect_err("malformed input must not resolve to a selection");
+    assert!(matches!(err, FrameworkManifestError::Malformed(_)));
+}
+
+#[test]
+fn missing_section_is_an_error() {
+    // A well-formed manifest with no [agent_categories] must NOT fall through to
+    // "deploy everything" — it is an error.
+    let err = parse_framework_manifest("version = 1\n", &fake_catalog())
+        .expect_err("a manifest with no categories declares nothing");
+    assert_eq!(err, FrameworkManifestError::MissingCategories);
+}
+
+#[test]
+fn empty_universal_is_an_error() {
+    // The "never silently deploy nothing" half of the requirement.
+    let raw = "[agent_categories]\nuniversal = []\n";
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("empty universal");
+    assert_eq!(err, FrameworkManifestError::EmptyUniversal);
+}
+
+#[test]
+fn unknown_stem_is_an_error() {
+    let raw = "[agent_categories]\nuniversal = [\"qa\", \"no-such-agent\"]\n";
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("unknown stem");
+    assert_eq!(
+        err,
+        FrameworkManifestError::UnknownAgent {
+            category: "universal",
+            stem: "no-such-agent".to_string(),
+        }
+    );
+}
+
+#[test]
+fn undeclared_bundled_agent_is_an_error() {
+    // `rust-engineer`, `react-engineer`, `vercel-ops` and `ops` are in the
+    // catalog but not declared here.
+    let raw = "[agent_categories]\nuniversal = [\"qa\"]\n";
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("undeclared agents");
+    match err {
+        FrameworkManifestError::UndeclaredAgents(missing) => {
+            assert_eq!(
+                missing,
+                vec![
+                    "ops".to_string(),
+                    "react-engineer".to_string(),
+                    "rust-engineer".to_string(),
+                    "vercel-ops".to_string()
+                ]
+            );
+        }
+        other => panic!("expected UndeclaredAgents, got {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_declaration_is_an_error() {
+    let raw = "[agent_categories]\nuniversal = [\"qa\"]\ndeprecated = [\"qa\"]\n";
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("duplicate");
+    assert_eq!(
+        err,
+        FrameworkManifestError::DuplicateDeclaration("qa".to_string())
+    );
+}
+
+#[test]
+fn stack_stem_without_markers_is_an_error() {
+    // `qa` has no row in LANGUAGE_ENGINEERS, so gating it on language detection
+    // would make it undeployable. That must be loud, not silent.
+    let raw = "[agent_categories]\nuniversal = [\"ops\"]\nlanguage = [\"qa\", \"rust-engineer\"]\n\
+               framework = [\"react-engineer\"]\nplatform = [\"vercel-ops\"]\n";
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("undetectable stack");
+    assert_eq!(
+        err,
+        FrameworkManifestError::UndetectableStack {
+            category: "language",
+            stem: "qa".to_string(),
+        }
+    );
+}
+
+#[test]
+fn platform_stem_without_markers_is_an_error() {
+    let raw = "[agent_categories]\nuniversal = [\"ops\"]\nlanguage = [\"rust-engineer\"]\n\
+               framework = [\"react-engineer\"]\nplatform = [\"qa\", \"vercel-ops\"]\n";
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("undetectable platform");
+    assert_eq!(
+        err,
+        FrameworkManifestError::UndetectablePlatform("qa".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Composition — against SYNTHETIC categories
+// ---------------------------------------------------------------------------
+
+#[test]
+fn universal_agents_deploy_with_no_markers() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "README.md");
+    let scope = agent_scope_from(&parsed_fake(), tmp.path());
+    assert!(
+        deploys(&scope, "qa"),
+        "universal deploys with zero detection"
+    );
+}
+
+#[test]
+fn language_engineers_still_gate_on_detection() {
+    // A Cargo project keeps rust-engineer; a Python-marker project does not.
+    let rust = TempDir::new().unwrap();
+    touch(rust.path(), "Cargo.toml");
+    let scope = agent_scope_from(&parsed_fake(), rust.path());
+    assert!(deploys(&scope, "rust-engineer"));
+    assert!(
+        deploys(&scope, "qa"),
+        "universal is unaffected by stack gating"
+    );
+
+    let py = TempDir::new().unwrap();
+    touch(py.path(), "pyproject.toml");
+    let scope = agent_scope_from(&parsed_fake(), py.path());
+    assert!(
+        !deploys(&scope, "rust-engineer"),
+        "a Python project must not get the Rust engineer"
+    );
+    assert!(
+        deploys(&scope, "qa"),
+        "...and the exclusion must be stack-specific, not a blanket drop"
+    );
+}
+
+#[test]
+fn framework_engineers_gate_on_detection() {
+    // `react-engineer` fires on package.json today (its only marker); a Rust
+    // project does not get it.
+    let js = TempDir::new().unwrap();
+    touch(js.path(), "package.json");
+    assert!(deploys(
+        &agent_scope_from(&parsed_fake(), js.path()),
+        "react-engineer"
+    ));
+
+    let rust = TempDir::new().unwrap();
+    touch(rust.path(), "Cargo.toml");
+    assert!(!deploys(
+        &agent_scope_from(&parsed_fake(), rust.path()),
+        "react-engineer"
+    ));
+}
+
+#[test]
+fn deprecated_agent_never_deploys() {
+    // `ops` IS in the synthetic catalog and IS declared — only its category
+    // keeps it out. Every other fixture agent is checked in the same call so a
+    // blanket-drop selection cannot make this pass.
+    for markers in [
+        vec!["README.md"],
+        vec!["Cargo.toml"],
+        vec!["package.json", "vercel.json"],
+    ] {
+        let tmp = TempDir::new().unwrap();
+        for m in &markers {
+            touch(tmp.path(), m);
+        }
+        let scope = agent_scope_from(&parsed_fake(), tmp.path());
+        assert!(
+            !deploys(&scope, "ops"),
+            "deprecated `ops` must not deploy for markers {markers:?}"
+        );
+        assert!(
+            deploys(&scope, "qa"),
+            "...while the universal agent still does, for markers {markers:?}"
+        );
+    }
+}
+
+#[test]
+fn platform_agent_absent_without_marker() {
+    // "No platform detected" is an ORDINARY result: a selection that simply
+    // drops the platform agents, distinguishable from the Err a broken manifest
+    // produces (see `malformed_manifest_is_an_error`).
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+    let scope = agent_scope_from(&parsed_fake(), tmp.path());
+    assert!(
+        !deploys(&scope, "vercel-ops"),
+        "no Vercel marker -> no vercel-ops"
+    );
+    assert!(
+        deploys(&scope, "rust-engineer") && deploys(&scope, "qa"),
+        "the same call still deploys the stack and universal agents — the empty \
+         platform result is explicit, not a collapsed selection"
+    );
+}
+
+#[test]
+fn platform_agent_deploys_with_marker() {
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+    touch(tmp.path(), "vercel.json");
+    assert!(deploys(
+        &agent_scope_from(&parsed_fake(), tmp.path()),
+        "vercel-ops"
+    ));
+}
+
+#[test]
+fn no_platform_detected_is_not_a_manifest_error() {
+    // The distinguishability requirement, stated as one assertion set: the same
+    // manifest that yields Ok for a platform-less project yields Err when the
+    // document itself is broken.
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "Cargo.toml");
+    assert!(parse_framework_manifest(&fake_manifest(), &fake_catalog()).is_ok());
+    assert!(!deploys(
+        &agent_scope_from(&parsed_fake(), tmp.path()),
+        "vercel-ops"
+    ));
+    assert!(parse_framework_manifest("broken {{{", &fake_catalog()).is_err());
+}
+
+#[test]
+fn unknown_project_keeps_every_stack_engineer() {
+    // Zero-regression fallback: a project with NO recognised stack marker keeps
+    // every language and framework engineer, exactly as `language_agent_scope`
+    // behaved before #4760. Platform agents get no such fallback.
+    let tmp = TempDir::new().unwrap();
+    touch(tmp.path(), "README.md");
+    let scope = agent_scope_from(&parsed_fake(), tmp.path());
+    assert!(deploys(&scope, "rust-engineer"));
+    assert!(deploys(&scope, "react-engineer"));
+    assert!(
+        !deploys(&scope, "vercel-ops"),
+        "platform has no unknown-project fallback"
+    );
+    assert!(!deploys(&scope, "ops"));
+}

@@ -1,0 +1,123 @@
+# framework-manifest.toml — the FRAMEWORK TIER of the manifest.toml format.
+#
+# This is NOT a second file format. It is a `HarnessManifest` document, parsed by
+# the same `HarnessManifest::from_toml` every other manifest layer uses
+# (`<project>/.trusty-mpm/manifest.toml`, `~/.trusty-mpm/manifest.toml`, the
+# catalog manifest). It differs only in tier: it is compiled into the binary and
+# declares the FRAMEWORK'S OWN agent catalog, which no project authors.
+#
+# Owner ruling 2026-08-01: "extend manifest.toml, do NOT add a second file
+# format." Owner ruling 2026-08-04: the catalog declares FOUR deployment
+# categories.
+#
+# ---------------------------------------------------------------------------
+# What this file decides
+# ---------------------------------------------------------------------------
+#
+#   universal  — deploy to every project, no detection.
+#   language   — deploy only when the project's LANGUAGE is detected.
+#   framework  — deploy only when the project's FRAMEWORK is detected.
+#   platform   — deploy only when the project's PLATFORM is detected.
+#   deprecated — never deploy. Declared so the agent stays accounted for.
+#
+# Composition (see `core::manifest::framework::agent_scope_from`):
+#
+#   include = universal
+#           ∪ ((language ∪ framework) ∩ detected stacks)
+#           ∪ (platform ∩ detected platforms)
+#
+# with ONE zero-regression fallback: when NO stack marker at all is recognized
+# (unknown project type), every `language` and `framework` stem is included —
+# exactly what `language_agent_scope` did before this file existed. There is no
+# such fallback for `platform`: no platform marker means no platform agent.
+#
+# ---------------------------------------------------------------------------
+# Editing rules — all mechanically enforced, all LOUD on violation
+# ---------------------------------------------------------------------------
+#
+#   * Every bundled agent (every `agents/*.md` in `core::bundle::ALL` that is not
+#     a `BASE-*` foundation template) MUST appear in EXACTLY ONE list below.
+#     Omitting one is an error; listing one twice is an error.
+#   * Every stem in `language` / `framework` MUST have a marker row in
+#     `LANGUAGE_ENGINEERS` (`core::manifest::project_lang`).
+#   * Every stem in `platform` MUST have a marker row in `PLATFORM_AGENTS`.
+#   * `universal` MUST be non-empty — an empty catalog would silently deploy
+#     nothing.
+#
+# Deprecating an agent is an edit to THIS FILE: move its stem into `deprecated`.
+# The deploy filter then never selects it. (It does not retract an already-
+# deployed copy — orphan retraction is issue #391 / ADR-0025 clause 9, unshipped.)
+
+version = 1
+
+[agent_categories]
+
+# --- universal: always deployed, no detection --------------------------------
+universal = [
+  "api-qa",
+  "code-analyzer",
+  "code-critic",
+  "data-engineer",
+  "documentation",
+  "engineer",
+  "local-ops",
+  "memory-manager",
+  "mpm-agent-manager",
+  "mpm-skills-manager",
+  "prompt-engineer",
+  "qa",
+  "refactoring-engineer",
+  "research",
+  "security",
+  "ticketing",
+  "version-control",
+  "web-qa",
+  "web-ui-engineer",
+]
+
+# --- language: gated on a detected LANGUAGE ----------------------------------
+language = [
+  "dart-engineer",
+  "dotnet-engineer",
+  "golang-engineer",
+  "java-engineer",
+  "javascript-engineer",
+  "php-engineer",
+  "python-engineer",
+  "ruby-engineer",
+  "rust-engineer",
+  "typescript-engineer",
+]
+
+# --- framework: gated on a detected FRAMEWORK --------------------------------
+#
+# NOTE for reviewers: `language` and `framework` are two DECLARED categories but
+# ONE gating MECHANISM today — both resolve through `detected_engineers`, whose
+# `LANGUAGE_ENGINEERS` markers are unchanged by this file. Splitting the gate
+# itself (so that, e.g., `react-engineer` needs a React marker rather than any
+# `package.json`) is a behavior change and is NOT made here. See the PR body.
+framework = [
+  "nextjs-engineer",
+  "phoenix-engineer",
+  "react-engineer",
+  "svelte-engineer",
+  "tauri-engineer",
+]
+
+# --- platform: gated on a detected PLATFORM ----------------------------------
+#
+# These deployed to EVERY project before this file existed. They now deploy only
+# where a platform marker is present. That is an intended behavior change.
+platform = [
+  "gcp-ops",
+  "vercel-ops",
+]
+
+# --- deprecated: never deployed ----------------------------------------------
+#
+# `ops` was superseded by `local-ops`. `agent-delegation.md` has said so in prose
+# since before this file existed, with zero code-level effect — it still reached
+# every roster. Listing it here is that missing code-level effect.
+deprecated = [
+  "ops",
+]

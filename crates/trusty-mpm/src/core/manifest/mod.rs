@@ -17,14 +17,17 @@
 
 mod apply;
 mod default;
+pub mod framework;
 pub(crate) mod project_lang;
 mod resolve;
 mod schema;
 
 pub use apply::HarnessPlan;
 pub use default::default_manifest;
+pub use framework::{FRAMEWORK_MANIFEST_FILE, FrameworkManifestError, framework_agent_categories};
 pub use resolve::{MANIFEST_FILE, ManifestSources, resolve_manifest};
 pub use schema::{
-    AgentSet, ContentSource, CustomMcpServer, HarnessManifest, InstructionLayers, MANIFEST_VERSION,
-    McpServers, ModelTiers, SkillSet, StyleSelection, matches_any, selection_matches,
+    AgentCategories, AgentSet, ContentSource, CustomMcpServer, HarnessManifest, InstructionLayers,
+    MANIFEST_VERSION, McpServers, ModelTiers, SkillSet, StyleSelection, matches_any,
+    selection_matches,
 };

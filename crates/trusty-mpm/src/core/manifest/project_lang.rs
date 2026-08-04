@@ -1,31 +1,26 @@
-//! Per-project language detection → agent-set scoping (#1941 / HR-2).
+//! Per-project stack and platform MARKER DETECTION (#1941 / HR-2, #4760).
 //!
-//! Why: the compiled-in default manifest deploys the FULL polyglot agent roster
-//! (every `*-engineer` — javascript/typescript/python/php/java/golang/dart/ruby/
-//! svelte/react/nextjs/tauri/phoenix/dotnet + rust) to every project regardless of
-//! language. In a pure-Rust workspace that is pure noise in the delegation
-//! surface and a contributor to the catalog-drift false positives (#1940). This
-//! module auto-detects a project's language(s) from well-known marker files and
-//! produces an [`AgentSet`] that scopes the deployed roster to the relevant
-//! language engineers PLUS every language-agnostic agent (BASE-*, qa, ops,
-//! research, generic engineers, …).
-//! What: [`language_agent_scope`] probes `project_dir` for language markers
-//! ([`LANGUAGE_ENGINEERS`]) and, when at least one is recognized, returns an
-//! [`AgentSet`] whose `exclude` list drops exactly the language engineers that do
-//! NOT match the project (keeping everything else via the empty `include`). When
-//! no language marker is recognized it returns `None` so provisioning falls back
-//! to today's deploy-everything behavior (zero-regression for unknown project
-//! types). The scope is applied as the lowest override layer in
-//! [`super::resolve::resolve_manifest`], so an explicit `[agents]` override in the
-//! catalog/user/project manifest always wins.
-//! Test: `rust_workspace_scopes_to_rust_engineer`,
-//! `js_project_keeps_js_family`, `unknown_project_is_unscoped`,
-//! `polyglot_project_keeps_both`.
+//! Why: deploying the FULL polyglot agent roster (every `*-engineer` —
+//! javascript/typescript/python/php/java/golang/dart/ruby/svelte/react/nextjs/
+//! tauri/phoenix/dotnet + rust) plus every platform-ops agent to every project
+//! regardless of stack is pure noise in the delegation surface and a contributor
+//! to the catalog-drift false positives (#1940). This module answers the two
+//! detection questions the framework manifest's gated categories depend on:
+//! *which stacks does this project use* and *which platforms does it target*.
+//! What: [`detected_engineers`] probes `project_dir` for the
+//! [`LANGUAGE_ENGINEERS`] markers; [`detected_platforms`] probes it for the
+//! [`PLATFORM_AGENTS`] markers. Both return a possibly-EMPTY set — an empty
+//! result is a valid answer, never an error. `super::framework` composes those
+//! answers with the framework manifest's declared categories into the final
+//! [`super::schema::AgentSet`]; this module owns markers only, never selection
+//! policy. (#4760 replaced this module's former `language_agent_scope`, which
+//! computed an exclude-list by complement, with that declarative composition.)
+//! Test: `rust_workspace_detects_only_rust_engineer`, `js_project_detects_js_family`,
+//! `unknown_project_detects_nothing`, `vercel_marker_detects_vercel_ops`,
+//! `gcp_marker_detects_gcp_ops`, `no_platform_marker_detects_nothing`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
-
-use super::schema::{AgentSet, ContentSource};
 
 /// A bundled language-specific engineer agent and the marker files that select it.
 ///
@@ -182,43 +177,90 @@ pub(crate) fn detected_engineers(project_dir: &Path) -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Auto-detect `project_dir`'s language(s) and scope the deployed agent roster.
+/// A bundled platform-ops agent and the marker files that select it (#4760).
 ///
-/// Why: a Rust-only workspace should not receive the Python/JS/Java/etc. engineers
-/// (#1941). Detecting the project's language at resolve time and dropping the
-/// irrelevant language engineers keeps the delegation surface focused while never
-/// touching language-agnostic agents.
-/// What: probes `project_dir` for the [`LANGUAGE_ENGINEERS`] markers. If none
-/// match (unknown project type — e.g. the daemon's framework root), returns `None`
-/// so provisioning deploys everything (unchanged behavior). Otherwise returns an
-/// [`AgentSet`] with an empty `include` (= keep all) and an `exclude` naming every
-/// language engineer that did NOT match — so BASE-*, generic roles, and the
-/// project's own language engineers survive while foreign-language engineers are
-/// dropped. `source` is [`ContentSource::Bundled`], matching the default.
-/// Test: `rust_workspace_scopes_to_rust_engineer`, `unknown_project_is_unscoped`,
-/// `js_project_keeps_js_family`, `polyglot_project_keeps_both`.
-pub fn language_agent_scope(project_dir: &Path) -> Option<AgentSet> {
-    let kept = detected_engineers(project_dir);
-    if kept.is_empty() {
-        // No recognizable language markers → do not scope (deploy everything).
-        return None;
-    }
+/// Why: `gcp-ops` and `vercel-ops` are gated on a detected PLATFORM, which is a
+/// third axis alongside language and framework — a Rust API deployed to Vercel
+/// is neither a "JavaScript project" nor a "Next.js project", so
+/// [`LANGUAGE_ENGINEERS`] cannot express the gate. Before #4760 they were
+/// ungated and deployed to every project.
+/// What: same shape as [`LangEngineer`], probed by the same [`marker_present`].
+/// Test: `vercel_marker_detects_vercel_ops`, `gcp_marker_detects_gcp_ops`,
+/// `no_platform_marker_detects_nothing`.
+struct PlatformAgent {
+    /// Agent stem (filename without `.md`), e.g. `vercel-ops`.
+    stem: &'static str,
+    /// Marker paths (relative to the project root) that select this agent.
+    markers: &'static [&'static str],
+}
 
-    let mut exclude: Vec<String> = LANGUAGE_ENGINEERS
+/// The bundled platform-ops agents and their project-root marker files.
+///
+/// Why: the single source of truth for which agents are "platform specific".
+/// The marker sets are deliberately narrow — each entry is a file the platform's
+/// own tooling creates or requires, not an inferred heuristic — because a false
+/// positive puts an irrelevant agent in every roster, which is the exact noise
+/// #1941 built language scoping to remove.
+/// What: one entry per bundled `*-ops` agent that targets a single cloud
+/// platform. `local-ops` is deliberately absent: it is platform-agnostic and
+/// stays universal.
+/// Test: `vercel_marker_detects_vercel_ops`, `gcp_marker_detects_gcp_ops`.
+const PLATFORM_AGENTS: &[PlatformAgent] = &[
+    PlatformAgent {
+        stem: "gcp-ops",
+        // `app.yaml` (App Engine), `cloudbuild.yaml`/`.yml` (Cloud Build), and
+        // `.gcloudignore` (every `gcloud` deploy) are created by GCP tooling.
+        markers: &[
+            "app.yaml",
+            "cloudbuild.yaml",
+            "cloudbuild.yml",
+            ".gcloudignore",
+        ],
+    },
+    PlatformAgent {
+        stem: "vercel-ops",
+        // `vercel.json` is the project config; `.vercel/project.json` is written
+        // by `vercel link`; `.vercelignore` by the deploy flow.
+        markers: &["vercel.json", ".vercelignore", ".vercel/project.json"],
+    },
+];
+
+/// The set of platform-agent stems whose markers are present in `project_dir`.
+///
+/// Why: the platform category needs the same "which of these are relevant here"
+/// probe the language/framework categories get from [`detected_engineers`].
+/// What: returns the stems from [`PLATFORM_AGENTS`] for which at least one
+/// marker exists under `project_dir`. An EMPTY result is a valid, expected
+/// answer meaning "this project targets no known platform" — it is never
+/// confused with a manifest error, which is a distinct `Err` on a different
+/// code path (`core::manifest::framework::parse_framework_manifest`).
+/// Test: `no_platform_marker_detects_nothing`, `vercel_marker_detects_vercel_ops`.
+pub(crate) fn detected_platforms(project_dir: &Path) -> BTreeSet<&'static str> {
+    PLATFORM_AGENTS
         .iter()
-        .map(|le| le.stem)
-        .filter(|stem| !kept.contains(stem))
-        .map(str::to_owned)
-        .collect();
-    exclude.sort_unstable();
-    exclude.dedup();
+        .filter(|pa| pa.markers.iter().any(|m| marker_present(project_dir, m)))
+        .map(|pa| pa.stem)
+        .collect()
+}
 
-    Some(AgentSet {
-        include: Vec::new(),
-        exclude,
-        ignore_staleness: Vec::new(),
-        source: ContentSource::Bundled,
-    })
+/// Every stem [`LANGUAGE_ENGINEERS`] carries markers for.
+///
+/// Why: the framework manifest declares which stems are language- or
+/// framework-gated; that declaration is only meaningful if each declared stem
+/// actually HAS a marker row here. Exposing the stem set lets
+/// `core::manifest::framework` enforce that as a loud invariant instead of
+/// letting a typo silently produce an agent that can never deploy.
+/// What: the `stem` column of [`LANGUAGE_ENGINEERS`].
+/// Test: `language_and_framework_stems_all_have_markers`.
+pub(crate) fn language_engineer_stems() -> BTreeSet<&'static str> {
+    LANGUAGE_ENGINEERS.iter().map(|le| le.stem).collect()
+}
+
+/// Every stem [`PLATFORM_AGENTS`] carries markers for.
+///
+/// Why/What/Test: as [`language_engineer_stems`], for the platform table.
+pub(crate) fn platform_agent_stems() -> BTreeSet<&'static str> {
+    PLATFORM_AGENTS.iter().map(|pa| pa.stem).collect()
 }
 
 #[cfg(test)]
@@ -236,21 +278,14 @@ mod tests {
     }
 
     #[test]
-    fn rust_workspace_scopes_to_rust_engineer() {
-        // A Cargo workspace must keep rust-engineer and exclude every other
-        // language engineer.
+    fn rust_workspace_detects_only_rust_engineer() {
+        // A Cargo workspace must detect rust-engineer and NO other language
+        // engineer.
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "Cargo.toml");
 
-        let scope = language_agent_scope(tmp.path()).expect("rust project is scoped");
-        assert!(
-            scope.include.is_empty(),
-            "empty include = keep all agnostic"
-        );
-        assert!(
-            !scope.exclude.contains(&"rust-engineer".to_string()),
-            "rust-engineer must be kept"
-        );
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("rust-engineer"), "rust must be detected");
         for foreign in [
             "python-engineer",
             "javascript-engineer",
@@ -268,33 +303,30 @@ mod tests {
             "dotnet-engineer",
         ] {
             assert!(
-                scope.exclude.contains(&foreign.to_string()),
-                "{foreign} must be excluded from a Rust-only project"
+                !detected.contains(foreign),
+                "{foreign} must not be detected in a Rust-only project"
             );
         }
-        assert_eq!(scope.source, ContentSource::Bundled);
     }
 
     #[test]
-    fn unknown_project_is_unscoped() {
-        // A directory with no recognized language marker must NOT be scoped, so
-        // provisioning falls back to deploy-everything (zero regression).
+    fn unknown_project_detects_nothing() {
+        // A directory with no recognized language marker detects nothing — the
+        // signal `framework::agent_scope_from` reads as "unknown project type".
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "README.md");
-        assert!(
-            language_agent_scope(tmp.path()).is_none(),
-            "unknown project type must not be scoped"
-        );
+        assert!(detected_engineers(tmp.path()).is_empty());
     }
 
     #[test]
-    fn js_project_keeps_js_family() {
-        // A package.json project keeps the whole JS/TS family and drops the
-        // non-JS engineers (rust/python/…).
+    fn js_project_detects_js_family() {
+        // A package.json project detects the whole JS/TS family and no non-JS
+        // engineer. This pins TODAY'S marker behavior: react/nextjs/svelte fire
+        // on a bare package.json, with no framework-specific marker required.
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "package.json");
 
-        let scope = language_agent_scope(tmp.path()).expect("js project is scoped");
+        let detected = detected_engineers(tmp.path());
         for kept in [
             "javascript-engineer",
             "typescript-engineer",
@@ -303,71 +335,134 @@ mod tests {
             "svelte-engineer",
         ] {
             assert!(
-                !scope.exclude.contains(&kept.to_string()),
-                "{kept} must be kept for a package.json project"
+                detected.contains(kept),
+                "{kept} must be detected for a package.json project"
             );
         }
-        assert!(scope.exclude.contains(&"rust-engineer".to_string()));
-        assert!(scope.exclude.contains(&"python-engineer".to_string()));
+        assert!(!detected.contains("rust-engineer"));
+        assert!(!detected.contains("python-engineer"));
     }
 
     #[test]
-    fn polyglot_project_keeps_both() {
-        // A repo with both Cargo.toml and pyproject.toml keeps rust + python and
-        // drops the rest.
+    fn polyglot_project_detects_both() {
+        // A repo with both Cargo.toml and pyproject.toml detects rust + python
+        // and nothing else.
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "Cargo.toml");
         touch(tmp.path(), "pyproject.toml");
 
-        let scope = language_agent_scope(tmp.path()).expect("polyglot is scoped");
-        assert!(!scope.exclude.contains(&"rust-engineer".to_string()));
-        assert!(!scope.exclude.contains(&"python-engineer".to_string()));
-        assert!(scope.exclude.contains(&"golang-engineer".to_string()));
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("rust-engineer"));
+        assert!(detected.contains("python-engineer"));
+        assert!(!detected.contains("golang-engineer"));
     }
 
     #[test]
-    fn dotnet_csproj_scopes_to_dotnet_engineer() {
+    fn dotnet_csproj_detects_dotnet_engineer() {
         // A .NET project is identified by an extension-glob marker (`*.csproj`),
-        // exercising `marker_present`'s glob branch. It must keep dotnet-engineer
-        // and drop the non-.NET language engineers.
+        // exercising `marker_present`'s glob branch.
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "MyApp.csproj");
 
-        let scope = language_agent_scope(tmp.path()).expect("dotnet project is scoped");
-        assert!(
-            !scope.exclude.contains(&"dotnet-engineer".to_string()),
-            "dotnet-engineer must be kept for a *.csproj project"
-        );
-        assert!(scope.exclude.contains(&"rust-engineer".to_string()));
-        assert!(scope.exclude.contains(&"golang-engineer".to_string()));
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("dotnet-engineer"));
+        assert!(!detected.contains("rust-engineer"));
+        assert!(!detected.contains("golang-engineer"));
     }
 
     #[test]
-    fn dotnet_vbproj_and_exact_markers_scope_to_dotnet_engineer() {
+    fn dotnet_vbproj_and_exact_markers_detect_dotnet_engineer() {
         // Legacy VB.NET (`*.vbproj` glob) and the exact-filename markers
         // (`global.json`, `Directory.Build.props`) all select dotnet-engineer.
         for marker in ["Legacy.vbproj", "global.json", "Directory.Build.props"] {
             let tmp = TempDir::new().unwrap();
             touch(tmp.path(), marker);
-            let scope =
-                language_agent_scope(tmp.path()).unwrap_or_else(|| panic!("{marker} is scoped"));
             assert!(
-                !scope.exclude.contains(&"dotnet-engineer".to_string()),
-                "dotnet-engineer must be kept for a {marker} project"
+                detected_engineers(tmp.path()).contains("dotnet-engineer"),
+                "dotnet-engineer must be detected for a {marker} project"
             );
         }
     }
 
     #[test]
-    fn tauri_marker_scopes_without_bare_package_json() {
-        // A Tauri config selects tauri-engineer even though tauri.conf.json lives
-        // under src-tauri/.
+    fn tauri_marker_detects_without_bare_package_json() {
+        // A Tauri config selects tauri-engineer even though tauri.conf.json
+        // lives under src-tauri/ — and, unlike react/nextjs/svelte, tauri has NO
+        // package.json fallback, so it is the one genuinely framework-gated stem.
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "src-tauri/tauri.conf.json");
-        let scope = language_agent_scope(tmp.path()).expect("tauri project is scoped");
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("tauri-engineer"));
+
+        let bare_js = TempDir::new().unwrap();
+        touch(bare_js.path(), "package.json");
         assert!(
-            !scope.exclude.contains(&"tauri-engineer".to_string()),
-            "tauri-engineer must be kept"
+            !detected_engineers(bare_js.path()).contains("tauri-engineer"),
+            "tauri must NOT fire on a bare package.json"
         );
+    }
+
+    #[test]
+    fn vercel_marker_detects_vercel_ops() {
+        // Each Vercel marker selects vercel-ops and nothing else.
+        for marker in ["vercel.json", ".vercelignore", ".vercel/project.json"] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            let detected = detected_platforms(tmp.path());
+            assert!(
+                detected.contains("vercel-ops"),
+                "vercel-ops must be detected for {marker}"
+            );
+            assert!(
+                !detected.contains("gcp-ops"),
+                "gcp-ops must NOT be detected for {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn gcp_marker_detects_gcp_ops() {
+        // Each GCP marker selects gcp-ops and nothing else.
+        for marker in [
+            "app.yaml",
+            "cloudbuild.yaml",
+            "cloudbuild.yml",
+            ".gcloudignore",
+        ] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            let detected = detected_platforms(tmp.path());
+            assert!(
+                detected.contains("gcp-ops"),
+                "gcp-ops must be detected for {marker}"
+            );
+            assert!(!detected.contains("vercel-ops"));
+        }
+    }
+
+    #[test]
+    fn no_platform_marker_detects_nothing() {
+        // A project with language markers but no platform marker detects zero
+        // platforms — an explicit, valid empty answer, never an error.
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "Cargo.toml");
+        touch(tmp.path(), "package.json");
+        assert!(
+            detected_platforms(tmp.path()).is_empty(),
+            "no platform marker → empty platform set"
+        );
+        assert!(
+            !detected_engineers(tmp.path()).is_empty(),
+            "the same project DOES detect languages — so the empty platform set \
+             cannot be an artifact of an unreadable directory"
+        );
+    }
+
+    #[test]
+    fn stem_accessors_match_their_tables() {
+        assert_eq!(language_engineer_stems().len(), LANGUAGE_ENGINEERS.len());
+        assert_eq!(platform_agent_stems().len(), PLATFORM_AGENTS.len());
+        assert!(platform_agent_stems().contains("gcp-ops"));
+        assert!(platform_agent_stems().contains("vercel-ops"));
     }
 }

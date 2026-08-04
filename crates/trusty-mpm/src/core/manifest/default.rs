@@ -37,6 +37,11 @@ pub fn default_manifest() -> HarnessManifest {
             ignore_staleness: Vec::new(),
             source: ContentSource::Bundled,
         }),
+        // The catalog declaration is the FRAMEWORK tier's business (#4760); the
+        // compiled default is the floor every layer overlays, and it carries no
+        // categories of its own. `ManifestSources::resolve` always applies the
+        // framework tier's composed `[agents]` selection directly on top.
+        agent_categories: None,
         skills: Some(all_skills()),
         instructions: Some(InstructionLayers {
             system: Some(true),

@@ -51,6 +51,13 @@ pub struct HarnessManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentSet>,
 
+    /// `[agent_categories]` — the FRAMEWORK-TIER catalog declaration (#4760).
+    ///
+    /// Set only by the bundled `framework-manifest.toml`; no project, user, or
+    /// catalog layer is expected to carry it. See [`AgentCategories`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_categories: Option<AgentCategories>,
+
     /// `[skills]` — which skills the harness deploys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<SkillSet>,
@@ -116,6 +123,46 @@ pub struct AgentSet {
     /// Where the agent source files are read from.
     #[serde(default)]
     pub source: ContentSource,
+}
+
+/// `[agent_categories]` — the framework tier's catalog declaration (#4760).
+///
+/// Why: [`AgentSet`] carries exactly one flat, un-categorised selection list
+/// (`include`). It can say "deploy these names", but it cannot say "deploy these
+/// unconditionally, gate THESE on a detected language, gate THESE on a detected
+/// framework, gate THESE on a detected platform, and never deploy THESE" —
+/// four of the five buckets need a *gating rule* bound to the name, and no
+/// existing field carries a rule dimension. This is the additive extension that
+/// closes that gap. It is a separate section rather than extra keys on
+/// `[agents]` for a second reason: `[agents]` merges by WHOLE-SECTION
+/// REPLACEMENT ([`HarnessManifest::merge`]), so a project manifest that set
+/// `[agents]` at all would silently erase the framework catalog declaration.
+/// What: the five disjoint stem lists that partition the bundled agent catalog.
+/// `universal` deploys everywhere; `language`/`framework`/`platform` deploy only
+/// when the corresponding marker is detected; `deprecated` never deploys and
+/// exists so a retired agent stays accounted for rather than becoming an
+/// unexplained omission. `core::manifest::framework` validates that the five
+/// lists exactly partition the bundled catalog and composes them into an
+/// [`AgentSet`].
+/// Test: `agent_categories_roundtrip` here;
+/// `core::manifest::framework_tests` for validation and composition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentCategories {
+    /// Stems deployed to every project, with no detection at all.
+    #[serde(default)]
+    pub universal: Vec<String>,
+    /// Stems deployed only when the project's LANGUAGE is detected.
+    #[serde(default)]
+    pub language: Vec<String>,
+    /// Stems deployed only when the project's FRAMEWORK is detected.
+    #[serde(default)]
+    pub framework: Vec<String>,
+    /// Stems deployed only when the project's PLATFORM is detected.
+    #[serde(default)]
+    pub platform: Vec<String>,
+    /// Stems that are still bundled but are never deployed.
+    #[serde(default)]
+    pub deprecated: Vec<String>,
 }
 
 /// `[skills]` — the skill set a harness deploys.
@@ -389,7 +436,8 @@ impl HarnessManifest {
     ///   partial override like `[mcp] trusty_search = false` no longer resets the
     ///   other toggle (e.g. `trusty_memory`) back to `None` (see [`McpServers::merge`],
     ///   [`InstructionLayers::merge`]).
-    /// - **Whole-section replacement** (`[agents]`, `[skills]`, `[style]`,
+    /// - **Whole-section replacement** (`[agents]`, `[agent_categories]`,
+    ///   `[skills]`, `[style]`,
     ///   `[models]`): a `Some` section in `higher` replaces the whole section in
     ///   `self`. This is intentional for the list-like include/exclude sections,
     ///   where a higher layer states a complete agent/skill set rather than
@@ -404,6 +452,7 @@ impl HarnessManifest {
             version: higher.version.or(self.version),
             // Whole-section replacement (list-like / scalar sections).
             agents: higher.agents.or(self.agents),
+            agent_categories: higher.agent_categories.or(self.agent_categories),
             skills: higher.skills.or(self.skills),
             style: higher.style.or(self.style),
             models: higher.models.or(self.models),

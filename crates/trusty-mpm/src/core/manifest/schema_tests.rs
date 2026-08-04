@@ -18,6 +18,13 @@ fn manifest_roundtrip() {
             ignore_staleness: vec!["engineer".into()],
             source: ContentSource::Catalog,
         }),
+        agent_categories: Some(AgentCategories {
+            universal: vec!["qa".into()],
+            language: vec!["rust-engineer".into()],
+            framework: vec!["react-engineer".into()],
+            platform: vec!["vercel-ops".into()],
+            deprecated: vec!["ops".into()],
+        }),
         skills: Some(SkillSet {
             include: vec!["example-skill".into()],
             exclude: vec![],
@@ -415,4 +422,66 @@ fn mcp_servers_merge_unions_custom() {
         other => panic!("expected Stdio, got {other:?}"),
     }
     assert!(merged.custom.contains_key("lower-only"));
+}
+
+#[test]
+fn agent_categories_roundtrip() {
+    // #4760: the framework tier's five category lists must survive a TOML
+    // round-trip through the SAME parser every other manifest layer uses —
+    // that shared parser is the whole point of extending `manifest.toml`
+    // rather than inventing a second format.
+    let raw = "version = 1\n\
+               [agent_categories]\n\
+               universal = [\"qa\"]\n\
+               language = [\"rust-engineer\"]\n\
+               framework = [\"react-engineer\"]\n\
+               platform = [\"vercel-ops\"]\n\
+               deprecated = [\"ops\"]\n";
+    let parsed = HarnessManifest::from_toml(raw).expect("parses");
+    let cats = parsed.agent_categories.clone().expect("section present");
+    assert_eq!(cats.universal, vec!["qa".to_string()]);
+    assert_eq!(cats.deprecated, vec!["ops".to_string()]);
+
+    let round =
+        HarnessManifest::from_toml(&parsed.to_toml().expect("serializes")).expect("re-parses");
+    assert_eq!(round, parsed);
+}
+
+#[test]
+fn agent_categories_absent_parses_as_none() {
+    // Every other manifest layer omits `[agent_categories]`; that must stay a
+    // clean parse, not an error, so the new section is genuinely additive.
+    let parsed = HarnessManifest::from_toml("[agents]\ninclude = [\"qa\"]\n").expect("parses");
+    assert!(parsed.agent_categories.is_none());
+}
+
+#[test]
+fn agent_categories_merge_is_whole_section() {
+    // A higher layer's section replaces the lower one outright, matching the
+    // documented merge mode for the list-like sections.
+    let lower = HarnessManifest {
+        agent_categories: Some(AgentCategories {
+            universal: vec!["qa".into()],
+            ..AgentCategories::default()
+        }),
+        ..HarnessManifest::default()
+    };
+    let higher = HarnessManifest {
+        agent_categories: Some(AgentCategories {
+            universal: vec!["engineer".into()],
+            ..AgentCategories::default()
+        }),
+        ..HarnessManifest::default()
+    };
+    let merged = lower.clone().merge(higher);
+    assert_eq!(
+        merged.agent_categories.unwrap().universal,
+        vec!["engineer".to_string()]
+    );
+    // An absent higher section inherits the lower one.
+    let inherited = lower.merge(HarnessManifest::default());
+    assert_eq!(
+        inherited.agent_categories.unwrap().universal,
+        vec!["qa".to_string()]
+    );
 }

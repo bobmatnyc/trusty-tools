@@ -17,40 +17,63 @@ spec_refs:
 **Last-updated:** 2026-08-04
 **DOC-N claim:** `DOC-65`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md), verified free on `origin/main` (`d6e13326`): no filename or self-label claim under `docs/specs/**` (highest cataloged is `DOC-64`, README's own "next free" hint says `DOC-65`); no open pull requests at all (`gh pr list --state open` → empty); `scripts/check_doc_numbers.sh` clean (96 docs / 90 claims, 0 violations) before this file is added.
 **Builds on:** [ADR-0025](../adr/0025-collapse-agent-and-skill-tier-hierarchies.md) and its 2026-08-03 addendum ("Manifest-Based Project Configuration and the Four-Category Agent Model", §B1–B6) — the deployment/sourcing/precedence model this document maps its catalog onto, cited not restated. [DOC-61](./DOC-61-canonical-agent-standard.md) — the compose-chain source format (`extends:` inheritance, frontmatter merge, per-product builders) every agent cataloged here is built from, cited not restated. `crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md` — the hand-authored routing prose this document formalizes into a governed spec artifact without duplicating its table.
-**Related issues:** **#4755** (this spec, milestone `1.3.5-2`)
+**Related issues:** **#4755** (this spec), **#4760** (the framework manifest this document was updated for) — both milestone `1.3.5-2`
 
 ---
 
 ## 1. Summary
 
 trusty-mpm ships a bundled agent catalog of 42 sub-agent source files under
-`crates/trusty-mpm/src/assets/agents/` (five `BASE-*` inheritance templates,
-15 language/framework-specific `*-engineer` agents gated by
-`language_agent_scope`, and 22 agents that are not gated by it). ADR-0025's
-2026-08-03 addendum names the ungated set "**category 1: universal
-bundled**" in its four-category model (§B3) but gives only an illustrative
-subset as example (`research, qa, version-control, documentation,
-code-critic, engineer, local-ops, security, …`). This document is the
-missing catalog: it enumerates every agent the code actually treats as
-universal, states each one's trigger, model tier, and ownership boundary,
-and reconciles three findings the inventory surfaced against ADR-0025,
-DOC-61, and the delegation-routing prose — reported to the owner in §6
-rather than resolved here, per this document's own dispatch instruction.
+`crates/trusty-mpm/src/assets/agents/`: five `BASE-*` inheritance templates
+plus 37 dispatchable agents. ADR-0025's 2026-08-03 addendum names the
+always-deployed set "**category 1: universal bundled**" in its four-category
+model (§B3) but gives only an illustrative subset as example (`research, qa,
+version-control, documentation, code-critic, engineer, local-ops, security,
+…`). This document is the missing catalog: it enumerates every agent, states
+each one's trigger, model tier, and ownership boundary, and records how the
+deployment categories settle three findings the original inventory surfaced.
 
-**What "universal" means, precisely, per the code (not per prose):** an
-agent is universal if and only if its stem is **absent** from
-`LANGUAGE_ENGINEERS`
-(`crates/trusty-mpm/src/core/manifest/project_lang.rs`) — the single table
-`language_agent_scope` consults to decide which `*-engineer` stems to
-exclude from a project whose marker files (`Cargo.toml`, `package.json`,
-`go.mod`, …) don't match. Nothing else in the deploy or roster path
-narrows the "universal" set any further: `deployed_agent_dirs` /
-`roster_from_dirs`
-(`crates/trusty-mpm/src/core/delegation_authority.rs`) scan every `.md`
-file in each tier directory and admit anything with a frontmatter `name:`
-that isn't a `BASE-*` foundation file (`is_foundation_file`). This is a
-narrower, purely mechanical test than "applies to every project regardless
-of stack" — §6 flags where that gap matters.
+**What "universal" means, precisely, per the code (not per prose).** Since
+issue #4760 it is a **declaration**, read from the bundled
+`crates/trusty-mpm/src/assets/framework-manifest.toml`. That file is the
+FRAMEWORK TIER of the existing `manifest.toml` format — a `HarnessManifest`
+document parsed by the same `HarnessManifest::from_toml`, not a second file
+format — and its `[agent_categories]` section partitions all 37 dispatchable
+agents into five disjoint lists:
+
+| Category | Count | Gate |
+|---|---|---|
+| `universal` | 19 | Deploys to every project. No detection at all. |
+| `language` | 10 | Deploys only when a LANGUAGE marker is detected. |
+| `framework` | 5 | Deploys only when a FRAMEWORK marker is detected. |
+| `platform` | 2 | Deploys only when a PLATFORM marker is detected. |
+| `deprecated` | 1 | Never deploys. Declared so a retired agent stays accounted for. |
+
+The previous definition — "universal iff its stem is **absent** from
+`LANGUAGE_ENGINEERS`" — was a mechanical complement, not a decision, and it
+is what let `ops` stay deprecated in prose while reaching every roster. Its
+22-agent result equals this document's 19 universal + 2 platform + 1
+deprecated; nothing was added or removed from the catalog, the same agents
+are now sorted by an explicit rule instead of by omission from one table.
+`core::manifest::framework::parse_framework_manifest` enforces that the five
+lists exactly partition the bundled catalog, so an agent can no longer be
+forgotten into (or out of) deploying — a bundled agent nobody classified is a
+hard error, not a silent default.
+
+The roster path is unchanged and remains broader than the deploy path:
+`deployed_agent_dirs` / `roster_from_dirs`
+(`crates/trusty-mpm/src/core/delegation_authority.rs`) scan every `.md` file
+in each tier directory and admit anything with a frontmatter `name:` that
+isn't a `BASE-*` foundation file (`is_foundation_file`). A deprecated or
+undetected agent stops being DEPLOYED; a copy already on disk is not
+retracted (orphan retraction is issue #391 / ADR-0025 clause 9, unshipped).
+
+**Naming caution.** ADR-0025's "four-category agent model" and these four
+deployment categories share a number and nothing else. ADR-0025 classifies by
+WHO AUTHORED an agent and WHERE it lives (universal bundled / stack-specific
+bundled / project custom / user custom); this document's categories classify,
+within ADR-0025's bundled categories 1–2 only, by WHAT GATES deployment. The
+axes are orthogonal — see §5.
 
 ## 2. Scope and Non-Goals
 
@@ -128,32 +151,94 @@ different precedence tier.
 |---|---|---|---|---|
 | `memory-manager` | Store/recall/tag/prune project and session facts, exclusively through the trusty-memory MCP backend | **haiku** | No static memory files — MCP-only, per its own frontmatter description; does not decide *what* is worth remembering strategically (that judgment stays with the delegating assistant) | `crates/trusty-mpm/src/assets/agents/memory-manager.md`, `extends: base-agent` |
 | `mpm-agent-manager` | Agent-catalog lifecycle: discovery, validation, bundled-asset deployment, contribution workflow | sonnet | Per ADR-0025 addendum §B2: its differentiator from Claude Code's own `/agents` is that it *composes* a new custom agent from the five `BASE_*` fragments rather than writing a bare file — but that on-request authoring workflow is **not built today**; only the underlying `compose_agent` primitive exists (§6.2) | `crates/trusty-mpm/src/assets/agents/mpm-agent-manager.md`, `extends: base-agent` |
-| `mpm-skills-manager` | Skill-catalog lifecycle: discovery, deployment, tech-stack-based recommendations, contribution workflow | sonnet | Skill-side counterpart to `mpm-agent-manager`; per ADR-0025 addendum §"Deliberately Out of Scope," no stack-detection auto-selection exists for skills the way `language_agent_scope` exists for agents — `[skills] include/exclude` stays manual-only | `crates/trusty-mpm/src/assets/agents/mpm-skills-manager.md`, `extends: base-agent` |
+| `mpm-skills-manager` | Skill-catalog lifecycle: discovery, deployment, tech-stack-based recommendations, contribution workflow | sonnet | Skill-side counterpart to `mpm-agent-manager`; per ADR-0025 addendum §"Deliberately Out of Scope," no stack-detection auto-selection exists for skills the way `detected_engineers` + `framework-manifest.toml`'s gated categories do for agents — `[skills] include/exclude` stays manual-only | `crates/trusty-mpm/src/assets/agents/mpm-skills-manager.md`, `extends: base-agent` |
 
-## 4. Universal vs. Stack-Specific Agents {#SPEC-UNIVAGENT-04~draft}
+## 4. The Four Deployment Categories {#SPEC-UNIVAGENT-04~draft}
 
-The only code-level line between "universal" and "stack-specific" is
-`LANGUAGE_ENGINEERS`
-(`crates/trusty-mpm/src/core/manifest/project_lang.rs`): 15 `*-engineer`
-stems, each paired with marker files (`Cargo.toml` → `rust-engineer`,
-`package.json`/`tsconfig.json` → the JS/TS family, `go.mod` →
-`golang-engineer`, …). `language_agent_scope` probes the project root for
-those markers and, when at least one matches, returns an `AgentSet` whose
-`exclude` list drops every *non-matching* language engineer — a Rust
-workspace's deploy excludes `python-engineer`, `javascript-engineer`, etc.,
-but keeps every agent not in the table at all, unconditionally. An unknown
-project type (no marker recognized) returns `None`, so `resolve_manifest`
-falls back to deploying the full, unscoped roster — universal agents plus
-every stack-specific one — rather than deploying nothing.
+Deployment is decided in two halves that must not be conflated: the bundled
+`framework-manifest.toml` declares WHICH CATEGORY each agent is in, and
+`crates/trusty-mpm/src/core/manifest/project_lang.rs` owns the MARKER TABLES
+that answer whether a category's gate is satisfied for a given project.
+`core::manifest::framework::agent_scope_from` composes the two:
 
-This means: a stack-specific agent is scoped **out** by absence of its
-marker; a universal agent is never scoped by this mechanism at all,
-regardless of the project. That is the entire mechanism — there is no
-separate "universal allowlist," only a stack-specific exclusion list whose
-complement is, by construction, everything else. §6.1/§6.2 report where
-this construction produces agents that are universal by this mechanical
-test but not universal in the sense a reader of ADR-0025's illustrative
-list would expect.
+```text
+exclude = deprecated
+        ∪ ((language ∪ framework) \ detected stacks)
+        ∪ (platform \ detected platforms)
+```
+
+A `universal` stem appears in no term of that expression, so nothing can
+exclude it. That is the whole meaning of "always deploy": not that some code
+path forgot to filter it, but that the manifest declares it and the
+composition has no term that could remove it.
+
+The gate is stated as an EXCLUSION rather than an `include` allowlist on
+purpose. The agent source directory also carries the five `BASE-*`
+inheritance fragments, and a `ContentSource::Catalog` checkout may carry
+agents no bundled manifest names; an allowlist would silently drop all of
+them. The exhaustiveness invariant buys what the allowlist would have — a
+bundled agent absent from the manifest is a hard error, so it cannot be
+forgotten into deploying.
+
+### 4.1 `language` and `framework` — two declarations, one gate today
+
+Both resolve through `detected_engineers`, which probes the project root
+against `LANGUAGE_ENGINEERS` (15 stems: 10 declared `language`, 5 declared
+`framework`). The split is a DECLARATION of intent that the markers do not
+yet fully honour, and this is stated plainly rather than implied:
+
+| Stem | Category | Markers today | Genuinely framework-gated? |
+|---|---|---|---|
+| `tauri-engineer` | framework | `src-tauri/tauri.conf.json`, `tauri.conf.json` | **Yes** — framework markers only |
+| `nextjs-engineer` | framework | `next.config.{js,mjs,ts}` **and** `package.json` | No — the `package.json` fallback fires for any JS project |
+| `svelte-engineer` | framework | `svelte.config.{js,ts}` **and** `package.json` | No — same fallback |
+| `react-engineer` | framework | `package.json` only | No — has no framework marker at all |
+| `phoenix-engineer` | framework | `mix.exs` | No — `mix.exs` is the ELIXIR language marker; every Elixir project has one, and there is no `elixir-engineer` |
+
+Tightening those four gates so a framework agent requires a framework marker
+is a **behavior change** (a plain JS project would stop receiving
+`react-engineer`/`nextjs-engineer`/`svelte-engineer`; a non-Phoenix Elixir
+project would stop receiving `phoenix-engineer`, with nothing to replace it).
+It is deliberately NOT made here, and neither is the question of whether
+Elixir needs its own `language` entry.
+
+### 4.2 `platform` — a genuinely new gate
+
+`gcp-ops` and `vercel-ops` are gated on `PLATFORM_AGENTS`
+(`project_lang.rs`), a table introduced with this category. Markers are
+deliberately narrow — files the platform's own tooling creates or requires,
+not inferred heuristics:
+
+| Stem | Markers |
+|---|---|
+| `gcp-ops` | `app.yaml`, `cloudbuild.yaml`, `cloudbuild.yml`, `.gcloudignore` |
+| `vercel-ops` | `vercel.json`, `.vercelignore`, `.vercel/project.json` |
+
+**This is an intended behavior change.** Both agents deployed to every
+project before this category existed; they now deploy only where a marker is
+present. A project matching no platform deploys zero platform agents — an
+ordinary, explicitly tested result, distinct from the loud error an unusable
+manifest raises.
+
+### 4.3 The unknown-project fallback
+
+A project with NO recognised stack marker (e.g. the daemon's own framework
+root) contributes nothing to the stack term, so every `language` and
+`framework` engineer still deploys — unchanged from `language_agent_scope`.
+`platform` has no such fallback by design: "I could not tell what stack this
+is" is a reason to be generous with engineers and is not evidence that the
+project targets GCP or Vercel.
+
+### 4.4 Loud failure
+
+`parse_framework_manifest` returns `Err` — never a permissive default — for a
+malformed document, a missing `[agent_categories]` section, an empty
+`universal` list, a declared stem with no bundled agent, a bundled agent
+nobody declared, a stem declared twice, or a gated stem with no marker row.
+The manifest is embedded with `include_str!`, so a MISSING file is a compile
+error. `framework_agent_scope` refuses to resolve a selection from an
+unusable manifest rather than falling back to deploying everything or
+nothing.
 
 ## 5. Mapping onto the ADR-0025 Four-Category Model {#SPEC-UNIVAGENT-05~draft}
 
@@ -161,20 +246,29 @@ ADR-0025's 2026-08-03 addendum (§B3) defines four categories; this section
 maps the catalog above onto them without restating the addendum's own
 column definitions (deploy target, selection mechanism, code status).
 
+**The two axes are orthogonal, and share only a number.** ADR-0025 asks *who
+authored this agent and where does it live*; §4 asks *what gates its
+deployment*. Every stem `framework-manifest.toml` declares falls inside
+ADR-0025 categories 1–2; the manifest says nothing at all about ADR-0025
+categories 3–4, which no manifest declares. Do not read a §4 category name as
+an ADR-0025 category name — `universal` is the one word both taxonomies use,
+and it means different things in each.
+
 ### 5.1 Category 1 — universal bundled
 
-Every agent in §3.1 and §3.2, plus every agent §6.1 reports as
-mechanically universal but under-documented. Deploy target:
-`FrameworkPaths::agent_deploy_dir()`, unconditionally selected (absent from
-`LANGUAGE_ENGINEERS`).
+Every agent declared `universal` in `framework-manifest.toml` (19 of the 37
+dispatchable agents: §3.1 and §3.2 plus the four §6.1 reports as
+under-documented). Deploy target: `FrameworkPaths::agent_deploy_dir()`,
+unconditionally selected.
 
 ### 5.2 Category 2 — stack-specific bundled
 
-The 15 `*-engineer` stems in `LANGUAGE_ENGINEERS`, selected via
-`[agents] include/exclude` in `manifest.toml`, auto-derived per project by
-`language_agent_scope`. Same deploy target as category 1 — selection, not a
-separate directory, is what distinguishes the two (ADR-0025 addendum §B3's
-own point).
+The 18 marker-gated agents: 10 declared `language`, 5 declared `framework`,
+2 declared `platform`, plus the 1 declared `deprecated`, which is bundled but
+gated out unconditionally. Same deploy target as category 1 — selection, not
+a separate directory, is what distinguishes ADR-0025's categories 1 and 2
+(ADR-0025 addendum §B3's own point). ADR-0025 assumed this set was exactly
+`LANGUAGE_ENGINEERS`; §4.2 adds the platform gate it did not anticipate.
 
 ### 5.3 Categories 3 and 4 — user-installed custom agents
 
@@ -208,15 +302,29 @@ kind this document catalogs, but trusty-agents' assistant tier (L0) is
 explicitly the different, out-of-scope object kind neither this document
 nor DOC-61 touches.
 
-## 6. Findings for the Owner {#SPEC-UNIVAGENT-06~draft}
+## 6. Findings {#SPEC-UNIVAGENT-06~draft}
 
-Per this document's own dispatch instruction, the following are reported,
-not resolved.
+This section was written as "reported, not resolved." Issue #4760 resolved
+three of its findings; each is kept below with its original evidence and a
+**RESOLVED** note describing how the manifest settles it. The findings still
+open keep their original wording. Evidence quoted under a RESOLVED note
+describes the code as it stood when the finding was made — in particular it
+cites `language_agent_scope`, which #4760 removed — and is preserved
+deliberately so the reasoning stays auditable.
 
 ### 6.1 Undocumented, duplicated, or deprecated-but-still-deployed agents
 
-- **`ops` is deprecated in prose but still a full, still-deployed bundled
-  asset.** `agent-delegation.md` states twice — "Generic `ops` is
+- **RESOLVED (#4760) — `ops` is deprecated in prose but still a full,
+  still-deployed bundled asset.** It is now declared in
+  `framework-manifest.toml`'s `deprecated` list, which
+  `agent_scope_from` places in the exclude term unconditionally, for every
+  project. Deprecating an agent is now an edit to that file rather than a
+  note in prose. Two limits, stated so neither is mistaken for done: the
+  `ops.md` asset is still bundled (whether to delete it is a separate
+  decision — the `deprecated` list is exactly the mechanism that makes
+  "keep it, do not deploy it" expressible), and an `ops.md` ALREADY deployed
+  to a machine is not retracted, because orphan retraction is issue #391 /
+  ADR-0025 clause 9 and has not shipped. Original evidence: `agent-delegation.md` states twice — "Generic `ops` is
   DEPRECATED; use `local-ops` for localhost/PM2/docker" and "**NOTE**: Generic `ops` agent is
   DEPRECATED. Use platform-specific agents." — but
   `crates/trusty-mpm/src/assets/agents/ops.md` is a 63-line, fully-formed
@@ -227,10 +335,13 @@ not resolved.
   from `resolve_roster`). `agent-delegation.md`'s own header states "The
   ONLY agents filtered out are foundation templates... frontmatter is never
   used to hide an agent" — confirming `ops` mechanically reaches every
-  project's roster and the PM's delegation prompt today, deprecation notice
+  project's roster and the PM's delegation prompt, deprecation notice
   notwithstanding.
-- **`gcp-ops` and `vercel-ops` are platform-specific but not scoped like a
-  language engineer.** They are, in character, exactly the same shape as a
+- **RESOLVED (#4760) — `gcp-ops` and `vercel-ops` are platform-specific but
+  not scoped like a language engineer.** They are now the `platform`
+  category, gated on the `PLATFORM_AGENTS` marker table (§4.2). A project
+  with no GCP or Vercel marker no longer deploys them — an intended behavior
+  change, not accidental scope loss. Original evidence: They are, in character, exactly the same shape as a
   `*-engineer` stem — relevant only to projects targeting that one
   platform — but `LANGUAGE_ENGINEERS` only covers language markers, not
   cloud-platform markers, so `language_agent_scope` never excludes them.
@@ -238,10 +349,18 @@ not resolved.
   both agents in its roster, unconditionally — the same class of roster
   noise issue #1941 built `language_agent_scope` to eliminate for
   languages, left unaddressed for ops platforms.
-- **`web-ui-engineer`, `data-engineer`, `prompt-engineer`, and
-  `refactoring-engineer` have no routing entry in `agent-delegation.md`.**
-  All four are correctly left ungated by `LANGUAGE_ENGINEERS` (none is tied
-  to one specific stack), but none appears in the routing table's "When to
+- **PARTIALLY RESOLVED (#4760) — `web-ui-engineer`, `data-engineer`,
+  `prompt-engineer`, and `refactoring-engineer` have no routing entry in
+  `agent-delegation.md`.** Their CLASSIFICATION is now a decision rather than
+  a default: all four are declared `universal` in `framework-manifest.toml`,
+  on the ground that none is tied to a single stack, platform, or framework
+  (`web-ui-engineer` covers HTML/CSS/accessibility across any front end,
+  `data-engineer` covers ETL and migrations across any store,
+  `prompt-engineer` and `refactoring-engineer` are language-agnostic by
+  construction). Their absence from the ROUTING TABLE is untouched and stays
+  open — classification and routing are different documents. Original
+  evidence: all four are correctly left ungated (none is tied to one
+  specific stack), but none appears in the routing table's "When to
   Delegate to Each Agent" section, so a PM has no documented signal
   distinguishing "delegate to `engineer`" from "delegate to
   `web-ui-engineer`" or `refactoring-engineer`. `web-qa`/`api-qa`, by
@@ -250,20 +369,19 @@ not resolved.
 
 ### 6.2 Conflicts between the deployed roster, ADR-0025, DOC-61, and the delegation prose
 
-- **ADR-0025 addendum §B3's category-1 example list is illustrative, not
-  exhaustive, and could be mistaken for the actual boundary.** Its own text
-  — "`research`, `qa`, `version-control`, `documentation`, `code-critic`,
-  `engineer`, `local-ops`, `security`, …" — trails with an ellipsis, but
-  gives no pointer to what the "…" actually contains. §3–§4 of this
-  document supply that: the real boundary is "absent from
-  `LANGUAGE_ENGINEERS`," which is a substantially larger and less curated
-  set than the ADR's example (it includes `gcp-ops`, `vercel-ops`,
-  `web-ui-engineer`, `data-engineer`, `prompt-engineer`,
-  `refactoring-engineer`, `memory-manager`, `mpm-agent-manager`,
-  `mpm-skills-manager`, and the deprecated `ops`). Whether "universal"
-  should be formally redefined as exactly that mechanical complement, or
-  whether platform-ops agents deserve their own scoping dimension
-  alongside `language_agent_scope`, is not decided here.
+- **RESOLVED (#4760) — ADR-0025 addendum §B3's category-1 example list is
+  illustrative, not exhaustive, and could be mistaken for the actual
+  boundary.** Its own text — "`research`, `qa`, `version-control`,
+  `documentation`, `code-critic`, `engineer`, `local-ops`, `security`, …" —
+  trails with an ellipsis and gives no pointer to what the "…" contains, and
+  the real boundary at the time was the mechanical complement of
+  `LANGUAGE_ENGINEERS`, a substantially larger and less curated set. Both
+  open questions that finding raised are now answered by
+  `framework-manifest.toml`: "universal" is NOT the mechanical complement —
+  it is a declared list of 19 — and platform-ops agents DID get their own
+  scoping dimension (§4.2). The `[agent_categories]` section is the
+  exhaustive list the ellipsis stood in for, and
+  `parse_framework_manifest`'s partition invariant keeps it exhaustive.
 - **`mpm-agent-manager`'s documented differentiator over Claude Code's
   `/agents` is not yet backed by code.** ADR-0025 addendum §B2 states its
   value is composing a new custom agent from the `BASE_*` fragments — but
@@ -312,12 +430,24 @@ not an extension of an existing one.** Reasoning:
 **Code (verified directly in this repository, this worktree):**
 
 - `crates/trusty-mpm/src/assets/agents/*.md` — the 42-file bundled agent
-  catalog (5 `BASE-*` templates, 15 stack-specific engineers, 22 universal
-  agents by this document's test).
+  catalog: 5 `BASE-*` templates plus 37 dispatchable agents (19 `universal`,
+  10 `language`, 5 `framework`, 2 `platform`, 1 `deprecated`).
+- `crates/trusty-mpm/src/assets/framework-manifest.toml` — the framework tier
+  of the `manifest.toml` format; its `[agent_categories]` section is the
+  declaration §4 describes.
+- `crates/trusty-mpm/src/core/manifest/framework.rs` —
+  `parse_framework_manifest`, `framework_agent_categories`,
+  `agent_scope_from`, `framework_agent_scope`, `bundled_agent_stems` — the
+  declaration's parser, its validation invariants, and the composition with
+  detected markers.
+- `crates/trusty-mpm/src/core/manifest/schema.rs` — `AgentCategories`, the
+  one additive section this work adds to the shared manifest schema.
 - `crates/trusty-mpm/src/core/manifest/project_lang.rs` —
-  `LANGUAGE_ENGINEERS`, `language_agent_scope`, `detected_engineers`,
-  `marker_present` — the sole code-level universal/stack-specific
-  boundary.
+  `LANGUAGE_ENGINEERS`, `PLATFORM_AGENTS`, `detected_engineers`,
+  `detected_platforms`, `marker_present` — the marker tables the gated
+  categories are evaluated against. (`language_agent_scope`, the
+  exclude-by-complement function this document's original text described, was
+  removed by #4760.)
 - `crates/trusty-mpm/src/core/delegation_authority.rs` —
   `deployed_agent_dirs`, `roster_from_dirs`, `resolve_roster`,
   `deployed_roster_section`, `is_foundation_file` — the roster resolver
@@ -348,3 +478,18 @@ not an extension of an existing one.** Reasoning:
   `crates/trusty-mpm/src/core/delegation_authority.rs` on `origin/main`
   (`d6e13326`). Maps onto ADR-0025's 2026-08-03 four-category-model
   addendum. Filed for issue #4755, milestone `1.3.5-2`.
+- 2026-08-04 — Updated for issue #4760, landing with the code change rather
+  than one PR later. "Universal" is now a DECLARATION read from the bundled
+  `framework-manifest.toml`, not the mechanical complement of
+  `LANGUAGE_ENGINEERS`. §1 restated around the four deployment categories
+  (`universal` / `language` / `framework` / `platform`, plus `deprecated`);
+  §4 rewritten from "universal vs. stack-specific" to the four categories,
+  their composition, the language-vs-framework gating caveat (§4.1), the new
+  platform gate (§4.2), the unknown-project fallback (§4.3), and the
+  loud-failure contract (§4.4); §5 gained an explicit statement that
+  ADR-0025's four-category model is a different axis that shares only a
+  number; §6.1 and §6.2 mark the `ops`, `gcp-ops`/`vercel-ops`, and
+  ellipsis-boundary findings RESOLVED, and the four undocumented agents
+  PARTIALLY resolved (classified, still unrouted), each keeping its original
+  evidence. Counts restated: 37 dispatchable agents = 19 + 10 + 5 + 2 + 1,
+  equal to the previously stated 15 stack-specific + 22 universal.
