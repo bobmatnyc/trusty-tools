@@ -224,6 +224,17 @@ pub struct PrepReport {
     pub instructions: PipelineOutput,
     /// Path the merged instructions were stashed to for inspection.
     pub stash: PathBuf,
+    /// Path the framework-level compiled prompt was written to (#4752).
+    ///
+    /// Why: exposing it makes the launch-ordering guarantee assertable — a
+    /// returned `PrepReport` means this file exists and holds the exact text
+    /// the session is about to receive, because the write is fatal and happens
+    /// before this value is constructed.
+    /// What: `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` (or the `fw`
+    /// root a test supplies), byte-identical to [`Self::stash`].
+    /// Test: `prepare_session_writes_the_compiled_prompt_before_returning`,
+    /// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`.
+    pub compiled_prompt: PathBuf,
     /// Path the `trusty-mpm` output style was deployed to, if it succeeded.
     ///
     /// `None` when the deploy write failed; the session still launches in
@@ -331,8 +342,17 @@ pub enum PrepError {
 /// `<project_dir>/.trusty-mpm/last-instructions.md` so the inspectable stash
 /// matches the live launch prompt byte-for-byte (issue #1409), and returns a
 /// [`PrepReport`].
+///
+/// ORDERING CONTRACT (#4752): the same prompt is ALSO written to
+/// `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+/// ([`crate::core::paths::FrameworkPaths::instructions_compiled`]) before this
+/// function returns, and a failed write aborts the preparation. Every caller
+/// spawns `claude` only after `Ok`, so "prepare returned" is exactly "the
+/// compiled prompt on disk is the prompt this session is about to run with".
 /// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
-/// `prepare_session_stash_reflects_override`.
+/// `prepare_session_stash_reflects_override`,
+/// `prepare_session_writes_the_compiled_prompt_before_returning`,
+/// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
     prepare_session_with_style(fw, project_dir, None)
 }
@@ -804,6 +824,25 @@ fn prepare_session_inner(
         source,
     })?;
 
+    // #4752: the framework-level compiled prompt must be on disk and CURRENT
+    // before `claude` is spawned — every caller of `prepare_session` starts the
+    // process only after this function returns `Ok`, so a blocking write here IS
+    // the ordering guarantee. Deliberately fatal (`?`), not best-effort: a
+    // launch that proceeds past a failed write would leave the operator reading
+    // a stale prompt while the session runs a different one, which is the exact
+    // class of defect #4752 closes.
+    //
+    // Cost is one `write` of a string already in memory — `resolved_prompt` is
+    // the SAME text just stashed above and about to be passed to
+    // `claude --append-system-prompt-file`. No second composition pass; adding
+    // one here would be the thing to eliminate, not to accept.
+    let compiled = fw.instructions_compiled();
+    crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
+        .map_err(|source| PrepError::Io {
+            path: compiled.clone(),
+            source,
+        })?;
+
     // Resolve the active output style for settings.json using the same
     // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
     // An unknown id is logged and falls back to the professional default rather
@@ -1117,6 +1156,7 @@ fn prepare_session_inner(
         skill_deploy,
         instructions,
         stash,
+        compiled_prompt: compiled,
         output_style,
         hooks_written,
         trusty_mpm_injected,

@@ -1129,3 +1129,102 @@ renaming `base_pm()`, and updating the ~30 test assertions that pin the
 literal string is a **code change**. Per this ruling's own scope note, it
 lands in the #4286 core PR, not this docs-only one. This section records
 the target model and the current gap; it does not perform the rename.
+
+## 10. Owner Ruling (2026-08-04): the Compiled Prompt Owns a Distinct Path, Written Before Launch {#SPEC-PMINSTR-10~draft}
+
+Issue [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752). This
+section supersedes any earlier text in this document that treats
+`~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` as the home of the
+compiled PM system prompt.
+
+### 10.1 The defect
+
+One path carried three roles at once:
+
+- `instruction_pipeline.rs`'s `install_system_prompt` / `install_system_prompt_to`
+  wrote the **full compiled prompt** to `framework/instructions/INSTRUCTIONS.md`.
+- `bundle_all.rs` used to write a **4-line stub** to that same path. (Already
+  removed by #4286 split A — see §10.4; the `ALL` table and the
+  `FRAMEWORK_INSTRUCTIONS` constant no longer carry the entry.)
+- `build_instructions` **reads** that path as an optional framework section —
+  i.e. the compiled output was simultaneously a pipeline input.
+
+Last writer won, so the artifact an operator inspects to answer "what
+instructions is my session actually running?" was non-deterministic. #383 fixed
+one instance of this by ordering the writes; ordering is not a fix when the real
+problem is that two roles share one name.
+
+### 10.2 The ruling
+
+- The compiled prompt is written to **`~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`**
+  — directly under `framework/`, **not** under `framework/instructions/`, which
+  stays the bundled-input directory. Resolved by
+  `FrameworkPaths::instructions_compiled`; the filename constant is
+  `instruction_pipeline::COMPILED_PROMPT_FILE`.
+- **Nothing else writes that path.** Both writers go through one function,
+  `write_compiled_prompt_to`, so the file can only ever hold a full compiled
+  prompt — never a stub.
+- A pre-#4752 `instructions/INSTRUCTIONS.md` is a **stale leftover**: no writer
+  can refresh it, yet `build_instructions` would keep reading it. `tm install`
+  removes it (`remove_stale_bundled_instructions`).
+
+### 10.3 Ordering: current before launch, and blocking
+
+**Ruling (2026-08-04):** `INSTRUCTIONS-COMPILED.md` must be fully written and
+current **before** Claude Code launches — not concurrently, not best-effort, not
+eventually consistent with the next `tm install`.
+
+Before this change, the compiled artifact was written at **install time only**
+(`commands/install.rs::install`). The launch path never refreshed it, so it went
+stale the moment a project's `CLAUDE.md` overrides changed.
+
+After: `session_launch::prepare_session_inner` writes the prompt to
+`fw.instructions_compiled()` immediately after stashing
+`.trusty-mpm/last-instructions.md` and before returning. The write is **fatal**,
+not best-effort — a failure aborts the preparation with `PrepError::Io`. Every
+caller spawns `claude` only after `prepare_session` returns `Ok`, so "prepare
+returned" **is** "the compiled prompt on disk is the prompt this session will
+run with".
+
+**Cost.** The launch write reuses the `resolved_prompt` string the composer has
+already built for `--append-system-prompt-file` — the same text just written to
+the project stash. It is one additional `fs::write`, with **no second
+composition pass**. If a future change introduces one, eliminate the extra
+composition; do not relax the ordering.
+
+### 10.4 Corrections to earlier characterizations of #4752
+
+Recorded because the issue text and this document previously said otherwise, and
+both were checked directly against the code rather than taken from the report:
+
+- **The `bundle_all.rs` stub was already gone.** #4286 split A removed the
+  `instructions/INSTRUCTIONS.md` entry from `bundle::ALL` and deleted the
+  `FRAMEWORK_INSTRUCTIONS` constant it backed (`bundle_tests.rs`,
+  `bundle_table_is_complete`, pins `ALL.len() == 178`). Finding #1 in
+  `sections/README.md` described a two-writer collision whose first writer no
+  longer existed. The surviving half of the collision — compiled output sharing
+  a path with a pipeline input — is real, and is what §10.2 fixes.
+- **`FrameworkPaths::framework_instructions` / `framework_instructions_path`
+  are NOT dead** and were retained: `session_launch::prepare_session_inner` and
+  `commands/session.rs` both still construct a `PipelineInput` from them.
+
+### 10.5 CLAUDE.md pointer — deferred, not delivered
+
+The ruling that a project's `CLAUDE.md` should point at
+`INSTRUCTIONS-COMPILED.md` is **not implemented here**, superseded mid-flight by
+a second ruling: **all `CLAUDE.md` modification is reserved to the scaffolding
+agent**, which owns that file exclusively.
+
+Two code paths mutate a project `CLAUDE.md` today, neither of which is that
+agent — recorded as a defect to resolve separately, not fixed here:
+
+- `instruction_pipeline::load_or_create_claude_md` seeds `CLAUDE_MD_STUB` on
+  first session start (reached via `build_instructions`).
+- `session_launch::worktree_sync::self_heal_claude_md` strips the legacy #2170
+  delegation block on every session resume, via `strip_delegation_block`.
+
+The scaffolding path itself is the `tm-init` skill, which is agent-driven prose
+— it has no code component and no knowledge of the
+`<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` marked-block format. Teaching it to
+author marked section-override blocks is unbuilt capability, and where the
+pointer lives is an open owner decision.
