@@ -409,3 +409,150 @@ async fn prune_reports_dirty_worktree_retained() {
         "the uncommitted file must survive a prune sweep"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// #4732: git declining is a REFUSAL, not a failure to work around.
+//
+// Every test below fails against the pre-#4732 remover, which fell through to
+// `std::fs::remove_dir_all` on ANY non-zero git exit and on any failure to
+// resolve the owning checkout. The two "cleans up" tests are the other half of
+// the contract: the one legitimate fallback case must still work, or this fix
+// would have traded a data-loss bug for a leak.
+// ─────────────────────────────────────────────────────────────────────────
+
+use super::decommission::remove_session_worktree;
+use super::worktree_git_fixture::{GitWorktreeFixture, deny_all};
+
+/// A worktree whose admin directory was removed out of band must be preserved
+/// (#4732).
+///
+/// Why: `git rev-parse` from inside it answers `not a git repository: (null)`,
+/// which `registry_root_for` reports as `None` — and the remover read that
+/// `None` as "a plain directory nothing claims". The working tree, including
+/// work that was never committed anywhere, is entirely intact. This is the
+/// state ~70 worktrees on this machine were left in on 2026-07-21.
+#[test]
+fn remove_refuses_a_stale_worktree_pointer() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("stale-pointer-e2e-4732");
+    std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
+    std::fs::remove_dir_all(fx.repo.join(".git").join("worktrees")).expect("drop admin dir");
+
+    let outcome = remove_session_worktree(&wt);
+    assert!(
+        wt.join("precious.txt").exists(),
+        "a stale pointer must not cost the working tree: {outcome:?}"
+    );
+    assert!(
+        !outcome.removed(),
+        "and must report NOT removed: {outcome:?}"
+    );
+}
+
+/// A `.git` git cannot read is a worktree, not an absent one (#4732).
+#[test]
+fn remove_refuses_an_unreadable_git_entry() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("unreadable-git-e2e-4732");
+    std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
+    let _restore = deny_all(&wt.join(".git"));
+
+    let outcome = remove_session_worktree(&wt);
+    assert!(
+        wt.join("precious.txt").exists(),
+        "an unreadable .git must not cost the working tree: {outcome:?}"
+    );
+    assert!(
+        !outcome.removed(),
+        "and must report NOT removed: {outcome:?}"
+    );
+}
+
+/// `is not a .git file` is git validating and declining, not git reporting an
+/// empty directory (#4732).
+#[test]
+fn remove_refuses_a_worktree_with_a_broken_git_file() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("broken-git-e2e-4732");
+    std::fs::write(wt.join("precious.txt"), "never committed\n").expect("write precious file");
+    std::fs::write(wt.join(".git"), "gitdir: /nonexistent/xyz\n").expect("corrupt .git");
+
+    let outcome = remove_session_worktree(&wt);
+    assert!(
+        wt.join("precious.txt").exists(),
+        "a broken .git must not cost the working tree: {outcome:?}"
+    );
+    assert!(
+        !outcome.removed(),
+        "and must report NOT removed: {outcome:?}"
+    );
+}
+
+/// The surviving fallback, half one: a trusty-mpm-owned directory with no
+/// repository above it at all (#4732).
+///
+/// Why: pinning this is what keeps the fix from silently becoming "never clean
+/// anything up". Nothing can be claiming a directory outside every repository,
+/// so there is no git state to protect and a direct removal is the only way to
+/// reclaim it.
+#[test]
+fn remove_cleans_up_a_directory_no_repository_claims() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let leftover = tmp.path().join("leftover-4732");
+    std::fs::create_dir_all(&leftover).expect("mkdir");
+    std::fs::write(leftover.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
+
+    let outcome = remove_session_worktree(&leftover);
+    assert!(outcome.removed(), "{outcome:?}");
+    assert!(!leftover.exists(), "the leftover directory must be gone");
+}
+
+/// The surviving fallback, half two: a leftover inside a real repository whose
+/// registry positively does not name it (#4732).
+///
+/// Why: this is the ordinary shape — a worktree git already pruned, or one
+/// whose creation never completed registration. Git holds nothing, so the
+/// directory is the only thing to clean up.
+#[test]
+fn remove_cleans_up_an_unregistered_leftover_inside_a_repo() {
+    let fx = GitWorktreeFixture::new();
+    let leftover = fx.repo.join(".worktrees").join("unregistered-e2e-4732");
+    std::fs::create_dir_all(&leftover).expect("mkdir");
+
+    let outcome = remove_session_worktree(&leftover);
+    assert!(outcome.removed(), "{outcome:?}");
+    assert!(!leftover.exists(), "the leftover directory must be gone");
+}
+
+/// The happy path is unchanged: git removes a healthy worktree, and the ref
+/// cleanup still runs behind it (#4732 regression guard).
+#[test]
+fn remove_still_removes_a_healthy_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("healthy-4732");
+
+    let outcome = remove_session_worktree(&wt);
+    assert!(outcome.removed(), "{outcome:?}");
+    assert!(!wt.exists(), "the worktree directory must be gone");
+
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fx.repo)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("git worktree list");
+    assert!(
+        !String::from_utf8_lossy(&listed.stdout).contains("healthy-4732"),
+        "the registry entry must be pruned too"
+    );
+    let branches = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fx.repo)
+        .args(["branch", "--list", "session/healthy-4732"])
+        .output()
+        .expect("git branch --list");
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+        "the session branch must be deleted too"
+    );
+}

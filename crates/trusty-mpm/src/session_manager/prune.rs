@@ -773,7 +773,7 @@ impl SessionManager {
         dry_run: bool,
         policy: DirtyWorktreePolicy,
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
-        use super::decommission::remove_session_worktree;
+        use super::decommission::{WorktreeRemoval, remove_session_worktree};
         use super::worktree_ownership::SentinelOwner;
         use std::collections::HashSet;
 
@@ -966,16 +966,25 @@ impl SessionManager {
 
             info!(path = %candidate.display(), "prune-worktrees: removing orphaned worktree");
             let candidate_clone = candidate.clone();
-            let removed_ok =
+            let outcome =
                 tokio::task::spawn_blocking(move || remove_session_worktree(&candidate_clone))
                     .await
                     .unwrap_or_else(|e| {
                         tracing::error!(
                             "prune-worktrees: spawn_blocking panicked during removal: {e}"
                         );
-                        false
+                        WorktreeRemoval::Kept(format!("the removal task panicked: {e}"))
                     });
-            if removed_ok {
+            // #4732: the remover now reports WHY it kept a worktree — most
+            // often a deliberate refusal (a `git worktree lock`, a stale
+            // pointer), which used to be indistinguishable from a silent no-op.
+            if let Some(reason) = outcome.reason() {
+                warn!(
+                    path = %candidate.display(),
+                    "prune-worktrees: worktree kept — {reason}"
+                );
+            }
+            if outcome.removed() {
                 removed.push(candidate);
             }
         }

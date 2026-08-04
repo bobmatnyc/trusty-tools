@@ -414,12 +414,12 @@ fn scan_from_anchor_never_admits_the_containment_boundary_itself() {
 ///
 /// Why: NOT because `--force` overrides the lock — it does not. Git refuses a
 /// single `--force` on a locked worktree (exit 128, "use 'remove -f -f' to
-/// override or unlock first") and leaves the directory intact. The problem is
-/// that `decommission::remove_session_worktree` reads that refusal as a generic
-/// git failure and falls back to `std::fs::remove_dir_all`, deleting the
-/// directory anyway and orphaning git's registry entry. So the veto is defeated
-/// through the error path, and never enumerating a locked worktree is the only
-/// place it survives.
+/// override or unlock first") and leaves the directory intact. The problem was
+/// that `decommission::remove_session_worktree` read that refusal as a generic
+/// git failure and fell back to `std::fs::remove_dir_all`, deleting the
+/// directory anyway and orphaning git's registry entry — the veto defeated
+/// through the error path (#4732, since fixed). Keeping a locked worktree out
+/// of the candidate list is the first of the two defences.
 #[test]
 fn enumerate_excludes_a_locked_worktree() {
     let fixture = GitWorktreeFixture::new();
