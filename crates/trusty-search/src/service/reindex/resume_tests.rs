@@ -488,13 +488,25 @@ async fn completed_reindex_leaves_no_checkpoint() {
 /// behaviour without a downgrade. It has to be verified against the real
 /// pipeline, not just against `resume_enabled()`, because a probe that read the
 /// flag too late would still have adopted the corpus.
-/// What: plants a valid checkpoint, disables resume, and asserts the run reports
-/// `resumed: false` and re-indexes every file.
+///
+/// #4721: `TRUSTY_REINDEX_RESUME` is supplied at process spawn instead of by
+/// `unsafe { set_var }` under `#[serial]`. `#[serial]` only excludes other
+/// `#[serial]` tests — the binary's ~1400 non-serial tests kept running inside
+/// the window, several of which drive reindexes that read this exact variable,
+/// so the old form both raced them and (in Rust 2024 terms) raced `getenv`. See
+/// `super::test_isolation` and #4213.
+/// What: plants a valid checkpoint, and — in a child process started with
+/// `TRUSTY_REINDEX_RESUME=0` — asserts the run reports `resumed: false`.
 ///
 /// Test: this test.
 #[tokio::test]
-#[serial_test::serial]
 async fn resume_kill_switch_disables_adoption() {
+    if !super::test_isolation::run_isolated(
+        "service::reindex::resume_tests::resume_kill_switch_disables_adoption",
+        &[("TRUSTY_REINDEX_RESUME", "0")],
+    ) {
+        return;
+    }
     let root = make_root(&FIXTURE[..2]);
     let handle = make_handle(root.path(), "resume-killswitch");
     reindex(&handle).await;
@@ -503,11 +515,15 @@ async fn resume_kill_switch_disables_adoption() {
     let checkpoint = valid_checkpoint_json(&handle, "resume-killswitch", root.path());
     plant_staging_corpus(root.path(), &live, &checkpoint);
 
-    // SAFETY: `TRUSTY_REINDEX_RESUME` is read only by `checkpoint::resume_enabled`
-    // and is not touched by any other test in this module.
-    unsafe { std::env::set_var("TRUSTY_REINDEX_RESUME", "0") };
+    // Guard against a vacuous pass: the child process must genuinely have the
+    // kill switch set, or "did not resume" proves nothing.
+    assert_eq!(
+        std::env::var("TRUSTY_REINDEX_RESUME").ok().as_deref(),
+        Some("0"),
+        "#4721: this body must only ever run in the isolated child process that \
+         was spawned with TRUSTY_REINDEX_RESUME=0"
+    );
     let progress = reindex(&handle).await;
-    unsafe { std::env::remove_var("TRUSTY_REINDEX_RESUME") };
 
     let events = progress.events.lock().await.clone();
     let start = events
@@ -518,5 +534,131 @@ async fn resume_kill_switch_disables_adoption() {
     assert_eq!(
         start["resumed"], false,
         "#3979: TRUSTY_REINDEX_RESUME=0 must suppress adoption; got {start}"
+    );
+}
+
+/// The probe must hand its OPEN staging-corpus handle to the adoption, not drop
+/// it and let the adoption re-open the same redb file (#4721).
+///
+/// Why: the shipped code opened `index.redb.tmp` twice — once in
+/// `checkpoint::probe_resume` to validate the record, once again in
+/// `corpus_swap::adopt_staged_corpus` to install it. redb takes an EXCLUSIVE
+/// lock per file, so the two opens are mutually exclusive by construction: they
+/// only worked because the first handle happened to be dropped inside the
+/// probe's blocking task before the second ran. Between them the staging corpus
+/// was owned by nobody, and the second open has real failure modes (a wedged
+/// #3659 open gate, a file removed by another daemon, a lock not yet released) —
+/// each of which `adopt_staged_corpus` swallowed into `Ok(None)`, silently
+/// abandoning the resume and writing to the LIVE corpus instead. The fix makes
+/// the file open exactly once, and this test pins it: ownership is observable,
+/// because a second open of a held redb file is refused.
+///
+/// What: probes a planted, adoptable staging corpus, then asserts a competing
+/// `CorpusStore::open` on that path is REFUSED while the returned state is
+/// alive, and succeeds once the state is dropped — which is what proves the
+/// refusal was ownership rather than a corrupt file.
+///
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn probe_hands_the_open_staging_corpus_to_the_adoption() {
+    let root = make_root(&FIXTURE[..2]);
+    let handle = make_handle(root.path(), "resume-single-open");
+    reindex(&handle).await;
+    let live =
+        crate::service::colocated_storage::colocated_redb_path(root.path()).expect("live path");
+    let cp = checkpoint_for(&handle, "resume-single-open", root.path());
+    let tmp_path = plant_staging_corpus(
+        root.path(),
+        &live,
+        &serde_json::to_vec(&cp).expect("serialize checkpoint"),
+    );
+
+    let canonical = super::validate::canonical_walk_root(root.path());
+    let state = super::checkpoint::probe_resume(
+        &handle,
+        &IndexId::new("resume-single-open"),
+        &canonical,
+        &cp,
+    )
+    .await
+    .expect("the planted checkpoint must be adoptable");
+
+    assert!(
+        CorpusStore::open(&tmp_path).is_err(),
+        "#4721: the probe must still OWN the staging corpus it validated — a \
+         second open succeeding means the handle was released and the adoption \
+         has to re-open the file, which is exactly the window this fix closes"
+    );
+
+    drop(state);
+    CorpusStore::open(&tmp_path).expect(
+        "once the resume state is dropped the file must open normally — \
+                 the refusal above was ownership, not corruption",
+    );
+}
+
+/// A promoted corpus must never carry an in-progress checkpoint, even if the
+/// staging handle was already released when the promotion started (#4721).
+///
+/// Why: this invariant used to hold only because `commit_staged_corpus_swap`
+/// happened to call the checkpoint clear before `take_corpus_store`. The clear
+/// reads the INSTALLED store, so with no store installed it returned early and
+/// did nothing — and the rename then promoted a finished corpus advertising
+/// itself as mid-reindex, which nothing ever cleans up (the probe only reads
+/// `*.tmp` paths). That is one statement swap away in a function no test would
+/// have flagged, and it is also reachable today whenever the store is absent at
+/// promote time (a #4122 write quarantine, a failed re-install). Encoding the
+/// order in `PromotionRelease` plus a fallback clear on the released file makes
+/// the invariant hold regardless of how the caller got here.
+///
+/// What: plants a staging corpus carrying a checkpoint, takes the corpus store
+/// out of the indexer FIRST (the exact state a reordered caller would produce),
+/// runs the promotion, and asserts the promoted live corpus has no checkpoint
+/// while still holding the staged chunks.
+///
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn promotion_clears_the_checkpoint_even_when_the_store_was_released_early() {
+    let root = make_root(&FIXTURE[..2]);
+    let handle = make_handle(root.path(), "resume-promote-order");
+    reindex(&handle).await;
+    let live =
+        crate::service::colocated_storage::colocated_redb_path(root.path()).expect("live path");
+    let checkpoint = valid_checkpoint_json(&handle, "resume-promote-order", root.path());
+    let tmp_path = plant_staging_corpus(root.path(), &live, &checkpoint);
+
+    // The reordered / quarantined shape: no corpus store installed when the
+    // promotion begins, so the clear cannot go through the indexer.
+    let _released = handle.indexer.write().await.take_corpus_store();
+    drop(_released);
+
+    super::corpus_swap::commit_staged_corpus_swap(
+        &handle,
+        &IndexId::new("resume-promote-order"),
+        &tmp_path,
+    )
+    .await;
+
+    let promoted = handle
+        .indexer
+        .read()
+        .await
+        .corpus_store()
+        .expect("the promoted corpus must be installed");
+    assert!(
+        promoted
+            .read_reindex_checkpoint_sync()
+            .expect("read checkpoint")
+            .is_none(),
+        "#4721: a promoted corpus must not carry an in-progress checkpoint, no \
+         matter whether the staging handle was still installed when the \
+         promotion started"
+    );
+    // Guard against a vacuous pass: the promotion must really have happened.
+    assert!(
+        promoted.chunk_count().expect("chunk count") > 0,
+        "the staged corpus must actually have been promoted"
     );
 }

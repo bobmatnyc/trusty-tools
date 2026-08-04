@@ -69,8 +69,13 @@ use crate::core::registry::{IndexHandle, IndexId};
 /// What: compared for exact equality — neither older nor newer records are
 /// accepted. `serde` would happily deserialize a v2 record into this struct by
 /// ignoring unknown fields, so the version check, not the parse, is the gate.
-/// Test: `stale_schema_version_is_discarded`.
-pub(super) const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+/// Test: `stale_schema_version_is_discarded`,
+/// `checkpoints_written_by_the_shipped_v1_format_are_discarded`.
+// #4721: bumped 1 → 2 because [`config_fingerprint`] changed its encoding. A
+// record written by trusty-search 0.42.0 carries a fingerprint computed under
+// the old, ambiguous framing; the bump makes every such record fail the version
+// gate outright rather than relying on the fingerprint comparison to notice.
+pub(super) const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 
 /// Default maximum age of an adoptable checkpoint, in seconds (24 h).
 ///
@@ -222,55 +227,118 @@ pub(super) fn evaluate(
 /// have walked the same files and parsed them the same way. Rather than trying
 /// to reason about which config changes are benign, hash all of them and discard
 /// on any difference.
-/// What: SHA-256 over a canonical, order-stable rendering of the walk filters
+/// What: SHA-256 over a LENGTH-PREFIXED rendering of the walk filters
 /// (`include_paths`, `exclude_globs`, `extensions`, `path_filter`,
 /// `extra_skip_dirs`, `include_docs`, `respect_gitignore`, `follow_links`,
 /// `data_file_max_bytes`) and the pipeline flags that decide which stages run
 /// (`lexical_only`, `skip_kg`, `skip_vector`, `defer_embed`). Collection fields
 /// are sorted so a pure reordering in `indexes.toml` does not force a rebuild.
+///
+/// # Why length-prefixed and not a separator (#4721)
+///
+/// The original encoding was `name=value;` with list elements joined by `,`,
+/// which is not injective: `exclude_globs = ["a", "b"]` and
+/// `exclude_globs = ["a,b"]` both rendered `exclude_globs=a,b;` and therefore
+/// hashed identically, and a value containing `;name=` could forge a field
+/// boundary outright. Two distinct configurations sharing a fingerprint means a
+/// checkpoint is accepted as valid for a configuration it was not built under —
+/// precisely the outcome the record exists to prevent.
+///
+/// No separator byte is safe here. Globs, extensions, and skip-dir names arrive
+/// from `indexes.toml`, so they are arbitrary Rust `String`s — every candidate
+/// delimiter (`,`, `;`, `=`, `\n`, even `\0`) is a legal character inside one.
+/// Paths are worse still: on POSIX only `/` and NUL are reserved, and `/` is
+/// already meaningful inside the value. Length prefixing sidesteps the question
+/// entirely — `len ‖ bytes` is injective for arbitrary byte strings, so no value
+/// can impersonate a boundary regardless of its content. Paths are absorbed as
+/// their raw `OsStr` bytes rather than `to_string_lossy`, which maps every
+/// invalid sequence to the same `U+FFFD` and is therefore lossy in exactly the
+/// direction that creates collisions.
+///
 /// Test: `config_fingerprint_is_order_insensitive`,
-/// `config_fingerprint_changes_with_extensions`.
+/// `config_fingerprint_changes_with_extensions`,
+/// `config_fingerprint_distinguishes_list_element_boundaries`,
+/// `config_fingerprint_cannot_be_forged_across_field_boundaries`.
 pub(super) fn config_fingerprint(handle: &IndexHandle) -> String {
     let mut hasher = Sha256::new();
-    let mut field = |name: &str, value: &str| {
-        hasher.update(name.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
-        hasher.update(b";");
-    };
+    // Domain-separation tag: a fingerprint is only ever compared against another
+    // fingerprint produced by this same encoding version.
+    absorb(&mut hasher, b"trusty-search/reindex-checkpoint/config/v2");
 
-    let sorted = |items: &[String]| {
-        let mut v = items.to_vec();
-        v.sort();
-        v.join(",")
-    };
-    let sorted_paths = |items: &[PathBuf]| {
-        let mut v: Vec<String> = items
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        v.sort();
-        v.join(",")
-    };
-
-    field("include_paths", &sorted_paths(&handle.include_paths));
-    field("exclude_globs", &sorted(&handle.exclude_globs));
-    field("extensions", &sorted(&handle.extensions));
-    field("path_filter", &sorted(&handle.path_filter));
-    field("extra_skip_dirs", &sorted(&handle.extra_skip_dirs));
-    field("include_docs", &handle.include_docs.to_string());
-    field("respect_gitignore", &handle.respect_gitignore.to_string());
-    field("follow_links", &handle.follow_links.to_string());
-    field(
+    absorb_paths(&mut hasher, "include_paths", &handle.include_paths);
+    absorb_list(&mut hasher, "exclude_globs", &handle.exclude_globs);
+    absorb_list(&mut hasher, "extensions", &handle.extensions);
+    absorb_list(&mut hasher, "path_filter", &handle.path_filter);
+    absorb_list(&mut hasher, "extra_skip_dirs", &handle.extra_skip_dirs);
+    absorb_scalar(&mut hasher, "include_docs", &handle.include_docs);
+    absorb_scalar(&mut hasher, "respect_gitignore", &handle.respect_gitignore);
+    absorb_scalar(&mut hasher, "follow_links", &handle.follow_links);
+    absorb_scalar(
+        &mut hasher,
         "data_file_max_bytes",
-        &handle.data_file_max_bytes.to_string(),
+        &handle.data_file_max_bytes,
     );
-    field("lexical_only", &handle.lexical_only.to_string());
-    field("skip_kg", &handle.skip_kg.to_string());
-    field("skip_vector", &handle.skip_vector.to_string());
-    field("defer_embed", &handle.defer_embed.to_string());
+    absorb_scalar(&mut hasher, "lexical_only", &handle.lexical_only);
+    absorb_scalar(&mut hasher, "skip_kg", &handle.skip_kg);
+    absorb_scalar(&mut hasher, "skip_vector", &handle.skip_vector);
+    absorb_scalar(&mut hasher, "defer_embed", &handle.defer_embed);
 
     format!("{:x}", hasher.finalize())
+}
+
+/// Absorb one length-prefixed byte string into the fingerprint (#4721).
+///
+/// Why: the single primitive the injectivity argument in [`config_fingerprint`]
+/// rests on — every value is preceded by its own length, so no value's content
+/// can be mistaken for framing.
+/// What: an 8-byte little-endian length followed by the bytes themselves.
+/// Test: `config_fingerprint_distinguishes_list_element_boundaries`.
+fn absorb(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Absorb a `name` → scalar pair, rendering the scalar via `Display` (#4721).
+fn absorb_scalar(hasher: &mut Sha256, name: &str, value: &impl std::fmt::Display) {
+    absorb(hasher, name.as_bytes());
+    absorb(hasher, value.to_string().as_bytes());
+}
+
+/// Absorb a `name` → sorted string-list pair (#4721).
+///
+/// Why: the element COUNT is absorbed alongside the elements, so a list cannot
+/// be confused with a shorter list whose trailing elements were absorbed as part
+/// of the following field.
+/// What: sorts a copy (order in `indexes.toml` is not meaningful), then absorbs
+/// the count followed by each element length-prefixed.
+/// Test: `config_fingerprint_distinguishes_list_element_boundaries`.
+fn absorb_list(hasher: &mut Sha256, name: &str, items: &[String]) {
+    absorb(hasher, name.as_bytes());
+    let mut sorted: Vec<&str> = items.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for item in sorted {
+        absorb(hasher, item.as_bytes());
+    }
+}
+
+/// Absorb a `name` → sorted path-list pair, byte-exactly (#4721).
+///
+/// Why: `to_string_lossy` collapses every invalid UTF-8 sequence to `U+FFFD`, so
+/// two genuinely different roots could fingerprint identically.
+/// `OsStr::as_encoded_bytes` is lossless and portable.
+/// Test: `config_fingerprint_is_order_insensitive`.
+fn absorb_paths(hasher: &mut Sha256, name: &str, items: &[PathBuf]) {
+    absorb(hasher, name.as_bytes());
+    let mut sorted: Vec<&[u8]> = items
+        .iter()
+        .map(|p| p.as_os_str().as_encoded_bytes())
+        .collect();
+    sorted.sort_unstable();
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for item in sorted {
+        absorb(hasher, item);
+    }
 }
 
 /// Whether resume-from-checkpoint is enabled for this daemon.
@@ -278,17 +346,31 @@ pub(super) fn config_fingerprint(handle: &IndexHandle) -> String {
 /// Why: this path decides whether partial work is adopted, so an operator who
 /// suspects it needs a one-flag kill switch that forces the pre-#3979
 /// always-rebuild behaviour without a downgrade.
-/// What: reads `TRUSTY_REINDEX_RESUME`; enabled unless it is set to `0`,
-/// `false`, `no`, or `off` (case-insensitive). Defaults to enabled — the whole
-/// point of the feature is that the fleet gets it without configuration.
-/// Test: `resume_disabled_by_env`.
+/// What: reads `TRUSTY_REINDEX_RESUME` and defers the decision to
+/// [`resume_enabled_from`]. Defaults to enabled — the whole point of the feature
+/// is that the fleet gets it without configuration.
+/// Test: `resume_kill_switch_disables_adoption` (end to end, in an isolated
+/// child process); the parsing itself is covered by `resume_enabled_from_parses`.
 pub(super) fn resume_enabled() -> bool {
-    match std::env::var("TRUSTY_REINDEX_RESUME") {
-        Ok(v) => !matches!(
+    resume_enabled_from(std::env::var("TRUSTY_REINDEX_RESUME").ok().as_deref())
+}
+
+/// Pure decision for [`resume_enabled`] — no environment access (#4721).
+///
+/// Why: the env read and the parse used to be one function, so the only way to
+/// test the parse was to mutate a process-global variable from a test. Splitting
+/// them means the interesting half is exhaustively testable with no globals, no
+/// `unsafe`, and no cross-test interference at all.
+/// What: `false` only for `0`, `false`, `no`, or `off` (trimmed,
+/// case-insensitive); `true` for anything else, including `None`.
+/// Test: `resume_enabled_from_parses`.
+pub(super) fn resume_enabled_from(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
         ),
-        Err(_) => true,
+        None => true,
     }
 }
 
@@ -297,23 +379,56 @@ pub(super) fn resume_enabled() -> bool {
 /// Why: see [`DEFAULT_CHECKPOINT_MAX_AGE_SECS`].
 /// What: `TRUSTY_REINDEX_CHECKPOINT_MAX_AGE_SECS` when parseable, else the
 /// default. `0` disables the age gate.
-/// Test: `stale_by_age_is_discarded`, `zero_max_age_disables_age_gate`.
+/// Test: `stale_by_age_is_discarded`, `zero_max_age_disables_age_gate`,
+/// `checkpoint_max_age_from_parses`.
 pub(super) fn checkpoint_max_age_secs() -> u64 {
-    std::env::var("TRUSTY_REINDEX_CHECKPOINT_MAX_AGE_SECS")
-        .ok()
+    checkpoint_max_age_from(
+        std::env::var("TRUSTY_REINDEX_CHECKPOINT_MAX_AGE_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse for [`checkpoint_max_age_secs`] — no environment access (#4721).
+///
+/// Why: same reason as [`resume_enabled_from`] — testing the parse must not
+/// require mutating a process-global variable shared with every other test in
+/// the binary.
+/// What: the parsed seconds when the value is a valid `u64`, else the default. A
+/// garbage value therefore keeps the gate rather than silently disabling it.
+/// Test: `checkpoint_max_age_from_parses`.
+pub(super) fn checkpoint_max_age_from(value: Option<&str>) -> u64 {
+    value
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_CHECKPOINT_MAX_AGE_SECS)
 }
 
-/// A staging corpus that passed every adoption check.
+/// A staging corpus that passed every adoption check, together with the open
+/// handle the probe used to check it.
 ///
-/// Why: carries the two things the runner needs from the probe — which file to
-/// adopt, and the done-set to seed the in-process hash cache with.
-/// What: the staging path plus its persisted `(relative_path, sha256)` pairs.
-/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`.
+/// Why: carries the three things the runner needs from the probe — which file to
+/// adopt, the done-set to seed the in-process hash cache with, and (#4721) the
+/// already-open `CorpusStore` itself. The store used to be dropped at the end of
+/// the probe and re-opened moments later by `adopt_staged_corpus`, which was
+/// both wasted work on a multi-GB redb file and an unguarded window: redb takes
+/// an exclusive lock per file, so between the two opens the staging corpus was
+/// owned by nobody and the second open could fail (`DatabaseAlreadyOpen`, a
+/// removed file, a wedged open gate) — and that failure path silently gives up
+/// the resume and writes to the live corpus instead. Handing the handle over
+/// makes the file open exactly once, from validation through adoption.
+///
+/// What: the staging path, the open store, its persisted `(relative_path,
+/// sha256)` pairs, and its chunk count. The store is OWNED (not `Arc`-shared) so
+/// that adopting it moves it onto the indexer — nothing can retain a second
+/// reference that would still hold the file open at promote time, when the
+/// rename requires every handle released.
+/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`,
+/// `super::resume_tests::probe_hands_the_open_staging_corpus_to_the_adoption`.
 pub(super) struct ResumeState {
     /// Path of the staging corpus to adopt (`index.redb.tmp`).
     pub(super) tmp_path: PathBuf,
+    /// The open staging corpus, moved onto the indexer by the adoption (#4721).
+    pub(super) staged: crate::core::corpus::CorpusStore,
     /// The staged file-hash table — the done-set for this resume.
     pub(super) staged_hashes: Vec<(String, String)>,
     /// Chunks already present in the staging corpus (logging / SSE only).
@@ -328,7 +443,10 @@ pub(super) struct ResumeState {
 /// corpus or from the staged one is exactly what resuming changes.
 /// What: resolves the staging path, and — when it exists — opens it, reads and
 /// [`evaluate`]s its checkpoint, and on `Resume` returns the staged file-hash
-/// table. Every failure mode (missing file, unopenable file, absent record,
+/// table together with the still-open handle (#4721: the adoption reuses it
+/// rather than opening the same file a second time). Every discard path drops
+/// the handle before unlinking the file it refers to. Every failure mode
+/// (missing file, unopenable file, absent record,
 /// unparseable record, any mismatch) logs a reason and returns `None`, which
 /// leaves the caller on the untouched pre-#3979 path. On a `Discard` the stale
 /// staging file is removed so it cannot be re-evaluated on every subsequent run;
@@ -376,14 +494,17 @@ pub(super) async fn probe_resume(
         }
     };
 
+    // #4721: the store is handed BACK out of the blocking task rather than
+    // dropped here, so the adoption below inherits this one open handle instead
+    // of re-opening the same redb file (see `ResumeState`).
     let read = tokio::task::spawn_blocking(move || {
         let raw = store.read_reindex_checkpoint_sync()?;
         let hashes = store.load_file_hashes()?;
         let chunks = store.chunk_count().unwrap_or(0);
-        Ok::<_, anyhow::Error>((raw, hashes, chunks))
+        Ok::<_, anyhow::Error>((store, raw, hashes, chunks))
     })
     .await;
-    let (raw, staged_hashes, staged_chunks) = match read {
+    let (store, raw, staged_hashes, staged_chunks) = match read {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             tracing::warn!(
@@ -408,6 +529,8 @@ pub(super) async fn probe_resume(
     let Some(raw) = raw else {
         // A staging file with no checkpoint record: either pre-#3979 leftovers
         // or a `force` run's staging (force never checkpoints). Not adoptable.
+        // #4721: release the handle before unlinking the file it holds.
+        drop(store);
         discard_staging(
             &tmp_path,
             index_id,
@@ -419,6 +542,7 @@ pub(super) async fn probe_resume(
     let found: ReindexCheckpoint = match serde_json::from_slice(&raw) {
         Ok(c) => c,
         Err(e) => {
+            drop(store); // #4721: release before discarding the file.
             discard_staging(
                 &tmp_path,
                 index_id,
@@ -431,6 +555,7 @@ pub(super) async fn probe_resume(
 
     match evaluate(&found, current, checkpoint_max_age_secs()) {
         ResumeDecision::Discard { reason } => {
+            drop(store); // #4721: release before discarding the file.
             discard_staging(&tmp_path, index_id, &reason).await;
             None
         }
@@ -448,6 +573,8 @@ pub(super) async fn probe_resume(
             );
             Some(ResumeState {
                 tmp_path,
+                // #4721: hand the validated, still-open handle to the adoption.
+                staged: store,
                 staged_hashes,
                 staged_chunks,
             })

@@ -48,6 +48,28 @@
 //!   produces a Developer-ID-signed `.app` directly); this table entry covers
 //!   the fallback case of a bare `cargo install --path crates/trusty-mpm-gui`.
 //!
+//! - #4277: `trusty-agents` joins as its own signable set ([`AGENTS_SET`]),
+//!   same cdhash-instability class as #2721/#873 — the `tagent` CLI binary
+//!   (`crates/trusty-agents`, `[[bin]] name = "tagent"`) is ad-hoc/linker-signed
+//!   by every `cargo install` and re-prompts a macOS TCC category on every
+//!   rebuild. `tagent` gets its own set (not folded into [`MPM_SET`]) because
+//!   it is an entirely separate crate/binary with no dependency on trusty-mpm's
+//!   install path. The desktop shell, `Trusty Agents.app`
+//!   (`crates/trusty-agents/ui/src-tauri`), is DELIBERATELY handled
+//!   differently from the sibling `trusty-mpm-gui`/`trusty-code-gui` pattern:
+//!   rather than hardcoding `bundle.macOS.signingIdentity` in `tauri.conf.json`
+//!   (which hard-fails `cargo tauri build` on any machine without that exact
+//!   cert — see `docs/reference/common-pitfalls.md`), `tauri.conf.json` is left
+//!   with no `signingIdentity` set at all, and
+//!   `scripts/install-trusty-agents-signed.sh` exports `APPLE_SIGNING_IDENTITY`
+//!   (Tauri's own bundler env-var override) only around the build/sign step —
+//!   present → Developer-ID-signed bundle; absent → Tauri's ad-hoc default,
+//!   fail-soft for free. This module/table only covers the bare `tagent`
+//!   binary via this crate's flat-file `codesign` path, which does not apply
+//!   to a directory bundle; the `.app` bundle is signed by Tauri's own
+//!   bundler (or the install script's best-effort `codesign --deep` pass over
+//!   an already-built bundle) instead — see that script for both paths.
+//!
 //! What: [`binaries_for_set`] and [`codesign_identifier`] are both derived from
 //! the single [`SIGNABLE_BINARIES`] table (binary, set, identifier) so set
 //! membership and identifier mapping can never drift apart again.
@@ -82,6 +104,21 @@ pub const SEARCH_SET: &str = "trusty-search";
 /// data from other apps" prompt still recurred. Both binaries must carry a
 /// stable Developer-ID `--identifier` for the grant to survive.
 pub const MPM_SET: &str = "trusty-mpm";
+
+/// The `trusty-agents` signable set: the `tagent` CLI/daemon binary
+/// (`cargo install --path crates/trusty-agents`).
+///
+/// Why (#4277): Same cdhash-instability class as #873/#2721 — every
+/// `cargo install` mints a fresh ad-hoc identity for `tagent`, so macOS
+/// re-prompts a TCC category on every rebuild. Kept as its own set (rather
+/// than folded into [`MPM_SET`]) since `trusty-agents` is an independent
+/// crate with its own install path. The `Trusty Agents.app` desktop shell is
+/// NOT part of this table — it is a directory bundle signed via Tauri's own
+/// `APPLE_SIGNING_IDENTITY` build-time env var (set by
+/// `scripts/install-trusty-agents-signed.sh`), not this module's flat-file
+/// `codesign` path — see the module doc's #4277 note for why that's a
+/// deliberate deviation from the `trusty-mpm-gui` precedent.
+pub const AGENTS_SET: &str = "trusty-agents";
 
 /// The master table: every signable binary → (its set, its codesign identifier).
 ///
@@ -124,6 +161,10 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // own bundler and this fallback for a bare `cargo install`ed binary) agree
     // on one designated requirement.
     ("trusty-mpm-gui", MPM_SET, "com.trusty.trusty-mpm.gui"),
+    // `tagent` (#4277): the trusty-agents CLI/daemon binary, installed via
+    // `cargo install --path crates/trusty-agents`. Own set ([`AGENTS_SET`]) —
+    // see that constant's doc for why it is not folded into `MPM_SET`.
+    ("tagent", AGENTS_SET, "com.trusty.tagent"),
 ];
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
@@ -190,17 +231,20 @@ pub fn codesign_identifier(binary: &str) -> &'static str {
 /// bug #873/#2558 fix) depends on `--identifier` + Team ID, NOT on
 /// `--options runtime`, so this split does not reintroduce the identifier-drift
 /// problem — it only affects notarization eligibility and dylib-validation
-/// strictness.
+/// strictness. #4277: `trusty-agents` (`tagent`) loads no dylibs either (no
+/// ONNX/embedding runtime — that's trusty-search/trusty-embedderd's job), so
+/// it joins [`MPM_SET`] in always being hardened, same reasoning.
 ///
 /// What: `explicit` (the operator directly ran `tctl sign <target>`, or the
 /// wrapper script which shells out to it) → always `true`. Automatic
-/// (`tctl install`'s fail-soft hook, `explicit = false`) → `true` only for
-/// [`MPM_SET`]; `false` for [`SEARCH_SET`] until ONNX-under-Hardened-Runtime
-/// is verified (see the tracking issue referenced in PR #2657).
+/// (`tctl install`'s fail-soft hook, `explicit = false`) → `true` for
+/// [`MPM_SET`] and [`AGENTS_SET`]; `false` for [`SEARCH_SET`] until
+/// ONNX-under-Hardened-Runtime is verified (see the tracking issue referenced
+/// in PR #2657).
 ///
 /// Test: `tests::hardened_runtime_policy`.
 pub fn use_hardened_runtime(set: &str, explicit: bool) -> bool {
-    explicit || set == MPM_SET
+    explicit || set == MPM_SET || set == AGENTS_SET
 }
 
 /// Parse the Developer ID Application identity out of `security
@@ -506,7 +550,7 @@ impl std::fmt::Display for SignSetError {
         match self {
             SignSetError::UnknownSet(set) => write!(
                 f,
-                "unknown signable set '{set}' (expected 'trusty-search' or 'trusty-mpm')"
+                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', or 'trusty-agents')"
             ),
             SignSetError::NoCertificate => {
                 write!(f, "no Developer ID Application certificate found")

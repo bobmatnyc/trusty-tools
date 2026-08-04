@@ -20,6 +20,15 @@ fn binaries_for_set_covers_search_and_mpm() {
     );
 }
 
+/// Why (#4277): `trusty-agents` is its own signable set, distinct from
+/// `trusty-mpm` — see [`AGENTS_SET`]'s doc for why it isn't folded in.
+/// What: Asserts `AGENTS_SET` resolves to exactly `["tagent"]`.
+/// Test: This is the test.
+#[test]
+fn binaries_for_set_covers_agents() {
+    assert_eq!(binaries_for_set(AGENTS_SET), vec!["tagent"]);
+}
+
 /// Why: An unrecognised set name must not silently sign nothing without
 /// signal — callers detect "unknown set" via an empty result.
 /// What: Asserts a bogus name returns an empty `Vec`.
@@ -54,6 +63,7 @@ fn identifier_map_covers_all_signable_binaries() {
         codesign_identifier("trusty-mpm-gui"),
         "com.trusty.trusty-mpm.gui"
     );
+    assert_eq!(codesign_identifier("tagent"), "com.trusty.tagent");
 }
 
 /// Why: PR #2657 review MEDIUM — with set membership and identifier now
@@ -66,7 +76,7 @@ fn identifier_map_covers_all_signable_binaries() {
 /// Test: This is the test.
 #[test]
 fn every_set_member_has_a_real_identifier() {
-    for set in [SEARCH_SET, MPM_SET] {
+    for set in [SEARCH_SET, MPM_SET, AGENTS_SET] {
         for binary in binaries_for_set(set) {
             assert_ne!(
                 codesign_identifier(binary),
@@ -79,16 +89,19 @@ fn every_set_member_has_a_real_identifier() {
 
 /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
 /// per-context split — pin the truth table so a future edit cannot
-/// silently flip either preserved pre-PR behavior.
-/// What: explicit=true is always hardened (both sets); explicit=false is
-/// hardened only for MPM_SET.
+/// silently flip either preserved pre-PR behavior. #4277 added `AGENTS_SET`
+/// to the always-hardened side (no dylib-loading concern, same as MPM_SET).
+/// What: explicit=true is always hardened (all sets); explicit=false is
+/// hardened only for MPM_SET and AGENTS_SET.
 /// Test: This is the test.
 #[test]
 fn hardened_runtime_policy() {
     assert!(use_hardened_runtime(SEARCH_SET, true));
     assert!(use_hardened_runtime(MPM_SET, true));
+    assert!(use_hardened_runtime(AGENTS_SET, true));
     assert!(!use_hardened_runtime(SEARCH_SET, false));
     assert!(use_hardened_runtime(MPM_SET, false));
+    assert!(use_hardened_runtime(AGENTS_SET, false));
 }
 
 /// Why: The migration notice must actually fire when the on-disk
