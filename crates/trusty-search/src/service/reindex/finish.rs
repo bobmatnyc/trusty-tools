@@ -102,6 +102,17 @@ pub(super) struct FinishCtx {
     pub(super) quarantine: Option<ReindexQuarantine>,
     pub(super) mem_limit: Option<u64>,
     pub(super) force: bool,
+    /// Issue #3979: this run adopted an interrupted run's staging corpus.
+    ///
+    /// Why: the chunks it inherited were embedded into the previous run's
+    /// STAGED HNSW snapshot, which was never promoted — so the live snapshot
+    /// this daemon booted from does not contain their vectors. The staged
+    /// snapshot is deliberately not adopted (it is written by the periodic
+    /// persister on its own schedule, so it is not transactionally tied to the
+    /// staged corpus); instead this flag forces the vector catch-up pass that
+    /// already exists for `defer_embed`, which embeds exactly the chunks the
+    /// vector store is missing.
+    pub(super) resumed: bool,
 }
 
 /// Post-batch-loop completion: prune, KG rebuild, poller teardown, and events.
@@ -140,6 +151,7 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         quarantine,
         mem_limit,
         force,
+        resumed,
     } = ctx;
 
     let BatchTotals {
@@ -449,8 +461,15 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     // Issue #923: spawn the background embedding job if deferred.
     // Issue #2984 Phase 1: never spawn it for a skip_vector index — the
     // embedder must never run, not just be deferred.
+    // #3979: `|| resumed` — a resumed run's inherited chunks have no vector in
+    // the live HNSW snapshot (see `FinishCtx::resumed`), so a non-defer_embed
+    // index must also run the catch-up or its semantic lane would be short
+    // exactly those chunks until the next full reindex. The pass embeds only
+    // what `VectorStore::contains_many` reports missing, so on a non-resumed
+    // run this condition is unchanged and on a resumed one it is near-free
+    // when nothing is actually missing.
     let has_embedder = handle.indexer.read().await.has_embedder();
-    if defer_embed && !aborted_memory && has_embedder && !handle.skip_vector {
+    if (defer_embed || resumed) && !aborted_memory && has_embedder && !handle.skip_vector {
         // Issue #3748 slice A review finding 2: key the size-ordered
         // deferred-embed queue on the PENDING (un-embedded) chunk delta, not
         // `chunk_count()`'s total corpus size. `finish_reindex` runs after

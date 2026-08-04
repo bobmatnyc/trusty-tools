@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use super::batch::{
     commit_parsed_and_finalize, prepare_and_parse_batch, BatchCtx, REINDEX_BATCH_SIZE,
 };
+use super::checkpoint;
 use super::corpus_swap::begin_staged_corpus_swap;
 use super::finish::{BatchTotals, FileHashes, FinishCtx};
 use super::guard::ReindexTerminationGuard;
@@ -202,6 +203,26 @@ pub(super) async fn run_reindex(
     }
     progress.total_files.store(total, Ordering::Release);
 
+    // Issue #3979: before touching the hash cache, decide whether an
+    // interrupted run left an adoptable staging corpus. This has to happen
+    // here — ahead of the hash-cache branch below — because resuming changes
+    // WHERE the done-set comes from: the staged corpus rather than the live
+    // one. Gated on `has_corpus_store()`, which by the #4122 load-bearing
+    // invariant (`corpus_open_failed ⇒ corpus == None`) also guarantees a
+    // write-quarantined index never reaches this path.
+    //
+    // A `force` run neither writes nor consumes a checkpoint: it stages an
+    // EMPTY corpus and skips the prune pass, so a resumed force run could keep
+    // chunks for files deleted between the crash and the resume — drift a
+    // clean force run would not have. See `checkpoint`'s module docs.
+    let has_durable_corpus = handle.indexer.read().await.has_corpus_store();
+    let checkpoint_for_run = (!force && staging::should_stage(has_durable_corpus))
+        .then(|| checkpoint::ReindexCheckpoint::for_run(&handle, &index_id, &canonical_root));
+    let resume = match checkpoint_for_run.as_ref() {
+        Some(cp) => checkpoint::probe_resume(&handle, &index_id, &canonical_root, cp).await,
+        None => None,
+    };
+
     // Issues #840 / #662: load the persisted hash cache BEFORE emitting
     // the `start` event so `hashes_loaded` is available for the event payload.
     let hashes: FileHashes = hashes_for(&index_id);
@@ -215,7 +236,14 @@ pub(super) async fn run_reindex(
     // move changes the root prefix only. Do NOT clear the hash cache on a
     // root move for colocated indexes.
     let is_colocated = crate::service::colocated_storage::has_colocated_storage(&canonical_root);
-    let hashes_loaded: usize = if force {
+    let hashes_loaded: usize = if let Some(state) = resume.as_ref() {
+        // #3979: on a resume the STAGED corpus is the authority for what is
+        // already done, so the cache is replaced by its hash table rather than
+        // merged with the live one. A live-cache entry with no matching rows in
+        // the staging corpus would let the batch loop skip a file whose chunks
+        // are absent from the corpus about to be promoted.
+        checkpoint::seed_hash_cache_from_staging(&hashes, &state.staged_hashes)
+    } else if force {
         hashes.clear();
         hash_cache::clear_persisted(&handle).await;
         0
@@ -274,6 +302,10 @@ pub(super) async fn run_reindex(
             "lexical_only": handle.lexical_only,
             "hashes_loaded": hashes_loaded,
             "defer_embed": effective_defer_embed,
+            // #3979: tell the CLI/operator this run is continuing an
+            // interrupted one, and how much work it inherited.
+            "resumed": resume.is_some(),
+            "resumed_chunks": resume.as_ref().map(|r| r.staged_chunks).unwrap_or(0),
         }))
         .await;
 
@@ -298,7 +330,15 @@ pub(super) async fn run_reindex(
     // Issue #28, Phase 4 + #603: stage the rebuilt corpus.
     let corpus_swap_tmp: Option<PathBuf> =
         if staging::should_stage(handle.indexer.read().await.has_corpus_store()) {
-            match begin_staged_corpus_swap(&handle, &index_id, force).await {
+            match begin_staged_corpus_swap(
+                &handle,
+                &index_id,
+                force,
+                resume.as_ref(),
+                checkpoint_for_run.as_ref(),
+            )
+            .await
+            {
                 Ok(path) => path,
                 Err(e) => {
                     tracing::error!(
@@ -552,6 +592,9 @@ pub(super) async fn run_reindex(
         quarantine,
         mem_limit,
         force,
+        // #3979: a resumed run inherits chunks whose vectors only ever reached
+        // the staged HNSW snapshot, so `finish` must run a vector catch-up.
+        resumed: resume.is_some(),
     };
     let batch_totals = BatchTotals {
         walk_ms,
