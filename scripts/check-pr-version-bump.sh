@@ -44,8 +44,32 @@
 #   fail-closed authority, so a registry outage costs late detection (today's
 #   status quo) instead of blocking every PR in the repo.
 #
+# ATTRIBUTION (issue #4688). `PR_VERSION_BUMP_BASE` must name the base BRANCH
+#   as it exists NOW (`origin/main`), never a frozen commit SHA. The gate blames
+#   whatever `git merge-base BASE HEAD`..HEAD contains, so the base ref decides
+#   which commits are "the PR's". `github.event.pull_request.base.sha` — what
+#   this gate originally used — is the base tip recorded when the PR was last
+#   opened/synchronized, and it goes stale the moment anything else merges.
+#   Meanwhile `actions/checkout` resolves a `pull_request` event to
+#   `refs/pull/N/merge`, whose first parent is CURRENT main. Pair a stale base
+#   with a current merge ref and the diff spans every commit main took in
+#   between, so the gate reports another author's crate as this PR's drift.
+#
+#   That is not hypothetical: run 30839255128 failed PR #4666 — a docs-only
+#   change to two files under docs/specs/ — with
+#   `[FAIL] trusty-common 0.27.0`, because its merge base resolved to
+#   4e7d7073, ~20 commits behind main. Rebasing "fixed" it only by moving the
+#   base past the innocent commits. Against the live branch tip the merge base
+#   IS main's tip (the merge ref's own first parent), so the diff is exactly
+#   what the PR contributes to the merged result — no more, no less.
+#
+#   Keeping the MERGE REF as HEAD is deliberate and separate from the base
+#   question: it evaluates the post-merge tree, so a PR that touches
+#   `crates/X/src/**` while main independently bumps X reads the bumped version
+#   and passes, which checking the raw PR head would get wrong.
+#
 # Usage:
-#   PR_VERSION_BUMP_BASE=<ref> bash scripts/check-pr-version-bump.sh
+#   PR_VERSION_BUMP_BASE=<base-branch-ref> bash scripts/check-pr-version-bump.sh
 #
 # Exit: 0 when every touched crate is clear (or only warnings were raised);
 #   1 when at least one crate changed source under an already-published version,
@@ -212,6 +236,14 @@ main() {
         echo "       published on crates.io, and Cargo.toml was not bumped. Merging this"
         echo "       turns main's 'Version parity' workflow red (issues #4421, #3366)."
         echo "       Fix: bump ${manifest}'s version (patch/minor/major per the change)."
+        # Name the commits instead of asserting the PR owns them (#4688). A
+        # blamed author previously had no way to tell "my change" from "main's
+        # change swept in by a stale base" without bisecting by hand; #4666 cost
+        # exactly that. If these subjects are not yours, the base ref is wrong —
+        # see the ATTRIBUTION note in this file's header.
+        echo "       Commits in ${merge_base:0:10}..HEAD touching crates/${crate}/src/:"
+        git log --no-merges --format='         %h %s' \
+          "${merge_base}..HEAD" -- "crates/${crate}/src/" || true
         failures=$((failures + 1))
         ;;
       *)
