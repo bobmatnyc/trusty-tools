@@ -479,6 +479,64 @@ pub(crate) fn has_file_write_redirection(command: &str) -> bool {
     false
 }
 
+/// Whether EVERY segment of `command` is an allowlisted persistence git call.
+///
+/// Why (#4837 review, BLOCK 1(b)): the agent-cost hard stop needs an escape
+/// hatch that lets a stopped agent commit and push its work without letting it
+/// keep working. That question — "what does this Bash command actually do?" —
+/// is this module's domain, and this module already owns the two hard parts of
+/// answering it: composition splitting ([`split_shell_segments`]) and
+/// git-subcommand resolution through global flags
+/// ([`shell_lex::git_subcommand`], which sees past `git -C <path> commit`).
+/// Re-deriving either in the cost guard would be a second implementation of a
+/// safety-critical parser, so the classifier lives here and the *policy* (which
+/// subcommands, which tools) stays in [`trusty_mpm::core::agent_cost`].
+///
+/// This is an ALLOW-list and it is deliberately conservative in the opposite
+/// direction from the rest of this module: the rest over-denies to avoid
+/// missing a prohibited command, and so does this — an unrecognised segment
+/// means the whole command is not persistence, and the agent stays stopped.
+/// What: `true` only when the command is non-empty, contains no command
+/// substitution (`$(`, `` ` ``) and no file-write redirection, and every
+/// composition segment resolves to `git <sub>` with `<sub>` in
+/// [`PERSISTENCE_GIT_SUBCOMMANDS`]. A single non-git or non-allowlisted
+/// segment fails the whole command, so `git commit -m x && cargo test` is not
+/// persistence.
+/// Test: `command_is_persistence_only_accepts_commit_and_push`,
+/// `command_is_persistence_only_sees_past_git_global_flags`,
+/// `command_is_persistence_only_rejects_smuggled_work`,
+/// `command_is_persistence_only_rejects_substitution_and_redirection`.
+pub(crate) fn command_is_persistence_only(command: &str) -> bool {
+    use trusty_mpm::core::agent_cost::PERSISTENCE_GIT_SUBCOMMANDS;
+
+    if command.trim().is_empty() {
+        return false;
+    }
+    // A substitution can run anything (`git commit -m "$(cargo build)"`), and
+    // a redirection can write anywhere. Neither is needed to commit and push,
+    // so reject outright rather than recursing into them.
+    if command.contains("$(") || command.contains('`') || has_file_write_redirection(command) {
+        return false;
+    }
+    let segments = split_shell_segments(command);
+    let mut saw_one = false;
+    for segment in segments {
+        if segment.trim().is_empty() {
+            // A trailing separator leaves an empty tail; ignore it, but it
+            // cannot be the only thing in the command (guarded above).
+            continue;
+        }
+        saw_one = true;
+        let Some(sub) = shell_lex::git_subcommand(segment) else {
+            return false;
+        };
+        if !PERSISTENCE_GIT_SUBCOMMANDS.contains(&sub.as_str()) {
+            return false;
+        }
+    }
+    saw_one
+}
+
 /// Deny reason for `git worktree add` targeting a denylisted temp root.
 ///
 /// Why (issue #3977, filed as the worktree-hygiene follow-up to #3955): a

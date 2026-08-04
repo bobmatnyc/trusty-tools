@@ -849,3 +849,91 @@ fn evaluate_worktree_add_command_normalizes_dot_dot_traversal() {
         Some(WORKTREE_TMP_REASON)
     );
 }
+
+// ── #4837 review BLOCK 1(b): the agent-cost stop's persistence escape hatch ──
+
+#[test]
+fn command_is_persistence_only_accepts_commit_and_push() {
+    // Exactly the sequence a stopped agent needs to not lose its work.
+    for cmd in [
+        "git add -A",
+        "git commit -m 'fix: something'",
+        "git push origin HEAD",
+        "git status --short",
+        "git diff --stat",
+        // Composed, but every segment is still persistence.
+        "git add -A && git commit -m x && git push",
+        "git status; git diff",
+        // A trailing separator leaves an empty tail segment.
+        "git status && ",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to count as persistence"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_sees_past_git_global_flags() {
+    // Agents commit from a worktree with `git -C <path> …` constantly; the
+    // escape hatch is useless if it cannot see the subcommand behind that.
+    for cmd in [
+        "git -C /repo/wt commit -m x",
+        "git --git-dir=/repo/.git --work-tree=/repo add -A",
+        "git -c user.name=bot commit -m x",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to resolve past its global flags"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_smuggled_work() {
+    // The whole risk of an allowlist: one allowed verb dragging real work in
+    // behind it. Every one of these must fail the WHOLE command.
+    for cmd in [
+        "git commit -m x && cargo test",
+        "cargo test && git commit -m x",
+        "git commit -m x | tee log",
+        "git commit -m x; rm -rf /",
+        // Not persistence: these mutate the tree or fetch work.
+        "git checkout main",
+        "git reset --hard",
+        "git worktree add /tmp/x",
+        "git rebase -i HEAD~3",
+        // Not git at all.
+        "echo hi",
+        "",
+        "   ",
+        // `git` reached only through sudo-with-flag, which the resolver
+        // refuses to parse — unresolvable must mean "not persistence".
+        "sudo -u bob git commit -m x",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as non-persistence"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_substitution_and_redirection() {
+    // A substitution runs arbitrary code inside an "allowed" segment, and a
+    // redirection writes arbitrary files. Neither is needed to commit.
+    for cmd in [
+        "git commit -m \"$(cargo build 2>&1)\"",
+        "git commit -m `date`",
+        "git status > /tmp/out.txt",
+        "git diff >> notes.md",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected"
+        );
+    }
+    // A discard sink is not a file write, so it stays allowed.
+    assert!(command_is_persistence_only("git status 2>/dev/null"));
+}

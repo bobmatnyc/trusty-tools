@@ -353,10 +353,13 @@ pub struct MpmConfig {
 
     /// `[agent_cost]` — per-subagent context ceiling (#4837).
     ///
-    /// Absent section → guard ON with the defaults derived from #4837's
-    /// evidence table (warn 250k, stop 400k). Set `enabled = false`, or
-    /// `max_tokens = 0`, to disable enforcement. The section type lives in
-    /// [`crate::core::agent_cost`] alongside the pure policy it configures.
+    /// Absent section → WARN-ONLY: warn at 250k, no hard stop (`max_tokens =
+    /// 0`). The stop is opt-in because the measured transcript distribution
+    /// (p50 136k / p90 268k / p95 323k, 3.0% at or above 400k) puts a 400k
+    /// ceiling only ~1.24x above p95 — it would deny roughly one dispatch in
+    /// 33. Set `max_tokens` to enable it; set `enabled = false` to silence the
+    /// warning too. The section type lives in [`crate::core::agent_cost`]
+    /// alongside the pure policy it configures.
     pub agent_cost: crate::core::agent_cost::AgentCostConfig,
 }
 
