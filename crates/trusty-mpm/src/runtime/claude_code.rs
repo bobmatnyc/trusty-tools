@@ -345,7 +345,19 @@ fn spawn_command(
 /// "trusty-mpm must never modify the target project's CLAUDE.md" a hard
 /// constraint, so a write failure here means the session runs without the
 /// injected PM system prompt rather than falling back to a different carrier.
-/// Test: `build_prompt_file_writes_resolved_prompt_for_project`.
+///
+/// #4752: this is also where the framework-level compiled prompt
+/// (`INSTRUCTIONS-COMPILED.md`) is refreshed. This function is the ONE seam all
+/// three spawn paths share — `spawn`, the isolated-spawn variant, and
+/// `spawn_resume` — and it materializes the exact bytes handed to
+/// `--append-system-prompt-file`. `resume_managed` never calls
+/// `prepare_session*` on its healthy path, so writing the compiled file here is
+/// what covers resume, guided-resume and crash-recovery launches; writing it
+/// from `prompt` (rather than recomposing) is what makes the on-disk artifact
+/// the SAME text as the running session's prompt by construction.
+/// Test: `build_prompt_file_writes_resolved_prompt_for_project`,
+/// `build_prompt_file_refreshes_the_compiled_prompt`,
+/// `build_prompt_file_compiled_write_failure_does_not_block_the_spawn`.
 fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
@@ -353,6 +365,27 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
         None,
         native,
     );
+
+    // #4752: refresh `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` from the
+    // very string about to be passed to `--append-system-prompt-file`.
+    //
+    // Best-effort ON PURPOSE, matching this function's existing contract: the
+    // spawn must not be blocked by an inspection-artifact write. Making it fatal
+    // here would trade a stale debugging aid for a session that fails to launch
+    // — the same inverted priority that put an earlier revision's `?` upstream
+    // of the MCP injectors in `prepare_session_inner`.
+    let compiled = crate::core::paths::FrameworkPaths::default().instructions_compiled();
+    if let Err(err) =
+        crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &prompt)
+    {
+        tracing::warn!(
+            project = %project_dir.display(),
+            path = %compiled.display(),
+            "failed to refresh the compiled PM prompt (non-fatal; the session still \
+             launches with the prompt file below): {err}"
+        );
+    }
+
     let file = crate::core::model_inject::write_prompt_file(&prompt);
     if file.is_none() {
         tracing::warn!(

@@ -1168,29 +1168,63 @@ problem is that two roles share one name.
   can refresh it, yet `build_instructions` would keep reading it. `tm install`
   removes it (`remove_stale_bundled_instructions`).
 
-### 10.3 Ordering: current before launch, and blocking
+### 10.3 Ordering: what is actually guaranteed
 
 **Ruling (2026-08-04):** `INSTRUCTIONS-COMPILED.md` must be fully written and
 current **before** Claude Code launches — not concurrently, not best-effort, not
 eventually consistent with the next `tm install`.
 
-Before this change, the compiled artifact was written at **install time only**
-(`commands/install.rs::install`). The launch path never refreshed it, so it went
-stale the moment a project's `CLAUDE.md` overrides changed.
+Before this change the artifact was written at **install time only**
+(`commands/install.rs::install`), so it went stale the moment a project's
+`CLAUDE.md` overrides changed.
 
-After: `session_launch::prepare_session_inner` writes the prompt to
-`fw.instructions_compiled()` immediately after stashing
-`.trusty-mpm/last-instructions.md` and before returning. The write is **fatal**,
-not best-effort — a failure aborts the preparation with `PrepError::Io`. Every
-caller spawns `claude` only after `prepare_session` returns `Ok`, so "prepare
-returned" **is** "the compiled prompt on disk is the prompt this session will
-run with".
+**What the code now does, stated precisely** (an earlier revision of this
+section claimed a guarantee the code does not make; that claim is retracted):
 
-**Cost.** The launch write reuses the `resolved_prompt` string the composer has
-already built for `--append-system-prompt-file` — the same text just written to
-the project stash. It is one additional `fs::write`, with **no second
-composition pass**. If a future change introduces one, eliminate the extra
-composition; do not relax the ordering.
+1. `session_launch::prepare_session_inner` writes the prompt to
+   `fw.instructions_compiled()` as its **last** step and returns `Err` on
+   failure.
+2. `runtime::claude_code::build_prompt_file` writes it again, from the exact
+   bytes it hands to `--append-system-prompt-file`, immediately before the spawn
+   command is built.
+
+**(2) is what actually makes the guarantee hold**, for two reasons. First,
+`prepare_session`'s `Err` does **not** block any launch: since #2149 every
+production caller treats a prep failure as non-fatal and spawns anyway —
+`commands/launch.rs::connect`, the managed-clone block in `commands/launch.rs`,
+`commands/meta/launch.rs`,
+`commands/session/start.rs::start_session_in_place`,
+`client/http_client/session_connect.rs`,
+`daemon/managed_routes/lifecycle.rs::prepare_inproject_session`, and
+`provisioner/workspace.rs`. The only caller that propagates,
+`core/standalone/load.rs::run_prepare_session`, spawns no `claude` at all, so
+the fatality's sole live effect is hard-failing `tm load <alias>`. Second,
+`resume_managed` never calls `prepare_session*` on its healthy path
+(`resume_self_heal` → `ensure_status_line` → `ensure_deployment_complete` →
+`spawn_resume`), so resume, guided-resume and crash-recovery launches are
+reached only by (2).
+
+Because (2) writes from the same string it passes to the spawn, the artifact is
+current **by construction** rather than by policy. The compiled write there is
+deliberately **best-effort**: it is an inspection artifact, and a failure must
+not cost the session its actual system prompt.
+
+**Position of (1) is load-bearing and must stay last.** An earlier revision
+placed it immediately after the `last-instructions.md` stash, where its `?` sat
+upstream of `write_output_style`, `write_project_hooks`, the workspace trust
+pre-seed, and all four MCP injectors — including `inject_trusty_mpm_mcp` /
+`inject_trusty_review_mcp`, the content-pinning defense against the
+#3918/#3950 MCP name-squatting class. Combined with the non-fatal callers above,
+a failed compiled write would have skipped those injectors **and still
+launched** — a security regression introduced by the fix itself. Pinned by
+`compiled_write_failure_does_not_skip_the_mcp_injectors`.
+
+**Cost.** Both writes reuse an already-composed string; neither adds a
+composition pass. Not benchmarked — no no-regression claim is made.
+
+**Open:** making the spawn genuinely conditional on the write would mean
+reversing #2149's deliberate non-fatal design at seven call sites. Not done
+here; see §10.6.
 
 ### 10.4 Corrections to earlier characterizations of #4752
 
@@ -1228,3 +1262,36 @@ The scaffolding path itself is the `tm-init` skill, which is agent-driven prose
 `<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` marked-block format. Teaching it to
 author marked section-override blocks is unbuilt capability, and where the
 pointer lives is an open owner decision.
+
+### 10.6 Open for owner ruling: launch-blocking, and the global-path collision
+
+Two questions raised by the #4759 review are deliberately **not** answered by
+this change. Both alter a contract the owner should rule on.
+
+**(a) Should a failed compiled write block the spawn?** The owner's requirement
+said the write "blocks" the launch. It does not, and cannot without reversing
+#2149, which made prep failure non-fatal at seven call sites on purpose. Making
+it fatal would mean a transient disk error prevents sessions from launching at
+all — a worse failure than a stale inspection file. §10.3 documents the actual
+guarantee instead: the artifact is current by construction because the spawn
+seam writes it from the string it is passing. Recommendation: accept the
+by-construction guarantee; do not reverse #2149.
+
+**(b) Should the artifact be per-project or per-session?** `INSTRUCTIONS-COMPILED.md`
+is one global file. `FrameworkPaths::for_managed_project` deliberately keeps
+`framework` at the shared managed root (`for_managed_project_keeps_framework_source_at_managed_root`),
+and `for_managed_workspace` resolves it from the real `$HOME`. So `tm install`
+writes the BUNDLED assembly and every launch writes that project's RESOLVED
+prompt to the same path, and concurrent sessions across projects overwrite each
+other. The file answers "the most recent prepare or install on this machine",
+not "what is MY session running" — the question it exists to answer. #383's
+collision was narrowed, not eliminated: the writers now agree on content *kind*
+but still race.
+
+The project-local `.trusty-mpm/last-instructions.md` already answers the
+per-session question correctly and is written on the same paths. Options:
+scope the compiled file per project (e.g. `framework/compiled/<slug>.md`),
+scope it per session, or keep it global and document it explicitly as
+"most recent launch" while pointing at `last-instructions.md` for the
+per-session answer. Recommendation: per-project scoping, since the artifact's
+stated purpose is the per-session question. Not built pending the ruling.
