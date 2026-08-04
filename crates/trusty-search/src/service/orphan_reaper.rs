@@ -261,6 +261,32 @@ pub fn classify_ambiguous_root(
     }
 }
 
+/// Render a duration for an operator-facing log line (#4095 review follow-up).
+///
+/// Why: the reaper's messages divided by 86,400 to print days, so every
+/// sub-day duration rendered as a flat "0 day(s)" — including the default test
+/// grace and, most misleadingly, a DISABLED terminal path. A log line that
+/// says "removed in 0 days" when removal is off is worse than no line at all.
+/// What: picks the largest unit that yields a non-zero value (day → hour →
+/// minute → second) and pluralises it. Deliberately coarse: this is a human
+/// hint, not a precise countdown.
+/// Test: `render_duration_secs_picks_a_sensible_unit`.
+fn render_duration_secs(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    let (value, unit) = if secs >= DAY {
+        (secs / DAY, "day")
+    } else if secs >= HOUR {
+        (secs / HOUR, "hour")
+    } else if secs >= MINUTE {
+        (secs / MINUTE, "minute")
+    } else {
+        (secs, "second")
+    };
+    format!("{value} {unit}{}", if value == 1 { "" } else { "s" })
+}
+
 /// Apply [`classify_ambiguous_root`] to one entry, persisting and logging
 /// (#4095).
 ///
@@ -291,27 +317,50 @@ pub fn handle_ambiguous_root(entry: &PersistedIndex, candidate_count: usize) {
                 ambiguous_root_since_unix: Some(now_unix),
                 ..entry.clone()
             };
-            if let Err(e) = crate::service::persistence::upsert_index_registry_entry(stamped) {
-                tracing::warn!(
-                    "orphan-reaper(ambiguous): could not stamp deferral start for '{}': {e} \
-                     (issue #4095; will re-stamp next boot)",
-                    entry.id
-                );
-            }
+            // #4095 review follow-up: the ERROR below used to fire even when
+            // this upsert failed, telling an operator a deferral clock had
+            // started when nothing had been persisted — a log claiming state
+            // the system does not have, which is the exact failure mode this
+            // issue is about. Report what actually happened instead.
+            let persisted =
+                crate::service::persistence::upsert_index_registry_entry(stamped).is_ok();
+            // #4095 review follow-up: `grace / 86_400` rendered "0 day(s)" for
+            // any sub-day grace, and — worse — rendered "removed in 0 day(s)"
+            // when the terminal path was DISABLED (`grace == None`), i.e. the
+            // exact opposite of the truth.
+            let deadline = match grace {
+                Some(g) => format!(
+                    "If it is still unresolved after {}, the REGISTRATION will be removed \
+                     automatically (on-disk index data is never deleted); set {}=0 to disable \
+                     that.",
+                    render_duration_secs(g),
+                    AMBIGUOUS_ROOT_GRACE_ENV,
+                ),
+                None => format!(
+                    "Automatic removal is DISABLED ({}=0), so this entry will accumulate as \
+                     registry debris until you fix it.",
+                    AMBIGUOUS_ROOT_GRACE_ENV,
+                ),
+            };
+            let clock = if persisted {
+                "The deferral clock starts now."
+            } else {
+                "WARNING: the deferral clock could NOT be persisted to indexes.toml, so it \
+                 restarts on the next boot and the grace period will not elapse."
+            };
             tracing::error!(
                 index_id = %entry.id,
                 candidates = candidate_count,
+                stamp_persisted = persisted,
                 "orphan-reaper(ambiguous): index '{}' root {} no longer exists and {} \
                  ambiguous relocation candidates were found, so the daemon cannot safely \
                  pick one. DEFERRED — fix it with `trusty-search index <path>` against the \
-                 correct root. If it is still unresolved in {} day(s) the REGISTRATION will \
-                 be removed automatically (on-disk index data is never deleted). Set \
-                 {}=0 to disable that. (issue #4095)",
+                 correct root. {} {} (issue #4095)",
                 entry.id,
                 entry.root_path.display(),
                 candidate_count,
-                grace.map(|g| g / 86_400).unwrap_or(0),
-                AMBIGUOUS_ROOT_GRACE_ENV,
+                clock,
+                deadline,
             );
         }
         AmbiguousRootAction::KeepWaiting { age_secs } => {
@@ -319,11 +368,11 @@ pub fn handle_ambiguous_root(entry: &PersistedIndex, candidate_count: usize) {
                 index_id = %entry.id,
                 candidates = candidate_count,
                 age_secs,
-                "orphan-reaper(ambiguous): index '{}' still deferred after {} day(s) — {} \
+                "orphan-reaper(ambiguous): index '{}' still deferred after {} — {} \
                  ambiguous candidates for missing root {}. Fix with \
                  `trusty-search index <path>`. (issue #4095)",
                 entry.id,
-                age_secs / 86_400,
+                render_duration_secs(age_secs),
                 candidate_count,
                 entry.root_path.display(),
             );
@@ -352,15 +401,17 @@ pub fn handle_ambiguous_root(entry: &PersistedIndex, candidate_count: usize) {
                 candidates = candidate_count,
                 age_secs,
                 "orphan-reaper(ambiguous): REMOVED the registration for index '{}' — its root \
-                 {} has been missing with {} ambiguous relocation candidates for {} day(s), \
-                 past the {} day grace period. ON-DISK INDEX DATA WAS NOT DELETED: only the \
+                 {} has been missing with {} ambiguous relocation candidates for {}, past the \
+                 {} grace period. ON-DISK INDEX DATA WAS NOT DELETED: only the \
                  `indexes.toml` row and the `roots.toml` entry were removed, so re-register \
                  with `trusty-search index <path>` to recover it. (issue #4095)",
                 entry.id,
                 entry.root_path.display(),
                 candidate_count,
-                age_secs / 86_400,
-                grace.unwrap_or(0) / 86_400,
+                render_duration_secs(age_secs),
+                // `classify_ambiguous_root` only ever returns this variant when
+                // `grace` is `Some`, so the fallback is unreachable in practice.
+                render_duration_secs(grace.unwrap_or_default()),
             );
         }
     }
@@ -601,26 +652,61 @@ mod tests {
     }
 
     /// Why (issue #4095 safety contract): the terminal action is allowed to
-    /// remove a *registration* and nothing else. This pins the enum so a future
-    /// change that adds a data-deleting variant has to touch this test and
-    /// justify itself.
-    /// What: asserts the action set is exactly the three known variants and
-    /// that none of them is a data-deletion.
+    /// remove a *registration* and nothing else — deleting a corpus the daemon
+    /// cannot even identify is strictly worse than the debris it would clean
+    /// up. This pins that contract so a future data-deleting variant cannot be
+    /// added without a reviewer confronting it.
+    /// What: classifies every variant through an EXHAUSTIVE match with no
+    /// wildcard arm. Adding a variant makes this test fail to COMPILE, which is
+    /// the enforcement — a `format!("{:?}")` substring check (the first version
+    /// of this test) proved nothing, since a `DeleteIndexData` variant would
+    /// have passed it simply by being named something else.
     /// Test: this test.
     #[test]
     fn ambiguous_root_actions_never_include_data_deletion() {
-        let actions = [
+        /// Does this action touch on-disk index DATA (as opposed to the
+        /// registration)? Exhaustive by construction — no `_ =>` arm.
+        fn deletes_index_data(action: AmbiguousRootAction) -> bool {
+            match action {
+                // Records a timestamp in indexes.toml.
+                AmbiguousRootAction::Stamp => false,
+                // Logs only.
+                AmbiguousRootAction::KeepWaiting { .. } => false,
+                // Removes the indexes.toml row + roots.toml entry. The corpus
+                // on disk outlives it, which is what makes the reap reversible
+                // via `trusty-search index <path>`.
+                AmbiguousRootAction::ReapRegistration { .. } => false,
+            }
+        }
+
+        for action in [
             AmbiguousRootAction::Stamp,
             AmbiguousRootAction::KeepWaiting { age_secs: 1 },
             AmbiguousRootAction::ReapRegistration { age_secs: 1 },
-        ];
-        for action in actions {
-            let rendered = format!("{action:?}");
+        ] {
             assert!(
-                !rendered.contains("Data") && !rendered.contains("Delete"),
-                "no ambiguous-root action may delete index data (issue #4095): {rendered}"
+                !deletes_index_data(action),
+                "no ambiguous-root action may delete index data (issue #4095): {action:?}"
             );
         }
+    }
+
+    /// Why (#4095 review follow-up): every duration in the reaper's logs used
+    /// integer-divide-by-86400, so a sub-day value printed "0 day(s)" — and a
+    /// DISABLED terminal path printed "removed in 0 day(s)", the opposite of
+    /// the truth.
+    /// What: pins the unit selection and pluralisation across the boundaries.
+    /// Test: this test.
+    #[test]
+    fn render_duration_secs_picks_a_sensible_unit() {
+        assert_eq!(render_duration_secs(7 * DAY), "7 days");
+        assert_eq!(render_duration_secs(DAY), "1 day");
+        assert_eq!(render_duration_secs(2 * 3600), "2 hours");
+        assert_eq!(render_duration_secs(600), "10 minutes");
+        assert_eq!(render_duration_secs(45), "45 seconds");
+        assert_eq!(render_duration_secs(1), "1 second");
+        // The regression: a sub-day grace must never collapse to "0 days".
+        assert!(!render_duration_secs(600).starts_with('0'));
     }
 
     /// Why: with no orphans the split must return everything as survivors.

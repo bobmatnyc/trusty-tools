@@ -24,6 +24,7 @@ use crate::service::persistence::PersistedIndex;
 use crate::service::warm_boot::{
     collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
     probe_warmboot_volumes, probe_warmboot_volumes_from_paths, restore_one_index_bounded,
+    BoundedRestoreOutcome,
 };
 
 /// Collect colocated index entries for warm-boot, honoring
@@ -190,6 +191,9 @@ pub(super) async fn restore_indexes(
     // Issue #873: TCC vs timeout skip counters for WarmBootSummary.
     let mut total_skipped_tcc: usize = 0;
     let mut total_skipped_timeout: usize = 0;
+    // #4087 review follow-up: panicked restores are NOT timeouts and are never
+    // parked — tallied separately so the timeout counter stops absorbing them.
+    let mut total_panicked: usize = 0;
     let mut total_ok: usize = 0;
 
     // Split eager entries by source so we can probe volumes per-batch.
@@ -220,8 +224,11 @@ pub(super) async fn restore_indexes(
         }
         let total_legacy = legacy_eager.len();
         tracing::info!("warm-boot: restoring {total_legacy} legacy index(es) from indexes.toml");
-        let (mut legacy_ok, mut legacy_skipped_tcc, mut legacy_skipped_other) =
-            (0usize, 0usize, 0usize);
+        // #4087 review follow-up: `timed_out` and `panicked` are counted
+        // SEPARATELY — they used to share one bucket, which is how a panicked
+        // restore came to be parked (and reported) as a recoverable timeout.
+        let (mut legacy_ok, mut legacy_skipped_tcc, mut legacy_timed_out, mut legacy_panicked) =
+            (0usize, 0usize, 0usize, 0usize);
         for entry in legacy_eager {
             seen_legacy_ids.insert(entry.id.clone());
             if is_on_inaccessible_volume(&entry.root_path, &inaccessible_volumes) {
@@ -233,28 +240,20 @@ pub(super) async fn restore_indexes(
                 legacy_skipped_tcc += 1;
                 continue;
             }
-            let s = state.clone();
-            let e = Arc::clone(embedder);
-            // #4087: keep a copy so a timed-out restore can be PARKED COLD
-            // rather than dropped — see `ColdIndexStore::park_timed_out`.
-            let parked = entry.clone();
-            if restore_one_index_bounded(entry, move |en| async move {
-                restore_one_index(&s, &e, en).await;
-            })
-            .await
-            {
-                legacy_ok += 1;
-            } else {
-                legacy_skipped_other += 1;
-                state.cold_store.park_timed_out(parked);
+            match restore_eager_entry(state, embedder, entry).await {
+                BoundedRestoreOutcome::Completed => legacy_ok += 1,
+                BoundedRestoreOutcome::TimedOut => legacy_timed_out += 1,
+                BoundedRestoreOutcome::Panicked => legacy_panicked += 1,
             }
         }
         total_skipped_tcc += legacy_skipped_tcc;
-        total_skipped_timeout += legacy_skipped_other;
+        total_skipped_timeout += legacy_timed_out;
+        total_panicked += legacy_panicked;
         total_ok += legacy_ok;
         tracing::info!(
             "warm-boot: legacy phase complete — {legacy_ok}/{total_legacy} \
-             (skipped tcc={legacy_skipped_tcc} timeout={legacy_skipped_other})"
+             (skipped tcc={legacy_skipped_tcc} timeout={legacy_timed_out} \
+             panicked={legacy_panicked})"
         );
     }
 
@@ -264,34 +263,27 @@ pub(super) async fn restore_indexes(
         tracing::info!(
             "warm-boot: restoring {total_colocated} colocated index(es) from tracked roots"
         );
-        let (mut colocated_ok, mut colocated_skipped_tcc, mut colocated_skipped_other) =
-            (0usize, 0usize, 0usize);
+        let (mut colocated_ok, mut colocated_skipped_tcc, mut colo_timed_out, mut colo_panicked) =
+            (0usize, 0usize, 0usize, 0usize);
         for entry in colocated_eager {
             if is_on_inaccessible_volume(&entry.root_path, &colocated_inaccessible) {
                 colocated_skipped_tcc += 1;
                 continue;
             }
-            let s = state.clone();
-            let e = Arc::clone(embedder);
-            // #4087: see the legacy branch — park, don't drop.
-            let parked = entry.clone();
-            if restore_one_index_bounded(entry, move |en| async move {
-                restore_one_index(&s, &e, en).await;
-            })
-            .await
-            {
-                colocated_ok += 1;
-            } else {
-                colocated_skipped_other += 1;
-                state.cold_store.park_timed_out(parked);
+            match restore_eager_entry(state, embedder, entry).await {
+                BoundedRestoreOutcome::Completed => colocated_ok += 1,
+                BoundedRestoreOutcome::TimedOut => colo_timed_out += 1,
+                BoundedRestoreOutcome::Panicked => colo_panicked += 1,
             }
         }
         total_skipped_tcc += colocated_skipped_tcc;
-        total_skipped_timeout += colocated_skipped_other;
+        total_skipped_timeout += colo_timed_out;
+        total_panicked += colo_panicked;
         total_ok += colocated_ok;
         tracing::info!(
             "warm-boot: colocated phase complete — {colocated_ok}/{total_colocated} \
-             (skipped tcc={colocated_skipped_tcc} timeout={colocated_skipped_other})"
+             (skipped tcc={colocated_skipped_tcc} timeout={colo_timed_out} \
+             panicked={colo_panicked})"
         );
     }
 
@@ -316,6 +308,19 @@ pub(super) async fn restore_indexes(
         total_skipped_timeout,
         indexes_lazy,
     );
+
+    // #4087 review follow-up: a panicked restore is real breakage. It is never
+    // parked, so it does not appear in `indexes_lazy`; log it at ERROR here so
+    // it is loud on its own terms rather than relying on the legacy-only
+    // id-diff below (which under-reports colocated entries — TODO #796).
+    if total_panicked > 0 {
+        tracing::error!(
+            panicked = total_panicked,
+            "warm-boot FAIL-LOUD: {total_panicked} index(es) PANICKED during restore. These \
+             are BROKEN, not slow: they were deliberately NOT parked for lazy retry and are \
+             absent from search until the fault is fixed and the daemon restarts (#4087)."
+        );
+    }
 
     // Issue #764: fail-loud warm-boot — tally total skipped/failed indexes and
     // store the count on AppState so `/health` can surface it without operators
@@ -343,6 +348,43 @@ pub(super) async fn restore_indexes(
              for the count, then resolve the root cause and restart (issue #764).",
         );
     }
+}
+
+/// Run one eager restore under its deadline, parking it cold ONLY if it timed
+/// out (#4087, and the review follow-up that scoped this correctly).
+///
+/// Why: the parking decision previously lived inline in BOTH eager loops, keyed
+/// off `!completed` — which is `TimedOut` OR `Panicked`. That parked a panicked
+/// (genuinely broken) index into the cold store, where `/health` reports it as
+/// lazy and therefore recoverable. #4087 exists to stop broken indexes from
+/// masquerading as fine; parking breakage reintroduces exactly that, one layer
+/// up. Centralising the decision here means there is one place that can make it,
+/// and it is gated on [`BoundedRestoreOutcome::is_parkable`] — a named
+/// predicate rather than a negation, because the negation is what shipped the
+/// bug.
+/// What: runs `restore_one_index_bounded` and hands the entry plus its typed
+/// outcome to `ColdIndexStore::park_if_parkable`, which owns the decision — this
+/// function no longer has a branch to get wrong. Returns the outcome for the
+/// caller's tally.
+/// Test: `only_timed_out_is_parkable` (the predicate) and
+/// `panicked_restore_is_not_parked_in_cold_store` /
+/// `timed_out_entry_is_parked_in_cold_store` (the effect) in
+/// `service::server::tests_4087`.
+async fn restore_eager_entry(
+    state: &SearchAppState,
+    embedder: &Arc<dyn crate::core::Embedder>,
+    entry: PersistedIndex,
+) -> BoundedRestoreOutcome {
+    let s = state.clone();
+    let e = Arc::clone(embedder);
+    // Keep a copy so a TIMED-OUT restore can be parked cold rather than dropped.
+    let parked = entry.clone();
+    let outcome = restore_one_index_bounded(entry, move |en| async move {
+        restore_one_index(&s, &e, en).await;
+    })
+    .await;
+    state.cold_store.park_if_parkable(parked, outcome);
+    outcome
 }
 
 /// Self-heal `indexes.toml` after warm-boot dedup collapses a corpus-path

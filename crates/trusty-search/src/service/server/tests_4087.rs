@@ -18,6 +18,7 @@ use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::indexer::{CodeIndexer, SearchMode, SearchQuery, SearchStage};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::store::{UsearchStore, VectorStore};
+use crate::service::warm_boot::BoundedRestoreOutcome;
 
 /// Build a registered index handle, optionally flagged corpus-open-failed.
 fn build_state_with(
@@ -43,6 +44,15 @@ fn build_state_with(
         ));
     }
     (Arc::new(SearchAppState::new(registry)), embedder)
+}
+
+/// A minimal entry for the cold-store parking-gate tests.
+fn parkable_entry(id: &str) -> crate::service::persistence::PersistedIndex {
+    crate::service::persistence::PersistedIndex {
+        id: id.to_string(),
+        root_path: format!("/tmp/4087-{id}").into(),
+        ..Default::default()
+    }
 }
 
 fn probe_query() -> SearchQuery {
@@ -252,15 +262,13 @@ async fn corpus_open_failure_kind_tracks_the_flag() {
 /// indexes lost this way on a live daemon, recoverable only by a restart). A
 /// timeout is the most transient failure available; dropping is the least
 /// appropriate response.
-/// What: calls `park_timed_out_entry` (the exact call the timeout branch makes)
-/// and asserts the entry is now in the cold store, i.e. reachable by the
-/// existing lazy-load path and counted by `cold_store.len()` — which is what
-/// feeds `search_all`'s `cold_indexes_skipped`.
+/// What: hands a `TimedOut` outcome to `park_if_parkable` (the exact call the
+/// warm-boot loop makes) and asserts the entry is now in the cold store, i.e.
+/// reachable by the existing lazy-load path and counted by `cold_store.len()` —
+/// which is what feeds `search_all`'s `cold_indexes_skipped`.
 /// Test: this test.
 #[tokio::test]
 async fn timed_out_entry_is_parked_in_cold_store() {
-    use crate::service::persistence::PersistedIndex;
-
     let (state, _embedder) = build_state_with(&[]);
     let id = IndexId::new("slow-restore".to_string());
     assert!(
@@ -268,11 +276,10 @@ async fn timed_out_entry_is_parked_in_cold_store() {
         "precondition: not parked yet"
     );
 
-    state.cold_store.park_timed_out(PersistedIndex {
-        id: "slow-restore".to_string(),
-        root_path: "/tmp/4087-slow".into(),
-        ..Default::default()
-    });
+    state.cold_store.park_if_parkable(
+        parkable_entry("slow-restore"),
+        BoundedRestoreOutcome::TimedOut,
+    );
 
     assert!(
         state.cold_store.contains(&id),
@@ -283,5 +290,57 @@ async fn timed_out_entry_is_parked_in_cold_store() {
         1,
         "the parked entry must be counted so `cold_indexes_skipped` surfaces the \
          incomplete fan-out"
+    );
+}
+
+/// Why (#4087 review BLOCK — the regression this pins): the parking gate
+/// originally keyed off `!completed`, which is `TimedOut` OR `Panicked`. A
+/// panicked restore was therefore parked in the cold store, where `/health`
+/// reports it under `indexes_lazy` — i.e. as recoverable. That inverts the
+/// purpose of #4087: a genuinely broken index went back to masquerading as
+/// fine, one layer up from the silently-empty 200 this PR removed. Parking must
+/// be scoped to the transient outcome only.
+/// What: hands a `Panicked` outcome to the same entry point and asserts NOTHING
+/// is parked. Against the pre-fix code the cold store would contain the entry.
+/// Test: this test.
+#[tokio::test]
+async fn panicked_restore_is_not_parked_in_cold_store() {
+    let (state, _embedder) = build_state_with(&[]);
+    let id = IndexId::new("panicked-restore".to_string());
+
+    state.cold_store.park_if_parkable(
+        parkable_entry("panicked-restore"),
+        BoundedRestoreOutcome::Panicked,
+    );
+
+    assert!(
+        !state.cold_store.contains(&id),
+        "a PANICKED restore must NOT be parked — it is broken, not slow, and parking it \
+         reports real breakage as lazy/recoverable on /health (issue #4087 review)"
+    );
+    assert_eq!(
+        state.cold_store.len(),
+        0,
+        "a panicked restore must not inflate the lazy count either"
+    );
+}
+
+/// Why: the gate must also not park a restore that SUCCEEDED — that would
+/// duplicate a registered index into the cold store and inflate
+/// `cold_indexes_skipped` for a perfectly healthy fan-out.
+/// Test: this test.
+#[tokio::test]
+async fn completed_restore_is_not_parked_in_cold_store() {
+    let (state, _embedder) = build_state_with(&[]);
+
+    state.cold_store.park_if_parkable(
+        parkable_entry("completed-restore"),
+        BoundedRestoreOutcome::Completed,
+    );
+
+    assert_eq!(
+        state.cold_store.len(),
+        0,
+        "a completed restore is registered, not parked"
     );
 }

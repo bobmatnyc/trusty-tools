@@ -216,10 +216,15 @@ pub(super) async fn search_handler(
                 cold_reload_timeout(),
                 move |entry| async move {
                     let e = Arc::clone(&embedder);
+                    // #4087 review follow-up: `is_complete()` preserves the
+                    // exact prior contract — anything short of a finished
+                    // restore is a lazy-load failure, which this handler
+                    // already surfaces loudly as a 503 below.
                     restore_one_index_bounded(entry, move |en| async move {
                         restore_index_on_demand(&s, &e, en).await;
                     })
                     .await
+                    .is_complete()
                 },
             )
             .await;

@@ -17,9 +17,12 @@ Fixed
   `503 index_corpus_unavailable` carrying the failure classification, and
   `POST /search` excludes such indexes from the fan-out and reports them in a new
   `corpus_failed_indexes_skipped` field. An index whose eager warm-boot restore
-  times out is now parked in the cold store — recoverable by lazy load on the
+  **times out** is now parked in the cold store — recoverable by lazy load on the
   next query — instead of being dropped from both the registry and the cold store
-  for the rest of the boot (see
+  for the rest of the boot. A restore that **panics** is deliberately not parked:
+  it is broken rather than slow, so it keeps failing loudly instead of being
+  reported as lazy/recoverable, and panics are now counted separately from
+  timeouts in the warm-boot summary (see
   [#4087](https://github.com/bobmatnyc/trusty-tools/issues/4087)).
 - The orphan reaper no longer defers indefinitely on ambiguous relocation
   candidates. The first ambiguous observation is stamped and logged at ERROR (so

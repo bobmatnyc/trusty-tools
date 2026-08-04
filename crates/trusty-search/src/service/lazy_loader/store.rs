@@ -12,6 +12,7 @@ use dashmap::DashMap;
 
 use crate::core::registry::IndexId;
 use crate::service::persistence::{warmboot_sort_key, PersistedIndex};
+use crate::service::warm_boot::BoundedRestoreOutcome;
 
 /// Split `entries` into `(eager, cold)` based on a recency cap.
 ///
@@ -178,15 +179,32 @@ impl ColdIndexStore {
     /// folds it into `search_all`'s `cold_indexes_skipped` so an incomplete
     /// fan-out stays visible.
     ///
-    /// What: [`Self::register_cold_entries`] for one entry, plus a WARN naming
-    /// the state change. Idempotent by replacement, so a second timeout for the
-    /// same id simply re-parks it. Deliberately does NOT retry the restore
-    /// inline — the abandoned blocking thread from the timeout may still hold
-    /// the redb file, and the lazy-load path already handles that via the
-    /// `DatabaseAlreadyOpen` retry and the #3659 open gate.
-    /// Test: `timed_out_entry_is_parked_in_cold_store` in
+    /// **The parking DECISION lives here, not at the call site** (#4087 review
+    /// BLOCK). The first version of this fix exposed a bare `park_timed_out` and
+    /// let the warm-boot loops decide when to call it, which they did on
+    /// `!completed` — i.e. on a panic as well as a timeout. That parked a
+    /// genuinely broken index and let `/health` report it as lazy and therefore
+    /// recoverable: exactly the "broken index masquerading as fine" failure
+    /// #4087 exists to remove. Taking the typed
+    /// [`BoundedRestoreOutcome`] and gating internally means no caller can make
+    /// that mistake again — there is no longer a call site with a choice.
+    ///
+    /// What: parks `entry` iff `outcome.is_parkable()` (i.e. `TimedOut` only),
+    /// logging a WARN that names the state change. `Completed` and `Panicked`
+    /// are no-ops — the latter deliberately, so real breakage keeps failing
+    /// loudly. Idempotent by replacement, so a second timeout for the same id
+    /// simply re-parks it. Deliberately does NOT retry the restore inline — the
+    /// abandoned blocking thread from the timeout may still hold the redb file,
+    /// and the lazy-load path already handles that via the `DatabaseAlreadyOpen`
+    /// retry and the #3659 open gate.
+    /// Test: `timed_out_entry_is_parked_in_cold_store`,
+    /// `panicked_restore_is_not_parked_in_cold_store`, and
+    /// `completed_restore_is_not_parked_in_cold_store` in
     /// `service::server::tests_4087`.
-    pub fn park_timed_out(&self, entry: PersistedIndex) {
+    pub fn park_if_parkable(&self, entry: PersistedIndex, outcome: BoundedRestoreOutcome) {
+        if !outcome.is_parkable() {
+            return;
+        }
         let id = entry.id.clone();
         self.register_cold_entries(vec![entry]);
         tracing::warn!(
