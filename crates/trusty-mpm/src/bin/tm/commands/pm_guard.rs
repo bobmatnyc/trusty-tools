@@ -86,6 +86,15 @@
 //! both exemptions for the same reason the worktree guard does: both return
 //! ALLOW exactly when the caller IS a subagent, the only case the rule fires
 //! on. See that module's doc for the two markers it trusts and why.
+//! **Per-subagent context ceiling (issue #4837):** immediately after the
+//! fan-out check — and ahead of the same two exemptions, for the same reason —
+//! [`pm_guard`] measures the calling subagent's accumulated context via
+//! [`crate::commands::pm_guard_cost::evaluate_agent_cost`] and denies its next
+//! tool call once that context crosses `agent_cost.max_tokens`. The PM is
+//! never evaluated (the whole block is gated on `caller_is_subagent`), a
+//! warning level is audited without touching stdout, and every failure to
+//! measure fails OPEN. See [`trusty_mpm::core::agent_cost`] for the cost model
+//! and the thresholds' derivation.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -103,9 +112,12 @@ use crate::commands::pm_guard_bash::{
     extract_shell_edit_target,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
+use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_fanout;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
+use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
+use trusty_mpm::core::config::MpmConfig;
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
 /// enforcement for the invocation.
@@ -290,13 +302,44 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // It fails OPEN: `caller_is_subagent` reports false whenever neither the
     // payload's `agent_id` nor `CLAUDE_MPM_SUB_AGENT` is present, so an
     // unrecognised context allows the dispatch rather than blocking the PM.
-    if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(
-        tool_name,
-        pm_guard_fanout::caller_is_subagent(&payload),
-    ) {
+    let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
+
+    if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
         println!("{}", build_pretooluse_deny_response(reason));
         return Ok(());
+    }
+
+    // #4837: per-subagent context ceiling. Placed here for the same structural
+    // reason as the fan-out guard directly above — Guards 1 and 4 below
+    // early-return ALLOW precisely when the caller IS a subagent, which is the
+    // only case this rule fires on, so a check placed after either one would be
+    // a guaranteed no-op. Gated on `caller_is_subagent` so the PM never pays
+    // the config load or the transcript read, and can never be stopped by it.
+    // Fails OPEN throughout (see `core::agent_cost`): an unreadable transcript,
+    // a missing usage record, or a disabled config all reach `Ok`.
+    if caller_is_subagent {
+        let cost_config = MpmConfig::load_default().agent_cost;
+        let (status, tokens) = pm_guard_cost::evaluate_agent_cost(&payload, &cost_config).await;
+        match status {
+            BudgetStatus::Exceeded => {
+                let reason = agent_cost::stop_reason(tokens, cost_config.max_tokens);
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            BudgetStatus::Warning => {
+                // ALLOW, but make the spend visible. The warning deliberately
+                // does NOT touch stdout: a `PreToolUse` exit-0 stdout must
+                // contain only a decision object, and emitting an explicit
+                // `allow` there would bypass the normal permission flow for
+                // every tool call an expensive agent makes. The audit POST
+                // reaches the daemon's event stream instead, where the PM and
+                // the dashboard can see it without altering the decision.
+                audit_agent_cost_warning(url, session_id, tool_name, tokens, &cost_config).await;
+            }
+            BudgetStatus::Ok => {}
+        }
     }
 
     // Guard 1: never block a nested MPM sub-agent for anything else — it is
@@ -601,6 +644,61 @@ pub(crate) fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value 
 /// Test: side-effect-only best-effort I/O — covered indirectly by the deny
 /// paths in `tests/tm_hook_pm_guard.rs` (which point at an unreachable daemon,
 /// proving the deny still emits despite the failed POST).
+/// Best-effort audit POST recording an agent-cost WARNING to the daemon.
+///
+/// Why (#4837): the warning level must be observable without changing the
+/// decision. A `PreToolUse` hook that exits 0 may print only a decision object,
+/// so there is no stdout channel for "allowed, but expensive" — writing one
+/// would force an explicit `allow` and bypass the normal permission flow on
+/// every call an expensive agent makes. Routing the signal to the daemon
+/// instead puts it in the event stream the PM and dashboard already read, at
+/// zero risk to the tool call in flight. Fire-and-forget with the same tight
+/// timeouts as [`audit_denied_tool`]: a down daemon costs the timeout and
+/// nothing else.
+/// What: POSTs `{session_id, event:"PreToolUse", payload:{cwd, tool,
+/// pm_guard_decision:"warn", agent_cost_tokens, agent_cost_max,
+/// pm_guard_reason}}` to `<url>/hooks` and drops any error.
+/// Test: side-effect-only best-effort I/O; the classification that reaches it
+/// is pinned by `core::agent_cost::warns_at_the_warn_threshold` and
+/// `pm_guard_cost::reports_exceeded_for_an_over_ceiling_transcript`.
+async fn audit_agent_cost_warning(
+    url: &str,
+    session_id: &str,
+    tool_name: &str,
+    tokens: u64,
+    config: &AgentCostConfig,
+) {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_default();
+    let reason = format!(
+        "Agent context at {tokens} tokens, past the {} warn threshold (#4837); \
+         hard stop at {}. Wrap up and report back so the PM can re-dispatch with clean context.",
+        config.warn_tokens, config.max_tokens
+    );
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "event": "PreToolUse",
+        "payload": {
+            "cwd": cwd,
+            "tool": tool_name,
+            "pm_guard_decision": "warn",
+            "agent_cost_tokens": tokens,
+            "agent_cost_max": config.max_tokens,
+            "pm_guard_reason": reason,
+        }
+    });
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return;
+    };
+    let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
+}
+
 async fn audit_denied_tool(url: &str, session_id: &str, tool_name: &str, reason: &str) {
     let cwd = std::env::current_dir()
         .ok()

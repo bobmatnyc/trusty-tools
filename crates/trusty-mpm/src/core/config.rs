@@ -288,32 +288,31 @@ pub struct PmConfig {
 /// floating-point `temperature`, and `f32` is not `Eq`. `PartialEq` is retained
 /// for the equality assertions in tests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+// #4837: one container-level `default` replaces the twelve identical
+// per-field attributes this struct used to carry — same semantics (the
+// derived `Default` is field-wise), and it keeps `config.rs` under the
+// 500-SLOC production cap as new sections are added.
+#[serde(default)]
 pub struct MpmConfig {
     /// `[agents]` — agent discovery sources.
-    #[serde(default)]
     pub agents: AgentsConfig,
 
     /// `[models]` — per-agent and tier model configuration.
-    #[serde(default)]
     pub models: ModelsConfig,
 
     /// `[skills]` — skill source configuration.
-    #[serde(default)]
     pub skills: SkillsConfig,
 
     /// `[manifest]` — harness-manifest catalog source (HR-2 / DOC-17).
-    #[serde(default)]
     pub manifest: ManifestConfig,
 
     /// `[pm]` — PM-layer feature toggles.
-    #[serde(default)]
     pub pm: PmConfig,
 
     /// `[session_manager]` — Session Manager agent config (DOC-14 §10).
     ///
     /// Defaults to `enabled = false`; absent or partial sections parse to spec
     /// defaults and leave the legacy overseer path untouched.
-    #[serde(default)]
     pub session_manager: SessionManagerConfig,
 
     /// `[control_plane]` — SESSCTL auth + cost guardrails (SPEC-SESSCTL-01 §9,
@@ -322,14 +321,12 @@ pub struct MpmConfig {
     /// Absent or partial section → spec defaults (concurrency cap 5, launch
     /// stagger 2000 ms, auth timeout 30 s, LLM classifier off). The daemon
     /// injects this into the control-plane `SessionRegistry`.
-    #[serde(default)]
     pub control_plane: crate::control::config::ControlPlaneConfig,
 
     /// `[style]` — active output-style selection (HR-4 / DOC-17).
     ///
     /// Absent section → professional default (`trusty-mpm`). See
     /// [`crate::core::output_style::StyleConfig`].
-    #[serde(default)]
     pub style: crate::core::output_style::StyleConfig,
 
     /// `[catchup]` — incremental catch-up runtime (DOC-28 / #1762).
@@ -338,14 +335,12 @@ pub struct MpmConfig {
     /// git_limit=50, drawer_limit=15). Present only during the migration
     /// window.
     // CUTOVER BRIDGE — remove post-migration (#1762)
-    #[serde(default)]
     pub catchup: CatchupConfig,
 
     /// `[idle_auto_stop]` — opt-in idle auto-suspend feature (#1816).
     ///
     /// Absent section → `enabled = false` (feature OFF, zero behavior change).
     /// Set `enabled = true` to activate the background idle-reaper loop.
-    #[serde(default)]
     pub idle_auto_stop: IdleAutoStopConfig,
 
     /// `[idle_nudge]` — opt-in auto-nudge for idle-parked sessions (#2621).
@@ -354,8 +349,15 @@ pub struct MpmConfig {
     /// Set `enabled = true` to let the daemon nudge parked managed sessions. The
     /// section type lives in [`crate::core::idle_nudge`] alongside the pure
     /// decision logic and ledger it configures.
-    #[serde(default)]
     pub idle_nudge: crate::core::idle_nudge::IdleNudgeConfig,
+
+    /// `[agent_cost]` — per-subagent context ceiling (#4837).
+    ///
+    /// Absent section → guard ON with the defaults derived from #4837's
+    /// evidence table (warn 250k, stop 400k). Set `enabled = false`, or
+    /// `max_tokens = 0`, to disable enforcement. The section type lives in
+    /// [`crate::core::agent_cost`] alongside the pure policy it configures.
+    pub agent_cost: crate::core::agent_cost::AgentCostConfig,
 }
 
 // ──────────────────────────────────────────────
