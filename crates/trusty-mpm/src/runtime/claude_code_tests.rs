@@ -878,18 +878,89 @@ fn spawn_command_without_prompt_file_omits_flag() {
 }
 
 #[test]
+#[serial_test::serial]
 fn build_prompt_file_writes_resolved_prompt_for_project() {
     // #2125 item 3: build_prompt_file must reuse the SAME
     // build_system_prompt_for_with_style_and_native seam the CLI/client
     // launch paths use, so the daemon adapter's injected prompt is never a
     // divergent copy — proven here by asserting the written file carries
     // the bundled PM_INSTRUCTIONS heading.
+    //
+    // #4752 added a compiled-prompt refresh resolved from `$HOME`, so this test
+    // now needs the HomeGuard + `#[serial]` pairing to keep that write off the
+    // developer's real `~/.trusty-mpm` (the #2459/#2460/#2461 hazard class).
+    let _home = HomeGuard::set();
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = build_prompt_file(tmp.path()).expect("prompt file written");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
         content.contains("# PM Agent -- Trusty MPM"),
         "prompt file must contain the resolved PM system prompt: {content}"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+#[serial_test::serial]
+fn build_prompt_file_refreshes_the_compiled_prompt() {
+    // Why (#4752 review, HIGH 3): `resume_managed` never calls `prepare_session*`
+    // on its healthy path — it goes `resume_self_heal` → `ensure_status_line` →
+    // `ensure_deployment_complete` → `spawn_resume`, and `spawn_resume` builds
+    // its prompt here. Before this fix, every resume, guided-resume and
+    // crash-recovery launch ran a prompt that never reached the compiled path.
+    //
+    // This is the seam ALL THREE spawn paths share, so covering it covers
+    // resume. FIXTURE: the compiled file is pre-seeded with stale sentinel
+    // content, so "the file exists" cannot pass this — only an actual refresh
+    // can. Equality with the prompt file is what makes the artifact the same
+    // text the session runs with.
+    let _home = HomeGuard::set();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path());
+    std::fs::create_dir_all(compiled.parent().unwrap()).expect("create framework dir");
+    const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
+    std::fs::write(&compiled, STALE).expect("seed stale compiled prompt");
+
+    let path = build_prompt_file(tmp.path()).expect("prompt file written");
+
+    let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt readable");
+    assert_ne!(
+        on_disk, STALE,
+        "the spawn seam must refresh a stale compiled prompt — resume paths \
+         depend on this, since they never run prepare_session"
+    );
+    let launch_prompt = std::fs::read_to_string(&path).expect("prompt file readable");
+    assert_eq!(
+        on_disk, launch_prompt,
+        "the compiled prompt must be byte-identical to the file passed to \
+         --append-system-prompt-file"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+#[serial_test::serial]
+fn build_prompt_file_compiled_write_failure_does_not_block_the_spawn() {
+    // Why (#4752 review, HIGH 1's lesson applied here): the compiled file is an
+    // INSPECTION artifact. A failure writing it must never cost the session its
+    // actual system prompt — that would trade a stale debugging aid for a
+    // broken launch, the same inverted priority the review flagged in
+    // `prepare_session_inner`.
+    //
+    // FIXTURE: a directory is planted at the compiled path so only that write
+    // fails; the prompt file itself must still be produced and still carry the
+    // real PM prompt.
+    let _home = HomeGuard::set();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path());
+    std::fs::create_dir_all(&compiled).expect("plant a directory at the compiled path");
+
+    let path =
+        build_prompt_file(tmp.path()).expect("spawn must still get its prompt file (non-fatal)");
+    let content = std::fs::read_to_string(&path).expect("prompt file readable");
+    assert!(
+        content.contains("# PM Agent -- Trusty MPM"),
+        "the session must still receive the real PM prompt: {content}"
     );
     std::fs::remove_file(&path).ok();
 }

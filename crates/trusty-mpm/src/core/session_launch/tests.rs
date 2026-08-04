@@ -263,6 +263,311 @@ fn prepare_session_writes_claude_md_and_stash() {
     );
 }
 
+// ── #4752: INSTRUCTIONS-COMPILED.md must be current BEFORE the spawn ────────
+
+#[test]
+fn instruction_failure_is_fatal() {
+    // Why (#4752 ruling 2026-08-04): exactly one preparation failure refuses a
+    // launch. `is_fatal` is the single discriminator the seven spawning call
+    // sites consult, so it is pinned directly.
+    let err = PrepError::Instructions {
+        path: PathBuf::from("/p/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md"),
+        source: std::io::Error::other("boom"),
+    };
+    assert!(err.is_fatal());
+    // The Display must be the operator-facing message, not a bare io error.
+    let shown = err.to_string();
+    assert!(shown.contains("/p/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md"));
+    assert!(shown.contains("was NOT started"));
+}
+
+#[test]
+fn deploy_and_io_failures_stay_non_fatal() {
+    // Why (#4752): #2149 deliberately made preparation non-fatal so a roster or
+    // skill deploy hiccup could not stop a session launching. Only the
+    // instruction condition is ruled fatal — a blanket "all prep errors abort"
+    // would have reversed #2149 wholesale. This pins that the other variants
+    // did NOT silently inherit the new policy.
+    assert!(!PrepError::Deploy("agents".into()).is_fatal());
+    assert!(!PrepError::SkillDeploy("skills".into()).is_fatal());
+    assert!(
+        !PrepError::Io {
+            path: PathBuf::from("/p/.trusty-mpm/last-instructions.md"),
+            source: std::io::Error::other("boom"),
+        }
+        .is_fatal()
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_writes_the_compiled_prompt_before_returning() {
+    // Why (#4752, owner ruling 2026-08-04): the framework-level compiled prompt
+    // must reflect the prompt the session is ABOUT TO RUN WITH, not the one the
+    // last `tm install` produced. Every caller spawns `claude` only after
+    // `prepare_session` returns `Ok`, so "current at return" IS "current at
+    // launch".
+    //
+    // FIXTURE NOTE — this is deliberately not an existence check. The compiled
+    // path is PRE-SEEDED with stale sentinel content, so a test that only
+    // asserted "the file exists" would pass against a broken implementation
+    // that never writes at launch. Only an actual launch-time write of the
+    // resolved prompt can turn the assertions below green.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_writes_claude_md_and_stash` for why.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    const STALE: &str = "STALE-FROM-A-PREVIOUS-INSTALL";
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project);
+    std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
+    std::fs::write(&compiled, STALE).unwrap();
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    assert_eq!(
+        report.compiled_prompt, compiled,
+        "the report must name the compiled path the launch actually wrote"
+    );
+    let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt must be readable");
+    assert_ne!(
+        on_disk, STALE,
+        "the launch must overwrite a stale compiled prompt, not leave it in place"
+    );
+    // The stash is the byte-exact text handed to
+    // `claude --append-system-prompt-file` (issue #1409). Equality here is what
+    // makes the compiled file "the prompt this session runs with" rather than
+    // merely "some compiled prompt".
+    let launch_prompt = std::fs::read_to_string(&report.stash).expect("stash must be readable");
+    assert_eq!(
+        on_disk, launch_prompt,
+        "the compiled prompt must be byte-identical to the text passed to claude"
+    );
+    assert!(!on_disk.is_empty(), "the compiled prompt must not be empty");
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
+    // Why (#4752): the ordering requirement is that the write BLOCKS the
+    // launch — not that it happens eventually and not that it is best-effort.
+    // This is the test that distinguishes those: if the write were a
+    // `let _ = …`, a warn-and-continue, or deferred to a background task,
+    // `prepare_session` would return `Ok` here and the assertion below fails.
+    //
+    // FIXTURE: a DIRECTORY is planted at the compiled prompt's exact path.
+    // `create_dir_all(parent)` still succeeds, so the failure is isolated to
+    // the compiled write itself — no other step of the preparation is
+    // sabotaged, which is what keeps this test about the guard it names.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(crate::core::instruction_pipeline::compiled_prompt_path(
+        project,
+    ))
+    .unwrap();
+
+    let err = prepare_session(&fw, project)
+        .expect_err("a failed compiled-prompt write must abort the launch preparation");
+    // #4752 ruling: this is the ONE fatal preparation error — the seven
+    // spawning call sites refuse to launch on it.
+    assert!(
+        err.is_fatal(),
+        "a compiled-prompt write failure must be classified fatal, got {err:?}"
+    );
+    match &err {
+        PrepError::Instructions { path, .. } => assert_eq!(
+            *path,
+            crate::core::instruction_pipeline::compiled_prompt_path(project),
+            "the error must name the compiled prompt path"
+        ),
+        other => panic!("expected PrepError::Instructions, got {other:?}"),
+    }
+    // Ruling follow-up 1: the operator must see why, and where.
+    let shown = err.to_string();
+    assert!(
+        shown.contains("was NOT started"),
+        "must tell the operator the session did not start: {shown}"
+    );
+    assert!(
+        shown.contains(&compiled_display(project)),
+        "must name the path: {shown}"
+    );
+}
+
+/// The compiled-prompt path as it appears in an operator-facing message.
+fn compiled_display(project: &std::path::Path) -> String {
+    crate::core::instruction_pipeline::compiled_prompt_path(project)
+        .display()
+        .to_string()
+}
+
+#[test]
+#[serial_test::serial]
+fn compiled_write_failure_does_not_skip_the_mcp_injectors() {
+    // Why (#4752 review, HIGH 1): an earlier revision put the compiled write —
+    // and its fatal `?` — immediately after the `last-instructions.md` stash,
+    // UPSTREAM of `write_output_style`, `write_project_hooks`, the workspace
+    // trust pre-seed, and all four MCP injectors. Because every production
+    // caller treats a prep failure as non-fatal (#2149) and spawns anyway, a
+    // failed compiled write would have launched a session with NO
+    // `inject_trusty_mpm_mcp` / `inject_trusty_review_mcp` content pinning —
+    // silently removing the #3918/#3950 MCP name-squatting defense.
+    //
+    // FIXTURE: the compiled write is forced to fail (directory planted at its
+    // path) and we assert the security-relevant side effects STILL happened.
+    // This fails if the write is ever moved back above them.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(crate::core::instruction_pipeline::compiled_prompt_path(
+        project,
+    ))
+    .unwrap();
+
+    // The compiled write fails, so preparation reports Err …
+    prepare_session(&fw, project).expect_err("compiled write is expected to fail here");
+
+    // … but everything a launching caller depends on must already be on disk,
+    // because the failing step is last and nothing below it is skipped.
+    let mcp_json = project.join(".mcp.json");
+    assert!(
+        mcp_json.exists(),
+        ".mcp.json must be written even when the compiled prompt write fails — \
+         the MCP injectors must not sit downstream of it"
+    );
+    let mcp = std::fs::read_to_string(&mcp_json).expect("read .mcp.json");
+    for server in ["trusty-mpm", "trusty-review"] {
+        assert!(
+            mcp.contains(server),
+            "`{server}` MCP entry missing from .mcp.json — the #3918/#3950 \
+             content-pinning injector was skipped by the compiled-write failure"
+        );
+    }
+    assert!(
+        project.join(".claude/output-styles/trusty-mpm.md").exists(),
+        "the output style must still be deployed"
+    );
+    assert!(
+        project.join(".claude/settings.json").exists(),
+        "project settings/hooks must still be written"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_refuses_when_the_instructions_cannot_be_built() {
+    // Why (#4752, owner ruling round 4): "If writing the instruction fails, we
+    // shouldn't start ... we depend on those instructions." `build_instructions`
+    // used to return the NON-fatal `PrepError::Instructions(PipelineError)`,
+    // which every spawning caller logged and continued past — starting a session
+    // whose instructions were never established. It is now the same fatal
+    // condition as the compiled write, so the launch is refused.
+    //
+    // FIXTURE: a directory planted at `<project>/CLAUDE.md`, so the pipeline's
+    // load-or-create step fails. This is the ONLY early exit upstream of the
+    // compiled write; if it ever returns non-fatally again, the ordering
+    // contract's promise stops being true and this test fails.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(project.join("CLAUDE.md"))
+        .expect("plant a directory where CLAUDE.md goes");
+
+    let err = prepare_session(&fw, project)
+        .expect_err("a session whose instructions cannot be built must NOT start");
+
+    assert!(
+        err.is_fatal(),
+        "an instruction-build failure must be classified fatal, got {err:?}"
+    );
+    match &err {
+        PrepError::Instructions { path, .. } => assert!(
+            path.starts_with(project),
+            "the error must name the offending project path, got {}",
+            path.display()
+        ),
+        other => panic!("expected PrepError::Instructions, got {other:?}"),
+    }
+    // Operator-facing, not a bare io error.
+    let shown = err.to_string();
+    assert!(
+        shown.contains("was NOT started"),
+        "must say the session did not start: {shown}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn stash_write_failure_does_not_skip_the_fatal_instruction_write() {
+    // Why (#4752 round 4): the ordering contract promises that a session which
+    // starts has its instructions on disk. An unwritable `.trusty-mpm/` used to
+    // return a short-circuiting non-fatal `PrepError::Io` from the
+    // `last-instructions.md` stash, which sits ABOVE the fatal compiled write.
+    // Because `Io` is non-fatal, every caller launched the session anyway —
+    // having skipped the write that records its instructions. That is the exact
+    // case the contract forbids.
+    //
+    // The stash is an inspection copy, so losing it is not itself grounds to
+    // refuse a launch; what matters is that it cannot take the fatal write down
+    // with it.
+    //
+    // FIXTURE: a directory planted at `.trusty-mpm/last-instructions.md`, so
+    // `create_dir_all` on the parent succeeds and only the stash WRITE fails.
+    // The compiled write below it is untouched and must still succeed, so
+    // preparation reports Ok. This test fails if the stash write is ever
+    // restored to a `?`.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(project.join(".trusty-mpm/last-instructions.md"))
+        .expect("plant a directory where the stash file goes");
+
+    let report = prepare_session(&fw, project)
+        .expect("a failed stash write must NOT refuse the launch (#2149) nor abort preparation");
+
+    // The compiled write still ran and is still the fatal one …
+    assert!(
+        report.compiled_prompt.exists(),
+        "the compiled prompt must still be written when only the stash fails"
+    );
+
+    // … and every security-relevant side effect downstream of the stash ran.
+    let mcp_json = project.join(".mcp.json");
+    assert!(
+        mcp_json.exists(),
+        ".mcp.json must be written even when the stash write fails — the MCP \
+         injectors must not sit downstream of a short-circuiting stash error"
+    );
+    let mcp = std::fs::read_to_string(&mcp_json).expect("read .mcp.json");
+    for server in ["trusty-mpm", "trusty-review"] {
+        assert!(
+            mcp.contains(server),
+            "`{server}` MCP entry missing from .mcp.json — the #3918/#3950 \
+             content-pinning injector was skipped by the stash-write failure"
+        );
+    }
+    assert!(
+        project.join(".claude/settings.json").exists(),
+        "project settings/hooks must still be written"
+    );
+}
+
 #[test]
 #[serial_test::serial]
 fn prepare_session_deploys_project_tier_output_style() {
