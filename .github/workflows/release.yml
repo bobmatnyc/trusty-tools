@@ -1151,18 +1151,44 @@ jobs:
           # compiling `probes/arm_neon.c` with `-march=armv8-a+simd`, which
           # AL2023's GCC 11 accepts — unlike the zig/clang path #4822 hit,
           # where `__attribute__((target("neon")))` was rejected and would have
-          # forced the choice between a broken build and NK_TARGET_*=0 (i.e.
-          # shipping a vector search engine with SIMD off). Using a real GCC in
-          # the container avoids that trade entirely: baseline NEON stays on,
-          # and only the ISA extensions GCC 11 genuinely predates (SVE2p1,
-          # SME*, fp8) probe false and are compiled out, which is exactly the
-          # designed behaviour of the probe mechanism. Verified from the build
-          # log's `cargo:warning=NK_TARGET_*: not supported by compiler` lines
-          # rather than assumed — see the PR body.
+          # forced the choice between a broken build and NK_TARGET_*=0 across
+          # the board (i.e. shipping a vector search engine with SIMD off).
+          # Using a real GCC in the container avoids that wholesale trade:
+          # baseline NEON stays ON, the ISA extensions GCC 11 genuinely
+          # predates (SVE2p1, SME*, fp8, bf16) probe false and compile out as
+          # the mechanism intends, and exactly ONE extension has to be forced
+          # off by hand — see NK_TARGET_NEONSDOT immediately below. Read from
+          # the build log's `cargo:warning=NK_TARGET_*` lines rather than
+          # assumed; the full enabled/disabled list is in the PR body.
           NK_TARGET_SAPPHIREAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_GRANITEAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_DIAMOND: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_SIERRA: ${{ matrix.variant == 'al2023' && '0' || '' }}
+          # 2533 follow-up — the ONE AArch64 counterpart of the same GCC-11
+          # probe/source desync, found by running the build, not by reasoning:
+          # numkong's NEONSDOT probe compiles cleanly with
+          # `-march=armv8.2-a+dotprod`, so NK_TARGET_NEONSDOT=1 — but
+          # `include/numkong/maxsim/neonsdot.h` is the single ARM header that
+          # gates its body with the BARE `#pragma GCC target("+dotprod")` form
+          # instead of the `arch=armv8.2-a+dotprod` form its five sibling
+          # neonsdot headers use. GCC 11 accepts that pragma without actually
+          # enabling the feature, so the `vdotq_s32` intrinsic then fails as
+          # `inlining failed in call to 'always_inline' 'vdotq_s32': target
+          # specific option mismatch` (observed: run 30948527782, job
+          # 92124822938, compiling c/dispatch_f32.c). GCC 13 on the Ubuntu
+          # runners handles it, which is why only the AL2023 arm64 leg needs
+          # this.
+          #
+          # SCOPE OF WHAT THIS COSTS, stated rather than buried: it disables
+          # the NEON int8 dot-product kernels only. Baseline NEON, NEONHALF,
+          # NEONFHM, SVE, SVEHALF, SVE2 and SVESDOT all still probe TRUE on
+          # this leg and stay enabled — this is not a scalar build. int8 work
+          # keeps an SVE dot-product path on SVE-capable Graviton; f32/f16
+          # (what trusty-search actually indexes with by default) is
+          # untouched. The alternative, raising the whole leg's baseline to
+          # `-march=armv8.2-a+dotprod`, was rejected: it would trade a
+          # narrow kernel loss for a SIGILL on any pre-Armv8.2 host.
+          NK_TARGET_NEONSDOT: ${{ (matrix.variant == 'al2023' && startsWith(matrix.target, 'aarch64')) && '0' || '' }}
         run: |
           CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 
