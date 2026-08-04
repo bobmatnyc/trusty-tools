@@ -8,9 +8,7 @@
 //! could not make the setting durable by any supported means. Regenerating a
 //! service unit must not silently discard operator intent.
 //!
-//! What: three things, all pure and platform-independent so they are testable
-//! on every CI runner (the plist *rendering* is macOS-only and asserted in
-//! [`crate::commands::service`]):
+//! What: three things —
 //!
 //! 1. [`parse_truthy_bool`] — the shared truthiness rule. It is the clap
 //!    `value_parser` for `--no-auto-discover` / `TRUSTY_NO_AUTO_DISCOVER`
@@ -19,26 +17,37 @@
 //!    presence flag but the env var goes through strict `FromStr<bool>` —
 //!    accepting only `true`/`false`. The documented spelling
 //!    `TRUSTY_NO_AUTO_DISCOVER=1` (README, CHANGELOG #314) was therefore
-//!    *rejected* and the daemon refused to boot.
+//!    *rejected* and the daemon refused to boot. Platform-independent: the
+//!    flag exists everywhere, so this and its tests are never gated.
 //! 2. [`InstalledUnit`] + [`parse_installed_unit`] — a dependency-free reader
 //!    for the two plist sections that carry operator intent
 //!    (`ProgramArguments`, `EnvironmentVariables`).
 //! 3. [`resolve_auto_discover`] / [`resolve_persisted_env`] — what the
 //!    regenerated unit should carry forward.
 //!
-//! Test: `parse_truthy_bool_*`, `parse_installed_unit_*`,
-//! `suppresses_auto_discover_*`, `resolve_auto_discover_*`,
-//! `resolve_persisted_env_*` below.
+//! Items 2 and 3 are `#[cfg(target_os = "macos")]`: launchd is the only
+//! service manager this crate generates units for, so their sole consumers
+//! ([`crate::commands::service`]) compile out elsewhere and leaving them
+//! ungated is dead code that fails `clippy -D warnings` on Linux. Their logic
+//! is still pure string handling — the macOS gate is about who calls them, not
+//! about platform APIs.
+//!
+//! Test: `parse_truthy_bool_*` and `cli_tests::*` (every platform);
+//! `parse_installed_unit_*`, `suppresses_auto_discover_*`,
+//! `resolve_auto_discover_*`, `resolve_persisted_env_*` (macOS).
 
+#[cfg(target_os = "macos")]
 use crate::service::PERSISTED_ENV_VARS;
 
 /// Env var backing `--no-auto-discover`.
 ///
 /// This name is deliberately NEVER emitted into a generated plist's
 /// `EnvironmentVariables` — see [`resolve_persisted_env`].
+#[cfg(target_os = "macos")]
 pub const NO_AUTO_DISCOVER_ENV: &str = "TRUSTY_NO_AUTO_DISCOVER";
 
 /// The CLI spelling written into the generated plist's `ProgramArguments`.
+#[cfg(target_os = "macos")]
 pub const NO_AUTO_DISCOVER_ARG: &str = "--no-auto-discover";
 
 /// Parse a boolean written the way operators actually write booleans.
@@ -81,6 +90,7 @@ pub fn parse_truthy_bool(raw: &str) -> Result<bool, String> {
 }
 
 /// The operator-meaningful contents of an installed launchd plist.
+#[cfg(target_os = "macos")]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct InstalledUnit {
     /// `ProgramArguments` minus `argv[0]` handling — every `<string>` in the
@@ -90,6 +100,7 @@ pub struct InstalledUnit {
     pub env: Vec<(String, String)>,
 }
 
+#[cfg(target_os = "macos")]
 impl InstalledUnit {
     /// Look up an environment variable the installed unit carried.
     pub fn env_value(&self, key: &str) -> Option<&str> {
@@ -141,6 +152,7 @@ impl InstalledUnit {
 /// Test: `parse_installed_unit_reads_args_and_env`,
 /// `parse_installed_unit_tolerates_missing_sections`,
 /// `parse_installed_unit_unescapes_xml`.
+#[cfg(target_os = "macos")]
 pub fn parse_installed_unit(xml: &str) -> InstalledUnit {
     InstalledUnit {
         args: section(xml, "ProgramArguments", "<array>", "</array>")
@@ -160,6 +172,7 @@ pub fn parse_installed_unit(xml: &str) -> InstalledUnit {
 /// Pair `<key>`/`<string>` tokens into (key, value), skipping any key whose
 /// value is not a plain string (a `<key>` immediately followed by another
 /// `<key>` drops the first).
+#[cfg(target_os = "macos")]
 fn pair_key_strings(body: &str) -> Vec<(String, String)> {
     let tokens = scan_tags(body, &["key", "string"]);
     let mut out = Vec::new();
@@ -179,6 +192,7 @@ fn pair_key_strings(body: &str) -> Vec<(String, String)> {
 
 /// Return the body between the balanced `open`/`close` container that follows
 /// `<key>{name}</key>`.
+#[cfg(target_os = "macos")]
 fn section<'a>(xml: &'a str, name: &str, open: &str, close: &str) -> Option<&'a str> {
     let needle = format!("<key>{name}</key>");
     let after = &xml[xml.find(&needle)? + needle.len()..];
@@ -207,6 +221,7 @@ fn section<'a>(xml: &'a str, name: &str, open: &str, close: &str) -> Option<&'a 
 
 /// Collect `(tag, unescaped_text)` for every occurrence of any tag in `tags`,
 /// in document order.
+#[cfg(target_os = "macos")]
 fn scan_tags(body: &str, tags: &[&str]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
@@ -237,6 +252,7 @@ fn scan_tags(body: &str, tags: &[&str]) -> Vec<(String, String)> {
 }
 
 /// Reverse the escaping applied by `LaunchdConfig::render_plist`.
+#[cfg(target_os = "macos")]
 fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -246,6 +262,7 @@ fn xml_unescape(s: &str) -> String {
 }
 
 /// What the regenerated unit should do about auto-discovery.
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoDiscover {
     /// Emit `--no-auto-discover`. `preserved` is true when the suppression came
@@ -256,6 +273,7 @@ pub enum AutoDiscover {
     Enable { dropped: bool },
 }
 
+#[cfg(target_os = "macos")]
 impl AutoDiscover {
     /// Whether the generated `ProgramArguments` must carry the flag.
     pub fn suppressed(self) -> bool {
@@ -278,6 +296,7 @@ impl AutoDiscover {
 /// `resolve_auto_discover_explicit_request`,
 /// `resolve_auto_discover_explicit_reenable_reports_drop`,
 /// `resolve_auto_discover_defaults_to_enabled`.
+#[cfg(target_os = "macos")]
 pub fn resolve_auto_discover(
     request_off: bool,
     request_on: bool,
@@ -314,6 +333,7 @@ pub fn resolve_auto_discover(
 /// Test: `resolve_persisted_env_prefers_process_env`,
 /// `resolve_persisted_env_carries_forward_installed_values`,
 /// `resolve_persisted_env_never_emits_no_auto_discover`.
+#[cfg(target_os = "macos")]
 pub fn resolve_persisted_env(
     lookup: impl Fn(&str) -> Option<String>,
     existing: Option<&InstalledUnit>,
@@ -367,6 +387,17 @@ mod tests {
         assert!(parse_truthy_bool("2").is_err());
         assert!(parse_truthy_bool("enabled").is_err());
     }
+}
+
+/// Tests for the launchd-unit half of this module.
+///
+/// Gated to macOS for the same reason the code under test is — see the module
+/// docs. The logic is pure string handling, so these would run anywhere; the
+/// items they exercise simply do not exist on other targets.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod launchd_unit_tests {
+    use super::*;
 
     fn sample_plist() -> &'static str {
         "<plist version=\"1.0\">\n<dict>\n\
