@@ -699,3 +699,133 @@ fn pm_guard_allows_benign_pipes_and_dev_null() {
     );
     assert_eq!(dev_null.trim(), "", "2>/dev/null discard must be allowed");
 }
+
+// ---------------------------------------------------------------------------
+// Subagent fan-out denial (issue #4784) — `commands::pm_guard_fanout`.
+//
+// The pure policy is unit-tested in that module; these cases prove the two
+// caller-context markers actually resolve through the real binary (env is
+// controlled per-process here, which a threaded unit test cannot do safely)
+// and that the decision reaches stdout in the documented deny shape.
+// ---------------------------------------------------------------------------
+
+/// Assert the printed deny names the fan-out rule and its remedy, not just
+/// "denied" — the message is the whole point of the guard for the agent that
+/// hits it.
+fn assert_fanout_denied(stdout: &str) {
+    assert_denied(stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#4784") && reason.contains("report back to the PM"),
+        "the fan-out deny must name the rule and the remedy, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_agent_dispatch_from_native_subagent() {
+    // A native Task/Agent-dispatched subagent (agent_id present) trying to
+    // dispatch again. This is the case #4784 exists for, and it must fire
+    // AHEAD of Guard 4, which would otherwise exempt this exact payload.
+    for tool in ["Agent", "Task"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"rust-engineer","tool_name":"{tool}","tool_input":{{"subagent_type":"qa","prompt":"go"}}}}"#
+        );
+        assert_fanout_denied(&run_pm_guard(&payload, &[]));
+    }
+}
+
+#[test]
+fn pm_guard_denies_task_dispatch_from_mpm_subagent_env() {
+    // trusty-agents spawns subagents as their own top-level Claude Code
+    // sessions, which carry no `agent_id` — `CLAUDE_MPM_SUB_AGENT` is the only
+    // marker available there. Without this arm the guard is a no-op for that
+    // whole class. It must also fire ahead of Guard 1, which exempts this
+    // process for everything else.
+    for tool in ["Agent", "Task"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"qa","prompt":"go"}}}}"#
+        );
+        assert_fanout_denied(&run_pm_guard(&payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]));
+    }
+}
+
+#[test]
+fn pm_guard_allows_agent_dispatch_from_pm() {
+    // The load-bearing arm: the PM carries neither marker, so its dispatches
+    // must pass silently. A regression here halts every delegation in the
+    // system, which is strictly worse than the fan-out this guard prevents.
+    for tool in ["Agent", "Task"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
+        );
+        assert_eq!(
+            run_pm_guard(&payload, &[]).trim(),
+            "",
+            "the PM's own {tool} dispatch must be allowed"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_fanout_fails_open_on_indeterminate_caller() {
+    // An empty-string `agent_id` and a payload with no marker at all are both
+    // INDETERMINATE. Indeterminate must ALLOW (#4784): a false deny against
+    // the PM halts orchestration; a false allow reproduces prior behaviour.
+    for payload in [
+        r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
+        r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
+    ] {
+        assert_eq!(
+            run_pm_guard(payload, &[]).trim(),
+            "",
+            "an indeterminate caller context must fail OPEN: {payload}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_never_denies_send_message() {
+    // SendMessage is how a fan-out-denied agent reports back and gets resumed.
+    // Denying it would strand the agent this guard redirects, so it is asserted
+    // in every caller context — including both subagent markers.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"SendMessage","tool_input":{"agent_id":"x","message":"done"}}"#;
+    let sub_payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"SendMessage","tool_input":{"agent_id":"x","message":"done"}}"#;
+    assert_eq!(run_pm_guard(payload, &[]).trim(), "");
+    assert_eq!(run_pm_guard(sub_payload, &[]).trim(), "");
+    assert_eq!(
+        run_pm_guard(payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]).trim(),
+        "",
+        "SendMessage must never be denied, in any caller context"
+    );
+}
+
+#[test]
+fn pm_guard_fanout_yields_to_operator_escape_hatches() {
+    // Guards 2/3 are human escape hatches and stay ahead of every rule in the
+    // file, this one included — an operator who explicitly lifts enforcement
+    // gets exactly that. Pinned so a future reordering is a deliberate choice.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Agent","tool_input":{"prompt":"go"}}"#;
+    assert_eq!(
+        run_pm_guard(payload, &[("TRUSTY_MPM_DISABLE_HOOKS", "1")]).trim(),
+        ""
+    );
+    assert_eq!(
+        run_pm_guard(payload, &[("TRUSTY_MPM_PM_UNRESTRICTED", "1")]).trim(),
+        ""
+    );
+}
+
+#[test]
+fn pm_guard_subagent_keeps_its_working_tool_surface() {
+    // Only fan-out is cut. A subagent's ordinary work — the Edit/Write calls
+    // Guard 4 exists to exempt (#2014) — must still be allowed, proving the
+    // new guard narrowed nothing else.
+    let edit = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#;
+    assert_eq!(run_pm_guard(edit, &[]).trim(), "");
+    let read = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#;
+    assert_eq!(run_pm_guard(read, &[]).trim(), "");
+}

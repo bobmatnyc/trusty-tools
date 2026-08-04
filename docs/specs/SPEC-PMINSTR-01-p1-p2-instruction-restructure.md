@@ -1129,3 +1129,238 @@ renaming `base_pm()`, and updating the ~30 test assertions that pin the
 literal string is a **code change**. Per this ruling's own scope note, it
 lands in the #4286 core PR, not this docs-only one. This section records
 the target model and the current gap; it does not perform the rename.
+
+## 10. Owner Ruling (2026-08-04): the Compiled Prompt Owns a Distinct Path, Written Before Launch {#SPEC-PMINSTR-10~draft}
+
+Issue [#4752](https://github.com/bobmatnyc/trusty-tools/issues/4752). This
+section supersedes any earlier text in this document that treats
+`~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` as the home of the
+compiled PM system prompt.
+
+### 10.1 The defect
+
+One path carried three roles at once:
+
+- `instruction_pipeline.rs`'s `install_system_prompt` / `install_system_prompt_to`
+  wrote the **full compiled prompt** to `framework/instructions/INSTRUCTIONS.md`.
+- `bundle_all.rs` used to write a **4-line stub** to that same path. (Already
+  removed by #4286 split A — see §10.4; the `ALL` table and the
+  `FRAMEWORK_INSTRUCTIONS` constant no longer carry the entry.)
+- `build_instructions` **reads** that path as an optional framework section —
+  i.e. the compiled output was simultaneously a pipeline input.
+
+Last writer won, so the artifact an operator inspects to answer "what
+instructions is my session actually running?" was non-deterministic. #383 fixed
+one instance of this by ordering the writes; ordering is not a fix when the real
+problem is that two roles share one name.
+
+### 10.2 The ruling
+
+- The compiled prompt is written **per project**, to
+  `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` (§10.6(b)).
+  Resolved by `instruction_pipeline::compiled_prompt_path(project_dir)`; the
+  filename constant is `instruction_pipeline::COMPILED_PROMPT_FILE`.
+  `framework/instructions/` stays the bundled-input directory.
+- **Nothing else writes that path.** Every writer goes through one function,
+  `write_compiled_prompt_to`, so the file can only ever hold a full compiled
+  prompt — never a stub. `tm install` writes no compiled prompt at all
+  (§10.6(b)).
+- A pre-#4752 `instructions/INSTRUCTIONS.md` is a **stale leftover**: no writer
+  can refresh it, yet `build_instructions` would keep reading it. `tm install`
+  removes it (`remove_stale_bundled_instructions`).
+
+### 10.3 Ordering: the write is fatal, and it blocks the spawn
+
+**Ruling (2026-08-04, revised after the #4759 review):** the compiled prompt is
+**per project**, at `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`,
+and a failure to write it **refuses the launch**.
+
+Owner's reasoning, verbatim: *"If we can't write a simple file to this
+directory, we have a bigger issue."* That holds because `.trusty-mpm/` is a
+directory `tm` already writes on every launch (it holds `last-instructions.md`
+and `sessions/`), and because the prompt file `--append-system-prompt-file`
+points at is already a mandatory write — a session that cannot write its own
+prompt cannot launch. The compiled file is a second copy alongside a write that
+is fatal by necessity, so a loud, diagnosable refusal beats a session running
+against a silently stale artifact.
+
+**Where the fatal write happens — all THREE pre-spawn paths:**
+
+| Path | Fatal write | Error |
+|---|---|---|
+| start / connect / in-project / cloned | `session_launch::prepare_session_inner` — at BOTH `build_instructions` and, as its LAST step, the compiled write | `PrepError::Instructions` |
+| resume / guided-resume / crash recovery | `daemon::managed_routes::lifecycle::resume_managed`, immediately before `spawn_resume` | `ResumeManagedError::Other` |
+| bare `tm` in a managed pane (in-place relaunch) | `tm::commands::guided_inplace::run_inplace_relaunch`, before it builds the resume command | `anyhow::Error` from `instructions_failure_message` |
+
+`resume_managed` needs its own write because it never calls `prepare_session*`
+on its healthy path (`resume_self_heal` → `ensure_status_line` →
+`ensure_deployment_complete` → `spawn_resume`).
+
+`run_inplace_relaunch` needs one for the same reason and was **missed until
+round 4** of this issue: it calls neither `prepare_session*` nor
+`resume_managed`, and its only daemon call is the `reactivate` route, which does
+no prompt work. Its sole compiled write was therefore
+`build_prompt_file`'s best-effort refresh — so a bare-`tm` relaunch could start
+a session on a stale or missing compiled prompt exactly where a fresh launch
+would have refused.
+
+**Two of the three share one helper — not all three.** The two resume-shaped
+paths (daemon resume, in-place relaunch) route through
+`instruction_pipeline::refresh_compiled_prompt`, which composes, writes, and
+formats the failure message. `prepare_session` deliberately does NOT: it must
+compose with the `effective_style` it has just resolved (flag > config >
+manifest), and `refresh_compiled_prompt` hardcodes the style to `None`, so
+routing preparation through it would silently drop the operator's chosen output
+style from the compiled copy. All three still share the actual write —
+`write_compiled_prompt_to` — and the same fatal policy; only the composed text
+differs. An earlier draft of this section claimed all three routed through the
+helper, which was false.
+
+**Only this one preparation failure is fatal.** #2149 deliberately made
+preparation non-fatal so a roster or skill deploy hiccup could not stop a
+session launching, and that still holds: `PrepError::is_fatal()` returns `true`
+for `Instructions` and nothing else. All seven spawning call sites consult it
+— `commands/launch.rs::connect`, the managed-clone block in
+`commands/launch.rs`, `commands/meta/launch.rs`,
+`commands/session/start.rs::start_session_in_place`,
+`client/http_client/session_connect.rs`,
+`daemon/managed_routes/lifecycle.rs::prepare_inproject_session` (now
+`Result`-returning, propagated by both in-project spawns), and
+`provisioner/workspace.rs` (→ `ProvisionError::PrepareSession`). A blanket
+"every prep error aborts" would have reversed #2149 wholesale.
+
+**Operator-facing failure.** A refusal never surfaces a bare `io::Error`.
+`instruction_pipeline::compiled_prompt_failure_message` is the single formatter:
+it names the path, carries the cause, states that the session was NOT started,
+and points at permissions/free space. Pinned by
+`instructions_failure_message_names_the_path_and_a_remedy`.
+
+**Position is load-bearing and must stay last.** An earlier revision placed the
+write immediately after the `last-instructions.md` stash, upstream of
+`write_output_style`, `write_project_hooks`, the workspace trust pre-seed, and
+all four MCP injectors — including `inject_trusty_mpm_mcp` /
+`inject_trusty_review_mcp`, the content-pinning defense against the
+#3918/#3950 MCP name-squatting class. That was a security regression: a failed
+write skipped the injectors while the (then non-fatal) callers launched anyway.
+Under a FATAL write the placement matters more, not less — a refusal must not
+also mean provisioning was half-applied. Pinned by
+`compiled_write_failure_does_not_skip_the_mcp_injectors`.
+
+**THE CONTRACT: a session that starts always has its instructions on disk.**
+Owner ruling, round 4, verbatim: *"If writing the instruction fails, we
+shouldn't start. But that should be a protected path, we depend on those
+instructions."* Two steps in `prepare_session_inner` establish them and BOTH are
+fatal:
+
+1. `build_instructions` composes the merged instructions. This used to return a
+   NON-fatal error, which every spawning call site logged and continued past —
+   so a session could start with no instructions established at all. Reproduced
+   during round-4 review by planting a directory at `<project>/CLAUDE.md`, which
+   makes `load_or_create_claude_md` fail `IsADirectory` rather than `NotFound`:
+   `is_fatal = false`, no compiled prompt on disk, and the session launched.
+   Pre-existing, not introduced by this issue. Now fatal. Pinned by
+   `prepare_session_refuses_when_the_instructions_cannot_be_built`.
+2. The compiled write, as the function's LAST step.
+
+**One CONDITION, two sites — not two error classes.** Both report
+`PrepError::Instructions`, and `PrepError::is_fatal()` is `true` for that variant
+and nothing else. The "exactly one fatal preparation failure" ruling is about
+there being one fatal *condition*; enforcing it at a second site is the same
+error class reaching another site. The variant was renamed from `CompiledPrompt`
+in round 4 because it no longer describes only the compiled write, and
+`compiled_prompt_failure_message` became `instructions_failure_message` for the
+same reason — its wording would have been wrong at half its call sites.
+
+**The `.trusty-mpm/` stash write is the one write that stays a warning.** It is
+an inspection copy (`tm session instructions`), not the text the session runs
+on, so losing it is not itself grounds to refuse a launch. What it must never do
+is take the fatal write down with it: an unwritable `.trusty-mpm/` used to
+return a short-circuiting non-fatal `PrepError::Io` from the stash, which sits
+ABOVE the compiled write, so every caller launched the session having skipped
+the write that records its instructions — exactly what the contract forbids. It
+now logs and continues. Pinned by
+`stash_write_failure_does_not_skip_the_fatal_instruction_write`.
+
+**One best-effort write remains, deliberately.**
+`runtime::claude_code::build_prompt_file` refreshes the file from the exact
+bytes it hands to `--append-system-prompt-file`. It is NOT fatal, because it
+sits *inside* the spawn, past the provisioning gate — and, now that the in-place
+relaunch carries its own fatal write, every one of the three paths reaching it
+has already had a fatal write succeed, so it is a belt-and-braces refresh rather
+than the sole guarantee. That claim was false until round 4; a fourth spawn path
+must add its own fatal write before relying on it. Making it fatal would also
+invert that function's own priority: a failure of the strictly more important
+write beside it (the actual system-prompt file) already degrades to spawning
+without it (#2173). Refusing to launch over the inspection copy while shrugging
+at the real prompt would be backwards.
+
+**Cost.** Every write reuses an already-composed string; none adds a composition
+pass. Not benchmarked — no no-regression claim is made.
+
+### 10.4 Corrections to earlier characterizations of #4752
+
+Recorded because the issue text and this document previously said otherwise, and
+both were checked directly against the code rather than taken from the report:
+
+- **The `bundle_all.rs` stub was already gone.** #4286 split A removed the
+  `instructions/INSTRUCTIONS.md` entry from `bundle::ALL` and deleted the
+  `FRAMEWORK_INSTRUCTIONS` constant it backed (`bundle_tests.rs`,
+  `bundle_table_is_complete`, pins `ALL.len() == 178`). Finding #1 in
+  `sections/README.md` described a two-writer collision whose first writer no
+  longer existed. The surviving half of the collision — compiled output sharing
+  a path with a pipeline input — is real, and is what §10.2 fixes.
+- **`FrameworkPaths::framework_instructions` / `framework_instructions_path`
+  are NOT dead** and were retained: `session_launch::prepare_session_inner` and
+  `commands/session.rs` both still construct a `PipelineInput` from them.
+
+### 10.5 CLAUDE.md pointer — deferred, not delivered
+
+The ruling that a project's `CLAUDE.md` should point at
+`INSTRUCTIONS-COMPILED.md` is **not implemented here**, superseded mid-flight by
+a second ruling: **all `CLAUDE.md` modification is reserved to the scaffolding
+agent**, which owns that file exclusively.
+
+Two code paths mutate a project `CLAUDE.md` today, neither of which is that
+agent — recorded as a defect to resolve separately, not fixed here:
+
+- `instruction_pipeline::load_or_create_claude_md` seeds `CLAUDE_MD_STUB` on
+  first session start (reached via `build_instructions`).
+- `session_launch::worktree_sync::self_heal_claude_md` strips the legacy #2170
+  delegation block on every session resume, via `strip_delegation_block`.
+
+The scaffolding path itself is the `tm-init` skill, which is agent-driven prose
+— it has no code component and no knowledge of the
+`<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` marked-block format. Teaching it to
+author marked section-override blocks is unbuilt capability, and where the
+pointer lives is an open owner decision.
+
+### 10.6 Rulings on the two questions this change raised (2026-08-04)
+
+Both were referred to the owner during the #4759 review and are now settled.
+
+**(a) Should a failed compiled write block the spawn? RULED: yes.** The
+implementer's proposal to keep it non-fatal was overruled. That proposal reasoned
+about the OLD global path; under project-local scoping it does not hold — see
+§10.3 for the reasoning and the implementation.
+
+**(b) Per-project or per-session? RULED: per project, project-local.** Not
+`framework/compiled/<slug>.md` under the global framework dir, which was the
+implementer's proposal. The file lives inside the project's own `.trusty-mpm/`,
+beside `last-instructions.md` and `sessions/`. That removes the collision **by
+construction** rather than by slug disambiguation: no shared root, no `$HOME`
+special case for managed workspaces, no slugs to collide. Owner: *"it's only
+used on startup, shouldn't be an issue to update it on startup."*
+
+Two consequences worth recording:
+
+- **The accessor moved off `FrameworkPaths`.** That type models the global
+  framework INSTALL layout; an accessor there would have to choose between the
+  shared managed root and the real `$HOME` — the very ambiguity that caused the
+  collision. The compiled prompt is now resolved by
+  `instruction_pipeline::compiled_prompt_path(project_dir)`.
+- **`tm install` no longer writes a compiled prompt at all.** Install has no
+  project, so it has nothing meaningful to compile; writing the bundled assembly
+  to a shared path was exactly the "wrong content kind on a shared path"
+  collision this issue closes. This eliminates the second writer rather than
+  relocating it. `tm install` still deletes a stale pre-#4752
+  `instructions/INSTRUCTIONS.md`.

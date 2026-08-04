@@ -67,10 +67,21 @@ use crate::core::instruction_package::{CustomizationTier, OverrideTier, SectionI
 /// `CLAUDE.md` could see marker blocks with no way to find what they compile
 /// into. The pointer runs one way only — `CLAUDE.md` → compiled file — so this
 /// module records the path without owning, creating, or reading it.
-/// What: the tilde-form path, written verbatim into the pointer block. Producing
-/// the file at this path belongs to the instruction pipeline, not here.
-/// Test: `pointer_block_names_the_compiled_instructions_path`.
-pub const COMPILED_INSTRUCTIONS_PATH: &str = "~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md";
+/// What: the path RELATIVE TO THE PROJECT ROOT — which is where the `CLAUDE.md`
+/// holding the pointer lives, so a reader can follow it directly. Written
+/// verbatim into the pointer block. Producing the file at this path belongs to
+/// the instruction pipeline, not here.
+///
+/// #4752: this was the global `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+/// until the compiled prompt became project-local. Nothing writes the global
+/// path any more, so a pointer naming it would have sent every reader to a file
+/// that never exists. Kept in step with
+/// [`crate::core::instruction_pipeline::compiled_prompt_path`] by
+/// `pointer_path_matches_the_instruction_pipeline`, which fails if either side
+/// moves.
+/// Test: `pointer_block_names_the_compiled_instructions_path`,
+/// `pointer_path_matches_the_instruction_pipeline`.
+pub const COMPILED_INSTRUCTIONS_PATH: &str = ".trusty-mpm/framework/INSTRUCTIONS-COMPILED.md";
 
 /// First line of the managed compiled-instructions pointer block.
 ///

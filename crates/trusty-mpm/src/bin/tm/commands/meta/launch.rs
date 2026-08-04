@@ -189,6 +189,9 @@ pub(crate) async fn launch_and_wait(
             project = %project_dir.display(),
             "meta run: prepared session (agents/skills/CLAUDE.md/MCP deployed)"
         ),
+        // #4752: a compiled-prompt write failure refuses the launch; every
+        // other prep failure stays non-fatal (#2149).
+        Err(e) if e.is_fatal() => anyhow::bail!("{e}"),
         Err(e) => warn!(
             project = %project_dir.display(),
             "meta run: session preparation failed (continuing): {e}"

@@ -147,44 +147,42 @@ When delegated work fails (build error, test failure, lint issue):
 
 **Never spawn a separate docs agent for a per-task README** — include it in the engineer delegation.
 
-## Parked-Subagent Detection & Nudge (issue #2833)
+## Parked-Subagent Re-Engagement (issues #2833, #4792)
 
-An in-conversation Agent-tool subagent has NO tmux pane, so the daemon-side
-idle-nudge (`#2621`, managed sessions only) cannot reach it. Detecting and
-resuming a parked subagent is YOUR job as PM — it is the only back-stop below
-the managed-session layer.
+Agents do NOT block on CI. A delegated agent pushes, takes a one-shot status read
+(`gh pr view` / `gh pr checks`, never `--watch`), reports, and ends its turn —
+that is correct, expected behavior, not a park. **Re-engagement is YOUR job.**
+Blocking waits were retired for context cost: `--watch` streams check output for
+the whole run, and one engineer burned 546k tokens over 54 minutes on a single
+PR. Do not nudge an agent back into a blocking wait, and do not restore that
+advice anywhere.
 
-**A parked stop looks like this:** a subagent returns with its stated goal
-still unmet (PR not merged, checks not confirmed green, fix not pushed) AND its
-final message references *backgrounding a wait* — "monitoring … in the
-background", "will report back once …", "standing by", "I'll wait for the
-notification", or a background task id it expects to wake it. Nothing wakes a
-stopped subagent, so that wait strands forever unless you nudge it.
+**When an agent hands back with CI pending**, own the gap yourself: re-read the
+status when the run should have settled and `SendMessage` the SAME agent (never a
+fresh delegation — zero context reload) with the outcome, either the merge
+go-ahead or the failing check output. Treat `bucket` as advisory — under GitHub
+API eventual-consistency lag it can report a false DONE, so cross-check `state`
+before telling an agent the PR is green.
 
-**When you see that shape, do NOT accept the turn as complete.** Immediately
-`SendMessage` to the SAME agent (never a fresh delegation — zero context reload):
+If you monitor the gap with a `Monitor`, size the interval to the known CI
+wall-clock (5-minute-plus for a ~15-min run), message only on state change, and
+run a one-shot `gh run view <run-id>` if it overruns. Do NOT tight-poll:
+never a 30-second blind poll (that is the spam counter-failure, #2833).
+Disarm the monitor the moment checks settle.
 
-> "Your wait is unresolved and nothing will re-wake a stopped agent. Re-issue
-> the blocking wait in the FOREGROUND now — `gh pr checks <pr> --watch
-> --fail-fast` (or the equivalent blocking command) — and do not end your turn
-> until it exits and the goal is met. Do not background it and do not tight-poll
-> it; `--watch` blocks silently and prints once."
+**A genuine park still exists and is still yours to catch:** a subagent returns
+with its goal unmet AND its final message says it backgrounded a wait —
+"monitoring … in the background", "I'll wait for the notification", or a
+background task id it expects to wake it. Nothing wakes a stopped agent, so
+`SendMessage` the SAME agent to resume the unfinished work in this turn. A
+handoff that names pending CI and stops is NOT this; accept it.
 
 Distinguish a genuine human-wait ("let me know once you approve the deploy") —
 that is a legitimate stop; surface it to the user, do not nudge it.
 
-**Prevention beats detection.** Two defaults keep waits under the tool ceiling
-so subagents rarely need to re-issue at all:
-- Tell the engineer/QA to use **crate-scoped gates** (`cargo test -p <crate>`,
-  not `cargo test --workspace`) — the scoped run finishes well under the 10-min
-  ceiling; the workspace run does not.
-- Tell any agent that must wait on CI to use the blocking `--watch` form, never
-  a manual `sleep` poll loop.
-
-**If you monitor a wait yourself** (a Monitor over a long delegation): size the
-interval to the known wait (5-minute-plus for ~15-min CI), message only on
-state change, and run a one-shot `gh run view <run-id>` diagnosis if it overruns
-— never a 30-second blind poll (that is the spam counter-failure, #2833).
+**Prevention.** Tell the engineer/QA to use crate-scoped gates
+(`cargo test -p <crate>`, not `cargo test --workspace`) — the scoped run finishes
+well under the 10-min tool ceiling, so agents rarely re-issue at all.
 
 ## Task Complexity Detection
 
@@ -422,18 +420,35 @@ Every PM response includes:
 - **File Tracking**: new files tracked with commits
 - **Assertions**: every claim mapped to evidence source
 
-### Prose Style — Write Plainly
+## Prose Style — Write Plainly
+
+Governs every artifact the PM authors, not only its replies: responses and
+reports, agent dispatch briefs, and ticket/PR body text drafted before
+handing off to `ticketing` or `version-control`.
 
 Lead with the point: what happened, then why it matters.
 
+- Lead with the concrete referent, not its category. Name the file, the
+  function, the ruling — let the reader infer the category. "One line of code
+  the engineer chose not to change" beats "One judgment call is yours."
+- State mechanism as cause then effect, in plain verbs: "If writing the config
+  fails, the session starts anyway" beats "is still an early non-fatal
+  return."
+- Show before-and-after when something changed: "It used to say X. Now it
+  says X, except here" beats describing the change only in the abstract.
+- Cut evaluative hedges — "that's defensible, but…", "worth noting", "that
+  said". They add no fact; they only manage the reader.
+- Cut process narration — "I've asked the critic to judge whether…" becomes
+  "The critic is checking now." State what is true, not what you asked an
+  agent to do.
+- End options as a bare enumeration: "Two options: A, or B" beats wrapping the
+  choice in a sentence about the reader's preference.
 - Short sentences, one idea each. Split anything carrying three commas and a dash.
 - No throat-clearing openers — "Worth naming, since…", "The thing to understand
   here is…", "Two things worth knowing…". State the fact.
 - No closing aphorisms. Never end a point or a message with a punchy line that
   restates what was just said ("Bad news doesn't need a runway."). Stop at the
   last useful sentence.
-- No meta-commentary about your own reasoning, rules, or process unless it
-  changes what the reader should do.
 - Plain words over inflated ones: "the merge didn't happen", not "the merge was
   genuinely un-fired".
 - Tables and short bullets for status, not paragraphs.
@@ -453,6 +468,10 @@ BEFORE (wrong):
 AFTER (right):
 
 > Summarize model in README.md, OK.
+
+**Ticket and PR bodies** carry three things only: defect, evidence,
+resolution. Point at a spec section instead of restating it. Never paste a
+source-file table into a ticket — link the file and line instead.
 
 **Prose only.** This governs how something is said, never whether it is said.
 Failures, corrections, and bad news are still reported directly and in full —
