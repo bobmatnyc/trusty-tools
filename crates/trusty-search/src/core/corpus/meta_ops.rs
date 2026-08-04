@@ -220,6 +220,87 @@ impl CorpusStore {
         Ok(())
     }
 
+    /// Read the raw in-progress reindex-checkpoint blob from `_meta` (#3979).
+    ///
+    /// Why: the reindex runner must decide whether the staging corpus it found
+    /// on disk was left by a run it can safely continue. That decision has to
+    /// come from state written *inside the same redb file* as the partial
+    /// chunks, so a torn write can never leave the marker and the data
+    /// disagreeing: redb commits the blob in its own ACID transaction, which is
+    /// a strictly stronger crash-safety guarantee than a write-then-rename
+    /// sidecar file (there is no window in which a half-written record is
+    /// readable).
+    /// What: opens a read transaction on `_meta` and returns the bytes stored
+    /// under `META_KEY_REINDEX_CHECKPOINT`. Returns `None` when the table or
+    /// the key is absent — the normal case for a corpus that was never staged.
+    /// Parsing and validating the bytes is the caller's job
+    /// (`service::reindex::checkpoint`), so a corrupt blob degrades to "no
+    /// resume" rather than an open failure.
+    /// Test: `reindex_checkpoint_roundtrip` in `corpus::tests`.
+    pub(crate) fn read_reindex_checkpoint_sync(&self) -> Result<Option<Vec<u8>>> {
+        use crate::core::migration::{META_KEY_REINDEX_CHECKPOINT, META_TABLE};
+        let txn = self.db.begin_read().context("begin _meta read txn")?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("open _meta table: {e}")),
+        };
+        match table
+            .get(META_KEY_REINDEX_CHECKPOINT)
+            .context("read reindex_checkpoint")?
+        {
+            Some(v) => Ok(Some(v.value().to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// Write the in-progress reindex-checkpoint blob into `_meta` (#3979).
+    ///
+    /// Why: written into the STAGING corpus immediately after it is opened and
+    /// seeded, before the first batch commits. Any later crash therefore leaves
+    /// a staging file that is self-describing: it carries the index id, root,
+    /// and config fingerprint of the run that produced it.
+    /// What: one redb write transaction upserting `bytes` under
+    /// `META_KEY_REINDEX_CHECKPOINT`. The commit is atomic, so a crash during
+    /// this call leaves either the old value or the new one — never a partial
+    /// record.
+    /// Test: `reindex_checkpoint_roundtrip` in `corpus::tests`.
+    pub(crate) fn write_reindex_checkpoint_sync(&self, bytes: &[u8]) -> Result<()> {
+        use crate::core::migration::{META_KEY_REINDEX_CHECKPOINT, META_TABLE};
+        let txn = self.db.begin_write().context("begin _meta write txn")?;
+        {
+            let mut table = txn.open_table(META_TABLE).context("open _meta table")?;
+            table
+                .insert(META_KEY_REINDEX_CHECKPOINT, bytes)
+                .context("insert reindex_checkpoint")?;
+        }
+        txn.commit().context("commit _meta write txn")?;
+        Ok(())
+    }
+
+    /// Remove the in-progress reindex-checkpoint blob from `_meta` (#3979).
+    ///
+    /// Why: the staging corpus is promoted by RENAMING it over the live
+    /// `index.redb`, so anything left in its `_meta` table becomes live state.
+    /// A stale "reindex in progress" marker sitting in a promoted, complete
+    /// corpus would be a lie about that corpus, so it is cleared in the last
+    /// moments before the rename.
+    /// What: one redb write transaction removing the key. Removing an absent
+    /// key is a no-op, so this is safe to call unconditionally.
+    /// Test: `reindex_checkpoint_roundtrip` in `corpus::tests`.
+    pub(crate) fn clear_reindex_checkpoint_sync(&self) -> Result<()> {
+        use crate::core::migration::{META_KEY_REINDEX_CHECKPOINT, META_TABLE};
+        let txn = self.db.begin_write().context("begin _meta write txn")?;
+        {
+            let mut table = txn.open_table(META_TABLE).context("open _meta table")?;
+            table
+                .remove(META_KEY_REINDEX_CHECKPOINT)
+                .context("remove reindex_checkpoint")?;
+        }
+        txn.commit().context("commit _meta write txn")?;
+        Ok(())
+    }
+
     /// Bulk-copy all durable rows from `source` into `self` (issue #839).
     ///
     /// Why: the incremental reindex staging path opens a FRESH empty
@@ -237,6 +318,11 @@ impl CorpusStore {
     /// and `_meta` (indexed_root, schema_version). KG tables are intentionally
     /// NOT copied here — they are rebuilt from scratch at the end of every
     /// reindex via `rebuild_symbol_graph_for_reindex` + `save_kg_graph`.
+    ///
+    /// `META_KEY_REINDEX_CHECKPOINT` is likewise and deliberately NOT in the
+    /// copied-key list (#3979): the checkpoint describes the run building
+    /// *this* staging corpus, so inheriting one from the live corpus would
+    /// mean a fresh staging file claiming to be resumable partial work.
     ///
     /// What: opens one read transaction on `source` and one write transaction
     /// on `self`, streams every row from the four core tables, and commits the

@@ -7,17 +7,55 @@
 //! safety-critical rename path easy to audit.
 //!
 //! What:
+//! - `staging_corpus_path` — the one place the staging path is resolved (#3979).
 //! - `begin_staged_corpus_swap` — open a fresh staging store and optionally
-//!   seed it from the live corpus for an incremental reindex (#839).
+//!   seed it from the live corpus for an incremental reindex (#839), or ADOPT an
+//!   interrupted run's staging store when resuming (#3979).
 //! - `commit_staged_corpus_swap` — rename staging → live on success.
 //! - `abort_staged_corpus_swap` — delete staging and re-open live on failure.
 //!
 //! Test: `incremental_reindex_no_durable_data_loss` and
-//! `incremental_reindex_carryover_failure_aborts` in `service::reindex::tests`.
+//! `incremental_reindex_carryover_failure_aborts` in `service::reindex::tests`;
+//! the adopt path in `service::reindex::resume_tests`.
 
 use crate::core::registry::{IndexHandle, IndexId};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
+
+use super::checkpoint::{ReindexCheckpoint, ResumeState};
+
+/// Resolve the staging (`index.redb.tmp`) path for this index, or `None` when
+/// it cannot be resolved.
+///
+/// Why (#3979): `begin_staged_corpus_swap` used to compute this inline, but the
+/// resume probe has to look at the SAME file before staging begins. Two copies
+/// of the colocated-vs-legacy routing would be a silent correctness hazard — the
+/// probe could inspect one file while the swap wrote another — so both callers
+/// share this one function.
+/// What: returns the colocated `.trusty-search/index.redb.tmp` when the root has
+/// colocated storage (#403), otherwise the daemon-global per-index staging path.
+/// A resolution failure is logged at `warn` and returns `None`, which puts the
+/// caller on the direct-write-to-live fallback exactly as before.
+/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`
+/// depends on the probe and the swap agreeing on one path.
+pub(super) fn staging_corpus_path(handle: &IndexHandle, index_id: &IndexId) -> Option<PathBuf> {
+    let resolved = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
+        crate::service::colocated_storage::colocated_redb_tmp_path(&handle.root_path)
+    } else {
+        crate::service::persistence::corpus_redb_tmp_path(&index_id.0)
+    };
+    match resolved {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!(
+                "staged corpus swap: cannot resolve staging corpus path for '{}' ({e}) — \
+                 reindex will write directly to the live corpus",
+                index_id.0
+            );
+            None
+        }
+    }
+}
 
 /// Begin the atomic-swap corpus staging for a reindex (issue #28, Phase 4;
 /// durable-data-loss fix issue #839).
@@ -34,13 +72,28 @@ use std::path::{Path, PathBuf};
 /// success; `Ok(None)` when staging is skipped (BM25-only / unresolvable
 /// temp path); `Err(e)` when the live-corpus carryover copy failed for an
 /// incremental reindex — caller MUST abort the reindex immediately.
-/// Test: `incremental_reindex_no_durable_data_loss` and
-/// `incremental_reindex_carryover_failure_aborts`.
+///
+/// Issue #3979: `resume` is `Some` only when [`super::checkpoint::probe_resume`]
+/// already proved an existing staging corpus adoptable. In that case this
+/// function ADOPTS that file (plain `open`, no `open_fresh`, no carryover copy —
+/// the carryover is already inside it from the interrupted run) instead of
+/// recreating it. When `resume` is `None` the behaviour is byte-for-byte the
+/// pre-#3979 path, plus a checkpoint record stamped into the fresh staging
+/// corpus so a future interruption is itself resumable.
+/// Test: `incremental_reindex_no_durable_data_loss`,
+/// `incremental_reindex_carryover_failure_aborts`, and
+/// `super::resume_tests::interrupted_reindex_resumes_to_identical_index`.
 pub(super) async fn begin_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     force: bool,
+    resume: Option<&ResumeState>,
+    checkpoint: Option<&ReindexCheckpoint>,
 ) -> Result<Option<PathBuf>, anyhow::Error> {
+    // #3979: adopt the already-validated staging corpus rather than deleting it.
+    if let Some(state) = resume {
+        return adopt_staged_corpus(handle, index_id, state).await;
+    }
     // Quick read-lock probe: nothing to stage if no durable corpus.
     // Also capture the live corpus Arc for the incremental copy path (#839).
     let live_corpus = {
@@ -59,31 +112,11 @@ pub(super) async fn begin_staged_corpus_swap(
     // Whether this is an incremental (carryover) reindex — tracked so the
     // error path can distinguish a copy failure from a staging-open failure.
     let is_incremental_carryover = live_corpus.is_some();
-    // Issue #403: route tmp corpus path to colocated or legacy storage.
-    let tmp_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
-        match crate::service::colocated_storage::colocated_redb_tmp_path(&handle.root_path) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "staged corpus swap: cannot resolve colocated staging corpus path for '{}' ({e}) — \
-                     reindex will write directly to the live corpus",
-                    index_id.0
-                );
-                return Ok(None);
-            }
-        }
-    } else {
-        match crate::service::persistence::corpus_redb_tmp_path(&index_id.0) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "staged corpus swap: cannot resolve staging corpus path for '{}' ({e}) — \
-                     reindex will write directly to the live corpus",
-                    index_id.0
-                );
-                return Ok(None);
-            }
-        }
+    // Issue #403: route tmp corpus path to colocated or legacy storage
+    // (extracted to `staging_corpus_path` for #3979 — the resume probe must
+    // resolve the identical path).
+    let Some(tmp_path) = staging_corpus_path(handle, index_id) else {
+        return Ok(None);
     };
     // Open the staging store on a blocking worker (redb's API is sync), then
     // seed it from the live corpus when performing an incremental reindex.
@@ -158,7 +191,164 @@ pub(super) async fn begin_staged_corpus_swap(
         index_id.0,
         tmp_path.display()
     );
+    // #3979: stamp the fresh staging corpus so an interruption from here on is
+    // resumable. Written AFTER the carryover copy so the record and the rows it
+    // describes land in the same file; `copy_all_from` deliberately does not
+    // carry this key over, so it can only ever describe THIS run.
+    if let Some(cp) = checkpoint {
+        write_checkpoint(handle, index_id, cp).await;
+    }
     Ok(Some(tmp_path))
+}
+
+/// Adopt an existing, already-validated staging corpus for a resumed reindex
+/// (issue #3979).
+///
+/// Why: the whole point of resume. `begin_staged_corpus_swap`'s normal path
+/// calls `CorpusStore::open_fresh`, which DELETES the file at the staging path
+/// before opening it — that single call is what discarded every committed batch
+/// after a crash. Adoption opens the same file without deleting it and without
+/// re-seeding from live, because the interrupted run already copied the live
+/// rows in (#839) and then added its own committed batches on top.
+///
+/// What: opens the staging corpus (serialized against concurrent openers,
+/// #3659), installs it on the indexer via `swap_corpus_store` — the same sink
+/// the fresh path uses, deliberately NOT `set_corpus_store`, so the #4122 write
+/// quarantine is neither lifted nor bypassed — and then drops the in-memory
+/// chunk/BM25/entity caches. That last step is required for correctness, not
+/// memory: those caches were rehydrated at warm boot from the LIVE corpus, so
+/// for any file the interrupted run had already re-indexed they hold the OLD
+/// chunks while the adopted corpus holds the NEW ones. Clearing them makes every
+/// downstream reader (search lanes, the KG rebuild, `remove_file_no_kg_rebuild`)
+/// lazily rehydrate from the adopted corpus through the existing
+/// `ensure_corpus_rehydrated` guards, so the served state matches the corpus
+/// that will be promoted.
+///
+/// Returns `Ok(Some(tmp_path))` on success. An open failure is NOT fatal: it
+/// returns `Ok(None)` so the caller proceeds without staging (writing to the
+/// live corpus, the pre-existing fallback) rather than aborting the reindex.
+/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`.
+async fn adopt_staged_corpus(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    state: &ResumeState,
+) -> Result<Option<PathBuf>, anyhow::Error> {
+    let tmp_path = state.tmp_path.clone();
+    let open_path = tmp_path.clone();
+    let opened = crate::core::corpus::open_serialized(&tmp_path, move || {
+        crate::core::corpus::CorpusStore::open(&open_path)
+            .with_context(|| format!("adopt staging corpus {}", open_path.display()))
+    })
+    .await;
+    let staged = match opened {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "reindex[{}]: could not adopt the staging corpus at {} ({e}) — \
+                 continuing without staging (issue #3979)",
+                index_id.0,
+                tmp_path.display(),
+            );
+            return Ok(None);
+        }
+    };
+    {
+        let mut indexer = handle.indexer.write().await;
+        let _prev = indexer.swap_corpus_store(std::sync::Arc::new(staged));
+    }
+    // Drop caches built from the LIVE corpus — see the doc comment above.
+    let reclaimed = handle.indexer.read().await.reclaim_memory_now().await;
+    tracing::info!(
+        "reindex[{}]: adopted staging corpus {} ({} staged chunk(s)); dropped {} \
+         in-memory cache entr(ies) built from the pre-crash live corpus so reads \
+         rehydrate from the adopted corpus (issue #3979)",
+        index_id.0,
+        tmp_path.display(),
+        state.staged_chunks,
+        reclaimed,
+    );
+    Ok(Some(tmp_path))
+}
+
+/// Persist `checkpoint` into the currently-installed (staging) corpus (#3979).
+///
+/// Why: the record has to live in the same redb file as the partial chunks so a
+/// crash cannot leave the two disagreeing — redb's ACID commit means the blob is
+/// either fully there or not there at all, which is strictly stronger than a
+/// write-then-rename sidecar.
+/// What: serializes to JSON and calls `write_reindex_checkpoint_sync` on a
+/// blocking worker. A failure is logged at `warn` and ignored — the only
+/// consequence is that this run's staging corpus is not adoptable, i.e. exactly
+/// the pre-#3979 behaviour.
+/// Test: `super::resume_tests::interrupted_reindex_resumes_to_identical_index`.
+async fn write_checkpoint(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    checkpoint: &ReindexCheckpoint,
+) {
+    let corpus = {
+        let indexer = handle.indexer.read().await;
+        indexer.corpus_store()
+    };
+    let Some(corpus) = corpus else {
+        return;
+    };
+    let bytes = match serde_json::to_vec(checkpoint) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                "reindex[{}]: could not serialize the resume checkpoint ({e}) — \
+                 an interruption will fall back to a full reindex (issue #3979)",
+                index_id.0
+            );
+            return;
+        }
+    };
+    let res =
+        tokio::task::spawn_blocking(move || corpus.write_reindex_checkpoint_sync(&bytes)).await;
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            "reindex[{}]: could not write the resume checkpoint ({e}) — an \
+             interruption will fall back to a full reindex (issue #3979)",
+            index_id.0
+        ),
+        Err(e) => tracing::warn!(
+            "reindex[{}]: resume-checkpoint write task panicked ({e}) — an \
+             interruption will fall back to a full reindex (issue #3979)",
+            index_id.0
+        ),
+    }
+}
+
+/// Clear the resume checkpoint from the staging corpus just before it is
+/// promoted (issue #3979).
+///
+/// Why: promotion is a RENAME, so whatever sits in the staging corpus's `_meta`
+/// table becomes live metadata. A completed corpus carrying an "in progress"
+/// marker would be a corpus lying about itself, and the next run's probe reads
+/// only `*.tmp` paths so it would never be cleaned up.
+/// What: best-effort `clear_reindex_checkpoint_sync` on a blocking worker.
+/// Failures are logged at `debug` and ignored — a stale record in a promoted
+/// live corpus is inert (the probe never reads the live corpus, and
+/// `copy_all_from` never copies this key into a staging corpus).
+/// Test: `super::resume_tests::completed_reindex_leaves_no_checkpoint`.
+pub(super) async fn clear_checkpoint_before_promote(handle: &IndexHandle, index_id: &IndexId) {
+    let corpus = {
+        let indexer = handle.indexer.read().await;
+        indexer.corpus_store()
+    };
+    let Some(corpus) = corpus else {
+        return;
+    };
+    let res = tokio::task::spawn_blocking(move || corpus.clear_reindex_checkpoint_sync()).await;
+    if !matches!(res, Ok(Ok(()))) {
+        tracing::debug!(
+            "reindex[{}]: could not clear the resume checkpoint before promoting the \
+             staging corpus — the stale record is inert (issue #3979)",
+            index_id.0
+        );
+    }
 }
 
 /// Finalize (commit) the atomic corpus swap after a successful reindex
@@ -208,6 +398,10 @@ pub(super) async fn commit_staged_corpus_swap(
             }
         }
     };
+    // #3979: the promote is a rename, so the staging corpus's `_meta` becomes
+    // live metadata — clear the "reindex in progress" record first. Must run
+    // BEFORE the store handle is dropped below, since it needs the open store.
+    clear_checkpoint_before_promote(handle, index_id).await;
     // Drop the staging store's last Arc so redb releases the temp file before
     // the rename.
     {

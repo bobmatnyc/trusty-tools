@@ -579,6 +579,33 @@ fields that let operators diagnose why a reindex produced zero chunks:
 These fields are populated every time a reindex task runs. On a healthy index
 with chunks you will see `last_walk_error: null` and `last_walk_files_seen > 0`.
 
+`last_walk_started_at: null` on an index reporting `chunk_count: 0` means
+something different from all three of the above: **no walk has ever run for
+this index in this daemon's lifetime**. That is a stuck index, not an empty
+one — see below.
+
+### `/health` — stuck (never-walked) indexes (issue #4680)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `indexes_stuck_empty` | `number` | Registered indexes whose lexical stage claims a walk is underway (`in_progress`) while none has ever been driven for them |
+| `boot_reconcile.stuck_retried` | `number` | Indexes boot reconcile re-drove because they were in that state |
+
+A non-zero `indexes_stuck_empty` forces the top-level `status` to `"degraded"`.
+
+Read it alongside the walk diagnostics above: an index at `chunk_count: 0` with
+`last_walk_started_at` **set** and `last_walk_error` describing zero indexable
+files is a legitimately-empty corpus and is never counted here or re-driven. An
+index at `chunk_count: 0` with `last_walk_started_at: null` has had no walk at
+all — it is counted, and boot reconcile re-drives it with a **non-force**
+reindex (incremental hash cache and staged-corpus carryover both apply, so
+recovery never clears or rebuilds a corpus).
+
+Note that `indexes` and `warmboot_summary.indexes_loaded` count registered
+index *slots*, not populated ones — a daemon can report `222/222` loaded while
+221 of those indexes hold no data. `indexes_stuck_empty` is the field that
+distinguishes the two.
+
 ## Network-mounted deployments (EFS/NFS/SMB) — issue #3408
 
 **`POST /indexes/:id/index-file` / `POST /indexes/:id/remove-file` (and the

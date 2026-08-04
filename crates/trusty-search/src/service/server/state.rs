@@ -642,4 +642,19 @@ pub struct ReconcileSummary {
     /// `true` when at least one index encountered an error during reconciliation
     /// (the error was logged; the index may still be partially usable).
     pub degraded: bool,
+    /// Issue #4680: count of indexes that were re-driven because they had never
+    /// been walked in this daemon's lifetime while still owing lexical work —
+    /// the "stuck at `chunk_count = 0`" case that both staleness markers
+    /// classify as needing nothing.
+    ///
+    /// Why: these indexes previously landed in `up_to_date` (git path) or
+    /// `skipped_no_data` (mtime path), which made a total indexing outage read
+    /// as a clean reconcile. Counting them separately is what lets an operator
+    /// tell "nothing needed doing" from "221 indexes had no data at all".
+    /// What: incremented by `reconcile_one_index` immediately before it spawns
+    /// the recovery reindex.
+    /// Test: `stuck_unwalked_git_index_is_retried_not_marked_up_to_date` and
+    /// `stuck_unwalked_non_git_index_is_retried_not_skipped` in
+    /// `service/reconcile_tests.rs`.
+    pub stuck_retried: usize,
 }
