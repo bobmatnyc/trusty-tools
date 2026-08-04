@@ -365,8 +365,9 @@ async fn try_show_picker(
 ) -> Option<anyhow::Result<()>> {
     // #1809: exclude decommissioned tombstones from the picker by default. The
     // shared fetch path returns the same live-only list the static renderer uses.
-    // #4702: no TTY pre-gate here any more — the auto-prune this fetch runs is
-    // record-only and never touches disk, so a scripted bare `tm` prunes exactly
+    // #4702: no TTY pre-gate here any more — the auto-prune this fetch runs
+    // touches neither the filesystem nor the runtime (see #4728, which is what
+    // made the second half of that true), so a scripted bare `tm` prunes exactly
     // like an interactive one instead of leaving dead records to accumulate.
     let sessions = super::session_picker::fetch_live_sessions(client, url, Some(source_id), false)
         .await

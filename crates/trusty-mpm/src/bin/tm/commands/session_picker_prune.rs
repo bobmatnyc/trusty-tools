@@ -16,14 +16,20 @@
 //! hardenings close that gap:
 //!   1. **Record-only removal** — [`decommission_dead_record`] calls the
 //!      `/decommission` route with `record_only=true`
-//!      (`SessionManager::decommission_record_only`), which never touches
-//!      the filesystem. A remount between the listing-time probe and this
-//!      call can never lose data, because nothing is ever deleted here.
+//!      (`SessionManager::decommission_record_only`), which touches neither the
+//!      filesystem nor the runtime. A remount between the listing-time probe and
+//!      this call can never lose data, because nothing is ever deleted here.
+//!      (#4728: the "nor the runtime" half was NOT true until that fix — the
+//!      teardown call sat above the `record_only` guard, so this sweep could
+//!      SIGTERM and kill a live pane whose name matched the record's. Treat
+//!      "record-only" as a claim that must stay pinned by tests, never as a
+//!      property the name guarantees.)
 //!   2. **Two-sightings confirmation** — [`auto_prune_dead_records_at`] only
-//!      acts on a session id whose `unresumable` flag was ALSO seen on a
-//!      strictly earlier call, tracked via a small persisted marker file
-//!      ([`load_seen`]/[`save_seen`]). A single-shot blip (one bad listing)
-//!      never triggers a prune.
+//!      acts on a session id first seen dead at least
+//!      [`SIGHTING_MIN_AGE_SECS`] ago, tracked via a small persisted marker
+//!      file ([`load_seen`]/[`save_seen`]). A single-shot blip (one bad
+//!      listing) never triggers a prune, and neither does a tight loop of
+//!      them — the window is elapsed TIME, not a call count.
 //!   3. **Per-call cap** — at most [`AUTO_PRUNE_CAP`] confirmed records are
 //!      decommissioned per call; the rest are reported as "pending
 //!      confirmation" rather than acted on. A bad-mount day cannot
@@ -96,6 +102,18 @@ const AUTO_PRUNE_CAP: usize = 5;
 /// Basename of the two-sightings confirmation marker file, under the
 /// framework root (`~/.trusty-mpm/` by default).
 const SEEN_MARKER_FILENAME: &str = "auto-prune-seen.json";
+
+/// Minimum elapsed time between a record's FIRST sighting as dead and the call
+/// that may act on it: 10 minutes (#4702).
+///
+/// Why: "two sightings" is only a safeguard if the two are genuinely separated
+/// in time. Before #4702 the check was `seen.contains_key(id)` — presence, never
+/// age — so `tm ls; tm ls` confirmed instantly and [`AUTO_PRUNE_CAP`] degraded
+/// from a rate limit to a per-call batch size a loop could defeat. Ten minutes
+/// is long enough that no scripted or accidental double-listing clears anything,
+/// and short enough that an operator's ordinary session-to-session usage still
+/// reaps dead rows without ever running a manual command.
+const SIGHTING_MIN_AGE_SECS: i64 = 10 * 60;
 
 /// Reserved key inside the marker file recording "a stale daemon already
 /// proved it ignores `record_only`" (critic CRITICAL finding, 2026-07-30
@@ -266,17 +284,31 @@ fn workdir_candidates(s: &ManagedSessionSummary) -> [Option<&str>; 2] {
 /// it).
 ///
 /// 🔴 This predicate is the ONLY thing standing between a still-recoverable
-/// stopped session and a tombstone, so it is deliberately FAIL-CLOSED-toward-
-/// KEEPING: `true` requires that at least one candidate path was present on the
-/// wire AND every candidate probe came back a definitive `Ok(false)`. A probe
-/// `Err` (permission denied, unmounted network volume, transient I/O) counts as
-/// "possibly present" and returns `false`, mirroring `is_unresumable`'s own
-/// fail-open rule. A record carrying NO path at all is unverifiable and is
-/// likewise kept. Measured 2026-08-03: 4 of 5 spot-checked stopped workspaces
-/// still existed on disk — those must never be cleared.
-/// What: `tokio::fs::try_exists` over [`workdir_candidates`].
+/// stopped session and a tombstone, so it is deliberately FAIL-CLOSED-TOWARD-
+/// KEEPING. `true` requires ALL of:
+///   * at least one candidate path was present on the wire (a record carrying
+///     none is unverifiable, and is kept);
+///   * every candidate's probe came back a definitive `Ok(false)`. A probe
+///     `Err` (permission denied, transient I/O) counts as "possibly present";
+///   * every candidate's PARENT DIRECTORY exists — see below.
+///
+/// 🔴 The parent check is not defensive padding, it is the whole point of the
+/// word "verified". `try_exists("/Volumes/Unplugged/work/proj")` returns
+/// `Ok(false)`, NOT `Err`, when the volume is not mounted — ENOENT on an
+/// intermediate component is indistinguishable from ENOENT on the leaf. Without
+/// this check, unplugging an external drive reads as "verified gone" for every
+/// session on it, and one `tm ls` tombstones the lot. Requiring the parent to
+/// exist means the only thing we ever call gone is a leaf missing from a
+/// directory we can still see. This errs toward keeping — a workspace whose
+/// whole parent tree was deleted is kept rather than cleared, which costs one
+/// stale row and risks nothing. Measured 2026-08-03: 4 of 5 spot-checked
+/// stopped workspaces still existed on disk.
+///
+/// What: for each of [`workdir_candidates`], `tokio::fs::try_exists` on the path
+/// itself and on `Path::parent()`.
 /// Test: `auto_prune_clears_stopped_record_whose_workspace_is_gone`,
-/// `auto_prune_keeps_stopped_record_whose_workspace_still_exists`.
+/// `auto_prune_keeps_stopped_record_whose_workspace_still_exists`,
+/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
 async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
     let mut probed_any = false;
     for candidate in workdir_candidates(s).into_iter().flatten() {
@@ -285,7 +317,17 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
             // Definitively present, or the probe could not tell — either way,
             // never treat this workspace as gone.
             Ok(true) | Err(_) => return false,
-            Ok(false) => continue,
+            Ok(false) => {}
+        }
+        // #4702: the leaf is absent — but is its directory even reachable? An
+        // unmounted volume answers `Ok(false)` for every path under it.
+        let Some(parent) = std::path::Path::new(candidate).parent() else {
+            // No parent (a bare relative name, or the filesystem root itself) —
+            // nothing to corroborate against, so refuse to call it gone.
+            return false;
+        };
+        if !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+            return false;
         }
     }
     probed_any
@@ -298,14 +340,31 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
 /// `decommissioned` records (35 on the reporting machine) are explicitly out of
 /// scope — nobody has assessed what discarding them costs — and a `deleted`
 /// slot tombstone is a rendering placeholder, not a session. Anything running
-/// (`active`, `provisioning`, `attached`) is untouchable by construction.
+/// (`active`, `provisioning`) is untouchable by construction, because the list
+/// endpoint reconciles a live tmux pane back to `active` before the CLI ever
+/// sees the row.
+///
+/// The `attached` guard covers the one hole in that reconciliation (PR #4725
+/// review): `reconcile_live_state` only rewrites `state` for records persisted
+/// `Active`/`Stopped`, so an `Errored` record is served with its persisted state
+/// verbatim and a live pane never turns it back into `active`. `attached` IS
+/// set for every record regardless of state, so it is the only wire-visible
+/// liveness signal an errored row carries. It is a partial signal — it proves a
+/// client is attached, not that no pane exists — so an errored record whose pane
+/// is live but DETACHED can still be cleared. That residue is bounded: clearing
+/// is record-only (it cannot kill the pane — see
+/// `SessionManager::decommission_record_only`) and still requires
+/// [`workspace_verified_gone`], so the session it tombstones has already lost
+/// its workspace.
+///
 /// What: the DISPLAY state must be `stopped`/`errored`, the row must not be a
-/// slot tombstone, and the PERSISTED state (when the daemon sends it) must not
-/// already be terminal.
+/// slot tombstone, must not be `attached`, and the PERSISTED state (when the
+/// daemon sends it) must not already be terminal.
 /// Test: `auto_prune_never_touches_a_running_record`,
-/// `auto_prune_never_touches_a_decommissioned_record`.
+/// `auto_prune_never_touches_a_decommissioned_record`,
+/// `auto_prune_never_touches_an_attached_record`.
 fn is_clearable_state(s: &ManagedSessionSummary) -> bool {
-    if s.deleted || !matches!(s.state.as_str(), "stopped" | "errored") {
+    if s.deleted || s.attached || !matches!(s.state.as_str(), "stopped" | "errored") {
         return false;
     }
     !matches!(
@@ -317,16 +376,27 @@ fn is_clearable_state(s: &ManagedSessionSummary) -> bool {
 /// The full "this record is definitively dead" predicate (#4702).
 ///
 /// Why: `unresumable` alone missed the majority of what operators see as dead
-/// (see [`workspace_verified_gone`]). Widening it here — rather than at the
-/// partition site — keeps the two conditions readable as one contract: the
-/// daemon's verdict, OR a stopped-class record the CLI independently confirmed
-/// has no workdir left.
-/// What: `s.unresumable || (is_clearable_state(s) && workspace_verified_gone(s))`.
-/// Test: the `auto_prune_*` suite in `tests_behavior_d_tests.rs`.
+/// (see [`workspace_verified_gone`]). Widening it is half the fix; the other
+/// half is that the daemon's verdict is no longer trusted ON ITS OWN.
+///
+/// 🔴 There is deliberately NO `if s.unresumable { return true }` short-circuit
+/// (PR #4725 review). `is_unresumable` probes with a bare `try_exists`, which
+/// answers `Ok(false)` for every path on an unmounted volume — so a daemon can
+/// and will flag an entire unplugged external drive's worth of sessions dead. A
+/// short-circuit on that flag would hand exactly the scenario
+/// [`workspace_verified_gone`]'s parent check exists to prevent straight past
+/// the check. Requiring the CLI's own confirmation for EVERY record closes that.
+///
+/// Dropping the short-circuit costs nothing in coverage: `is_unresumable`
+/// requires all three of `last_cwd`/`workspace_path`/`cwd` absent, so any record
+/// it flags is one this predicate also finds gone — provided the record carries
+/// a path on the wire. A legacy record with neither `workspace_path` nor `cwd`
+/// serialized is now kept rather than cleared; unverifiable is not dead.
+///
+/// What: `is_clearable_state(s) && workspace_verified_gone(s)`.
+/// Test: the `auto_prune_*` suite in `tests_behavior_d_tests.rs`, in particular
+/// `auto_prune_ignores_daemon_unresumable_when_parent_is_unreachable`.
 async fn is_dead_record(s: &ManagedSessionSummary) -> bool {
-    if s.unresumable {
-        return true;
-    }
     is_clearable_state(s) && workspace_verified_gone(s).await
 }
 
@@ -413,9 +483,17 @@ pub(crate) async fn auto_prune_dead_records_at(
     let mut confirmed = Vec::new();
     let mut first_sighting = Vec::new();
     for s in dead {
-        if seen.contains_key(&s.id) {
+        // #4702: the stored first-sighting timestamp must actually be COMPARED.
+        // The pre-#4702 code tested `seen.contains_key(&s.id)`, i.e. presence
+        // only, so two `tm ls` calls milliseconds apart satisfied the
+        // "two sightings" rule and `AUTO_PRUNE_CAP` stopped being a rate limit —
+        // a script could clear the fleet in a tight loop.
+        if sighting_is_confirmed(seen.get(&s.id)) {
             confirmed.push(s);
         } else {
+            // Fresh id, OR an entry too recent / unparseable to count: (re)stamp
+            // it and wait. Rewriting an unparseable entry is deliberate — a
+            // corrupt marker must restart the window, never satisfy it.
             seen.insert(s.id.clone(), now.clone());
             changed = true;
             first_sighting.push(s);
@@ -493,6 +571,27 @@ pub(crate) async fn auto_prune_dead_records_at(
         pruned,
         pending,
     }
+}
+
+/// Whether a stored first-sighting timestamp is old enough to CONFIRM a record
+/// for pruning (#4702).
+///
+/// Why: the confirmation rule is "seen dead on two separate occasions," and
+/// only a real elapsed interval makes it that. Presence alone made it "seen
+/// dead twice," which two back-to-back `tm ls` calls satisfy in milliseconds —
+/// collapsing both the two-sightings guard AND [`AUTO_PRUNE_CAP`] (which only
+/// rate-limits if the caller cannot immediately retry) into no guard at all.
+/// What: `true` only when `ts` parses as RFC 3339 and is at least
+/// [`SIGHTING_MIN_AGE_SECS`] old. `None`, an unparseable value, or a
+/// too-recent one all return `false` — the caller restamps and waits.
+/// Test: `auto_prune_does_not_confirm_two_calls_in_quick_succession`,
+/// `auto_prune_confirms_once_the_sighting_window_has_elapsed`.
+fn sighting_is_confirmed(ts: Option<&String>) -> bool {
+    ts.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .is_some_and(|first| {
+            chrono::Utc::now().signed_duration_since(first)
+                >= chrono::Duration::seconds(SIGHTING_MIN_AGE_SECS)
+        })
 }
 
 /// Whether the persisted `STALE_DAEMON_MARKER_KEY` sentinel is still within

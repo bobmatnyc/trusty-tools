@@ -179,14 +179,19 @@ pub(crate) async fn session_ls(
 /// Why: a test must never write the operator's real
 /// `~/.trusty-mpm/auto-prune-seen.json`; injecting the path is the same seam
 /// `auto_prune_dead_records_at` already provides one level down.
-/// What: see [`session_ls`]. The `--json` branch keeps its byte-for-byte
-/// passthrough contract by echoing a REAL daemon response — it re-GETs only
-/// when the prune actually removed something, so the printed bytes still
-/// reflect the post-prune fleet. A response the client cannot parse degrades to
-/// a plain passthrough (no prune) rather than failing the command: the raw echo
-/// is the contract there, the prune is a best-effort side task.
+/// What: see [`session_ls`]. The `--json` branch echoes the ORIGINAL response
+/// body and never re-GETs (PR #4725 review). A re-GET looked like it kept the
+/// output fresh but did neither job well: the raw passthrough is unfiltered, so
+/// a just-pruned row came back with `state` flipped to `"decommissioned"` rather
+/// than absent, and the second fetch's `?` could fail the command AFTER the
+/// registry had already been mutated — the caller would see an error and have no
+/// idea the prune landed. `--json` is a point-in-time snapshot of the fleet;
+/// a prune triggered by this invocation shows up on the next one. A response the
+/// client cannot parse degrades to a plain passthrough with no prune: the raw
+/// echo is the contract there, the prune is a best-effort side task.
 /// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
-/// `session_ls_json_passthrough_prunes_dead_records`.
+/// `session_ls_json_passthrough_prunes_dead_records`,
+/// `session_ls_json_never_refetches_after_pruning`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_ls_at(
     client: &reqwest::Client,
@@ -206,21 +211,16 @@ pub(crate) async fn session_ls_at(
     let parsed = crate::commands::session_picker::parse_scoped_sessions(&raw, all);
     if json {
         // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
-        // byte-for-byte.
-        let mut raw = raw;
+        // byte-for-byte. #4702: prune as a side effect, then echo the body we
+        // ALREADY have. No re-GET — see this function's doc.
         if let Ok(sessions) = parsed {
-            let before = sessions.len();
-            let kept = crate::commands::session_picker_prune::prune_and_report_at(
+            crate::commands::session_picker_prune::prune_and_report_at(
                 client,
                 url,
                 sessions,
                 marker_path,
             )
             .await;
-            if kept.len() != before {
-                raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id)
-                    .await?;
-            }
         }
         println!("{raw}");
         return Ok(());

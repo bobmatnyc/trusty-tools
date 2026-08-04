@@ -851,6 +851,138 @@ async fn decommission_record_only_never_removes_existing_workspace() {
     );
 }
 
+/// 🔴 A record-only decommission must not touch the RUNTIME either (#4702).
+///
+/// Why: `record_only` was named and documented as "never touches the
+/// filesystem," and every caller — including the shipped `tm ls` auto-prune
+/// (#4384) — read that as "safe to run unattended on every listing." It was
+/// only half true. `graceful_terminate_runtime` sat ABOVE the `record_only`
+/// guard in `decommission_with_root` and ran unconditionally: it SIGTERMed the
+/// claude process and `kill_session`ed the pane. Its self-guard is
+/// `session_exists(name)` — plain LIVE-TMUX NAME MEMBERSHIP, never the record's
+/// captured `pane_id` — so it killed whatever live session happened to carry
+/// this record's name, routing around the pane-scoped containment #3714 added
+/// for display. The sibling test above proves the filesystem half and passed
+/// throughout; it never seeded a live tmux session, so it could not see this.
+///
+/// What: seeds `FakeTmuxDriver::seeded_names` with the record's `tmux_name` so
+/// `session_exists` reports it LIVE — the exact precondition that made the old
+/// code signal and kill — then drives `decommission_with_root(…, record_only =
+/// true)`. Asserts on the DRIVER'S CALL LOG (`interrupt_calls`, `kill_calls`,
+/// `graceful_stop_calls` all empty), not on an observable outcome: a test that
+/// checked only "the record is tombstoned" would pass against the buggy code.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_record_only_never_touches_the_runtime() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("live");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true,
+        )
+        .await
+        .expect("create");
+
+    // Make the record's name resolve LIVE, so `graceful_terminate_runtime`'s
+    // `session_exists` fast-path does NOT short-circuit. Without this the test
+    // would pass vacuously against the buggy code.
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push(record.tmux_name.clone());
+    assert!(
+        fake.session_exists(&record.tmux_name),
+        "precondition: the driver must report this session LIVE, otherwise the \
+         helper's own fast-path makes this test vacuous"
+    );
+
+    mgr.decommission_with_root(&record.id, managed_root.path(), None, true)
+        .await
+        .expect("record-only decommission");
+
+    assert!(
+        fake.interrupt_calls.lock().unwrap().is_empty(),
+        "record-only must never signal the runtime; got {:?}",
+        fake.interrupt_calls.lock().unwrap()
+    );
+    assert!(
+        fake.kill_calls.lock().unwrap().is_empty(),
+        "record-only must never reclaim the pane — this is the call that killed \
+         a live session sharing the record's name; got {:?}",
+        fake.kill_calls.lock().unwrap()
+    );
+    assert!(
+        fake.graceful_stop_calls.lock().unwrap().is_empty(),
+        "record-only must never issue a graceful-stop; got {:?}",
+        fake.graceful_stop_calls.lock().unwrap()
+    );
+}
+
+/// The full (non-`record_only`) decommission still tears the runtime down
+/// (#1975) — the #4702 gate must not silently disable it for everyone.
+///
+/// Why: gating `graceful_terminate_runtime` behind `!record_only` is only
+/// correct if the normal path is unaffected. Without this test the gate could
+/// be inverted or over-applied and nothing would notice.
+/// What: identical fixture to
+/// [`decommission_record_only_never_touches_the_runtime`], but `record_only =
+/// false`. Asserts the pane IS reclaimed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_full_still_terminates_the_runtime() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let workspace_path = managed_root.path().join("owner").join("repo").join("full");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true,
+        )
+        .await
+        .expect("create");
+
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push(record.tmux_name.clone());
+
+    mgr.decommission_with_root(&record.id, managed_root.path(), None, false)
+        .await
+        .expect("full decommission");
+
+    assert_eq!(
+        *fake.kill_calls.lock().unwrap(),
+        vec![record.tmux_name.clone()],
+        "the FULL decommission path must still reclaim the pane (#1975)"
+    );
+}
+
 // Build a minimal Active session record for reconcile tests (avoids repeating
 // 20-field struct literals when only tmux_name / task / ws_path vary).
 fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {

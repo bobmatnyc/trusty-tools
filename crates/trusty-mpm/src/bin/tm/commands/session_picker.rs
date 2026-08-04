@@ -435,12 +435,21 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 /// #4702: the prune used to be behind an `allow_auto_prune` opt-in that only
 /// the TTY-gated call sites ever passed. That inconsistency is the defect —
 /// piped/scripted/`--json` listings never pruned, so dead records accumulated
-/// without bound. The opt-in was justified by auto-prune being
-/// "destructive-adjacent"; it is not destructive at all (record-only
-/// decommission, verified against the response body — never a worktree, branch,
-/// or file on disk), so every listing surface now prunes identically. The
-/// non-destructiveness guarantee is what makes that safe, and it is pinned by
-/// `auto_prune_always_requests_record_only_never_full_teardown`.
+/// without bound.
+///
+/// Removing the opt-in is only defensible because the prune is now genuinely
+/// non-destructive, and #4728 is why that qualifier is load-bearing rather than
+/// decorative: `record_only` did NOT gate the runtime teardown until that fix,
+/// so the very same sweep could SIGTERM and `kill_session` a live pane. What
+/// makes running this on every listing safe is the conjunction of three pinned
+/// guarantees, not the flag's name:
+///   * no filesystem writes —
+///     `decommission_record_only_never_removes_existing_workspace`;
+///   * no runtime teardown —
+///     `decommission_record_only_never_touches_the_runtime`;
+///   * every request actually takes that route —
+///     `auto_prune_always_requests_record_only_never_full_teardown`.
+///
 /// Test: HTTP path in `tests/session_manager_mvp.rs`; the parse/filter seam is
 /// unit-tested via `parse_scoped_sessions`; the auto-prune seam by
 /// `auto_prune_*` in `tests_behavior_d_tests.rs`.

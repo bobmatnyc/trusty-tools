@@ -358,11 +358,23 @@ impl SessionManager {
     /// nothing to remove; if it reappeared, nothing is deleted. `caller: None`
     /// — this is a daemon-internal sweep, never a session acting on its own
     /// behalf.
+    ///
+    /// #4702: "record-only" also means NO RUNTIME TEARDOWN. Until #4702 the
+    /// `graceful_terminate_runtime` call sat ABOVE the `record_only` guard and
+    /// ran unconditionally, so this path SIGTERMed the claude process and
+    /// `kill_session`ed the pane of any live tmux session whose NAME matched the
+    /// record's — the self-guard is `session_exists(name)`, plain name
+    /// membership, never the record's captured `pane_id`. Callers reading
+    /// "record-only" as "safe to run on every listing" were therefore relying on
+    /// a guarantee the code did not provide.
+    ///
     /// What: [`decommission_with_root`](Self::decommission_with_root) with
     /// `record_only = true`. The returned `bool` is always `false` (nothing is
     /// ever removed by this path).
     /// Test: `decommission_record_only_never_removes_existing_workspace`
-    /// (remount-race stand-in — a REAL, populated directory survives the call).
+    /// (remount-race stand-in — a REAL, populated directory survives the call);
+    /// `decommission_record_only_never_touches_the_runtime` (a LIVE tmux session
+    /// carrying the record's name is neither signalled nor killed).
     pub async fn decommission_record_only(
         &self,
         id: &ManagedSessionId,
@@ -432,7 +444,20 @@ impl SessionManager {
         // then reclaim the pane — instead of an abrupt `kill_session`. Best-effort:
         // a session whose runtime is already gone still decommissions cleanly —
         // the helper self-guards and is a no-op when the pane is already gone.
-        self.graceful_terminate_runtime(&record.tmux_name).await;
+        //
+        // #4702: this MUST be inside the `record_only` gate. Until this fix it sat
+        // above it and ran unconditionally, so a "record-only" decommission still
+        // SIGTERMed and `kill_session`ed a live pane. `graceful_terminate_runtime`
+        // self-guards on `session_exists(name)` — LIVE-TMUX NAME MEMBERSHIP, not
+        // the record's captured `pane_id` — so any live session that happens to
+        // carry this record's `tmux_name` was killed, including one owned by a
+        // DIFFERENT, healthy record under the #3692 duplicate-name condition. That
+        // routed straight around the pane-scoped containment #3714 added for
+        // display. Record-only means the registry row and nothing else: no
+        // filesystem, and no runtime.
+        if !record_only {
+            self.graceful_terminate_runtime(&record.tmux_name).await;
+        }
 
         // Guard: only remove the workspace directory if the SM provisioned it.
         // Track whether remove_dir_all ACTUALLY RAN (not inferred from filesystem).
