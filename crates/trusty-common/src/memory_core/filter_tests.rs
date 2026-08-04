@@ -1428,4 +1428,32 @@ fn real_secrets_still_blocked_after_4312_charset_gate() {
          If it now flags, the structural bypass changed — re-check scope. Got {:?}",
         find_secret_token(aws_secret)
     );
+
+    // KNOWN MISS INTRODUCED BY #4312, asserted rather than left implicit.
+    //
+    // Narrowing `is_url_credential_shaped` to require `user:pass@` removed a
+    // shield that the round-2 broad predicate had incidentally given to
+    // userinfo-free URLs. The class that moved is exactly: a URL whose PATH
+    // carries a secret that is all-lowercase and digit-free, so the entropy
+    // floor reads it as English. Measured against origin/main, where both
+    // flag:
+    //     https://webhook.example.com/services/abcdefghij/…   flagged -> missed
+    //
+    // This is the entropy floor's already-accepted bound, not a new class of
+    // hole, and the exposure is narrow: real webhook tokens are near-universally
+    // mixed-case or digit-bearing, which is why the uppercase form above is
+    // still caught in the must-flag battery. Pinned here so a future change that
+    // fixes OR worsens it is visible instead of silent. If these start flagging,
+    // the follow-up landed — move them into the battery above.
+    for missed in [
+        "https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij", // pragma: allowlist secret
+        "https://hooks.example.org/t/aaaaaaaaaa/bbbbbbbbbb/cccccccccc", // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(missed).is_none(),
+            "KNOWN MISS (#4312): an all-lowercase, digit-free URL path secret is \
+             not flagged after the userinfo narrowing. If it now flags, the bound \
+             changed — update the doc on `is_url_credential_shaped`. Token: {missed}"
+        );
+    }
 }

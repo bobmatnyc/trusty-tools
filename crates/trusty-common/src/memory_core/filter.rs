@@ -855,10 +855,26 @@ fn is_plausible_b64_charset(token: &str) -> bool {
 /// containing `://` OR `@`, which held open 14 URL-shaped prose false
 /// positives the floor would otherwise have fixed — bare `https://` doc links,
 /// `git@github.com:…` remotes, plain `mailto`-ish addresses. Requiring the
-/// `user:pass@` userinfo keeps every real connection string and exempts none of
-/// them. Note this predicate can only ever WIDEN flagging: it is an OR term
-/// inside the branch's conjunction, so narrowing it is strictly safe in the
-/// security direction and can never turn a caught credential into a miss.
+/// `user:pass@` userinfo keeps every real connection string.
+///
+/// Cost of that narrowing, stated exactly because this is a security module:
+/// this predicate is an OR term inside the branch's conjunction, so widening it
+/// widens flagging and **narrowing it narrows flagging** — narrowing therefore
+/// CAN turn a caught credential into a miss. The exposure is bounded to tokens
+/// that reach this branch, pass the charset gate, and carry neither an
+/// uppercase letter nor a digit, i.e. a userinfo-free URL whose path secret is
+/// all-lowercase:
+///
+/// ```text
+/// https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij
+///     origin/main: flagged  ->  here: missed
+/// ```
+///
+/// That is the entropy floor's already-accepted bound (an all-lowercase run is
+/// read as English), not a new class of hole — the broad predicate shielded
+/// these incidentally, never by design. Real webhook tokens are near-universally
+/// mixed-case or digit-bearing and stay caught; see the known-miss assertion in
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
 /// What: returns `true` iff `token` contains `://` and the text between it and
 /// the first following `@` contains a `:`.
 /// Test: `four_4312_acceptance_cases_are_not_flagged`,
