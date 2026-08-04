@@ -3,9 +3,10 @@
 //!
 //! Why: #4840's four load-bearing behaviors are (1) the deploy fires when the
 //! compiled-in bundle differs from disk, (2) it is a no-op when identical,
-//! (3) it fails open when the target cannot be written, and (4) it WARNS,
-//! naming the file, whenever it declines to overwrite something. Each gets a
-//! test here.
+//! (3) it fails open when the target cannot be written, and (4) it WARNS —
+//! in a bounded count-plus-preview summary, not one line per file (PR #4848
+//! review) — whenever it declines to overwrite something or fails to compose
+//! it. Each gets a test here.
 //! What: hermetic — every case runs against `tempfile::TempDir`, never the
 //! real `~/.trusty-mpm`.
 //! Test: this file.
@@ -130,34 +131,65 @@ fn ensure_agent_source_fresh_prunes_renamed_files() {
 }
 
 #[test]
-fn skip_warning_lines_is_empty_when_nothing_skipped() {
+fn deploy_summary_lines_is_empty_on_a_clean_deploy() {
     let result = DeployResult {
         deployed: vec!["engineer.md".into()],
         ..DeployResult::default()
     };
-    assert!(skip_warning_lines(&result).is_empty());
+    assert!(deploy_summary_lines(&result).is_empty());
 }
 
 #[test]
-fn skip_warning_lines_names_each_skipped_file() {
+fn deploy_summary_lines_summarises_skips_in_one_line() {
+    // PR #4848 review (HIGH): the skipped set can be dozens wide and is never
+    // reconciled until someone runs `--reset-agents`, so this runs on every
+    // spawn and resume. It must be ONE line with a count + preview, matching
+    // `agents::deployer`'s #2504 policy — never one line per file.
+    let skipped: Vec<String> = (0..12).map(|i| format!("agent-{i}.md")).collect();
     let result = DeployResult {
-        skipped: vec!["engineer.md".into(), "qa.md".into()],
-        untracked_modified: vec!["engineer.md".into()],
+        skipped: skipped.clone(),
+        untracked_modified: vec!["agent-0.md".into()],
         ..DeployResult::default()
     };
 
-    let lines = skip_warning_lines(&result);
+    let lines = deploy_summary_lines(&result);
 
-    assert_eq!(lines.len(), 2);
-    // Every skipped file is named, and the two ownership cases read differently.
-    assert!(lines[0].contains("engineer.md"), "{:?}", lines[0]);
+    assert_eq!(lines.len(), 1, "one summary line, not N: {lines:?}");
+    assert!(lines[0].contains("12 agent file(s)"), "{:?}", lines[0]);
+    assert!(lines[0].contains("agent-0.md"), "{:?}", lines[0]);
+    assert!(lines[0].contains('…'), "elision marker: {:?}", lines[0]);
     assert!(
-        lines[0].contains("--reset-agents engineer"),
+        !lines[0].contains("agent-11.md"),
+        "the preview must be truncated: {:?}",
+        lines[0]
+    );
+    // The actionable pointer survives the shrink — the original silence was
+    // half the defect.
+    assert!(
+        lines[0].contains("--reset-agents agent-0"),
         "{:?}",
         lines[0]
     );
-    assert!(lines[1].contains("qa.md"), "{:?}", lines[1]);
-    assert!(lines[1].contains("user-owned"), "{:?}", lines[1]);
+}
+
+#[test]
+fn deploy_summary_lines_reports_failed_agents() {
+    // A compose failure means the agent does not land AT ALL — worse than
+    // stale, and previously never surfaced anywhere (PR #4848 review, MEDIUM).
+    let result = DeployResult {
+        failed: vec!["engineer: invalid frontmatter YAML: bad".into()],
+        ..DeployResult::default()
+    };
+
+    let lines = deploy_summary_lines(&result);
+
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("engineer"), "{:?}", lines[0]);
+    assert!(
+        lines[0].contains("did NOT deploy at all"),
+        "the failure must read as worse than stale: {:?}",
+        lines[0]
+    );
 }
 
 #[test]
@@ -326,6 +358,41 @@ fn autodeploy_agents_for_skips_source_refresh_on_submodule() {
         "the git-tracked submodule must be left exactly as found"
     );
     assert!(target.join("submodule-agent.md").exists());
+}
+
+#[test]
+fn autodeploy_agents_for_falls_back_when_the_submodule_is_empty() {
+    // PR #4848 review: an EMPTY `agents/agents` (an uninitialized submodule on
+    // a source checkout — and #4840 was originally measured on one) satisfies
+    // `agent_source_dir()`'s `is_dir()` test, so the old code deployed from it
+    // and landed NOTHING, silently. Fall back to the compiled-in bundle.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let checkout = tempfile::TempDir::new().unwrap();
+    let submodule = checkout.path().join("agents").join("agents");
+    std::fs::create_dir_all(&submodule).unwrap();
+
+    let mut paths = FrameworkPaths::under(tmp.path());
+    paths.trusty_mpm_root = Some(checkout.path().to_path_buf());
+    assert_eq!(paths.agent_source_dir(), submodule);
+    let target = tmp.path().join("claude-config/agents");
+
+    let out = autodeploy_agents_for(&paths, &target);
+
+    assert!(
+        out.refreshed,
+        "the empty submodule must not suppress the bundle refresh"
+    );
+    assert!(
+        out.deployed.iter().any(|f| f == "BASE-AGENT.md"),
+        "the bundled roster must land: {:?}",
+        out.deployed
+    );
+    assert!(target.join("engineer.md").exists());
+    assert_eq!(
+        std::fs::read_dir(&submodule).unwrap().count(),
+        0,
+        "the submodule directory is still never written"
+    );
 }
 
 #[test]

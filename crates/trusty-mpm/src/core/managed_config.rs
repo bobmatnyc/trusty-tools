@@ -159,11 +159,15 @@ pub fn ensure_managed_config_dir_with_root(
         );
     }
     // #4840: a file the deployer declines to overwrite (untracked-and-differing,
-    // or a user-owned entry that was edited) used to be skipped SILENTLY — the
-    // other half of the defect. Name every one of them.
+    // or a user-owned entry that was edited), and an agent that failed to
+    // compose at all, used to be handled SILENTLY — the other half of the
+    // defect. `agents.warnings` is a bounded count-plus-preview summary (at
+    // most a couple of lines), matching `agents::deployer`'s own #2504 policy:
+    // this runs on every spawn AND every resume, and the stale set is never
+    // reconciled until someone runs `--reset-agents`, so one line per file
+    // would be permanent log spam. PR #4848 review (HIGH).
     for warning in &agents.warnings {
         tracing::warn!("managed config dir: {warning}");
-        eprintln!("{warning}");
     }
 
     // PR #2818 review (round 3, MEDIUM decision): route through the multi-tier

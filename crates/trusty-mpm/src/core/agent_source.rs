@@ -22,7 +22,8 @@
 //! [`autodeploy_agents`] is the entry point session provisioning calls: it
 //! refreshes the source, deploys it, and returns a report — it NEVER returns
 //! an error, because a broken deploy must not block a session (a stale file is
-//! the strictly lesser failure). Anything it declined to overwrite is named in
+//! the strictly lesser failure). Anything it declined to overwrite, and
+//! anything that failed to compose at all, is summarised in
 //! [`AgentAutodeploy::warnings`], closing the other half of #4840: the
 //! deployer's user-edited-file protection previously skipped silently.
 //!
@@ -59,9 +60,9 @@ const STAMP_FILE_NAME: &str = ".bundle-stamp";
 /// declined overwrite was silent.
 /// What: `refreshed` is `true` when the source directory was re-materialized
 /// from the compiled-in bundle this run; `deployed` lists the composed agent
-/// files actually (re)written into the target; `warnings` carries one
-/// human-readable line per file left stale, plus one line if the refresh or
-/// the deploy itself failed outright.
+/// files actually (re)written into the target; `warnings` carries a BOUNDED
+/// summary — at most one line for the stale set, one for the failed set, plus
+/// one line if the refresh or the deploy itself failed outright.
 /// Test: every `autodeploy_*` case in `agent_source_tests.rs`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentAutodeploy {
@@ -69,8 +70,11 @@ pub struct AgentAutodeploy {
     pub refreshed: bool,
     /// Composed agent filenames (re)written into the target this run.
     pub deployed: Vec<String>,
-    /// One line per file left stale, or per step that failed. Always safe to
-    /// print verbatim; empty means nothing was declined and nothing failed.
+    /// Bounded summary lines: one for the files left stale, one for the agents
+    /// that failed to compose, plus one per step that failed outright. Count +
+    /// preview, never one line per file — see [`deploy_summary_lines`]. Always
+    /// safe to print verbatim; empty means nothing was declined and nothing
+    /// failed.
     pub warnings: Vec<String>,
 }
 
@@ -179,43 +183,109 @@ pub fn ensure_agent_source_fresh(agents_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// One warning line per file the deploy declined to overwrite.
+/// `count` + a short preview of `items`, for a one-line summary.
 ///
-/// Why: #4840's second half. `agents::deployer` preserves an untracked-and-
-/// differing file, and a user-owned (seed-once tier) entry that was edited,
-/// **silently** — which is precisely what let a three-day-stale `BASE-AGENT.md`
-/// go unnoticed. Whatever auto-deploy declines to fix, it must name.
-/// What: maps [`DeployResult::skipped`] to lines, distinguishing the
-/// untracked-and-modified case (which `tm install --reset-agents` resolves)
-/// from a tracked user-owned edit. Returns an empty vector when nothing was
-/// skipped. Pure — no I/O, no logging.
-/// Test: `skip_warning_lines_names_each_skipped_file`,
-/// `skip_warning_lines_is_empty_when_nothing_skipped`.
-pub fn skip_warning_lines(result: &DeployResult) -> Vec<String> {
-    let untracked: HashSet<&str> = result
-        .untracked_modified
+/// What: joins the first `limit` entries with `, `, appending `, …` when more
+/// were elided. Pure.
+/// Test: exercised through `deploy_summary_lines_*`.
+fn preview(items: &[String], limit: usize) -> String {
+    let head = items
         .iter()
+        .take(limit)
         .map(String::as_str)
-        .collect();
-    result
-        .skipped
-        .iter()
-        .map(|file| {
-            if untracked.contains(file.as_str()) {
-                format!(
-                    "warning: agent {file} is stale — it is not tracked by the deploy manifest \
-                     and differs from the bundled version, so it was NOT updated. \
-                     Run `tm install --reset-agents {}` to adopt it.",
-                    file.strip_suffix(".md").unwrap_or(file)
-                )
-            } else {
-                format!(
-                    "warning: agent {file} is stale — it is user-owned and edited, \
-                     so it was NOT updated with the bundled version."
-                )
-            }
-        })
-        .collect()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if items.len() > limit {
+        format!("{head}, …")
+    } else {
+        head
+    }
+}
+
+/// A bounded summary of what a deploy left stale and what it failed to compose.
+///
+/// Why: #4840's second half is that `agents::deployer` preserves an untracked-
+/// and-differing file, and a user-owned (seed-once tier) entry that was edited,
+/// **silently** — which is precisely what let a three-day-stale `BASE-AGENT.md`
+/// go unnoticed. But this runs on EVERY spawn and every resume, and the stale
+/// set is never reconciled until someone runs `--reset-agents`, so one line per
+/// file would be permanent, dozens-wide log spam. `agents::deployer` already
+/// settled that tradeoff for its own warning (issue #2504: count + preview);
+/// this is the same policy, not a second one. PR #4848 review (HIGH).
+/// What: at most two lines — one for [`DeployResult::skipped`] (with the
+/// actionable `tm install --reset-agents <name>` pointer), one for
+/// [`DeployResult::failed`], whose agents did not land AT ALL and are therefore
+/// worse than stale. Each is a count plus a short preview. Returns an empty
+/// vector on a clean deploy. Pure — no I/O, no logging.
+/// Test: `deploy_summary_lines_is_empty_on_a_clean_deploy`,
+/// `deploy_summary_lines_summarises_skips_in_one_line`,
+/// `deploy_summary_lines_reports_failed_agents`.
+pub fn deploy_summary_lines(result: &DeployResult) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if !result.skipped.is_empty() {
+        let count = result.skipped.len();
+        let head = &result.skipped[0];
+        let first = head.strip_suffix(".md").unwrap_or(head);
+        lines.push(format!(
+            "warning: {count} agent file(s) are stale — user-owned (untracked and differing, \
+             or an edited seed-once entry), so the bundled version was NOT written: {}. \
+             Run `tm install --reset-agents {first}` to adopt one.",
+            preview(&result.skipped, 5)
+        ));
+    }
+
+    if !result.failed.is_empty() {
+        let count = result.failed.len();
+        lines.push(format!(
+            "warning: {count} agent(s) failed to compose and did NOT deploy at all — \
+             absent, not merely stale: {}.",
+            preview(&result.failed, 3)
+        ));
+    }
+
+    lines
+}
+
+/// Deploy `source_dir` into `target_dir`, folding the outcome into `out`.
+///
+/// What: on success records the deployed set and appends
+/// [`deploy_summary_lines`]; on failure appends a single fail-open warning.
+/// Test: exercised through every `autodeploy_agents*` case.
+fn deploy_into(source_dir: &Path, target_dir: &Path, out: &mut AgentAutodeploy) {
+    match deploy_agents(source_dir, target_dir) {
+        Ok(result) => {
+            out.warnings.extend(deploy_summary_lines(&result));
+            out.deployed = result.deployed;
+        }
+        Err(err) => out.warnings.push(format!(
+            "warning: could not deploy agents into {} ({err}) — \
+             this session runs with the previously deployed agents",
+            target_dir.display()
+        )),
+    }
+}
+
+/// Whether `dir` holds at least one non-hidden `.md` file.
+///
+/// Why: an *empty* `agents/agents` directory — an uninitialized git submodule
+/// on a source checkout — satisfies `agent_source_dir()`'s `is_dir()` test but
+/// is not an authoritative source; deploying from it lands nothing, silently.
+/// PR #4848 review. #4840 was originally measured on a source checkout, so this
+/// is not hypothetical.
+/// What: a shallow read of `dir`, ignoring hidden entries. A read error (absent
+/// or unreadable) counts as empty. Test:
+/// `autodeploy_agents_for_falls_back_when_the_submodule_is_empty`.
+fn has_agent_markdown(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| !name.starts_with('.') && name.ends_with(".md"))
+    })
 }
 
 /// Refresh the bundled agent source from the compiled-in bundle and deploy it,
@@ -230,8 +300,8 @@ pub fn skip_warning_lines(result: &DeployResult) -> Vec<String> {
 /// stamp matches; (2) [`deploy_agents`] from `source_dir` into `target_dir`,
 /// which composes and writes only the files it safely may (bundled-origin
 /// drift IS overwritten — see the module doc's overwrite policy); (3) collects
-/// [`skip_warning_lines`] for everything it declined. Every failure is
-/// converted into a warning line rather than an `Err`.
+/// [`deploy_summary_lines`] for everything it declined or could not compose.
+/// Every failure is converted into a warning line rather than an `Err`.
 /// Test: `autodeploy_agents_deploys_when_bundle_differs`,
 /// `autodeploy_agents_is_a_noop_when_already_current`,
 /// `autodeploy_agents_fails_open_when_target_is_unwritable`,
@@ -248,17 +318,7 @@ pub fn autodeploy_agents(source_dir: &Path, target_dir: &Path) -> AgentAutodeplo
         )),
     }
 
-    match deploy_agents(source_dir, target_dir) {
-        Ok(result) => {
-            out.warnings.extend(skip_warning_lines(&result));
-            out.deployed = result.deployed;
-        }
-        Err(err) => out.warnings.push(format!(
-            "warning: could not deploy agents into {} ({err}) — \
-             this session runs with the previously deployed agents",
-            target_dir.display()
-        )),
-    }
+    deploy_into(source_dir, target_dir, &mut out);
 
     out
 }
@@ -272,29 +332,22 @@ pub fn autodeploy_agents(source_dir: &Path, target_dir: &Path) -> AgentAutodeplo
 /// would be destructive and wrong. Callers holding a `FrameworkPaths` should
 /// use this instead of [`autodeploy_agents`] so they cannot get that wrong.
 /// (Mirrors `skill_source::ensure_skill_source_fresh`'s identical guard.)
-/// What: when the resolved source is the framework-owned
-/// [`FrameworkPaths::agents`] directory, delegates to [`autodeploy_agents`];
-/// when it is the submodule, deploys without refreshing the source. Never
-/// fails, for the same fail-open reason.
-/// Test: `autodeploy_agents_for_skips_source_refresh_on_submodule`.
+/// What: when the resolved source is a POPULATED submodule, deploys from it
+/// without refreshing the source; otherwise — the framework-owned
+/// [`FrameworkPaths::agents`] directory, or an EMPTY submodule directory
+/// (uninitialized on a source checkout, which would otherwise deploy nothing
+/// at all, silently — PR #4848 review) — delegates to [`autodeploy_agents`]
+/// against the framework source. Never fails, for the same fail-open reason.
+/// Test: `autodeploy_agents_for_skips_source_refresh_on_submodule`,
+/// `autodeploy_agents_for_falls_back_when_the_submodule_is_empty`.
 pub fn autodeploy_agents_for(paths: &FrameworkPaths, target_dir: &Path) -> AgentAutodeploy {
     let source_dir = paths.agent_source_dir();
-    if source_dir != paths.agents {
+    if source_dir != paths.agents && has_agent_markdown(&source_dir) {
         let mut out = AgentAutodeploy::default();
-        match deploy_agents(&source_dir, target_dir) {
-            Ok(result) => {
-                out.warnings.extend(skip_warning_lines(&result));
-                out.deployed = result.deployed;
-            }
-            Err(err) => out.warnings.push(format!(
-                "warning: could not deploy agents into {} ({err}) — \
-                 this session runs with the previously deployed agents",
-                target_dir.display()
-            )),
-        }
+        deploy_into(&source_dir, target_dir, &mut out);
         return out;
     }
-    autodeploy_agents(&source_dir, target_dir)
+    autodeploy_agents(&paths.agents, target_dir)
 }
 
 #[cfg(test)]
