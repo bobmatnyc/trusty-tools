@@ -46,23 +46,29 @@ pub fn sort_label(key: ThreeWaySortKey) -> &'static str {
 
 /// Whether to keep a palace in the visible list.
 ///
-/// Why: palaces with no vectors, no KG triples, AND no drawers carry no
-/// user-visible content and would only clutter the list. A palace with drawers
-/// but no vectors is one whose memories have been stored but not yet embedded
-/// (e.g. the embedding model has not run yet); hiding it causes confusion
-/// because the palace clearly exists and has written content. Including
-/// `drawer_count > 0` in the gate keeps such palaces visible in the TUI.
-/// What: returns `true` when any of `vector_count`, `kg_triple_count`, or
-/// `drawer_count` is non-zero; returns `false` only when all three are zero.
-/// Test: `test_filter_empty_palaces`.
+/// Why: a palace measured to hold no vectors, no KG triples, AND no drawers
+/// carries no user-visible content and would only clutter the list. A palace
+/// with drawers but no vectors is one whose memories have been stored but not
+/// yet embedded (e.g. the embedding model has not run yet); hiding it causes
+/// confusion because the palace clearly exists and has written content, so
+/// drawers count toward the gate too. A palace whose counts the daemon never
+/// measured is a third case entirely: unknown is not empty, and hiding it would
+/// erase a palace that may well be full.
+/// What: reads the counts through the `Option<u64>` accessors so the three
+/// cases stay distinguishable. Returns `true` when the counts are unknown, or
+/// when any measured count is non-zero; returns `false` only when every count
+/// was measured and every one of them is zero.
+/// Test: `test_filter_empty_palaces`, `test_cold_palace_visible`,
+/// `test_cold_palace_navigable`.
 //
-// #4682: this reads the raw fields on purpose. Since #4640 an unloaded palace
-// reports zeros that mean *unknown*, so this gate now also hides cold palaces —
-// the same "unknown treated as empty" class as #68. Changing it would make
-// every one of ~2,180 cold palaces appear, which is a visibility decision this
-// change deliberately does not take. Tracked in #4682 as a known adjacent gap.
+// #4690: this reads the accessors, not the raw fields. Since #4640 an unloaded
+// palace reports zeros that mean *unknown*, and reading the raw fields hid every
+// cold palace before any renderer could print the `—` that #4684 added — the
+// same "unknown treated as empty" class as #68.
 pub fn palace_has_content(palace: &PalaceRow) -> bool {
-    palace.vector_count > 0 || palace.kg_triple_count > 0 || palace.drawer_count > 0
+    // `None` (unknown) keeps the palace; `Some(0)` (measured empty) does not.
+    let keeps = |count: Option<u64>| count.is_none_or(|n| n > 0);
+    keeps(palace.vectors()) || keeps(palace.kg_triples()) || keeps(palace.drawers())
 }
 
 /// Maximum characters retained for the trailing snippet column.
@@ -89,10 +95,10 @@ const DRAWER_CREATOR_WIDTH: usize = 24;
 /// state's palaces, returning the visible subset in display order.
 ///
 /// Why: delegates to the shared [`tui_common::filtered_sorted`] so memory and
-/// search apply identical filter / sort rules. Empty palaces (zero vectors and
-/// zero KG triples) are dropped first — they carry no recallable or graph
-/// content and would only clutter the list. Kept as a memory-named wrapper for
-/// the existing tests and callers.
+/// search apply identical filter / sort rules. Measured-empty palaces are
+/// dropped first — they carry no recallable or graph content and would only
+/// clutter the list — while palaces whose counts are unknown are kept (#4690).
+/// Kept as a memory-named wrapper for the existing tests and callers.
 /// What: filters out empty palaces via [`palace_has_content`], then delegates
 /// to [`tui_common::filtered_sorted`].
 /// Test: `test_apply_filter`, `test_apply_sort_*`, `test_filter_empty_palaces`.
