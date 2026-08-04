@@ -119,7 +119,7 @@ fn verify_venv_alive_false_when_venv_python_missing() {
         let layout = resolve_layout().unwrap();
         write_site_packages_marker(&layout);
         // Nothing written at `layout.venv_python` at all.
-        assert!(!super::verify_venv_alive(&layout));
+        assert_eq!(super::verify_venv_alive(&layout), RecheckOutcome::Failed);
     });
 }
 
@@ -132,7 +132,7 @@ fn verify_venv_alive_false_when_site_packages_marker_missing() {
         // (simulates a half-deleted venv) — must fail WITHOUT ever spawning
         // python, since the marker check runs first.
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
-        assert!(!super::verify_venv_alive(&layout));
+        assert_eq!(super::verify_venv_alive(&layout), RecheckOutcome::Failed);
     });
 }
 
@@ -144,7 +144,7 @@ fn verify_venv_alive_false_when_interpreter_exits_nonzero() {
         write_site_packages_marker(&layout);
         // Simulates a broken interpreter binary / missing shared library.
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
-        assert!(!super::verify_venv_alive(&layout));
+        assert_eq!(super::verify_venv_alive(&layout), RecheckOutcome::Failed);
     });
 }
 
@@ -155,7 +155,7 @@ fn verify_venv_alive_true_when_marker_present_and_interpreter_ok() {
         let layout = resolve_layout().unwrap();
         write_site_packages_marker(&layout);
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
-        assert!(super::verify_venv_alive(&layout));
+        assert_eq!(super::verify_venv_alive(&layout), RecheckOutcome::Passed);
     });
 }
 
@@ -167,7 +167,10 @@ fn verify_full_import_smoke_false_when_venv_python_missing() {
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
         // Nothing written at `layout.venv_python` at all.
-        assert!(!super::verify_full_import_smoke(&layout));
+        assert_eq!(
+            super::verify_full_import_smoke(&layout),
+            RecheckOutcome::Failed
+        );
     });
 }
 
@@ -179,7 +182,10 @@ fn verify_full_import_smoke_false_when_stub_exits_nonzero() {
         // Simulates a corrupted venv (e.g. a broken native `.so`): the
         // interpreter itself runs but the import fails.
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
-        assert!(!super::verify_full_import_smoke(&layout));
+        assert_eq!(
+            super::verify_full_import_smoke(&layout),
+            RecheckOutcome::Failed
+        );
     });
 }
 
@@ -189,7 +195,10 @@ fn verify_full_import_smoke_true_when_stub_exits_zero() {
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
-        assert!(super::verify_full_import_smoke(&layout));
+        assert_eq!(
+            super::verify_full_import_smoke(&layout),
+            RecheckOutcome::Passed
+        );
     });
 }
 
@@ -294,4 +303,190 @@ fn materialize_project_writes_package_and_lock_skips_tests() {
         !dest.join("tests").exists(),
         "tests fixture dir must be skipped"
     );
+}
+
+// ── #4125: a timeout is a distinct outcome, never a verification failure ──
+
+/// Write a fake venv python that records each invocation as one line in
+/// `counter` and then behaves per `body`.
+///
+/// Why (#4125): the retry tests must prove HOW MANY times the recheck ran,
+/// which a plain exit-status stub cannot express.
+/// What: a `/bin/sh` script that appends a line to `counter` before running
+/// `body`.
+/// Test: `full_import_recheck_retries_once_before_reporting_indeterminate`,
+/// `full_import_recheck_retry_lets_a_starved_venv_prove_itself`.
+fn write_counting_venv_python(path: &Path, counter: &Path, body: &str) {
+    write_fake_venv_python(
+        path,
+        &format!(
+            "#!/bin/sh\nprintf 'x\\n' >> {}\n{}\n",
+            counter.display(),
+            body
+        ),
+    );
+}
+
+/// How many times [`write_counting_venv_python`]'s stub has run.
+fn invocation_count(counter: &Path) -> usize {
+    fs::read_to_string(counter)
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+/// Why (#4125): `run_bounded_python_check` returned a bare `bool`, so "the
+/// check ran out of time" and "the check ran and the venv failed it" were the
+/// SAME value — the conflation that made a slow-but-intact venv look broken.
+/// What: pins all three classifications at the one site that produces them —
+/// a clean exit is `Passed`, a non-zero exit is `Failed`, and outliving the
+/// budget is `Indeterminate`. Against the pre-fix code the last case was
+/// indistinguishable from the middle one.
+/// Test: this test.
+#[test]
+fn bounded_python_check_classifies_timeout_apart_from_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ok = tmp.path().join("ok");
+    let bad = tmp.path().join("bad");
+    let slow = tmp.path().join("slow");
+    write_fake_venv_python(&ok, "#!/bin/sh\nexit 0\n");
+    write_fake_venv_python(&bad, "#!/bin/sh\nexit 3\n");
+    write_fake_venv_python(&slow, "#!/bin/sh\nsleep 30\n");
+
+    // Asymmetric budgets on purpose: the two decided outcomes get a budget no
+    // realistic scheduler delay can eat (a loaded CI box can take a surprising
+    // while just to fork /bin/sh, and a flaky `Passed` here would be exactly
+    // the "slow read as broken" mistake this test exists to forbid), while the
+    // `sleep 30` stub is small enough to keep the test fast.
+    let generous = Duration::from_secs(30);
+    let tight = Duration::from_millis(300);
+    assert_eq!(
+        super::run_bounded_python_check(&ok, &["-c", "pass"], generous, "t"),
+        RecheckOutcome::Passed
+    );
+    assert_eq!(
+        super::run_bounded_python_check(&bad, &["-c", "pass"], generous, "t"),
+        RecheckOutcome::Failed
+    );
+    assert_eq!(
+        super::run_bounded_python_check(&slow, &["-c", "pass"], tight, "t"),
+        RecheckOutcome::Indeterminate,
+        "running out of time says nothing about the venv and must not be reported \
+         as a failed check (#4125)"
+    );
+}
+
+/// Why (#4125): a single fixed budget under variable startup load is wrong
+/// again the moment the load changes, so an over-budget first attempt must buy
+/// a second, larger one rather than a verdict.
+/// What: a stub that outlives BOTH budgets is invoked twice and still reports
+/// `Indeterminate`, never `Failed`.
+/// Test: this test.
+#[test]
+fn full_import_recheck_retries_once_before_reporting_indeterminate() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        let counter = tmp.path().join("invocations");
+        write_counting_venv_python(&layout.venv_python, &counter, "sleep 30");
+
+        // The first budget must comfortably outlast the stub's own startup
+        // (fork + `printf`) or the invocation would go unrecorded on a loaded
+        // box; only the `sleep` needs to outlast the budget, and it does by
+        // an order of magnitude.
+        let outcome = super::verify_full_import_smoke_bounded(
+            &layout,
+            Duration::from_millis(1500),
+            Duration::from_millis(1500),
+        );
+        assert_eq!(
+            outcome,
+            RecheckOutcome::Indeterminate,
+            "two exhausted budgets still prove nothing about the venv"
+        );
+        assert_eq!(
+            invocation_count(&counter),
+            2,
+            "an over-budget first attempt must be retried with the larger budget"
+        );
+    });
+}
+
+/// Why (#4125): this is the real production shape — torch's import is starved
+/// past the first budget by the daemon's own warm-boot, then completes fine
+/// once given room. That venv must come back `Passed`, not be condemned.
+/// What: a stub that outlives the first budget and exits 0 immediately on its
+/// second invocation reports `Passed`.
+/// Test: this test.
+#[test]
+fn full_import_recheck_retry_lets_a_starved_venv_prove_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        let counter = tmp.path().join("invocations");
+        // First run: the counter holds one line (this run's own) -> sleep past
+        // the budget. Second run: two lines -> exit 0 at once.
+        let body = format!(
+            "if [ \"$(wc -l < {})\" -gt 1 ]; then exit 0; fi\nsleep 30",
+            counter.display()
+        );
+        write_counting_venv_python(&layout.venv_python, &counter, &body);
+
+        // First budget generous enough that the stub always gets to record its
+        // invocation before being killed (see the sibling test), retry budget
+        // generous enough that the immediate `exit 0` always lands.
+        assert_eq!(
+            super::verify_full_import_smoke_bounded(
+                &layout,
+                Duration::from_millis(1500),
+                Duration::from_secs(30),
+            ),
+            RecheckOutcome::Passed,
+            "a venv that merely needed more time must pass, not be rebuilt"
+        );
+        assert_eq!(invocation_count(&counter), 2);
+    });
+}
+
+/// Why (#4125): THE defect. `ensure_venv_checked` treated a timed-out recheck
+/// as proof of a broken venv and tore down a perfectly intact one; the
+/// resulting needless rebuild then hard-failed on `uv` discovery and pinned the
+/// daemon on the ort backend for its whole lifetime. Against the pre-fix code
+/// the `Indeterminate` arm below collapses to `false`, the rebuild runs, and
+/// the call returns the uv error instead of the layout.
+/// What: with a `.ready` venv in place and any rebuild guaranteed to fail
+/// (`TRUSTY_UV_BIN` points at nothing), asserts `Indeterminate` returns the
+/// existing layout untouched while `Failed` — the outcome that IS evidence —
+/// still rebuilds. Both arms are asserted so the fix cannot be "kept" by
+/// trusting every outcome either.
+/// Test: this test.
+#[test]
+fn ensure_venv_does_not_rebuild_on_an_indeterminate_recheck() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
+        write_site_packages_marker(&layout);
+        std::fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
+
+        // Any rebuild attempt must fail loudly rather than start a real ~3 GB
+        // torch download. `with_data_override` already holds `ENV_LOCK`.
+        unsafe { std::env::set_var("TRUSTY_UV_BIN", "/nonexistent/uv/binary") };
+
+        let indeterminate =
+            super::ensure_venv_verified(&|_| RecheckOutcome::Indeterminate).map(|l| l.venv_python);
+        let failed = super::ensure_venv_verified(&|_| RecheckOutcome::Failed);
+
+        unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
+
+        assert_eq!(
+            indeterminate.as_deref().ok(),
+            Some(layout.venv_python.as_path()),
+            "a timed-out recheck must reuse the `.ready` venv, not rebuild it (#4125)"
+        );
+        let err = failed.expect_err("a FAILED recheck is real evidence and must still rebuild");
+        assert!(
+            format!("{err:#}").contains("does not point to an existing file"),
+            "expected the rebuild attempt to surface the uv-missing error, got: {err:#}"
+        );
+    });
 }

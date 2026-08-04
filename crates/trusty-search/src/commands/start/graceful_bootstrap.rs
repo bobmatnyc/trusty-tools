@@ -264,7 +264,9 @@ pub(super) async fn drive_bootstrap(
     let mut last_err = None;
 
     for attempt in 1..=retries {
-        match try_bootstrap_once(&switchable, &state, &ops).await {
+        // #4125: each retry gets a proportionally larger probe budget — see
+        // `try_bootstrap_once`.
+        match try_bootstrap_once(&switchable, &state, &ops, attempt).await {
             Ok(python_teardown) => {
                 tracing::info!("embedder hot-swapped ort -> python/MPS (sidecar ready)");
                 return Some(python_teardown);
@@ -299,10 +301,22 @@ pub(super) async fn drive_bootstrap(
 /// through the teardown trait so the swap-back watchdog can shut it down
 /// later without needing to downcast the trait object `switchable` now
 /// holds.
+///
+/// #4125: `attempt` (1-based) scales the readiness-probe budget. The probe
+/// forces a cold python spawn — torch import, model load, one real embed —
+/// while the daemon is simultaneously warm-booting its indexes, and the flat
+/// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` budget is measurably too tight under
+/// that self-inflicted load (both attempts of the 2026-08-04T12:19:28 boot
+/// died at exactly 30 s with no child output, and the next daemon start
+/// succeeded unchanged). Unlike the venv recheck this timeout is NOT a
+/// misclassification — a sidecar that will not answer genuinely cannot serve
+/// this attempt — so the fix is not a new outcome but a budget that grows with
+/// the retry instead of failing the same way twice.
 async fn try_bootstrap_once(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
     ops: &Arc<dyn PythonBootstrap>,
+    attempt: u32,
 ) -> Result<Arc<dyn PythonAdapterTeardown>> {
     // Step a: blocking venv bootstrap off the async runtime — mirrors the
     // eager `TRUSTY_EMBEDDER=python` arm's `ensure_venv_eager` off-thread call.
@@ -321,7 +335,9 @@ async fn try_bootstrap_once(
     // awaited teardown is required on every failure path below rather than
     // relying on `Drop`.
     let (adapter, pid_slot, teardown) = ops.build_adapter(launcher);
-    let probe_timeout = ops.probe_timeout();
+    // #4125: a fixed budget under variable startup load is wrong again as soon
+    // as the load changes — give attempt N N x the base budget.
+    let probe_timeout = ops.probe_timeout() * attempt.max(1);
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
     // load + one real embed THROUGH the supervisor, bounded by a timeout.
