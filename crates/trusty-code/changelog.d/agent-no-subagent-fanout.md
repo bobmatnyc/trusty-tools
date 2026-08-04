@@ -7,3 +7,7 @@ Added
 - Synced `BASE-AGENT.md` from trusty-mpm: "Agent-Authored Prose", extending
   the PM's "Write Plainly" register to review verdicts, reports, ticket/PR
   body text, and generated documentation
+- Synced `BASE-AGENT.md` from trusty-mpm: Agent-Authored Prose adds "never
+  announce the register you're writing in" — no heading or preamble
+  labelling the writing as plain, honest, direct, candid, blunt, or
+  unvarnished

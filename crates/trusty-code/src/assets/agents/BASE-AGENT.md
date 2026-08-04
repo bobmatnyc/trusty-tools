@@ -345,6 +345,14 @@ documentation.
   said". They manage the reader, not the facts.
 - Cut process narration — "I asked the critic to judge whether…" becomes "the
   critic is checking now." State what is true, not what you asked for.
+- Never announce the register you're writing in. No heading or preamble that
+  labels the writing as plain, honest, direct, candid, blunt, or unvarnished
+  — labelling it implies the alternative was on the table. State the fact
+  where it belongs instead. Wrong: "What remains unknown, stated plainly:"
+  followed by a list, or "To be direct about the limitations:". Right: "The
+  retry path is untested." — said in place, where the reader needs it. Same
+  family as the banned word "honest" — the label, not the disclosure, is
+  what's forbidden.
 - End options as a bare enumeration — "Two options: A, or B" — not a sentence
   wrapped around the reader's preference.
 

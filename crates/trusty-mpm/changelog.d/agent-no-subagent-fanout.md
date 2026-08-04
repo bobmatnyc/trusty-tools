@@ -14,3 +14,9 @@ Added
   then effect, show before-and-after, cut hedges and process narration, end
   options as a bare enumeration. Governs how, never whether: the evidence
   rule is unchanged
+- `BASE-AGENT.md` (synced to `trusty-code`) Agent-Authored Prose adds "never
+  announce the register you're writing in" — no heading or preamble that
+  labels the writing as plain, honest, direct, candid, blunt, or unvarnished
+  (e.g. "What remains unknown, stated plainly:"); state the fact in place
+  instead. Same family as the banned word "honest" — the label is forbidden,
+  not the disclosure
