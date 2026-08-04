@@ -15,12 +15,21 @@
 //! reconciled via `git diff --name-only <stored>..HEAD`. Per-file or full-reindex
 //! depending on delta size vs. `FULL_REINDEX_THRESHOLD`.
 //!
-//! **mtime path** (issue #1672): indexes whose root is not a git repo (or whose
-//! `indexed_head_sha` is None) are reconciled by walking the index root and
-//! collecting all files whose mtime exceeds the persisted `last_indexed_unix`
-//! timestamp from `indexes.toml`. Same threshold / full-reindex fallback applies.
-//! Non-git indexes with no `last_indexed_unix` AND no corpus are skipped (never
-//! indexed — nothing to catch up).
+//! **mtime path** (issue #1672): indexes whose root is CORROBORATED not to be a
+//! git repository are reconciled by walking the index root and collecting all
+//! files whose mtime exceeds the persisted `last_indexed_unix` timestamp from
+//! `indexes.toml`. Same threshold / full-reindex fallback applies. Non-git
+//! indexes with no `last_indexed_unix` AND no corpus are skipped (never indexed
+//! — nothing to catch up).
+//!
+//! 🔴 The mtime walk consults only `SKIP_DIRS` and the walker's skip predicates
+//! — it does NOT honour `.gitignore`, unlike the reindex walk. Reaching it
+//! because a git probe merely FAILED (issue #4733: a stale worktree gitlink,
+//! `detected dubious ownership`, an unreadable `.git`) indexed files the repo
+//! deliberately excludes and made them retrievable through the `search` and
+//! `grep` MCP tools. `reconcile_one_index` therefore gates it behind
+//! `core::git::probe_work_tree` and full-reindexes (gitignore-honouring) on
+//! anything short of a corroborated `NoRepo`.
 //!
 //! Both paths reuse the walker's `path_in_skipped_dir` / `should_skip_path`
 //! predicates so exclusion rules are applied consistently.
@@ -36,6 +45,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::core::git::WorkTree;
 use crate::core::registry::IndexHandle;
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress};
 use crate::service::server::ReconcileSummary;
@@ -308,12 +318,16 @@ pub async fn reconcile_stale_indexes(state: &SearchAppState) {
 /// or lazily-restored index is served without a watcher, to catch edits missed
 /// while the watcher was off — hence `pub(crate)`.
 /// What: first checks the never-walked guard (issue #4680) and re-drives the
-/// walk if it fires; otherwise reads the stored + current HEAD SHAs (git path),
-/// or falls back to the mtime path for non-git / missing-SHA indexes. Updates
+/// walk if it fires; otherwise reads the stored + current HEAD SHAs (git path).
+/// When either SHA is missing it asks `core::git::probe_work_tree` WHY, and
+/// takes the `.gitignore`-blind mtime path only for a corroborated
+/// [`WorkTree::NoRepo`]; a present-or-unknown work tree gets a full,
+/// gitignore-honouring background reindex instead (issue #4733). Updates
 /// `summary` with the outcome so `GET /health` reports reconcile progress.
 /// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`,
 /// `stuck_unwalked_git_index_is_retried_not_marked_up_to_date`,
-/// `stuck_unwalked_non_git_index_is_retried_not_skipped` in reconcile_tests.rs.
+/// `stuck_unwalked_non_git_index_is_retried_not_skipped`,
+/// `broken_git_repo_full_reindexes_instead_of_mtime_walking` in reconcile_tests.rs.
 pub(crate) async fn reconcile_one_index(
     handle: Arc<IndexHandle>,
     summary: Arc<std::sync::Mutex<ReconcileSummary>>,
@@ -372,10 +386,25 @@ pub(crate) async fn reconcile_one_index(
         (Some(stored), Some(current)) => {
             reconcile_git_path(&handle, &index_id, &stored, &current, &summary).await;
         }
-        _ => {
-            // Non-git root or missing stored SHA: fall back to mtime-based catch-up.
-            reconcile_mtime_path(&handle, &index_id, &summary).await;
-        }
+        // #4733: the mtime walk does not honour `.gitignore` — only take it once
+        // git has CORROBORATED that no repository exists here.
+        _ => match crate::core::git::probe_work_tree(&handle.root_path) {
+            WorkTree::NoRepo => {
+                reconcile_mtime_path(&handle, &index_id, &summary).await;
+            }
+            state => {
+                tracing::warn!(
+                    "reconcile[{index_id}]: no usable HEAD SHA but a git repository \
+                     could not be ruled out ({state:?}) — falling back to a full \
+                     background reindex instead of the mtime walk, which does not \
+                     honour .gitignore (issue #4733)"
+                );
+                trigger_full_reindex(&handle);
+                if let Ok(mut s) = summary.lock() {
+                    s.fell_back_to_full += 1;
+                }
+            }
+        },
     }
 }
 

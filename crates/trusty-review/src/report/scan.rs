@@ -160,42 +160,148 @@ pub fn list_tracked_files(root: &Path) -> Vec<PathBuf> {
     list_files(root)
 }
 
+/// The only git stderr CONSISTENT with "there is genuinely no repository here".
+///
+/// Why: the parenthesised clause is load-bearing. Git emits
+/// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
+/// shorter phrase `not a git repository` matches a broken repo and a
+/// genuinely-absent one alike — and here the broken repo is the dangerous one,
+/// because its `.gitignore` is exactly what stops a `.env` reaching the LLM.
+///
+/// Consistent with, NOT proof of: git emits this same text for an unreadable
+/// `.git` too, where the repository is real. [`classify_ls_files_failure`]
+/// corroborates it with a filesystem witness before concluding anything.
+///
+/// What: verified byte-identical against git 2.54.0. Any wording drift falls
+/// through to [`Corpus::Refused`] — the fail-closed direction. Mirrors
+/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727); #4735
+/// extracts the shared probe both will call.
+/// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`.
+const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+
+/// What `git ls-files` was able to tell us about `root`.
+///
+/// Why: #4733 — "git said no repository" and "git could not be asked" are
+/// different facts with opposite safe answers, and collapsing them is what let a
+/// gitignored `.env` into the corpus this crate ships to an LLM. Only the first
+/// justifies the filtered walk, which consults [`SKIP_DIRS`] and nothing else.
+/// What: [`Tracked`](Self::Tracked) — git listed the corpus (possibly empty);
+/// [`NoRepo`](Self::NoRepo) — corroborated absence of any repository, so the
+/// walk is the documented non-git path; [`Refused`](Self::Refused) — no
+/// conclusion available, so no corpus at all.
+/// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`,
+/// `scan_tests.rs::scan_non_git_dir_uses_walk_fallback`.
+enum Corpus {
+    /// git listed the tracked corpus. Authoritative, `.gitignore`-honouring.
+    Tracked(Vec<PathBuf>),
+    /// Corroborated: there is no git repository at or above `root`.
+    NoRepo,
+    /// git could not be consulted. No corpus may be inferred.
+    Refused,
+}
+
+/// Why a failed `git ls-files` failed — the gate the walk fallback turns on.
+///
+/// Why: git's "no repository" message is not proof there is no repository. It
+/// emits [`NO_REPO_STDERR`] whenever discovery never got far enough to conclude
+/// otherwise — an unreadable `.git`, an unreadable `.git/HEAD`, or
+/// `GIT_CEILING_DIRECTORIES` stopping the upward walk. In every one of those the
+/// repository (and its `.gitignore`) is real. `symlink_metadata` on an ancestor
+/// `.git` is a witness git does not use; if the two disagree, that disagreement
+/// IS the "cannot be asked" state.
+/// What: [`Corpus::NoRepo`] only when the message matches AND no ancestor
+/// carries a `.git` entry; [`Corpus::Refused`] otherwise. The path is
+/// canonicalised first — a relative `root` would walk a truncated ancestor chain,
+/// miss the project's `.git`, and land back on the permissive answer.
+/// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`,
+/// `scan_tests.rs::classify_ls_files_failure_corroborates_the_no_repo_message`,
+/// `scan_tests.rs::classify_ls_files_failure_rejects_near_miss_and_unknown_wordings`.
+fn classify_ls_files_failure(root: &Path, stderr: &str) -> Corpus {
+    if !stderr.contains(NO_REPO_STDERR) {
+        return Corpus::Refused;
+    }
+    match root.canonicalize() {
+        Ok(abs)
+            if !abs
+                .ancestors()
+                .any(|p| p.join(".git").symlink_metadata().is_ok()) =>
+        {
+            Corpus::NoRepo
+        }
+        _ => Corpus::Refused,
+    }
+}
+
 /// List tracked repository files relative to `root`.
 ///
 /// Why: `git ls-files` honours `.gitignore` and records exactly the tracked
-/// corpus — the right denominator for a DD scan; a non-git path still deserves a
-/// substantive report, so a filtered walk is the fallback.
-/// What: runs `git -C <root> ls-files`; on any failure walks the tree skipping
-/// well-known noise directories (`.git`, `node_modules`, `target`, `dist`, …).
-/// Test: `scan_tests.rs::scan_counts_loc_and_languages` (git path).
+/// corpus — the right denominator for a DD scan, and the only thing keeping a
+/// gitignored `.env` out of the file list this crate hands to an LLM. A path
+/// with genuinely no repository still deserves a substantive report, so the
+/// filtered walk stays the fallback for THAT case and only that case.
+/// What: runs `git -C <root> ls-files`. On success returns the listing. On a
+/// corroborated "no repository here" walks the tree skipping well-known noise
+/// directories. On ANY other failure returns an empty list — a report that
+/// degrades loudly beats one that leaks (#4733).
+/// Test: `scan_tests.rs::scan_counts_loc_and_languages` (git path),
+/// `scan_tests.rs::scan_non_git_dir_uses_walk_fallback` (walk path),
+/// `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`.
 fn list_files(root: &Path) -> Vec<PathBuf> {
-    if let Some(list) = git_ls_files(root) {
-        return list;
+    match git_ls_files(root) {
+        Corpus::Tracked(list) => list,
+        Corpus::NoRepo => {
+            let mut out = Vec::new();
+            walk(root, root, &mut out);
+            out
+        }
+        // #4733: the walk consults SKIP_DIRS only, never .gitignore — running it
+        // against a repo git merely declined to read puts secrets in the corpus.
+        Corpus::Refused => {
+            tracing::warn!(
+                root = %root.display(),
+                "scan: `git ls-files` failed and a repository could not be ruled out — \
+                 refusing the non-gitignore-aware directory walk; this repository \
+                 contributes no measured baseline (issue #4733)"
+            );
+            Vec::new()
+        }
     }
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out
 }
 
-/// Run `git ls-files` and parse its newline-separated output into rel paths.
-fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
-    let output = Command::new("git")
+/// Run `git ls-files` and classify the outcome into a [`Corpus`].
+///
+/// Why: the single place the git-probe outcome is decided, so the three-way
+/// answer is not reconstructed at the call site.
+/// What: a spawn failure or non-UTF-8 stdout is [`Corpus::Refused`] (git could
+/// not be asked); a non-zero exit is delegated to [`classify_ls_files_failure`];
+/// success yields [`Corpus::Tracked`] with the newline-separated relative paths.
+///
+/// 🔴 An empty successful listing is `Tracked(vec![])`, NOT a walk trigger. A
+/// repository with nothing committed yet has an empty tracked corpus and a live
+/// `.gitignore`; walking it is precisely the leak (#4733).
+/// Test: `scan_tests.rs::scan_empty_git_repo_does_not_walk_untracked_files`.
+fn git_ls_files(root: &Path) -> Corpus {
+    let Ok(output) = Command::new("git")
         .arg("-C")
         .arg(root)
         .arg("ls-files")
         .output()
-        .ok()?;
+    else {
+        return Corpus::Refused;
+    };
     if !output.status.success() {
-        return None;
+        return classify_ls_files_failure(root, &String::from_utf8_lossy(&output.stderr));
     }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let files: Vec<PathBuf> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect();
-    if files.is_empty() { None } else { Some(files) }
+    let Ok(text) = String::from_utf8(output.stdout) else {
+        return Corpus::Refused;
+    };
+    Corpus::Tracked(
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+    )
 }
 
 /// Directory names never descended into by the filtered-walk fallback.

@@ -1164,3 +1164,112 @@ async fn already_walked_empty_index_is_not_re_driven() {
         "with the walk already done, the ordinary git marker path applies"
     );
 }
+
+// ── #4733: a failed git probe must not downgrade to a gitignore-blind walk ──
+
+/// Premise test for the #4733 gate: the mtime walk is `.gitignore`-BLIND.
+///
+/// Why: `collect_stale_files_by_mtime` consults `SKIP_DIRS` and the walker's
+/// skip predicates only — never the repo's ignore rules, unlike the reindex
+/// walk (`respect_gitignore`). That is fine for the non-git roots the path was
+/// built for, and it is exactly why reaching it on a git root leaks. This test
+/// pins the premise so the gate below cannot be removed as "redundant".
+/// What: a `.env` that `.gitignore` excludes is nonetheless collected.
+/// Test: this test itself.
+#[test]
+fn mtime_walk_does_not_honour_gitignore() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.path().join(".env"), "AWS_SECRET_ACCESS_KEY=hunter2\n").expect("env");
+
+    let stale = collect_stale_files_by_mtime(dir.path(), 0);
+    assert!(
+        stale.iter().any(|p| p == ".env"),
+        "the mtime walk is gitignore-blind by construction — this is the hazard \
+         `probe_work_tree` gates (#4733): {stale:?}"
+    );
+}
+
+/// Regression guard for #4733, search-index leg.
+///
+/// Why: `head_sha` returns `None` for a repo git merely declined to read —
+/// a stale worktree gitlink, `detected dubious ownership`, an unreadable
+/// `.git`. Before this fix that dropped straight into `reconcile_mtime_path`,
+/// whose walk (pinned above) ignores `.gitignore`, so previously-excluded files
+/// entered the corpus and became retrievable through the `search` and `grep`
+/// MCP tools. Against the pre-fix implementation this test fails on its first
+/// assertion (`skipped_no_data` is 1, not 0).
+/// What: a directory whose `.git` is a gitlink pointing nowhere — git 2.54.0
+/// answers `fatal: not a git repository: (null)`, which contains the shorter
+/// phrase `not a git repository` while meaning the opposite. Asserts reconcile
+/// takes the gitignore-honouring full reindex instead of the mtime walk.
+/// Test: this test itself.
+#[tokio::test]
+async fn broken_git_repo_full_reindexes_instead_of_mtime_walking() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-live\n").expect("env");
+    std::fs::write(dir.path().join(".git"), "gitdir: /nonexistent/xyz-4733\n").expect("gitlink");
+
+    let handle = stuck_unwalked_handle("broken-git-4733", dir.path(), None);
+    // Defuse the #4680 never-walked guard so this test exercises the marker
+    // paths, which is where the #4733 defect lives.
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.skipped_no_data, 0,
+        "a broken repo must never reach the mtime path (#4733)"
+    );
+    assert_eq!(
+        s.delta_reindexed, 0,
+        "a broken repo must never apply an mtime delta (#4733)"
+    );
+    assert_eq!(
+        s.fell_back_to_full, 1,
+        "an unreadable repository gets the gitignore-honouring full reindex (#4733)"
+    );
+    assert_eq!(s.up_to_date, 0, "must not be marked up-to-date");
+}
+
+/// Why: the gate must not over-refuse. A genuinely non-git root is the case the
+/// mtime path exists for; routing it to a full reindex on every boot would be a
+/// real regression for archived tarballs and mounted docs trees.
+/// What: a plain tempdir with no repository anywhere above it still reaches
+/// `reconcile_mtime_path`, which reports `skipped_no_data` (no
+/// `last_indexed_unix`) rather than `fell_back_to_full`.
+/// Test: this test itself.
+#[tokio::test]
+async fn genuinely_non_git_root_still_takes_the_mtime_path() {
+    use crate::service::server::ReconcileSummary;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("doc.md"), "# docs\n").expect("write");
+
+    let handle = stuck_unwalked_handle("plain-dir-4733", dir.path(), None);
+    {
+        let mut diag = handle.walk_diagnostics.write().await;
+        diag.last_walk_started_at = Some("2026-08-03T00:00:00Z".to_owned());
+    }
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.skipped_no_data, 1,
+        "a corroborated non-git root keeps the mtime path (#4733 must not over-refuse)"
+    );
+    assert_eq!(
+        s.fell_back_to_full, 0,
+        "no full reindex for a plain directory"
+    );
+}
