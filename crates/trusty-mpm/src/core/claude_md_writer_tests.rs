@@ -620,3 +620,119 @@ fn pointer_and_section_block_coexist() {
         "the pointer must survive a later section rewrite"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review follow-ups (#4762): line endings, the EOF replace path, pointer
+// duplicate collapse.
+// ---------------------------------------------------------------------------
+
+/// A block spliced into a CRLF host must be CRLF too. Without this the writer
+/// leaves a mixed-ending file — a user-visible defect in a file the project
+/// owns. The assertion is that NO bare LF survives anywhere.
+#[test]
+fn matches_the_hosts_crlf_line_endings() {
+    let dir = project();
+    seed(dir.path(), "# Project\r\n\r\nExisting prose.\r\n");
+
+    write_section_override(dir.path(), SectionId::Workflow, "line one\nline two")
+        .expect("write accepted");
+
+    let text = read(dir.path());
+    assert!(
+        !text.replace("\r\n", "").contains('\n'),
+        "no bare LF may survive in a CRLF host:\n{text:?}"
+    );
+    assert!(text.contains("\r\n"), "the file is still CRLF");
+    // And the reader still resolves the multi-line body correctly.
+    assert_eq!(
+        scan_project(dir.path()).overrides[0].body,
+        "line one\nline two"
+    );
+}
+
+/// The dominant ending wins in a mixed host, rather than the first one seen.
+#[test]
+fn a_mixed_ending_host_takes_the_dominant_ending() {
+    let dir = project();
+    // One LF line, three CRLF lines: CRLF dominates.
+    seed(dir.path(), "lf-line\r\na\r\nb\r\nc\n");
+
+    write_section_override(dir.path(), SectionId::Memory, "BODY").expect("write accepted");
+
+    let text = read(dir.path());
+    let appended = &text[text.find("TRUSTY-MPM").expect("marker present")..];
+    assert!(
+        !appended.replace("\r\n", "").contains('\n'),
+        "the appended block must use the dominant CRLF ending:\n{appended:?}"
+    );
+}
+
+/// Replacing a block that sits at end-of-file in a host with NO trailing
+/// newline must not invent one. This is the `splice` EOF branch, which was
+/// previously reachable only by inspection.
+#[test]
+fn replacing_a_trailing_block_preserves_a_missing_final_newline() {
+    let dir = project();
+    let token = section_token(SectionId::Workflow);
+    // No trailing newline after the END marker — the block ends the file.
+    seed(
+        dir.path(),
+        &format!(
+            "intro\n<!-- TRUSTY-MPM: {token} START v=1 -->\nOLD\n<!-- TRUSTY-MPM: {token} END -->"
+        ),
+    );
+    assert!(
+        !read(dir.path()).ends_with('\n'),
+        "premise: the fixture has no final newline"
+    );
+
+    write_section_override(dir.path(), SectionId::Workflow, "NEW").expect("write accepted");
+
+    let text = read(dir.path());
+    assert!(
+        !text.ends_with('\n'),
+        "the missing final newline must be preserved, got:\n{text:?}"
+    );
+    assert!(text.starts_with("intro\n"), "prefix preserved");
+    let scanned = scan_project(dir.path());
+    assert_eq!(scanned.overrides.len(), 1, "{:?}", scanned.diagnostics);
+    assert_eq!(scanned.overrides[0].body, "NEW");
+}
+
+/// A host that already carries two pointer blocks is collapsed to one, matching
+/// the section-override rule. The fixture seeds genuine duplicates, so the test
+/// cannot pass unless the collapse actually happens.
+#[test]
+fn pointer_write_collapses_duplicate_pointer_blocks() {
+    let dir = project();
+    seed(
+        dir.path(),
+        &format!(
+            "intro\n\
+             {POINTER_BEGIN}\n> stale first copy\n{POINTER_END}\n\
+             middle\n\
+             {POINTER_BEGIN}\n> stale second copy\n{POINTER_END}\n\
+             outro\n"
+        ),
+    );
+    assert_eq!(
+        read(dir.path()).matches(POINTER_BEGIN).count(),
+        2,
+        "premise: two pointer blocks"
+    );
+
+    ensure_compiled_pointer(dir.path()).expect("write accepted");
+
+    let text = read(dir.path());
+    assert_eq!(
+        text.matches(POINTER_BEGIN).count(),
+        1,
+        "duplicates must be collapsed:\n{text}"
+    );
+    assert!(!text.contains("stale first copy"));
+    assert!(!text.contains("stale second copy"));
+    assert!(text.contains(COMPILED_INSTRUCTIONS_PATH));
+    for kept in ["intro", "middle", "outro"] {
+        assert!(text.contains(kept), "unrelated prose `{kept}` must survive");
+    }
+}

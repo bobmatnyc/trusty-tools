@@ -196,12 +196,46 @@ fn section_is_writable(section: SectionId) -> Result<(), WriteRejection> {
     Ok(())
 }
 
+/// The line ending the host predominantly uses.
+///
+/// Why: a rendered block always spells `\n` internally, so splicing one into a
+/// CRLF host would leave a file with mixed endings — a user-visible defect in a
+/// file the project owns, and the kind of diff noise that makes a `CLAUDE.md`
+/// change unreviewable. Matching the host's dominant ending keeps the writer
+/// invisible in the diff.
+/// What: `"\r\n"` when more than half the newlines in `text` are CRLF, else
+/// `"\n"`. An empty or newline-free host yields `"\n"`.
+/// Test: `matches_the_hosts_crlf_line_endings`,
+/// `a_mixed_ending_host_takes_the_dominant_ending`.
+fn dominant_eol(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let newlines = text.matches('\n').count();
+    if crlf * 2 > newlines { "\r\n" } else { "\n" }
+}
+
+/// Re-spell a rendered block's `\n` endings as `eol`.
+///
+/// Why: rendering stays single-spelling (`\n`) so the templates remain readable;
+/// the host-specific ending is applied once, at the boundary.
+/// What: identity for `"\n"`; otherwise every `\n` becomes `\r\n`. Safe against
+/// double-conversion because rendered blocks never contain a `\r`.
+/// Test: `matches_the_hosts_crlf_line_endings`.
+fn normalize_eol(rendered: &str, eol: &str) -> String {
+    debug_assert!(!rendered.contains('\r'), "rendered blocks are LF-only");
+    if eol == "\r\n" {
+        rendered.replace('\n', "\r\n")
+    } else {
+        rendered.to_string()
+    }
+}
+
 /// Render one section override block, terminator included.
 ///
 /// Why: the emitted text has to be something the reader accepts unchanged, so
 /// every variable part comes from the reader — the token from
 /// [`section_token`], the version from [`SUPPORTED_VERSION`].
-/// What: `START` line, trimmed body, `END` line, each newline-terminated.
+/// What: `START` line, trimmed body, `END` line, each `\n`-terminated; the
+/// caller re-spells the endings via [`normalize_eol`] to match the host.
 /// Test: `written_block_declares_the_readers_supported_version`,
 /// `round_trips_through_the_reader`.
 fn render_block(section: SectionId, body: &str) -> String {
@@ -279,19 +313,21 @@ fn splice(text: &str, spans: &[(usize, usize)], replacement: &str) -> String {
 /// and an existing file that lacks a final newline would otherwise have its last
 /// line swallowed into the marker line.
 /// What: returns `block` alone for empty input; otherwise `text`, a normalising
-/// newline when absent, a blank line, then `block`.
+/// line ending when absent, a blank line, then `block` — both separators spelled
+/// with the host's own `eol`.
 /// Test: `appends_after_existing_prose`,
-/// `appends_newline_when_existing_file_lacks_trailing_newline`.
-fn append_block(text: &str, block: &str) -> String {
+/// `appends_newline_when_existing_file_lacks_trailing_newline`,
+/// `matches_the_hosts_crlf_line_endings`.
+fn append_block(text: &str, block: &str, eol: &str) -> String {
     if text.is_empty() {
         return block.to_string();
     }
-    let mut out = String::with_capacity(text.len() + block.len() + 2);
+    let mut out = String::with_capacity(text.len() + block.len() + 2 * eol.len());
     out.push_str(text);
     if !out.ends_with('\n') {
-        out.push('\n');
+        out.push_str(eol);
     }
-    out.push('\n');
+    out.push_str(eol);
     out.push_str(block);
     out
 }
@@ -378,9 +414,10 @@ pub fn write_section_override(
         return Err(WriteRejection::HostMalformed { host: path });
     }
 
-    let block = render_block(section, body);
+    let eol = dominant_eol(&text);
+    let block = normalize_eol(&render_block(section, body), eol);
     let next = if located.spans.is_empty() {
-        append_block(&text, &block)
+        append_block(&text, &block, eol)
     } else {
         splice(&text, &located.spans, &block)
     };
@@ -411,11 +448,12 @@ pub fn write_section_override(
 pub fn ensure_compiled_pointer(project_dir: &Path) -> Result<WriteOutcome, WriteRejection> {
     let path = host_path(project_dir);
     let (text, existed) = read_host(&path)?;
-    let block = render_pointer();
+    let eol = dominant_eol(&text);
+    let block = normalize_eol(&render_pointer(), eol);
 
     let spans = pointer_spans(&text);
     let next = if spans.is_empty() {
-        append_block(&text, &block)
+        append_block(&text, &block, eol)
     } else {
         splice(&text, &spans, &block)
     };
@@ -438,22 +476,30 @@ pub fn ensure_compiled_pointer(project_dir: &Path) -> Result<WriteOutcome, Write
 /// stays conservative in the same direction as the reader: an unpaired begin
 /// marker yields no span, so the block is appended rather than the file being
 /// rewritten around a delimiter whose extent is unknown.
-/// What: at most one `(start, end)` span, matching trimmed delimiter lines.
+/// It also returns EVERY paired block, not just the first, so [`splice`]
+/// collapses duplicates here exactly as it does for sections. The argument is
+/// the same one that justified collapsing there: a caller must be able to read
+/// back what it wrote, and a second pointer block left behind is a stale copy a
+/// reader can find first.
+/// What: one `(start, end)` span per paired delimiter, in file order, matching
+/// trimmed delimiter lines.
 /// Test: `pointer_write_is_idempotent`,
-/// `an_unpaired_pointer_marker_does_not_consume_the_file`.
+/// `an_unpaired_pointer_marker_does_not_consume_the_file`,
+/// `pointer_write_collapses_duplicate_pointer_blocks`.
 fn pointer_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
     let mut start = None;
     for (index, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed == POINTER_BEGIN {
             start = Some(index);
         } else if trimmed == POINTER_END
-            && let Some(open) = start
+            && let Some(open) = start.take()
         {
-            return vec![(open, index)];
+            spans.push((open, index));
         }
     }
-    Vec::new()
+    spans
 }
 
 // A `remove_section_override` counterpart is deliberately absent. Removing a

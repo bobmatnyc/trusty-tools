@@ -11,6 +11,9 @@ Added
   - every refusal (protected section, empty body, a marker line inside the body,
     an unpaired marker in the host, an unreadable host) leaves the file
     byte-identical and the bundled section in force
+  - written blocks adopt the host's dominant line ending, so splicing into a
+    CRLF `CLAUDE.md` does not leave a mixed-ending file
   - `ensure_compiled_pointer` records where the composed PM prompt lands, using
     delimiters deliberately outside the `TRUSTY-MPM:` grammar so the reader sees
-    no override and raises no diagnostic
+    no override and raises no diagnostic; it collapses duplicate pointer blocks
+    the same way section writes do
