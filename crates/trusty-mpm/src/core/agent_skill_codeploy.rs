@@ -218,23 +218,38 @@ mod tests {
         // deliberately just above today's worst case so that adding a skill to
         // a bundled agent is a decision someone has to make on purpose.
         const BUDGET_BYTES: u64 = 24_000;
+        // The rust family carries `rust-build-performance` (10,546 bytes) on
+        // top of the shared core, per a standing 2026-07-17 operator directive
+        // recorded in `rust_build_performance_declared_by_rust_family_agents`.
+        // #4642 does not get to reverse that, so the exception is explicit and
+        // named here rather than hidden by a blanket budget raise.
+        const RUST_FAMILY_BUDGET_BYTES: u64 = 34_000;
+        const RUST_FAMILY: &[&str] = &["rust-engineer", "tauri-engineer"];
 
         let mut over: Vec<String> = Vec::new();
         for stem in bundled_agent_stems() {
+            let budget = if RUST_FAMILY.contains(&stem.as_str()) {
+                RUST_FAMILY_BUDGET_BYTES
+            } else {
+                BUDGET_BYTES
+            };
             let total: u64 = composed_skills(&stem)
                 .iter()
                 .filter_map(|s| std::fs::metadata(skills_dir().join(format!("{s}.md"))).ok())
                 .map(|m| m.len())
                 .sum();
-            if total > BUDGET_BYTES {
-                over.push(format!("{stem}: {total} bytes (~{} tokens)", total / 4));
+            if total > budget {
+                over.push(format!(
+                    "{stem}: {total} bytes (~{} tokens, budget {budget})",
+                    total / 4
+                ));
             }
         }
         assert!(
             over.is_empty(),
-            "resident skill-body cost exceeds the {BUDGET_BYTES}-byte per-dispatch \
-             budget (#4642). Drop the skill from `skills:` — it stays invokable \
-             via the Skill tool on demand: {over:?}"
+            "resident skill-body cost exceeds the per-dispatch budget (#4642). \
+             Drop the skill from `skills:` — it stays invokable via the Skill \
+             tool on demand: {over:?}"
         );
     }
 

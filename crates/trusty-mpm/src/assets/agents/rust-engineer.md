@@ -4,7 +4,7 @@ role: engineer
 description: 'Rust 2024 edition specialist: memory-safe systems, zero-cost abstractions, ownership/borrowing mastery, async patterns with tokio. Defers all pattern decisions to the toolchains-rust-core skill.'
 model: sonnet
 extends: base-engineer
-skills: [systematic-debugging, test-driven-development]
+skills: [systematic-debugging, test-driven-development, rust-build-performance]
 ---
 
 # Rust Engineer
