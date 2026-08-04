@@ -82,7 +82,15 @@ use crate::core::instruction_package::{
 pub const HOST_FILES: [&str; 1] = ["CLAUDE.md"];
 
 /// The only marker version this build understands.
-const SUPPORTED_VERSION: u32 = 1;
+///
+/// Why: [`crate::core::claude_md_writer`] stamps this exact number into every
+/// block it emits rather than hardcoding its own `1`. A writer that spelled the
+/// version independently could drift past the reader on the next bump and emit
+/// blocks its own reader would decline as [`REASON_UNSUPPORTED_VERSION`] — the
+/// writer/reader drift this pairing exists to make impossible.
+/// What: the `v=` value written, and the only one accepted.
+/// Test: `written_block_declares_the_readers_supported_version`.
+pub(crate) const SUPPORTED_VERSION: u32 = 1;
 
 /// Literal opening a marker line.
 const MARKER_OPEN: &str = "<!--";
@@ -371,6 +379,64 @@ fn parse_blocks(text: &str, host: &Path) -> (Vec<ParsedBlock>, Vec<ScanDiagnosti
         diagnostics.push(diagnostic(host, start_line, REASON_UNCLOSED));
     }
     (blocks, diagnostics)
+}
+
+/// Whether any line of `text` would be recognised as a framework marker.
+///
+/// Why: [`crate::core::claude_md_writer`] must refuse a body that itself
+/// contains a marker line. Emitting one would nest a `START` inside the block
+/// being written, and [`parse_blocks`] resolves nesting by DISCARDING the outer
+/// block ([`REASON_UNCLOSED`]) — so an override body carrying a stray marker
+/// would silently delete the very section the author was trying to set. The
+/// check has to use the reader's own recogniser, not a substring search for
+/// `TRUSTY-MPM:`, because prose mentioning the marker inline is legal content
+/// and must stay writable.
+/// What: `true` when [`parse_marker`] accepts any line of `text`.
+/// Test: `body_containing_a_marker_line_is_refused`,
+/// `body_mentioning_the_marker_in_prose_is_written`.
+pub(crate) fn contains_marker_line(text: &str) -> bool {
+    text.lines().any(|line| parse_marker(line).is_some())
+}
+
+/// Where a section's well-formed blocks sit in a host, and whether the host's
+/// marker structure is intact.
+///
+/// Why: the writer needs exactly two facts before it edits a file — which line
+/// ranges belong to the section it is replacing, and whether any marker in the
+/// file is unpaired. It must not re-derive either from its own parser.
+/// What: `spans` holds `(start_line, end_line)` 0-based inclusive line indices
+/// of every well-formed block claiming the section, in file order; `unclosed`
+/// is true when any `START` in the host lacked a matching `END`.
+/// Test: `locate_blocks_finds_one_span_per_block`,
+/// `locate_blocks_flags_an_unclosed_marker`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HostBlocks {
+    /// 0-based inclusive `(start_line, end_line)` of each matching block.
+    pub(crate) spans: Vec<(usize, usize)>,
+    /// Whether the host contains an unpaired `START` marker.
+    pub(crate) unclosed: bool,
+}
+
+/// Locate every well-formed block in `text` that claims `section`.
+///
+/// Why: one grammar, one pairing pass. The writer splices by line index, and
+/// deriving those indices from [`parse_blocks`] — the same function the reader
+/// uses — is what guarantees the writer can never target a region the reader
+/// would parse differently.
+/// What: runs [`parse_blocks`] and projects the blocks whose token resolved to
+/// `section`, plus whether any [`REASON_UNCLOSED`] diagnostic was raised.
+/// Test: `locate_blocks_finds_one_span_per_block`,
+/// `locate_blocks_flags_an_unclosed_marker`, `locate_blocks_ignores_other_sections`.
+pub(crate) fn locate_blocks(text: &str, section: SectionId) -> HostBlocks {
+    let (blocks, diagnostics) = parse_blocks(text, Path::new("<in-memory>"));
+    HostBlocks {
+        spans: blocks
+            .iter()
+            .filter(|b| b.section == Some(section))
+            .map(|b| (b.start_line, b.end_line))
+            .collect(),
+        unclosed: diagnostics.iter().any(|d| d.reason == REASON_UNCLOSED),
+    }
 }
 
 /// Decide whether a parsed pair may become an override.
