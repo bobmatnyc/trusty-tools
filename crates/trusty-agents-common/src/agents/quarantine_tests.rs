@@ -271,6 +271,54 @@ fn quarantine_refuses_a_tracked_file_when_git_cannot_be_read() {
     assert!(!f.tier.join("qa.md.disabled").exists());
 }
 
+/// GATE 3, #4448 review ROUND 2 reproduced end to end. A COMMITTED file in a
+/// repository whose `.git` is UNREADABLE must be refused.
+///
+/// This is the critic's own probe. Before `classify_failure` corroborated git's
+/// message with a filesystem witness it asserted the opposite and passed:
+/// `report.moved.len() == 1`, `!original.exists()` — a tracked file moved,
+/// because git reports an unreadable `.git` with the same wording it uses for a
+/// genuinely absent repository.
+#[test]
+#[cfg(unix)]
+fn quarantine_refuses_a_tracked_file_when_the_git_dir_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restore the mode on drop so a panic cannot leave `TempDir` unable to
+    /// clean up.
+    struct ModeGuard(PathBuf);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let f = Fixture::new();
+    let content = tm_agent("qa");
+    let original = f.write("qa.md", &content);
+    f.git_add(".claude/agents/qa.md");
+
+    // Healthy repo refuses — establishes the fixture is real.
+    let healthy = f.sweep(&roster(&["qa"])).expect("sweep");
+    assert!(healthy.moved.is_empty(), "report: {healthy:?}");
+    assert_eq!(healthy.skipped[0].reason, SkipReason::GitTracked);
+
+    let git_dir = f.project.join(".git");
+    let _guard = ModeGuard(git_dir.clone());
+    std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod .git");
+
+    let report = f.sweep(&roster(&["qa"])).expect("sweep");
+
+    assert!(
+        report.moved.is_empty(),
+        "a COMMITTED file must never move because git could not read .git: {report:?}"
+    );
+    assert_eq!(report.skipped[0].reason, SkipReason::VcsUnknown);
+    assert!(original.exists(), "the committed file must still be there");
+    assert_eq!(std::fs::read_to_string(&original).expect("read"), content);
+    assert!(!f.tier.join("qa.md.disabled").exists());
+}
+
 /// GATE 4, and the #4448 review HIGH reproduced end to end. A MINIMAL
 /// hand-authored agent — no exotic key, every key inside the whitelist — is not
 /// tm's to move. Before the fix the key whitelist accepted it by omission.

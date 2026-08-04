@@ -222,3 +222,212 @@ fn a_healthy_repo_still_answers_both_ways() {
     assert_eq!(index.claim("tracked.md"), VcsClaim::Claimed);
     assert_eq!(index.claim("loose.md"), VcsClaim::Unclaimed);
 }
+
+// ---------------------------------------------------------------------------
+// #4448 review round 2 — git's "no repository" message is not PROOF of absence.
+//
+// Git emits the exact parenthesised NO_REPO_STDERR whenever discovery never got
+// far enough to conclude otherwise. In each case below the repository is real
+// and its files are committed; before `classify_failure` corroborated the
+// message with a filesystem witness, every one of them classified `NoRepo` →
+// `Unclaimed` → sweepable.
+// ---------------------------------------------------------------------------
+
+/// Restore a path's permissions on drop, so a panicking test cannot leave a
+/// mode-000 directory behind for `TempDir` to fail cleaning up.
+#[cfg(unix)]
+struct ModeGuard(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// TRIGGER 1 — an unreadable `.git` directory. The repository exists and tracks
+/// the file; git simply could not open it.
+#[test]
+#[cfg(unix)]
+fn an_unreadable_git_dir_is_unknown_not_no_repo() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, tier) = repo_with_mixed_tier();
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Claimed,
+        "the fixture must start healthy, or this test proves nothing"
+    );
+
+    let git_dir = tmp.path().join(".git");
+    let _guard = ModeGuard(git_dir.clone());
+    std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000)).expect("chmod .git");
+
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Unknown,
+        "an unreadable .git must be UNKNOWN — git reports the SAME text it uses \
+         for a genuinely absent repository, so the message alone cannot decide"
+    );
+}
+
+/// TRIGGER 1b — the same message from an unreadable `.git/HEAD`, with the
+/// `.git` directory itself perfectly readable.
+#[test]
+#[cfg(unix)]
+fn an_unreadable_git_head_is_unknown_not_no_repo() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, tier) = repo_with_mixed_tier();
+    let head = tmp.path().join(".git").join("HEAD");
+    let _guard = ModeGuard(head.clone());
+    std::fs::set_permissions(&head, std::fs::Permissions::from_mode(0o000)).expect("chmod HEAD");
+
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Unknown
+    );
+}
+
+/// TRIGGER 2 — `GIT_CEILING_DIRECTORIES` stops the upward walk before the
+/// `.git`, so git reports absence for a repository that is right there.
+///
+/// `#[serial]` + a restoring guard: the env var is process-global.
+#[test]
+#[serial_test::serial]
+fn a_ceiling_directory_is_unknown_not_no_repo() {
+    let (tmp, tier) = repo_with_mixed_tier();
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Claimed,
+        "the fixture must start healthy, or this test proves nothing"
+    );
+
+    struct EnvGuard(Option<std::ffi::OsString>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: this test is `#[serial]`, so no other thread races the
+            // set/restore of this process-global variable.
+            unsafe {
+                match self.0.take() {
+                    Some(prev) => std::env::set_var("GIT_CEILING_DIRECTORIES", prev),
+                    None => std::env::remove_var("GIT_CEILING_DIRECTORIES"),
+                }
+            }
+        }
+    }
+    let _guard = EnvGuard(std::env::var_os("GIT_CEILING_DIRECTORIES"));
+    // SAFETY: as above.
+    unsafe {
+        std::env::set_var("GIT_CEILING_DIRECTORIES", tmp.path());
+    }
+
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("tracked.md"),
+        VcsClaim::Unknown,
+        "a ceiling-blocked discovery must be UNKNOWN — the repository and its \
+         committed files are still there"
+    );
+}
+
+/// A stray empty `.git` DIRECTORY is not a repository, and git says so with the
+/// genuine message — but this refuses anyway. A deliberate over-refusal:
+/// fail-closed, and visible in the report as `VcsUnknown` rather than silent.
+#[test]
+fn a_stray_empty_git_dir_is_unknown() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    std::fs::create_dir_all(tmp.path().join(".git")).expect("create stray .git");
+
+    assert_eq!(VcsIndex::probe(&tier).claim("qa.md"), VcsClaim::Unknown);
+}
+
+/// A path that cannot be canonicalised is `Unknown`, never `NoRepo`.
+///
+/// This closes a hole the ancestor walk would otherwise have: a RELATIVE `dir`
+/// walks a truncated chain (`.claude/agents` → `.claude` → `""`), misses the
+/// project's `.git`, and lands back on the permissive answer. Not reachable
+/// from today's call sites, which pass absolute paths — but one caller away,
+/// and it fails in the dangerous direction.
+#[test]
+fn an_unresolvable_relative_path_is_unknown() {
+    let relative = std::path::Path::new("no/such/relative/.claude/agents");
+    assert_eq!(
+        classify_failure(relative, NO_REPO_STDERR),
+        IndexState::Unavailable
+    );
+}
+
+/// The genuine case still resolves to `NoRepo`, so the corroboration did not
+/// simply freeze the gate into always-refusing.
+#[test]
+fn a_truly_empty_directory_is_still_no_repo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    assert_eq!(classify_failure(&tier, NO_REPO_STDERR), IndexState::NoRepo);
+    assert_eq!(VcsIndex::probe(&tier).claim("qa.md"), VcsClaim::Unclaimed);
+}
+
+/// A non-matching stderr never reaches the filesystem witness at all.
+#[test]
+fn a_non_matching_stderr_is_unavailable_without_stat() {
+    assert_eq!(
+        classify_failure(
+            std::path::Path::new("/"),
+            "fatal: detected dubious ownership in repository at '/x'"
+        ),
+        IndexState::Unavailable
+    );
+}
+
+/// M40 — the witness must be `symlink_metadata`, not `metadata`.
+///
+/// A DANGLING `.git` symlink: git reports the parenthesised "no repository"
+/// message, `lstat` succeeds, and `stat` fails. Following the link would
+/// conclude "nothing is there" and hand back the sweepable answer for a project
+/// whose `.git` is merely broken. The link's existence is the signal — refuse.
+#[test]
+#[cfg(unix)]
+fn a_dangling_git_symlink_is_unknown_not_no_repo() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    std::os::unix::fs::symlink("/nonexistent/gone", tmp.path().join(".git"))
+        .expect("dangling .git symlink");
+
+    // The premise: lstat sees it, stat does not.
+    assert!(tmp.path().join(".git").symlink_metadata().is_ok());
+    assert!(tmp.path().join(".git").metadata().is_err());
+
+    assert_eq!(
+        VcsIndex::probe(&tier).claim("qa.md"),
+        VcsClaim::Unknown,
+        "a broken .git symlink must refuse, not read as an absent repository"
+    );
+}
+
+/// M42 — the constant must keep the parenthesised form even though the ancestor
+/// witness now covers the stale-worktree case.
+///
+/// A bogus `GIT_DIR` in a directory with NO `.git` anywhere emits
+/// `fatal: not a git repository: '/nonexistent/x'` — it matches the SHORT
+/// phrase, and the filesystem witness finds nothing to contradict it. So the
+/// two defences do not overlap here: shortening `NO_REPO_STDERR` would hand
+/// back `NoRepo` for a directory whose repository was merely misconfigured.
+#[test]
+fn a_bogus_git_dir_message_is_unavailable_even_with_no_ancestor_git() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    assert!(
+        !tier.ancestors().any(|p| p.join(".git").exists()),
+        "the fixture must have NO ancestor .git, or the witness masks the phrase"
+    );
+
+    assert_eq!(
+        classify_failure(&tier, "fatal: not a git repository: '/nonexistent/x'"),
+        IndexState::Unavailable,
+        "only the parenthesised form means genuine absence"
+    );
+}

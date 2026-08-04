@@ -27,19 +27,25 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-/// The ONLY git stderr that means "there is genuinely no repository here".
+/// The only git stderr CONSISTENT with "there is genuinely no repository here".
 ///
-/// Why: this literal is the whole safety margin of gate 3 — see
-/// [`VcsIndex::probe`]. The parenthesised clause is load-bearing: git emits
+/// Why: the parenthesised clause is load-bearing. Git emits
 /// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
 /// shorter phrase `not a git repository` matches a broken repo and a
-/// genuinely-absent one alike. Only the "searched the parents and found
-/// nothing" form is real absence.
-/// What: verified byte-identical against git's output for an empty temp
+/// genuinely-absent one alike — matching it would have swept the ~70 worktrees
+/// orphaned on 2026-07-21.
+///
+/// Consistent with, NOT proof of. Git emits this exact text for an unreadable
+/// `.git` too, where the repository is real. [`classify_failure`] therefore
+/// corroborates it with a filesystem witness before concluding anything; this
+/// constant is a necessary condition, never a sufficient one.
+///
+/// What: verified byte-identical against git 2.54.0's output for an empty temp
 /// directory. Any wording drift falls through to [`IndexState::Unavailable`],
 /// which refuses — the fail-closed direction.
 /// Test: `claim_outside_a_repo_is_unclaimed` (the match),
-/// `a_stale_worktree_pointer_is_unknown_not_no_repo` (the near-miss).
+/// `a_stale_worktree_pointer_is_unknown_not_no_repo` (the near-miss),
+/// `an_unreadable_git_dir_is_unknown_not_no_repo` (the same text, real repo).
 const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
 
 /// What the project's VCS says about one file.
@@ -66,6 +72,60 @@ pub enum VcsClaim {
     Unknown,
 }
 
+/// Why a failed `rev-parse` failed — the classifier gate 3 turns on.
+///
+/// Why: git's "no repository" message is NOT proof there is no repository. It
+/// emits the exact [`NO_REPO_STDERR`] text whenever discovery never got far
+/// enough to conclude otherwise — an unreadable `.git` (mode 000), an
+/// unreadable `.git/HEAD`, or `GIT_CEILING_DIRECTORIES` stopping the upward
+/// walk. In every one of those the repository is real, its agent files are
+/// committed, and trusting the message moves them. #4448 review round 2 executed
+/// exactly that and moved a tracked file.
+///
+/// So the message alone does not decide. This code has a witness git does not
+/// use: `symlink_metadata` on a `.git` entry needs only the PARENT's search
+/// bit, which is necessarily present — the sweep already listed the tier below
+/// it. If any ancestor carries a `.git` and git still says "no repository",
+/// the two disagree, and a disagreement is exactly the "cannot be asked" state.
+///
+/// What: [`IndexState::NoRepo`] only when the message matches AND no ancestor
+/// carries a `.git` entry; [`IndexState::Unavailable`] otherwise.
+///
+/// The path is canonicalised first, and a canonicalisation failure is itself
+/// `Unavailable`. A RELATIVE `dir` would otherwise walk a truncated ancestor
+/// chain — `.claude/agents` → `.claude` → `""` — miss the project's `.git`
+/// entirely, and land back on the permissive answer. That hole is not
+/// reachable from today's call sites, which pass absolute paths, but it is one
+/// caller away and fails in the dangerous direction.
+///
+/// Two deliberate over-refusals, both fail-closed and both visible in the
+/// report as `VcsUnknown` rather than silent: a stray empty `.git` DIRECTORY
+/// that is not a repository, and a project under `GIT_CEILING_DIRECTORIES`.
+/// Both refuse to sweep. Refusing to move a file that could have moved is the
+/// cheap error here; the expensive one is the reverse.
+///
+/// Test: `an_unreadable_git_dir_is_unknown_not_no_repo`,
+/// `an_unreadable_git_head_is_unknown_not_no_repo`,
+/// `a_ceiling_directory_is_unknown_not_no_repo`,
+/// `a_stray_empty_git_dir_is_unknown`,
+/// `claim_outside_a_repo_is_unclaimed`,
+/// `an_unresolvable_relative_path_is_unknown`.
+fn classify_failure(dir: &Path, stderr: &str) -> IndexState {
+    if !stderr.contains(NO_REPO_STDERR) {
+        return IndexState::Unavailable;
+    }
+    match dir.canonicalize() {
+        Ok(abs)
+            if !abs
+                .ancestors()
+                .any(|p| p.join(".git").symlink_metadata().is_ok()) =>
+        {
+            IndexState::NoRepo
+        }
+        _ => IndexState::Unavailable,
+    }
+}
+
 /// The tracked-file set for one directory, resolved once per sweep.
 ///
 /// Why: a per-file `git ls-files --error-unmatch` would spawn a process for
@@ -80,7 +140,7 @@ pub struct VcsIndex {
     state: IndexState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum IndexState {
     /// A work tree was found; these are its tracked entries under the probed
     /// directory, as bare file names.
@@ -115,13 +175,13 @@ impl VcsIndex {
     /// worktree gitdir is gone, a broken `repositoryformatversion`, or any
     /// failing `git` shim on `PATH`.
     ///
-    /// So the branch is on the REASON, matched against
-    /// [`NO_REPO_STDERR`] — and note that a substring match on the shorter
-    /// `not a git repository` would NOT be safe: a stale worktree pointer emits
+    /// So the branch is on the REASON, delegated to [`classify_failure`] — and
+    /// even the reason is corroborated, because git emits its "no repository"
+    /// text for an unreadable `.git` as readily as for a genuinely empty
+    /// directory. A substring match on the shorter `not a git repository` is
+    /// wrong for a third reason: a stale worktree pointer emits
     /// `fatal: not a git repository: (null)`, which contains that phrase while
-    /// meaning the opposite. Only the parenthesised "searched the parents and
-    /// found nothing" form is genuine absence. Any future git wording change
-    /// therefore falls through to `Unavailable` — the refusing side.
+    /// meaning the opposite.
     ///
     /// Success is likewise not enough: a BARE repository exits 0 printing
     /// `false`, so `stdout` must read exactly `true` before the listing is
@@ -131,6 +191,8 @@ impl VcsIndex {
     /// `probe_drops_nested_entries`, `probe_of_a_missing_directory_does_not_panic`,
     /// `an_unreadable_repo_is_unknown_not_no_repo`,
     /// `a_stale_worktree_pointer_is_unknown_not_no_repo`,
+    /// `an_unreadable_git_dir_is_unknown_not_no_repo`,
+    /// `a_ceiling_directory_is_unknown_not_no_repo`,
     /// `a_bare_repo_is_unknown`.
     pub fn probe(dir: &Path) -> Self {
         let inside = Command::new("git")
@@ -144,15 +206,11 @@ impl VcsIndex {
                     state: IndexState::Unavailable,
                 };
             }
-            // #4448: branch on WHY it failed, never on the bare exit code.
+            // #4448: branch on WHY it failed, never on the bare exit code — and
+            // corroborate even that, see `classify_failure`.
             Ok(out) if !out.status.success() => {
-                let why = String::from_utf8_lossy(&out.stderr);
                 return Self {
-                    state: if why.contains(NO_REPO_STDERR) {
-                        IndexState::NoRepo
-                    } else {
-                        IndexState::Unavailable
-                    },
+                    state: classify_failure(dir, &String::from_utf8_lossy(&out.stderr)),
                 };
             }
             // #4448: a bare repo exits 0 printing `false`; it has no work tree,

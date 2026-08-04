@@ -142,9 +142,11 @@ const CLAUDE_MPM_KEYS: &[&str] = &[
 /// REFUSAL to move, which is the safe direction and the one this issue asks
 /// for. Two tests guard it: `composed_marker_survives_composition` here, and
 /// `the_bundled_base_agent_carries_the_composition_marker` in `trusty-mpm`,
-/// which owns the asset and pins this literal against it.
+/// which owns the asset and asserts its heading line is EXACTLY this string —
+/// public for that reason, so the pin compares the real constant rather than a
+/// second copy that could drift on its own.
 /// Test: `composed_marker_survives_composition`.
-const COMPOSED_BASE_MARKER: &str = "# BASE-AGENT — Foundation for all trusty-mpm agents";
+pub const COMPOSED_BASE_MARKER: &str = "# BASE-AGENT — Foundation for all trusty-mpm agents";
 
 /// Classify a document by its frontmatter key set.
 ///

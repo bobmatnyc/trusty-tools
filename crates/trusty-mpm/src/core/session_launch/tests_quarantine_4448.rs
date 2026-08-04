@@ -24,9 +24,9 @@ fn tm_shadow(name: &str) -> String {
     )
 }
 
-/// The composition root a real deployed agent carries. Pinned against the
-/// bundled asset by `the_bundled_base_agent_carries_the_composition_marker`.
-const BASE_MARKER: &str = "# BASE-AGENT — Foundation for all trusty-mpm agents";
+/// The composition root a real deployed agent carries — the REAL constant the
+/// sweep gates on, not a local copy, so the pin below cannot drift from it.
+use trusty_agents_common::agents::agent_schema::COMPOSED_BASE_MARKER as BASE_MARKER;
 
 /// Seed a minimal bundled source so the deploy half of `prepare_session` has
 /// something to do. The ROSTER the quarantine keys on additionally includes
@@ -341,11 +341,18 @@ fn walk(root: &std::path::Path) -> Vec<PathBuf> {
 #[test]
 fn the_bundled_base_agent_carries_the_composition_marker() {
     let base = include_str!("../../assets/agents/BASE-AGENT.md");
-    assert!(
-        base.contains(BASE_MARKER),
-        "crates/trusty-mpm/src/assets/agents/BASE-AGENT.md no longer carries `{BASE_MARKER}`. \
-         Update COMPOSED_BASE_MARKER in trusty-agents-common's agent_schema.rs to match, or the \
-         #4448 quarantine will refuse every file it exists to move."
+    let heading = base
+        .lines()
+        .find(|l| l.starts_with("# "))
+        .expect("BASE-AGENT.md must open with a level-1 heading");
+    // EQUALITY, not `contains`: a shortened marker still matches every composed
+    // file, so `contains` would tolerate silently loosening the predicate.
+    assert_eq!(
+        heading, BASE_MARKER,
+        "crates/trusty-mpm/src/assets/agents/BASE-AGENT.md's heading and \
+         trusty-agents-common's COMPOSED_BASE_MARKER have drifted. They must be \
+         byte-identical, or the #4448 quarantine either refuses every file it exists \
+         to move (heading changed) or matches too loosely (constant shortened)."
     );
 }
 
