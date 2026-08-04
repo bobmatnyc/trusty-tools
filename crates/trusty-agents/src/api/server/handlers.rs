@@ -325,9 +325,18 @@ pub(super) async fn submit_task(
     // assistant's own tool calls. Record it as attendance for the instance the
     // human addressed (no roster selection = the `ctrl` concierge).
     // Infallible: a failure is logged and swallowed, never surfaced here.
-    crate::attendance::note_turn(
+    // #4703: through the root injected on `AppState`, not the `$HOME`-resolving
+    // `note_turn` this replaced — that one made this very call site impossible
+    // to assert on without writing into the developer's real home.
+    crate::attendance::note_command_turn_in(
+        state.attendance_root.as_deref(),
         agent_override(&req).as_deref().unwrap_or("ctrl"),
         crate::attendance::TurnOrigin::Human,
+        // The API sidecar's "sender is entitled to assert presence" check: a
+        // request that reached this handler is already past the server's auth
+        // layer, so the only question left is the one `origin` answers.
+        true,
+        chrono::Utc::now(),
     );
 
     // #192 Phase B: announce the new session immediately on the event bus so

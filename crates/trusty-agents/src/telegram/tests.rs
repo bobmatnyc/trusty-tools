@@ -707,3 +707,134 @@ fn plain_message_records_a_human_turn_and_is_not_a_switch() {
     let id = crate::assistants::AssistantInstanceId::new("izzie").expect("valid id");
     assert_eq!(tracker.last_human_turn(&id).expect("read"), Some(now));
 }
+
+// ---------------------------------------------------------------------------
+// #4703: the two PRODUCTION entry points. The tests above exercise the
+// injectable helpers UNDERNEATH `handle_command` / `handle_message`; these two
+// drive the handlers themselves. Neither could exist before: both handlers
+// resolved `$HOME` inline, so the natural assertion could only be made against
+// the developer's real `~/.trusty-agents/attendance/<persona>.json`.
+// ---------------------------------------------------------------------------
+
+/// A persona no roster can resolve, so any dispatch that reaches the agent
+/// loader fails on a filesystem read rather than an LLM call.
+const PROBE_PERSONA: &str = "attendance-probe-4703";
+
+/// A `Bot` whose API base is a closed loopback port.
+///
+/// Why: these tests drive real handlers, and real handlers reply. Pointing the
+/// bot at `127.0.0.1:1` makes every send fail INSTANTLY with a connection
+/// refusal instead of reaching api.telegram.org — hermetic, and no slower than
+/// a local socket error. Every send in the paths below is either ignored or
+/// returned, and the attendance write happens before any of them.
+fn probe_bot() -> teloxide::Bot {
+    teloxide::Bot::new("4703:probe")
+        .set_api_url(reqwest::Url::parse("http://127.0.0.1:1/").expect("closed-port url parses"))
+}
+
+/// A minimal inbound Telegram message, built the way Telegram itself delivers
+/// one — by deserializing the update payload.
+fn probe_message(chat_id: i64, text: &str) -> teloxide::types::Message {
+    serde_json::from_value(serde_json::json!({
+        "message_id": 1,
+        "date": 0,
+        "chat": { "id": chat_id, "type": "private" },
+        "from": { "id": 4703, "is_bot": false, "first_name": "Probe" },
+        "text": text,
+    }))
+    .expect("valid telegram message payload")
+}
+
+/// A session map holding one chat already switched to [`PROBE_PERSONA`], so
+/// both handlers record against a distinctive name rather than the `ctrl`
+/// default.
+fn probe_sessions(chat_id: ChatId, project_path: &std::path::Path) -> super::SessionMap {
+    let mut session = super::ChatSession::new(project_path.to_path_buf());
+    session.active_persona = Some(PROBE_PERSONA.to_string());
+    let mut map = HashMap::new();
+    map.insert(chat_id, session);
+    Arc::new(tokio::sync::Mutex::new(map))
+}
+
+/// The last human turn recorded for `persona` under `root`.
+fn recorded_turn(root: &std::path::Path, persona: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let tracker = crate::attendance::AttendanceTracker::new(
+        root,
+        crate::attendance::AttendanceConfig::default(),
+    );
+    let id = crate::assistants::AssistantInstanceId::new(persona).expect("valid id");
+    tracker.last_human_turn(&id).expect("read")
+}
+
+/// #4703 regression: `handle_command` records attendance under the root it is
+/// GIVEN, not one it resolves from `$HOME`.
+///
+/// Why: the assertion the old inline `default_attendance_root()` made
+/// impossible. Deleting the `note_command_turn_in(...)` call from
+/// `handle_command` must fail this test — confirmed by doing exactly that.
+/// What: drives the real handler with `/clear` on a paired chat. The reply
+/// fails against the closed-port bot; the hook ran before it.
+#[tokio::test]
+async fn telegram_handle_command_records_attendance_under_the_injected_root() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = Arc::new(crate::attendance::attendance_root(dir.path()));
+    let chat_id = ChatId(4703);
+
+    let paired: PairedChats = Arc::new(RwLock::new(HashMap::new()));
+    paired.write().await.insert(chat_id, Instant::now());
+
+    let _ = super::handlers::handle_command(
+        probe_bot(),
+        probe_message(chat_id.0, "/clear"),
+        super::handlers::Command::Clear,
+        probe_sessions(chat_id, dir.path()),
+        Arc::new(dir.path().to_path_buf()),
+        paired,
+        Arc::new(dir.path().join("paired.json")),
+        new_pending_pairs(),
+        Some(Arc::clone(&root)),
+    )
+    .await;
+
+    assert!(
+        recorded_turn(&root, PROBE_PERSONA).is_some(),
+        "handle_command must record the human turn under the INJECTED root; \
+         finding nothing here means the hook resolved $HOME again (#4703)"
+    );
+}
+
+/// #4703 regression: `handle_message` records attendance under the injected
+/// root.
+///
+/// Why: same trap, the other Telegram entry point. Deleting the
+/// `note_turn_and_is_switch(...)` call from `handle_message` must fail this
+/// test — confirmed by doing exactly that.
+/// What: drives the real handler with a `/switch` line on a paired chat.
+/// `/switch` is intercepted right after the hook, so the handler returns
+/// without ever reaching the LLM dispatch — and the hook deliberately runs
+/// BEFORE that intercept (#4652), which is precisely what this pins.
+#[tokio::test]
+async fn telegram_handle_message_records_attendance_under_the_injected_root() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = Arc::new(crate::attendance::attendance_root(dir.path()));
+    let chat_id = ChatId(4703);
+
+    let paired: PairedChats = Arc::new(RwLock::new(HashMap::new()));
+    paired.write().await.insert(chat_id, Instant::now());
+
+    let _ = super::handlers::handle_message(
+        probe_bot(),
+        probe_message(chat_id.0, "/switch ctrl"),
+        probe_sessions(chat_id, dir.path()),
+        Arc::new(dir.path().to_path_buf()),
+        paired,
+        Some(Arc::clone(&root)),
+    )
+    .await;
+
+    assert!(
+        recorded_turn(&root, PROBE_PERSONA).is_some(),
+        "handle_message must record the human turn under the INJECTED root; \
+         finding nothing here means the hook resolved $HOME again (#4703)"
+    );
+}

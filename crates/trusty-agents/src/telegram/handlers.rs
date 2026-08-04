@@ -67,6 +67,10 @@ pub(super) async fn handle_command(
     paired: PairedChats,
     paired_state_path: Arc<PathBuf>,
     pending: PendingPairs,
+    // #4703: injected by `run_telegram_bot`. Resolving the root inline here
+    // (as this handler did) meant no test could assert on its attendance hook
+    // without writing into the developer's real `~/.trusty-agents`.
+    attendance_root: crate::attendance::AttendanceRoot,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
 
@@ -91,7 +95,7 @@ pub(super) async fn handle_command(
         map.get(&chat_id).and_then(|s| s.active_persona.clone())
     };
     crate::attendance::note_command_turn_in(
-        crate::attendance::default_attendance_root().ok().as_deref(),
+        attendance_root.as_deref().map(PathBuf::as_path),
         persona_for_attendance.as_deref().unwrap_or("ctrl"),
         // #4685: a Telegram update is by definition somebody's typing.
         crate::attendance::TurnOrigin::Human,
@@ -321,6 +325,8 @@ pub(super) async fn handle_message(
     sessions: SessionMap,
     project_path: Arc<PathBuf>,
     paired: PairedChats,
+    // #4703: injected by `run_telegram_bot`; see `handle_command` above.
+    attendance_root: crate::attendance::AttendanceRoot,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
     let user_msg_id = msg.id;
@@ -345,7 +351,7 @@ pub(super) async fn handle_message(
         map.get(&chat_id).and_then(|s| s.active_persona.clone())
     };
     let is_switch = note_turn_and_is_switch(
-        crate::attendance::default_attendance_root().ok().as_deref(),
+        attendance_root.as_deref().map(PathBuf::as_path),
         persona_for_attendance.as_deref().unwrap_or("ctrl"),
         &text,
         chrono::Utc::now(),
