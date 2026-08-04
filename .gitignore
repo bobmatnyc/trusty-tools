@@ -43,6 +43,15 @@
 # directory and only the listed subpaths are re-added.
 .claude/worktrees/
 
+# Per-agent memory notes are agent scratch, not repo content: they are written
+# unprompted by whichever agent happens to run, differ per machine, and a
+# tracked copy conflicts with the untracked one every other checkout already
+# has (a tracked and an untracked MEMORY.md with disjoint contents blocked a
+# fast-forward). Re-excluded here for the same reason as worktrees/ above:
+# `!.claude/` un-ignores the whole directory, so anything we do NOT want
+# tracked must be named explicitly.
+.claude/agent-memory/
+
 # trusty-mpm session/worktree runtime state is machine-local (issue #3972),
 # except the one intentionally-tracked file. Uses `.trusty-mpm/*` (ignore
 # immediate children only), NOT `.trusty-mpm/` + `!.trusty-mpm/` — the latter

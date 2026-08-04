@@ -1,0 +1,103 @@
+# vmtest-harness project defaults.
+# Format: key<TAB>value. '#' comments and blank lines ignored. Unknown keys are an error.
+# Override per-host with the matching VMTEST_* environment variable; never edit this
+# file to suit one machine.
+
+# --- guest sizing (DOC-1 §8.5; measured at vm-install-probe-findings.md:841-843) ---
+cpu	8
+memory_mib	16384
+disk_gib	100
+
+# --- guest paths (measured: vm-install-probe-findings.md:139) ---
+guest_home	/Users/admin
+guest_src_dir	/Users/admin/vmtest-src
+guest_target_dir	/Users/admin/vmtest-target
+
+# --- host capacity preflight (DOC-1 §4.1 gap; see §8.4) ---
+host_min_memory_gib	24
+host_warn_physical_cores	8
+
+# --- polling and watchdogs, seconds (see §10) ---
+#
+# GROUNDED AT PLAN P8-T2, 2026-08-04. Every key below carries EITHER a
+# `file:line` measurement citation OR the literal words `judgment call`. That is
+# P8-T2's acceptance check, and it is deliberately binary: a tunable whose
+# comment claims a grounding it does not have is worse than an unlabelled guess.
+# NO MAXIMUM WAS INVENTED and no value changed in this pass — where a budget
+# still holds with margin, the margin is stated instead.
+#
+# Two citation forms appear, because the evidence has two homes. Research
+# baselines cite `01-research/vm-install-probe-findings.md:<line>`, which is
+# append-only and whose line numbers are stable. Harness observations cite the
+# MANIFEST by PHASE AND MEASUREMENT NUMBER rather than by line, because P8-T6
+# edits that file above the phase sections and any line number written here
+# would rot on the same commit that wrote it.
+
+# boot-ready: 150 s max, 2 s interval. MEASUREMENT: research 34.4 s first boot
+# (vm-install-probe-findings.md:378) and 18.0 s "subsequent"
+# (vm-install-probe-findings.md:483). THE 18.0 s FIGURE DID NOT REPRODUCE: every
+# boot on this host looks like a first boot. Harness observations span 12-34 s
+# (MANIFEST Phase 1 Measurement 2; Phase 3 Measurement 1 = 24/28/33/33; Phase 5
+# Measurement 1 = 12/34/17; Phase 6 = 17; Phase 7 Measurement 4 = 17; Phase 8
+# drill = 18). 150 s is sized against the SLOWEST OBSERVED BOOT, 34 s, at ~4.4x.
+# Unchanged; DOC-2 §10.1's boot row was already re-grounded at source 2026-08-02.
+boot_ready_timeout	150
+# 2 s fixed, NOT exponential backoff. MEASUREMENT: poll overhead negligible
+# (01-research/logs/k1d-state-poll-overhead.log). The distribution is tight
+# (12-34 s observed), so backoff only overshoots a ready guest.
+boot_ready_interval	2
+# 120 s max. JUDGMENT CALL — DOC-2 §10.1 labels it one, and P8-T2 does not
+# promote it: worst-case flush duration is still unmeasured. What IS measured is
+# the nominal case, and it is below the harness's own observational floor: the
+# first poll after `vm_request_stop` returned already saw `stopped`, i.e. <1 s
+# (MANIFEST Phase 1 Measurement 5). That is 2+ orders of magnitude of headroom in
+# the nominal case and says NOTHING about a stuck VM, which is the only case this
+# budget is ever spent on. Left loose deliberately.
+stopped_timeout	120
+# 1 s. JUDGMENT CALL. Same K1d overhead finding as boot_ready_interval; nothing
+# measures how finely the state flag needs to be sampled.
+stopped_interval	1
+# 300 s. MEASUREMENT: 30.079 s baseline (vm-install-probe-findings.md:857-858,
+# PROVISION_MS=30079). THIRTEEN harness observations, 2026-07-31..2026-08-04:
+# 16, 17, 18, 19, 24, 35, 38, 40, 52, 64, 78, 97, 137 s (MANIFEST Phases 1, 3, 5,
+# 6, 7 and the Phase 8 drill). READ THE SPREAD, NOT THE MEAN: the range is 8.6x
+# end to end on ONE host, and the step is network-bound (the rust toolchain
+# download alone is 20.8 s, vm-install-probe-findings.md:854). DOC-2 §10.2 calls
+# this budget "10x" its baseline; against the SLOWEST OBSERVED RUN, 137 s, it is
+# 2.19x. THAT IS THE HONEST MULTIPLE and it is the one that matters. The budget
+# still holds, with real but much thinner margin than the doc implied, so it is
+# LEFT UNCHANGED and the multiple is corrected instead. Two of thirteen runs
+# (97 s, 137 s) exceeded plan P3-T2's 3x-of-baseline acceptance note, which is
+# recorded as non-fatal for exactly this reason.
+provision_timeout	300
+# install_timeout is the FULL-STACK SCENARIO budget despite its name (DOC-2
+# §10.2); the single-crate install budget is a different site, 900 s, built in.
+# TIGHTENED 2700 -> 1800 at plan P5-T8, on the first real measurement rather
+# than on DOC-1 §9's 4-8 min extrapolation, which it supersedes. MEASUREMENT:
+# scenario wall clock 640 s / 748 s / 610 s across three pattern-(c) runs
+# (MANIFEST Phase 5 Measurement 1); 1800 s is ~2.4x the slowest. CONFIRMED, NOT
+# CHANGED, at P8-T2 against three further full-stack runs the tightening did not
+# see: 650 s total under (b) (MANIFEST Phase 6), 511 s under (a) (MANIFEST
+# Phase 7) and the Phase 8 drill under (c). Five full-stack runs now sit in
+# 511-919 s TOTAL wall clock; no scenario has come within 2.4x of this budget.
+# §10.2's constraint is why the headroom stays generous: a tight timeout does not
+# enforce a budget, it manufactures flaky failures that get "fixed" by raising
+# it. What changed at P5-T8 is that the multiple sits over a MEASUREMENT instead
+# of over an estimate labelled low-confidence.
+install_timeout	1800
+# 60 s. JUDGMENT CALL — and it is STILL a guess, which P8-T2 says out loud rather
+# than dressing up. DOC-2 §10.1 records daemon time-to-ready as "wholly
+# unmeasured"; P5-T7 did not produce a number, because `_verify_wait_for_addr`
+# and the /health probe assert an OUTCOME and never log an elapsed time. The only
+# thing six full-stack runs establish is a bound in the wrong direction: the
+# budget has never been HIT (MANIFEST Phase 5 Measurement 4, Phases 6-8), so
+# daemon readiness is somewhere in (0, 60] s and nothing narrows it further.
+# Instrumenting it is a code change P8-T2 does not own; recorded as still open.
+health_timeout	60
+# 1 s. JUDGMENT CALL. Nothing measures how finely /health needs to be sampled;
+# it inherits stopped_interval's reasoning and no more.
+health_interval	1
+
+# --- source (DOC-1 §6.2) ---
+repo_url	https://github.com/bobmatnyc/trusty-tools.git
+default_branch	main
