@@ -214,7 +214,9 @@ an agent told to "rerun the suite until green" spent 415k tokens because
 
 1. **Run it.** Don't watch, tail, or poll a live stream.
 2. **Trim the output.** `--quiet` plus `tail`/`grep` for the summary line covers
-   most gates. For a heavier squeeze this repo ships a Unix filter:
+   most gates — but never as the last stage of a gate chain, see "Never end a
+   gate chain in a pipe" below. For a heavier squeeze this repo ships a Unix
+   filter:
    `<command> 2>&1 | tm compress --tool "<tool-name>"` (`--tool` is free-form,
    substring-matched — `"cargo test"`, `"git diff"`). Known gap: its
    structured-format guard can misread a leading `key: value`-shaped line — such
@@ -281,6 +283,18 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
   for a delegated agent.
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
+
+### Never end a gate chain in a pipe
+
+🔴 A pipeline's exit status is the LAST command's. `cargo test … | tail` exits 0
+on a failing suite. FORBIDDEN — it produced a false green twice in one day, once
+for an engineer and once for a reviewer. Redirect to a file, then echo the status:
+
+```bash
+( <gate> && <gate> ) > /tmp/gates.txt 2>&1; echo "EXIT=$?"
+```
+
+`EXIT=0` → don't read the file. Non-zero → Read only the failing portion.
 
 ## Agent-Authored Prose
 
