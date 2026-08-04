@@ -1171,6 +1171,80 @@ fn real_secrets_still_blocked_after_4312_backtick_split() {
     );
 }
 
+/// Why (issue #4312 round 3): the first cut of `is_url_credential_shaped`
+/// exempted any token containing `://` or `@`, which is monotone-WIDENING — it
+/// held open 14 URL-shaped prose false positives that the entropy floor would
+/// otherwise have closed. Bare documentation links, `git@…` remotes and plain
+/// addresses are not credentials, and this project's own always-clickable-links
+/// convention puts one of these tokens in essentially every session checkpoint.
+/// Narrowing the predicate to `scheme://user:pass@host` — a colon-bearing
+/// userinfo before the first `@` — closes 10 of the 14 while exempting zero
+/// prose and keeping every connection string (asserted in
+/// `real_secrets_still_blocked_after_4312_charset_gate`).
+/// What: asserts the ten URL-shaped prose tokens the narrowing fixes. All ten
+/// are false positives on `origin/main`.
+/// Test: itself.
+#[test]
+fn url_shaped_prose_is_not_flagged() {
+    for tok in [
+        "https://crates.io/crates/trusty-common/versions",
+        "https://docs.rs/trusty-common/latest/trusty_common",
+        "https://api.github.com/repos/bobmatnyc/trusty-tools",
+        "https://example.com/docs/getting-started-guide",
+        "https://bobmatnyc.github.io/trusty-tools/reference",
+        "git@github.com:bobmatnyc/trusty-tools.git",
+        "contact@example.com/support-team-list",
+        "amqp://rabbitmq.svc.cluster.local/vhost-production",
+        "redis://cache.internal/keyspace-notifications",
+        "postgres://localhost/trusty_dev",
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "URL-shaped prose must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        // The narrowed predicate must not exempt prose — exempting it would
+        // mask the result above rather than earn it.
+        assert!(
+            !is_url_credential_shaped(tok),
+            "prose must not be exempted by is_url_credential_shaped: {tok}"
+        );
+    }
+}
+
+/// Why (issue #4312 round 3): four URL-shaped prose tokens still false-positive
+/// after the narrowing, because they carry a digit or an uppercase letter and so
+/// clear the entropy floor on their own. They are **pre-existing** — all four are
+/// flagged identically on `origin/main` — and this PR fixes ten of their
+/// fourteen siblings, but the residue includes the single most common shape in
+/// this project's checkpoints: a bare GitHub issue/PR link.
+///
+/// They are NOT fixed here because the obvious blanket rule is unsafe. A
+/// userinfo-free URL can still carry a secret in its PATH — the webhook URL in
+/// `real_secrets_still_blocked_after_4312_charset_gate` is exactly that shape,
+/// and exempting bare URLs would lose it. Separating "URL path that is a path"
+/// from "URL path that is a credential" is a distinct design problem and belongs
+/// in its own change.
+/// What: pins the residue as change-detectors. If one starts passing, the
+/// follow-up landed — update this test, do not delete it.
+/// Test: itself.
+#[test]
+fn url_prose_residue_is_a_known_pre_existing_bound() {
+    for tok in [
+        "https://github.com/bobmatnyc/trusty-tools/pull/4723",
+        "https://github.com/bobmatnyc/trusty-tools/issues/4312",
+        "file:///Users/masa/trusty-tools/crates/common",
+        "mongodb://cluster0.mongodb.net/analytics-store",
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "KNOWN BOUND (#4312): this URL-shaped prose is still flagged, as it \
+             is on origin/main. If it now passes, the follow-up landed — move it \
+             into `url_shaped_prose_is_not_flagged`. Token: {tok}"
+        );
+    }
+}
+
 // ---- Issue #4312: the base64-branch charset gate + entropy floor ----
 
 /// Why (issue #4312): the delimiter change alone closes the backtick shape but
@@ -1321,6 +1395,21 @@ fn real_secrets_still_blocked_after_4312_charset_gate() {
         (
             "lowercase ftp conn",
             "ftp://deployer:deploypassword@files.internal/pub",
+        ), // pragma: allowlist secret
+        (
+            "lowercase mysql conn",
+            "mysql://admin:letmein@localhost/mydb",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for the narrowed `is_url_credential_shaped` (#4312
+        // round 3): a userinfo-free URL whose PATH carries the secret. This is
+        // why "a bare URL is not a credential" cannot be a blanket exemption —
+        // it would lose every webhook secret. Caught here by the entropy floor
+        // (uppercase + digits), not by the URL predicate. Host is deliberately
+        // generic: the real vendor form trips GitHub push protection, which is
+        // itself a second opinion that this shape reads as a credential.
+        (
+            "webhook URL with secret path",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
         ), // pragma: allowlist secret
     ] {
         assert!(

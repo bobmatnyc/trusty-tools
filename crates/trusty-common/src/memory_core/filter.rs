@@ -823,8 +823,9 @@ fn is_issue_number_list(token: &str) -> bool {
 ///
 /// Known bound: a token built only from this charset still reaches the branch,
 /// so a hyphen/plus-joined English phrase such as `ticker+shutdown-channel`
-/// remains a false positive. See [`is_single_b64_alphabet`] for the second gate
-/// that resolves it.
+/// remains a false positive. The second gate is what resolves it — the
+/// `has_upper || has_digit` entropy floor in [`looks_like_secret`], with
+/// [`is_url_credential_shaped`] exempting connection strings from that floor.
 /// What: returns `true` iff every char is ASCII alphanumeric or in
 /// `{'+', '/', '=', '-', '_', '.', ':', '@'}`.
 /// Test: `four_4312_acceptance_cases_are_not_flagged`,
@@ -836,8 +837,9 @@ fn is_plausible_b64_charset(token: &str) -> bool {
     })
 }
 
-/// True when `token` carries the credential-embedding shape of a URL —
-/// a `://` scheme separator or a userinfo `@`.
+/// True when `token` is a URL that actually carries credentials — a `://`
+/// scheme separator followed by a colon-bearing userinfo before the first `@`,
+/// i.e. the `scheme://user:pass@host` shape.
 ///
 /// Why (issue #4312, repro 4): the entropy floor added alongside this
 /// (`has_upper || has_digit` in [`looks_like_secret`]'s base64 branch) is what
@@ -845,14 +847,32 @@ fn is_plausible_b64_charset(token: &str) -> bool {
 /// whose every character is individually credential-plausible. That floor
 /// would also drop an all-lowercase connection string
 /// (`postgres://user:password@host/database`), which is a genuine credential
-/// and one this module has always caught. A connection string is not a blob:
-/// it is a structured URL whose password happens to sit inside it, so it is
-/// exempted by shape rather than by entropy.
-/// What: returns `true` iff `token` contains `://` or `@`.
+/// this module has always caught. A connection string is not a blob: it is a
+/// structured URL whose password sits inside it, so it is exempted by shape
+/// rather than by entropy.
+///
+/// Why the predicate is this narrow: the first cut exempted any token
+/// containing `://` OR `@`, which held open 14 URL-shaped prose false
+/// positives the floor would otherwise have fixed — bare `https://` doc links,
+/// `git@github.com:…` remotes, plain `mailto`-ish addresses. Requiring the
+/// `user:pass@` userinfo keeps every real connection string and exempts none of
+/// them. Note this predicate can only ever WIDEN flagging: it is an OR term
+/// inside the branch's conjunction, so narrowing it is strictly safe in the
+/// security direction and can never turn a caught credential into a miss.
+/// What: returns `true` iff `token` contains `://` and the text between it and
+/// the first following `@` contains a `:`.
 /// Test: `four_4312_acceptance_cases_are_not_flagged`,
+/// `url_shaped_prose_is_not_flagged`,
 /// `real_secrets_still_blocked_after_4312_charset_gate`.
 fn is_url_credential_shaped(token: &str) -> bool {
-    token.contains("://") || token.contains('@')
+    // #4312: `scheme://user:pass@host` only — a bare URL carries no userinfo.
+    let Some((_, after_scheme)) = token.split_once("://") else {
+        return false;
+    };
+    let Some((userinfo, _)) = after_scheme.split_once('@') else {
+        return false;
+    };
+    userinfo.contains(':')
 }
 
 /// True when every character in `token` could plausibly appear in a bare
