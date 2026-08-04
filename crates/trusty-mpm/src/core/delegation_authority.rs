@@ -62,17 +62,79 @@ struct AgentFrontmatter {
     extends: Option<String>,
 }
 
+/// Whether a parsed value is a YAML block-scalar header rather than a value.
+///
+/// Why: `description: >` means "the value is on the following indented lines",
+/// not "the value is `>`". Five bundled writing agents (`copyeditor`,
+/// `pangram-editor`, `proofreader`, `writer`, `writing-critic`) author their
+/// descriptions that way, and taking the marker literally rendered each one into
+/// the PM prompt as a bare `>`.
+/// What: matches `>` or `|` optionally followed by a chomping indicator (`-`,
+/// `+`) and/or an explicit indentation digit, in either order — the full set of
+/// YAML block-scalar headers.
+/// Test: `block_scalar_description_is_folded`,
+/// `literal_block_scalar_description_keeps_its_line_breaks`.
+fn is_block_scalar_header(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix(['>', '|']) else {
+        return false;
+    };
+    rest.chars().all(|c| matches!(c, '-' | '+' | '1'..='9'))
+}
+
+/// Consume a block scalar's body from the frontmatter line stream.
+///
+/// Why: the body is whatever follows the header, indented, up to the first line
+/// that is not — which is how the closing `---` (column 0) terminates it without
+/// a special case.
+/// What: takes indented and blank lines from `lines`, then joins them. A folded
+/// header (`>`) joins the lines with a space and turns a blank line into a line
+/// break, per YAML folding; a literal header (`|`) preserves every line break.
+/// Test: `block_scalar_description_is_folded`,
+/// `literal_block_scalar_description_keeps_its_line_breaks`.
+fn read_block_scalar(header: &str, lines: &mut std::iter::Peekable<std::str::Lines<'_>>) -> String {
+    let folded = header.starts_with('>');
+    let mut body: Vec<String> = Vec::new();
+    while let Some(next) = lines.peek() {
+        if !next.trim().is_empty() && !next.starts_with([' ', '\t']) {
+            break;
+        }
+        body.push(lines.next().unwrap_or_default().trim().to_string());
+    }
+    while body.last().is_some_and(|l| l.is_empty()) {
+        body.pop();
+    }
+    if !folded {
+        return body.join("\n");
+    }
+    // Folded: run together, but a blank line is a deliberate paragraph break.
+    let mut out = String::new();
+    for line in body {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push(' ');
+            }
+            out.push_str(&line);
+        }
+    }
+    out
+}
+
 /// Parse the leading `---` frontmatter block of a Markdown document.
 ///
 /// Why: composed agents store their metadata in a YAML-ish frontmatter block;
 /// the scanner reads just the keys it needs without a YAML library.
 /// What: if the document opens with a `---` line, collects `key: value` pairs
-/// until the closing `---`; quotes are stripped and keys lower-cased. A
+/// until the closing `---`; quotes are stripped and keys lower-cased. A value
+/// that is a block-scalar header (`>`, `|`, with any chomping indicator) takes
+/// the following indented lines as its value via [`read_block_scalar`]. A
 /// document with no frontmatter yields an all-`None` result.
-/// Test: `scan_finds_agents` (frontmatter present), `scan_handles_no_frontmatter`.
+/// Test: `scan_finds_agents` (frontmatter present), `scan_handles_no_frontmatter`,
+/// `block_scalar_description_is_folded`.
 fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
     let trimmed = raw.trim_start_matches(['\u{feff}']);
-    let mut lines = trimmed.lines();
+    let mut lines = trimmed.lines().peekable();
 
     match lines.next() {
         Some(first) if first.trim() == "---" => {}
@@ -80,7 +142,7 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
     }
 
     let mut fm = AgentFrontmatter::default();
-    for line in lines {
+    while let Some(line) = lines.next() {
         if line.trim() == "---" {
             break;
         }
@@ -88,6 +150,11 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
         // model ids) are preserved rather than silently truncated.
         let Some((key, value)) = parse_kv_line(line) else {
             continue;
+        };
+        let value = if is_block_scalar_header(&value) {
+            read_block_scalar(&value, &mut lines)
+        } else {
+            value
         };
         if value.is_empty() {
             continue;
@@ -292,8 +359,17 @@ fn build_extends_chain(extends: Option<&str>, name: &str) -> Vec<String> {
 /// `extends`). This section is re-emitted into EVERY PM session, so ~2 KB of
 /// per-session noise is worth deleting.
 ///
+/// `Handles` is omitted for the same reason, one level up: its text is the
+/// agent's frontmatter `description`, which is byte-identical to the description
+/// the harness already publishes for that agent in its own Agent-type catalog.
+/// Re-emitting it made the roster a second copy of a list the session already
+/// has. What the harness does NOT publish is `Role` and `Model`, so those are
+/// the roster's whole contribution and they stay. `description` is still parsed
+/// into [`AgentSummary`] — it is public API and other consumers read it.
+///
 /// Test: `generate_authority_nonempty`, `generate_authority_empty`,
-/// `generate_authority_omits_self_referential_lines`
+/// `generate_authority_omits_self_referential_lines`,
+/// `generate_authority_omits_the_harness_supplied_description`
 pub fn generate_authority(agents: &[AgentSummary]) -> String {
     let mut out = String::from("## Delegation Authority\n\n");
 
@@ -315,11 +391,6 @@ pub fn generate_authority(agents: &[AgentSummary]) -> String {
         if agent.role != agent.name {
             out.push_str(&format!("- **Role:** {}\n", agent.role));
         }
-        let handles = agent
-            .description
-            .as_deref()
-            .unwrap_or("(no description provided)");
-        out.push_str(&format!("- **Handles:** {handles}\n"));
         if agent.extends_chain.len() > 1 {
             out.push_str(&format!(
                 "- **Foundation:** {}\n",
