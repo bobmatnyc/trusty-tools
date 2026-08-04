@@ -212,96 +212,56 @@ This applies especially to verification-critical commands: test runs, `git`/`gh`
 reads and writes, and build output. An unobservable result is never a passing
 result.
 
-## Foreground Execution — NEVER End Your Turn To Wait
+## Finishing Work — Push, Report, Stop
 
-🔴 **You must NEVER end your turn to "wait" for anything.** Nothing re-invokes a
-stopped agent. The moment you end your turn, you are stopped — no background
-monitor, watcher, poller, timer, or notification you spawned can ever wake you
-back up. It fires into the void and your task strands until a human notices and
-manually resumes you. Waiting is done ONLY by running a blocking command in the
-FOREGROUND and letting it hold your turn until the thing you're waiting for is
-done.
-
-**Background monitors/watchers/pollers are FORBIDDEN as a wake mechanism.** Do
-not spawn a "background polling monitor", "background watcher", or async job and
-then end your turn expecting it to report back. That mechanism does not exist for
-you — it exists only for a top-level human-driven orchestrator, never for a
-delegated agent.
-
-**Ending your turn with any of these — "waiting for…", "monitoring…", "standing
-by…", "will report when…", "I'll report back once…", "checking back later",
-"I'll wait for the notification" — is a PROTOCOL VIOLATION, not a status
-update.** If you catch yourself about to write one of those, you are about to
-strand the task. Instead: run the blocking command now, in this turn.
-
-### Canonical CI-wait pattern (blocking, foreground)
+🔴 **Never block on CI.** When your work is done: push, take a ONE-SHOT status
+read, report what it says, and END YOUR TURN. The PM re-engages when CI settles.
+Anti-parking is enforced by the PM coming back, not by you holding a turn open.
 
 ```bash
-gh pr checks <pr> --watch --fail-fast    # blocks until all checks settle
+gh pr view <pr> --json state,mergeable,statusCheckRollup   # one shot
+gh pr checks <pr>                                          # one shot
 ```
 
-Run it as a plain foreground command and let it hold the turn — even 15+ minutes.
-Do NOT background it (`&` / `run_in_background`). Do NOT end the turn to "monitor
-the checks". When it exits, read the result and act. If it exits nonzero, capture
-the failure evidence and report it — don't retry-by-waiting.
+Two ways that read misleads if you take it flatly:
 
-### Canonical long-command pattern (blocking, foreground)
+- **`bucket` can report a false DONE.** Under GitHub API eventual-consistency
+  lag a check surfaces as bucketed-complete before it has actually settled.
+  Cross-check the `state` field before calling anything green.
+- **Repeated `gh pr update-branch` is a treadmill.** When main drifts faster than
+  CI completes, each update mints a new untested head and restarts the clock.
+  Merge the head that is actually green; BEHIND is not a correctness gate.
 
-Run builds, test suites, and deploy waits as plain foreground commands with a
-long timeout and wait for them to exit. If a command was already backgrounded,
-you MUST poll it to completion with blocking status calls in the SAME turn — you
-may not end the turn while it is still running.
+### Never `gh pr checks --watch`
 
-### When a single invocation times out
+`--watch` streams every check's output into your context for the whole run — one
+engineer burned 546k tokens over 54 minutes on a single PR. That is why blocking
+CI waits are retired: **context cost**, not runnability (`--watch` runs fine; an
+explicit `timeout` raises the 120s bash default toward the 600000ms ceiling). Do
+not reintroduce it, and do not substitute a manual poll loop for it.
 
-The tool layer enforces a hard per-invocation timeout (10 minutes / 600000ms). If
-a blocking command hits that ceiling before finishing — or otherwise legitimately
-outlasts one invocation — immediately RE-ISSUE the same blocking command (or its
-status-check equivalent; e.g. running `gh pr checks <pr> --watch` again resumes
-watching) in the SAME turn, looping re-invocations until it completes. Re-issuing
-is not "checking back later"; the forbidden move is ending the turn to wait, not
-the re-invocation itself.
+### Report, don't promise
 
-This rule exists because merge/CI/release agents repeatedly parked mid-watch
-waiting for a notification that never came (issues #2501, #2610).
+Hand back with an observation: "pushed `<sha>`; 3 checks pending — PM to
+re-engage when they settle." Ending with "I'll report back once CI is green",
+"monitoring the checks", "standing by", or "waiting for the notification" is a
+PROTOCOL VIOLATION, not a status update — nothing re-invokes a stopped agent, so
+a promise to return strands the task.
 
-### Re-issue without spamming — the chunked-repoll pattern (issue #2833)
+### Your own gates DO block, in the foreground
 
-Re-issuing a wait must not degenerate into the OPPOSITE failure: a tight blind
-poll loop that emits a "still pending" line every ~30 seconds for 20+ minutes.
-Parking and spamming are two ends of the same mistake — both come from not
-sizing the wait to its real duration.
+A build, test suite, or lint run is YOUR gate, it terminates, and its output is
+the evidence you owe. Run it as a plain foreground command with an explicit long
+`timeout` and let it hold the turn until it exits. Keep gates crate-scoped
+(`cargo test -p <crate>`) so they finish inside one invocation; re-issue in the
+SAME turn if one legitimately outlasts the ceiling. If a command was already
+backgrounded, poll it to completion in the same turn.
 
-- **Prefer the blocking watch.** `gh pr checks <pr> --watch --fail-fast` blocks
-  silently until checks settle and prints once. It is the correct primitive —
-  it neither parks nor spams. Re-issue it verbatim after a 10-min ceiling.
-- **If you must repoll a status command** (no `--watch` available), use a
-  blocking wait sized to the KNOWN wall-clock, not to impatience — a
-  Monitor/until-loop where the harness provides one, or a minutes-scale sleep
-  where it doesn't (some harnesses block a raw foreground `sleep`; use whatever
-  blocking primitive is actually available). Size it to a 5-minute-plus interval
-  for a ~15-minute CI run, not 30 seconds. A tight loop tells the reader nothing
-  they didn't know 30 seconds ago.
-- **Message only on state change.** Emit a line when the observed state actually
-  changes (pending→running, a check flips, count drops), not on every poll. "No
-  change" is not worth a message.
-- **Diagnose an overrun once.** If a wait runs abnormally long (well past the
-  expected wall-clock), run a ONE-SHOT diagnosis — `gh run view <run-id>` (or
-  `gh pr checks <pr>` without `--watch`) — to see WHY it's stuck, then resume the
-  blocking wait. Do not convert the overrun into faster polling.
-- **Disarm monitors on goal completion.** When your goal completes or becomes
-  moot — a CI run settles, a deployment finishes, a file appears, a condition
-  is satisfied — immediately cancel or disarm any `Monitor` tool call, `/loop`,
-  or `/schedule` routine you started (this cleans up legitimate recurring checks
-  — it does not re-authorize a background watcher to wake your own stopped turn).
-  A stale monitor re-fires after your goal is done, waking the agent again and
-  surfacing as a spurious "Agent finished" event to the user. Disarm first, then
-  report. This applies even if the monitor timeout is "distant" — do not rely on
-  wall-clock limits to clean up your own armed state.
-
-Do not end your turn while an unresolved wait is yours to watch — re-issue the
-blocking wait instead. A quiet foreground block is the goal; a poll-spam stream
-is a smell that you dropped the blocking primitive for a manual loop.
+Never spawn a background monitor, watcher, poller, or timer as a wake mechanism
+and end your turn expecting it to report back — that mechanism does not exist for
+a delegated agent. If you armed a `Monitor`, `/loop`, or `/schedule` and its goal
+completed or went moot, disarm it before reporting; a stale monitor re-fires and
+surfaces as a spurious wake.
 
 ## Output Format
 

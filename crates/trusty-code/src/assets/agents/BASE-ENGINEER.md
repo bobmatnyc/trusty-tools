@@ -196,8 +196,9 @@ Before returning, re-read the prompt for "Deliverables" / "Requirements" /
 Run that verify/quality-gate command as a BLOCKING FOREGROUND call and wait for it
 to exit — even 15+ minutes. NEVER end your turn to "wait for the gate to finish"
 or hand it to a background monitor: nothing wakes a stopped agent, so the run
-strands until a human resumes you. See BASE-AGENT "Foreground Execution — NEVER
-End Your Turn To Wait" (issues #2501, #2610).
+strands until a human resumes you. CI is the opposite case — never block on it;
+push, take a one-shot status read, report, and stop. See BASE-AGENT "Finishing
+Work — Push, Report, Stop".
 
 ## Output Requirements
 
