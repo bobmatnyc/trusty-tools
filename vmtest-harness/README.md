@@ -145,6 +145,49 @@ that file carries either a `file:line` measurement citation or the literal words
 `judgment call` — if you change one, keep that property; a tunable whose comment
 claims a grounding it does not have is worse than an unlabelled guess.
 
+### The two opt-in modes
+
+Both are **off by default and change nothing when off.** Neither is a CLI flag,
+because the five flags above are the whole CLI surface (DOC-2 §8.2); both are
+environment variables whose names cannot collide with the `VMTEST_<KEY>` override
+mapping, because neither `dirty_check` nor `degraded_check` is a configuration key.
+Each must be `0` or `1` — anything else is exit **2**.
+
+| Variable | What the run additionally does |
+|---|---|
+| `VMTEST_DIRTY_CHECK=1` | Validates pattern (c)'s **defining property** — that the delivered file set includes **uncommitted** work and still excludes **gitignored** paths — by dirtying the host worktree with three sentinel fixtures before the stream and asserting in the guest which of them arrived. |
+| `VMTEST_DEGRADED_CHECK=1` | **Fault-injects** the daemon-liveness predicate's non-2xx branch and asserts **both** directions of it. Runs last, after every default assertion has reported. |
+
+```bash
+VMTEST_DEGRADED_CHECK=1 vmtest-harness/vmtest run local
+```
+
+**`VMTEST_DIRTY_CHECK` is the only thing in the harness that writes to the host
+worktree.** It restores its fixtures at the earliest safe point *and* from the
+`EXIT` trap, and it refuses to start if those paths are not already clean.
+
+**`VMTEST_DEGRADED_CHECK` writes nothing on the host at all.** Every fault it
+injects is inside the guest — two `tctl stop` calls and one `pkill` against guest
+processes — and **nothing is restored, because nothing needs to be**: the guest is
+deleted by the `EXIT` trap like any other run. It breaks the stack it just
+installed, which is exactly why it runs after everything else, and why it is not
+the default.
+
+What it asserts, in one run of the **same** predicate the default path uses:
+
+- **Positive** — `trusty-search` is stopped by itself; `trusty-analyze` must then
+  answer a **non-200** code with a parseable body and `.status == "degraded"`, and
+  the predicate must **accept** it and let the run continue.
+- **Negative** — `trusty-review` is SIGKILLed (so its graceful-shutdown `http_addr`
+  cleanup never runs and its address stays discoverable) and its launchd job is
+  unloaded; the shipped verdict path must then **exit 60** on the
+  `NO HTTP RESPONSE (curl code '000')` branch — while still accepting the degraded
+  `trusty-analyze` in that same verdict run.
+
+The negative half is the one that matters. A predicate that accepts a 503 is only
+correct if it still rejects a daemon that is genuinely gone; without that assertion
+all the positive half proves is that the rule got more permissive.
+
 ---
 
 ## Two rules you are most likely to break
@@ -252,6 +295,19 @@ rather than an oversight:
   product fixed. **A daemon that answers nothing at all still fails the run**, as
   does one whose body is not JSON, carries no string `.status`, or reports
   `down`/`error`/`unhealthy`.
+
+  **Both of those claims are now OBSERVED, not inferred** *(2026-08-04)*. They were
+  correct-by-construction only until then — on the verifying run `trusty-search`
+  was already answering, so `trusty-analyze` returned 200 and the 503 path never
+  executed. `VMTEST_DEGRADED_CHECK=1` creates the condition on purpose. In one run
+  of one predicate: with `trusty-search` stopped, `trusty-analyze` answered
+  **HTTP 503** with `{"status":"degraded",…,"search_reachable":false}` and was
+  **accepted**; with `trusty-review` SIGKILLed, the same verdict **exited 60** on
+  `NO HTTP RESPONSE (curl code '000')`. The predicate is more permissive about
+  status **codes** and no more permissive about **dead daemons**.
+
+  **Three rejection branches remain unexercised** by any run — an unparseable body,
+  an absent/empty/non-string `.status`, and `.status ∈ {down, error, unhealthy}`.
 
   **A squatter emitting a generic `{"status":"ok"}` on a stale port would still
   pass.** That is the **#3364** collision class and it is open. Closing it needs a

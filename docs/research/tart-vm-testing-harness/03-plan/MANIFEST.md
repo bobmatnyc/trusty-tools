@@ -274,15 +274,96 @@ green run means.** Anyone using this harness needs all six.
    scenarios today and guarding a hazard no scenario exhibits would add a
    mechanism nobody needs. **A future editor moving those calls must read this
    first.**
-10. **The 503 branch of the amended predicate is UNEXERCISED BY ANY RUN SO FAR.**
-   Item 7's fix is what makes `trusty-analyze` safe to probe, but in the pattern
-   (c) run of 2026-08-04 `trusty-search` was already answering by the time analyze
-   was probed, so analyze returned **HTTP 200 / `status='ok'`** and the non-2xx
-   path never executed. The fix is therefore **correct-by-construction and
-   validated only in its 200 path**; `trusty-review` did exercise the
-   `status='degraded'` acceptance (at 200). Stated so nobody reads a green run as
-   evidence the 503 tolerance was observed working. Exercising it needs a run in
-   which search is slow or absent when analyze is probed.
+10. ~~**The 503 branch of the amended predicate is UNEXERCISED BY ANY RUN SO FAR.**~~
+   **CLOSED 2026-08-04 BY FAULT INJECTION — both directions observed in one run.**
+   The original text is kept verbatim below because it was accurate when written.
+
+   > Item 7's fix is what makes `trusty-analyze` safe to probe, but in the pattern
+   > (c) run of 2026-08-04 `trusty-search` was already answering by the time analyze
+   > was probed, so analyze returned **HTTP 200 / `status='ok'`** and the non-2xx
+   > path never executed. The fix is therefore **correct-by-construction and
+   > validated only in its 200 path**; `trusty-review` did exercise the
+   > `status='degraded'` acceptance (at 200). Stated so nobody reads a green run as
+   > evidence the 503 tolerance was observed working. Exercising it needs a run in
+   > which search is slow or absent when analyze is probed.
+
+   **What closed it.** A new opt-in mode, `VMTEST_DEGRADED_CHECK=1`
+   (`verify_degraded_probe`, `lib/verify.sh`), held to the same discipline as
+   `VMTEST_DIRTY_CHECK`: **off by default, default path untouched**, runs last so a
+   deliberately broken stack cannot change any other verdict, and **injects every
+   fault inside the guest** so there is nothing to restore on the host. Pattern (c)
+   run `vmtest-degraded1`, tree `8ae1b7da`, 2026-08-04, **exit 0**, total wall clock
+   **747 s**.
+
+   **BASELINE, before any fault** — the contrast without which neither direction
+   means anything:
+   ```
+   vmtest:   trusty-analyze: LIVE — HTTP 200, JSON parses, .status='ok'
+   vmtest: degraded-check BASELINE trusty-analyze: HTTP 200, .status='ok', body: {"status":"ok","version":"0.8.0","search_reachable":true}
+   ```
+
+   **POSITIVE — a 503 with a well-formed body is ACCEPTED, and the run continues.**
+   `trusty-search` was stopped **by itself** (`tctl stop trusty-search --json
+   --yes` → `"detail": "booted out com.trusty.trusty-search"`, `all_ok: true`) and
+   its unreachability CONFIRMED by polling before anything was asserted:
+   ```
+   vmtest: degraded-check: trusty-search at 127.0.0.1:7878 confirmed unreachable (curl 000)
+   vmtest:   trusty-analyze: HTTP 503 (NOT 2xx) — carried to the envelope check, not rejected on the code.
+   vmtest:   trusty-analyze: LIVE — HTTP 503, JSON parses, .status='degraded'
+   vmtest: degraded-check POSITIVE raw: trusty-analyze HTTP '503', body: {"status":"degraded","version":"0.8.0","search_reachable":false}
+   ```
+   **HTTP 503, `.status='degraded'`, `search_reachable:false`, ACCEPTED, `die 60`
+   NOT taken.** The 200-only rule item 7 removed would have failed this run.
+
+   **NEGATIVE — a daemon that is genuinely gone STILL FAILS THE RUN.** This is the
+   half that matters: a predicate that accepts a 503 is only correct if it still
+   rejects a dead daemon, and without this all item 7 would have proved is that the
+   rule got more permissive. `trusty-review` was **SIGKILLed** and then unloaded
+   (`pkill -9 -x trusty-review; tctl stop trusty-review --json --yes` → `"booted out
+   com.trusty.trusty-review"`). The **shipped verdict path** — not a copy of it —
+   was then run over the same derived five-daemon set and **exited 60**:
+   ```
+   vmtest: degraded-check NEGATIVE raw: the shipped verdict path exited 60. Its complete output:
+       | vmtest:   trusty-analyze: LIVE — HTTP 503, JSON parses, .status='degraded'
+       | vmtest:   trusty-review: address 127.0.0.1:7891 (tctl port trusty-review --json-port)
+       | vmtest: FAIL[60]: verify_daemon_liveness FAILED under pattern c — §1.3's INTERIM predicate (liveness only) does not hold:
+       |     trusty-search: no address recorded after 60s — `tctl port trusty-search --json-port` never reported one, so GET /health has no host:port to reach
+       |     trusty-review: GET http://127.0.0.1:7891/health got NO HTTP RESPONSE (curl code '000') — refused, timed out, or unreachable
+   ```
+   **BOTH DIRECTIONS HOLD IN ONE RUN OF ONE PREDICATE**, which is the only form in
+   which either is worth anything: the same verdict that rejected the dead
+   `trusty-review` accepted `trusty-analyze` at 503, and the run's exit code was 60.
+
+   **TWO rejection branches were exercised, not one, and the second was free.**
+   `trusty-search` — stopped *gracefully* — reached **"no address recorded"**, while
+   `trusty-review` — SIGKILLed — reached **curl `000`**. That difference is a
+   PRODUCT OBSERVATION worth keeping: **every daemon removes its own `http_addr`
+   discovery file on graceful shutdown** (`trusty-search`
+   `service/daemon.rs::deregister_shared_discovery`, `trusty-analyze`
+   `service/routes.rs`, `trusty-review` `service/mod.rs`, `trusty-memory`
+   `commands/stop.rs`), so a cleanly stopped daemon can NEVER reach the curl-`000`
+   branch — its address is gone before the probe. Reaching that branch requires a
+   process that dies without running its cleanup. This is why the negative
+   direction uses SIGKILL, and it is recorded because the obvious implementation
+   (`tctl stop` alone) silently tests the *other* branch.
+
+   **A structural change came with it, and it is worth reading before editing
+   either function.** `verify_daemon_liveness` was split into `_verify_daemon_set`
+   (derivation + fail-closed check), the `tctl start --json` side effect,
+   `_verify_liveness_verdict` (loop + verdict) and `_verify_probe_liveness` (the
+   per-daemon predicate). **The split point is the `tctl start --json` call, and it
+   is item 9 that forces it:** that call installs and bootstraps plists, so
+   re-running the whole function for the negative direction would have
+   **resurrected the daemon the fault had just killed**. The predicate itself is
+   byte-for-byte the same logic; the check exercises the shipped code rather than a
+   re-implementation, which is the only reason its result transfers to the default
+   path.
+
+   **STILL NOT PROVEN, and deliberately not claimed:** the remaining three
+   rejection branches (unparseable body; absent/empty/non-string `.status`;
+   `.status ∈ {down, error, unhealthy}`) are still unexercised by any run, and the
+   **#3364** squatter class is untouched — a stale port answering a generic
+   `{"status":"ok"}` would still pass. RC-1 remains what closes that.
 
 > **Items 3, 7, 8, 9 and 10 are FOLLOW-UP WORK, not a ninth phase.** The plan closed at
 > Phase 8. These were found by re-reading the shipped oracle against the product

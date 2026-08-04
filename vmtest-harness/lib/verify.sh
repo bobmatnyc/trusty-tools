@@ -1013,33 +1013,12 @@ verify_versions() {
 # ===========================================================================
 verify_daemon_liveness() {
     local vm="$1" pattern="$2"
-    local daemons d addr code body status bad='' checked=0 rc start_out
+    local rc start_out
 
     log "--- verify_daemon_liveness (pattern ${pattern}; DOC-2 §1.3 INTERIM, pending RC-1) ---"
     log 'ASSERTS LIVENESS ONLY: an address, a response, parseable JSON, non-empty .status outside {down,error,unhealthy} — ON THE BODY, NOT THE STATUS CODE. Nothing stronger, because no shared health type exists (RC-1).'
 
-    # WHICH daemons — DERIVED FROM THE PRODUCT, NOT TRANSCRIBED FROM A DOCUMENT.
-    # `stack doctor`'s member table IS `stable_set()` filtered to `m.daemon`
-    # (doctor.rs:151) — the product's own answer to "which members are daemons" —
-    # intersected with the expectation table's in-scope packages so the set stays
-    # derived from scope rather than listed twice. The TSV's `in_scope` column
-    # marks BINARIES, not daemons (§F-7), so it cannot supply this set alone.
-    #
-    # THIS IS WHAT BRINGS `trusty-analyze` IN. It was never absent from any
-    # product surface: it is an in-scope package, `stable_set` marks it a daemon,
-    # and `stack doctor` has reported it on every run. It was absent from a
-    # HARDCODED FOUR-NAME LIST in this function, transcribed from §1.3's
-    # four-shape table. Deriving the set removes the transcription and the drift
-    # with it — `trusty-console` is a `stable_set` daemon too and is correctly
-    # excluded here, by the intersection, because the TSV marks it out of scope.
-    daemons=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
-        | grep -x -F -f <(tsv_scope_packages) | tr '\n' ' ') || :
-    daemons=${daemons% }
-    # FAILS CLOSED. An empty set would make every assertion below vacuous and
-    # still print a PASS line — the false pass this whole oracle exists to avoid.
-    [ -n "$daemons" ] \
-        || die 60 'verify_daemon_liveness: the derived daemon set is EMPTY. `tctl stack doctor --json` reported no member that the expectation table also carries as in-scope, so there is nothing to probe and a PASS here would assert nothing. Either doctor produced no parseable member table or the expectation table and `stable_set()` have diverged.'
-    log "in-scope daemons (stack doctor's stable_set daemons ∩ expectation table): ${daemons}"
+    _verify_daemon_set "$vm"
 
     # START, via the machine-readable lifecycle command (§F-7 step 2). Its output
     # is logged whatever it says: on a source-only install there are no launchd
@@ -1050,69 +1029,135 @@ verify_daemon_liveness() {
     log "tctl start --json exited ${rc}:"
     printf '%s\n' "$start_out" | sed 's/^/    | /' >&2 || :
 
-    for d in $daemons; do
+    _verify_liveness_verdict "$vm" "$pattern" $LIVENESS_DAEMONS
+}
+
+# _verify_daemon_set <vm_name>
+# SETS $LIVENESS_DAEMONS to the space-separated in-scope daemon set, or dies 60.
+#
+# NOT a stdout emitter, and that is deliberate: the fail-closed check below calls
+# `die`, and `die` inside a `$(…)` command substitution kills only the subshell —
+# the caller would read an empty string and carry on. The value channel is a
+# global for the same §12.3 reason EXPECTED_TSV is one: `VMTEST_<KEY>` names are
+# reserved for §8.2's override mapping, so a harness global must not use them.
+#
+# WHICH daemons — DERIVED FROM THE PRODUCT, NOT TRANSCRIBED FROM A DOCUMENT.
+# `stack doctor`'s member table IS `stable_set()` filtered to `m.daemon`
+# (doctor.rs:151) — the product's own answer to "which members are daemons" —
+# intersected with the expectation table's in-scope packages so the set stays
+# derived from scope rather than listed twice. The TSV's `in_scope` column
+# marks BINARIES, not daemons (§F-7), so it cannot supply this set alone.
+#
+# THIS IS WHAT BRINGS `trusty-analyze` IN. It was never absent from any
+# product surface: it is an in-scope package, `stable_set` marks it a daemon,
+# and `stack doctor` has reported it on every run. It was absent from a
+# HARDCODED FOUR-NAME LIST in this function, transcribed from §1.3's
+# four-shape table. Deriving the set removes the transcription and the drift
+# with it — `trusty-console` is a `stable_set` daemon too and is correctly
+# excluded here, by the intersection, because the TSV marks it out of scope.
+_verify_daemon_set() {
+    local vm="$1"
+    LIVENESS_DAEMONS=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
+        | grep -x -F -f <(tsv_scope_packages) | tr '\n' ' ') || :
+    LIVENESS_DAEMONS=${LIVENESS_DAEMONS% }
+    # FAILS CLOSED. An empty set would make every assertion below vacuous and
+    # still print a PASS line — the false pass this whole oracle exists to avoid.
+    [ -n "$LIVENESS_DAEMONS" ] \
+        || die 60 'verify_daemon_liveness: the derived daemon set is EMPTY. `tctl stack doctor --json` reported no member that the expectation table also carries as in-scope, so there is nothing to probe and a PASS here would assert nothing. Either doctor produced no parseable member table or the expectation table and `stable_set()` have diverged.'
+    log "in-scope daemons (stack doctor's stable_set daemons ∩ expectation table): ${LIVENESS_DAEMONS}"
+}
+
+# _verify_liveness_verdict <vm_name> <pattern> <daemon>...
+# The loop and the VERDICT. Returns 0, or dies 60 naming every rejection.
+#
+# SPLIT OUT FROM `verify_daemon_liveness` 2026-08-04 so that the opt-in
+# degraded-check can run THE SHIPPED VERDICT PATH rather than a re-implementation
+# of it. It is separated at exactly the `tctl start --json` line because that call
+# is the one part of the liveness step with a SIDE EFFECT — it installs and
+# bootstraps launchd plists (MANIFEST open item 9) and would therefore RESURRECT
+# the very daemon the negative direction has just killed. The predicate itself has
+# no side effect and is what the check needs. Nothing else moved.
+_verify_liveness_verdict() {
+    local vm="$1" pattern="$2"
+    shift 2
+    local d bad='' checked=0
+
+    for d in "$@"; do
         checked=$(( checked + 1 ))
-
-        # PORT DISCOVERY — polled, never slept (DOC-1 §4.3). §10.1's daemon-health
-        # row: 1 s interval, 60 s maximum, and §10.1 labels that maximum "WHOLLY
-        # UNMEASURED". Both are `health_interval` / `health_timeout` in
-        # vmtest.defaults.
-        addr=$(_verify_wait_for_addr "$vm" "$d")
-        if [ -z "$addr" ]; then
-            bad="${bad}
-    ${d}: no address recorded after $(conf_get health_timeout)s — \`tctl port ${d} --json-port\` never reported one, so GET /health has no host:port to reach"
-            continue
-        fi
-        log "  ${d}: address ${addr} (tctl port ${d} --json-port)"
-
-        code=$(vm_exec "$vm" "curl -s -o /tmp/vmtest-health-${d}.json -w '%{http_code}' --max-time 10 http://${addr}/health" 2>/dev/null) || :
-        body=$(vm_exec "$vm" "cat /tmp/vmtest-health-${d}.json" 2>/dev/null) || :
-
-        # NO RESPONSE AT ALL still fails. curl writes `000` for a refused
-        # connection, a timeout, or an unresolvable host — nothing answered, so
-        # there is no body to be the signal. This is the product's `Refused` /
-        # `Timeout`, and it is the branch that keeps an unreachable daemon
-        # failing the run. Every OTHER code is carried to the envelope check
-        # below rather than rejected here (see this function's header).
-        if [ "$code" = '000' ] || [ -z "$code" ]; then
-            bad="${bad}
-    ${d}: GET http://${addr}/health got NO HTTP RESPONSE (curl code '${code}') — refused, timed out, or unreachable"
-            continue
-        fi
-        [ "$code" = '200' ] \
-            || log "  ${d}: HTTP ${code} (NOT 2xx) — carried to the envelope check, not rejected on the code. trusty-analyze answers 503 + status='degraded' when search is unreachable; probe_http.rs:396-406 records that the body is the signal."
-        if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
-            bad="${bad}
-    ${d}: /health body does not parse as JSON: ${body}"
-            continue
-        fi
-        # A STRING `.status`, exactly as `classify_response` requires. This is the
-        # ENVELOPE CHECK that replaces the code check: it is what stops a stale
-        # `http_addr` plus an unrelated squatter on a loopback port reading as
-        # healthy. It is NOT a complete defence — a squatter emitting a generic
-        # `{"status":"ok"}` still passes, the #3364 collision class — and closing
-        # that needs a `service` discriminator in each daemon's payload, which no
-        # daemon emits and which `stack health --json` does not carry either. So
-        # it stays open, and RC-1 remains the thing that would close it.
-        status=$(printf '%s' "$body" | jq -r 'if (.status | type) == "string" then .status else "" end')
-        if [ -z "$status" ]; then
-            bad="${bad}
-    ${d}: /health body parses as JSON but carries no non-empty STRING .status — not a health envelope (the product's \`BadEnvelope\`, probe_http.rs). Body: ${body}"
-            continue
-        fi
-        case "$status" in
-            down|error|unhealthy)
-                bad="${bad}
-    ${d}: .status='${status}', which §1.3's INTERIM predicate rejects" ;;
-            *)
-                log "  ${d}: LIVE — HTTP ${code}, JSON parses, .status='${status}'" ;;
-        esac
+        _verify_probe_liveness "$vm" "$d" || bad="${bad}
+    ${PROBE_REASON}"
     done
 
     [ -z "$bad" ] \
         || die 60 "verify_daemon_liveness FAILED under pattern ${pattern} — §1.3's INTERIM predicate (liveness only) does not hold:${bad}"
 
     log "verify_daemon_liveness PASS: ${checked} in-scope daemon(s) live (a response + parseable JSON + a string .status outside {down,error,unhealthy}; the status CODE is logged, not asserted). That is EVERY daemon \`stack doctor\` reports which the expectation table carries — no in-scope daemon is skipped. LIVENESS ONLY — see RC-1."
+}
+
+# _verify_probe_liveness <vm_name> <member>
+# §1.3's INTERIM predicate FOR ONE DAEMON. 0 = accepted, 1 = rejected, and on a
+# rejection $PROBE_REASON carries the text the verdict prints. $PROBE_ADDR /
+# $PROBE_CODE / $PROBE_BODY / $PROBE_STATUS carry the RAW observation either way,
+# which is what lets the degraded-check report a status code and a body rather
+# than a verdict.
+#
+# A GLOBAL VALUE CHANNEL, NOT stdout: the caller needs four values plus a
+# pass/fail, and a `$(…)` capture would run the assignments in a subshell that
+# discards them. Unprefixed by §12.3 rule 2, as above.
+_verify_probe_liveness() {
+    local vm="$1" d="$2"
+    PROBE_ADDR=''; PROBE_CODE=''; PROBE_BODY=''; PROBE_STATUS=''; PROBE_REASON=''
+
+    # PORT DISCOVERY — polled, never slept (DOC-1 §4.3). §10.1's daemon-health
+    # row: 1 s interval, 60 s maximum, and §10.1 labels that maximum "WHOLLY
+    # UNMEASURED". Both are `health_interval` / `health_timeout` in
+    # vmtest.defaults.
+    PROBE_ADDR=$(_verify_wait_for_addr "$vm" "$d")
+    if [ -z "$PROBE_ADDR" ]; then
+        PROBE_REASON="${d}: no address recorded after $(conf_get health_timeout)s — \`tctl port ${d} --json-port\` never reported one, so GET /health has no host:port to reach"
+        return 1
+    fi
+    log "  ${d}: address ${PROBE_ADDR} (tctl port ${d} --json-port)"
+
+    PROBE_CODE=$(vm_exec "$vm" "curl -s -o /tmp/vmtest-health-${d}.json -w '%{http_code}' --max-time 10 http://${PROBE_ADDR}/health" 2>/dev/null) || :
+    PROBE_BODY=$(vm_exec "$vm" "cat /tmp/vmtest-health-${d}.json" 2>/dev/null) || :
+
+    # NO RESPONSE AT ALL still fails. curl writes `000` for a refused
+    # connection, a timeout, or an unresolvable host — nothing answered, so
+    # there is no body to be the signal. This is the product's `Refused` /
+    # `Timeout`, and it is the branch that keeps an unreachable daemon
+    # failing the run. Every OTHER code is carried to the envelope check
+    # below rather than rejected here (see this function's header).
+    if [ "$PROBE_CODE" = '000' ] || [ -z "$PROBE_CODE" ]; then
+        PROBE_REASON="${d}: GET http://${PROBE_ADDR}/health got NO HTTP RESPONSE (curl code '${PROBE_CODE}') — refused, timed out, or unreachable"
+        return 1
+    fi
+    [ "$PROBE_CODE" = '200' ] \
+        || log "  ${d}: HTTP ${PROBE_CODE} (NOT 2xx) — carried to the envelope check, not rejected on the code. trusty-analyze answers 503 + status='degraded' when search is unreachable; probe_http.rs:396-406 records that the body is the signal."
+    if ! printf '%s' "$PROBE_BODY" | jq -e . >/dev/null 2>&1; then
+        PROBE_REASON="${d}: /health body does not parse as JSON: ${PROBE_BODY}"
+        return 1
+    fi
+    # A STRING `.status`, exactly as `classify_response` requires. This is the
+    # ENVELOPE CHECK that replaces the code check: it is what stops a stale
+    # `http_addr` plus an unrelated squatter on a loopback port reading as
+    # healthy. It is NOT a complete defence — a squatter emitting a generic
+    # `{"status":"ok"}` still passes, the #3364 collision class — and closing
+    # that needs a `service` discriminator in each daemon's payload, which no
+    # daemon emits and which `stack health --json` does not carry either. So
+    # it stays open, and RC-1 remains the thing that would close it.
+    PROBE_STATUS=$(printf '%s' "$PROBE_BODY" | jq -r 'if (.status | type) == "string" then .status else "" end')
+    if [ -z "$PROBE_STATUS" ]; then
+        PROBE_REASON="${d}: /health body parses as JSON but carries no non-empty STRING .status — not a health envelope (the product's \`BadEnvelope\`, probe_http.rs). Body: ${PROBE_BODY}"
+        return 1
+    fi
+    case "$PROBE_STATUS" in
+        down|error|unhealthy)
+            PROBE_REASON="${d}: .status='${PROBE_STATUS}', which §1.3's INTERIM predicate rejects"
+            return 1 ;;
+    esac
+    log "  ${d}: LIVE — HTTP ${PROBE_CODE}, JSON parses, .status='${PROBE_STATUS}'"
+    return 0
 }
 
 # _verify_wait_for_addr <vm_name> <member>
@@ -1232,4 +1277,158 @@ verify_snapshot_inputs() {
 
     log '--- END SNAPSHOT ---'
     return 0
+}
+
+# ===========================================================================
+# THE OPT-IN DEGRADED CHECK (`VMTEST_DEGRADED_CHECK=1`) — MANIFEST open item 10.
+#
+# WHAT IT IS FOR. The 2026-08-04 correction above replaced a 200-only liveness
+# rule with a body-based envelope check, because `trusty-analyze` answers 503 +
+# `{"status":"degraded"}` when `trusty-search` is unreachable. THAT 503 BRANCH WAS
+# NEVER EXERCISED: on the verifying run search was already answering, so analyze
+# returned 200 / `ok` and the non-2xx path never executed. The fix was
+# correct-by-construction and nothing more, and MANIFEST open item 10 says so.
+#
+# This mode DELIBERATELY CREATES THE CONDITION and asserts the predicate's
+# behaviour in BOTH directions, because either one alone is worthless:
+#
+#   POSITIVE — a 503 carrying a well-formed body is ACCEPTED. Stop `trusty-search`
+#     only; probe `trusty-analyze`; require HTTP != 200, a parseable body,
+#     `.status == "degraded"`, and that the predicate does NOT reject it. Without
+#     this, the 503 tolerance is unproven.
+#   NEGATIVE — a daemon that is genuinely gone STILL FAILS THE RUN. Kill
+#     `trusty-review` outright and require the SHIPPED verdict path to die 60 on
+#     the curl-`000` branch. Without this, all the positive direction proves is
+#     that the predicate became more permissive, which is not the same as correct.
+#
+# WHY IT IS OFF BY DEFAULT and why the default path is untouched: exactly as
+# `VMTEST_DIRTY_CHECK` left it. A run that breaks the stack it just installed
+# cannot also be the run that reports whether the install worked.
+#
+# WHY AN ENVIRONMENT VARIABLE AND NOT A FLAG: §8.2's five flags are the whole CLI
+# surface, and `degraded_check` is not a configuration key, so it cannot collide
+# with §8.2's mechanical `VMTEST_<KEY>` override mapping. Same reasoning, and the
+# same precedent, as `VMTEST_DIRTY_CHECK`.
+#
+# RESTORE DISCIPLINE. NOTHING IS RESTORED, AND NOTHING NEEDS TO BE. Every fault is
+# injected INSIDE THE GUEST — two `tctl stop` calls and one `pkill` against guest
+# processes — and the guest is deleted by the EXIT trap on every path. No host
+# daemon, host launchd job or host file is touched at any point; unlike the dirty
+# check, this mode has no host-side fixture and therefore no host-side restore.
+# It runs LAST in the lifecycle, after every default assertion has already
+# reported, so a broken stack cannot change any other verdict.
+#
+# WHY THE TWO FAULTS ARE INJECTED DIFFERENTLY — an observation about the product,
+# recorded because it is the whole reason the negative direction needs a `pkill`:
+# EVERY daemon removes its own `http_addr` discovery file on graceful shutdown
+# (`trusty-search` service/daemon.rs `deregister_shared_discovery`,
+# `trusty-analyze` service/routes.rs, `trusty-review` service/mod.rs,
+# `trusty-memory` commands/stop.rs). A cleanly stopped daemon therefore reaches
+# the predicate's "no address recorded" rejection, NOT the curl-`000` one. To
+# reach the branch that matters — a stale address that resolves and then answers
+# nothing — the process must die WITHOUT running its cleanup, which is what
+# SIGKILL does. The `tctl stop` that follows unloads the launchd job so
+# `KeepAlive: Always` cannot respawn it (service_bootstrap.rs:501).
+# ===========================================================================
+
+# verify_degraded_probe <vm_name> <pattern>
+# 0, or dies 60. Runs only when VMTEST_DEGRADED_CHECK=1.
+verify_degraded_probe() {
+    local vm="$1" pattern="$2"
+    local search_addr review_addr base_code base_status neg_log rc=0
+    local pos_code pos_status pos_body pos_reason pos_rc=0
+
+    log "--- degraded-check (pattern ${pattern}): FAULT INJECTION for §1.3's non-2xx branch (MANIFEST open item 10) ---"
+
+    # ---- 0. PRE-FAULT BASELINE. Recorded, never asserted on. -------------
+    # A "503 accepted" result means nothing unless the same daemon answered 200
+    # a moment earlier, and a search that was already down would make the whole
+    # exercise vacuous. Both are read here so the contrast is in the record.
+    _verify_probe_liveness "$vm" trusty-search \
+        || die 60 "degraded-check: trusty-search is NOT live BEFORE the fault, so stopping it proves nothing: ${PROBE_REASON}"
+    search_addr="$PROBE_ADDR"
+    _verify_probe_liveness "$vm" trusty-review \
+        || die 60 "degraded-check: trusty-review is NOT live BEFORE the fault, so killing it proves nothing: ${PROBE_REASON}"
+    review_addr="$PROBE_ADDR"
+    _verify_probe_liveness "$vm" trusty-analyze \
+        || die 60 "degraded-check: trusty-analyze is NOT live BEFORE the fault: ${PROBE_REASON}"
+    base_code="$PROBE_CODE"; base_status="$PROBE_STATUS"
+    log "degraded-check BASELINE trusty-analyze: HTTP ${base_code}, .status='${base_status}', body: ${PROBE_BODY}"
+
+    # ---- 1. FAULT A — trusty-search, gracefully, and BY ITSELF. ----------
+    # `tctl stop <member>` resolves exactly the named member through
+    # `select_members` (lifecycle.rs), so the other four daemons are untouched;
+    # that they stay live is asserted, not assumed, by the negative direction's
+    # verdict run below, which names every daemon it rejects.
+    log 'degraded-check: FAULT A — `tctl stop trusty-search --json --yes` (that daemon only)'
+    vm_exec "$vm" 'tctl stop trusty-search --json --yes' 2>&1 | sed 's/^/    | /' >&2 || :
+    _verify_wait_unreachable "$vm" "$search_addr" \
+        || die 60 "degraded-check: trusty-search is STILL answering on ${search_addr} after \`tctl stop\`; the fault was not achieved and the positive direction would be a false pass"
+    log "degraded-check: trusty-search at ${search_addr} confirmed unreachable (curl 000)"
+
+    # ---- 2. POSITIVE — a 503 with a well-formed body is ACCEPTED. --------
+    pos_rc=0
+    _verify_probe_liveness "$vm" trusty-analyze || pos_rc=$?
+    pos_code="$PROBE_CODE"; pos_status="$PROBE_STATUS"; pos_body="$PROBE_BODY"; pos_reason="$PROBE_REASON"
+    log "degraded-check POSITIVE raw: trusty-analyze HTTP '${pos_code}', body: ${pos_body}"
+    [ "$pos_rc" -eq 0 ] \
+        || die 60 "degraded-check POSITIVE FAILED — the predicate REJECTED trusty-analyze while it was answering with a well-formed degraded envelope. This is the defect the 2026-08-04 correction was supposed to remove. Rejection: ${pos_reason}"
+    [ "$pos_code" != '200' ] \
+        || die 60 "degraded-check POSITIVE INCONCLUSIVE — trusty-analyze still answered HTTP 200 with .status='${pos_status}' after trusty-search was confirmed unreachable, so the non-2xx branch STILL did not execute. Not a pass: this is the same unexercised state MANIFEST open item 10 already records."
+    [ "$pos_status" = 'degraded' ] \
+        || die 60 "degraded-check POSITIVE FAILED — trusty-analyze answered HTTP ${pos_code} but .status='${pos_status}', not 'degraded' (routes.rs:188-201). Body: ${pos_body}"
+    log "degraded-check POSITIVE PASS: trusty-analyze answered HTTP ${pos_code} with .status='degraded'; the predicate ACCEPTED it and the run continues. A NON-2xx CODE CARRYING A WELL-FORMED BODY NO LONGER FAILS THE RUN — observed, not inferred."
+
+    # ---- 3. FAULT B — trusty-review, genuinely gone, address left stale. --
+    # SIGKILL first so the graceful-shutdown path that removes `http_addr` never
+    # runs, then `tctl stop` to unload the launchd job so KeepAlive cannot
+    # respawn it. One `tart exec`, so the window between them is sub-second and
+    # far inside launchd's ThrottleInterval. `pkill -x` matches the process NAME
+    # exactly — never `-f`, which would also match this very command line.
+    log 'degraded-check: FAULT B — `pkill -9 -x trusty-review` then `tctl stop trusty-review --json --yes`'
+    vm_exec "$vm" 'pkill -9 -x trusty-review; tctl stop trusty-review --json --yes' 2>&1 | sed 's/^/    | /' >&2 || :
+    _verify_wait_unreachable "$vm" "$review_addr" \
+        || die 60 "degraded-check: trusty-review is STILL answering on ${review_addr} after being killed and unloaded; the negative direction cannot be arranged and MUST NOT be reported as passing"
+    log "degraded-check: trusty-review at ${review_addr} confirmed unreachable (curl 000)"
+
+    # ---- 4. NEGATIVE — the SHIPPED verdict path must still fail the run. --
+    # `_verify_liveness_verdict` is the function the default run uses, called
+    # here over the same derived daemon set, in a SUBSHELL so that its `die 60`
+    # can be OBSERVED instead of ending this run. `tctl start --json` is
+    # deliberately NOT re-run: it would resurrect the daemon this step just
+    # killed (MANIFEST open item 9), which is why the verdict was split out.
+    _verify_daemon_set "$vm"
+    neg_log="$VMTEST_TMPDIR/degraded-negative.log"
+    rc=0
+    ( _verify_liveness_verdict "$vm" "$pattern" $LIVENESS_DAEMONS ) >"$neg_log" 2>&1 || rc=$?
+    log "degraded-check NEGATIVE raw: the shipped verdict path exited ${rc}. Its complete output:"
+    sed 's/^/    | /' "$neg_log" >&2 || :
+
+    [ "$rc" -eq 60 ] \
+        || die 60 "degraded-check NEGATIVE FAILED — with trusty-review dead, \`_verify_liveness_verdict\` exited ${rc}, not 60. A predicate that accepts a daemon that is genuinely gone has been relaxed into uselessness, which is the exact risk the 2026-08-04 correction had to avoid."
+    grep -q "trusty-review: GET http://${review_addr}/health got NO HTTP RESPONSE (curl code '000')" "$neg_log" \
+        || die 60 "degraded-check NEGATIVE FAILED — the verdict did exit 60, but NOT on the curl-000 branch for trusty-review. The exit code alone does not prove the right rejection fired; see the raw output above."
+    grep -q "trusty-analyze: LIVE — HTTP ${pos_code}" "$neg_log" \
+        || die 60 "degraded-check NEGATIVE FAILED — in the same verdict run that rejected the dead trusty-review, trusty-analyze was NOT accepted at HTTP ${pos_code}. Both directions must hold IN ONE RUN OF THE SAME PREDICATE, or neither result means anything."
+    log "degraded-check NEGATIVE PASS: the shipped verdict path exited 60, rejecting trusty-review on 'NO HTTP RESPONSE (curl code 000)' while ACCEPTING trusty-analyze at HTTP ${pos_code}/degraded in the SAME run. The predicate is more permissive about status CODES and no more permissive about DEAD DAEMONS."
+
+    log 'degraded-check PASS — both directions observed. Nothing was restored inside the guest and nothing needed to be: the VM is deleted by the EXIT trap. NO HOST STATE WAS TOUCHED.'
+}
+
+# _verify_wait_unreachable <vm_name> <host:port>
+# 0 once GET http://<host:port>/health yields curl `000`, 1 if it never does.
+# Polls the OBSERVABLE condition at §10.1's daemon-health interval and maximum
+# (DOC-1 §4.3) — a fixed sleep after a stop is exactly the "bare stop trusted as
+# completion" mistake DOC-1 §8.1 exists to forbid, one layer down.
+_verify_wait_unreachable() {
+    local vm="$1" addr="$2" budget interval t0 code
+    budget=$(conf_get health_timeout)
+    interval=$(conf_get health_interval)
+    t0=$(date '+%s')
+    while :; do
+        code=$(vm_exec "$vm" "curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://${addr}/health" 2>/dev/null) || :
+        if [ "$code" = '000' ]; then return 0; fi
+        if [ $(( $(date '+%s') - t0 )) -ge "$budget" ]; then return 1; fi
+        sleep "$interval"
+    done
 }
