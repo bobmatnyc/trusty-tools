@@ -559,11 +559,36 @@ const IDENTIFIER_DELIMITERS: [char; 3] = ['-', '_', '.'];
 /// measurement disproved: a segment that is not uniformly uppercase admits **at
 /// most one uppercase letter, and only as its first letter**. That is what
 /// keeps the run-of-two case alternation of an encoded blob (`AbCd`, `EfGh`)
-/// out — two uppercase letters in a non-uppercase segment is disqualifying. It
-/// is NOT a claim that no credential can be built from capitalized segments:
-/// `Abcd-1234-Efgh-5678` satisfies it. That shape is a product key, already
-/// exempt in its conventional ALL-CAPS form, and carries no case entropy to
-/// lose.
+/// out — two uppercase letters in a non-uppercase segment is disqualifying.
+///
+/// The ACCEPTED side of that bound, stated because the rejected side alone
+/// would read as a stronger guarantee than this predicate gives: what
+/// [`is_segmented_identifier`] admits is a token whose **every segment is
+/// independently case-uniform**. At short segment lengths that includes shapes
+/// which are not human words at all —
+/// `Xy7-Kp2-Qm9-Rt4-Vw8-Nz3-Bc6-Fj0` and `A1b2-C3d4-E5f6-G7h8-I9j0-K1l2` are
+/// both admitted, and neither is a filename. They are a real, measured miss,
+/// not a hypothetical.
+///
+/// Why that is an acceptable price rather than a hole: a *generated* credential
+/// essentially never satisfies per-segment case uniformity, because it is not
+/// segmented into short groups in the first place, and if it is, every group
+/// must independently land in one of three case shapes. Treating a short
+/// alphanumeric segment as case-uniform with probability roughly ¼ (an
+/// estimate, assuming uniform draws from a mixed alphabet — not a measured
+/// constant), an eight-segment token clears the bar about `(1/4)^8` of the
+/// time, order 1 in 10^4–10^5. Everything **generated** rather than
+/// **composed** — bare blobs, base64, base64url, JWTs, provider-prefixed keys —
+/// carries no such segmentation and still flags. The exposure is to a
+/// credential a human deliberately composed to look like an identifier, which
+/// is the accidental-storage hygiene threat model this module has always had,
+/// not an adversarial one.
+///
+/// The earlier revision of this doc illustrated the accepted side with
+/// `Abcd-1234-Efgh-5678`. That example was wrong: at 19 characters it is below
+/// `looks_like_secret`'s own 20-char floor, so it never reaches this branch and
+/// could not demonstrate anything about it. `Abcd-1234-Efgh-5678-Ijkl` (24) is
+/// the corrected form and is genuinely admitted here.
 ///
 /// Known bound, deliberately not fixed: CamelCase (`TrustyMemory`,
 /// `MyDocument`) has two capitalized runs and is still not a word here, so
@@ -578,7 +603,8 @@ const IDENTIFIER_DELIMITERS: [char; 3] = ['-', '_', '.'];
 /// predicate constrains case, not charset.
 /// Test: `structural_tokens_are_not_flagged`,
 /// `dotted_capitalised_filenames_are_not_flagged`,
-/// `real_secrets_still_blocked_after_4739_capitalised_segments`.
+/// `real_secrets_still_blocked_after_4739_capitalised_segments`,
+/// `per_segment_case_uniformity_is_a_known_accepted_bound`.
 fn is_human_word_segment(seg: &str) -> bool {
     let s = seg.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     if s.is_empty() {

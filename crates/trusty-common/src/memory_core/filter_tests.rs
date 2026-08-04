@@ -1607,3 +1607,50 @@ fn real_secrets_still_blocked_after_4739_capitalised_segments() {
         );
     }
 }
+
+/// Why (issue #4739, review round 1): the battery above probes the REJECTED
+/// side of `is_human_word_segment`'s bound — shapes that must stay flagged.
+/// Nothing probed the ACCEPTED side at token scale, which left the widening
+/// reading as a stronger guarantee than it gives. What `is_segmented_identifier`
+/// actually admits is a token whose every segment is independently case-uniform,
+/// and at short segment lengths that includes shapes which are not human words
+/// at all. These moved FLAG -> pass in this PR; they are neither prose nor
+/// credentials the module is expected to catch, and they are accepted (see the
+/// bound stated on `is_human_word_segment`) rather than fixed.
+///
+/// This block is modelled on the #4312 known-miss pin it sits beside: that one
+/// is the reason the URL-path misses stayed visible across two PRs instead of
+/// being rediscovered. The accepted side of this bound gets the same treatment,
+/// so any future movement — in either direction — is caught rather than found.
+/// What: pins two of the admitted shapes, plus the corrected doc example.
+/// Test: itself.
+#[test]
+fn per_segment_case_uniformity_is_a_known_accepted_bound() {
+    for (label, tok) in [
+        (
+            "capitalised 3-char groups",
+            "Xy7-Kp2-Qm9-Rt4-Vw8-Nz3-Bc6-Fj0",
+        ),
+        ("capitalised 4-char groups", "A1b2-C3d4-E5f6-G7h8-I9j0-K1l2"),
+        // The corrected doc example. The earlier revision cited
+        // `Abcd-1234-Efgh-5678`, which at 19 chars is below the 20-char floor in
+        // `looks_like_secret` and so never reaches this branch at all — it could
+        // not illustrate the bound it was cited for. This form does.
+        ("corrected doc example", "Abcd-1234-Efgh-5678-Ijkl"),
+    ] {
+        assert!(
+            tok.len() >= 20,
+            "{label}: this pin is meaningless below the 20-char secret floor — \
+             the token would never reach the segmented-identifier branch. \
+             Token: {tok} ({} chars)",
+            tok.len()
+        );
+        assert!(
+            find_secret_token(tok).is_none(),
+            "KNOWN ACCEPTED BOUND (#4739, {label}): every segment is \
+             independently case-uniform, so this is admitted even though it is \
+             not a human-readable identifier. If it now FLAGS, the bound \
+             tightened — update the doc on `is_human_word_segment`. Token: {tok}"
+        );
+    }
+}
