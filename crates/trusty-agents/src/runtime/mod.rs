@@ -120,6 +120,13 @@ use cli_def::{Cli, HELP, argv_as_task_text};
 /// Test: Indirectly via `cargo run -p trusty-agents`/`trusty-agents-local` and the
 ///       crate's integration tests.
 pub async fn run() -> Result<()> {
+    // #4825: install the process-level rustls CryptoProvider before ANY code
+    // path can reach a TLS handshake. Lives here rather than in `main.rs` so
+    // every launcher that calls `run()` — `tagent` and `trusty-agents-local`
+    // alike — is covered, and ahead of the `config` / `mcp-serve` early
+    // dispatches below because those make HTTPS calls too.
+    crate::tls::install_crypto_provider()?;
+
     let args: Vec<String> = std::env::args().collect();
 
     // #2405: the universal `config` credential CLI is a lightweight, daemon-less

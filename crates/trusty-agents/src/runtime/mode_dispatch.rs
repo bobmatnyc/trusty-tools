@@ -319,6 +319,9 @@ pub(super) async fn dispatch_cli_mode(
     // Why: Same shape as --telegram — each channel gets its own ChatSession +
     // ConversationTurn history, dispatched through ctrl::run_pm_task_with_history.
     if cli.slack {
+        // #4826: this is the gateway's project root — `TAGENT_PROJECT_DIR` now
+        // outranks exe-path inference, so a deployed gateway answers against
+        // the project it was pointed at rather than $HOME.
         let project_path = ctrl::detect_self_project()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
