@@ -412,9 +412,9 @@ fn mask_git_shas(s: &str) -> String {
         .join(" ")
 }
 
-/// Scan `content` for the first whitespace token that looks like a genuine
-/// high-entropy secret (API key, access token, long base64/JWT-ish blob),
-/// explicitly allowlisting git-SHA-shaped hex tokens.
+/// Scan `content` for the first token that looks like a genuine high-entropy
+/// secret (API key, access token, long base64/JWT-ish blob), explicitly
+/// allowlisting git-SHA-shaped hex tokens.
 ///
 /// Why (issue #1481): credentials must never be stored, but git SHAs (the most
 /// common "high-entropy-looking" token in engineering prose) must be. A pure
@@ -422,14 +422,43 @@ fn mask_git_shas(s: &str) -> String {
 /// the SHA allowlist and keys "secret" on the character-class mix that real
 /// credentials exhibit (mixed upper+lower+digit, or known credential prefixes,
 /// or symbol-bearing base64) which a SHA never does.
-/// What: returns `Some(<redacted preview>)` for the first secret-looking token,
-/// else `None`. The preview shows the leading characters and masks the tail so
-/// the secret itself is not echoed back verbatim. Tokens are stripped of
-/// surrounding punctuation before classification.
+///
+/// Why the backtick is a delimiter (issue #4312, the FOURTH recurrence of one
+/// false-positive shape after #1667, #2800, #4216): splitting on whitespace
+/// alone made two adjacent Markdown inline-code spans joined by a bare `/` —
+/// `` `foo`/`bar` `` — arrive as ONE token. This function trims punctuation
+/// only from the OUTER boundary of each token, so the interior backticks
+/// survived, every `/`-segment failed `is_word_segment`, and the token fell to
+/// the base64 branch of [`looks_like_secret`] and was flagged. Splitting on the
+/// backtick removes that whole class, and strictly tightens detection for a
+/// credential written flush against a backtick, which previously polluted the
+/// token and defeated [`is_plausible_credential_charset`].
+///
+/// Bound on the safety of that split, stated precisely because a reader will
+/// rely on it: a backtick occurs in no *machine-generated* credential — not
+/// base64, base64url, hex or base32, and not in any provider key format
+/// (`sk-`, `ghp_`, `AKIA`, `xoxb-`, JWT). Verified exhaustively in
+/// `real_secrets_still_blocked_after_4312_backtick_split`. It is NOT true of a
+/// *user-chosen* password inside a connection-string URL, where the charset is
+/// unbounded and a literal backtick is legal: `mongodb://user:pa` + backtick +
+/// `ss@host` splits into two fragments and is missed. The adversarial delta is
+/// nil — the detector has always split on whitespace, so deliberate evasion
+/// costs a space either way — but this is an accidental-storage hygiene gate,
+/// not an adversarial control, and the limitation is real.
+///
+/// What: returns `Some(<redacted preview>)` for the first secret-looking
+/// token, else `None`. Tokens are delimited by whitespace or a backtick, then
+/// stripped of surrounding punctuation before classification. The preview
+/// shows the leading characters and masks the tail so the secret itself is not
+/// echoed back verbatim.
 /// Test: `secret_token_is_blocked`, `git_sha_prose_is_accepted`,
-/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`.
+/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`,
+/// `backtick_joined_spans_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_backtick_split`.
 pub fn find_secret_token(content: &str) -> Option<String> {
-    for raw in content.split_whitespace() {
+    // #4312: backticks delimit Markdown inline-code spans and occur in no
+    // machine-generated credential, so split on them alongside whitespace.
+    for raw in content.split(|c: char| c.is_whitespace() || c == '`') {
         let tok =
             raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
         if looks_like_secret(tok) {
@@ -697,7 +726,19 @@ fn looks_like_secret(token: &str) -> bool {
     let has_digit = token.chars().any(|c| c.is_ascii_digit());
     let has_b64_sym = token.chars().any(|c| matches!(c, '+' | '/' | '='));
     // base64/url-safe blob: long, not structural, and carries a base64 symbol.
-    if has_b64_sym && (has_lower || has_upper || has_digit) {
+    //
+    // #4312: two gates, both narrowing an ≥20-char-plus-a-slash rule that four
+    // rounds of false positives (#1667, #2800, #4216, #4312) all bottomed out
+    // in. (1) [`is_plausible_b64_charset`] — the same treatment #2442 gave the
+    // mixed-case branch below. (2) an entropy floor: base64 encodes bytes, so a
+    // ≥20-char encoded run all but certainly carries an uppercase letter or a
+    // digit; an all-lowercase run is English. URL-shaped credentials are
+    // structured, not encoded, so they are exempted by shape — see
+    // [`is_url_credential_shaped`].
+    if has_b64_sym
+        && is_plausible_b64_charset(token)
+        && (is_url_credential_shaped(token) || has_upper || has_digit)
+    {
         return true;
     }
     // Mixed-case alphanumeric of credential length: SHAs are single-case hex,
@@ -754,6 +795,100 @@ fn is_issue_number_list(token: &str) -> bool {
         && token
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'#' | b'/'))
+}
+
+/// True when every character in `token` could plausibly appear in a base64,
+/// base64url, or URL-embedded credential: ASCII alphanumeric, the base64
+/// symbols `+` `/` `=`, the base64url symbols `-` `_`, and the `.` `:` `@` that
+/// connection-string credentials (`postgres://user:pass@host/db`) carry.
+///
+/// Why (issue #4312): the base64 branch of [`looks_like_secret`] fired on ANY
+/// ≥20-char token containing a `/` plus one letter that [`is_structural_token`]
+/// declined to rescue. That is the root cause of four rounds of false positives
+/// — #1667 (slash paths), #2800 / #4216 (issue-number lists), #4312 (backtick
+/// spans) — each previously patched with another allowlist for one token shape.
+/// The shapes kept recurring because `is_word_segment`'s charset is deliberately
+/// narrow, and every character outside it (backtick, `*`, `"`, `'`, `[`, `(`,
+/// `|`, `%`, `,`) routes an ordinary piece of Markdown prose into a credential
+/// verdict. Gating the branch on the charset a real blob is *made of* attacks
+/// the cause instead of enumerating the symptoms.
+///
+/// Why this is safe: every machine-generated credential format this module
+/// targets is drawn from this charset by construction — standard base64
+/// (`A–Za–z0–9+/=`), base64url (`A–Za–z0–9-_=`), JWTs (base64url plus `.`),
+/// and connection-string URLs (`scheme://user:pass@host/db`). Prose punctuation
+/// is what the gate excludes, and prose punctuation is exactly what no encoder
+/// emits. The known-prefix layer (`sk-`, `ghp_`, `AKIA`, …) is checked earlier
+/// and is unaffected, so provider keys never depend on this branch at all.
+///
+/// Known bound: a token built only from this charset still reaches the branch,
+/// so a hyphen/plus-joined English phrase such as `ticker+shutdown-channel`
+/// remains a false positive. The second gate is what resolves it — the
+/// `has_upper || has_digit` entropy floor in [`looks_like_secret`], with
+/// [`is_url_credential_shaped`] exempting connection strings from that floor.
+/// What: returns `true` iff every char is ASCII alphanumeric or in
+/// `{'+', '/', '=', '-', '_', '.', ':', '@'}`.
+/// Test: `four_4312_acceptance_cases_are_not_flagged`,
+/// `markdown_decorated_paths_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
+fn is_plausible_b64_charset(token: &str) -> bool {
+    token.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_' | '.' | ':' | '@')
+    })
+}
+
+/// True when `token` is a URL that actually carries credentials — a `://`
+/// scheme separator followed by a colon-bearing userinfo before the first `@`,
+/// i.e. the `scheme://user:pass@host` shape.
+///
+/// Why (issue #4312, repro 4): the entropy floor added alongside this
+/// (`has_upper || has_digit` in [`looks_like_secret`]'s base64 branch) is what
+/// finally excludes `ticker+shutdown-channel` — a lowercase English phrase
+/// whose every character is individually credential-plausible. That floor
+/// would also drop an all-lowercase connection string
+/// (`postgres://user:password@host/database`), which is a genuine credential
+/// this module has always caught. A connection string is not a blob: it is a
+/// structured URL whose password sits inside it, so it is exempted by shape
+/// rather than by entropy.
+///
+/// Why the predicate is this narrow: the first cut exempted any token
+/// containing `://` OR `@`, which held open 14 URL-shaped prose false
+/// positives the floor would otherwise have fixed — bare `https://` doc links,
+/// `git@github.com:…` remotes, plain `mailto`-ish addresses. Requiring the
+/// `user:pass@` userinfo keeps every real connection string.
+///
+/// Cost of that narrowing, stated exactly because this is a security module:
+/// this predicate is an OR term inside the branch's conjunction, so widening it
+/// widens flagging and **narrowing it narrows flagging** — narrowing therefore
+/// CAN turn a caught credential into a miss. The exposure is bounded to tokens
+/// that reach this branch, pass the charset gate, and carry neither an
+/// uppercase letter nor a digit, i.e. a userinfo-free URL whose path secret is
+/// all-lowercase:
+///
+/// ```text
+/// https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij
+///     origin/main: flagged  ->  here: missed
+/// ```
+///
+/// That is the entropy floor's already-accepted bound (an all-lowercase run is
+/// read as English), not a new class of hole — the broad predicate shielded
+/// these incidentally, never by design. Real webhook tokens are near-universally
+/// mixed-case or digit-bearing and stay caught; see the known-miss assertion in
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
+/// What: returns `true` iff `token` contains `://` and the text between it and
+/// the first following `@` contains a `:`.
+/// Test: `four_4312_acceptance_cases_are_not_flagged`,
+/// `url_shaped_prose_is_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_charset_gate`.
+fn is_url_credential_shaped(token: &str) -> bool {
+    // #4312: `scheme://user:pass@host` only — a bare URL carries no userinfo.
+    let Some((_, after_scheme)) = token.split_once("://") else {
+        return false;
+    };
+    let Some((userinfo, _)) = after_scheme.split_once('@') else {
+        return false;
+    };
+    userinfo.contains(':')
 }
 
 /// True when every character in `token` could plausibly appear in a bare
