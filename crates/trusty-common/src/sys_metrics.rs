@@ -157,23 +157,121 @@ impl Default for SysMetrics {
     }
 }
 
+/// Maximum directory nesting the size walk will descend.
+///
+/// Why (#4764): an explicit bound keeps a pathological or adversarially deep
+/// tree from turning a best-effort metric into an unbounded sweep. Real
+/// trusty-* data directories nest well under ten levels, so this only ever
+/// trips on something already wrong.
+const MAX_WALK_DEPTH: usize = 64;
+
+/// Wall-clock budget for one size walk.
+///
+/// Why (#4764): the data directory is large and actively mutated by reindex
+/// and prune passes. A walk that has already run this long is contending with
+/// that churn rather than measuring it; returning the partial total is
+/// strictly better than holding a blocking-pool thread indefinitely. Set well
+/// above any healthy walk so it is a backstop, not a routine truncation.
+const WALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Sum the byte sizes of every regular file under `dir`, recursively.
 ///
 /// Why: daemon `/health` reports `disk_bytes` — the on-disk footprint of the
 ///      data directory (redb + usearch + snapshot files). Walking the tree on
 ///      demand keeps it accurate without a separate accounting layer.
-/// What: recursively descends `dir`, summing `metadata().len()` of each file.
-///      Symlinks are not followed (avoids double-counting and cycles).
-///      Unreadable entries are skipped rather than failing the whole walk —
-///      a health endpoint should degrade gracefully. Returns `0` when `dir`
-///      does not exist.
-/// Test: `dir_size_sums_files` creates files of known sizes and asserts the
-///      total; `dir_size_missing_dir_is_zero` covers the absent-path case.
+/// What: descends `dir`, summing `metadata().len()` of each file. Symlinks are
+///      not followed (avoids double-counting and cycles). Unreadable entries
+///      are skipped rather than failing the whole walk — a health endpoint
+///      should degrade gracefully. Returns `0` when `dir` does not exist, and
+///      the partial total if the walk is truncated by [`MAX_WALK_DEPTH`],
+///      [`WALK_BUDGET`], or a panic.
+///
+/// # Panic safety (issue #4764)
+///
+/// This function cannot panic and — critically — cannot *abort* the process.
+/// Both properties are load-bearing: it runs on a 60 s metrics ticker inside
+/// long-lived daemons, and a best-effort disk figure must never be able to
+/// take one down.
+///
+/// The abort this replaces came from `std`'s `impl Drop for DirStream`, which
+/// asserts that `closedir(3)` returned 0. When that assert fires, the panic
+/// originates *inside a destructor*. The previous implementation was
+/// recursive, so descending N levels kept N `ReadDir` handles alive
+/// simultaneously; the unwind from the innermost failing `closedir` then ran
+/// the enclosing `ReadDir` destructors, a second `closedir` failed the same
+/// way, and a panic raised while unwinding is a non-unwinding panic that Rust
+/// aborts on unconditionally (`core::panicking::panic_in_cleanup`).
+///
+/// Hence the two-layer defence, in this order:
+///
+/// 1. [`walk_bounded`] is iterative and holds **at most one** `ReadDir` alive
+///    at a time, dropping each directory handle before descending into any of
+///    its children. That removes the second destructor from the unwind path,
+///    so a `closedir` failure is now an ordinary, recoverable panic.
+/// 2. `catch_unwind` here contains that now-unwinding panic and returns the
+///    bytes counted so far.
+///
+/// Step 2 alone would **not** have fixed this: `catch_unwind` cannot intercept
+/// a double panic (the abort happens before any catch frame is reached), nor
+/// an allocation-failure abort. Preventing the *first* panic from being able
+/// to become the *second* is what makes the daemon survivable.
+///
+/// Test: `dir_size_sums_files` (known totals), `dir_size_missing_dir_is_zero`
+///      (absent path), `dir_size_survives_concurrent_mutation` (the TOCTOU
+///      hypothesis from #4764 made executable), `dir_size_respects_depth_cap`.
 #[must_use]
 pub fn dir_size_bytes(dir: &std::path::Path) -> u64 {
-    fn walk(dir: &std::path::Path, total: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    // #4764: keep the accumulator outside the unwind boundary so a panic
+    // degrades the metric to a partial total rather than a spurious 0.
+    let total = std::cell::Cell::new(0u64);
+    // `AssertUnwindSafe` is sound here: the only state crossing the boundary
+    // is a `Cell<u64>` counter, which has no invariant a partial walk breaks.
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| walk_bounded(dir, &total)));
+    if outcome.is_err() {
+        // The payload itself is logged by `crate::panic_hook`; this line ties
+        // it to the walk that produced it.
+        tracing::error!(
+            dir = %dir.display(),
+            "dir_size_bytes: directory walk panicked (see preceding PANIC log \
+             for the payload); reporting the partial total"
+        );
+    }
+    total.get()
+}
+
+/// Iterative, depth- and time-bounded directory walk holding one `ReadDir`.
+///
+/// Why (#4764): see [`dir_size_bytes`] — holding exactly one directory handle
+/// at a time is what prevents a panicking `closedir` in one handle's
+/// destructor from triggering a second one during the unwind, which is the
+/// mechanism that aborted the whole daemon.
+/// What: explicit `Vec` stack of `(path, depth)`. Each iteration opens one
+/// directory, drains it fully (accumulating file sizes, pushing child
+/// directories onto the stack), then drops the handle at the end of the loop
+/// body — before any child is opened. Bails out on [`WALK_BUDGET`]; refuses to
+/// descend past [`MAX_WALK_DEPTH`].
+/// Test: `dir_size_survives_concurrent_mutation`, `dir_size_respects_depth_cap`.
+fn walk_bounded(root: &std::path::Path, total: &std::cell::Cell<u64>) {
+    let started = std::time::Instant::now();
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+
+    while let Some((dir, depth)) = stack.pop() {
+        if started.elapsed() >= WALK_BUDGET {
+            tracing::warn!(
+                root = %root.display(),
+                pending = stack.len() + 1,
+                "dir_size_bytes: walk exceeded its {WALK_BUDGET:?} budget; \
+                 reporting the partial total"
+            );
             return;
+        }
+
+        // Scope note (#4764): `entries` is the ONLY live `ReadDir` in this
+        // function, and it is dropped at the end of this loop body — before
+        // the next `read_dir`. Do not reintroduce recursion here.
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
         };
         for entry in entries.flatten() {
             let Ok(file_type) = entry.file_type() else {
@@ -183,20 +281,19 @@ pub fn dir_size_bytes(dir: &std::path::Path) -> u64 {
                 continue;
             }
             if file_type.is_dir() {
-                walk(&entry.path(), total);
+                if depth < MAX_WALK_DEPTH {
+                    stack.push((entry.path(), depth + 1));
+                }
                 continue;
             }
             if !file_type.is_file() {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
-                *total = total.saturating_add(meta.len());
+                total.set(total.get().saturating_add(meta.len()));
             }
         }
     }
-    let mut total = 0u64;
-    walk(dir, &mut total);
-    total
 }
 
 #[cfg(test)]
@@ -239,6 +336,125 @@ mod tests {
     fn dir_size_missing_dir_is_zero() {
         let missing = std::path::Path::new("/nonexistent/trusty/path/xyz");
         assert_eq!(dir_size_bytes(missing), 0);
+    }
+
+    /// The walk must survive the tree being mutated underneath it.
+    ///
+    /// Why (issue #4764): this is the TOCTOU hypothesis made executable, and
+    /// it is the test that would have caught the original defect. In
+    /// production the disk-size ticker walks the data directory while reindex
+    /// and prune passes stage `.tmp` corpora, `rename(2)` them over the live
+    /// path, and delete whole subtrees — entries and entire directories
+    /// vanish between `read_dir` and `metadata`, and a directory handle can be
+    /// closed under a `DIR *` the walk still owns.
+    ///
+    /// Note on fidelity: no portable test can force `closedir(3)` to return a
+    /// failure, so this does not reproduce the exact `std` assert that fired
+    /// in production. What it does cover is the whole class — concurrent
+    /// rename/delete against a live walk — and the structural property the fix
+    /// rests on: with recursion removed, a panic anywhere in the walk is
+    /// recoverable rather than an abort. A regression to the recursive form
+    /// under a real `closedir` failure aborts the process, which no assertion
+    /// can catch; the assertion here is that the walk still returns a
+    /// plausible number at all.
+    /// What: seeds a fixed, never-mutated subtree (a hard floor on the total),
+    /// spins mutator threads doing create → populate → atomic-rename → delete
+    /// cycles, walks repeatedly during the churn, then asserts the floor holds
+    /// and no thread panicked.
+    /// Test: this test.
+    #[test]
+    fn dir_size_survives_concurrent_mutation() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const BRANCHES: u64 = 8;
+        const LEAF_BYTES: u64 = 64;
+        const TOP_BYTES: u64 = 32;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        // Stable subtree the mutators never touch — its bytes are a floor on
+        // every observation, so a truncating regression is detectable.
+        for i in 0..BRANCHES {
+            let branch = root.join(format!("branch-{i}"));
+            std::fs::create_dir_all(branch.join("a/b/c")).expect("seed dirs");
+            std::fs::write(
+                branch.join("a/b/c/leaf.bin"),
+                vec![0u8; LEAF_BYTES as usize],
+            )
+            .expect("seed leaf");
+            std::fs::write(branch.join("a/top.bin"), vec![0u8; TOP_BYTES as usize])
+                .expect("seed top");
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mutators: Vec<_> = (0..3)
+            .map(|t| {
+                let root = root.clone();
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut n: u64 = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        let staged = root.join(format!("staged-{t}-{n}"));
+                        let live = root.join(format!("live-{t}"));
+                        if std::fs::create_dir_all(staged.join("nested")).is_ok() {
+                            let _ = std::fs::write(staged.join("nested/data.bin"), vec![0u8; 128]);
+                            let _ = std::fs::remove_dir_all(&live);
+                            let _ = std::fs::rename(&staged, &live);
+                        }
+                        let _ = std::fs::remove_dir_all(&live);
+                        let _ = std::fs::remove_dir_all(&staged);
+                        n = n.wrapping_add(1);
+                    }
+                })
+            })
+            .collect();
+
+        let mut observed = 0u64;
+        for _ in 0..30 {
+            observed = dir_size_bytes(&root);
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        for handle in mutators {
+            handle.join().expect("mutator thread must not panic");
+        }
+
+        let floor = BRANCHES * (LEAF_BYTES + TOP_BYTES);
+        assert!(
+            observed >= floor,
+            "walk under concurrent mutation lost stable bytes: got {observed}, floor {floor}"
+        );
+    }
+
+    /// The walk must refuse to descend past [`MAX_WALK_DEPTH`].
+    ///
+    /// Why (issue #4764): the depth bound is one half of the blast-radius
+    /// limit on a best-effort metric; an unenforced constant is not a bound.
+    /// What: writes one file at the root and one below `MAX_WALK_DEPTH + 5`
+    /// nested directories, then asserts only the shallow file is counted.
+    /// Test: this test.
+    #[test]
+    fn dir_size_respects_depth_cap() {
+        const TOP_BYTES: u64 = 7;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("top.bin"), vec![0u8; TOP_BYTES as usize])
+            .expect("write top");
+
+        let mut deep = tmp.path().to_path_buf();
+        for _ in 0..(MAX_WALK_DEPTH + 5) {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).expect("create deep tree");
+        std::fs::write(deep.join("too-deep.bin"), vec![0u8; 4096]).expect("write deep file");
+
+        assert_eq!(
+            dir_size_bytes(tmp.path()),
+            TOP_BYTES,
+            "files below the depth cap must not be counted"
+        );
     }
 
     /// `physical_footprint_mb(self_pid)` must return a plausible non-zero

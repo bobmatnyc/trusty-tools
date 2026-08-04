@@ -493,6 +493,8 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // #4764: panic payloads reach the log stream via the hook that
+    // `trusty_common::init_tracing*` installs — see `trusty_common::panic_hook`.
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion to clap's standard error rendering before
     // exiting (issue #216).

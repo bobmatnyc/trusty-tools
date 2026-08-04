@@ -54,14 +54,19 @@ pub(super) fn spawn_status_ticker(state: Arc<SearchAppState>) {
     });
 }
 
-/// Spawn a background ticker that recomputes the data-directory size every
-/// 10 seconds and stores it in `state.disk_bytes`.
+/// Interval between recomputations of the data-directory disk footprint.
+///
+/// Why (#4764): see the cadence note inside [`spawn_disk_size_ticker`].
+const DISK_SIZE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Spawn a background ticker that recomputes the data-directory size on a
+/// fixed cadence and stores it in `state.disk_bytes`.
 ///
 /// Why (issue #35): `GET /health` reports `disk_bytes`. Walking the data
 /// directory (redb + usearch + snapshot files) on every health request would
 /// turn a 2 s health poll into unbounded recursive I/O. Computing it off the
 /// request path on a fixed cadence keeps `/health` cheap and bounds the
-/// staleness to ~10 s — fine for an at-a-glance footprint figure.
+/// staleness to [`DISK_SIZE_INTERVAL`] — fine for an at-a-glance footprint.
 /// What: spawns a detached tokio task holding a `Weak<SearchAppState>` so the
 /// ticker stops automatically when the daemon drops its last `Arc`. Each tick
 /// runs the (blocking) directory walk on `spawn_blocking` so it never stalls
@@ -71,7 +76,11 @@ pub(super) fn spawn_status_ticker(state: Arc<SearchAppState>) {
 pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
     let weak = Arc::downgrade(&state);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        // #4764: 10 s → 60 s. The data directory is multi-GB and actively
+        // mutated by reindex/prune passes; walking it six times less often is
+        // a 6× cut in exposure to that race at no user-visible cost, because
+        // `disk_bytes` is an at-a-glance footprint, not a live gauge.
+        let mut interval = tokio::time::interval(DISK_SIZE_INTERVAL);
         loop {
             interval.tick().await;
             let Some(state) = weak.upgrade() else {
