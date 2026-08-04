@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-54 top-level commands.
+55 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -62,6 +62,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `list` — List all user-scope MCP servers in the tm config dir
   - `remove` — Remove a user-scope MCP server by name
   - `test` — Verify MCP servers by running a real handshake against each
+- `memory` — Deterministic trusty-memory palace maintenance (issue #4837)
+  - `import` — Bulk-import a directory of memory `.md` files into a palace
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer
