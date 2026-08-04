@@ -907,3 +907,20 @@ fn fireworks_api_endpoint_base_url_override() {
         },
     );
 }
+
+/// #3766: the adapter must dial the SAME host `ollama_host()` reports, or the
+/// conversational fast path's "unreachable" message names the wrong endpoint.
+#[test]
+fn ollama_adapter_endpoint_uses_shared_host() {
+    let ep = OllamaAdapter {
+        model_id: "qwen3:30b".to_string(),
+    }
+    .api_endpoint(false);
+    let host = ollama_host();
+    assert!(
+        ep.base_url.starts_with(host.trim_end_matches('/')),
+        "endpoint {} must be derived from shared host {host}",
+        ep.base_url
+    );
+    assert!(ep.base_url.ends_with("/v1"), "got {}", ep.base_url);
+}

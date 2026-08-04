@@ -546,3 +546,32 @@ fn build_raw_request_without_cache_control_leaves_system_alone() {
         }
     }
 }
+
+// --- #3766: transport-failure classification -------------------------------
+
+/// A connect failure (nothing listening on the port) is a TRANSPORT error:
+/// no HTTP status was ever received. This is the owner's exact shape —
+/// ollama not running on localhost:11434.
+#[tokio::test]
+async fn transport_error_detects_connect_failure() {
+    // Port 1 on loopback: reserved, never listening — a deterministic
+    // connect-refused without touching the network.
+    let err = reqwest::Client::new()
+        .get("http://127.0.0.1:1/v1/chat/completions")
+        .send()
+        .await
+        .expect_err("connect to a closed port must fail");
+    let wrapped = anyhow::Error::new(err).context("raw chat completion POST failed");
+    assert!(
+        super::is_transport_error(&wrapped),
+        "connect failure must classify as transport: {wrapped:#}"
+    );
+}
+
+/// An error with no `reqwest::Error` in its chain is not a transport failure —
+/// the classifier must not treat arbitrary errors as retryable.
+#[test]
+fn transport_error_rejects_non_http_error() {
+    let err = anyhow::anyhow!("model returned malformed tool call");
+    assert!(!super::is_transport_error(&err));
+}

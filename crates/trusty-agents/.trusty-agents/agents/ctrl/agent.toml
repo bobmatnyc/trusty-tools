@@ -9,9 +9,14 @@ role = "assistant"
 # shows under a "System Tool" section, distinct from role (dispatch/tool
 # security) and hidden (visibility). See AgentInfo::kind's doc comment.
 kind = "system-tool"
-# "Qwopus" = qwen3:30b — community nickname for the Opus-class local model.
-# Already installed locally; routes through OllamaAdapter at http://localhost:11434.
-model = "ollama/qwen3:30b"
+# #3766: was "ollama/qwen3:30b" — an unreachable local daemon surfaced a raw
+# "Connection refused" as the user's reply whenever ollama wasn't running.
+# Bare Sonnet matches every other bundled agent. Which provider actually serves
+# it is decided at runtime by `pick_credentials()` (ClaudeCode > AnthropicDirect
+# > OpenRouter), and `apply_credential_routing()` overwrites the
+# `use_anthropic_direct` value below accordingly — so that value is a default,
+# not a routing guarantee.
+model = "claude-sonnet-4-6"
 description = "ctrl — trusty-agents coordination layer (assistant + project coordinator)"
 
 [llm]
