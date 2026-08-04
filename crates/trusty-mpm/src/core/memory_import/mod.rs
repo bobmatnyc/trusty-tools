@@ -13,16 +13,27 @@
 //!
 //! Idempotency, without `memory_recall`: the recall path is broken (issue
 //! #4836 — it returns the same five drawers at score 1.0 for every query), so
-//! dedup here is an exact **tag lookup plus a headline check**, not a
+//! dedup here is an exact **tag lookup plus a structural filter**, not a
 //! similarity search. Every derived drawer carries its file's frontmatter
 //! `name` (the kebab slug, identical to the filename stem and unique per file)
 //! as a tag, and trusty-memory's `memory_list` filters tags by exact string
 //! equality server-side — so `memory_list { tag: <slug> }` returns a small,
 //! deterministic candidate set with no embedding, ranking, or scoring
-//! involved. The tag alone is not sufficient, because a *different* file that
-//! links to `[[<slug>]]` also carries that tag; the candidates are therefore
-//! narrowed by [`is_import_of`], which requires the drawer's first line to be
-//! the file's own derived headline. Both halves are exact string comparisons.
+//! involved.
+//!
+//! The tag alone is not sufficient, because a *different* file that links to
+//! `[[<slug>]]` also carries that tag. The candidates are separated by
+//! [`links_to`] rather than by comparing prose: a foreign slug enters a tag set
+//! **only** via a `[[wikilink]]` in that file's body, and the body is stored
+//! verbatim — so re-deriving the stored text's wikilink targets with the very
+//! function that produced the tags reproduces exactly why each referrer carries
+//! it, and removes precisely those drawers. What remains is the file's own
+//! drawer, identified without reference to its text, so a description that has
+//! since drifted still reads as *present* instead of absent (issue #4837
+//! review: the earlier headline-only check made drift look like a missing
+//! drawer and wrote a second one). Nothing here can write a duplicate: when the
+//! remainder is ambiguous, or the candidate set hit its ceiling, the file is
+//! reported as failed rather than guessed at.
 //!
 //! Test: `core::memory_import::tests`.
 
@@ -74,8 +85,9 @@ pub struct ImportOptions {
 pub enum ImportStatus {
     /// Written; `drawer_id` carries the new drawer.
     Created,
-    /// Already present (matched by slug tag) or not a memory file at all;
-    /// `drawer_id` carries the existing drawer when one was found.
+    /// Already present (its own drawer was found) or not a memory file at all;
+    /// `drawer_id` carries the existing drawer when one was found, and `detail`
+    /// says whether that drawer's text still matches the file.
     Skipped,
     /// Dry run: would have been written.
     WouldCreate,
@@ -223,12 +235,16 @@ fn markdown_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 /// path produces exactly one [`FileResult`], so the report can never
 /// under-count.
 /// What: reads and parses the file; a file with no frontmatter is a clean skip
-/// (`MEMORY.md` and other index files land here). Otherwise looks for an
-/// existing drawer carrying the file's slug tag and skips when one exists;
+/// (`MEMORY.md` and other index files land here). Otherwise asks
+/// [`existing_drawer`] whether the palace already holds this file's own drawer
+/// and skips when it does — whether or not that drawer's text still matches;
 /// otherwise writes via `memory_remember` with `force` set (the established
 /// mapping — these drawers are deliberate re-writes of curated content, not
-/// conversational capture).
-/// Test: `import_is_idempotent`, `non_memory_files_are_skipped`.
+/// conversational capture). Note that `force` bypasses trusty-memory's own
+/// dedup along with the rest of its quality gates, so the check above is the
+/// only thing standing between a re-run and a duplicate.
+/// Test: `import_is_idempotent`, `drifted_description_is_not_reimported`,
+/// `non_memory_files_are_skipped_and_non_markdown_ignored`.
 async fn import_one(base_url: &str, opts: &ImportOptions, path: &Path) -> FileResult {
     let file = path
         .file_name()
@@ -254,18 +270,21 @@ async fn import_one(base_url: &str, opts: &ImportOptions, path: &Path) -> FileRe
         Err(e) => return failure(file, None, format!("parse failed: {e:#}"), Vec::new()),
     };
 
-    match existing_drawer_id(base_url, &opts.palace, &parsed).await {
-        Ok(Some(drawer_id)) => {
-            return FileResult {
-                file,
-                name: Some(parsed.name),
-                status: skip_status(opts.dry_run),
-                drawer_id: Some(drawer_id),
-                tags: parsed.tags,
-                detail: Some("already imported (slug tag present)".to_string()),
-            };
+    match existing_drawer(base_url, &opts.palace, &parsed).await {
+        Ok(Existing::Same(drawer_id)) => {
+            return skipped(file, parsed, drawer_id, "already imported", opts.dry_run);
         }
-        Ok(None) => {}
+        Ok(Existing::Drifted(drawer_id)) => {
+            return skipped(
+                file,
+                parsed,
+                drawer_id,
+                "already imported, but the stored drawer's text has drifted from \
+                 this file — left unchanged, never duplicated",
+                opts.dry_run,
+            );
+        }
+        Ok(Existing::Absent) => {}
         Err(e) => {
             return failure(
                 file,
@@ -305,6 +324,24 @@ async fn import_one(base_url: &str, opts: &ImportOptions, path: &Path) -> FileRe
     }
 }
 
+/// Build a skip row for a file whose drawer is already in the palace.
+fn skipped(
+    file: String,
+    parsed: ParsedMemory,
+    drawer_id: String,
+    detail: &str,
+    dry_run: bool,
+) -> FileResult {
+    FileResult {
+        file,
+        name: Some(parsed.name),
+        status: skip_status(dry_run),
+        drawer_id: Some(drawer_id),
+        tags: parsed.tags,
+        detail: Some(detail.to_string()),
+    }
+}
+
 /// Build a `Failed` row.
 fn failure(file: String, name: Option<String>, detail: String, tags: Vec<String>) -> FileResult {
     FileResult {
@@ -330,55 +367,115 @@ fn skip_status(dry_run: bool) -> ImportStatus {
 ///
 /// Why: the candidate set is "the file itself, plus every file that links to
 /// it" — tens at most in practice. A bounded fetch keeps the check O(1) in
-/// palace size without risking a miss.
+/// palace size, and `memory_list` offers no cursor to page with, so hitting
+/// this ceiling is treated as "cannot prove absence" rather than "absent".
 const DEDUP_CANDIDATE_LIMIT: usize = 200;
+
+/// What the palace already holds for one file.
+#[derive(Debug, PartialEq, Eq)]
+enum Existing {
+    /// The file's own drawer, storing the headline this file derives.
+    Same(String),
+    /// The file's own drawer, but its stored text has drifted from the file.
+    Drifted(String),
+    /// Nothing in the palace corresponds to this file.
+    Absent,
+}
 
 /// Look up an already-imported drawer for this file.
 ///
 /// Why: this is the idempotency check, and deliberately NOT `memory_recall` —
-/// see the module doc and issue #4836. Both halves are exact string
-/// comparisons: tag equality is decided by trusty-memory server-side, and the
-/// headline match is decided here.
-/// What: calls `memory_list { palace, tag, limit }` and returns the id of the
-/// first candidate satisfying [`is_import_of`], or `None`.
-/// Test: `import_is_idempotent`, `linking_drawer_does_not_block_its_target`.
-async fn existing_drawer_id(
+/// see the module doc and issue #4836. It must answer "is this file's drawer
+/// present?" without depending on the drawer's prose, because prose drifts and
+/// a drifted drawer read as absent is a duplicate.
+/// What: calls `memory_list { palace, tag, limit }`, drops every candidate that
+/// carries the tag only because it links to the slug ([`links_to`]), and
+/// classifies what is left. A full result page means the tag is shared by more
+/// drawers than can be inspected, and more than one surviving candidate means
+/// the palace is in a shape this cannot resolve — both are errors, so the
+/// caller reports the file rather than writing a possible duplicate.
+/// Test: `import_is_idempotent`, `linking_drawer_does_not_block_its_target`,
+/// `drifted_description_is_not_reimported`, `truncated_candidate_set_fails_closed`,
+/// `ambiguous_candidates_fail_closed`.
+async fn existing_drawer(
     base_url: &str,
     palace: &str,
     parsed: &ParsedMemory,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Existing> {
     let result = trusty_common::mcp::memory_rpc::call_memory_tool_at(
         base_url,
         "memory_list",
         json!({ "palace": palace, "tag": parsed.name, "limit": DEDUP_CANDIDATE_LIMIT }),
     )
     .await?;
-    let Some(drawers) = result.get("drawers").and_then(Value::as_array) else {
-        return Ok(None);
-    };
-    Ok(drawers
+    let drawers = result
+        .get("drawers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if drawers.len() >= DEDUP_CANDIDATE_LIMIT {
+        anyhow::bail!(
+            "the tag `{}` fills the whole {DEDUP_CANDIDATE_LIMIT}-drawer candidate page, \
+             so the candidate set is truncated and absence cannot be proven",
+            parsed.name
+        );
+    }
+
+    // A file that links to its own slug would be filtered out as a referrer of
+    // itself, so for that (rare) shape every candidate stays in the running.
+    let self_linking = links_to(&parsed.text, &parsed.name);
+    let own: Vec<(&str, &str)> = drawers
         .iter()
-        .find(|d| {
+        .filter_map(|d| {
+            let id = d.get("drawer_id").and_then(Value::as_str)?;
             let content = d.get("content").and_then(Value::as_str).unwrap_or_default();
-            is_import_of(content, &parsed.text)
+            (self_linking || !links_to(content, &parsed.name)).then_some((id, content))
         })
-        .and_then(|d| d.get("drawer_id"))
-        .and_then(Value::as_str)
-        .map(str::to_string))
+        .collect();
+
+    match own.as_slice() {
+        [] => Ok(Existing::Absent),
+        [(id, content)] => Ok(if has_headline_of(content, &parsed.text) {
+            Existing::Same((*id).to_string())
+        } else {
+            Existing::Drifted((*id).to_string())
+        }),
+        many => match many.iter().find(|(_, c)| has_headline_of(c, &parsed.text)) {
+            Some((id, _)) => Ok(Existing::Same((*id).to_string())),
+            None => anyhow::bail!(
+                "{} drawers tagged `{}` could each be this file's own drawer and none \
+                 carries its headline — refusing to guess",
+                many.len(),
+                parsed.name
+            ),
+        },
+    }
 }
 
-/// Whether `drawer_content` is this file's own drawer rather than a referrer.
+/// Whether `text` carries `slug` because it links to it.
 ///
-/// Why: a drawer for file A carries `[[b]]`'s slug as a tag, so tag equality
-/// alone would make file B look already-imported and silently drop it. The
-/// derived text's first line is the file's own description headline, which a
-/// referrer never reproduces — comparing it separates the two exactly.
-/// What: compares the first line of both strings; when the derived headline is
-/// empty (a file with no `description`), falls back to whole-text equality so
-/// the check never degenerates into "any drawer with this tag".
+/// Why: this is what separates a referrer from the file's own drawer, and it is
+/// exact rather than heuristic — a foreign slug reaches a drawer's tag set only
+/// through [`parse::wikilink_targets`], so running that same derivation over the
+/// stored text recovers precisely the set of slugs the drawer was tagged with
+/// for linking. Alias, anchor, and `.md` forms all normalise identically here
+/// and there.
+/// What: true when re-deriving `text`'s wikilink targets yields `slug`.
 /// Test: `linking_drawer_does_not_block_its_target`,
-/// `headline_match_identifies_own_drawer`.
-fn is_import_of(drawer_content: &str, derived_text: &str) -> bool {
+/// `drift_behind_a_referrer_is_not_reimported`.
+fn links_to(text: &str, slug: &str) -> bool {
+    parse::wikilink_targets(text).iter().any(|t| t == slug)
+}
+
+/// Whether a drawer still stores the headline this file derives.
+///
+/// Why: once [`links_to`] has established that a candidate is the file's own
+/// drawer, this only decides how to *describe* the skip — matched, or drifted —
+/// so a mismatch never changes the write decision.
+/// What: compares first lines; when the derived headline is empty (a file with
+/// no `description`), falls back to whole-text equality.
+/// Test: `headline_match_identifies_own_drawer`.
+fn has_headline_of(drawer_content: &str, derived_text: &str) -> bool {
     let headline = derived_text.lines().next().unwrap_or_default();
     if headline.is_empty() {
         drawer_content.trim() == derived_text.trim()

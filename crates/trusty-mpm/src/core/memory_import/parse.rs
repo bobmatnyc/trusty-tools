@@ -54,7 +54,7 @@ pub fn parse_memory_file(source: &str) -> anyhow::Result<Option<ParsedMemory>> {
     let Some((frontmatter, body)) = split_frontmatter(source) else {
         return Ok(None);
     };
-    let fields = scan_frontmatter(frontmatter);
+    let fields = scan_frontmatter(frontmatter)?;
     if fields.name.is_empty() {
         anyhow::bail!("frontmatter has no `name` field");
     }
@@ -130,16 +130,29 @@ struct Fields {
 /// Why: see the module doc — a real YAML load would strip quotes that the
 /// established mapping keeps, and the importer needs only three fields, so a
 /// focused line scanner is both more faithful and smaller than a full parse.
-/// What: walks the block tracking indentation; an indent-0 `key:` sets the
-/// current section, and `type:` is read only while that section is `metadata`.
-/// Values introduced by a `>` or `|` block-scalar indicator are gathered from
-/// the following more-indented lines and folded accordingly.
+/// Being purpose-built, though, it must **fail closed** on any shape it does
+/// not model: the alternative is importing a silently truncated description,
+/// which the palace then holds as if it were the whole fact.
+/// What: walks the block tracking the ancestor key chain by indentation, so
+/// `type:` is read only as the direct child of a top-level `metadata:` — a
+/// `type:` nested deeper is not the field we want. Values introduced by a `>`
+/// or `|` block-scalar indicator are gathered from the following more-indented
+/// lines and folded accordingly. Two shapes are hard errors rather than
+/// silently-skipped lines: a line carrying no `key:` separator, and a line
+/// indented under a key whose value was a plain (unindicated) scalar — that is
+/// YAML's plain multi-line form, whose continuation this scanner cannot fold.
 /// Test: `reads_nested_metadata_type`, `folds_block_scalar_description`,
-/// `reads_literal_block_scalar_description`.
-fn scan_frontmatter(frontmatter: &str) -> Fields {
+/// `reads_literal_block_scalar_description`,
+/// `plain_multiline_description_is_error`, `colonless_frontmatter_line_is_error`,
+/// `type_below_metadata_child_depth_is_ignored`.
+fn scan_frontmatter(frontmatter: &str) -> anyhow::Result<Fields> {
     let lines: Vec<&str> = frontmatter.lines().collect();
     let mut out = Fields::default();
-    let mut section = String::new();
+    // Ancestor chain of the line being scanned, outermost first: (indent, key).
+    let mut path: Vec<(usize, String)> = Vec::new();
+    // The most recent key whose value was a non-empty plain scalar, if any —
+    // anything indented under it is an unsupported multi-line continuation.
+    let mut plain: Option<(usize, String)> = None;
     let mut i = 0usize;
     while i < lines.len() {
         let raw = lines[i];
@@ -149,28 +162,38 @@ fn scan_frontmatter(frontmatter: &str) -> Fields {
             continue;
         }
         let indent = raw.len() - raw.trim_start().len();
+        if let Some((plain_indent, plain_key)) = &plain
+            && indent > *plain_indent
+        {
+            anyhow::bail!(
+                "`{plain_key}` is a plain multi-line scalar (continuation {trimmed:?}); \
+                 rewrite it as a single line or a `>`/`|` block scalar"
+            );
+        }
         let Some((key, head)) = trimmed.split_once(':') else {
-            i += 1;
-            continue;
+            anyhow::bail!("frontmatter line has no `key:` separator: {trimmed:?}");
         };
         let key = key.trim().to_string();
         let head = head.trim();
+        let multiline_risk = !head.is_empty() && block_style(head).is_none();
         let (value, next) = match block_style(head) {
             Some(style) => read_block_scalar(&lines, i + 1, indent, style),
             None => (head.to_string(), i + 1),
         };
-        if indent == 0 {
-            section = key.clone();
+        while path.last().is_some_and(|(depth, _)| *depth >= indent) {
+            path.pop();
         }
         match key.as_str() {
             "name" if indent == 0 => out.name = value,
             "description" if indent == 0 => out.description = value,
-            "type" if indent > 0 && section == "metadata" => out.kind = value,
+            "type" if path.len() == 1 && path[0].1 == "metadata" => out.kind = value,
             _ => {}
         }
+        plain = multiline_risk.then(|| (indent, key.clone()));
+        path.push((indent, key));
         i = next;
     }
-    out
+    Ok(out)
 }
 
 /// Whether a scalar value is a block-scalar indicator, and of which kind.
@@ -245,16 +268,7 @@ fn read_block_scalar(
         .map(|l| l.len() - l.trim_start().len())
         .min()
         .unwrap_or(0);
-    let dedented: Vec<&str> = collected
-        .iter()
-        .map(|l| {
-            if l.len() >= block_indent {
-                &l[block_indent..]
-            } else {
-                ""
-            }
-        })
-        .collect();
+    let dedented: Vec<&str> = collected.iter().map(|l| dedent(l, block_indent)).collect();
 
     let value = match style {
         BlockStyle::Literal => dedented.join("\n"),
@@ -274,6 +288,19 @@ fn read_block_scalar(
         }
     };
     (value.trim().to_string(), i)
+}
+
+/// Drop `n` leading bytes of indentation from `line`.
+///
+/// Why: `n` is the block's minimum indent measured in *bytes*, and
+/// `str::trim_start` also strips non-ASCII whitespace (U+00A0 and friends), so
+/// a block indented with a mix of the two can put `n` inside a multi-byte
+/// character — a raw slice there panics.
+/// What: slices when `n` is a char boundary within the line, and otherwise
+/// falls back to the line's content with all leading whitespace removed.
+/// Test: `dedent_survives_multibyte_indentation`.
+fn dedent(line: &str, n: usize) -> &str {
+    line.get(n..).unwrap_or_else(|| line.trim_start())
 }
 
 /// Extract every `[[wikilink]]` target in the body as a tag-shaped slug.

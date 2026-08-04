@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use super::parse::{describe, parse_memory_file, split_frontmatter, wikilink_targets};
-use super::{ImportOptions, ImportStatus, is_import_of, run_import};
+use super::{DEDUP_CANDIDATE_LIMIT, ImportOptions, ImportStatus, has_headline_of, run_import};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -196,11 +196,44 @@ fn wikilink_scan_is_utf8_safe() {
 
 #[test]
 fn headline_match_identifies_own_drawer() {
-    assert!(is_import_of("head.\n\nbody", "head.\n\ndifferent body"));
-    assert!(!is_import_of("other head.\n\nbody", "head.\n\nbody"));
+    assert!(has_headline_of("head.\n\nbody", "head.\n\ndifferent body"));
+    assert!(!has_headline_of("other head.\n\nbody", "head.\n\nbody"));
     // Empty headline falls back to whole-text equality.
-    assert!(is_import_of("\n\nbody", "\n\nbody"));
-    assert!(!is_import_of("\n\nbody", "\n\nother"));
+    assert!(has_headline_of("\n\nbody", "\n\nbody"));
+    assert!(!has_headline_of("\n\nbody", "\n\nother"));
+}
+
+#[test]
+fn plain_multiline_description_is_error() {
+    // A plain (unindicated) multi-line scalar used to import with the
+    // description silently truncated to its first line.
+    let src = "---\nname: n\ndescription: first half\n  second half\nmetadata:\n  type: user\n---\nbody\n";
+    let err = parse_memory_file(src).unwrap_err();
+    assert!(err.to_string().contains("plain multi-line scalar"), "{err}");
+}
+
+#[test]
+fn colonless_frontmatter_line_is_error() {
+    let err = parse_memory_file("---\nname: n\nstray line\n---\nbody\n").unwrap_err();
+    assert!(err.to_string().contains("no `key:` separator"), "{err}");
+}
+
+#[test]
+fn type_below_metadata_child_depth_is_ignored() {
+    // Only `metadata:`'s direct child `type:` is the field we want.
+    let src = "---\nname: n\nmetadata:\n  nested:\n    type: deep\n---\nbody\n";
+    let parsed = parse_memory_file(src).unwrap().unwrap();
+    assert_eq!(parsed.kind, "");
+    assert_eq!(parsed.tags, vec!["n".to_string()]);
+}
+
+#[test]
+fn dedent_survives_multibyte_indentation() {
+    // `trim_start` strips U+00A0 too, so a block mixing it with ASCII spaces
+    // puts the block indent (a byte count) inside a multi-byte character.
+    let src = "---\nname: n\ndescription: |\n  ascii indent\n \u{a0}nbsp indent\n---\nbody\n";
+    let parsed = parse_memory_file(src).unwrap().unwrap();
+    assert!(parsed.text.starts_with("ascii indent"), "{:?}", parsed.text);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +244,8 @@ fn headline_match_identifies_own_drawer() {
 struct StubState {
     /// Every `memory_remember` params object, in call order.
     writes: Vec<Value>,
+    /// Every `memory_list` params object, in call order.
+    lists: Vec<Value>,
     /// tag → drawer ids carrying it.
     by_tag: HashMap<String, Vec<String>>,
     /// drawer id → stored content.
@@ -228,13 +263,19 @@ async fn rpc(
     let mut st = state.lock().expect("stub lock");
     let result = match method {
         "memory_list" => {
+            st.lists.push(params.clone());
             let tag = params.get("tag").and_then(Value::as_str).unwrap_or("");
+            // The real handler filters by tag and *then* truncates to `limit`
+            // (`handle_memory_list` in trusty-memory) — the stub must do the
+            // same or the truncation boundary is untestable.
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
             let drawers: Vec<Value> = st
                 .by_tag
                 .get(tag)
                 .cloned()
                 .unwrap_or_default()
                 .iter()
+                .take(limit)
                 .map(|id| {
                     json!({
                         "drawer_id": id,
@@ -383,6 +424,161 @@ async fn linking_drawer_does_not_block_its_target() {
     assert_eq!(report.created, 2, "{:#?}", report.files);
     assert_eq!(report.failed, 0);
     assert_eq!(state.lock().unwrap().writes.len(), 2);
+}
+
+#[tokio::test]
+async fn drifted_description_is_not_reimported() {
+    // The defect this covers: the dedup check used to require the stored
+    // drawer's first line to equal the file's derived headline, so rewording a
+    // `description` made the drawer read as absent and the re-run wrote a
+    // second one carrying the same slug tag.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (url, state) = start_stub().await;
+
+    let first = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    assert_eq!(first.created, 1);
+    let drawer_id = first.files[0].drawer_id.clone().expect("drawer id");
+
+    let drifted = SAMPLE.replace(
+        "description: Admin-merge bypasses bot-approval ONLY — never a red CI gate;",
+        "description: Admin-merge bypasses bot approval, never a red CI gate",
+    );
+    assert_ne!(
+        drifted, SAMPLE,
+        "the fixture rewrite must change the headline"
+    );
+    std::fs::write(dir.path().join("admin-merge-only-on-green.md"), &drifted).unwrap();
+
+    let second = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+
+    assert_eq!(second.created, 0, "{:#?}", second.files);
+    assert_eq!(second.skipped, 1);
+    assert_eq!(
+        second.files[0].drawer_id.as_deref(),
+        Some(drawer_id.as_str()),
+        "the skip must point at the drawer already holding this file"
+    );
+    assert!(
+        second.files[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("drifted"),
+        "{:#?}",
+        second.files[0]
+    );
+    assert_eq!(
+        state.lock().unwrap().writes.len(),
+        1,
+        "drift must never write a second drawer"
+    );
+}
+
+#[tokio::test]
+async fn drift_behind_a_referrer_is_not_reimported() {
+    // The hard case: the drifted file's slug tag is on two drawers — its own,
+    // and the referrer that links to it — and neither carries its new
+    // headline. The referrer is excluded by re-deriving its wikilinks, which
+    // leaves exactly one candidate to recognise as the file's own.
+    let target = "---\nname: gate-merge-commands-with-and\ndescription: Gate merges with &&.\nmetadata:\n  type: feedback\n---\nGate body.\n";
+    let dir = write_dir(&[
+        ("admin-merge-only-on-green.md", SAMPLE),
+        ("gate-merge-commands-with-and.md", target),
+    ]);
+    let (url, state) = start_stub().await;
+    let first = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+    assert_eq!(first.created, 2, "{:#?}", first.files);
+
+    let drifted = target.replace(
+        "description: Gate merges with &&.",
+        "description: Always gate a merge behind `&&`.",
+    );
+    std::fs::write(dir.path().join("gate-merge-commands-with-and.md"), &drifted).unwrap();
+
+    let second = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+
+    assert_eq!(second.created, 0, "{:#?}", second.files);
+    assert_eq!(second.failed, 0, "{:#?}", second.files);
+    assert_eq!(state.lock().unwrap().writes.len(), 2);
+}
+
+#[tokio::test]
+async fn truncated_candidate_set_fails_closed() {
+    // More drawers share the slug tag than one `memory_list` page returns.
+    // `memory_list` has no cursor, so a full page means absence cannot be
+    // proven — reporting the file beats writing a possible duplicate.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (url, state) = start_stub().await;
+    {
+        let mut st = state.lock().unwrap();
+        let ids: Vec<String> = (0..DEDUP_CANDIDATE_LIMIT + 3)
+            .map(|n| format!("filler-{n}"))
+            .collect();
+        for id in &ids {
+            st.content
+                .insert(id.clone(), format!("Unrelated {id}.\n\nbody"));
+        }
+        st.by_tag
+            .insert("admin-merge-only-on-green".to_string(), ids);
+    }
+
+    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+
+    let st = state.lock().unwrap();
+    assert_eq!(
+        st.lists[0]["limit"].as_u64(),
+        Some(DEDUP_CANDIDATE_LIMIT as u64),
+        "the lookup must ask for the bounded page it reasons about"
+    );
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    assert!(
+        report.files[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("truncated"),
+        "{:#?}",
+        report.files[0]
+    );
+    assert!(
+        st.writes.is_empty(),
+        "a truncated candidate set must not write"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_candidates_fail_closed() {
+    // Two drawers carry the slug and neither links to it, so neither can be
+    // ruled out as the file's own. Guessing either way risks a duplicate.
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (url, state) = start_stub().await;
+    {
+        let mut st = state.lock().unwrap();
+        for id in ["twin-a", "twin-b"] {
+            st.content.insert(
+                id.to_string(),
+                format!("Some other headline ({id}).\n\nbody"),
+            );
+        }
+        st.by_tag.insert(
+            "admin-merge-only-on-green".to_string(),
+            vec!["twin-a".to_string(), "twin-b".to_string()],
+        );
+    }
+
+    let report = run_import(&opts(dir.path(), &url, false)).await.unwrap();
+
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    assert!(
+        report.files[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("refusing to guess"),
+        "{:#?}",
+        report.files[0]
+    );
+    assert!(state.lock().unwrap().writes.is_empty());
 }
 
 #[tokio::test]

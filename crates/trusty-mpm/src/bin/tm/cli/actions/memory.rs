@@ -18,7 +18,15 @@ pub(crate) enum MemoryAction {
     /// its YAML frontmatter onto drawer fields — the `description` leads the
     /// stored text, and `name` + `metadata.type` + every `[[wikilink]]` target
     /// become tags — and writes it via trusty-memory's JSON-RPC surface.
-    /// Re-running is safe: a file whose drawer is already present is skipped.
+    ///
+    /// Re-running never writes a file twice. A file's own drawer is found by
+    /// its slug tag, with drawers that merely link to that slug excluded, so
+    /// the match does not depend on the file's prose: a file whose text has
+    /// changed since it was imported is still skipped, and the report says its
+    /// drawer has drifted. This command does not refresh a drifted drawer —
+    /// delete it and re-import to replace it. When several drawers could be
+    /// the file's own, or the slug tag is shared by more drawers than one
+    /// lookup returns, the file is reported as failed rather than guessed at.
     Import {
         /// Directory of memory `.md` files (scanned non-recursively).
         dir: PathBuf,
