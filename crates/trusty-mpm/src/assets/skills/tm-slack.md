@@ -139,9 +139,14 @@ the document.
 
 ## Fallback When Slack Delivery Isn't Available
 
-Never silently drop the deliverable. If no Slack tool is registered, or the
-call fails, post the content as an Artifact or another available channel and
-hand back that link instead. Degrade the medium, never drop the payload.
+Never silently drop the deliverable. If only the canvas-specific call
+failed and Slack itself is reachable — the most common case is a free-tier
+workspace rejecting canvas creation while `slack_send_message` still works
+fine — degrade to a plain Slack message with the content inline before
+escalating further. Only when no Slack tool is registered, or Slack itself
+is unreachable, post the content as an Artifact or another available
+channel and hand back that link instead. Degrade the medium, never drop the
+payload.
 
 ## Related Skills
 
