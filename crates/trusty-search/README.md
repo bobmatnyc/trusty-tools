@@ -489,8 +489,11 @@ trusty-search start --data-dir <PATH>                # start with custom data di
                                                      # enables isolated daemon instances; each instance
                                                      # gets its own data dir, port, and index registry
 trusty-search start --no-auto-discover               # skip startup auto-discovery scan
-                                                     # (also: TRUSTY_NO_AUTO_DISCOVER=1)
+                                                     # (also: TRUSTY_NO_AUTO_DISCOVER=1, or =true/yes/on)
                                                      # daemon serves only already-registered indexes
+trusty-search service install --no-auto-discover     # macOS: bake the above into the launchd unit
+                                                     # preserved on every later `service install`;
+                                                     # `--auto-discover` turns the scan back on
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
                                                      # also writes ~/.config/trusty-search/indexes.toml
