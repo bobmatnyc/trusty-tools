@@ -10,9 +10,12 @@
 //! counters and paths. Extracting them here makes each decision independently
 //! testable and keeps the monolith from growing.
 //!
-//! What: four pure helpers —
+//! What: five pure helpers —
 //! - [`reindex_outcome`] decides Ready vs. Failed from the vector/file counters
 //!   (the #601 non-empty gate), honouring the lexical-only exception.
+//! - [`semantic_stage_broken_reason`] decides whether the semantic stage may
+//!   honestly be published as Ready, judged against the LIVE vector store
+//!   rather than the reindex's own counters (#4707).
 //! - [`canonical_walk_root`] canonicalizes a root exactly as the walker does so
 //!   `strip_prefix` reliably yields root-relative (portable) chunk paths (#602).
 //! - [`needs_path_relativization`] decides whether a root change between reindex
@@ -20,7 +23,7 @@
 //! - [`root_move_is_trusted`] decides whether a detected root move is backed by
 //!   durable, persisted config before the caller may walk/prune against it (#2178).
 //!
-//! Test: `super::validate::tests` covers every branch of all four.
+//! Test: `super::validate::tests` covers every branch of all five.
 
 use std::path::{Path, PathBuf};
 
@@ -172,6 +175,57 @@ pub(crate) fn reindex_outcome(
 /// Test: `semantic_ready_now_*` below.
 pub(crate) fn semantic_ready_now(defer_embed: bool, embedder_present: bool) -> bool {
     !(defer_embed && embedder_present)
+}
+
+/// Decide whether the semantic stage may honestly be marked `Ready`, given the
+/// LIVE vector store rather than the reindex's own bookkeeping (issue #4707).
+///
+/// Why: [`reindex_outcome`]'s `newly_submitted == 0` branch (issue #868) and
+/// the deferred-embed pass both legitimately finish with zero NEW vectors on an
+/// all-hash-skipped incremental run — and both then mark semantic `Ready`
+/// without ever asking whether the store they are vouching for holds any
+/// vectors at all. That is fine when the store was warm-booted populated. It is
+/// a lie when warm-boot fell back to an EMPTY store (a discarded snapshot: the
+/// #2922 size floor, a corrupt sidecar, the #3970 torn-pairing guard), because
+/// then nothing in the pass ever adds a vector and nothing ever notices. The
+/// observed consequence is worse than a missing lane: `search_capabilities`
+/// gains `"vector"`, so `service::server::search` stops down-shifting the query
+/// to the lexical lane, every query therefore calls `embed_query`, and a
+/// failing embedder turns that into a hard `Err` — `500 internal search error`
+/// on every query, forever, from an index reporting `status: ready`. Reported
+/// as an empty warm-boot whose save was (correctly) refused by the #1711 guard.
+///
+/// What: returns `Some(reason)` — mark the stage `Failed`, not `Ready` — only
+/// when all three hold: an embedder is wired (an index that cannot embed is
+/// legitimately vectorless), the corpus holds at least one chunk (an empty
+/// corpus has nothing to embed), and the live store reports zero vectors.
+/// `live_vector_count == None` means no store is wired at all, which is the
+/// BM25-only steady state and never a failure. Deliberately narrow: a
+/// PARTIALLY-populated store is not flagged here — partial embeds are surfaced
+/// via `embed_failure_count`, and widening this to a ratio would re-introduce
+/// exactly the heuristic-threshold problem documented on
+/// `SHRINK_GUARD_RATIO_DIVISOR`.
+/// Test: `semantic_stage_broken_reason_*` below.
+pub(crate) fn semantic_stage_broken_reason(
+    embedder_present: bool,
+    corpus_chunks: usize,
+    live_vector_count: Option<usize>,
+) -> Option<String> {
+    if !embedder_present {
+        return None;
+    }
+    let live = live_vector_count?;
+    if corpus_chunks == 0 || live > 0 {
+        return None;
+    }
+    Some(format!(
+        "semantic lane is not usable: the corpus holds {corpus_chunks} chunk(s) and an \
+         embedder is wired, but the live vector store holds 0 vectors — the HNSW snapshot \
+         was discarded at warm-boot and no vector has been added since. Reporting this as \
+         `failed` rather than `ready` keeps searches on the working lexical lane instead of \
+         routing them through a query-embed step that has nothing to search (issue #4707). \
+         Run `trusty-search index <path> --force` to rebuild."
+    ))
 }
 
 /// Canonicalize `root` exactly as the walker does (#602).
@@ -434,6 +488,61 @@ mod tests {
             semantic_ready_now(true, false),
             "defer_embed without an embedder has no background pass to wait for"
         );
+    }
+
+    /// Why (issue #4707): the reported failure — corpus has chunks, an
+    /// embedder is wired, live store holds zero vectors. Must NOT be Ready.
+    /// Test: this test.
+    #[test]
+    fn semantic_stage_broken_reason_flags_empty_store_with_populated_corpus() {
+        let reason = semantic_stage_broken_reason(true, 1732, Some(0))
+            .expect("an empty store over a populated corpus must be flagged");
+        assert!(reason.contains("0 vectors"), "reason: {reason}");
+        assert!(
+            reason.contains("1732"),
+            "reason must cite corpus size: {reason}"
+        );
+        assert!(
+            reason.contains("--force"),
+            "reason must be actionable: {reason}"
+        );
+    }
+
+    /// Why (issue #4707): the healthy steady state — a populated store — must
+    /// never be flagged, or every reindex would report failed.
+    /// Test: this test.
+    #[test]
+    fn semantic_stage_broken_reason_ignores_populated_store() {
+        assert!(semantic_stage_broken_reason(true, 1732, Some(1732)).is_none());
+        assert!(
+            semantic_stage_broken_reason(true, 1732, Some(1)).is_none(),
+            "a partial store is not this gate's business — see the doc comment"
+        );
+    }
+
+    /// Why (issue #4707): a BM25-only / test indexer with no embedder is
+    /// legitimately vectorless; flagging it would break every such deployment
+    /// (the same exemption `reindex_outcome` makes).
+    /// Test: this test.
+    #[test]
+    fn semantic_stage_broken_reason_ignores_index_without_embedder() {
+        assert!(semantic_stage_broken_reason(false, 1732, Some(0)).is_none());
+    }
+
+    /// Why (issue #4707): an empty corpus has nothing to embed, so zero
+    /// vectors is correct — a brand-new index must not report failed.
+    /// Test: this test.
+    #[test]
+    fn semantic_stage_broken_reason_ignores_empty_corpus() {
+        assert!(semantic_stage_broken_reason(true, 0, Some(0)).is_none());
+    }
+
+    /// Why (issue #4707): `None` means no vector store is wired at all — the
+    /// BM25-only steady state, not a broken semantic lane.
+    /// Test: this test.
+    #[test]
+    fn semantic_stage_broken_reason_ignores_unwired_store() {
+        assert!(semantic_stage_broken_reason(true, 1732, None).is_none());
     }
 
     /// Why: confirms the strip-prefix root resolves a real symlinked directory

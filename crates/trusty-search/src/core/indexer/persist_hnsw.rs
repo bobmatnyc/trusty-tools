@@ -72,6 +72,25 @@ impl CodeIndexer {
         self.store = Some(store);
     }
 
+    /// Number of vectors the LIVE vector store currently holds, or `None` when
+    /// no store is wired (BM25-only / test indexer).
+    ///
+    /// Why (issue #4707): every existing semantic-readiness signal is
+    /// bookkeeping — a stage counter written at warm-boot or at the end of a
+    /// reindex — and none of them is ever reconciled against the store that
+    /// actually answers queries. An index whose warm-boot fell back to an
+    /// empty store (`hnsw_load_failed`) and then saw an all-hash-skipped
+    /// incremental reindex was marked `semantic: ready` while holding zero
+    /// vectors. This accessor is the ground truth those markers must check.
+    /// What: one read-lock + `Index::size()` on the wired store.
+    /// Test: `service::reindex::stages::tests::semantic_health_reason_*` drive
+    /// the predicate this feeds; the accessor itself is exercised by every
+    /// reindex integration test.
+    pub async fn vector_count(&self) -> Option<usize> {
+        let store = self.store.as_ref()?;
+        store.len().await.ok()
+    }
+
     /// Compose the BM25 document text for a chunk: body + virtual_terms,
     /// matching the layout the per-query rebuild used to construct.
     pub(crate) fn bm25_doc_text(chunk: &RawChunk) -> String {
