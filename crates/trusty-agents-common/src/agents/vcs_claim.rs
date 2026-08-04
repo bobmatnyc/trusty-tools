@@ -38,8 +38,9 @@ use std::process::Command;
 /// [`Unclaimed`](Self::Unclaimed) — a repository was found and does not track
 /// it, or there is no repository at all (nothing can be claiming it);
 /// [`Unknown`](Self::Unknown) — git is absent or failed, so no conclusion.
-/// Test: `claim_of_a_tracked_file`, `claim_of_an_untracked_file`,
-/// `claim_outside_a_repo_is_unclaimed`, `claim_is_unknown_when_git_fails`.
+/// Test: `probe_finds_tracked_files`, `claim_of_an_untracked_file`,
+/// `claim_outside_a_repo_is_unclaimed`,
+/// `claim_is_unknown_when_git_is_unavailable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VcsClaim {
     /// Tracked — the project owns this file. Never movable.
@@ -89,7 +90,8 @@ impl VcsIndex {
     /// confirmed and the listing is the only thing that could clear a file.
     /// Entries containing `/` are dropped — the agent tier is flat, and a
     /// nested path can never name a file the sweep considers.
-    /// Test: `probe_finds_tracked_files`, `probe_outside_a_repo_is_unclaimed`.
+    /// Test: `probe_finds_tracked_files`, `claim_outside_a_repo_is_unclaimed`,
+    /// `probe_drops_nested_entries`, `probe_of_a_missing_directory_does_not_panic`.
     pub fn probe(dir: &Path) -> Self {
         let inside = Command::new("git")
             .arg("-C")
@@ -140,7 +142,8 @@ impl VcsIndex {
     ///
     /// Why/What: a lookup in the set [`VcsIndex::probe`] resolved. See
     /// [`VcsClaim`] for why the no-repo and could-not-ask cases differ.
-    /// Test: `claim_of_a_tracked_file`, `claim_of_an_untracked_file`.
+    /// Test: `probe_finds_tracked_files`, `claim_of_an_untracked_file`,
+    /// `claim_of_an_absent_file`.
     pub fn claim(&self, file_name: &str) -> VcsClaim {
         match &self.state {
             IndexState::Repo(tracked) if tracked.contains(file_name) => VcsClaim::Claimed,

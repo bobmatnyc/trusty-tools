@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 /// is their own repo's, and an unknown VCS state is a machine problem.
 /// What: one variant per gate in the movability conjunction, in the order the
 /// gates are evaluated.
-/// Test: `skip_reasons_render_distinctly`, and one test per gate in
-/// `quarantine_tests.rs`.
+/// Test: `movable_only_when_all_four_gates_agree` covers every variant, plus
+/// one `quarantine_never_moves_*` test per gate in `quarantine_tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     /// The file does not resolve to a name tm currently ships, so it shadows
@@ -211,7 +211,8 @@ pub fn shell_quote(path: &Path) -> String {
 /// [`shell_quote`]d `mv` for each moved file. Sections with no entries are
 /// still emitted with a zero count, so a reader can tell "none" from
 /// "truncated".
-/// Test: `receipt_lists_every_candidate`, `receipt_survives_a_partial_failure`,
+/// Test: `a_partial_failure_still_reports_every_candidate`,
+/// `a_clean_tier_writes_no_receipt`,
 /// `restore_command_survives_a_hostile_filename`.
 pub fn render_receipt(report: &QuarantineReport, tier_dir: &Path, run_id: &str) -> String {
     let mut out = format!(

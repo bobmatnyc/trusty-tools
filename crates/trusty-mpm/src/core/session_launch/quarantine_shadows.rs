@@ -84,7 +84,9 @@ pub fn quarantine_workspace_shadows(
 /// every launch.
 /// What: `None` when nothing moved and nothing failed. Otherwise a summary
 /// naming the counts and the receipt (or why it could not be written).
-/// Test: `quarantine_summary_is_silent_on_a_clean_sweep`.
+/// Test: `sync_assets_quarantines_a_shadowing_workspace_agent`,
+/// `sync_assets_is_silent_when_nothing_shadows`,
+/// `prepare_session_leaves_a_clean_project_clean`.
 pub fn summarize(report: &QuarantineReport) -> Option<String> {
     if !report.wrote_anything() {
         return None;
