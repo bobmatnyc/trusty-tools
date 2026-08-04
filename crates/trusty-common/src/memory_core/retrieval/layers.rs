@@ -6,7 +6,7 @@
 //! `retrieve_l3`, `expand_query`, `recall`, `recall_deep`,
 //! `recall_with_default_embedder`, `recall_deep_with_default_embedder`,
 //! `recall_across_palaces`, `recall_across_palaces_with_default_embedder`,
-//! `room_to_uuid`, `uuid_prefix_eq`, `dedup_extend`.
+//! `uuid_prefix_eq`, `dedup_extend`.
 //! Test: `recall_ranks_by_similarity_over_importance`, `l0_l1_always_present`,
 //! `l2_returns_relevant_drawer`, `l2_room_filter_excludes_other_rooms`,
 //! `recall_across_palaces_merges_results`.
@@ -18,6 +18,7 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
+use crate::memory_core::store::rooms::resolve_room_filter_id;
 use crate::memory_core::store::vector::VectorStore;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -38,24 +39,6 @@ use uuid::Uuid;
 /// (e.g. importance=0.5 * similarity=0.4 = 0.20).
 /// Test: `recall_ranks_by_similarity_over_importance` in the tests below.
 pub(super) const L1_NO_SIMILARITY_PENALTY: f32 = 0.15;
-
-/// Hash a `RoomType` to a deterministic `Uuid` so the room signal survives
-/// through the in-memory drawer table without a real `Room` row.
-///
-/// Why: `Drawer.room_id` is a `Uuid`; until we wire a Room table, callers need
-/// a stable mapping from `RoomType` to id so `list_drawers` can filter by room.
-/// What: FNV-1a-like hash of the `Debug` repr, packed into 16 bytes.
-/// Test: Indirectly via `cli_list_filters_by_room`.
-pub fn room_to_uuid(room: &RoomType) -> Uuid {
-    let label = format!("{room:?}");
-    let mut bytes = [0u8; 16];
-    // Fold each byte into the buffer with a simple xor-rot hash; collisions
-    // here are fine — this only needs to be stable per-process.
-    for (i, b) in label.bytes().enumerate() {
-        bytes[i % 16] ^= b.wrapping_add(i as u8);
-    }
-    Uuid::from_bytes(bytes)
-}
 
 /// Compare two UUIDs by their first 8 bytes.
 ///
@@ -168,9 +151,10 @@ pub fn rescore_l1_by_similarity(
 /// What: Embeds the query, searches the vector store with `top_k * 3` to
 /// leave room for filtering, maps each hit back to a drawer via UUID-prefix
 /// match, applies the optional room filter by comparing `drawer.room_id`
-/// against `room_to_uuid(&filter)` (issue #3274 — the same deterministic
-/// hash `list_drawers` already uses, since there is no real Room table yet),
-/// scores as `drawer.importance * hit.score`, and returns the top `top_k`
+/// against the id the palace's `ROOMS` registry holds for that room
+/// (issue #3274 for the filter itself; ADR-0027 D1.3 for resolving the id
+/// through the table instead of re-hashing it), scores as
+/// `drawer.importance * hit.score`, and returns the top `top_k`
 /// drawers tagged with `layer: 2`.
 /// Test: `l2_returns_relevant_drawer` upserts a Rust-themed drawer and
 /// asserts a Rust-themed query retrieves it at rank 0.
@@ -201,12 +185,15 @@ pub async fn retrieve_l2(
 
     // Issue #3274: this used to be a silent no-op (empty if-body) — a
     // caller-supplied `room_filter` was accepted but never applied, so
-    // results silently included every room. There is no real Room table yet,
-    // but `room_to_uuid` deterministically hashes a `RoomType` into the
-    // `Uuid` stamped on `Drawer::room_id` at creation time (see
-    // `PalaceHandle::upsert`), which is the exact mechanism `list_drawers`
-    // already uses to filter by room — so the filter IS enforceable now.
-    let target_room_id = room_filter.as_ref().map(room_to_uuid);
+    // results silently included every room.
+    // ADR-0027 D1.3: resolve the id through the palace's ROOMS registry rather
+    // than re-hashing the label. Re-hashing would silently return nothing for
+    // every room minted after ADR-0027 (their ids are UUIDv5, which no fold can
+    // reproduce); `resolve_room_filter_id` falls back to the legacy fold when
+    // the room has no row, so an un-backfilled palace filters exactly as before.
+    let target_room_id = room_filter
+        .as_ref()
+        .map(|r| resolve_room_filter_id(&handle.kg, r));
 
     for hit in hits {
         let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {

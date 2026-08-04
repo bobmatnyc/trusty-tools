@@ -12,14 +12,13 @@ use crate::{AppState, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::DrawerType;
+use trusty_common::memory_core::palace::{DrawerType, RoomType};
 use trusty_common::memory_core::retrieval::RememberOptions;
 use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
 
 use super::helpers::{
-    open_palace_handle, parse_room, parse_tags, resolve_palace, room_label, write_drawer,
-    WriteDrawerParams,
+    open_palace_handle, parse_tags, resolve_palace, room_label, write_drawer, WriteDrawerParams,
 };
 
 /// Create a Task drawer in a palace via the MCP surface.
@@ -47,7 +46,12 @@ pub(crate) async fn handle_task_add(state: &AppState, args: Value) -> Result<Val
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("task_add: missing 'content'"))?
         .to_string();
-    let room = parse_room(args.get("room").and_then(|v| v.as_str()));
+    // ADR-0027 T3: one room parser for every transport (`RoomType::parse`).
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(RoomType::parse)
+        .unwrap_or(RoomType::General);
     let tags = parse_tags(&args);
     let room_label_for_kg = room_label(&room);
 

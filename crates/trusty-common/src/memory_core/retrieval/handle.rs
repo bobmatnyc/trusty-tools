@@ -89,6 +89,10 @@ pub struct PalaceHandle {
     /// Why: Closets accelerate L2 by mapping topic keywords to candidate drawer
     /// ids without touching the vector store. The map is updated by
     /// `dream::Dreamer::dream_cycle` via NLP-only tokenization (no LLM calls).
+    /// NOT a hierarchy level (ADR-0027 D3): the palace model is
+    /// Palace -> Wing -> Room -> Drawer, and this index is many-to-many — one
+    /// drawer appears under every closet keyword its content contains, whereas
+    /// a level requires exactly one parent.
     /// What: `Arc<RwLock<HashMap<String, Vec<Uuid>>>>` so reads can run
     /// concurrently with the (rare) dream-time rebuild.
     /// Test: `dream::tests::closet_refresh_builds_index`.
@@ -577,10 +581,12 @@ impl PalaceHandle {
             check_secret(&content).map_err(|reject: FilterReject| anyhow::anyhow!("{reject}"))?;
         }
 
-        // Encode RoomType into the room_id deterministically by hashing the
-        // debug repr. Until we wire a real Room table, this keeps the room
-        // signal recoverable for `list_drawers` filtering.
-        let room_id = super::layers::room_to_uuid(&room);
+        // ADR-0027 T4/D4.2: the room id comes from the ROOMS registry — a
+        // lookup that creates the row when absent — never from hashing a
+        // `Debug` string. Fail-open: a registry error falls back to the legacy
+        // fold so a room problem can never fail a memory write.
+        let room_id =
+            crate::memory_core::store::rooms::resolve_or_create_room(&self.kg, &room).await;
 
         let mut drawer = Drawer::new(room_id, content.clone());
         drawer.tags = tags;
@@ -848,7 +854,10 @@ impl PalaceHandle {
         limit: usize,
     ) -> Vec<Drawer> {
         let drawers = self.drawers.read();
-        let target_room_id = room.as_ref().map(super::layers::room_to_uuid);
+        // ADR-0027 D1.3: ids are read from the ROOMS table, never recomputed.
+        let target_room_id = room
+            .as_ref()
+            .map(|r| crate::memory_core::store::rooms::resolve_room_filter_id(&self.kg, r));
         let mut filtered: Vec<Drawer> = drawers
             .iter()
             .filter(|d| match &target_room_id {
