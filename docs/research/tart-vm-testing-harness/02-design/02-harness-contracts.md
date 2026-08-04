@@ -91,16 +91,233 @@ in-scope members of `expected-binaries.tsv` (§9):
 
 ```
 PASS  iff  for every in-scope package p:
-             if expect_P(p) == present  then  member(p).health   ∈ {healthy, stale}
+             if expect_P(p) == present  then  member(p).health   ∈ H_P(p)
                                         and   member(p).on_path  == true
                                         and   member(p).version  != null
              if expect_P(p) == absent   then  member(p).health   == "not_installed"
                                         and   member(p).on_path  == false
+
+           where every clause above is quantified over
+             health_scope := tsv_scope_packages ∩ { m.member : m ∈ report.members }
+           and H_P(p), the accepted health set for p under pattern P, is
+
+             H_P(p) := {healthy, stale}
+                     ∪ {unknown}  if member(p).plist_installed == null
+                     ∪ {down}     if P ∈ {b, c} and member(p).plist_installed == false
 ```
+
+#### 1.1a Health is quantified over doctor's daemon-member set, not over the TSV
+
+*(Amended 2026-08-03 — owner decision. Supersedes the two bullets that follow it
+wherever they disagree.)*
+
+**The predicate above was unsatisfiable for a source-installed stack, and Phase 5
+proved it on a real guest with every one of the eight in-scope packages failing —
+not one of them because installation had failed.** `verify_binaries` had just
+resolved all 13 binaries and `doctor` itself reported `on_path=true` and a real
+`version` for every member it carries. A predicate that fails on a stack it agrees
+is correctly installed is testing the wrong thing. **The oracle stops asserting
+what the scenario structurally cannot produce.** Three confirmed causes, each
+narrowing the predicate in exactly one way:
+
+**(a) `stack doctor` does not enumerate `tsv_scope_packages`, so health is
+quantified over the members it actually reports.** **`trusty-code`,
+`trusty-installer` and `tga` are structurally absent from doctor's output** and
+can never satisfy a predicate quantified over `member(p)`.
+
+> **CAUSE CORRECTED 2026-08-03.** This bullet previously attributed all three
+> absences to a single mechanism — `stack doctor` filtering `stable_set()` to
+> `m.daemon`. **That explains exactly one of the three.** There are **two
+> distinct causes**, and a future reader who acts on the single-cause version
+> will reason wrongly about what happens when the scope changes.
+
+- **`trusty-code` and `trusty-installer` are not in `stable_set()` at all.**
+  `stable_set()` (`crates/trusty-installer/src/commands/stable_set.rs:173-183`)
+  has exactly **seven** members — `trusty-search`, `trusty-memory`,
+  `trusty-analyze`, `trusty-review`, `tga`, `trusty-console`, `trusty-mpm`.
+  Neither package appears in it. **They would be absent even if the `m.daemon`
+  filter were deleted outright**; their absence is upstream of any filtering.
+- **`tga` IS in `stable_set()`, and it is the filter that removes it.** It is
+  declared `StableMember::new("tga", "tga", false, false)`
+  (`stable_set.rs:179`); the third argument of `StableMember::new` is `daemon`
+  (`stable_set.rs:109`), so `tga` carries **`daemon: false`** and is dropped by
+  `doctor.rs:151`, which resolves doctor's member set as `stable_set()`
+  **filtered to `m.daemon`**. `tga` is the *only* one of the three this
+  mechanism accounts for.
+
+**The two causes reach one conclusion**, which is why the original single-cause
+text could be wrong about the mechanism and still land on the correct predicate:
+none of the three is in doctor's member set, so no health obligation can attach
+to any of them. **This correction has zero runtime effect.** `verify.sh:659`
+tests membership **dynamically** —
+`jq -e --arg m "$pkg" 'any(.members[]; .member == $m)'` — so the oracle asks the
+report what it actually contains rather than deriving it from a stated cause, and
+**already handles both cases identically**. A package later added to
+`stable_set()`, or flipped to `daemon: true`, is picked up with no edit to the
+oracle; that is the property the dynamic test buys, and it is unaffected by which
+of the two causes applied.
+
+They are not exempted from verification:
+their **presence is asserted by `verify_binaries`** (all 13 in-scope binaries,
+including `tcode`, `trusty-installer`, `tctl` and `tga`) **and by
+`verify_single_install`** for the multi-binary ones, both of which are unaffected
+by this amendment and both of which are stronger evidence of a correct install
+than a daemon health field a non-daemon package does not have. §F-10(e) resolved
+the *opposite* direction — a doctor member the TSV does not carry is logged, not
+asserted, which is why `trusty-console` correctly does not fail a run. This is
+that rule's missing counterpart.
+
+**(b) `unknown` is accepted for members the product deliberately declines to
+probe.** `probe_member_health` (`commands/probe.rs:141-158`) returns
+`ProbeOutcome::Unprobeable` for `ManageStrategy::OwnVerb`, and
+`probe_http.rs:211` maps `Unprobeable` to `unknown`. The source comment is
+explicit that this is a decision, not a gap:
+
+> `#4246`: trusty-mpm (`OwnVerb`) is DELIBERATELY left unprobed and reported
+> `unknown`, even though it does answer `/health` on 7880. […] probing it would
+> flip `tctl status` to exit 2 and `tctl install` to NOT VERIFIED for every user
+> who simply has not started mpm. Enabling it is a separate, user-visible policy
+> change, tracked separately.
+
+Rejecting `unknown` therefore asserts against a documented product decision.
+**The condition is written as `plist_installed == null`, not as a member name.**
+`null` means "not a launchd member" (§1.1's own field table) which is exactly the
+`OwnVerb`/`None` set that `probe_member_health` returns `Unprobeable` for, so the
+acceptance is **derived from the JSON** and follows the product automatically if
+another member ever changes strategy. Naming `trusty-mpm` in the predicate would
+hardcode today's `stable_set` into the oracle.
+
+**(c) `down` is accepted under the source-install patterns (b) and (c) when
+`plist_installed == false`.** The acceptance is correct and `verify.sh` implements
+it correctly. **The cause previously recorded for it was not.**
+
+> **CAUSE FALSIFIED AND CORRECTED 2026-08-03.** This bullet previously asserted:
+> *"A launchd member reports `down` because it has no plist."* **That is false**,
+> and this repo's own `#4246` fix (`6078b21c`) is what made it false. It is
+> corrected here rather than deleted, per this doc set's record-reversals
+> convention. **The conclusion is unchanged and `verify.sh`'s predicate is NOT
+> modified by this correction** — only the reasoning a future reader would act on.
+
+**Mechanism — `health` is a pure HTTP fact, and `plist_installed` is not an input
+to it.** For a `Launchd` member, `probe_member_health` delegates to
+`probe_member_http_blocking` (`commands/probe.rs:146`), a blocking `GET /health`
+against the member's recorded address. `probe_http.rs:213-218` maps
+`NoAddress | Refused | Timeout | HttpError | BadEnvelope | ProbeFailed` to
+`down` — **every one of those is a transport fact about the request**.
+`plist_installed` is computed **only** at `doctor.rs:117-124`, solely to populate
+the report field of the same name, and is **read by nothing on the probe path**.
+No value of `plist_installed` can move `health`.
+
+**Observed refutation, in both directions, on the development host (2026-08-03).**
+The investigation that produced this correction recorded four launchd members with
+**no plist** reporting **`healthy`** — `trusty-search`, `trusty-analyze`,
+`trusty-review` and `trusty-console`, each with `"plist_installed": false`. A
+second reading the same day, taken while re-verifying this amendment, records the
+complementary case:
+
+```
+{"member":"trusty-search","health":"down","plist_installed":false}
+{"member":"trusty-memory","health":"down","plist_installed":true}
+{"member":"trusty-analyze","health":"down","plist_installed":false}
+{"member":"trusty-review","health":"down","plist_installed":false}
+{"member":"trusty-console","health":"down","plist_installed":false}
+{"member":"trusty-mpm","health":"unknown","plist_installed":null}
+```
+
+`trusty-memory` **has** a plist, its `trusty-memory serve` process was running,
+and it still reports `down`. Between them the two readings refute the causal claim
+from both sides: members without a plist have been observed `healthy`, and a
+member with a plist has been observed `down`. In both readings health tracked the
+**probe**, never the plist.
+
+**The correct statement.** Under DOC-1 §6.5's patterns (b) and (c), **nothing has
+started the daemons at the point the oracle reads `doctor`.**
+`plans_service_bootstrap` (`install.rs:528`) is banned under those patterns, so
+the install path starts nothing. A daemon that was never started answers nothing
+on `/health`, so the probe returns `NoAddress`/`Refused` and `health_string()`
+renders `down`. **That is the expected state of a correctly source-installed
+stack**, not a packaging defect, and it is why the acceptance is right.
+**`plist_installed == false` is a co-indicator of "no bootstrap ran", not the
+cause of `down`.** Both facts descend from the same upstream cause — the banned
+bootstrap step — and neither causes the other.
+
+> **The ordering qualifier is load-bearing; do not drop it.** It is *not* true
+> that nothing in a pattern-(c) scenario ever starts the daemons — the harness's
+> own `verify_daemon_liveness` step runs an explicit `tctl start --json` (§1.3),
+> after which the very same members answer `/health` with HTTP 200. What is true
+> is that this happens **after** `verify_stack_doctor` has read and asserted the
+> report. Observed in the Phase 5 pattern (c) run of 2026-08-03: `trusty-search`,
+> `trusty-memory`, `trusty-analyze` and `trusty-review` were reported
+> `health=down, plist=false` by `doctor`, and the same four were then reported
+> **LIVE — HTTP 200** by `verify_daemon_liveness` a few steps later in the same
+> run. That transition is this correction's mechanism demonstrated end to end:
+> **what changes `health` is the start, not a plist.**
+
+**Consequence 1 — the fail-closed branch this bullet promises is INERT under the
+very patterns it is gated to.** The original text justified requiring
+`plist_installed == false` by adding that *"a launchd member that **does** have a
+plist and is still `down` is a real failure and still fails."* But under (b)/(c)
+no plist is ever written, so that guard **can never be `true`** and that branch
+**can never fire**. It contributes no discriminating power under (b)/(c). It is
+**not wrong — it is dead**, and it is recorded as dead here so a future reader does
+not count it as live protection. It becomes reachable only under a pattern where a
+bootstrap actually runs, which is pattern (a) — where the `H_P` term is already
+not gated in, so the strict form applies there anyway.
+
+**Consequence 2 — do NOT reuse `plist_installed` as a "was bootstrapped" signal
+under pattern (a).** It is sound as a co-indicator only under (b)/(c), where the
+bootstrap is *banned* and the implication runs one way. Pattern (a) carries no
+such guarantee, and this host is the standing counter-example: it has carried
+launchd members answering `/health` with **no** plist, alongside `trusty-memory`
+**with** one. `plist_installed` reports whether a file exists at
+`plist_path_for(binary)` (`doctor.rs:117-124`) and nothing more.
+
+**The `stale` justification below was wrong, and is corrected here rather than
+deleted.** It reads "on a freshly installed VM where daemons have just been
+bootstrapped, a stale heartbeat is expected timing". **Pattern (c) cannot reach
+that state at all** — by (c) above, nothing in a source-based scenario bootstraps
+a daemon, so there is no just-bootstrapped heartbeat to be stale. The sentence
+described pattern (a)'s world and was applied to all three. `stale` remains
+accepted (it is still not evidence of a packaging failure), but its stated reason
+holds only where a bootstrap actually happens.
+
+**What this does NOT narrow, stated so a future reader does not over-read it:**
+`on_path == true` and `version != null` are still asserted for **every** in-scope
+member doctor reports; all **13** in-scope binaries are still asserted present by
+`verify_binaries`; all **4** Single-Install gates still run; §1.3's RC-1
+liveness-only rule is untouched. The narrowing is to **daemon health**, and to
+nothing else.
+
+**Pattern (a) may legitimately assert more strictly, and Phase 7 should consider
+it.** Under (a) the harness is permitted `tctl install`, whose service-bootstrap
+step **actually starts the daemons** (and, incidentally, writes their plists), so
+a member can answer `/health` and a real `healthy` or `stale` becomes reachable —
+cause (c) does not apply there, and the `H_P` term above is already pattern-gated
+to `{b, c}` so that (a) inherits the strict form. *(Emphasis corrected
+2026-08-03 alongside cause (c): what makes `healthy` reachable under (a) is the
+**start**, not the plist write. Reading it as the plist is the same falsified
+causal step that (c) records.)* Causes (a) and (b) are structural and apply under
+every pattern. **This is recorded for Phase 7, not implemented now**; asserting it
+before a pattern-(a) run has ever been observed would be inventing a contract,
+which is what this amendment exists to stop doing.
+
+**A second, separate Phase 7 candidate — assert `plist_installed == false`
+DIRECTLY under (b)/(c).** Under those patterns it is a **derivable invariant**: no
+bootstrap ran, therefore no plist was written. Asserting it directly would **fail
+closed** if `tctl install` ever leaked into a source-install scenario — the exact
+false pass DOC-1 §6.5 bans that step to prevent, and which nothing in the oracle
+currently detects. **This is a NEW assertion, not a widening of the health
+predicate**: it does not touch `H_P` and does not relax anything. It is the
+productive use of the signal that Consequence 1 above shows is otherwise inert
+under (b)/(c). **Recorded for Phase 7, not implemented now** (plan §PHASE 7,
+MANIFEST open items).
 
 Two deliberate choices, both judgment calls with no measurement behind them:
 
-- **`stale` is accepted, `down` is not.** `stale` describes a daemon whose
+- **`stale` is accepted, `down` is not.** *(Scoped by §1.1a, 2026-08-03: `down`
+  IS accepted under patterns (b)/(c) when `plist_installed == false`, and the
+  justification in this bullet describes a state those patterns cannot reach.)*
+  `stale` describes a daemon whose
   heartbeat is old; on a freshly installed VM where daemons have just been
   bootstrapped, a stale heartbeat is expected timing, not a packaging defect. The
   harness's claim is that *installation* succeeded (DOC-1 Purpose), and a stale
@@ -828,6 +1045,86 @@ would be inventing a contract. What the harness needs from `trusty-installer` is
 *On failure:* **exit 30**, the same phase code as N1 — both are the negative probe,
 and an operator reading the code should not have to know which half fired. The
 message says which.
+
+##### RC-2 CLOSED as *unreachable-by-design* — N2 records BLOCKED and the run continues
+
+*(Amended 2026-08-03 — owner decision. RC-2 is closed here, not left unpinned.)*
+
+**N2's guide-and-abort is not reachable through `tctl install` from a guest.** This
+is not "not yet measured"; it is structural, it was read out of the source and
+confirmed by observation on two real guest runs and once on the host (MANIFEST
+Phase 5, Deviations item 2, Measurements item 3), and no change on the harness side
+can reach it. **Both** causes must be stated, because fixing only the first makes
+the situation worse:
+
+**1. The consent gate returns before `install_one` is ever called.**
+`decide_install_gate` (`commands/install_gate.rs:77-85`) returns
+`InstallGate::Refuse` whenever `--yes` is absent and stdin is not a TTY — **and the
+guest exec channel is not a TTY**. Its arm in `install.rs:266-278` prints the
+refusal to stderr and **`return 3`**, before `install_all` on line 295. The cargo
+guard at **`install.rs:826`** lives inside `install_one`, which that refusal never
+reaches. Observed, identically, three times:
+
+```
+exit 3, stdout 0 bytes, stderr 204 bytes:
+  info: ✓ git Git-155) found
+  tctl install: refusing to install without confirmation in a non-interactive
+  context; pass --yes to proceed non-interactively, or --dry-run to preview
+  what would be installed.
+```
+
+`3` is non-zero and distinct from 1, so it satisfies RC-2's *shape* — but it is the
+**consent-gate code, not the cargo-absent code**, and recording it as RC-2's would
+be exactly the false precision this section refuses.
+
+**2. Adding `--yes` would be worse, and is therefore forbidden here.** It reaches
+`install_one`, which is **prebuilt-tarball-first**: the cargo guard sits only in the
+`Outcome::Fallback` arm, reached **only when the prebuilt download fails**. On a
+networked guest the download **succeeds** — and installs **released binaries over
+the source-built ones under test**, before the oracle reads them. That is precisely
+the false pass **DOC-1 §6.5** bans `tctl install` from patterns (b)/(c) to prevent,
+and it is the worst failure mode a harness has. A probe that can corrupt its own
+run's subject is not a probe.
+
+**Status: RC-2 is CLOSED as *unreachable-by-design*, not satisfied and not
+outstanding.** The distinction matters. RC-2 is not a request `trusty-installer`
+has failed to answer — it is a request that **cannot be exercised through this
+entry point at all**, so leaving it open would leave a permanently unresolvable
+item on the register and imply work that would never be done. The behaviour it
+describes is real (`which::which("cargo")` at `install.rs:826`, and the same guard
+in `upgrade.rs:502` and `self_update.rs:295`); what is unreachable is **N2's route
+to it**. Anything that wants to assert it must reach the guard by a route that does
+not run `tctl install` on a networked guest — a unit test in
+`crates/trusty-installer`, or an offline-network scenario — and **neither is this
+harness's job**. Recorded so a future contributor does not re-open RC-2 and re-run
+the same probe expecting a different answer.
+
+**What N2 does now.** It records the observation and continues, loudly. This is the
+doc set's **own established remedy** — §F-7's "record as BLOCKED and skip" branch,
+written so a required-contract gap "cannot strand the phase". **The predicate is
+NOT weakened.** Exit 0, non-empty stdout and empty stderr all still **die 30**, and
+a stderr that *does* carry a cargo token still takes the **normal PASS path**. Only
+the one shape proven unreachable — non-zero exit, clean stdout, guidance on stderr,
+no cargo token — is recorded instead of asserted, and it prints
+
+```
+*** N2 BLOCKED (RC-2 / DOC-2 §6.2) — NOT A PASS. ***
+```
+
+on **every run**. A BLOCKED N2 therefore satisfies the Phase 5 checkpoint's clause
+(v), which asks for the observation to be recorded (plan §Phase 5 checkpoint, as
+corrected 2026-08-03); it never satisfies a claim that guide-and-abort was proved.
+
+**Reconciling P5-T2.** P5-T2 anticipated only that the observed code "might be
+`1`", and told the implementer not to tighten the predicate to an observed code
+unless it was non-zero and distinct from 1. The observed code **is** non-zero and
+distinct from 1 — and tightening to it would still have been wrong, because it is
+a different guard's code. P5-T2's instinct (an observed code is not a documented
+contract) was right; its enumeration of outcomes was incomplete, and it did not
+anticipate the predicate being unreachable at all. **The correct action under
+P5-T2 is the one taken: do not tighten, do not weaken, record.** P5-T2's rule that
+nothing in `crates/trusty-installer` may be changed to make the predicate happier
+stands, and nothing was.
 
 #### 6.3 Lifecycle position — pinned
 
@@ -2221,8 +2518,19 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
 
 - **RC-1 — unified daemon health envelope** (§1.3). Does not exist. Until it does,
   the oracle asserts liveness only, and DOC-1 §7.1's third JSON source is aspirational.
-- **RC-2 — `tctl install` cargo-absent exit code and message** (§6.2). Not pinned to
-  a verified value. N2's predicate is deliberately weak until it is.
+- ~~**RC-2 — `tctl install` cargo-absent exit code and message** (§6.2). Not pinned
+  to a verified value. N2's predicate is deliberately weak until it is.~~
+  **CLOSED 2026-08-03 as *unreachable-by-design*** (§6.2's RC-2 closure). Not
+  satisfied and not outstanding: `decide_install_gate`'s `Refuse` arm returns **3**
+  before `install_one` is called whenever `--yes` is absent and stdin is not a TTY,
+  so the cargo guard at `install.rs:826` cannot be reached from a guest; and `--yes`
+  would reach a prebuilt-tarball-first path that installs **released** binaries over
+  the source-built ones under test, the exact false pass DOC-1 §6.5 exists to
+  prevent. N2 records **BLOCKED** and prints it every run; every other failure shape
+  still dies 30. Asserting the guard needs a route that is not `tctl install` on a
+  networked guest — a `crates/trusty-installer` unit test, or an offline-network
+  scenario — and neither is this harness's job. **Do not re-open and re-run the same
+  probe.**
 - **Full base-image digest** (§3.2). Never recorded in the research — only the
   truncated `sha256:a8e1...` (`vm-install-probe-findings.md:652`). Must be captured
   at implementation time.

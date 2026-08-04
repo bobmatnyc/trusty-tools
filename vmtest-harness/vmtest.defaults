@@ -23,7 +23,17 @@ boot_ready_interval	2
 stopped_timeout	120
 stopped_interval	1
 provision_timeout	300
-install_timeout	2700
+# install_timeout is the FULL-STACK SCENARIO budget despite its name (DOC-2
+# §10.2); the single-crate install budget is a different site, 900 s, built in.
+# TIGHTENED 2700 -> 1800 at plan P5-T8, on the first real measurement rather
+# than on DOC-1 §9's 4-8 min extrapolation, which it supersedes. Two pattern-(c)
+# full-stack runs on 2026-08-02 measured the SCENARIO at 640 s and 748 s
+# (8 crates, 13 binaries, shared CARGO_TARGET_DIR). 1800 s is ~2.4x the slower
+# of the two. §10.2's constraint is why the headroom stays generous: a tight
+# timeout does not enforce a budget, it manufactures flaky failures that get
+# "fixed" by raising it. What changed is that the multiple now sits over a
+# MEASUREMENT instead of over an estimate labelled low-confidence.
+install_timeout	1800
 health_timeout	60
 health_interval	1
 

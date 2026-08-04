@@ -109,6 +109,215 @@ source_deliver_local() {
     printf '%s\n' "$bytes"
 }
 
+# --- install steps (DOC-2 §12.2; DOC-1 §7.3, §7.4, §8.4, §8.6, §6.5) -------
+
+# install_from_path <vm_name> <guest_dir> <crate_dir>
+# Asserts `rustc --version` FIRST, then installs. 0, or dies 50.
+#
+# ============================================================================
+# THE ONE RULE THIS FUNCTION EXISTS TO HOLD: IT INSTALLS A **PACKAGE**.
+# NEVER `--bin`. NEVER `--bins` WITH A FILTER. (DOC-2 §12.2, amended
+# 2026-07-31; mirrored in plan P5-T1; the hazard is named in plan §F-3.)
+#
+# `expected-binaries.tsv`'s `binary` column is the ORACLE's input. It is never
+# the INSTALLER's. A "row-faithful" loop — `cargo install --path <dir> --bin
+# <binary>`, once per TSV row — looks like tidying up and is a change in
+# meaning: DOC-1 §7.4's Single-Install Convention gate asserts exactly one
+# thing, that ONE package-granular install yields EVERY sidecar. Install each
+# sidecar by name and `verify_binaries` reports 13/13 while
+# `verify_single_install` passes four times over, and NOTHING has tested the
+# convention. A crate that silently stopped shipping a sidecar would still show
+# green. Unlike a missing table row, `--check-table` cannot catch it, because
+# the table is not what is wrong. There is no accessor in this harness that
+# emits `(crate_dir, binary)` pairs, precisely so this loop cannot be written
+# by accident — see `tsv_scope_binaries` in the driver.
+#
+# `tctl install` IS BANNED HERE (DOC-1 §6.5). `install_one()` in
+# `crates/trusty-installer/src/commands/install.rs` is prebuilt-tarball-first
+# with a crates.io `cargo install --locked` fallback and has NO `--path` code
+# path, so invoking it during a source-based scenario would overwrite the
+# source-built binaries under test with RELEASED artefacts — a false pass, the
+# worst failure mode a harness has.
+#
+# NEVER `cp` A BINARY INTO A PATH DIRECTORY (DOC-1 §7.3): copying a Mach-O
+# binary is not installing it, and cdhash-dependent behaviour (TCC attribution,
+# keychain ACLs, notarisation) does not survive an arbitrary copy.
+# ============================================================================
+install_from_path() {
+    local vm="$1" guest_dir="$2" crate_dir="$3"
+    local crate_path expected rustc_line t0 elapsed rc bins now
+
+    # `crate_dir` IS RELATIVE TO `crates/`, NOT TO THE REPOSITORY ROOT.  §9.1
+    # defines the column as "directory under `crates/`", `--check-table` derives
+    # it by stripping exactly `<workspace_root>/crates/`, and §7.4's worked
+    # invocation spells the guest path out in full:
+    #     cd /Users/admin/vmtest-src/crates/trusty-git-analytics && rustc --version
+    # Joining `guest_dir` to `crate_dir` directly produces
+    # `/Users/admin/vmtest-src/trusty-search`, which does not exist — observed on
+    # the first Phase 5 run, where `cd` failed and `&&` (never `;`, §7.4) stopped
+    # the command from running in the wrong directory, exactly as designed.
+    crate_path="${guest_dir}/crates/${crate_dir}"
+
+    # The canonical log line the P5 checkpoint and P5-T8's tripwire both count.
+    # It is ALSO appended to a run-scoped ledger, because the count has to be
+    # answerable from data the harness owns rather than from whatever the
+    # operator happened to redirect stderr into — see the ledger note in
+    # `scenarios/install-local.sh`.
+    log "install_from_path ${crate_dir}"
+    printf '%s\n' "$crate_dir" >> "$VMTEST_RUNDIR/installs.log" \
+        || die 50 "could not append to the install ledger $VMTEST_RUNDIR/installs.log"
+
+    # §10.2's full-stack budget, enforced as a deadline (see `scenario_dispatch`
+    # for why it is not a wrapper). §10.3 clause 3: name the condition, the
+    # elapsed time, the budget and the key that changes it.
+    now=$(date '+%s')
+    if [ -n "${INSTALL_DEADLINE_EPOCH:-}" ] && [ "$now" -ge "$INSTALL_DEADLINE_EPOCH" ]; then
+        die 50 "the full-stack scenario budget of $(conf_get install_timeout)s was exhausted before '${crate_dir}' could be installed (change it with vmtest.defaults key install_timeout; DOC-2 §10.2 full-stack row). No retry, ever (§10.3)."
+    fi
+
+    # ------------------------------------------------------------------
+    # DOC-1 §8.4's per-build-step assertion, adjacent to the build.
+    #
+    # WHAT `expected` IS, AND WHY IT IS NOT ALWAYS THE WORKSPACE PIN.
+    # DOC-2 §12.2 gives `verify_rustc <vm> <dir> <expected>` an expected
+    # argument "rather than assuming 1.91.1 everywhere", and measurement K5 is
+    # why: `crates/trusty-git-analytics/rust-toolchain.toml` pins
+    # `channel = "stable"`, which resolved to rustc 1.97.1 INSIDE that crate
+    # against the workspace's 1.91.1 at the root. rustup resolves by current
+    # directory, so the two are both correct and both real.
+    #
+    # The expectation is therefore derived from the same thing rustup resolves
+    # against — the presence of a crate-local `rust-toolchain.toml`:
+    #   - no crate-local file -> the crate inherits the workspace toolchain, and
+    #     `expected` is `toolchain.tsv`'s measured `rustc_version`. ASSERTED for
+    #     equality; a mismatch dies 50.
+    #   - a crate-local file  -> the crate overrides the workspace pin with a
+    #     CHANNEL (`stable`), not a version, so no literal can be predicted
+    #     host-side without resolving rustup's channel ourselves. `expected` is
+    #     passed EMPTY, which `verify_rustc` treats as "assert that rustc
+    #     resolves and reports a version, do not assert WHICH" — and the K5
+    #     comparison against the workspace pin is logged loudly right here.
+    # Inventing a literal for the override case would be pinning a number this
+    # harness cannot derive; asserting the workspace pin for it would fail the
+    # run on a toolchain difference that is the crate's declared intent.
+    # ------------------------------------------------------------------
+    local workspace_rustc
+    workspace_rustc=$(tsv_get "$VMTEST_RUNDIR/toolchain.tsv" rustc_version) \
+        || die 50 "no rustc_version in $VMTEST_RUNDIR/toolchain.tsv (DOC-2 §7.1) — cannot form DOC-1 §8.4's expectation for '${crate_dir}'"
+
+    if vm_exec "$vm" "[ -f ${crate_path}/rust-toolchain.toml ]" >/dev/null 2>&1; then
+        log "rustc(${crate_dir}): crate declares its OWN rust-toolchain.toml — it overrides the workspace pin ${workspace_rustc} (DOC-1 §8.4, measurement K5); asserting resolution, not a literal"
+        expected=''
+    else
+        expected="$workspace_rustc"
+    fi
+
+    rustc_line=$(verify_rustc "$vm" "$crate_path" "$expected")
+
+    if [ -z "$expected" ]; then
+        case "$rustc_line" in
+            *"$workspace_rustc"*)
+                log "*** FINDING: ${crate_dir} declares its own rust-toolchain.toml but resolved to the WORKSPACE version ${workspace_rustc} — measurement K5's toolchain drift did NOT reproduce. Recorded, not smoothed over (plan P5-T1 acceptance). ***" ;;
+            *)
+                log "rustc(${crate_dir}): K5 REPRODUCED — '${rustc_line}' differs from the workspace pin ${workspace_rustc}" ;;
+        esac
+    fi
+
+    # ------------------------------------------------------------------
+    # The build. PACKAGE GRANULARITY — see the banner above.
+    #
+    #   - `cd` INTO the crate directory and `&&`, not `;` (DOC-2 §7.4): rustup
+    #     resolves by current directory, and a failed `cd` must not run cargo in
+    #     the wrong one. `--path .` therefore names the directory we just proved
+    #     we are in, rather than re-deriving it.
+    #   - `--locked` is the same reproducibility discipline DOC-1 §6.3 applies to
+    #     pattern (a): build the dependency set the committed `Cargo.lock`
+    #     names, not whatever resolves today. Under pattern (c) the lockfile
+    #     arrived in the same stream as the source, so it is the tree's own.
+    #   - PATH, CARGO_TARGET_DIR (DOC-1 §8.6's single shared target directory)
+    #     and SKIP_UI_BUILD ride in $VMTEST_GUEST_ENV, composed in `vm_exec` and
+    #     nowhere else (DOC-2 §7.3).
+    #   - 900 s per crate, DOC-2 §10.2's single-crate row. NO vmtest.defaults key
+    #     exists for it and §10.3's amendment requires the message to say so
+    #     rather than name one that does not exist.
+    # ------------------------------------------------------------------
+    log "cargo install --path ${crate_path} (PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)"
+    t0=$(date '+%s')
+    rc=0
+    run_watchdog 900 "$VMTEST_TMPDIR/install-${crate_dir}.log" \
+        vm_exec "$vm" "cd ${crate_path} && cargo install --path . --locked" || rc=$?
+    elapsed=$(( $(date '+%s') - t0 ))
+
+    if [ "$rc" -ne 0 ]; then
+        tail -40 "$VMTEST_TMPDIR/install-${crate_dir}.log" 2>/dev/null | sed 's/^/    | /' >&2 || :
+        if [ "$rc" -eq 124 ]; then
+            die 50 "\`cargo install --path\` for '${crate_dir}' exceeded its 900 s budget (DOC-2 §10.2 single-crate row; NO vmtest.defaults key exists for this budget). No retry, ever (§10.3)."
+        fi
+        die 50 "\`cargo install --path .\` in '${crate_path}' exited ${rc} (last 40 lines above)"
+    fi
+
+    # Cargo names every binary it placed on `Installed`/`Replacing` lines. They
+    # are the direct evidence for DOC-1 §7.4 — that ONE package-granular install
+    # produced the whole sidecar set — so they are logged where the reader can
+    # see them beside the command that produced them, rather than left in a
+    # temporary file cleanup deletes.
+    bins=$(awk '/^ +(Installed|Replacing) /' "$VMTEST_TMPDIR/install-${crate_dir}.log" 2>/dev/null | sed 's/^ *//' | tr '\n' '; ')
+    log "MEASURE install_s ${crate_dir} ${elapsed}"
+    log "installed ${crate_dir} in ${elapsed}s: ${bins:-<no Installed/Replacing lines>}"
+}
+
+# install_assert_install_count
+# P5-T8's run-level tripwire: the install loop must have run EXACTLY ONCE per
+# emitted `crate_dir`. 0, or dies 60.
+#
+# TWO DEPARTURES FROM P5-T8'S SNIPPET, BOTH NARROW, BOTH RECORDED.
+#
+#   1. IT IS A LIB FUNCTION, NOT INLINE SCENARIO CODE. P5-T8 writes the tripwire
+#      as two lines inside the scenario calling `die 60` directly — but DOC-2
+#      §12.4 states that "scenarios do NOT call `die` with a code of their own…
+#      so a scenario stays a description of steps and expectations and never
+#      encodes the exit-code table". The two are in direct conflict. Putting the
+#      identical logic behind a lib function satisfies both: the scenario calls a
+#      function, the function dies with its phase code, and the assertion is
+#      unchanged.
+#
+#   2. IT COUNTS A LEDGER, NOT `$VMTEST_RUNDIR/run.log`. P5-T8 greps
+#      `"$VMTEST_RUNDIR/run.log"` for `^vmtest: install_from_path `. THAT FILE
+#      DOES NOT EXIST: the harness as merged through Phase 4 writes every
+#      diagnostic to STDERR (DOC-2 §12.1) and keeps no run log, so the snippet as
+#      written would grep a missing path. Rather than invent a whole run-log
+#      facility to support one `grep -c`, `install_from_path` appends the crate
+#      directory it is installing to `$VMTEST_RUNDIR/installs.log`, and this
+#      counts that.
+#
+#      The ledger is STRICTLY STRONGER than the log grep it replaces, which is
+#      the reason to prefer it rather than merely a way around a missing file:
+#      it is written by `install_from_path` ITSELF, so it records an install
+#      issued from ANYWHERE — a second install block, a retry, a future
+#      `install-upgrade.sh` — whereas a scenario counting its own log lines can
+#      only ever see the loop it wrote. The canonical `vmtest: install_from_path
+#      <dir>` line is still emitted on stderr for the human and for the
+#      checkpoint's clause (i).
+install_assert_install_count() {
+    local ledger expected actual dups
+    ledger="$VMTEST_RUNDIR/installs.log"
+
+    [ -f "$ledger" ] \
+        || die 60 "the install ledger ${ledger} does not exist — \`install_from_path\` never ran, so the scenario installed nothing at all"
+
+    expected=$(tsv_scope_crate_dirs | wc -l | tr -d ' ')
+    actual=$(grep -c . "$ledger" | tr -d ' ')
+    [ "$actual" = "$expected" ] \
+        || die 60 "install ran ${actual} times, expected ${expected} (one per crate_dir). Thirteen in-scope ROWS resolve to ${expected} distinct DIRECTORIES (§F-3); a count equal to the row count means the loop is iterating rows or binaries instead of crates."
+
+    dups=$(sort "$ledger" | uniq -d)
+    if [ -n "$dups" ]; then
+        die 60 "a crate_dir was installed twice: $(printf '%s' "$dups" | tr '\n' ' ')"
+    fi
+
+    log "install count OK: ${actual} package-granular installs for ${expected} in-scope crate directories, none installed twice ($(sort "$ledger" | tr '\n' ' '))"
+}
+
 # ---------------------------------------------------------------------------
 # PATTERN (c)'S DEFINING PROPERTY — the three dirty-worktree assertions.
 #

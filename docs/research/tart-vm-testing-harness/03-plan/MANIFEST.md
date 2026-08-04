@@ -112,7 +112,7 @@ not been completed is not complete, regardless of what its code does.
 | **P2** — Host-side skeleton | `complete` | 2026-08-01 | `eee03178` |
 | **P3** — Guest bring-up | `complete` | 2026-08-02 | `345e5b12`, `f181a44e`, + the 2026-08-02 defect-fix commits |
 | **P4** — Expectation table and `--check-table` | `complete` | 2026-08-02 | `0c25d48f`, `12a87f28` |
-| **P5** — Pattern (c) complete: installs, N2, oracle | `not-started` | — | — |
+| **P5** — Pattern (c) complete: installs, N2, oracle | `complete` | 2026-08-03 | `298a02c7`, `462f6d5c`, `2bf453bc` |
 | **P6** — Pattern (b): branch | `not-started` | — | — |
 | **P7** — Pattern (a): released | `not-started` | — | — |
 | **P8** — Hardening, docs, measurement write-back | `not-started` | — | — |
@@ -138,7 +138,62 @@ set algebra makes a deleted table row `ADDED`. The implementation follows §9.6.
 **RESOLVED AT SOURCE 2026-08-02** — the plan's Phase 4 checkpoint and P4-T5
 acceptance now read `ADDED` and carry a dated correction note on the set
 direction; DOC-2 §9.6 was not amended and no code changed. See Phase 4 Deviations
-item 1. Phase 5 is the next phase to begin, and it needs a VM.
+item 1.
+
+**Phase 5 is `blocked`, 2026-08-02 — and it is blocked on a CONTRACT, not on the
+harness.** Everything Phase 5 was built to do, it does: `vmtest run local` streams
+97 MB of worktree into a clean guest, installs **all eight in-scope crates with
+eight package-granular `cargo install --path` commands**, lands **all thirteen
+in-scope binaries**, and passes **all four Single-Install Convention gates** —
+including the three-sidecar `trusty-memory` case that DOC-1's original seed table
+had omitted. Measurement K5 reproduced: `trusty-git-analytics` resolves rustc
+**1.97.1** against the workspace's **1.91.1**. **The real full-stack wall clock is
+656 s, 722 s and 919 s across three runs (11–15 min), which SUPERSEDES DOC-1 §9's
+4–8 minute extrapolation** — the measured value is 1.4×–3.8× that upper bound, and
+`install_timeout` is tightened 2700 → 1800 s on it.
+
+> **PHASE 5 IS NOW `complete`, 2026-08-03.** The paragraphs below describe the
+> `blocked` state as it stood on 2026-08-02 and are **retained** per this file's
+> record-reversals rule. Both blocking contract defects were resolved — DOC-2
+> §1.1a scopes the `stack doctor` predicate (and its own two mis-stated causes
+> were corrected on 2026-08-03), and §6.2 closes RC-2 as
+> *unreachable-by-design*. **Run C re-ran the checkpoint and exited 0 with all six
+> clauses satisfied**, in 656 s — the fastest of the three runs *and* the only one
+> to complete the entire oracle. **Nothing was weakened to get there.** RC-2 stays
+> **OPEN** as a product-side item.
+
+**Two contract defects stopped the checkpoint, and both were found by executing
+predicates nobody had run before.**
+
+> **(i) DOC-2 §1.1's `stack doctor` predicate is UNSATISFIABLE for a
+> source-installed stack**, for three independent reasons: `stack doctor`
+> enumerates `stable_set()` filtered to daemons, so **`trusty-code`,
+> `trusty-installer` and `tga` are structurally absent** from its output and can
+> never satisfy a predicate quantified over `member(p)`; **`trusty-mpm` is
+> deliberately left unprobed** (#4246) and always reports `unknown`, which §1.1
+> rejects — and the checkpoint singles `trusty-mpm` out by name; and the four
+> launchd daemons are `down` because a source install creates no plists, which
+> only `tctl install`'s service bootstrap does — and **DOC-1 §6.5 bans
+> `tctl install` from pattern (c)**. §1.1's own judgment call, that `stale` is
+> acceptable because "daemons have just been bootstrapped", describes a state
+> pattern (c) cannot reach. **The predicate was implemented exactly as written and
+> the run exits 60; it was not weakened.** §1.1 needs an owner decision.
+>
+> **(ii) DOC-2 §6.2's N2 probe cannot reach the behaviour RC-2 describes.**
+> `tctl install` with no cargo on PATH exits **3** with **no cargo-related token**:
+> the non-interactive consent gate returns before `install_one`, so the guard at
+> `install.rs:826` is unreachable — and `--yes` would be worse, reaching a
+> prebuilt-first path that could overwrite the source-built binaries under test.
+> **RC-2 is NOT pinned and remains open**; `3` is the consent-gate code, not the
+> cargo guard's. N2 is recorded **BLOCKED** using §F-7's own remedy, narrowly:
+> every other failure shape still dies 30.
+
+**No `crates/*` source was changed** — the harness adapts to the product, never the
+reverse. **RC-1 is unchanged**; §F-7 resolved by **step 2** (both `tctl start
+--json` and `tctl port <m> --json-port` exist), so its BLOCKED branch was not
+taken, though `verify_daemon_liveness` did not execute because §12.4 ends a run at
+the first classified failure. Per the state rules, `blocked` **halts the plan**:
+Phase 6 does not start around it.
 
 > **BOTH PHASE 3 CONTRACT DEFECTS ARE RESOLVED AT SOURCE, 2026-08-02**, by owner
 > decision, each on the reading Phase 3 identified as the narrower/stronger fix.
@@ -298,6 +353,20 @@ item 1. Phase 5 is the next phase to begin, and it needs a VM.
   four observations, and states that the **unchanged** 150 s maximum is sized
   against the slowest observed boot (33 s, ~4.5×). A note to that effect is on
   P8-T2, whose remaining scope is the watchdog tier and the daemon-health row.
+- **NEW, opened 2026-08-03 by the §1.1a cause corrections — assert
+  `plist_installed == false` DIRECTLY under patterns (b)/(c). Deferred to Phase 7;
+  NOT implemented.** Under (b)/(c) it is a **derivable invariant**: DOC-1 §6.5 bans
+  `plans_service_bootstrap` (`install.rs:528`), so no bootstrap runs and no plist is
+  written. Asserting it **directly** would fail closed if `tctl install` ever leaked
+  into a source-install scenario — **the exact false pass §6.5 bans that step to
+  prevent, and which nothing in today's oracle detects**. It is a **NEW assertion,
+  not a widening of the health predicate**: it does not touch `H_P` and relaxes
+  nothing. Its motivation is DOC-2 §1.1a Consequence 1 — as used today the
+  `plist_installed == false` guard is **inert** under (b)/(c) (it can never be
+  `true`, so the fail-closed branch it promises never fires), and this is the
+  productive use of that otherwise-dead signal. Recorded at plan §PHASE 7
+  (candidate 2) and DOC-2 §1.1a. **Scope addition — needs an owner decision, per
+  the stop rule; it did not ride in on the Phase 5 re-run.**
 
 ---
 
@@ -2308,7 +2377,37 @@ item 1. Phase 5 is the next phase to begin, and it needs a VM.
 
 ## Phase 5 — Pattern (c) complete: install steps, N2, and the full oracle
 
-- **State:** `not-started`
+- **State:** `complete`
+
+  > **UPDATED 2026-08-03 — `blocked` → `complete`.** The checkpoint was re-run
+  > after DOC-2 §1.1a's scoping and §6.2's RC-2 closure, and **run C exited 0 with
+  > all six clauses satisfied**. The two conditions the previous `blocked` value
+  > named as needed to unblock were both supplied: the owner decision on DOC-2 §1.1
+  > (delivered as §1.1a, whose two mis-stated causes were themselves corrected on
+  > 2026-08-03), and RC-2's disposition (closed *unreachable-by-design*, §6.2).
+  > **Nothing was weakened to reach the green**: all 13 binaries are still asserted
+  > present, all 4 Single-Install gates still run, and `on_path`/`version` are still
+  > asserted for every member `doctor` reports. RC-2 itself remains **OPEN** as a
+  > product-side item. The `blocked` note below is retained, not deleted.
+
+  > **CORRECTED 2026-08-03 — this field read `not-started` while P5-T1…P5-T9 were
+  > complete, two full-stack VM runs had been performed and this section's
+  > `Observed result` was several hundred lines long.** The record contradicted
+  > itself: the Summary table already carried `blocked` for P5, and the section —
+  > which the Schema declares **authoritative** over the table — carried the
+  > placeholder. The section was the wrong one. `blocked` is the correct value
+  > under the State rules: the phase's tasks are done, the checkpoint was run and
+  > NOT met, and the Deviations field names what was needed to unblock (an owner
+  > decision on DOC-2 §1.1, and RC-2's disposition).
+  >
+  > **This is the second instance of this slip** — Phase 3's `State` was found
+  > stale and fixed on 2026-08-02. Twice is a pattern, and the cause is structural:
+  > the update rule makes the MANIFEST the **final** task of a phase (P5-T9), so
+  > the `State` field is written last, at exactly the point where an autonomous
+  > session is most likely to end. Phases 1, 2, 4, 6, 7 and 8 were re-checked
+  > against their sections on 2026-08-03 and are correct; only P5 was stale.
+  > **Recorded rather than silently fixed**, per this file's own rule that a
+  > record whose history is rewritten is a record nobody can audit.
 - **Pass condition:** `vmtest run local` **exits 0**, and the run log shows:
   Counts below are **derived**, with today's value as the expected literal; if the
   TSV has changed, the derivation is the condition and the literal follows it.
@@ -2317,27 +2416,509 @@ item 1. Phase 5 is the next phase to begin, and it needs a VM.
   emitted from inside that crate's directory;
   (ii) `verify_binaries` reporting **N/N in-scope binaries present**, where N is the
   count of `in_scope=yes` rows (**13** today);
-  (iii) `tctl stack doctor --json` parsed, with every one of `tsv_scope_packages`'
-  values (**8** today) — **including `trusty-mpm`** — satisfying
-  `health ∈ {healthy, stale}`, `on_path == true`, `version != null`;
+  (iii) `tctl stack doctor --json` parsed, with every in-scope package **that
+  `doctor` reports as a member** satisfying `on_path == true`, `version != null`,
+  and `health ∈ H_c` — where, per **DOC-2 §1.1 as amended 2026-08-03 (§1.1a)**,
+  `H_c` is `{healthy, stale}`, plus `unknown` for a member with
+  `plist_installed == null`, plus `down` for a member with
+  `plist_installed == false`. In-scope packages `doctor` does not report —
+  `trusty-code`, `trusty-installer` and `tga`, which are not daemon members —
+  carry **no health obligation**; their coverage is clause (ii) and clause (iv);
   (iv) one `verify_single_install` passing per multi-binary in-scope package
   (**4** today): `trusty-search` (2 binaries), `trusty-memory` (**3**),
   `trusty-installer` (2), and `trusty-mpm` (2);
-  (v) N2 recorded with its observed exit code and stderr;
+  (v) N2 recorded with its observed exit code and stderr — **and, per DOC-2 §6.2
+  as amended 2026-08-03, an N2 recorded `BLOCKED` SATISFIES THIS CLAUSE**;
   (vi) a total wall clock, logged, which is recorded here as the **first full-stack
   measurement**.
-- **Observed result:** — not run
-- **Files delivered:** — none
-- **Measurements:** — none *(expected: **the first full-stack wall clock**, which
-  replaces DOC-1 §9's 4–8 min extrapolation; **RC-2's observed exit code and
-  stderr** from P5-T2; the RC-1 / §F-7 daemon-liveness disposition)*
-- **Deviations from plan:** None. *(Expected entries: §F-7 daemon start and port
-  discovery, including the BLOCKED branch if it fires. The fourth
-  `verify_single_install` call for `trusty-mpm` is **no longer a deviation to
-  record** — DOC-2 §12.5's skeleton was amended at source on 2026-07-31 and carries
-  it. Neither is §F-2's `tsv_version` contradiction — DOC-2 §1.2 was amended at
-  source on the same date.)*
-- **Tasks:** — none complete *(P5-T1 … P5-T9)*
+- **Observed result:** **PASS CONDITION MET — all six clauses, run C.**
+
+  **Run C, 2026-08-03 UTC, tree `2bf453bc`. `vmtest run local` exited 0**, VM
+  `vmtest-20260803T234712Z-18149`, **total wall clock 656 s**. Every clause is
+  evidenced below under "Run C". The two runs that preceded it are **retained in
+  full**, per this file's record-reversals rule.
+
+  | clause | run A | run B | **run C** |
+  |---|---|---|---|
+  | (i) 8 installs, none twice, each with in-directory `rustc` | PASS | PASS | **PASS** |
+  | (ii) `verify_binaries` 13/13 | PASS | PASS | **PASS** |
+  | (iii) `stack doctor` predicate | **FAIL** | **FAIL** | **PASS** |
+  | (iv) 4 × `verify_single_install` | PASS | PASS | **PASS** |
+  | (v) N2 recorded (BLOCKED satisfies, §6.2) | BLOCKED | BLOCKED | **BLOCKED — satisfies** |
+  | (vi) total wall clock logged | PASS | PASS | **PASS** |
+  | `vmtest run local` exit code | 60 | 60 | **0** |
+
+  **Run C, clause (iii) — the clause that had never passed.** `verify_stack_doctor`
+  applied §1.1a's predicate to the **5** in-scope packages `doctor` reports, and
+  named the 3 it does not:
+  ```
+  vmtest: stack doctor verdict: degraded   [LOGGED, NOT ASSERTED — §1.1]
+  vmtest:   trusty-search: health='down' accepted (plist_installed=false; H_c = {healthy,stale,down})
+  vmtest:   trusty-memory: health='down' accepted (plist_installed=false; H_c = {healthy,stale,down})
+  vmtest:   trusty-analyze: health='down' accepted (plist_installed=false; H_c = {healthy,stale,down})
+  vmtest:   trusty-mpm: health='unknown' accepted (plist_installed=null; H_c = {healthy,stale,unknown})
+  vmtest:   trusty-review: health='down' accepted (plist_installed=false; H_c = {healthy,stale,down})
+  vmtest: in-scope package(s) `stack doctor` does not report as members: trusty-code trusty-installer tga  [NO HEALTH OBLIGATION — DOC-2 §1.1a(a)]
+  vmtest: stack doctor reports member(s) the expectation table does not carry: trusty-console  [LOGGED, NOT ASSERTED — plan §F-10(e)]
+  vmtest: verify_stack_doctor PASS: all 5 in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern c (verdict 'degraded' logged but not asserted)
+  ```
+
+  **Run C — the two oracle functions runs A and B never reached both PASSED.**
+  §12.4's write-once `die` had ended both earlier runs at clause (iii):
+  ```
+  vmtest: verify_versions PASS: tool_version='0.5.0', stack_version='0.0.0-scaffold' (stub value, field asserted only), contract_floor <= contract_target
+  vmtest: verify_daemon_liveness PASS: 4 in-scope daemon(s) live (HTTP 200 + parseable JSON + acceptable .status). LIVENESS ONLY — see RC-1.
+  ```
+
+  **Run C — §1.1a(c)'s corrected mechanism, demonstrated end to end.** The same
+  four launchd members that `doctor` reported `health=down, plist=false` answered
+  HTTP 200 a few steps later, once `verify_daemon_liveness` ran an explicit
+  `tctl start --json`. **What moves `health` is the start, not a plist** — which is
+  precisely the causal claim §1.1a(c) was corrected to state on 2026-08-03:
+  ```
+  vmtest:   trusty-search: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-memory: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-mpm: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-review: LIVE — HTTP 200, JSON parses, .status='degraded'
+  ```
+
+  ---
+
+  **RUNS A AND B — RETAINED. PASS CONDITION NOT MET.** Clause (iii) failed and was
+  **unsatisfiable as written**; clauses (i), (ii), (iv) and (vi) passed; clause (v)
+  was recorded and is **BLOCKED**. Two full-stack runs, 2026-08-02 UTC — run A on
+  tree `298a02c7`, run B on tree `462f6d5c` (run B adds read-only snapshot
+  observations only; no assertion differs). **`vmtest run local` exited 60 on both.**
+
+  **Clause (i) — one `cargo install --path` per `tsv_scope_crate_dirs` value (8),
+  none twice, each preceded by a `rustc --version` from inside that directory.
+  PASS.**
+  ```
+  vmtest: install_from_path trusty-search
+  vmtest: rustc(/Users/admin/vmtest-src/crates/trusty-search): rustc 1.91.1 (ed61e7d7e 2025-11-07)   [emitted from INSIDE the crate directory; expected='1.91.1']
+  vmtest: cargo install --path /Users/admin/vmtest-src/crates/trusty-search (PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-search in 117s: Installed package `trusty-search v0.40.0 (/Users/admin/vmtest-src/crates/trusty-search)` (executables `trusty-embedderd`, `trusty-search`);
+  …
+  vmtest: install count OK: 8 package-granular installs for 8 in-scope crate directories, none installed twice (trusty-analyze trusty-code trusty-git-analytics trusty-installer trusty-memory trusty-mpm trusty-review trusty-search )
+  ```
+  **P5-T1's acceptance — K5 REPRODUCED**, on both runs:
+  ```
+  vmtest: rustc(trusty-git-analytics): crate declares its OWN rust-toolchain.toml — it overrides the workspace pin 1.91.1 (DOC-1 §8.4, measurement K5); asserting resolution, not a literal
+  vmtest: rustc(trusty-git-analytics): K5 REPRODUCED — 'rustc 1.97.1 (8bab26f4f 2026-07-14)' differs from the workspace pin 1.91.1
+  ```
+
+  **Clause (ii) — `verify_binaries` reporting N/N where N is the count of
+  `in_scope=yes` rows (13). PASS.**
+  ```
+  vmtest:   present  trusty-search/trusty-search -> /Users/admin/.cargo/bin/trusty-search
+  vmtest:   present  trusty-search/trusty-embedderd -> /Users/admin/.cargo/bin/trusty-embedderd
+  vmtest:   present  trusty-memory/trusty-memory -> /Users/admin/.cargo/bin/trusty-memory
+  vmtest:   present  trusty-memory/trusty-bm25-daemon -> /Users/admin/.cargo/bin/trusty-bm25-daemon
+  vmtest:   present  trusty-memory/trusty-memory-mcp-bridge -> /Users/admin/.cargo/bin/trusty-memory-mcp-bridge
+  vmtest:   present  trusty-analyze/trusty-analyze -> /Users/admin/.cargo/bin/trusty-analyze
+  vmtest:   present  trusty-code/tcode -> /Users/admin/.cargo/bin/tcode
+  vmtest:   present  trusty-installer/trusty-installer -> /Users/admin/.cargo/bin/trusty-installer
+  vmtest:   present  trusty-installer/tctl -> /Users/admin/.cargo/bin/tctl
+  vmtest:   present  tga/tga -> /Users/admin/.cargo/bin/tga
+  vmtest:   present  trusty-mpm/tm -> /Users/admin/.cargo/bin/tm
+  vmtest:   present  trusty-mpm/trusty-mpm -> /Users/admin/.cargo/bin/trusty-mpm
+  vmtest:   present  trusty-review/trusty-review -> /Users/admin/.cargo/bin/trusty-review
+  vmtest: verify_binaries PASS: 13/13 in-scope binaries present, 0 correctly absent (N is derived from the count of in_scope=yes rows, not hardcoded)
+  ```
+
+  **Clause (iv) — one `verify_single_install` per multi-binary in-scope package
+  (4). PASS.**
+  ```
+  vmtest: verify_single_install PASS: trusty-search — all 2 binaries present from ONE package-granular install (trusty-search trusty-embedderd)
+  vmtest: verify_single_install PASS: trusty-memory — all 3 binaries present from ONE package-granular install (trusty-memory trusty-bm25-daemon trusty-memory-mcp-bridge)
+  vmtest: verify_single_install PASS: trusty-installer — all 2 binaries present from ONE package-granular install (trusty-installer tctl)
+  vmtest: verify_single_install PASS: trusty-mpm — all 2 binaries present from ONE package-granular install (tm trusty-mpm)
+  ```
+  Cargo's own `Installed package … (executables …)` lines above are the direct
+  evidence: **one** package-granular command produced **all three**
+  `trusty-memory` binaries, which is exactly what DOC-1 §7.4 asks to be proved.
+
+  **Clause (iii) — `stack doctor --json` with all 8 `tsv_scope_packages` values
+  satisfying `health ∈ {healthy, stale}`, `on_path == true`, `version != null`.
+  FAILED — AND THE CLAUSE IS UNSATISFIABLE. See Deviations item 1.**
+  The parsed member table, verbatim:
+  ```
+  vmtest: stack doctor verdict: degraded   [LOGGED, NOT ASSERTED — §1.1]
+  vmtest: stack doctor member table as reported:
+      | trusty-search	health=down	on_path=true	plist=false	port=false	version=0.40.0
+      | trusty-memory	health=down	on_path=true	plist=false	port=false	version=0.22.0
+      | trusty-analyze	health=down	on_path=true	plist=false	port=false	version=0.8.0
+      | trusty-review	health=down	on_path=true	plist=false	port=false	version=0.11.0
+      | trusty-console	health=not_installed	on_path=false	plist=false	port=false	version=null
+      | trusty-mpm	health=unknown	on_path=true	plist=null	port=false	version=1.3.0
+  vmtest: stack doctor reports member(s) the expectation table does not carry: trusty-console  [LOGGED, NOT ASSERTED — plan §F-10(e)]
+  vmtest: FAIL[60]: verify_stack_doctor FAILED under pattern c — §1.1's per-member predicate does not hold for the following of the 8 in-scope packages:
+      trusty-search: health='down', expected one of {healthy, stale} (§1.1 accepts stale, rejects down and unknown)
+      trusty-memory: health='down', expected one of {healthy, stale} (§1.1 accepts stale, rejects down and unknown)
+      trusty-analyze: health='down', expected one of {healthy, stale} (§1.1 accepts stale, rejects down and unknown)
+      trusty-code: expected present, but `stack doctor` REPORTS NO MEMBER BY THAT NAME
+      trusty-installer: expected present, but `stack doctor` REPORTS NO MEMBER BY THAT NAME
+      tga: expected present, but `stack doctor` REPORTS NO MEMBER BY THAT NAME
+      trusty-mpm: health='unknown', expected one of {healthy, stale} (§1.1 accepts stale, rejects down and unknown)
+      trusty-review: health='down', expected one of {healthy, stale} (§1.1 accepts stale, rejects down and unknown)
+  ```
+  **Every one of the eight in-scope packages fails, and not one of them fails
+  because installation failed** — `verify_binaries` had just resolved all 13
+  binaries and `stack doctor` itself reports `on_path=true` and a real `version`
+  for every member it carries.
+
+  **Clause (v) — N2 recorded with its observed exit code and stderr. RECORDED;
+  N2 is BLOCKED. See Deviations item 2.**
+  ```
+  vmtest: N2 step 1: TCTL_PATH=/Users/admin/.cargo/bin/tctl (located under the installed environment)
+  vmtest: N2 step 2: probe PATH is /bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin — cargo confirmed ABSENT under it
+  vmtest: N2 OBSERVED exit code: 3
+  vmtest: N2 OBSERVED stdout (0 bytes):
+  vmtest: N2 OBSERVED stderr (204 bytes):
+      | info: ✓ git Git-155) found
+      | tctl install: refusing to install without confirmation in a non-interactive context; pass --yes to proceed non-interactively, or --dry-run to preview what would be installed.
+  vmtest: *** N2 BLOCKED (RC-2 / DOC-2 §6.2) — NOT A PASS. ***
+  ```
+
+  **Clause (vi) — a total wall clock, logged. PASS.**
+  ```
+  run A: vmtest: MEASURE run_wall_clock_s 722 (exit 60; excludes teardown) — DOC-1 §9's replacement measurement
+  run B: vmtest: MEASURE run_wall_clock_s 919 (exit 60; excludes teardown) — DOC-1 §9's replacement measurement
+  run C: vmtest: MEASURE run_wall_clock_s 656 (exit 0; excludes teardown) — DOC-1 §9's replacement measurement
+  ```
+
+  **`verify_versions` and `verify_daemon_liveness` DID NOT EXECUTE IN RUNS A AND
+  B.** §12.4's write-once `die` ends the run at the first classified failure, and
+  clause (iii) fired before them. Their raw inputs were captured by the diagnostics
+  snapshot (Deviations item 5) and are recorded under Measurements; **no verdict is
+  claimed for either function on those two runs.** *(Superseded for run C, which
+  reached both and passed both — see the run C block above.)*
+
+  **Host cleanliness — before and after, raw.** No `vmtest-*` VM survived any of
+  the three runs this phase performed.
+  ```
+  $ tart list                                    # before
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   48 minutes ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+
+  $ tart list                                    # after
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   16 minutes ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+  ```
+  Teardown on every path, including both exit-60 runs and the exit-50 run:
+  `vmtest: teardown: deleted vmtest-20260802T190434Z-67389`.
+
+  **Run C — host cleanliness, before and after, raw (2026-08-03).** No `vmtest-*`
+  survived either of the two runs performed that day.
+  ```
+  $ tart list                                    # before
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   1 hour ago     stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+
+  $ tart list                                    # after
+  Source Name                                                                                                        Disk Size Accessed       State
+  local  tahoe-base                                                                                                  50   33   3 minutes ago  stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago    stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago    stopped
+  ```
+  `vmtest: teardown: deleted vmtest-20260803T234712Z-18149`.
+
+  **A run whose log was lost is recorded rather than omitted.** An earlier
+  2026-08-03 invocation also exited 0 and tore its VM down cleanly, but its
+  **stderr was not captured** (the harness logs to stderr and prunes its run
+  registry on success), so it produced an exit code and no per-clause evidence.
+  It is **not** counted as a measurement and its wall clock is unknown; run C is
+  the re-run performed specifically to capture the log. Recorded because an
+  unlogged green is not evidence, and omitting it would misstate how many VMs the
+  host carried that day.
+- **Files delivered:** modify `vmtest-harness/vmtest`; modify
+  `vmtest-harness/lib/source.sh`; modify `vmtest-harness/lib/verify.sh`; modify
+  `vmtest-harness/scenarios/install-local.sh`; modify
+  `vmtest-harness/vmtest.defaults`; modify
+  `docs/research/tart-vm-testing-harness/03-plan/MANIFEST.md`
+- **Measurements:**
+
+  **1. THE FIRST FULL-STACK WALL CLOCK — this SUPERSEDES DOC-1 §9's 4–8 minute
+  extrapolation.** Three runs, 8 crates, 13 binaries, 8 vCPU / 16 GiB, shared
+  `CARGO_TARGET_DIR`, `SKIP_UI_BUILD=1`:
+
+  | | run A (`298a02c7`) | run B (`462f6d5c`) | **run C (`2bf453bc`)** |
+  |---|---|---|---|
+  | boot → ready | 12 s | 34 s | **17 s** |
+  | provisioning | 64 s | 137 s | **17 s** |
+  | source stream | 97,126,400 B / 5,345 files in 4 s | same, 4 s | 97,198,080 B / 5,346 files in **4 s** |
+  | **install phase (8 crates)** | **588 s** | **614 s** | **562 s** |
+  | scenario (install + probes + oracle) | ~640 s | ~748 s | **~610 s** |
+  | oracle reached | through clause (iii) | through clause (iii) | **complete** |
+  | **TOTAL run wall clock** | **722 s (12 min 02 s)** | **919 s (15 min 19 s)** | **656 s (10 min 56 s)** |
+
+  DOC-1 §9 extrapolated **4–8 minutes** and labelled it low-confidence, computed
+  for **six** crates against what is now an **eight**-crate scope. The measured
+  totals are **1.4×–3.8× that upper bound.** Per P5-T8 this is not a refutation of
+  the estimate — **it replaces it.** Runs A and B reached the same oracle failure,
+  so their totals include the full install and the first four verifications but
+  **not** `verify_versions` or `verify_daemon_liveness`; **run C completed the
+  entire oracle and is still the fastest of the three**, so the earlier totals are
+  not short for want of the missing steps — the spread is host variance in the
+  install phase, not oracle cost.
+
+  **What the three readings say about the 45-minute watchdog.** Observed range
+  **656–919 s**, mean **766 s**, spread **±17 %** about that mean. The watchdog
+  (`2700 s`) sits at **2.9× the slowest observed run** and **4.1× the fastest**.
+  The dominant term is the install phase (**562–614 s**, i.e. **83–86 %** of each
+  total), which is the term most exposed to host load; boot and provisioning
+  together never exceed 171 s. For the watchdog to fire, the install phase would
+  have to slow by roughly **3.4×** against the slowest run seen so far. **The
+  margin is comfortable and is now grounded in three measurements rather than
+  two** — but all three are from one host, so this bounds variance *on this
+  machine*, not across hosts. P8-T2 should not narrow the watchdog on this
+  evidence alone.
+
+  **2. Per-crate install times** (`MEASURE install_s`), TSV row order:
+
+  | crate_dir | run A | run B | **run C** |
+  |---|---|---|---|
+  | trusty-search | 117 s | 146 s | **91 s** |
+  | trusty-memory | 78 s | 92 s | **80 s** |
+  | trusty-analyze | 67 s | 66 s | **59 s** |
+  | trusty-code | 64 s | 55 s | **49 s** |
+  | trusty-installer | 21 s | 22 s | **22 s** |
+  | trusty-git-analytics | 62 s | 55 s | **64 s** |
+  | trusty-mpm | 121 s | 124 s | **138 s** |
+  | trusty-review | 58 s | 54 s | **59 s** |
+  | **total** | **588 s** | **614 s** | **562 s** |
+
+  `trusty-search` at 117/146/91 s brackets the research's 103–112 s. The largest
+  single-crate install observed across the three runs is **146 s**, so §10.2's
+  built-in 900 s single-crate budget is **~6.2×** measured — grounded, and left
+  unchanged. Run C's slowest crate is `trusty-mpm` at **138 s**, the only crate
+  whose time rose across all three runs; nothing in the budget turns on it.
+
+  **3. RC-2 — the observed `tctl install` cargo-absent exit code.** **The code is
+  `3`, and it is NOT the cargo-absent code.** Observed twice, identically:
+
+  - *In-guest, source-built `tctl` 0.5.0*, `PATH=/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin`
+    (cargo asserted absent under it first): **exit 3**, **stdout 0 bytes**, stderr
+    204 bytes:
+    ```
+    info: ✓ git Git-155) found
+    tctl install: refusing to install without confirmation in a non-interactive context; pass --yes to proceed non-interactively, or --dry-run to preview what would be installed.
+    ```
+  - *On the host, released `tctl` 0.4.10*, same PATH, `stdin=/dev/null`: **exit 3**,
+    stdout empty, byte-identical stderr. (Run before the first guest run, to
+    sequence the phase; side-effect-free because the prereq phase only
+    auto-installs under `--yes` or TTY consent, and the consent gate refuses
+    before any install action.)
+
+  **N2's predicate was NOT tightened**, and P5-T2's branch that applies is the
+  second one: `3` is non-zero and distinct from 1, **but it is the consent-gate
+  code, not the cargo guard's** — the guard at `install.rs:826` was never reached.
+  Recording `3` as RC-2's code would be precisely the false precision DOC-2 §6.2
+  refuses. **RC-2 remains OPEN.** `lib/verify.sh` carries DOC-2's weak predicate
+  verbatim plus a cited comment block explaining why it stands. **No `crates/*`
+  source was changed.**
+
+  **4. RC-1 / §F-7 — daemon start and port discovery.** §F-7 step 1 was performed
+  by reading the source; **both machine-readable surfaces EXIST**, so step 2
+  applies and **the step-3 BLOCKED-and-skip branch was NOT taken**:
+  - **start:** `tctl start [<members>] --json` — `main.rs` → `lifecycle::run_start`;
+    `--json` also suppresses the confirmation, so it is non-interactive by
+    construction.
+  - **port:** `tctl port <member> --json-port` → `{"addr":"host:port","port":N}`
+    (`port.rs`, `PortFormat::Json`), read from the member's `http_addr` discovery
+    file via `trusty_common::read_daemon_addr`.
+
+    > **CORRECTED 2026-08-03 — this reading is WRONG, and it cost a run.** `addr`
+    > is the **HOST ALONE**, not `host:port`. `format_output`'s `PortFormat::Json`
+    > arm splits the address on its last colon and serialises only the left side:
+    > `serde_json::json!({ "addr": host, "port": port })`, pinned by the crate's
+    > own unit test `format_output("127.0.0.1:7879", PortFormat::Json) ==
+    > {"addr":"127.0.0.1","port":7879}`. `verify_daemon_liveness` was built on the
+    > wrong reading and composed `http://127.0.0.1/health` with **no port**, which
+    > cannot reach any daemon — observed as **HTTP 000 for all four members** on
+    > the 2026-08-03 run, on which `tctl start --json` had just reported every one
+    > of them `installed + bootstrapped`. The oracle now composes the address from
+    > **both** fields and treats a response with `.addr` but no `.port` as "not yet
+    > recorded" rather than building a portless URL. `port.rs` is correct and
+    > unchanged; the defect was §F-7's transcription of it.
+
+  `verify_daemon_liveness` implements §1.3's INTERIM predicate against those two
+  commands and carries the RC-1 scoping statement as a header comment, as P5-T7
+  requires. **It did not execute** (clause (iii) fired first). The read-only half
+  of the port surface WAS observed:
+  ```
+  vmtest:   tctl port trusty-search --json-port -> tctl port: no address recorded for `trusty-search` (daemon not running?). Start it with `trusty-search start`.
+  vmtest:   tctl port trusty-memory --json-port -> tctl port: no address recorded for `trusty-memory` (daemon not running?). Start it with `trusty-memory start`.
+  vmtest:   tctl port trusty-mpm --json-port -> tctl port: no address recorded for `trusty-mpm` (daemon not running?). Start it with `trusty-mpm start`.
+  vmtest:   tctl port trusty-review --json-port -> tctl port: no address recorded for `trusty-review` (daemon not running?). Start it with `trusty-review start`.
+  ```
+  Consistent with `stack doctor`'s `port_recorded=false` for every member and
+  `plist_installed=false` for all four launchd members. **RC-1's status is
+  unchanged** — this phase neither advanced nor retired it.
+
+  **5. §1.2's inputs, observed** (`verify_versions` did not execute; no verdict is
+  claimed):
+  ```
+  vmtest: raw `tctl version --json`:
+      | { "contract_floor": 1, "contract_target": 1, "stack_version": "0.0.0-scaffold",
+      |   "tool": "trusty-installer", "tool_version": "0.5.0" }
+  vmtest: source_tree_version(trusty-installer) via cargo metadata at /Users/admin/vmtest-src: '0.5.0'
+  ```
+  The shape matches §1.2 exactly, `stack_version` is the documented stub, and
+  `tool_version == source_tree_version` — the (b)/(c) cross-check's inputs agree.
+
+  **6. `install_timeout` tightened 2700 → 1800 s** (P5-T8), ~2.4× the slower
+  measured scenario (748 s). The multiple now sits over a measurement rather than
+  over DOC-1 §9's low-confidence extrapolation.
+- **Deviations from plan:**
+
+  1. **CONTRACT DEFECT — DOC-2 §1.1's pass predicate and the plan's checkpoint
+     clause (iii) are UNSATISFIABLE for a source-installed stack. This is the
+     phase's headline finding.** Three independent reasons, all observed above and
+     all confirmed by reading `crates/trusty-installer`:
+
+     a. **`stack doctor` does not enumerate `tsv_scope_packages`.** It iterates
+        `stable_set()` **filtered to daemon members** (`commands/stack/doctor.rs`,
+        "for each in-scope daemon member"), which is a different set. Three of the
+        eight in-scope packages — **`trusty-code`, `trusty-installer` and `tga`** —
+        are structurally absent from its output and **can never satisfy a predicate
+        quantified over `member(p)`**. §F-10(e) resolved the *opposite* direction (a
+        doctor member the TSV does not carry → logged, not asserted, which is why
+        `trusty-console` correctly did not fail the run); nothing in the doc set
+        addresses this direction.
+
+     b. **`trusty-mpm` can never report `healthy` or `stale`, and the checkpoint
+        singles it out.** `probe_member_health` returns `ProbeOutcome::Unprobeable`
+        → `unknown` for `ManageStrategy::OwnVerb`, and the source comment is
+        explicit that mpm is **deliberately left unprobed** (#4246) even though it
+        does answer `/health`. §1.1 rejects `unknown`. Clause (iii)'s emphasis —
+        "**including `trusty-mpm`**" — names the one member the product guarantees
+        will fail it.
+
+     c. **The four launchd daemons are `down` because a source install creates no
+        plists, and creating them is banned.** `plist_installed=false` for all
+        four. Plists are bootstrapped by `tctl install`'s service-bootstrap step —
+        and **DOC-1 §6.5 bans `tctl install` from pattern (c)**. So DOC-2 §1.1's
+        stated judgment call, that `stale` is accepted because "on a freshly
+        installed VM ... daemons have just been bootstrapped", **describes a state
+        pattern (c) cannot reach**: nothing in a source-based scenario bootstraps a
+        daemon.
+
+     **The predicate was NOT weakened to reach a green checkpoint.** It is
+     implemented exactly as §1.1 states it, and the run exits 60. A package the
+     oracle cannot even locate is reported as its own named failure rather than
+     silently skipped. **Nothing under `crates/` was changed.** §1.1 needs an
+     owner decision this phase does not have standing to take; the narrowest
+     candidates, recorded without choosing between them: scope the predicate to
+     the packages `stack doctor` actually reports (and assert binary presence
+     alone for the rest, which `verify_binaries` already does); accept `unknown`
+     for members the product declines to probe; and either accept `down` under
+     source-install patterns or give the scenario a daemon-bootstrap step that
+     does not route through the banned `tctl install`.
+
+  2. **CONTRACT DEFECT — DOC-2 §6.2's N2 probe cannot reach the behaviour RC-2
+     describes; N2 is recorded BLOCKED.** Observed exit **3** with **no
+     cargo-related token** on stderr, so §6.2's weak predicate is not satisfied.
+     Two independent structural causes:
+     - `decide_install_gate`'s `InstallGate::Refuse` arm returns **3** whenever
+       `--yes` is absent and stdin is not a TTY — the guest exec channel is not a
+       TTY — and it returns **before `install_one` is ever called**, so the cargo
+       guard at `install.rs:826` is unreachable.
+     - Adding `--yes` would be **worse, not better**: `install_one` is
+       **prebuilt-tarball-first**, and the cargo guard sits in the
+       `Outcome::Fallback` arm reached only when the prebuilt download *fails*. On
+       a networked guest the download succeeds — and would install **released**
+       binaries over the source-built ones the run exists to test, which is exactly
+       the false pass DOC-1 §6.5 bans `tctl install` from pattern (c) to prevent.
+
+     **The plan has no branch for this.** P5-T2 anticipated only that the observed
+     code might be `1`; it did not anticipate the predicate being unreachable.
+     `negative_probe_n2` therefore applies **§F-7's own established remedy** —
+     record BLOCKED, log loudly, return 0 — which §F-7 created so a
+     required-contract gap "cannot strand the phase". **This is narrow, not a
+     weakening:** exit 0, non-empty stdout and empty stderr all still die 30, and a
+     stderr that *does* carry a cargo token still takes the normal PASS path. Only
+     the one shape proven unreachable is recorded instead of asserted, and it is
+     printed as `*** N2 BLOCKED … NOT A PASS ***` on every run.
+
+  3. **P5-T8's tripwire greps `$VMTEST_RUNDIR/run.log`, which does not exist.** The
+     harness as merged through Phase 4 writes every diagnostic to **stderr** (§12.1)
+     and keeps no run log, so the snippet would grep a missing path. Rather than
+     invent a run-log facility for one `grep -c`, `install_from_path` appends each
+     crate directory to `$VMTEST_RUNDIR/installs.log` and
+     `install_assert_install_count` counts that. **The ledger is strictly stronger
+     than the log grep**: it is written by `install_from_path` itself, so it records
+     an install issued from *anywhere* — a second install block, a retry, a future
+     `install-upgrade.sh` — whereas a scenario counting its own log lines can only
+     see the loop it wrote. The canonical `vmtest: install_from_path <dir>` line is
+     still emitted for the human and for clause (i).
+
+  4. **P5-T8's tripwire calls `die 60` from the scenario, which §12.4 forbids.**
+     §12.4: "scenarios do NOT call `die` with a code of their own … so a scenario
+     stays a description of steps and expectations and never encodes the exit-code
+     table." The identical logic lives behind the lib function
+     `install_assert_install_count`, satisfying both.
+
+  5. **`verify_snapshot_inputs` is not in §12.5's skeleton.** It logs the oracle's
+     raw JSON inputs verbatim before any assertion, asserts nothing, and always
+     returns 0. §12.4's first-failure unwind is correct for a harness and costly for
+     the one phase whose purpose is the oracle's first contact with reality: without
+     it, clause (iii)'s failure would have cost the record every observation
+     downstream, and a 12-minute build would have to be repeated to read a value
+     that was already on screen. It reads only what the assertions read; the one
+     side-effecting daemon command (`tctl start --json`) is deliberately **not** in
+     it, so it cannot change a verdict.
+
+  6. **The full-stack budget is enforced as a deadline, not a watchdog.**
+     `run_watchdog` backgrounds its command (§10.4 — no `timeout(1)` on macOS), so a
+     scenario wrapped in one would run in a **subshell**: `die` would exit the
+     subshell instead of unwinding the driver, the §12.4 chain would never fire, and
+     the write-once `VMTEST_EXIT` would not survive — §2's "first classified failure
+     wins" would report the wrong code. The deadline is re-checked before each
+     install and combines with the per-crate 900 s watchdog to bound the scenario at
+     `install_timeout + 900 s`.
+
+  7. **`verify_rustc`'s `expected` is empty for a crate with its own
+     `rust-toolchain.toml`.** `crates/trusty-git-analytics` pins `channel =
+     "stable"` — a *channel*, not a version — so no host-side literal can predict
+     it. The expectation is the workspace pin from `toolchain.tsv` everywhere else
+     (asserted for equality) and empty there, where resolution is asserted and the
+     K5 comparison is logged. Inventing `1.97.1` would pin a number the harness
+     cannot derive; asserting `1.91.1` would fail the run on the crate's declared
+     intent. **K5 reproduced on both runs.**
+
+  8. **§1.3 does not enumerate `trusty-analyze`, which is an in-scope daemon.**
+     `stable_set` marks it `daemon: true` and it exposes `/health` behind its
+     default `http-server` feature, but §1.3's four-shape table does not carry it,
+     so `verify_daemon_liveness` has no described shape for it and does not probe
+     it. Logged loudly every run rather than silently decided.
+
+  9. **Two implementation defects found by running, both fixed in `298a02c7`:**
+     `install_from_path` joined `guest_src_dir` to `crate_dir` directly, but §9.1
+     defines `crate_dir` as a directory **under `crates/`** (as `--check-table`'s
+     own derivation and §7.4's worked invocation both show). The failure was clean —
+     `cd` failed and the `&&`, never `;`, stopped cargo running in the wrong
+     directory, which is precisely why §7.4 requires `&&` there. Separately, the run
+     wall clock logged `exit 0` for a run that died 50, because `on_exit` runs
+     `local rc=$?` before cleanup samples `$?`; it now reports `VMTEST_EXIT`.
+
+  10. **§F items:** **§F-4, §F-5, §F-6, §F-10(a)/(b)/(e)** applied as previously
+      resolved, no new deviation. **§F-7** resolved by **step 2** (both surfaces
+      exist); the BLOCKED branch was not taken. **§F-3** applied as specified and
+      verified by both tripwires (8 installs, 8 directories, none twice). **§F-1,
+      §F-2, §F-8, §F-9** unaffected. The fourth `verify_single_install` call is not
+      a deviation (§12.5 was amended at source on 2026-07-31); it is **derived**
+      from the table's multi-binary in-scope packages rather than listed.
+- **Tasks:** P5-T1 … P5-T9 complete. **The phase checkpoint is NOT MET** — clause
+  (iii) is unsatisfiable pending an owner decision on DOC-2 §1.1 (Deviations item
+  1), and clause (v) is BLOCKED pending RC-2 (Deviations item 2). Every other
+  clause passed with observed output.
 
 ## Phase 6 — Pattern (b): branch
 

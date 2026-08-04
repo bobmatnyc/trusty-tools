@@ -87,6 +87,14 @@ VMTEST_TMPDIR=''
 # `scenario_dispatch` for what it does and why it is not a flag.
 VMTEST_DIRTY_CHECK="${VMTEST_DIRTY_CHECK:-0}"
 CONF_EFFECTIVE=''
+# Wall-clock start of the run, and the scenario's full-stack deadline.  Neither
+# is named `VMTEST_*`: §12.3 rule 2 reserves every `VMTEST_<KEY>` spelling for
+# §8.2's mechanical override channel, and `install_timeout` IS a key — so a
+# global called `VMTEST_INSTALL_*` would sit one keystroke from writing into the
+# harness's own override layer.  Same reasoning as CONF_EFFECTIVE and
+# EXPECTED_TSV.
+RUN_T0_EPOCH=''
+INSTALL_DEADLINE_EPOCH=''
 PIN_OCI_REF=''
 PIN_DIGEST=''
 PIN_LOCAL_NAME=''
@@ -241,6 +249,48 @@ tsv_scope_packages() {
     printf '%s\n' "$_pkgs"
 }
 
+# tsv_scope_binaries — emits `package<TAB>binary`, one line per `in_scope=yes`
+# row, in FILE ORDER (§9.3's row order, which §F-10(b) also makes the install
+# order).  This is `verify_binaries`' iteration set: §9.1's key is (package,
+# binary) and those are exactly the two columns emitted.
+#
+# NOTE WHAT IS NOT HERE, AND WHY IT IS NOT AN OVERSIGHT.  There is deliberately
+# NO accessor emitting `(crate_dir, binary)` pairs — Phase 4 recorded the same
+# refusal for the same reason (MANIFEST Phase 4, Deviations item 8).  That shape
+# is the one that invites `cargo install --path <dir> --bin <binary>`, which
+# DOC-2 §12.2 (amended 2026-07-31) prohibits outright: it satisfies every
+# binary-presence assertion while proving nothing about DOC-1 §7.4's
+# Single-Install Convention, and `--check-table` cannot catch it because the
+# table is not what would be wrong.  `crate_dir` is reachable only through
+# `tsv_scope_crate_dirs` (the INSTALLER's accessor, package-granular by
+# construction); `binary` is reachable only through the two accessors here and
+# `tsv_expect` (the ORACLE's accessors).  The two sets never meet in one row.
+tsv_scope_binaries() {
+    _tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes" { print $1 "\t" $3 }'
+}
+
+# tsv_package_binaries <package> — emits every `in_scope=yes` binary of one
+# package, in file order.  This is `verify_single_install`'s input: DOC-1 §7.4's
+# gate is that ONE package-granular install yields EVERY sidecar, so the
+# function needs the whole set, not a representative.
+tsv_package_binaries() {
+    _tsv_rows "$EXPECTED_TSV" | awk -F'\t' -v p="$1" '$6 == "yes" && $1 == p { print $3 }'
+}
+
+# tsv_scope_multibin_packages — emits the in-scope packages that declare MORE
+# THAN ONE in-scope binary.  DOC-2 §12.5's amendment of 2026-07-31 states the
+# rule this implements: "Every multi-binary in-scope package now gets a call;
+# single-binary packages do not need one, because for them `verify_binaries`
+# already is the whole claim."  Four values today — trusty-search,
+# trusty-memory, trusty-installer, trusty-mpm — DERIVED, not listed, so a crate
+# that gains a second binary is gated the moment `--check-table` adds its row.
+tsv_scope_multibin_packages() {
+    _tsv_rows "$EXPECTED_TSV" \
+        | awk -F'\t' '$6 == "yes" { n[$1]++; if (!($1 in ord)) ord[$1] = ++i }
+                      END { for (p in n) if (n[p] > 1) print ord[p] "\t" p }' \
+        | sort -n | cut -f2
+}
+
 # tsv_expect <package> <binary> <pattern> — emits `present` | `absent` | `-`.
 # The key is (package, binary), which is §9.2's composite primary key; the
 # pattern selects the column.  Returns 1 when no row carries that key, so a
@@ -380,6 +430,26 @@ vmtest_cleanup() {
     if [ "${VMTEST_CLEANUP_DONE:-0}" -eq 1 ]; then return 0; fi
     VMTEST_CLEANUP_DONE=1
 
+    # THE TOTAL WALL CLOCK IS LOGGED HERE, NOT AT THE END OF `run_lifecycle`,
+    # AND THAT PLACEMENT IS THE POINT (P5-T8).  DOC-1 §9 asks for the first
+    # pattern-(c) full-stack run to be recorded as the replacement measurement,
+    # and a measurement that only exists when the run SUCCEEDS is the one you do
+    # not have on the day you need it.  Cleanup runs on every exit path, so the
+    # number survives a failed oracle, a watchdog kill and a SIGINT alike.  It is
+    # emitted before teardown so that teardown's own seconds are excluded — the
+    # figure is the run, not the run plus the guest's removal.
+    if [ -n "${RUN_T0_EPOCH:-}" ]; then
+        # The code reported is VMTEST_EXIT when a `die` classified the failure,
+        # and `$?` otherwise.  `$?` ALONE IS WRONG HERE and was observed to be:
+        # `on_exit` runs `local rc=$?` before calling this function, and `local`
+        # is itself a command, so by the time cleanup samples `$?` it is reading
+        # the status of that assignment — always 0.  A failed run therefore
+        # logged "exit 0" beside its own FAIL line.  The write-once VMTEST_EXIT
+        # (§12.4) is the authoritative classification and is what the process
+        # will actually exit with.
+        log "MEASURE run_wall_clock_s $(( $(date '+%s') - RUN_T0_EPOCH )) (exit ${VMTEST_EXIT:-$_cleanup_rc}; excludes teardown) — DOC-1 §9's replacement measurement"
+    fi
+
     # The host worktree comes first: a VM that refuses to stop must not also
     # cost the host its worktree.  Idempotent and a no-op unless the opt-in
     # dirty check created fixtures, so the explicit call after the assertions
@@ -460,9 +530,24 @@ vmtest_cleanup() {
 # The explicit `exit` in the signal traps is NOT decoration: after a trap
 # handler returns, bash may resume the interrupted command rather than
 # terminating.  The explicit exit is what makes §2's user-abort codes real.
+#
+# A SIGNAL MUST CLASSIFY ITSELF **BEFORE** `vmtest_cleanup`, not after.  Cleanup
+# emits the MEASURE run_wall_clock_s line, and that line reports
+# `${VMTEST_EXIT:-$_cleanup_rc}`.  On a signal path nothing has called `die`, so
+# VMTEST_EXIT was unset and `_cleanup_rc` sampled `$?` of the preceding `log`
+# — zero.  An ABORTED RUN THEREFORE LOGGED `exit 0`: observed as
+# `MEASURE run_wall_clock_s 387 (exit 0; excludes teardown)` on a run terminated
+# with 143.  Anything reading that line to judge run success scored an
+# interrupted run as clean.  `_abort_classify` is the fix and it is
+# WRITE-ONCE (§12.4), exactly as `die` is: a scenario failure already classified
+# by `die` is NOT overwritten by a signal that arrives during unwinding, because
+# the operator needs to know what broke, not what broke last.  The literal
+# `exit` codes stay unconditional — they are the OS-level abort contract of §2,
+# a separate thing from the run's classification.
+_abort_classify() { [ -n "${VMTEST_EXIT:-}" ] || VMTEST_EXIT=$1; }
 on_exit() { local rc=$?; vmtest_cleanup; exit "$rc"; }
-on_int()  { log 'SIGINT — tearing down'; vmtest_cleanup; exit 130; }
-on_term() { log 'SIGTERM — tearing down'; vmtest_cleanup; exit 143; }
+on_int()  { log 'SIGINT — tearing down';  _abort_classify 130; vmtest_cleanup; exit 130; }
+on_term() { log 'SIGTERM — tearing down'; _abort_classify 143; vmtest_cleanup; exit 143; }
 
 trap on_exit EXIT
 trap on_int  INT
@@ -734,6 +819,8 @@ cmd_run() {
     conf_load
     conf_apply_flags
 
+    RUN_T0_EPOCH=$(date '+%s')
+
     VMTEST_RUNID="${FLAG_RUNID:-$(runid_generate)}"
     runid_validate "$VMTEST_RUNID"
     VMTEST_VM="vmtest-$VMTEST_RUNID"
@@ -860,6 +947,28 @@ scenario_dispatch() {
     local fn="scenario_install_${VMTEST_PATTERN}"
     command -v "$fn" >/dev/null 2>&1 \
         || die 2 "${file} does not define ${fn}() (plan §F-6)"
+
+    # §10.2's full-stack budget (`install_timeout`, 2700 s) is enforced as a
+    # DEADLINE the install step re-checks, not as a watchdog wrapped around the
+    # scenario. Recorded as a deviation, with the reason, because the obvious
+    # reading is the wrapper:
+    #
+    #   `run_watchdog` BACKGROUNDS its command (§10.4 — there is no timeout(1) on
+    #   macOS, so a watchdog is background-and-poll). A scenario run that way
+    #   executes in a SUBSHELL: `die` would exit that subshell instead of
+    #   unwinding the driver, so the §12.4 chain `die -> exit -> EXIT trap ->
+    #   teardown` never fires and every classified failure inside the scenario
+    #   silently becomes "the scenario returned non-zero". The write-once
+    #   VMTEST_EXIT would not survive either, so §2's "first classified failure
+    #   wins" would report the wrong code. Bounding the scenario that way would
+    #   cost the exit-code contract to buy a timeout.
+    #
+    # The deadline plus the per-install 900 s watchdog bound the scenario
+    # together: no install starts after the deadline, and no install runs longer
+    # than 900 s, so the scenario cannot exceed install_timeout + 900 s. That is
+    # a real bound reached without a subshell.
+    INSTALL_DEADLINE_EPOCH=$(( $(date '+%s') + $(conf_get install_timeout) ))
+    log "scenario budget: $(conf_get install_timeout)s (vmtest.defaults key install_timeout; DOC-2 §10.2 full-stack row), enforced as a deadline re-checked before each install step"
 
     log "--- scenario ${VMTEST_PATTERN} (${fn}) ---"
     "$fn"

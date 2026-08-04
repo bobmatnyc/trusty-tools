@@ -179,7 +179,7 @@ faithfully recording the state between the two amendments.
 | **P2** | Driver, config, exit codes, run registry, `lib/vm.sh`, preflight, `clean` | no | Host-side contract risk |
 | **P3** | N1 probe, provisioning, toolchain hand-off, `lib/source.sh` (local), delivery-only scenario | yes | Guest bring-up risk |
 | **P4** | `expected-binaries.tsv`, `--check-table` | no | Expectation-table drift |
-| **P5** | Pattern (c) installs + the full oracle; RC-2 pinned | yes | Oracle risk; **first full-stack timing** |
+| **P5** | Pattern (c) installs + the full oracle; RC-2 **closed as unreachable-by-design**, not pinned (2026-08-03, DOC-2 §6.2) | yes | Oracle risk; **first full-stack timing** |
 | **P6** | Pattern (b) | yes | — |
 | **P7** | Pattern (a) | yes | — |
 | **P8** | Hardening, docs, measurement write-back | mixed | Doc drift |
@@ -1211,15 +1211,59 @@ measurement.
 > `rustc --version` line emitted from inside that crate's directory;
 > (ii) `verify_binaries` reporting **N/N in-scope binaries present**, where N is the
 > count of `in_scope=yes` rows (**13** today);
-> (iii) `tctl stack doctor --json` parsed, with every one of `tsv_scope_packages`'
-> values (**8** today) —
-> **including `trusty-mpm`** — satisfying `health ∈ {healthy, stale}`,
-> `on_path == true`, `version != null`;
+> (iii) `tctl stack doctor --json` parsed, with every in-scope package **that
+> `doctor` reports as a member** satisfying `on_path == true`, `version != null`,
+> and `health ∈ H_c` — where, per **DOC-2 §1.1 as amended 2026-08-03 (§1.1a)**,
+> `H_c` is `{healthy, stale}`, plus `unknown` for a member with
+> `plist_installed == null` (the product deliberately declines to probe it,
+> `#4246`), plus `down` for a member with `plist_installed == false` (no plist,
+> because `tctl install`'s service step is banned from pattern (c) by DOC-1 §6.5).
+> In-scope packages `doctor` does not report — `trusty-code`, `trusty-installer`
+> and `tga`, which are not daemon members — carry **no health obligation**; their
+> coverage is clause (ii) and clause (iv);
 > (iv) `verify_single_install` passing for `trusty-search` (2 binaries),
 > `trusty-memory` (**3**), `trusty-installer` (2), and `trusty-mpm` (2);
-> (v) N2 recorded with its observed exit code and stderr;
+> (v) N2 recorded with its observed exit code and stderr — **and, per DOC-2 §6.2
+> as amended 2026-08-03, an N2 recorded `BLOCKED` SATISFIES THIS CLAUSE.** N2's
+> guide-and-abort is unreachable through `tctl install` from a guest for two
+> structural reasons (§6.2's RC-2 closure); the clause asks for the observation to
+> be recorded, and a BLOCKED record with its exit code and stderr is that
+> observation. Every other N2 failure shape still dies 30 and still fails the run;
 > (vi) a total wall clock, logged, which is recorded in the MANIFEST as the
 > **first full-stack measurement**.
+
+> **CORRECTED 2026-08-03 — clause (iii), by owner decision. The previous text is
+> not restored, and this note is why.** Phase 5 ran this checkpoint twice on real
+> guests and clause (iii) could not be met, for reasons that were **in the
+> checkpoint rather than in the harness or the product** (MANIFEST Phase 5,
+> Deviations item 1).
+>
+> It previously required all **8** `tsv_scope_packages` values — "**including
+> `trusty-mpm`**" — to satisfy `health ∈ {healthy, stale}`. Three of the eight are
+> **not daemon members and are structurally absent from `stack doctor`'s output**
+> (`doctor.rs:151` filters `stable_set()` to `m.daemon`), so no run of any pattern
+> could ever satisfy it; and the "including `trusty-mpm`" emphasis named **the one
+> member the product guarantees will fail the predicate** — `#4246` reports it
+> `unknown` by deliberate design. That emphasis was **not in DOC-2**; it entered
+> through this plan's own D2/D3 reversal, and it is **removed**, because a
+> checkpoint must not single out the member it is least able to assert. DOC-2
+> **§1.1a** now scopes the predicate and clause (iii) above tracks it.
+>
+> **This does not weaken an assertion the scenario can actually make.** All 13
+> in-scope binaries are still asserted present, all 4 Single-Install gates still
+> run, and `on_path`/`version` are still asserted for every member `doctor`
+> reports. **Nothing under `crates/` was changed** — the harness adapts to the
+> product, never the reverse.
+
+> **CORRECTED 2026-08-03 — clause (v), by owner decision.** It previously read only
+> "N2 recorded with its observed exit code and stderr", which P5-T2 read as
+> requiring a PASS. RC-2's behaviour is **unreachable through `tctl install` from a
+> guest** (DOC-2 §6.2, closed 2026-08-03 as *unreachable-by-design*), so the clause
+> could never go green while being read that way — the checkpoint would have been
+> permanently unmeetable for a reason that has nothing to do with whether the
+> install worked. It now says explicitly that a **BLOCKED record satisfies it**.
+> Every N2 failure shape other than the one proven unreachable still dies 30 and
+> still fails the run.
 
 ### P5-T1 — `install_from_path` and the per-build-step `rustc` assertion
 
@@ -1310,6 +1354,35 @@ DOC-2 §6.2 deliberately leaves N2's predicate weak because the code at
   either the pinned code or a comment citing `DOC-2 §6.2 RC-2` explaining why the
   weak predicate stands.
 - **Depends:** P5-T1
+
+> **RECONCILED 2026-08-03 — step 3's branches were both wrong, and the outcome was
+> a third thing neither anticipated.** The observed code is **3**: non-zero and
+> distinct from 1, so step 3 routes to the first branch — "RC-2 is satisfied in
+> practice; tighten N2 to assert that **exact** code". **Doing that would have been
+> a defect.** `3` is `decide_install_gate`'s **consent-gate** code
+> (`install_gate.rs:77-85` → `install.rs:266-278`), returned before `install_one`
+> is ever called; the cargo guard at `install.rs:826` was never reached, so
+> pinning `3` would have recorded a *different guard's* code as RC-2's and made
+> N2 assert something it had not tested. Step 2 asked which path the cargo-absent
+> error takes and assumed one of them was taken; **none was.**
+>
+> **RC-2 is now CLOSED as *unreachable-by-design* (DOC-2 §6.2), not pinned and not
+> left open.** Two structural causes, both read from the source and confirmed by
+> observation: the consent gate returns 3 before `install_one` whenever `--yes` is
+> absent and stdin is not a TTY (a guest exec channel is not); and `--yes` would
+> reach a **prebuilt-tarball-first** path whose cargo guard only fires when the
+> download *fails*, so on a networked guest it would install **released** binaries
+> over the source-built ones under test — the false pass DOC-1 §6.5 exists to
+> prevent.
+>
+> **What this task actually delivered stands.** P5-T2's real rule — an observed
+> code is not a documented contract, and **`crates/trusty-installer` is not to be
+> changed to make the harness happier** — was correct and was followed; nothing
+> under `crates/` was changed. The acceptance is met by the second of its two
+> alternatives: `lib/verify.sh` carries a comment block citing `DOC-2 §6.2 RC-2`,
+> and the MANIFEST carries the literal exit code and verbatim stderr. **This task
+> needs no re-execution**; it is reconciled here so a future reader does not
+> re-run it expecting branch one to apply.
 
 ### P5-T3 — N2 guide-and-abort probe
 
@@ -1626,6 +1699,34 @@ and asserts `tm` **present**. A run that does not find `tm` is a **failure**.
 > by `verify_binaries` reporting **N/N present**, where N is the count of
 > `in_scope=yes` rows (**13** today), with `tm` and `trusty-mpm` explicitly among
 > them, and `tctl stack doctor --json` reporting `trusty-mpm` as installed.
+
+**Carried into Phase 7 from DOC-2 §1.1a — two assertion candidates, NEITHER
+implemented before Phase 7 runs.** Both are recorded so they are not lost and not
+smuggled in early; asserting either before a pattern-(a) run has been observed
+would be inventing a contract, which is what §1.1a exists to stop.
+
+1. **Pattern (a) may assert daemon health more strictly.** Under (a) the harness
+   is permitted `tctl install`, whose service-bootstrap step **actually starts the
+   daemons**, so a real `healthy`/`stale` is reachable and §1.1a's cause (c) does
+   not apply. `H_P` is already pattern-gated to `{b, c}`, so (a) inherits the
+   strict form with no edit. Confirm against the first observed pattern-(a) run
+   before tightening anything further.
+2. **NEW (logged 2026-08-03) — assert `plist_installed == false` DIRECTLY under
+   patterns (b) and (c).** Under those patterns it is a **derivable invariant**:
+   DOC-1 §6.5 bans `plans_service_bootstrap` (`install.rs:528`), no bootstrap
+   runs, therefore no plist is written. Asserting it directly would **fail closed
+   if `tctl install` ever leaked into a source-install scenario** — precisely the
+   false pass §6.5 bans that step to prevent, and which nothing in today's oracle
+   detects.
+   - **This is a NEW assertion, NOT a widening of the health predicate.** It does
+     not touch `H_P`, does not relax any clause, and is independent of the
+     `down`-acceptance. Do not implement it by editing the health predicate.
+   - **Why it belongs here and not in Phase 5:** DOC-2 §1.1a Consequence 1 shows
+     the `plist_installed == false` guard is **inert** under (b)/(c) as currently
+     used — it can never be `true`, so the fail-closed branch it promises never
+     fires. This assertion is the productive use of that otherwise-dead signal,
+     and it is a scope addition, so it waits for an owner decision rather than
+     riding in on a re-run.
 
 ### P7-T1 — `install_from_registry`
 
