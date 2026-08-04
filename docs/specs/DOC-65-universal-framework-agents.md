@@ -25,8 +25,8 @@ spec_refs:
 
 trusty-mpm ships a bundled agent catalog of 42 sub-agent source files under
 `crates/trusty-mpm/src/assets/agents/` (five `BASE-*` inheritance templates,
-14 language/framework-specific `*-engineer` agents gated by
-`language_agent_scope`, and 23 agents that are not gated by it). ADR-0025's
+15 language/framework-specific `*-engineer` agents gated by
+`language_agent_scope`, and 22 agents that are not gated by it). ADR-0025's
 2026-08-03 addendum names the ungated set "**category 1: universal
 bundled**" in its four-category model (§B3) but gives only an illustrative
 subset as example (`research, qa, version-control, documentation,
@@ -134,7 +134,7 @@ different precedence tier.
 
 The only code-level line between "universal" and "stack-specific" is
 `LANGUAGE_ENGINEERS`
-(`crates/trusty-mpm/src/core/manifest/project_lang.rs`): 14 `*-engineer`
+(`crates/trusty-mpm/src/core/manifest/project_lang.rs`): 15 `*-engineer`
 stems, each paired with marker files (`Cargo.toml` → `rust-engineer`,
 `package.json`/`tsconfig.json` → the JS/TS family, `go.mod` →
 `golang-engineer`, …). `language_agent_scope` probes the project root for
@@ -170,7 +170,7 @@ mechanically universal but under-documented. Deploy target:
 
 ### 5.2 Category 2 — stack-specific bundled
 
-The 14 `*-engineer` stems in `LANGUAGE_ENGINEERS`, selected via
+The 15 `*-engineer` stems in `LANGUAGE_ENGINEERS`, selected via
 `[agents] include/exclude` in `manifest.toml`, auto-derived per project by
 `language_agent_scope`. Same deploy target as category 1 — selection, not a
 separate directory, is what distinguishes the two (ADR-0025 addendum §B3's
@@ -216,8 +216,8 @@ not resolved.
 ### 6.1 Undocumented, duplicated, or deprecated-but-still-deployed agents
 
 - **`ops` is deprecated in prose but still a full, still-deployed bundled
-  asset.** `agent-delegation.md` states twice — "Generic `ops` agent is
-  DEPRECATED; use `local-ops`" and "**NOTE**: Generic `ops` agent is
+  asset.** `agent-delegation.md` states twice — "Generic `ops` is
+  DEPRECATED; use `local-ops` for localhost/PM2/docker" and "**NOTE**: Generic `ops` agent is
   DEPRECATED. Use platform-specific agents." — but
   `crates/trusty-mpm/src/assets/agents/ops.md` is a 63-line, fully-formed
   agent definition, largely overlapping `local-ops.md` (151 lines) in
@@ -312,7 +312,7 @@ not an extension of an existing one.** Reasoning:
 **Code (verified directly in this repository, this worktree):**
 
 - `crates/trusty-mpm/src/assets/agents/*.md` — the 42-file bundled agent
-  catalog (5 `BASE-*` templates, 14 stack-specific engineers, 23 universal
+  catalog (5 `BASE-*` templates, 15 stack-specific engineers, 22 universal
   agents by this document's test).
 - `crates/trusty-mpm/src/core/manifest/project_lang.rs` —
   `LANGUAGE_ENGINEERS`, `language_agent_scope`, `detected_engineers`,
