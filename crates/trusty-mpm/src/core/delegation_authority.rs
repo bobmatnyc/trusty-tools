@@ -12,8 +12,8 @@
 //! prompt's delegation section, the `tm session start` count, and `tm doctor`
 //! (#4588); [`deployed_roster_section`] renders what it returns (#4069).
 //! Test: `delegation_authority_tests.rs` covers scanning, foundation-file
-//! exclusion and its near misses, the empty directory, and both render
-//! branches.
+//! exclusion and its near misses, the `name:`-required admission rule (#4711),
+//! the empty directory, and both render branches.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -114,12 +114,21 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
 /// precisely the failure mode the frontmatter `role:` rule was removed for.
 /// Sharing the predicate with the asset-level gate keeps the shipped files and
 /// the scanner from drifting apart the way the roster and its count did.
-/// What: case-insensitive `base-` prefix on the file stem, so every bundled
-/// `BASE-*.md` matches and nothing else plausibly does.
+/// What: case-insensitive `base-` prefix on the file stem, OR the bare stem
+/// `base` — so every bundled `BASE-*.md` matches, a hand-placed `base.md`
+/// matches, and nothing else plausibly does.
 /// Test: `scan_excludes_base_agents`,
-/// `near_miss_base_names_are_not_treated_as_foundation_files`.
-fn is_foundation_file(stem: &str) -> bool {
-    stem.to_ascii_lowercase().starts_with("base-")
+/// `near_miss_base_names_are_not_treated_as_foundation_files`,
+/// `bare_base_md_is_excluded_from_the_roster`,
+/// `base_prefixed_near_misses_survive_the_bare_base_rule`.
+pub(crate) fn is_foundation_file(stem: &str) -> bool {
+    // #4711: `base-` alone missed the hyphen-less `base.md`, whose body is a
+    // "Base QA Instructions… Appended to all QA agents" prompt fragment. That
+    // is exactly the shape a foundation file takes, so it must be excluded on
+    // the same rule. Matching the WHOLE stem (not a `base` prefix) keeps the
+    // #4589 near misses — `baseline-analyzer`, `base64-decoder` — in the roster.
+    let lower = stem.to_ascii_lowercase();
+    lower == "base" || lower.starts_with("base-")
 }
 
 /// Scan `agents_dir` and return summaries for all non-base agents.
@@ -128,8 +137,17 @@ fn is_foundation_file(stem: &str) -> bool {
 /// and what they handle so it can route work correctly.
 ///
 /// What: reads all .md files in agents_dir, parses frontmatter (name,
-/// role, description, model, extends), excludes BASE-* files and the
-/// manifest file, returns one AgentSummary per deployable agent.
+/// role, description, model, extends), excludes BASE-* files, files with no
+/// `name:` frontmatter, and the manifest file, returns one AgentSummary per
+/// deployable agent.
+///
+/// Two rules remove a file from the roster, and only two:
+/// 1. [`is_foundation_file`] — the `BASE-*` / bare `base` FILE NAME convention.
+/// 2. No frontmatter `name:` (#4711) — Claude Code dispatches by `name:`, so a
+///    file lacking one is a prompt fragment that could never be delegated to.
+///    The live case was `~/.claude/agents/base.md`, a "Base QA Instructions…
+///    Appended to all QA agents" fragment that the stem fallback turned into a
+///    delegatable agent called `base`.
 ///
 /// Foundation templates are identified by [`is_foundation_file`] — the `BASE-*`
 /// FILE NAME convention alone (#4589). An earlier revision also dropped any
@@ -145,6 +163,8 @@ fn is_foundation_file(stem: &str) -> bool {
 ///
 /// Test: `scan_finds_agents`, `scan_excludes_base_agents`,
 /// `agent_with_a_base_role_but_no_base_filename_stays_in_the_roster`,
+/// `bare_base_md_is_excluded_from_the_roster`,
+/// `file_without_name_frontmatter_is_excluded_from_the_roster`,
 /// `scan_empty_dir`
 pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
     // An ABSENT tier is normal (not every launch mode populates every tier) and
@@ -205,7 +225,23 @@ pub fn scan_agents(agents_dir: &Path) -> Vec<AgentSummary> {
             continue;
         };
         let fm = parse_frontmatter(&raw);
-        let name = fm.name.clone().unwrap_or_else(|| stem.to_string());
+        // #4711: a roster entry must be DISPATCHABLE, and Claude Code dispatches
+        // a subagent by its frontmatter `name:`. A file without one is a prompt
+        // fragment, not an agent; the old file-stem fallback minted a delegation
+        // target the harness cannot actually resolve. This is the durable half of
+        // the fix — `is_foundation_file` only catches fragments that happen to be
+        // named like one.
+        let Some(name) = fm.name.clone() else {
+            // Never silent: an operator whose file vanished from the roster needs
+            // a thread to pull, exactly as for the foundation-file exclusion.
+            tracing::debug!(
+                file = %file_name,
+                dir = %agents_dir.display(),
+                "excluded from the delegation roster: no `name:` frontmatter, so it is \
+                 not a dispatchable agent"
+            );
+            continue;
+        };
         let role = fm.role.clone().unwrap_or_else(|| name.clone());
         let extends_chain = build_extends_chain(fm.extends.as_deref(), &name);
 

@@ -5,7 +5,7 @@ description: Expert quality assurance engineer. Designs test strategies, impleme
 model: sonnet
 extends: base-qa
 tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
-skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, condition-based-waiting, test-driven-development, test-quality-inspector, testing-anti-patterns, webapp-testing]
+skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
 ---
 
 # QA Agent

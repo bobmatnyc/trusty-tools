@@ -4,7 +4,7 @@ role: documentation
 description: Documentation specialist. Creates, reorganises, and maintains technical documentation with consistency across the project.
 model: haiku
 extends: base-agent
-skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, internal-comms, test-driven-development, api-documentation]
+skills: [documentation-style]
 ---
 
 # Documentation Agent
