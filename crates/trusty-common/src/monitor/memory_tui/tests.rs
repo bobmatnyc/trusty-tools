@@ -844,6 +844,148 @@ fn test_filter_empty_palaces() {
     assert!(rows.iter().any(|r| r.text.contains("drawer-o")));
 }
 
+/// A never-opened palace: the daemon returned placeholder zeros it never
+/// measured, flagged by `counts_unknown`.
+fn cold_palace(id: &str) -> PalaceRow {
+    PalaceRow {
+        id: id.into(),
+        name: id.into(),
+        counts_unknown: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_palace_has_content_semantics() {
+    // Unknown counts are NOT empty — the palace stays visible so the renderer
+    // gets a chance to print `—` (#4690).
+    assert!(
+        view::palace_has_content(&cold_palace("cold")),
+        "unknown counts must not hide a palace"
+    );
+
+    // Measured and all zero — genuinely empty, still hidden.
+    assert!(
+        !view::palace_has_content(&PalaceRow {
+            id: "measured-empty".into(),
+            name: "measured-empty".into(),
+            ..Default::default()
+        }),
+        "a measured-empty palace stays hidden"
+    );
+
+    // Measured and non-zero — visible, unchanged.
+    for probe in [
+        PalaceRow {
+            vector_count: 1,
+            ..Default::default()
+        },
+        PalaceRow {
+            kg_triple_count: 1,
+            ..Default::default()
+        },
+        PalaceRow {
+            drawer_count: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            view::palace_has_content(&probe),
+            "a measured non-zero palace stays visible: {probe:?}"
+        );
+    }
+}
+
+#[test]
+fn test_cold_palace_visible() {
+    let mut state = MemoryTuiState::new("http://x");
+    state.palaces = vec![
+        cold_palace("cold"),
+        PalaceRow {
+            id: "measured-empty".into(),
+            name: "measured-empty".into(),
+            ..Default::default()
+        },
+        PalaceRow {
+            id: "warm".into(),
+            name: "warm".into(),
+            vector_count: 7,
+            ..Default::default()
+        },
+    ];
+
+    let visible = filtered_sorted_palaces(&state);
+    let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
+    assert!(ids.contains(&"cold"), "cold palace must survive the filter");
+    assert!(ids.contains(&"warm"));
+    assert!(
+        !ids.contains(&"measured-empty"),
+        "measured-empty palace stays filtered out"
+    );
+
+    // The em-dash path #4684 added is now actually reachable in the TUI.
+    let rows = palace_lines(&state);
+    let cold_row = rows
+        .iter()
+        .find(|r| r.text.contains("cold"))
+        .expect("cold palace must be rendered as a row");
+    assert!(
+        cold_row
+            .text
+            .contains(crate::monitor::dashboard::UNKNOWN_COUNT),
+        "unknown counts render as `—`, got {:?}",
+        cold_row.text
+    );
+    assert!(!rows.iter().any(|r| r.text.contains("measured-e")));
+}
+
+#[test]
+fn test_cold_palace_navigable() {
+    let mut state = MemoryTuiState::new("http://x");
+    state.sort_key = PalaceSortKey::Name;
+    state.palaces = vec![
+        PalaceRow {
+            id: "aaa-warm".into(),
+            name: "aaa-warm".into(),
+            vector_count: 3,
+            ..Default::default()
+        },
+        cold_palace("bbb-cold"),
+        PalaceRow {
+            id: "ccc-empty".into(),
+            name: "ccc-empty".into(),
+            ..Default::default()
+        },
+    ];
+
+    assert_eq!(
+        visible_palace_ids(&state),
+        vec![
+            tui_common::ALL_SENTINEL.to_string(),
+            "aaa-warm".to_string(),
+            "bbb-cold".to_string(),
+        ],
+        "the cold palace is addressable by the cursor; the measured-empty one is not"
+    );
+
+    navigate_down_visible(&mut state);
+    assert_eq!(state.selected_id(), Some("aaa-warm"));
+    navigate_down_visible(&mut state);
+    assert_eq!(
+        state.selected_id(),
+        Some("bbb-cold"),
+        "arrow keys must be able to land on a cold palace"
+    );
+    navigate_down_visible(&mut state);
+    assert_eq!(
+        state.selected_id(),
+        Some("bbb-cold"),
+        "the measured-empty palace is still skipped past the end"
+    );
+    navigate_up_visible(&mut state);
+    assert_eq!(state.selected_id(), Some("aaa-warm"));
+}
+
 #[test]
 fn test_palace_row_with_activity() {
     let p = PalaceRow {

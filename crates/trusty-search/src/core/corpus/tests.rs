@@ -539,3 +539,52 @@ fn copy_all_from_seeds_staging_corpus() {
         "copy from empty source must not erase staging rows"
     );
 }
+
+/// Why (#3979): the resume checkpoint is the only durable evidence that a
+/// staging corpus was left mid-run by a resumable reindex. It has to survive a
+/// close/reopen cycle (the interruption is, by definition, a process death),
+/// read back as `None` when never written or after being cleared, and — most
+/// importantly — never be dragged into a fresh staging corpus by
+/// `copy_all_from`, which would make a brand-new staging file claim to be
+/// somebody else's resumable partial work.
+/// Test: this test.
+#[test]
+fn reindex_checkpoint_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+
+    {
+        let store = CorpusStore::open(&path).unwrap();
+        assert!(
+            store.read_reindex_checkpoint_sync().unwrap().is_none(),
+            "a corpus with no checkpoint must read back None"
+        );
+        store.write_reindex_checkpoint_sync(br#"{"a":1}"#).unwrap();
+        assert_eq!(
+            store.read_reindex_checkpoint_sync().unwrap().as_deref(),
+            Some(&br#"{"a":1}"#[..])
+        );
+    }
+
+    // Reopen — the record must survive the process boundary a crash creates.
+    let store = CorpusStore::open(&path).unwrap();
+    assert_eq!(
+        store.read_reindex_checkpoint_sync().unwrap().as_deref(),
+        Some(&br#"{"a":1}"#[..]),
+        "#3979: the checkpoint must survive a close/reopen cycle"
+    );
+
+    // A fresh staging corpus seeded from this one must NOT inherit the record.
+    let staging_path = dir.path().join("index.redb.tmp");
+    let staging = CorpusStore::open_fresh(&staging_path).unwrap();
+    staging.copy_all_from(&store).unwrap();
+    assert!(
+        staging.read_reindex_checkpoint_sync().unwrap().is_none(),
+        "#3979: copy_all_from must not carry a checkpoint into a fresh staging corpus"
+    );
+
+    // Clearing is idempotent and leaves the key absent.
+    store.clear_reindex_checkpoint_sync().unwrap();
+    store.clear_reindex_checkpoint_sync().unwrap();
+    assert!(store.read_reindex_checkpoint_sync().unwrap().is_none());
+}
