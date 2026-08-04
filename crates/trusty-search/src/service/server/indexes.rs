@@ -515,6 +515,9 @@ pub(super) async fn create_index_handler(
             last_queried_unix: None,
             last_indexed_unix: None,
             repo_identity: repo_identity.clone(),
+            // #4095: a freshly-created index has an existing root by
+            // construction, so no ambiguity clock is running.
+            ambiguous_root_since_unix: None,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
@@ -575,7 +578,7 @@ pub(super) async fn create_index_handler(
             lexical_only,
             skip_kg,
             skip_vector,
-            corpus_open_failed: indexer.corpus_open_failed,
+            corpus_open_failure: indexer.corpus_open_failure,
         },
     );
     // The one deliberate divergence from warm-boot's classification. With no

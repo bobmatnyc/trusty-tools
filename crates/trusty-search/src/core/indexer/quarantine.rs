@@ -201,6 +201,10 @@ impl CodeIndexer {
             return;
         }
         self.corpus_open_failed = false;
+        // #4333: the classification is cleared in the SAME call that clears the
+        // flag, so `corpus_open_failure.is_some() == corpus_open_failed` holds
+        // by construction and the two surfaces can never disagree.
+        self.corpus_open_failure = None;
         let refused = self.incremental_writes_refused.swap(0, Ordering::Relaxed);
         tracing::warn!(
             index_id = %self.index_id,

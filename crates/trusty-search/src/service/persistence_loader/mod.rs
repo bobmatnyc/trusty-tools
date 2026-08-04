@@ -20,7 +20,7 @@ use trusty_common::migrations::{
 };
 
 use crate::core::{
-    corpus::{open_serialized, CorpusStore},
+    corpus::{open_serialized, CorpusOpenFailure, CorpusStore},
     embed::Embedder,
     indexer::{migrations::JsonCorpusToRedbMigration, CodeIndexer},
     store::{UsearchStore, VectorStore},
@@ -150,16 +150,25 @@ pub async fn build_indexer_from_entry(
             match open_result {
                 Ok(corpus) => indexer.set_corpus_store(Arc::new(corpus)),
                 Err(e) => {
+                    // #4333: classify WHY the open failed before logging, so
+                    // neither the log line nor the status surface tells an
+                    // operator "corrupted format, run --force" for what was a
+                    // transient warm-boot open timeout against an intact corpus.
+                    let kind = CorpusOpenFailure::classify(&e);
                     tracing::error!(
+                        index_id = %index_id,
+                        failure_kind = kind.label(),
+                        transient = kind.is_transient(),
                         "warm-boot: FAILED to open redb corpus for '{index_id}' at {} ({e}). \
-                         The durable corpus store is unavailable — the next reindex will be a \
-                         full cold-start (Skipped 0). Check permissions and whether another \
-                         process holds the redb file lock. (refs #840, #1158)",
-                        redb_path.display()
+                         Classified as '{}' — {}. (refs #840, #1158, #4333)",
+                        redb_path.display(),
+                        kind.label(),
+                        kind.stage_reason(),
                     );
                     // Issue #1158: mark the failure so the stage-classifier
                     // emits Failed instead of the misleading InProgress.
                     indexer.corpus_open_failed = true;
+                    indexer.corpus_open_failure = Some(kind);
                 }
             }
         }
@@ -181,6 +190,10 @@ pub async fn build_indexer_from_entry(
                  of silently 'ok'. (refs #2847, #1158)"
             );
             indexer.corpus_open_failed = true;
+            // #4333: an unresolvable storage path is a real failure but says
+            // NOTHING about the on-disk format — classify it as unclassified
+            // rather than letting it inherit the corruption wording.
+            indexer.corpus_open_failure = Some(CorpusOpenFailure::Unclassified);
         }
     }
 

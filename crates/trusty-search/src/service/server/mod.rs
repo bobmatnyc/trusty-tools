@@ -14,6 +14,9 @@
 mod admin;
 mod components;
 mod contrib_graph;
+// #4087: query-time guard so a corpus-failed index fails loudly instead of
+// answering HTTP 200 with an empty result set.
+mod degraded;
 mod fanout;
 mod files;
 mod health;
@@ -47,6 +50,8 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
+#[cfg(test)]
+mod tests_4087;
 #[cfg(test)]
 mod tests_4110;
 #[cfg(test)]
