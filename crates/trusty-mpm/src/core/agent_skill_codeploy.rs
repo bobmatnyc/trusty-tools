@@ -170,7 +170,14 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/skills")
     }
 
-    /// Every bundled non-`BASE-*` agent stem, sorted.
+    /// Every bundled non-foundation agent stem, sorted.
+    ///
+    /// Shares the production predicate deliberately: a private copy of the rule
+    /// here would let these gates and the roster scanner drift, which is the
+    /// exact defect shape #4711 removed. The first cut of this helper filtered
+    /// on the bare `starts_with("base")` prefix — the very form #4711 replaced
+    /// in `is_foundation_file` — which would have made a future bundled
+    /// `baseline-*` agent invisible to all three gates below.
     fn bundled_agent_stems() -> Vec<String> {
         let mut stems: Vec<String> = std::fs::read_dir(agents_dir())
             .expect("bundled agent assets dir")
@@ -178,7 +185,7 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
             .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-            .filter(|stem| !stem.to_ascii_lowercase().starts_with("base"))
+            .filter(|stem| !crate::core::delegation_authority::is_foundation_file(stem))
             .collect();
         stems.sort();
         stems

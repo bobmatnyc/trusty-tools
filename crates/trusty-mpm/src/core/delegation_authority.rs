@@ -121,7 +121,7 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
 /// `near_miss_base_names_are_not_treated_as_foundation_files`,
 /// `bare_base_md_is_excluded_from_the_roster`,
 /// `base_prefixed_near_misses_survive_the_bare_base_rule`.
-fn is_foundation_file(stem: &str) -> bool {
+pub(crate) fn is_foundation_file(stem: &str) -> bool {
     // #4711: `base-` alone missed the hyphen-less `base.md`, whose body is a
     // "Base QA Instructions… Appended to all QA agents" prompt fragment. That
     // is exactly the shape a foundation file takes, so it must be excluded on
