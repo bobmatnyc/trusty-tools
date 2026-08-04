@@ -114,7 +114,7 @@ not been completed is not complete, regardless of what its code does.
 | **P4** — Expectation table and `--check-table` | `complete` | 2026-08-02 | `0c25d48f`, `12a87f28` |
 | **P5** — Pattern (c) complete: installs, N2, oracle | `complete` | 2026-08-03 | `298a02c7`, `462f6d5c`, `2bf453bc` |
 | **P6** — Pattern (b): branch | `complete` | 2026-08-04 | `d9f09253` |
-| **P7** — Pattern (a): released | `not-started` | — | — |
+| **P7** — Pattern (a): released | `complete` | 2026-08-04 | `4f81bb37`, `b6017459` |
 | **P8** — Hardening, docs, measurement write-back | `not-started` | — | — |
 
 **Plan status:** Phase 1 complete, 2026-07-31; **closed out 2026-08-01** with a
@@ -213,6 +213,40 @@ was exercised against a commit **the host does not have**, but every in-scope cr
 version happened to match across the two trees, so this run proves the read is
 **correct** without falsifying the host-side alternative **by result**. Both are
 recorded in Phase 6 Measurements rather than claimed as more than they cover.
+
+**Phase 7 complete, 2026-08-04 — the last implementation phase, and the D2/D3
+reversal is now proved end to end by a run rather than by a `cargo search`.**
+`vmtest run released` exits **0** in **511 s** — the **fastest of the six
+full-stack runs**, because pattern (a) builds published sources with published
+lockfiles and skips a repository entirely. Eight `cargo install <pkg> --locked`
+invocations from crates.io — **including `cargo install tga --locked`, `cargo
+install trusty-mpm --locked` and `cargo install trusty-review --locked`** — land
+**13/13 in-scope binaries**, pass **all four Single-Install gates**, and satisfy
+the full oracle under pattern `a`. **`tm` and `trusty-mpm` are PRESENT**, and
+`stack doctor` reports `trusty-mpm` `on_path=true`, `version=1.3.4`. Under the
+superseded D2 that outcome was impossible in both halves. **All eight in-scope
+packages were independently confirmed published on crates.io before the run**, so
+no assertion rested on the plan's 2026-07-31 `cargo search` reading — two of which
+have since moved (`trusty-mpm` 1.0.2 → **1.3.4**, `trusty-review` 0.10.1 →
+**0.11.0**).
+
+**Phase 7 found one contract defect, and only a run could have found it.**
+DOC-2 §1.1a asserted that pattern (a) *"inherits the strict form automatically"*
+because `tctl install` is permitted under (a) and writes plists. **The premise is
+true and the conclusion does not follow:** plan **P7-T2 itself** specifies that
+the harness invokes `cargo install` directly under (a) too, *"so that all three
+patterns share one install mechanism and differ ONLY in source"*. A permission
+nobody exercises writes no plist. The first pattern-(a) run exited **60** with all
+four launchd members `down` / `plist=false` — **identical in shape to (b)'s and
+(c)'s** — while `verify_binaries` had just resolved 13/13. **The predicate was
+implemented exactly as §1.1a wrote it and it failed; it was not weakened to reach
+green.** Both of Phase 7's logged assertion candidates were then decided on that
+observation, and **the pair is a net strengthening**: the `down` acceptance drops
+its pattern gate, *and* `plist_installed == false` becomes a **direct assertion**
+under all three patterns, so the previously **inert** guard (§1.1a Consequence 1)
+now fails closed by name if `tctl install` ever leaks into a scenario — the false
+pass DOC-1 §6.5 bans that step to prevent, and which nothing in the oracle
+detected before. See Phase 7 Deviations items 1 and 2.
 
 > **BOTH PHASE 3 CONTRACT DEFECTS ARE RESOLVED AT SOURCE, 2026-08-02**, by owner
 > decision, each on the reading Phase 3 identified as the narrower/stronger fix.
@@ -372,9 +406,17 @@ recorded in Phase 6 Measurements rather than claimed as more than they cover.
   four observations, and states that the **unchanged** 150 s maximum is sized
   against the slowest observed boot (33 s, ~4.5×). A note to that effect is on
   P8-T2, whose remaining scope is the watchdog tier and the daemon-health row.
-- **NEW, opened 2026-08-03 by the §1.1a cause corrections — assert
+- **CLOSED 2026-08-04 by Phase 7 — assert `plist_installed == false` DIRECTLY.
+  IMPLEMENTED, and widened past (b)/(c) to ALL THREE patterns.** The first
+  pattern-(a) run showed the same four launchd members `down` with `plist=false`
+  as (b) and (c), because plan P7-T2 has the harness install with `cargo install`
+  under (a) too — so the invariant is universal here, not source-install-specific.
+  The **inverse** (`plist_installed == true` under (a)) does **not** hold and is
+  **not** implemented. See Phase 7 Deviations items 1 and 2 for the decision, the
+  observed evidence, and the exit-60 run that forced it. Original text:
+  *"**NEW, opened 2026-08-03 by the §1.1a cause corrections — assert
   `plist_installed == false` DIRECTLY under patterns (b)/(c). Deferred to Phase 7;
-  NOT implemented.** Under (b)/(c) it is a **derivable invariant**: DOC-1 §6.5 bans
+  NOT implemented.**"* Under (b)/(c) it is a **derivable invariant**: DOC-1 §6.5 bans
   `plans_service_bootstrap` (`install.rs:528`), so no bootstrap runs and no plist is
   written. Asserting it **directly** would fail closed if `tctl install` ever leaked
   into a source-install scenario — **the exact false pass §6.5 bans that step to
@@ -3272,7 +3314,16 @@ recorded in Phase 6 Measurements rather than claimed as more than they cover.
 
 ## Phase 7 — Pattern (a): released
 
-- **State:** `not-started`
+- **State:** `complete`
+
+  > **2026-08-04 — `not-started` → `complete` in one pass, over TWO runs.** The
+  > checkpoint was run twice: the first exited **60** on a contract defect in
+  > DOC-2 §1.1a (Deviations item 1), the second exited **0** with every clause
+  > satisfied. Per the State rules this phase passed through `in-progress` at its
+  > first commit (`4f81bb37`, P7-T1/P7-T2); it is recorded `complete` here because
+  > the checkpoint has been **run** and its output is pasted below, which is the
+  > gate the rules make it. **The failing run's output is retained in Deviations
+  > item 1 rather than replaced** — this file records reversals.
 - **Pass condition:** `vmtest run released` **exits 0**, and the run log shows one
   `cargo install <pkg> --locked` invocation per value of `tsv_scope_packages`
   (**8** today) — including **`cargo install tga --locked`**, **`cargo install
@@ -3280,16 +3331,384 @@ recorded in Phase 6 Measurements rather than claimed as more than they cover.
   by `verify_binaries` reporting **N/N present**, where N is the count of
   `in_scope=yes` rows (**13** today), with `tm` and `trusty-mpm` explicitly among
   them, and `tctl stack doctor --json` reporting `trusty-mpm` as installed.
-- **Observed result:** — not run
-- **Files delivered:** — none
-- **Measurements:** — none *(expected: total wall clock; the published versions
-  installed, which will legitimately differ from the working tree)*
-- **Deviations from plan:** None. *(If `cargo install trusty-mpm --locked` fails
-  because the crate is not on crates.io, record it verbatim and stop — that
-  contradicts both `cargo search trusty-mpm` → `1.0.2` and a manifest with no
-  `publish` key, and is a design-level finding about the D2 reversal, not a harness
-  bug.)*
-- **Tasks:** — none complete *(P7-T1 … P7-T5)*
+- **Observed result:** **PASS CONDITION MET — every clause.** Met on the **second**
+  run; the first exited **60** on a contract defect (Deviations item 1).
+
+  **2026-08-04 UTC, harness tree `b6017459`. `vmtest run released` exited 0**, VM
+  `vmtest-20260804T023953Z-50439`, **total wall clock 511 s**. Run started
+  `02:39:52Z`, ended `02:48:27Z` (515 s including teardown).
+
+  | clause | result |
+  |---|---|
+  | `vmtest run released` exits 0 | **PASS** — `EXIT_CODE=0` |
+  | one `cargo install <pkg> --locked` per value of `tsv_scope_packages` (**8**) | **PASS** — 8 invocations, set asserted equal to the accessor's |
+  | including `cargo install tga --locked` | **PASS** — line 84 of the run log |
+  | including `cargo install trusty-mpm --locked` | **PASS** — line 89 |
+  | including `cargo install trusty-review --locked` | **PASS** — line 94 |
+  | `verify_binaries` reporting N/N, N = count of `in_scope=yes` rows (**13**) | **PASS** — 13/13 |
+  | with `tm` explicitly among them | **PASS** — `present trusty-mpm/tm -> /Users/admin/.cargo/bin/tm` |
+  | with `trusty-mpm` explicitly among them | **PASS** — `present trusty-mpm/trusty-mpm -> /Users/admin/.cargo/bin/trusty-mpm` |
+  | `tctl stack doctor --json` reporting `trusty-mpm` as installed | **PASS** — `on_path=true`, `version=1.3.4`, `health=unknown` (§1.1a(b), #4246) |
+
+  **The eight registry installs — the clause the D2/D3 reversal turns on.** Every
+  package name comes from `tsv_scope_packages`; none is spelled out in the
+  scenario.
+  ```
+  vmtest: cargo install trusty-search --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-search in 80s: Installed package `trusty-search v0.39.1` (executables `trusty-embedderd`, `trusty-search`);
+  vmtest: cargo install trusty-memory --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-memory in 71s: Installed package `trusty-memory v0.21.2` (executables `trusty-bm25-daemon`, `trusty-memory`, `trusty-memory-mcp-bridge`);
+  vmtest: cargo install trusty-analyze --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-analyze in 54s: Installed package `trusty-analyze v0.7.4` (executable `trusty-analyze`);
+  vmtest: cargo install trusty-code --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-code in 37s: Installed package `trusty-code v0.2.0` (executable `tcode`);
+  vmtest: cargo install trusty-installer --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-installer in 13s: Installed package `trusty-installer v0.4.10` (executables `tctl`, `trusty-installer`);
+  vmtest: cargo install tga --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed tga in 32s: Installed package `tga v2.11.0` (executable `tga`);
+  vmtest: cargo install trusty-mpm --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-mpm in 106s: Installed package `trusty-mpm v1.3.4` (executables `tm`, `trusty-mpm`);
+  vmtest: cargo install trusty-review --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)
+  vmtest: installed trusty-review in 44s: Installed package `trusty-review v0.11.0` (executable `trusty-review`);
+  vmtest: install count OK: 8 package-granular installs, one per package name from `tsv_scope_packages` (8), none installed twice, set matches exactly (tga trusty-analyze trusty-code trusty-installer trusty-memory trusty-mpm trusty-review trusty-search )
+  ```
+  **`cargo install trusty-mpm --locked` SUCCEEDED and produced BOTH `tm` and
+  `trusty-mpm`.** That is the D2 reversal closed by execution: under the superseded
+  D2 this command did not exist and `tm` was asserted **known-absent**. **`cargo
+  install tga --locked`** closes the D3 discontinuity — the directory is
+  `crates/trusty-git-analytics/` and the only name crates.io answers to is `tga`.
+  **`cargo install trusty-review --locked`** closes §A.1b's scope widening.
+
+  **13/13 in-scope binaries present, `tm` and `trusty-mpm` among them.**
+  ```
+  vmtest:   present  trusty-search/trusty-search -> /Users/admin/.cargo/bin/trusty-search
+  vmtest:   present  trusty-search/trusty-embedderd -> /Users/admin/.cargo/bin/trusty-embedderd
+  vmtest:   present  trusty-memory/trusty-memory -> /Users/admin/.cargo/bin/trusty-memory
+  vmtest:   present  trusty-memory/trusty-bm25-daemon -> /Users/admin/.cargo/bin/trusty-bm25-daemon
+  vmtest:   present  trusty-memory/trusty-memory-mcp-bridge -> /Users/admin/.cargo/bin/trusty-memory-mcp-bridge
+  vmtest:   present  trusty-analyze/trusty-analyze -> /Users/admin/.cargo/bin/trusty-analyze
+  vmtest:   present  trusty-code/tcode -> /Users/admin/.cargo/bin/tcode
+  vmtest:   present  trusty-installer/trusty-installer -> /Users/admin/.cargo/bin/trusty-installer
+  vmtest:   present  trusty-installer/tctl -> /Users/admin/.cargo/bin/tctl
+  vmtest:   present  tga/tga -> /Users/admin/.cargo/bin/tga
+  vmtest:   present  trusty-mpm/tm -> /Users/admin/.cargo/bin/tm
+  vmtest:   present  trusty-mpm/trusty-mpm -> /Users/admin/.cargo/bin/trusty-mpm
+  vmtest:   present  trusty-review/trusty-review -> /Users/admin/.cargo/bin/trusty-review
+  vmtest: verify_binaries PASS: 13/13 in-scope binaries present, 0 correctly absent (N is derived from the count of in_scope=yes rows, not hardcoded)
+  ```
+  **All four Single-Install Convention gates pass — against PUBLISHED packages,
+  which is a claim patterns (b) and (c) cannot make.** A `[[bin]]` that stopped
+  shipping in a crate's published form (behind a feature no longer default, say)
+  builds fine from source and fails here.
+  ```
+  vmtest: verify_single_install PASS: trusty-search — all 2 binaries present from ONE package-granular install (trusty-search trusty-embedderd)
+  vmtest: verify_single_install PASS: trusty-memory — all 3 binaries present from ONE package-granular install (trusty-memory trusty-bm25-daemon trusty-memory-mcp-bridge)
+  vmtest: verify_single_install PASS: trusty-installer — all 2 binaries present from ONE package-granular install (trusty-installer tctl)
+  vmtest: verify_single_install PASS: trusty-mpm — all 2 binaries present from ONE package-granular install (tm trusty-mpm)
+  ```
+  **`stack doctor` reports `trusty-mpm` as installed** — the checkpoint's last
+  clause, and the member table it comes from:
+  ```
+  vmtest: stack doctor member table as reported:
+      | trusty-search	health=down	on_path=true	plist=false	port=true	version=0.39.1
+      | trusty-memory	health=down	on_path=true	plist=false	port=false	version=0.21.2
+      | trusty-analyze	health=down	on_path=true	plist=false	port=false	version=0.7.4
+      | trusty-review	health=down	on_path=true	plist=false	port=false	version=0.11.0
+      | trusty-console	health=not_installed	on_path=false	plist=false	port=false	version=null
+      | trusty-mpm	health=unknown	on_path=true	plist=null	port=false	version=1.3.4
+  vmtest:   trusty-search: health='down' accepted (plist_installed=false; H_a = {healthy,stale,down})
+  vmtest:   trusty-memory: health='down' accepted (plist_installed=false; H_a = {healthy,stale,down})
+  vmtest:   trusty-analyze: health='down' accepted (plist_installed=false; H_a = {healthy,stale,down})
+  vmtest:   trusty-mpm: health='unknown' accepted (plist_installed=null; H_a = {healthy,stale,unknown})
+  vmtest:   trusty-review: health='down' accepted (plist_installed=false; H_a = {healthy,stale,down})
+  vmtest: verify_stack_doctor PASS: all 5 in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern a, AND every launchd member among them is plist_installed=false — asserted directly since 2026-08-04, not inferred (verdict 'degraded' logged but not asserted)
+  ```
+  **§1.2's cross-check is SKIPPED under (a), and this run is the case that shows
+  why the skip is correct rather than convenient.** The installed `tctl` is the
+  **published 0.4.10**; the host working tree carries **0.5.0**. An equality clause
+  would have failed on a difference that is the whole point of pattern (a).
+  ```
+  vmtest: tctl version --json: {"contract_floor":1,"contract_target":1,"stack_version":"0.0.0-scaffold","tool":"trusty-installer","tool_version":"0.4.10"}
+  vmtest:   source-tree cross-check SKIPPED: pattern (a) installs from the registry, where the published version legitimately differs from any working tree (§1.2, §A.1b)
+  vmtest: verify_versions PASS: tool_version='0.4.10', stack_version='0.0.0-scaffold' (stub value, field asserted only), contract_floor <= contract_target
+  ```
+  **All four in-scope daemons live**, from published binaries:
+  ```
+  vmtest:   trusty-search: address 127.0.0.1:7878 (tctl port trusty-search --json-port)
+  vmtest:   trusty-search: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-memory: address 127.0.0.1:7070 (tctl port trusty-memory --json-port)
+  vmtest:   trusty-memory: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-mpm: address 127.0.0.1:7880 (tctl port trusty-mpm --json-port)
+  vmtest:   trusty-mpm: LIVE — HTTP 200, JSON parses, .status='ok'
+  vmtest:   trusty-review: address 127.0.0.1:7891 (tctl port trusty-review --json-port)
+  vmtest:   trusty-review: LIVE — HTTP 200, JSON parses, .status='degraded'
+  vmtest: verify_daemon_liveness PASS: 4 in-scope daemon(s) live (HTTP 200 + parseable JSON + acceptable .status). LIVENESS ONLY — see RC-1.
+  ```
+  **N2 — recorded BLOCKED, byte-identical to (b)'s and (c)'s, and that is itself a
+  result.** The `tctl` under probe here is the **published 0.4.10**, not a source
+  build, so this is the first run in which RC-2's shape is observed against a
+  released artefact. It is the same shape.
+  ```
+  vmtest: N2 step 1: TCTL_PATH=/Users/admin/.cargo/bin/tctl (located under the installed environment)
+  vmtest: N2 OBSERVED exit code: 3
+  vmtest: N2 OBSERVED stdout (0 bytes):
+  vmtest: N2 OBSERVED stderr (204 bytes):
+      | info: ✓ git Git-155) found
+      | tctl install: refusing to install without confirmation in a non-interactive context; pass --yes to proceed non-interactively, or --dry-run to preview what would be installed.
+  vmtest: *** N2 BLOCKED (RC-2 / DOC-2 §6.2) — NOT A PASS. ***
+  ```
+  **Host isolation — `tart list` before and after, verbatim.** No `vmtest-*` VM
+  survived either run; teardown ran on both the exit-60 path and the exit-0 one.
+  ```
+  === tart list BEFORE ===
+  Source Name                                                                                                        Disk Size Accessed    State
+  local  tahoe-base                                                                                                  50   33   1 hour ago  stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago stopped
+
+  === tart list AFTER ===
+  Source Name                                                                                                        Disk Size Accessed      State
+  local  tahoe-base                                                                                                  50   33   8 minutes ago stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base:latest                                                                  50   32   2 weeks ago   stopped
+  OCI    ghcr.io/cirruslabs/macos-tahoe-base@sha256:a8e1c8305758643f513fdccdd829c2243687c60791083dea42f73f0b7aeb435c 50   32   2 weeks ago   stopped
+
+  vmtest: teardown: deleted vmtest-20260804T022437Z-28772   (run 1, exit 60)
+  vmtest: teardown: deleted vmtest-20260804T023953Z-50439   (run 2, exit 0)
+  ```
+  Baseline held: `~/.tart` **62G**, `tahoe-base` **Disk 50 / Size 33**, unchanged.
+  `git diff --stat origin/main..HEAD -- crates/` is **empty** — no product source
+  was changed to reach any of this.
+
+- **Files delivered:**
+  - modify `vmtest-harness/lib/source.sh` — `source_deliver_released` (no-op, P7-T1),
+    `install_from_registry` (P7-T1), `install_assert_install_count` gains an
+    optional accessor argument and SET equality
+  - create `vmtest-harness/scenarios/install-released.sh` (P7-T2)
+  - modify `vmtest-harness/lib/verify.sh` — `verify_stack_doctor`'s §1.1a
+    correction (Deviations 1 and 2); `verify_rustc` log-text fix
+  - modify `docs/research/tart-vm-testing-harness/03-plan/MANIFEST.md` (P7-T5)
+  - **`vmtest-harness/expected-binaries.tsv` NOT modified** — `expect_a` already
+    read `present` on all thirteen in-scope rows, so the D2/D3 reversal needed no
+    table edit, only a run.
+
+- **Measurements:**
+
+  **1. Publishability of all eight in-scope packages, confirmed BEFORE the run.**
+  Queried directly against the crates.io API (`GET
+  https://crates.io/api/v1/crates/<pkg>`), read-only, host `~/.cargo` untouched:
+
+  | package | crates.io `max_version` | version the run actually installed |
+  |---|---|---|
+  | `trusty-search` | 0.39.1 | 0.39.1 |
+  | `trusty-memory` | 0.21.2 | 0.21.2 |
+  | `trusty-analyze` | 0.7.4 | 0.7.4 |
+  | `trusty-code` | 0.2.0 | 0.2.0 |
+  | `trusty-installer` | 0.4.10 | 0.4.10 |
+  | `tga` | 2.11.0 | 2.11.0 |
+  | `trusty-mpm` | **1.3.4** | 1.3.4 |
+  | `trusty-review` | **0.11.0** | 0.11.0 |
+
+  **All eight are published. No in-scope package had to be dropped from the
+  assertion set.** `trusty-code` and `trusty-installer` — the two the plan singled
+  out as worth checking first — are both live.
+
+  **Two of the plan's 2026-07-31 readings have moved, and neither changes a
+  decision.** `trusty-mpm` is **1.3.4**, not the 1.0.2 §A.1 records; `trusty-review`
+  is **0.11.0**, not the 0.10.1 §A.1b records. Recorded because §A.1b reasons
+  explicitly from "published 0.10.1 vs working tree 0.11.0" to justify §1.2's
+  pattern-(a) exemption, and **that particular example is now stale — the two are
+  equal**. The exemption is unaffected and is still doing work, on a different
+  crate: `trusty-installer` published **0.4.10** against the working tree's
+  **0.5.0**, which is the pair this run's `verify_versions` actually skipped.
+
+  **2. Total wall clock, beside the four prior readings.**
+
+  | pattern | run | wall clock |
+  |---|---|---|
+  | (c) local | run A | 722 s |
+  | (c) local | run B | 919 s |
+  | (c) local | run C | 656 s |
+  | (b) branch | first run | 650 s |
+  | **(a) released** | **run 2 (exit 0)** | **511 s** |
+
+  **Pattern (a) is the fastest full-stack run of the six, by 139 s over the next
+  fastest.** Two contributions, both structural rather than lucky: there is **no
+  acquisition step at all** (no 97 MB stream, no clone), and cargo builds each
+  published crate against **its own published lockfile** rather than the workspace
+  graph. The exit-60 first run measured **521 s** to the same point, so the figure
+  is stable across two runs.
+
+  **3. Per-package install times** (`MEASURE install_s`), TSV row order. Note the
+  key changes from `crate_dir` to `package` on this path — `tga`, not
+  `trusty-git-analytics`.
+
+  | package | (a) run 1 | (a) run 2 | (b) same crate | (c) run C same crate |
+  |---|---|---|---|---|
+  | trusty-search | 83 s | **80 s** | 95 s | 91 s |
+  | trusty-memory | 79 s | **71 s** | 85 s | 80 s |
+  | trusty-analyze | 55 s | **54 s** | 59 s | 59 s |
+  | trusty-code | 38 s | **37 s** | 47 s | 49 s |
+  | trusty-installer | 14 s | **13 s** | 21 s | 22 s |
+  | tga | 33 s | **32 s** | 60 s | 64 s |
+  | trusty-mpm | 108 s | **106 s** | 132 s | 138 s |
+  | trusty-review | 45 s | **44 s** | 58 s | 59 s |
+  | **total** | **455 s** | **437 s** | **557 s** | **562 s** |
+
+  **Every package installs faster from the registry than from source — by 22 % in
+  aggregate**, and `tga` is the outlier at **~1.9×** (32 s vs 60 s). The measured
+  `cargo install tga --locked` baseline in the research is **131 s at 4 vCPU**;
+  this run is **32 s at 8 vCPU**. **K5 does NOT reproduce under pattern (a), and
+  that is expected rather than drift**: `crates/trusty-git-analytics/rust-toolchain.toml`
+  governs builds run *inside that directory*, and a published `tga` is built from
+  cargo's own temporary unpack directory. Every registry install resolved
+  **rustc 1.91.1**, the workspace pin, asserted per install:
+  ```
+  vmtest: rustc(/Users/admin): rustc 1.91.1 (ed61e7d7e 2025-11-07)   [emitted from INSIDE /Users/admin, because rustup resolves by directory; expected='1.91.1']
+  ```
+
+  **4. Boot and provisioning, run 2:** `MEASURE boot_to_ready_s 17`; provisioning
+  wall clock **16 s** (measured baseline `PROVISION_MS=30079`). Both inside the
+  existing spread; neither prompts a timeout change.
+
+  **5. What `verify_versions` does under pattern (a).** It asserts **five** things
+  and skips exactly **one**. Asserted: `tool_version` non-empty; `stack_version`
+  non-empty (the FIELD only — `0.0.0-scaffold` is a known Phase-0 stub, §1.2);
+  `contract_floor` an integer; `contract_target` an integer; `contract_floor <=
+  contract_target`. Logged but never asserted: `tool`, which is hardcoded
+  `trusty-installer` even when the binary is invoked as `tctl`. **Skipped under (a)
+  alone:** the `tool_version == source_tree_version(trusty-installer)` equality.
+  It does **not** substitute a comparison against crates.io or against the host
+  tree — it makes **no** version comparison at all, because under (a) there is no
+  source tree in the guest to compare against and the published version
+  legitimately differs from any working tree.
+
+- **Deviations from plan:**
+
+  1. **CONTRACT DEFECT, FOUND BY EXECUTION — DOC-2 §1.1a's pattern-(a) strictness
+     claim is FALSE, and the first run exited 60 on it.** §1.1a read: *"Under (a)
+     `tctl install` is permitted and its service step DOES write plists, so
+     `plist_installed == true` and a real `healthy`/`stale` are reachable — cause
+     (c) does not apply there, which is why the `down` acceptance below is GATED ON
+     PATTERN b|c and (a) inherits the strict form automatically."* The plan carried
+     the same claim as Phase 7's logged candidate 1.
+
+     **The premise is true; the conclusion does not follow.** `tctl install` is
+     permitted under (a) — and **the harness does not use it**, by plan **P7-T2's
+     own instruction**: *"Even though `tctl install` would, in pattern (a) alone,
+     do roughly what this pattern specifies, the harness invokes `cargo install`
+     directly so that all three patterns share one install mechanism and differ
+     only in source."* A permission nobody exercises writes no plist. The `b|c`
+     gate was a proxy for *"no service bootstrap ran"*, and under this harness's
+     three scenarios that condition is **universal**.
+
+     **Observed, run 1, `vmtest run released`, exit 60**, after eight successful
+     `cargo install --locked` invocations and a passing `verify_binaries`:
+     ```
+     vmtest: FAIL[60]: verify_stack_doctor FAILED under pattern a — §1.1's per-member predicate (as amended 2026-08-03, §1.1a) does not hold for the following of the 5 in-scope packages doctor reports:
+         trusty-search: health='down', expected one of {healthy,stale} for plist_installed=false under pattern a (DOC-2 §1.1a)
+         trusty-memory: health='down', expected one of {healthy,stale} for plist_installed=false under pattern a (DOC-2 §1.1a)
+         trusty-analyze: health='down', expected one of {healthy,stale} for plist_installed=false under pattern a (DOC-2 §1.1a)
+         trusty-review: health='down', expected one of {healthy,stale} for plist_installed=false under pattern a (DOC-2 §1.1a)
+     ```
+     The member table was **identical in shape to (b)'s and (c)'s** — not one
+     member reached `healthy` or `stale`, not one plist existed. **The predicate
+     was implemented exactly as §1.1a wrote it and it failed. It was not weakened
+     to reach green** — see item 2 for what replaced it and why that is a
+     strengthening.
+
+     **DECISION on logged candidate 1 (`H_a` and `down`): `H_a` does NOT exclude
+     `down`.** The acceptance is now conditioned on `plist_installed == false`
+     alone and the pattern gate is removed. The candidate asked for the decision to
+     rest on observed evidence rather than assumption; it does — one run, quoted
+     above. **`H_a` was not left as-is**, because the branch that instruction
+     covers ("if the scenario does not in fact bootstrap, leave `H_a` as-is") is
+     unreachable: leaving it as-is means asserting a state the specified scenario
+     structurally cannot produce, which is exactly the defect §1.1a was written to
+     correct one pattern earlier. This item records that departure rather than
+     burying it. **Nothing under `crates/` was changed.**
+
+  2. **SCOPE ADDITION IMPLEMENTED — `plist_installed == false` is now asserted
+     DIRECTLY, under ALL THREE patterns (logged candidate 2, opened 2026-08-03).**
+
+     **DECISION: implement it, and widen it past (b)/(c) to (a).** The candidate
+     asked two questions and this answers both:
+     - *Implement it now for (b)/(c)?* **Yes.** Under (b)/(c) it is a derivable
+       invariant — DOC-1 §6.5 bans `plans_service_bootstrap` (`install.rs:528`), so
+       no bootstrap runs and no plist is written — but **derivable is not
+       asserted**. §1.1a Consequence 1 recorded that the guard was **inert**: it
+       could never be `true`, so the fail-closed branch it promised never fired.
+       Asserting it directly makes the run **fail closed by name** if `tctl
+       install` ever leaks into a source-install scenario, which is the false pass
+       §6.5 bans that step to prevent and **which nothing in the previous oracle
+       detected**.
+     - *Does an inverse hold under (a)?* **No, and it is NOT implemented.** An
+       inverse (`plist_installed == true` under (a)) would require the scenario to
+       run `tctl install`, which P7-T2 forbids. Asserting it would invent a
+       contract for a code path the harness deliberately does not take — precisely
+       the error the strict `H_a` made. What **does** hold under (a) is the *same*
+       invariant as under (b)/(c), and run 2 observed it on all four launchd
+       members.
+
+     **This is why item 1 is a net strengthening rather than a relaxation, and the
+     two are not separable.** Before: the oracle asserted **nothing** about plists.
+     After: every in-scope launchd member is asserted `plist_installed == false`
+     every run, and the `down` acceptance is **derived from an invariant the run
+     asserts** rather than inferred from a ban stated in a document. It is a **new
+     assertion, not a widening of `H_P`** — it lives outside the health predicate,
+     relaxes nothing, and is evaluated independently of the health value. `null`
+     (a non-launchd member, §1.1's field table) carries no obligation.
+
+     Observed, run 2:
+     ```
+     vmtest: verify_stack_doctor PASS: all 5 in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern a, AND every launchd member among them is plist_installed=false — asserted directly since 2026-08-04, not inferred (verdict 'degraded' logged but not asserted)
+     ```
+
+  3. **P7-T3 was ALREADY DONE before Phase 7 began — no code was written for it.**
+     The task asks to gate §1.2's equality clause on `pattern ∈ {b, c}`.
+     `verify_versions` has carried that gate, plus an explicit `a` arm that logs
+     the skip, **since Phase 5** (`lib/verify.sh`, the `case "$pattern" in b|c) …
+     a) …` block). Phase 7 verified it rather than re-implementing it, and run 2
+     exercised it for the first time with a real difference to skip over —
+     published `trusty-installer` **0.4.10** against the working tree's **0.5.0**.
+     P7-T3's acceptance is therefore met by observation, and its stated example is
+     recorded as stale in Measurements item 1.
+
+  4. **`install_assert_install_count` gained an optional accessor argument and a
+     SET-equality assertion — a departure from P5-T8's shape, made because pattern
+     (a) needs a different key.** (b)/(c) install by **directory**
+     (`tsv_scope_crate_dirs`); (a) installs by **package name**
+     (`tsv_scope_packages`), because that is what `cargo install` takes (DOC-2
+     §9.2). **Both accessors emit eight values today**, so the pre-existing
+     count-only check would have passed pattern (a) even if the loop had been
+     driven off the wrong accessor and tried `cargo install trusty-git-analytics`
+     — the exact discontinuity DOC-1 D3 warns about, and one that fails on the
+     **last** package after seven multi-minute installs. The assertion is now on the
+     **set**, which is what P7-T1's acceptance requires ("no more, no fewer, none
+     repeated", asserted against the helper's output rather than a literal list).
+     (b)/(c) keep the default accessor and are unchanged in behaviour.
+
+  5. **A cosmetic log defect corrected.** `verify_rustc` logged
+     `[emitted from INSIDE the crate directory]` unconditionally. On pattern (a)'s
+     path the directory is the **guest home** — cargo builds a published crate in
+     its own temporary unpack directory, so there is no crate directory in the
+     guest to be inside. The line now names the directory it actually ran in.
+
+  6. **§F items:** none newly resolved and none re-opened by this phase. §F-1
+     (Phase 2), §F-3 (closed at source), §F-4 (Phase 3), §F-5 (Phase 2), §F-6
+     (dispatch — `install-released.sh` / `scenario_install_released()` follows the
+     recorded mapping with no new deviation), §F-7 (Phase 5, resolved by step 2),
+     §F-10(b) (install order = TSV row order, followed) and §F-10(e) (`trusty-console`
+     logged, not asserted — observed again here) all stand as recorded.
+
+  7. **`--locked` held on every one of the eight installs. The E0063 hazard did
+     not reproduce, and that is the expected result rather than a lucky one** — the
+     incident it comes from (`cargo install trusty-analyze` pairing old published
+     source with a newer `trusty-common`) is caused by cargo *re-resolving* and
+     ignoring the published lockfile, which is precisely what `--locked` prevents.
+     No install failed for any reason. **No workaround was applied and none was
+     needed.**
+
+- **Tasks:** P7-T1 … P7-T5 complete.
 
 ## Phase 8 — Hardening, documentation, and measurement write-back
 

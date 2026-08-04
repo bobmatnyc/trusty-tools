@@ -389,7 +389,7 @@ verify_rustc() {
         die 50 "verify_rustc: ${dir} resolves rustc ${ver}, expected ${expected} (DOC-1 §8.4). rustup resolves by directory; a difference here means the toolchain the build will use is not the one provisioning measured."
     fi
 
-    log "rustc(${dir}): ${line}   [emitted from INSIDE the crate directory; expected='${expected:-<crate-local override: any>}']"
+    log "rustc(${dir}): ${line}   [emitted from INSIDE ${dir}, because rustup resolves by directory; expected='${expected:-<crate-local override: any>}']"
     printf '%s\n' "$line"
 }
 
@@ -577,16 +577,96 @@ _verify_package_expectation() {
 #       itself if another member ever changes strategy. Hardcoding `trusty-mpm`
 #       here would freeze today's `stable_set` into the oracle.
 #
-#   (c) `down` IS ACCEPTED UNDER SOURCE-INSTALL PATTERNS (b)/(c) WHEN
-#       `plist_installed == false`. A launchd member is `down` because it has no
-#       plist, and a plist is written by the member's `service install` step,
-#       reached from `tctl install`'s service-bootstrap step (install.rs:528,
-#       `plans_service_bootstrap`) — WHICH DOC-1 §6.5 BANS FROM PATTERNS (b)/(c).
-#       Nothing else bootstraps one before the oracle reads doctor. `down` with
-#       no plist is therefore the EXPECTED state of a correctly source-installed
-#       stack. `plist_installed == false` IS REQUIRED for the acceptance: a
-#       launchd member that DOES have a plist and is still `down` is a real
-#       failure and STILL FAILS.
+#   (c) `down` IS ACCEPTED WHEN `plist_installed == false`, UNDER ALL THREE
+#       PATTERNS — WIDENED FROM {b,c} ON 2026-08-04, BY OBSERVATION, AND ONLY
+#       BECAUSE THE PLIST INVARIANT IS NOW ASSERTED DIRECTLY (see below).
+#       A launchd member is `down` because it has no plist, and a plist is
+#       written by the member's `service install` step, reached from `tctl
+#       install`'s service-bootstrap step (install.rs:528,
+#       `plans_service_bootstrap`). Nothing else bootstraps one before the oracle
+#       reads doctor. `down` with no plist is therefore the EXPECTED state of a
+#       stack this harness installed, under EVERY pattern. `plist_installed ==
+#       false` IS REQUIRED for the acceptance: a launchd member that DOES have a
+#       plist and is still `down` is a real failure and STILL FAILS.
+#
+# ===========================================================================
+# THE 2026-08-04 CORRECTION — WHAT PATTERN (a) FALSIFIED, AND THE TWO DECISIONS
+# TAKEN ON IT (plan §PHASE 7, both logged assertion candidates).
+#
+# THE TEXT THIS REPLACES WAS WRONG, AND IT WAS WRONG IN A WAY ONLY A RUN COULD
+# SHOW. It read: "PATTERN (a) MAY ASSERT MORE STRICTLY AND PHASE 7 SHOULD
+# CONSIDER IT. Under (a) `tctl install` is permitted and its service step DOES
+# write plists, so `plist_installed == true` and a real `healthy`/`stale` are
+# reachable — cause (c) does not apply there, which is why the `down` acceptance
+# below is GATED ON PATTERN b|c and (a) inherits the strict form automatically."
+#
+# THE PREMISE IS TRUE AND THE CONCLUSION DOES NOT FOLLOW. `tctl install` is
+# indeed PERMITTED under (a) — DOC-1 §6.5 bans it only from (b)/(c). But the
+# harness DOES NOT USE IT under (a) either, and that is not an oversight: plan
+# P7-T2 specifies it in as many words — "Even though `tctl install` would, in
+# pattern (a) alone, do roughly what this pattern specifies, THE HARNESS INVOKES
+# `cargo install` DIRECTLY so that all three patterns share one install mechanism
+# and differ ONLY in source." A permission nobody exercises writes no plist. The
+# gate on `b|c` was a proxy for "no service bootstrap ran"; under this harness's
+# three scenarios that condition is UNIVERSAL, and the proxy was the only thing
+# that was pattern-shaped about it.
+#
+# OBSERVED, FIRST PATTERN-(a) RUN, 2026-08-04 (`vmtest run released`, exit 60,
+# VM `vmtest-20260804T022437Z-28772`) — `stack doctor`'s member table after eight
+# `cargo install <pkg> --locked` invocations from crates.io:
+#
+#     trusty-search   health=down     on_path=true  plist=false  version=0.39.1
+#     trusty-memory   health=down     on_path=true  plist=false  version=0.21.2
+#     trusty-analyze  health=down     on_path=true  plist=false  version=0.7.4
+#     trusty-review   health=down     on_path=true  plist=false  version=0.11.0
+#     trusty-mpm      health=unknown  on_path=true  plist=null   version=1.3.4
+#
+# IDENTICAL IN SHAPE TO (b)'s AND (c)'s. Not one member reached `healthy` or
+# `stale`; not one plist existed. The strict `H_a` was UNSATISFIABLE by the
+# scenario the same plan specifies, and it failed all four launchd members while
+# `verify_binaries` had just resolved 13/13 and all four Single-Install gates had
+# passed. That is the same shape of defect §1.1a itself was written to correct,
+# one pattern later.
+#
+# DECISION 1 (plan §PHASE 7 candidate 1) — `H_a` DOES NOT EXCLUDE `down`.
+# Decided on the observed run, not on assumption, which is what the candidate
+# asked for. The `down` acceptance is now conditioned on `plist_installed ==
+# false` ALONE and the pattern gate is gone. Nothing else about `H_P` changed.
+#
+# DECISION 2 (plan §PHASE 7 candidate 2) — `plist_installed == false` IS NOW
+# ASSERTED DIRECTLY, UNDER ALL THREE PATTERNS. This is what makes Decision 1 a
+# NET STRENGTHENING rather than a relaxation, and the two are not separable:
+#
+#   - BEFORE: the oracle asserted NOTHING about plists. §1.1a Consequence 1
+#     recorded that the `plist_installed == false` guard was INERT under (b)/(c)
+#     — it could never be `true`, so the fail-closed branch it promised never
+#     fired. Today's run showed the same inertness under (a).
+#   - AFTER: every in-scope launchd member is asserted `plist_installed == false`
+#     on every run. If `tctl install` — or anything else that reaches
+#     `plans_service_bootstrap` — ever LEAKS INTO A SCENARIO, this fires by name.
+#     That is the false pass DOC-1 §6.5 bans the step to prevent, and which
+#     NOTHING in the previous oracle detected. It is the productive use of the
+#     otherwise-dead signal.
+#   - So the `down` acceptance is no longer INFERRED from a ban stated in a
+#     document; it is DERIVED FROM AN INVARIANT THE RUN ASSERTS. Accepting `down`
+#     for a member the same run has just proven has no plist is not a weakened
+#     predicate — it is the only reading consistent with what was asserted.
+#
+# THE INVERSE DOES NOT HOLD UNDER (a), AND IS NOT IMPLEMENTED. The candidate
+# asked whether an inverse (`plist_installed == true`) holds under pattern (a).
+# IT DOES NOT: it would require the scenario to run `tctl install`, which P7-T2
+# forbids for the reason quoted above. Asserting it would be inventing a
+# contract for a code path this harness deliberately does not take — the exact
+# error the strict `H_a` made. Recorded as decided, not as pending.
+#
+# THIS IS A NEW ASSERTION, NOT A WIDENING OF THE HEALTH PREDICATE. It does not
+# live inside `H_P`, it relaxes nothing, and it is evaluated independently of the
+# health value. `null` (a non-launchd member, §1.1's field table) carries no
+# obligation: the invariant is about plists that could have been written.
+#
+# THE HARNESS ADAPTS TO THE PRODUCT, NEVER THE REVERSE: nothing under `crates/`
+# was changed to reach any of this.
+# ===========================================================================
 #
 # §1.1'S `stale` JUSTIFICATION WAS WRONG AND IS CORRECTED AT SOURCE, NOT DELETED.
 # It reads "on a freshly installed VM where daemons have just been bootstrapped,
@@ -600,17 +680,9 @@ _verify_package_expectation() {
 # run; §1.3's RC-1 liveness-only rule is untouched. DAEMON HEALTH, and nothing
 # else, is what narrowed.
 #
-# PATTERN (a) MAY ASSERT MORE STRICTLY AND PHASE 7 SHOULD CONSIDER IT. Under (a)
-# `tctl install` is permitted and its service step DOES write plists, so
-# `plist_installed == true` and a real `healthy`/`stale` are reachable — cause (c)
-# does not apply there, which is why the `down` acceptance below is GATED ON
-# PATTERN b|c and (a) inherits the strict form automatically. Causes (a) and (b)
-# are structural and apply under every pattern. NOT IMPLEMENTED HERE: asserting
-# it before a pattern-(a) run has ever been observed would invent a contract,
-# which is the thing this amendment exists to stop doing.
-#
-# THE HARNESS ADAPTS TO THE PRODUCT, NEVER THE REVERSE: nothing under `crates/`
-# was changed to reach this predicate.
+# CAUSES (a) AND (b) ARE STRUCTURAL AND APPLY UNDER EVERY PATTERN. So, since
+# 2026-08-04, does cause (c) — see the correction block above for the run that
+# settled it.
 # ===========================================================================
 verify_stack_doctor() {
     local vm="$1" pattern="$2"
@@ -684,10 +756,21 @@ verify_stack_doctor() {
                 # whose left side fails is the `set -e` gotcha the driver warns
                 # about at its own head, and this one would fire on every
                 # non-launchd member.
+                #
+                # NO PATTERN GATE (2026-08-04, Decision 1). It is conditioned on
+                # the plist alone, and the plist is ASSERTED just below.
                 if [ "$plist" = 'false' ]; then
-                    case "$pattern" in
-                        b|c) accepted="${accepted} down" ;;
-                    esac
+                    accepted="${accepted} down"
+                fi
+
+                # THE PLIST INVARIANT, ASSERTED DIRECTLY (2026-08-04, Decision
+                # 2). NOT part of H_P — an independent assertion that fails
+                # CLOSED if a service bootstrap ever runs in a scenario that
+                # must not run one. `null` is a non-launchd member and carries
+                # no obligation.
+                if [ "$plist" = 'true' ]; then
+                    bad="${bad}
+    ${pkg}: plist_installed=true, expected false. A plist is written only by \`plans_service_bootstrap\` (install.rs:528), reached from \`tctl install\`'s service step — which DOC-1 §6.5 BANS from patterns (b)/(c) and which plan P7-T2 declines to use under (a) so that all three patterns share one install mechanism. A plist here means that step RAN: released artefacts may have been installed over the ones under test, which is the false pass §6.5 exists to prevent."
                 fi
 
                 case " ${accepted} " in
@@ -724,7 +807,7 @@ EOF
     [ -z "$bad" ] \
         || die 60 "verify_stack_doctor FAILED under pattern ${pattern} — §1.1's per-member predicate (as amended 2026-08-03, §1.1a) does not hold for the following of the ${n} in-scope packages doctor reports:${bad}"
 
-    log "verify_stack_doctor PASS: all ${n} in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern ${pattern} (verdict '${verdict}' logged but not asserted)"
+    log "verify_stack_doctor PASS: all ${n} in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern ${pattern}, AND every launchd member among them is plist_installed=false — asserted directly since 2026-08-04, not inferred (verdict '${verdict}' logged but not asserted)"
 }
 
 # verify_versions <vm_name> <pattern>

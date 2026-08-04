@@ -1,10 +1,11 @@
 # vmtest-harness/lib/source.sh — host->guest transport and install steps
 # (DOC-1 §3.4, §6.1; DOC-2 §12.2).
 #
-# AT PLAN PHASE 6 THIS FILE CONTAINS `source_deliver_local` AND THE
-# DIRTY-WORKTREE ASSERTIONS THAT PROVE IT, `source_deliver_branch` (P6-T1), and
-# `install_from_path` (P5-T1). `source_deliver_released` and
-# `install_from_registry` (P7-T1) land later.
+# AT PLAN PHASE 7 THIS FILE IS COMPLETE: `source_deliver_local` and the
+# DIRTY-WORKTREE ASSERTIONS THAT PROVE IT, `source_deliver_branch` (P6-T1),
+# `source_deliver_released` and `install_from_registry` (P7-T1), and
+# `install_from_path` (P5-T1). All three delivery functions and both install
+# steps of DOC-2 §12.2 now exist.
 #
 # NAMING TENSION, RECORDED (DOC-2 §12.2). DOC-1 §3.4 calls this module "source
 # delivery" while DOC-1 §12.1 wants reusable INSTALL-STEP functions, so
@@ -240,6 +241,35 @@ source_deliver_branch() {
     printf '%s\n' "$sha"
 }
 
+# --- pattern (a): the registry (DOC-1 §6.3, D1) ----------------------------
+
+# source_deliver_released
+# A NO-OP RETURNING 0. Takes no arguments and touches no VM.
+#
+# ============================================================================
+# IT EXISTS SO THE SCENARIOS STAY SYMMETRIC (DOC-2 §12.2, verbatim: "no-op
+# returning 0; pattern (a) has no delivery step; exists so scenarios stay
+# symmetric"). DO NOT DELETE IT AS DEAD CODE.
+#
+# The symmetry is not decoration. DOC-1 §12.1's upgrade-testing extension is
+# "two install steps in one scenario file, and not a new mechanism" — that
+# composability only holds while all three scenario files have the same SHAPE, so
+# an upgrade scenario can be written by pairing any delivery with any install
+# step. A pattern-(a) scenario whose step 1 was simply missing would make
+# `install-released.sh` structurally different from its two siblings, and the
+# first upgrade scenario would then have to invent the missing slot.
+#
+# PATTERN (a) IS crates.io AND NOTHING ELSE (DOC-1 D1). `install.sh` and prebuilt
+# release tarballs are OUT OF SCOPE — settled, not pending. The crates.io path is
+# the only one grounded in measurement (`cargo install tga --locked`, 131 s, 211
+# deps, 4 vCPU), and it is the only one where "what the user gets" is a version
+# this harness can name.
+# ============================================================================
+source_deliver_released() {
+    log 'pattern (a): NO delivery step, by construction (DOC-2 §12.2). The source never crosses from the host and the guest never clones — `cargo install <package> --locked` fetches each package from crates.io (DOC-1 §6.3, D1). This no-op is called anyway, so the three scenario files stay symmetric.'
+    return 0
+}
+
 # --- install steps (DOC-2 §12.2; DOC-1 §7.3, §7.4, §8.4, §8.6, §6.5) -------
 
 # install_from_path <vm_name> <guest_dir> <crate_dir>
@@ -397,9 +427,155 @@ install_from_path() {
     log "installed ${crate_dir} in ${elapsed}s: ${bins:-<no Installed/Replacing lines>}"
 }
 
-# install_assert_install_count
+# install_from_registry <vm_name> <package> [version]
+# Asserts `rustc --version` FIRST, then installs from crates.io. 0, or dies 50.
+#
+# ============================================================================
+# THE KEY IS THE **PACKAGE NAME**, NOT THE DIRECTORY. (DOC-2 §9.2: `[package]
+# name` is "what `cargo install <name> --locked` takes, which is pattern (a)'s
+# entire interface".) That is why the caller drives this from
+# `tsv_scope_packages` and NEVER from `tsv_scope_crate_dirs`:
+#
+#     crates/trusty-git-analytics/  publishes as  **tga**
+#
+# `cargo install trusty-git-analytics --locked` does not exist on crates.io. This
+# discontinuity between directory name and package name is exactly what DOC-1 D3
+# warns about and the whole reason `expected-binaries.tsv` carries BOTH columns.
+# A pattern-(a) loop written over crate directories fails on one crate out of
+# eight, and it fails at the LAST possible moment — after seven successful
+# multi-minute installs.
+#
+# `--locked` IS MANDATORY, AND IT IS NOT A STYLE CHOICE. Default `cargo install`
+# RE-RESOLVES the dependency graph and IGNORES the lockfile the package was
+# published with; it will happily pair a published crate's source with a NEWER
+# version of a sibling library that has since been released. That is not
+# theoretical in this workspace: `cargo install trusty-analyze` has failed with
+# **E0063** (missing struct fields) from precisely that pairing — old
+# `trusty-analyze` source against a newer `trusty-common`. `--locked` builds the
+# graph the publisher tested. If an install still fails this way WITH `--locked`,
+# that is a genuine product finding about a published lockfile and it is RECORDED
+# rather than worked around.
+#
+# THE SAME PACKAGE-GRANULARITY RULE AS `install_from_path`, FOR THE SAME REASON:
+# NEVER `--bin`, NEVER `--bins` WITH A FILTER (DOC-2 §12.2). The TSV's `binary`
+# column is the ORACLE's input and never the INSTALLER's. `cargo install
+# trusty-mpm --locked` must yield BOTH `tm` and `trusty-mpm`, and DOC-1 §7.4's
+# Single-Install Convention gate is the assertion that it did — an assertion
+# worth nothing the moment the installer is handed the binary names.
+#
+# NO `tctl install` HERE EITHER, THOUGH IT IS NOT BANNED ON THIS PATH. DOC-1 §6.5
+# bans it from patterns (b)/(c); under (a) it would do roughly what this function
+# does. The harness still calls `cargo install` directly (plan P7-T2) SO THAT ALL
+# THREE PATTERNS SHARE ONE INSTALL MECHANISM AND DIFFER ONLY IN SOURCE. A
+# pattern-(a) run that went through `tctl install` would be testing the
+# installer's tarball-first path, not the registry, and the three patterns would
+# no longer be comparable.
+# ============================================================================
+install_from_registry() {
+    local vm="$1" pkg="$2" version="${3:-}"
+    local spec t0 elapsed rc bins now workspace_rustc guest_home
+
+    [ -n "$pkg" ] || die 50 'install_from_registry: empty package name (DOC-2 §12.2)'
+
+    # The canonical log line the P7 checkpoint counts, and the ledger
+    # `install_assert_install_count` counts — the same ledger `install_from_path`
+    # writes, so one tripwire covers all three patterns.
+    log "install_from_registry ${pkg}"
+    printf '%s\n' "$pkg" >> "$VMTEST_RUNDIR/installs.log" \
+        || die 50 "could not append to the install ledger $VMTEST_RUNDIR/installs.log"
+
+    # §10.2's full-stack budget, enforced as a deadline (see `scenario_dispatch`).
+    # §10.3 clause 3: name the condition, the elapsed time, the budget and the key.
+    now=$(date '+%s')
+    if [ -n "${INSTALL_DEADLINE_EPOCH:-}" ] && [ "$now" -ge "$INSTALL_DEADLINE_EPOCH" ]; then
+        die 50 "the full-stack scenario budget of $(conf_get install_timeout)s was exhausted before '${pkg}' could be installed (change it with vmtest.defaults key install_timeout; DOC-2 §10.2 full-stack row). No retry, ever (§10.3)."
+    fi
+
+    # ------------------------------------------------------------------
+    # DOC-1 §8.4's per-build-step assertion. A registry install IS a build step,
+    # so it gets one.
+    #
+    # THE DIRECTORY IS `guest_home`, AND THAT IS NOT A WEAKER CHOICE — IT IS THE
+    # ONLY CORRECT ONE. rustup resolves by CURRENT DIRECTORY, which is why
+    # `install_from_path` cd's into the crate. Pattern (a) has NO crate directory
+    # in the guest: cargo unpacks the published crate into its own temporary
+    # scratch and builds there. The directory that governs the toolchain is
+    # therefore the one cargo is invoked FROM, which is the guest home — the same
+    # directory `provision.sh` measured `rustc_version` in (`cd ${guest_home} &&
+    # rustc --version`, provision.sh:203). Asserting equality against
+    # `toolchain.tsv`'s value is therefore an assertion about the same resolution
+    # site, not an approximation of one.
+    #
+    # NO CRATE-LOCAL OVERRIDE BRANCH EXISTS HERE, and measurement K5 is why that
+    # is correct rather than an omission: `trusty-git-analytics`'s
+    # `rust-toolchain.toml` governs builds run INSIDE its directory. A published
+    # `tga` built from a temporary unpack directory under the guest home is not
+    # such a build, so K5's 1.97.1 is not expected on this path and its absence is
+    # not drift. It is logged either way by `verify_rustc`.
+    # ------------------------------------------------------------------
+    guest_home=$(conf_get guest_home)
+    workspace_rustc=$(tsv_get "$VMTEST_RUNDIR/toolchain.tsv" rustc_version) \
+        || die 50 "no rustc_version in $VMTEST_RUNDIR/toolchain.tsv (DOC-2 §7.1) — cannot form DOC-1 §8.4's expectation for '${pkg}'"
+    verify_rustc "$vm" "$guest_home" "$workspace_rustc" >/dev/null
+
+    # §12.2's optional third argument. Unused by today's scenario — every package
+    # installs at its published maximum — but it is the signature the contract
+    # gives, and DOC-1 §12.1's upgrade extension is the caller that will use it.
+    spec="$pkg"
+    [ -z "$version" ] || spec="${pkg} --version ${version}"
+
+    # ------------------------------------------------------------------
+    # The install. PACKAGE GRANULARITY — see the banner above.
+    #
+    #   - PATH, CARGO_TARGET_DIR (DOC-1 §8.6's single shared target directory) and
+    #     SKIP_UI_BUILD ride in $VMTEST_GUEST_ENV, composed in `vm_exec` and
+    #     nowhere else (DOC-2 §7.3).
+    #   - 900 s per package, DOC-2 §10.2's single-crate row. NO vmtest.defaults key
+    #     exists for it and §10.3's amendment requires the message to say so
+    #     rather than name one that does not exist.
+    #   - There is no `cd` and no `&&` chain: unlike `install_from_path` there is
+    #     no directory whose existence has to be proven before cargo runs.
+    # ------------------------------------------------------------------
+    log "cargo install ${spec} --locked (from crates.io; PACKAGE granularity — no --bin, no filtered --bins; DOC-2 §12.2)"
+    t0=$(date '+%s')
+    rc=0
+    run_watchdog 900 "$VMTEST_TMPDIR/install-registry-${pkg}.log" \
+        vm_exec "$vm" "cargo install ${spec} --locked" || rc=$?
+    elapsed=$(( $(date '+%s') - t0 ))
+
+    if [ "$rc" -ne 0 ]; then
+        tail -40 "$VMTEST_TMPDIR/install-registry-${pkg}.log" 2>/dev/null | sed 's/^/    | /' >&2 || :
+        if [ "$rc" -eq 124 ]; then
+            die 50 "\`cargo install ${spec} --locked\` exceeded its 900 s budget (DOC-2 §10.2 single-crate row; NO vmtest.defaults key exists for this budget). No retry, ever (§10.3)."
+        fi
+        die 50 "\`cargo install ${spec} --locked\` exited ${rc} (last 40 lines above). If the failure is 'could not find \`${pkg}\` in registry', the package is NOT PUBLISHED and that is a DESIGN-LEVEL FINDING about DOC-1 D2/D3's scope, not a harness bug to work around (plan P7-T4). If it is a COMPILE error, record it verbatim: \`--locked\` is present precisely to build the graph the publisher tested, so a compile failure under it is a finding about the PUBLISHED lockfile."
+    fi
+
+    # Cargo names every binary it placed on `Installed`/`Replacing` lines. Direct
+    # evidence for DOC-1 §7.4 — that ONE package-granular install produced the
+    # whole sidecar set — logged beside the command that produced it.
+    bins=$(awk '/^ +(Installed|Replacing) /' "$VMTEST_TMPDIR/install-registry-${pkg}.log" 2>/dev/null | sed 's/^ *//' | tr '\n' '; ')
+    log "MEASURE install_s ${pkg} ${elapsed}"
+    log "installed ${pkg} in ${elapsed}s: ${bins:-<no Installed/Replacing lines>}"
+}
+
+# install_assert_install_count [<accessor>]
 # P5-T8's run-level tripwire: the install loop must have run EXACTLY ONCE per
-# emitted `crate_dir`. 0, or dies 60.
+# value the accessor emits. 0, or dies 60.
+#
+# THE ACCESSOR ARGUMENT IS PHASE 7'S ONE ADDITION, and it is what keeps ONE
+# tripwire covering all three patterns. Patterns (b)/(c) install by DIRECTORY
+# (`tsv_scope_crate_dirs`, the default); pattern (a) installs by PACKAGE NAME
+# (`tsv_scope_packages`), because that is what `cargo install` takes (§9.2). Both
+# sets have eight members today, so a COUNT-ONLY check would pass pattern (a)
+# even if the loop had been driven off the wrong accessor and installed
+# `trusty-git-analytics` instead of `tga` — which is precisely the discontinuity
+# DOC-1 D3 warns about. The assertion is therefore on the SET, not the count:
+# P7-T1's acceptance requires the installed package names to be EXACTLY
+# `tsv_scope_packages` — "no more, no fewer, none repeated" — and asserted
+# against the helper's output rather than a literal list, because the scope has
+# already changed twice (§A.1, §A.1b) and a hardcoded list is the thing that
+# silently fails to change with it.
 #
 # TWO DEPARTURES FROM P5-T8'S SNIPPET, BOTH NARROW, BOTH RECORDED.
 #
@@ -430,23 +606,38 @@ install_from_path() {
 #      <dir>` line is still emitted on stderr for the human and for the
 #      checkpoint's clause (i).
 install_assert_install_count() {
-    local ledger expected actual dups
+    local accessor="${1:-tsv_scope_crate_dirs}"
+    local ledger unit expected actual dups missing extra
+
     ledger="$VMTEST_RUNDIR/installs.log"
+    case "$accessor" in
+        tsv_scope_packages)   unit='package name' ;;
+        *)                    unit='crate directory' ;;
+    esac
 
     [ -f "$ledger" ] \
-        || die 60 "the install ledger ${ledger} does not exist — \`install_from_path\` never ran, so the scenario installed nothing at all"
+        || die 60 "the install ledger ${ledger} does not exist — no install step ever ran, so the scenario installed nothing at all"
 
-    expected=$(tsv_scope_crate_dirs | wc -l | tr -d ' ')
+    expected=$("$accessor" | wc -l | tr -d ' ')
     actual=$(grep -c . "$ledger" | tr -d ' ')
     [ "$actual" = "$expected" ] \
-        || die 60 "install ran ${actual} times, expected ${expected} (one per crate_dir). Thirteen in-scope ROWS resolve to ${expected} distinct DIRECTORIES (§F-3); a count equal to the row count means the loop is iterating rows or binaries instead of crates."
+        || die 60 "install ran ${actual} times, expected ${expected} (one per ${unit}, from \`${accessor}\`). Thirteen in-scope ROWS resolve to ${expected} distinct values (§F-3); a count equal to the row count means the loop is iterating rows or binaries instead."
 
     dups=$(sort "$ledger" | uniq -d)
     if [ -n "$dups" ]; then
-        die 60 "a crate_dir was installed twice: $(printf '%s' "$dups" | tr '\n' ' ')"
+        die 60 "a ${unit} was installed twice: $(printf '%s' "$dups" | tr '\n' ' ')"
     fi
 
-    log "install count OK: ${actual} package-granular installs for ${expected} in-scope crate directories, none installed twice ($(sort "$ledger" | tr '\n' ' '))"
+    # SET equality, not just count. Under pattern (a) both accessors emit eight
+    # values, so a count-only check cannot tell `tga` from
+    # `trusty-git-analytics` — the one discontinuity DOC-1 D3 names.
+    missing=$(comm -23 <("$accessor" | sort) <(sort "$ledger") | tr '\n' ' ')
+    extra=$(comm -13 <("$accessor" | sort) <(sort "$ledger") | tr '\n' ' ')
+    if [ -n "${missing# }" ] || [ -n "${extra# }" ]; then
+        die 60 "the installed set is not \`${accessor}\`'s set. NOT INSTALLED: ${missing:-<none>} / INSTALLED BUT NOT IN SCOPE: ${extra:-<none>}. Under pattern (a) the key is the PACKAGE name \`cargo install\` takes, not the directory: crates/trusty-git-analytics publishes as \`tga\` (DOC-2 §9.2, DOC-1 D3)."
+    fi
+
+    log "install count OK: ${actual} package-granular installs, one per ${unit} from \`${accessor}\` (${expected}), none installed twice, set matches exactly ($(sort "$ledger" | tr '\n' ' '))"
 }
 
 # ---------------------------------------------------------------------------
