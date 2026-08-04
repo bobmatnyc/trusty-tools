@@ -1014,10 +1014,18 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: al2023-1.91-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          # 2533 follow-up: the cache key MUST carry the target. There are now
+          # two AL2023 legs (amd64 and arm64) whose only difference is
+          # architecture; without this they share one key, so whichever leg
+          # saves first hands the other its `target/` — including host-compiled
+          # build-script binaries of the wrong architecture. Keeping the old
+          # unqualified `al2023-1.91-` restore-key would reintroduce exactly
+          # that cross-arch restore through the fallback path, so the fallbacks
+          # are target-scoped too.
+          key: al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            al2023-1.91-${{ matrix.crate }}-
-            al2023-1.91-
+            al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-
+            al2023-1.91-${{ matrix.target }}-
 
       - name: Cache cargo registry + artefacts (standard + linux-zigbuild)
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
