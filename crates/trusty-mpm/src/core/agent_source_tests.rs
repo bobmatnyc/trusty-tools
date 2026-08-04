@@ -173,6 +173,56 @@ fn deploy_summary_lines_summarises_skips_in_one_line() {
 }
 
 #[test]
+fn deploy_summary_lines_omits_the_reset_pointer_for_user_owned_edits_only() {
+    // PR #4848 review (MEDIUM, round 2): `skipped` mixes two ownership
+    // classes — untracked-and-differing files (which `--reset-agents`
+    // legitimately resolves) and edited seed-once (user-owned) entries, which
+    // it does not. When the only skip is a user-owned edit, the pointer must
+    // not appear at all — naming that file would instruct the operator to
+    // discard their own deliberate customization.
+    let result = DeployResult {
+        skipped: vec!["engineer.md".into()],
+        ..DeployResult::default()
+    };
+
+    let lines = deploy_summary_lines(&result);
+
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("engineer.md"), "{:?}", lines[0]);
+    assert!(
+        !lines[0].contains("--reset-agents"),
+        "a user-owned edit must not carry the reset pointer: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn deploy_summary_lines_names_the_untracked_modified_file_in_the_pointer() {
+    // The companion case: when the skip set mixes a user-owned edit with an
+    // untracked-and-differing file, the pointer must name the
+    // untracked-modified entry, never `skipped[0]` unconditionally.
+    let result = DeployResult {
+        skipped: vec!["user-owned-edit.md".into(), "untracked-drift.md".into()],
+        untracked_modified: vec!["untracked-drift.md".into()],
+        ..DeployResult::default()
+    };
+
+    let lines = deploy_summary_lines(&result);
+
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("--reset-agents untracked-drift"),
+        "{:?}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains("--reset-agents user-owned-edit"),
+        "the pointer must never name the user-owned edit: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
 fn deploy_summary_lines_reports_failed_agents() {
     // A compose failure means the agent does not land AT ALL — worse than
     // stale, and previously never surfaced anywhere (PR #4848 review, MEDIUM).

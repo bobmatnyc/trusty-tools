@@ -1,5 +1,6 @@
-//! Self-healing materialization + auto-deploy of the bundled agent *source*
-//! directory (`~/.trusty-mpm/framework/agents/`) — issue #4840.
+//! Self-healing (against binary upgrade) materialization + auto-deploy of the
+//! bundled agent *source* directory (`~/.trusty-mpm/framework/agents/`) —
+//! issue #4840.
 //!
 //! Why: `crates/trusty-mpm/src/assets/agents/*.md` is compiled into the binary
 //! (`bundle::ALL`), but the ONLY code path that ever wrote it to disk was the
@@ -213,24 +214,33 @@ fn preview(items: &[String], limit: usize) -> String {
 /// settled that tradeoff for its own warning (issue #2504: count + preview);
 /// this is the same policy, not a second one. PR #4848 review (HIGH).
 /// What: at most two lines — one for [`DeployResult::skipped`] (with the
-/// actionable `tm install --reset-agents <name>` pointer), one for
+/// actionable `tm install --reset-agents <name>` pointer when
+/// [`DeployResult::untracked_modified`] is non-empty — `--reset-agents`
+/// resolves the untracked-and-differing case, not an edited seed-once entry,
+/// so the pointer never names a deliberate user customization), one for
 /// [`DeployResult::failed`], whose agents did not land AT ALL and are therefore
 /// worse than stale. Each is a count plus a short preview. Returns an empty
 /// vector on a clean deploy. Pure — no I/O, no logging.
 /// Test: `deploy_summary_lines_is_empty_on_a_clean_deploy`,
 /// `deploy_summary_lines_summarises_skips_in_one_line`,
+/// `deploy_summary_lines_omits_the_reset_pointer_for_user_owned_edits_only`,
+/// `deploy_summary_lines_names_the_untracked_modified_file_in_the_pointer`,
 /// `deploy_summary_lines_reports_failed_agents`.
 pub fn deploy_summary_lines(result: &DeployResult) -> Vec<String> {
     let mut lines = Vec::new();
 
     if !result.skipped.is_empty() {
         let count = result.skipped.len();
-        let head = &result.skipped[0];
-        let first = head.strip_suffix(".md").unwrap_or(head);
+        let pointer = result
+            .untracked_modified
+            .first()
+            .map_or_else(String::new, |head| {
+                let first = head.strip_suffix(".md").unwrap_or(head);
+                format!(" Run `tm install --reset-agents {first}` to adopt one.")
+            });
         lines.push(format!(
             "warning: {count} agent file(s) are stale — user-owned (untracked and differing, \
-             or an edited seed-once entry), so the bundled version was NOT written: {}. \
-             Run `tm install --reset-agents {first}` to adopt one.",
+             or an edited seed-once entry), so the bundled version was NOT written: {}.{pointer}",
             preview(&result.skipped, 5)
         ));
     }
