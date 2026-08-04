@@ -336,12 +336,12 @@ fn install_then_deploy_deploys_skills() {
     // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
     // tm-delegation-patterns, tm-session-management, tm-session-pause,
     // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations,
-    // tm-slack-canvas-delivery) + tm-doctor + the tm overview skill
+    // tm-slack) + tm-doctor + the tm overview skill
     // (tm-skills-portfolio epic: the `example-skill.md` placeholder and the
     // 11 mpm-* guidance skills no longer ship; the previously-orphaned
     // tm-doctor.md is now wired in; issue #2185 added tm-issues-prune; issue
     // #2321 added tm-cli-operations; issue #4447 added
-    // tm-slack-canvas-delivery) + 2 (issue
+    // tm-slack-canvas-delivery, replaced 1-for-1 by tm-slack, issue #4761) + 2 (issue
     // #2890: code-review-standards, contract-driven-testing — code-critic's
     // declared `skills:` dependencies; see
     // `tests_behavior_2890_skills_tests.rs` for the dedicated deep assertions

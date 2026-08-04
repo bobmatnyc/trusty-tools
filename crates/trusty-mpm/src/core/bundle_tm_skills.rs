@@ -221,17 +221,17 @@ pub const TM_CLI_OPERATIONS: &str = include_str!("../assets/skills/tm-cli-operat
 /// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
 pub const TM_ISSUES_PRUNE: &str = include_str!("../assets/skills/tm-issues-prune.md");
 
-/// Slack canvas delivery protocol — creation is not delivery (issue #4447).
+/// Slack delivery protocol, general (issue #4761).
 ///
-/// Why: a canvas-create tool call's success response was repeatedly mistaken
-/// for "the user has the document" when no message pointing at the canvas
-/// was ever sent into a destination the user watches. This skill fixes the
-/// completion signal (a successful `slack_send_message`, not the create
-/// response) and documents the native-vs-connector tool split, including the
-/// free-tier `channel_id`-binding requirement and the no-canvas-tool
-/// fallback.
-/// What: embedded markdown skill file deployed to
-/// `skills/tm-slack-canvas-delivery.md`.
+/// Why: replaces `tm-slack-canvas-delivery` (issue #4447), which existed as
+/// an asset file but was never wired into a const or the `ALL` bundle table
+/// (same shape of defect as `TM_DOCTOR`'s A3 gap) and whose scope was
+/// narrower than needed — canvas only, not Slack delivery generally. This
+/// skill routes through the native `mcp__slack-mcp__*` server
+/// (`trusty-channels`) per ADR-0014's native-first preference, documents the
+/// full verified 22-tool surface (`trusty-channels/src/slack/tools.rs`), and
+/// keeps the old skill's core completion rule — creation is not delivery —
+/// generalized to every delivery shape (plain message, canvas, scheduled).
+/// What: embedded markdown skill file deployed to `skills/tm-slack.md`.
 /// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
-pub const TM_SLACK_CANVAS_DELIVERY: &str =
-    include_str!("../assets/skills/tm-slack-canvas-delivery.md");
+pub const TM_SLACK: &str = include_str!("../assets/skills/tm-slack.md");
