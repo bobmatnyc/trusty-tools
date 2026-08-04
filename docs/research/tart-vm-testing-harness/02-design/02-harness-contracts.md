@@ -937,9 +937,50 @@ resolves the disagreement in the direction the owner chose.
 *Where the refusal comes from.* **The registry, not the VM listing.** The
 registry is the harness's own record of what is running; a VM's state is a
 symptom. `preflight_single_run` runs **before** the §4.1 VM-state checks, reads
-every registry entry through `registry_owner_alive` (the one place `kill -0` is
-issued), and classifies each non-`stopped` `vmtest-*` VM with
-`harness_vm_disposition` — the **same** helper `vmtest clean` (§5) uses.
+every registry entry through `registry_owner_alive` (the one place the harness
+decides whether an entry belongs to a live run), and classifies each
+non-`stopped` `vmtest-*` VM with `harness_vm_disposition` — the **same** helper
+`vmtest clean` (§5) uses.
+
+##### 4.3a.1 What "the owner is alive" means, and why it is not `kill -0`
+
+Making a registry entry a **gate** rather than a hint changed the cost of every
+error in reading one, so the reading is specified here rather than left to the
+primitive:
+
+| Observation | Verdict | Why |
+|---|---|---|
+| no run directory | not alive | nothing was ever acquired |
+| directory, no readable/numeric `pid` yet | **alive** | §4.3 acquires by `mkdir` and writes `pid` immediately after; this is exactly what a peer looks like *between* those two steps |
+| `kill -0` succeeds | alive | ours, and running |
+| `kill -0` fails, `ps` finds the process | **alive** | EPERM — it exists and belongs to **another user**. `kill -0` alone reports this identically to death |
+| `kill -0` fails, `ps` does not find it | not alive | ESRCH — provably gone |
+| alive, but `ps` shows a command line belonging to **another program** | **not alive — stale entry** | see below |
+
+Every uncertain case resolves to **alive**, because both callers' dangerous
+direction is the same one: the gate's cheap mistake is refusing a free host and
+its expensive one is admitting a second run; `clean`'s cheap mistake is skipping
+an orphan and its expensive one is deleting a live run's VM.
+
+**PID reuse is the failure mode this section exists to prevent.** `--keep`
+leaves its registry entry behind permanently and on purpose (§5.3), macOS PIDs
+wrap at ~99,999, and a reused PID makes a finished run's entry answer "alive"
+for ever. Under an uncorroborated reading that entry refuses **every future
+run**, with a message telling the operator to wait for a run that ended weeks
+ago — and `clean --include-kept`, the one flag that exists to remove a kept VM,
+could not reach it either, because it tested ownership first. Three things
+prevent it, and all three are required:
+
+1. **Corroboration.** An entry whose PID is alive but whose command line
+   demonstrably belongs to another program is **disregarded**, and the harness
+   says so on stderr rather than proceeding silently. This is positive evidence,
+   never a guess: no `ps`, empty output, or a driver-shaped command line all
+   leave the entry **alive**.
+2. **`clean --include-kept` outranks a live owner for a `stopped` kept VM**
+   (§5.3). That combination is precisely what `--keep` leaves behind. `running`
+   and `suspended` VMs are **not** weakened by the flag.
+3. **The refusal message names the escape.** Case (a) states that the entry may
+   be stale and prints the exact `rm -rf <registry root>/<runid>`.
 
 *The two refusals are distinct and must stay distinct*, because their remedies
 are opposites:
@@ -964,16 +1005,25 @@ research host of 18 logical cores / 64 GB
 "ample headroom" and two only by contending.
 
 *One residual, recorded rather than papered over.* Two invocations started in the
-same instant can both pass the gate before either has written a registry entry,
-and their auto-generated runids never collide in `registry_acquire` either.
-Closing that window needs a registry-root-wide lock this section does not define,
-and a post-acquire re-check would let two racers refuse *each other*. For an
-ad-hoc, manually-run, single-operator harness the gate is the operator's
-mistake-catcher, not a mutex.
+same instant can both pass the gate **before either has created its registry
+directory**, and their auto-generated runids never collide in `registry_acquire`
+either. The window is scan-to-`mkdir`, **not** scan-to-`pid`-file: a directory
+with no PID file yet reads as a live owner (§4.3a.1, row 2), which closes the
+`mkdir`-to-`pid`-write half of it. Closing the rest needs a registry-root-wide
+lock this section does not define, and a post-acquire re-check would let two
+racers refuse *each other*. For an ad-hoc, manually-run, single-operator harness
+the gate is the operator's mistake-catcher, not a mutex — and `README.md` says so
+too, because an operator reading only the README must not be told the gate is
+absolute.
 
-*Coverage.* `vmtest-harness/tests/test-preflight-single-run.sh` exercises (a),
-(b), (b) via a **dead** registry PID, `suspended`, the **mixed** scan, and two
-clean-namespace regressions — against a stub CLI, with no VM and no network.
+*Coverage.* `vmtest-harness/tests/test-preflight-single-run.sh` exercises (a)
+with and without a peer VM, the `mkdir`-to-`pid` window, (b), (b) via a **dead**
+registry PID, `suspended`, empty and non-numeric PID files, the **mixed** scan,
+the recycled-PID stale entry and its recovery through `clean --include-kept`,
+self-exclusion, TSV field splitting, and two clean-namespace regressions —
+against a stub CLI, with no VM and no network. Its liveness assertions
+(`proc_alive`, `proc_is_driver`) are made directly, because EPERM cannot be
+reached end-to-end without a root-owned driver.
 
 ---
 
@@ -1040,6 +1090,24 @@ skip **only** `vm_delete`, which is what makes this paragraph, condition 2, and
 `clean` lists kept VMs separately, with their age, and does not remove them.
 `vmtest clean --include-kept` removes them too, and is the intended way to tidy up
 after an inspection session.
+
+> **AMENDED 2026-08-04 (issue #15 review) — `--include-kept` now outranks
+> condition 3 for a `stopped` kept VM.** The paragraph above says the run "exits,
+> so its PID dies, so condition 3 is satisfied". **The registry entry outlives
+> the run**, and its recorded PID does not stay dead: macOS PIDs wrap, so a reused
+> PID eventually makes condition 3 fail again, permanently. `clean` then reported
+> the kept VM `IN-USE (live run, skipped)` and `--include-kept` — *the intended
+> way to tidy up after an inspection session* — could not remove it, because
+> ownership was tested first. §4.3a made the same reading a **gate**, so the same
+> entry also refused every future run: an unclearable brick with no documented
+> escape.
+>
+> The order is therefore `keep`-marker **and** `--include-kept` **first**, then
+> ownership, then the marker alone. Deleting still requires **both** the marker
+> and the explicit flag, and this changes nothing for a VM that is not `stopped`:
+> `running` and `suspended` are refused exactly as before, under every flag.
+> `clean`'s own conservative PID-reuse trade (§5.1) is untouched — a false "alive"
+> still only ever costs a skipped deletion there.
 
 #### 5.4 When `clean` cannot tell
 

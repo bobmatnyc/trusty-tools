@@ -88,7 +88,10 @@ Deletes orphaned `vmtest-*` VMs — ones a crashed or killed run left behind. It
 **refuses to touch a running VM** and refuses to touch a VM that a live run still
 owns; it prints what it would do and tells you the manual commands instead.
 `--dry-run` classifies without destroying. `--include-kept` additionally removes VMs
-you deliberately preserved with `--keep`.
+you deliberately preserved with `--keep` — and for a **stopped** kept VM it
+outranks the "a live run owns this" check, because a kept VM plus a leftover
+registry entry is exactly what `--keep` produces. It never overrides that check
+for a `running` or `suspended` VM.
 
 `clean` never issues a stop. That is deliberate: deciding to stop someone else's VM
 is a human's call, not a cleanup tool's.
@@ -110,6 +113,36 @@ give have **opposite remedies**, and it will tell you which one you have:
 
 If both are true at once you get both reports, and the failure line is the first
 one — because waiting is the only thing that is safe while a peer is live.
+
+**It is a mistake-catcher, not a mutex.** Two runs started in the *same instant*
+can both get past it, before either has created its registry entry. Nothing else
+gets past it, and nothing about the harness depends on that never happening —
+but do not build automation on the assumption that the gate serialises for you.
+
+**"A run is in progress" but nothing is running?** Then the registry entry is
+stale, and the harness tells you how to clear it. This is a real state, not a
+hypothetical: `--keep` leaves its registry entry behind on purpose, macOS reuses
+PIDs once the number wraps, and a finished run's PID can end up belonging to
+something else entirely. The harness checks *what* the process actually is, so it
+normally spots this itself and says so:
+
+```
+vmtest: WARN: single-run: registry entry 'nightly' records pid 4711, which is
+alive but is NOT a vmtest process (`/usr/sbin/cupsd`). That pid was REUSED after
+the run ended, so the entry is STALE and is being DISREGARDED.
+```
+
+If it cannot tell — no `ps`, or a command line it cannot read — it refuses
+conservatively and prints both escapes:
+
+```sh
+vmtest clean --include-kept          # the supported way: removes kept VMs and their entries
+rm -rf ~/.local/state/vmtest-harness/runs/<runid>    # the entry alone
+```
+
+`clean --include-kept` deliberately outranks the "a live run owns this" check for
+a **stopped** kept VM — that pairing is exactly what `--keep` leaves behind. It
+never overrides the refusal for a `running` or `suspended` VM.
 
 ### `vmtest --check-table`
 

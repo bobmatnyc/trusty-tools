@@ -1393,14 +1393,15 @@ detected before. See Phase 7 Deviations items 1 and 2.
   # and an orphan with no live owner refuses with case (b)'s:
   #   vmtest: FAIL[10]: harness-namespace VM(s) left behind by a run that is no longer alive: vmtest-orphan(running) — … CLEAN IT UP before retrying: run `vmtest clean` …
   #
-  # Both, the dead-pid and `suspended` variants, the mixed scan, two
-  # clean-namespace regressions and `clean`'s three verdict strings are now
-  # covered WITHOUT A VM by `vmtest-harness/tests/test-preflight-single-run.sh`
-  # — 34 assertions, ~1 s, stub CLI, no network. Against the PRE-FIX driver it
-  # reports `19 passed, 15 failed`; against the fixed one, `34 passed, 0
-  # failed`. The four `clean` assertions pass in BOTH, which is what makes the
-  # shared-classifier refactor behaviour-preserving rather than merely
-  # plausible. That file, not this transcript, is the standing evidence.
+  # Both, the dead-pid and `suspended` variants, empty and non-numeric pid
+  # files, a live peer with NO VM, the mkdir-to-pid-write window, the recycled-
+  # pid stale entry and its recovery, self-exclusion, TSV field splitting, two
+  # clean-namespace regressions and `clean`'s verdict strings are now covered
+  # WITHOUT A VM by `vmtest-harness/tests/test-preflight-single-run.sh` — 86
+  # assertions, a few seconds, stub CLI, no network. The fixture peer is a REAL
+  # live process renamed with `exec -a` so it is driver-shaped, and a second
+  # real process that is NOT, which is what distinguishes a peer run from a
+  # reused pid. That file, not this transcript, is the standing evidence.
 
   # P2-T4
   $ grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike
