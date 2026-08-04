@@ -4,8 +4,9 @@
 
 The Architect stage produces the binding contract between "what was asked" (Stage 1 spec)
 and "what will be built" (Stage 3 implementation). By separating interface design from
-implementation, the pipeline allows critic review of API design before any code is written,
-catching structural problems when they are cheapest to fix.
+implementation, the pipeline allows early architectural review — via `code-analyzer`, not
+`code-critic` (see the "code-critic Dispatch Standard" in `agent-delegation.md`) — before
+any code is written, catching structural problems when they are cheapest to fix.
 
 ## Agent and Mode
 

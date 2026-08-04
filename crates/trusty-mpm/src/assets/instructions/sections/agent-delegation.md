@@ -27,12 +27,38 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 | `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Generic `ops` is DEPRECATED; use `local-ops` for localhost/PM2/docker |
 | `qa`, `web-qa`, `api-qa` | Testing implementations, verifying deployments, regression tests, browser testing | Playwright (web), fetch (APIs), verification protocols | For browser: use `web-qa` (never use chrome-devtools, claude-in-chrome, or playwright directly) |
 | `code-analyzer` | Reviewing a proposed solution before implementation; static analysis, correctness and architectural health | Static analysis, APPROVED/NEEDS_IMPROVEMENT/BLOCKED verdict | This is the phase-2 "Code Analysis" agent. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
-| `code-critic` | Adversarial code review with rubric-based verdict (APPROVE/WARN/BLOCK). Universal qa-tier agent — code review, design critique, adversarial verdict on any engineer dispatch | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal) |
+| `code-critic` | Adversarial code review with a rubric-based verdict (APPROVE/WARN/BLOCK) on code that already exists and passes its tests. NOT for design critique, NOT for every engineer dispatch — dispatch is gated, see "code-critic Dispatch Standard" below | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal), dispatch-gated |
 | `documentation` | Creating/updating docs, README, API docs, guides | Style consistency, organization standards | - |
 | `ticketing` | Issue/ticket bookkeeping: create, update, close, label, triage, comment (P6) | `gh issue` surface, scope validation, workflow state | Required by P6 — ticket bookkeeping never goes to `version-control` |
 | `version-control` | Creating PRs, managing branches, complex git ops (P7) | PR workflows, branch management | Check git user for main branch access |
 | `security` | Pre-push credential scan, vulnerability assessment | Secret scanning, attack-vector detection | - |
 | `mpm-skills-manager` | Creating/improving skills, recommending skills, stack detection | manifest.json access, validation tools, GitHub PR integration | Triggers: "skill", "stack", "framework" |
+
+## code-critic Dispatch Standard
+
+The critic tier keys off the project's test-ladder rung (this repo's Rust
+Test Ladder in `CLAUDE.md`) — never a parallel risk axis invented for this
+decision.
+
+| Rung | Change class | Dispatch code-critic? |
+|---|---|---|
+| 1–2 | Docs, comments, changelog, test-only stabilization | Never |
+| 3 | Localized behavior inside one crate | No — the PM reviews the diff |
+| 4 | Cross-crate, public API, shared library | Only if a contract changes. Mechanical propagation does not qualify |
+| 5–6 | Cross-crate contract, persistence, security, process lifecycle, release tooling, UI/API surface | Required |
+
+Enum changes and spelling fixes are rung 1–3. No critic.
+
+**Escalate to required regardless of rung:**
+- the change can start, refuse, or gate a session
+- it touches a trust boundary or an injection defense
+- it rewrites history or force-pushes
+- the PR is already at review round 3+ — evidence something is being missed
+
+**Not a reason to dispatch:**
+- a design question — send it to the owner, or the PM decides
+- the PM is unsure and wants a second opinion
+- confirming green CI
 
 ## Ops Agent Routing
 
