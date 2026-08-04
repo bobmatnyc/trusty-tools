@@ -12,7 +12,9 @@ mod classification;
 mod history;
 // #3766: pure local-failure recovery policy split out of `history.rs`,
 // which sits against the 500-SLOC production cap.
-mod local_fallback;
+// #4788: `pub(crate)` (re-exported by `pm_task/mod.rs`) so the ctrl_turn REPL
+// route shares the one decision function rather than copying it.
+pub(crate) mod local_fallback;
 mod persona;
 // #4171 (epic #4167): pure gating helpers split out of `persona.rs`, which
 // sits exactly at the 500-SLOC production cap.

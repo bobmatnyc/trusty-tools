@@ -28,8 +28,10 @@ pub(super) fn is_local_model(model: &str) -> bool {
 /// implicit in match-arm guards.
 /// What: `RetryRemote` carries a model proven NOT to be local; `Explain`
 /// carries a user-facing message; `Propagate` keeps the original error.
+// #4788: `pub(crate)` so the ctrl_turn REPL route shares this exact decision
+// instead of re-implementing it.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum LocalFailureAction {
+pub(crate) enum LocalFailureAction {
     RetryRemote(String),
     Explain(String),
     Propagate,
@@ -54,15 +56,18 @@ pub(super) enum LocalFailureAction {
 /// are never swallowed.
 ///
 /// Deliberately takes NO preference flag: `local_inference.fallback_on_error`
-/// no longer influences this path. It remains meaningful elsewhere (the
-/// `ctrl_turn::dispatch` route and the `/local` REPL readout).
+/// does not influence recovery. #4788 routed the second conversational
+/// surface — `ctrl_turn::dispatch::run_ctrl_turn_via_rest`, the standalone
+/// ctrl REPL — through this same decision, so no dispatch path consults that
+/// flag any more; it survives only as a `/local` REPL readout.
 /// Test: `owner_path_local_inference_disabled_recovers`,
 /// `enabled_local_route_falls_back_to_a_distinct_remote_model`,
 /// `recovery_is_independent_of_local_inference_gate_state`,
 /// `local_route_will_not_retry_the_same_local_slug`,
 /// `non_transport_local_failure_propagates`,
-/// `fixed_ctrl_config_propagates_remote_failures`.
-pub(super) fn local_failure_action(
+/// `fixed_ctrl_config_propagates_remote_failures`; for the ctrl_turn route
+/// `ctrl_turn::dispatch::tests::ctrl_turn_recovers_in_both_local_gate_states`.
+pub(crate) fn local_failure_action(
     effective_model: &str,
     configured_model: &str,
     transport_failure: bool,
