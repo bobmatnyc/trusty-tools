@@ -265,8 +265,9 @@ impl ModelAdapter for OllamaAdapter {
         TokenUsage::new(prompt, completion, 0, 0)
     }
     fn api_endpoint(&self, _use_direct: bool) -> ApiEndpoint {
-        let host =
-            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        // #3766: shared resolver so the fast path's "unreachable" message names
+        // the same host this adapter actually dials.
+        let host = super::ollama_host();
         ApiEndpoint {
             base_url: format!("{}/v1", host.trim_end_matches('/')),
             // ollama needs no auth — leave the header empty so the LLM HTTP

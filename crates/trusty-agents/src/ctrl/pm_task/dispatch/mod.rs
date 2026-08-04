@@ -10,6 +10,9 @@
 
 mod classification;
 mod history;
+// #3766: pure local-failure recovery policy split out of `history.rs`,
+// which sits against the 500-SLOC production cap.
+mod local_fallback;
 mod persona;
 // #4171 (epic #4167): pure gating helpers split out of `persona.rs`, which
 // sits exactly at the 500-SLOC production cap.

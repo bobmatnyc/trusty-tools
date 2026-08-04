@@ -108,6 +108,28 @@ fn is_transient_anyhow_error(err: &anyhow::Error) -> bool {
     false
 }
 
+/// True when an `anyhow::Error` was produced by a TRANSPORT failure — the
+/// request never reached a server.
+///
+/// Why: #3766 — the conversational fast path must recover from "the local
+/// daemon isn't listening" (`Connection refused`, DNS failure, connect
+/// timeout) without swallowing genuine API errors the model actually
+/// returned. Gating recovery on the FAILURE MODE rather than on a
+/// local-inference preference flag is the point: a setting that means "prefer
+/// not to use Ollama" must never be what disables Ollama error recovery.
+/// What: walks the chain for a `reqwest::Error` that carries no HTTP status
+/// (nothing was received) and is not a body-decode failure. A status-bearing
+/// error (429, 500, 401) is NOT transport — the server answered.
+/// Test: `transport_error_detects_connect_failure`,
+/// `transport_error_rejects_non_http_error`.
+pub(crate) fn is_transport_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|re| re.status().is_none() && !re.is_decode())
+    })
+}
+
 /// Build a raw JSON request body mirroring async-openai's schema, optionally
 /// injecting Anthropic `cache_control` onto the system message content.
 ///
