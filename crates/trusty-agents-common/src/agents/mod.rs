@@ -36,3 +36,11 @@ pub mod metadata;
 // consumed by `tm doctor`'s asset_tier probe and (#4448) its quarantine
 // counterpart.
 pub mod tier_audit;
+// #4448: the quarantine — the REPAIR half of the pair `tier_audit` reports on —
+// plus the two gates that make moving a file safe, which `tier_audit` alone
+// could not supply: `agent_schema` (is this trusty-mpm's artifact or another
+// project's?) and `vcs_claim` (does the repository claim this file?).
+pub mod agent_schema;
+pub mod quarantine;
+pub mod quarantine_receipt;
+pub mod vcs_claim;

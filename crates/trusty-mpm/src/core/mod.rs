@@ -26,6 +26,9 @@ pub mod bundle;
 // `instruction_package`. Byte-identical to the legacy assembly it replaces; the
 // override configurations stay on that legacy path by design.
 pub mod bundled_pm_package;
+// #4442/#4448: the ONE bundled-agent name roster, shared by `tm doctor`'s
+// asset_tier probe (which reports) and the quarantine (which moves).
+pub mod bundled_roster;
 // DOC-28 cutover bridge: incremental catch-up runtime — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod catchup;
 pub mod circuit;
