@@ -1397,11 +1397,17 @@ detected before. See Phase 7 Deviations items 1 and 2.
   # files, a live peer with NO VM, the mkdir-to-pid-write window, the recycled-
   # pid stale entry and its recovery, self-exclusion, TSV field splitting, two
   # clean-namespace regressions and `clean`'s verdict strings are now covered
-  # WITHOUT A VM by `vmtest-harness/tests/test-preflight-single-run.sh` — 86
-  # assertions, a few seconds, stub CLI, no network. The fixture peer is a REAL
-  # live process renamed with `exec -a` so it is driver-shaped, and a second
-  # real process that is NOT, which is what distinguishes a peer run from a
-  # reused pid. That file, not this transcript, is the standing evidence.
+  # WITHOUT A VM by `vmtest-harness/tests/test-preflight-single-run.sh` — 117
+  # assertions, ~15 s, stub CLI, no network. The fixture peers are REAL live
+  # processes renamed with `exec -a`, beside one that is not, which is what
+  # distinguishes a peer run from a reused pid.
+  #
+  # It also carries the regression for a defect the FIX introduced and a review
+  # caught: corroboration once compared the peer against the CHECKER's own
+  # filename, so a driver copy named `vmtest-dev` deleted a live `vmtest` run's
+  # stopped VM. That case asserts on RECORDED DELETE CALLS rather than printed
+  # text, because printed text is exactly what let the original #15 defect ship
+  # green. That file, not this transcript, is the standing evidence.
 
   # P2-T4
   $ grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike

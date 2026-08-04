@@ -22,11 +22,21 @@
 #                    (`exec -a` renames argv[0]) -> a genuine peer run;
 #   LIVE_OTHER_PID   alive, and `ps` shows something else entirely -> the
 #                    RECYCLED-PID shape a `--keep` entry decays into;
+#   ALT_PEER_PID     alive, and named as the SHIPPED driver, checked by a
+#                    DIFFERENTLY-NAMED copy of the driver from a directory whose
+#                    path contains no occurrence of the driver's name;
 #   DEAD_PID         started and reaped;
 #   pid 1            alive, root-owned, so `kill -0` fails with EPERM.
 # Substituting `$$` or a bare `sleep` for the first would make the live-peer
 # cases pass for the wrong reason, which is the defect this file exists to stop
 # recurring.
+#
+# WHICH FIXTURES CARRY A RECORDED `cmdline` IS ITSELF UNDER TEST.  §4.3a.1 makes
+# corroboration a comparison between the identity an entry recorded FOR ITSELF
+# and what its pid is running now, so `registry_entry` writes none by default
+# (that is a pre-§4.3a.1 entry, and must resolve to ALIVE), `registry_cmdline_live`
+# records the pid's true current line (a corroborated peer), and
+# `registry_cmdline_stale` records one it is not running (a reused pid).
 #
 # THE VIRTUALISATION TOOL IS NEVER NAMED IN THIS FILE, and that is deliberate.
 # DOC-1 §3.2 permits its name in `lib/vm.sh` and nowhere else, mechanically
@@ -62,6 +72,16 @@ bail() { printf '%s: %s\n' "$TEST_NAME" "$*" >&2; exit 1; }
 
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/vmtest-single-run-test.XXXXXX") \
     || bail 'could not create a temporary directory'
+
+# A SECOND root, deliberately named so that NOTHING in its path contains the
+# driver's name.  The renamed-checker regression below is meaningless inside
+# `$TMPROOT`, whose own path contains `vmtest` and would therefore satisfy a
+# path-substring test by accident — which is exactly how the first review of
+# this mechanism concluded the defect was unreachable.
+ALTROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-alt-copy.XXXXXX") \
+    || bail 'could not create the alternate harness root'
+case "$ALTROOT" in *vmtest*) bail "ALTROOT must not contain the driver name: $ALTROOT" ;; esac
+
 LIVE_DRIVER_PID=''
 LIVE_OTHER_PID=''
 
@@ -74,6 +94,7 @@ cleanup() {
         [ -z "$p" ] || wait "$p" 2>/dev/null
     done
     [ -z "${TMPROOT:-}" ] || rm -rf "$TMPROOT"
+    [ -z "${ALTROOT:-}" ] || rm -rf "$ALTROOT"
 }
 trap cleanup EXIT
 
@@ -135,6 +156,10 @@ write_list() {
 # registry_entry <runid> <pid|-> [keep] — a run-registry entry exactly as §4.3
 # writes it.  `-` writes NO pid file at all (the mkdir-to-pid-write window);
 # an empty second argument writes an EMPTY pid file (the corrupt shape).
+#
+# It deliberately writes NO `cmdline`, because that is what an entry written by
+# a pre-§4.3a.1 driver looks like and every such entry must resolve to ALIVE.
+# The two `registry_cmdline*` helpers below add one where a case needs it.
 registry_entry() {
     mkdir -p "$TMPROOT/state/runs/$1" || bail "could not create registry entry $1"
     case "${2:-}" in
@@ -143,6 +168,21 @@ registry_entry() {
     esac
     printf '%s\n' "vmtest-$1" > "$TMPROOT/state/runs/$1/vm"
     [ "${3:-}" != 'keep' ] || : > "$TMPROOT/state/runs/$1/keep"
+}
+
+# registry_cmdline_live <runid> <pid> — record the pid's REAL current command
+# line, exactly as `registry_acquire` does.  This is a CORROBORATED owner.
+registry_cmdline_live() {
+    ps -ww -o command= -p "$2" 2>/dev/null | head -n 1 > "$TMPROOT/state/runs/$1/cmdline" \
+        || bail "could not record the command line of pid $2"
+    [ -s "$TMPROOT/state/runs/$1/cmdline" ] || bail "empty command line recorded for pid $2"
+}
+
+# registry_cmdline_stale <runid> <text> — record a command line the pid is NOT
+# running.  This is the recycled-pid shape: the run recorded one identity and
+# the pid now shows another.
+registry_cmdline_stale() {
+    printf '%s\n' "$2" > "$TMPROOT/state/runs/$1/cmdline"
 }
 
 registry_reset() { rm -rf "$TMPROOT/state/runs"; mkdir -p "$TMPROOT/state/runs"; }
@@ -245,8 +285,8 @@ OK_ANCHOR='single-run: no peer run is live and no vmtest-* VM is left over'
 
 # --- the fixture processes -------------------------------------------------
 
-# Alive AND driver-shaped: `exec -a` sets argv[0], so `ps` reports a command
-# line containing the driver's name and `proc_is_driver` corroborates it.
+# Alive AND driver-shaped: `exec -a` sets argv[0], so `ps` reports a plausible
+# driver command line that a registry entry can record and be corroborated by.
 bash -c 'exec -a vmtest-fixture-peer-driver sleep 300' &
 LIVE_DRIVER_PID=$!
 
@@ -293,8 +333,49 @@ fi
 unit 1 'proc_alive calls a reaped pid DEAD'                    "proc_alive $DEAD_PID"
 unit 0 'proc_alive calls an empty pid ALIVE (cannot disprove)' 'proc_alive ""'
 unit 0 'proc_alive calls a non-numeric pid ALIVE'              'proc_alive "not-a-pid"'
-unit 0 'proc_is_driver corroborates the driver-shaped process' "proc_is_driver $LIVE_DRIVER_PID"
-unit 1 'proc_is_driver rejects the unrelated process'          "proc_is_driver $LIVE_OTHER_PID"
+
+# D-E — an empty runid resolves to the registry ROOT, which always exists and
+# has no `pid`.  Without the guard, a VM named exactly `vmtest-` is permanently
+# "held by a live run".
+unit 1 'registry_owner_alive "" is NOT alive (the registry root is not a run)' \
+       'registry_owner_alive ""'
+
+# --- corroboration is symmetric: it never consults the CHECKER's identity ---
+
+printf -- '\n--- corroboration: recorded identity vs observed identity ---\n'
+registry_reset
+registry_entry corro "$LIVE_DRIVER_PID"
+registry_cmdline_live corro "$LIVE_DRIVER_PID"
+unit 0 'a pid still running its recorded command line is CORROBORATED' \
+       'registry_owner_corroborated corro'
+unit 1 'that same entry is not an impostor' \
+       "registry_owner_impostor corro $LIVE_DRIVER_PID"
+unit 0 'and it is alive' 'registry_owner_alive corro'
+
+registry_reset
+registry_entry recyc "$LIVE_OTHER_PID"
+registry_cmdline_stale recyc '/somewhere/vmtest run local'
+unit 0 'a pid running something OTHER than its recorded command line is an impostor' \
+       "registry_owner_impostor recyc $LIVE_OTHER_PID"
+unit 1 'an impostor is not corroborated'  'registry_owner_corroborated recyc'
+unit 1 'an impostor is not alive'         'registry_owner_alive recyc'
+
+# D-C — a bystander that merely MENTIONS the harness no longer reads as a peer.
+# The old substring test matched any command line containing `vmtest`.
+registry_reset
+registry_entry bystander "$LIVE_OTHER_PID"
+registry_cmdline_stale bystander 'grep -r vmtest .'
+unit 0 'a bystander whose command line merely mentions the harness is an impostor' \
+       "registry_owner_impostor bystander $LIVE_OTHER_PID"
+
+registry_reset
+registry_entry norecord "$LIVE_OTHER_PID"
+unit 1 'an entry with NO recorded command line is never an impostor' \
+       "registry_owner_impostor norecord $LIVE_OTHER_PID"
+unit 1 'an entry with NO recorded command line is not corroborated either' \
+       'registry_owner_corroborated norecord'
+unit 0 'an entry with NO recorded command line resolves to ALIVE (conservative)' \
+       'registry_owner_alive norecord'
 
 # --- case (a): a live peer run --------------------------------------------
 
@@ -441,13 +522,18 @@ assert_stderr_has 'single-run: orphaned VM(s), no live registry owner: vmtest-or
 printf -- '\n--- recycled pid: a stale --keep entry must not brick the harness ---\n'
 registry_reset
 registry_entry kept-run "$LIVE_OTHER_PID" keep
+registry_cmdline_stale kept-run "$HARNESS/vmtest run local --keep"
 write_list "vmtest-kept-run:stopped"
 run_driver t-case-recycled
 assert_rc_passed_gate               'a stale entry whose pid was reused does NOT refuse the run'
 assert_stderr_has "$OK_ANCHOR"      'the gate passes once the entry is disregarded'
-assert_stderr_has "records pid $LIVE_OTHER_PID, which is alive but is NOT a vmtest process" \
-                                    'the gate SAYS it disregarded the entry, rather than proceeding silently'
-assert_stderr_has "Clear it with: rm -rf $TMPROOT/state/runs/kept-run" \
+assert_stderr_has "was acquired by pid $LIVE_OTHER_PID running \`$HARNESS/vmtest run local --keep\`" \
+                                    'the warning names the identity the entry recorded'
+# shellcheck disable=SC2016  # the backticks are literal text in the message
+#                              being matched, not a command substitution.
+assert_stderr_has 'that pid is alive but is now running `sleep 300`' \
+                                    'the warning names what the pid is actually running now'
+assert_stderr_has "or: rm -rf $TMPROOT/state/runs/kept-run" \
                                     'the warning prints the exact command that clears the entry'
 assert_stderr_lacks "$WAIT_ANCHOR"  'a recycled pid does not produce a bogus WAIT refusal'
 
@@ -481,6 +567,128 @@ assert_stdout_has 'vmtest-busy  running  IN-USE (live run, skipped)' \
 assert_stdout_has 'vmtest-susp  suspended  WEDGED (refusing)' \
                                     '--include-kept does not delete a suspended VM'
 assert_no_delete                    '--include-kept issued no delete for non-stopped VMs'
+
+# --- D-A: a differently-named checker must not destroy a live run's VM ----
+#
+# THE REGRESSION THIS REPLACES WAS DESTRUCTIVE AND SHIPPED GREEN.  Corroboration
+# used to compare the peer's `ps` line against the CHECKER's own basename, which
+# is not a property of the peer: a copy named `vmtest-dev` found no `vmtest-dev`
+# inside a peer running `vmtest`, called the live run stale, and `clean` DELETED
+# its stopped VM.  Recorded against a real live process, `vmtest-realpeer
+# stopped ORPHANED (deleted)` where main and the previous commit both said
+# `IN-USE (live run, skipped)`.
+#
+# The assertions are on RECORDED DELETE CALLS, not on printed text, because
+# printed text is what let the original #15 defect ship.  The checker lives
+# outside $TMPROOT, in a path containing no occurrence of the driver's name.
+
+printf -- '\n--- D-A: a renamed driver copy checking a live peer of the shipped name ---\n'
+cp -R "$HARNESS/." "$ALTROOT/" || bail 'could not copy the harness'
+mv "$ALTROOT/$(basename "$DRIVER")" "$ALTROOT/vmtest-dev" || bail 'could not rename the driver copy'
+chmod +x "$ALTROOT/vmtest-dev"
+info "checker: $ALTROOT/vmtest-dev  (path contains no '$(basename "$DRIVER")')"
+
+# A REAL live process whose command line is the shipped driver's path — what a
+# genuine peer run looks like to `ps`.
+bash -c "exec -a '$DRIVER' sleep 300" &
+ALT_PEER_PID=$!
+sleep 1
+kill -0 "$ALT_PEER_PID" 2>/dev/null || bail 'the alternate peer fixture is not alive'
+
+registry_reset
+registry_entry realpeer "$ALT_PEER_PID"
+registry_cmdline_live realpeer "$ALT_PEER_PID"
+write_list "vmtest-realpeer:stopped"
+: > "$STUB_CALLS"
+harness_env "$ALTROOT/vmtest-dev" clean > "$OUT" 2> "$ERR"
+RC=$?
+assert_no_delete                    'a renamed checker issues NO delete against a live peer of the shipped name'
+assert_stdout_has 'vmtest-realpeer  stopped  IN-USE (live run, skipped)' \
+                                    'the renamed checker reports the live peer as IN-USE'
+assert_stdout_lacks 'ORPHANED'      'the renamed checker offers no destructive verdict'
+
+# The gate reached through the renamed checker must not advise cleanup either.
+run_gate_alt() {
+    harness_env "$ALTROOT/vmtest-dev" run local --runid "$1" --dry-run > "$OUT" 2> "$ERR"
+    RC=$?
+}
+run_gate_alt t-alt-gate
+assert_rc 10                        'the renamed checker still refuses, because the peer is live'
+assert_stderr_has "$WAIT_ANCHOR"    'the renamed checker tells the operator to WAIT'
+assert_stderr_lacks "$CLEAN_ANCHOR" 'the renamed checker does NOT advise destroying a live run'
+
+# The fix must not simply make everything conservative: a GENUINELY stale entry
+# is still detected through the very same renamed checker.
+printf -- '\n--- D-A control: the renamed checker still detects a genuinely stale entry ---\n'
+registry_reset
+registry_entry realpeer "$ALT_PEER_PID"
+registry_cmdline_stale realpeer '/gone/vmtest run local'
+write_list "vmtest-realpeer:stopped"
+: > "$STUB_CALLS"
+harness_env "$ALTROOT/vmtest-dev" clean > "$OUT" 2> "$ERR"
+RC=$?
+assert_stdout_has 'vmtest-realpeer  stopped  ORPHANED (deleted)' \
+                                    'a pid no longer running its recorded command line IS still collected'
+assert_deleted 'vmtest-realpeer'    'the control case proves the mechanism is not merely conservative'
+
+kill "$ALT_PEER_PID" 2>/dev/null; wait "$ALT_PEER_PID" 2>/dev/null
+
+# --- D-B: the advertised recovery command must work for the case it names --
+#
+# §4.3a's refusal names `vmtest clean --include-kept` as the supported way to
+# clear a stale entry.  For a registry-ONLY entry (no VM) whose pid merely
+# answers, `clean` reported `IN-USE (live run, no VM yet)` and left it in place —
+# so the advertised command did nothing for the exact case the message was
+# about, and only a raw `rm -rf` worked.
+
+printf -- '\n--- D-B: clean --include-kept prunes a VM-less uncorroborated entry ---\n'
+registry_reset
+registry_entry stuck "$LIVE_OTHER_PID"   # no recorded cmdline: cannot be corroborated
+write_list
+run_clean --dry-run
+assert_stdout_has 'runs/stuck  —  IN-USE (live run, no VM yet)' \
+                                    'plain clean still leaves an uncorroborated VM-less entry alone'
+run_clean --include-kept --dry-run
+assert_stdout_has 'runs/stuck  —  PRUNE (bookkeeping)' \
+                                    '--include-kept classifies it as prunable bookkeeping'
+run_clean --include-kept
+assert_rc 0                         'clean --include-kept succeeds'
+assert_stdout_has 'runs/stuck  —  PRUNED (bookkeeping)' \
+                                    '--include-kept actually prunes it'
+assert_no_delete                    'pruning bookkeeping destroys no VM'
+if [ -d "$TMPROOT/state/runs/stuck" ]; then
+    fail 'the advertised recovery command removes the entry'
+else
+    pass 'the advertised recovery command removes the entry'
+fi
+run_driver t-case-after-prune
+assert_rc_passed_gate               'and the harness runs again afterwards'
+
+printf -- '\n--- D-B guard: --include-kept must NOT prune a corroborated live peer ---\n'
+registry_reset
+registry_entry livepeer "$LIVE_DRIVER_PID"
+registry_cmdline_live livepeer "$LIVE_DRIVER_PID"
+write_list
+run_clean --include-kept
+assert_stdout_has 'runs/livepeer  —  IN-USE (live run, no VM yet)' \
+                                    'a corroborated live peer is never pruned, flag or no flag'
+if [ -d "$TMPROOT/state/runs/livepeer" ]; then
+    pass 'the corroborated live peer keeps its registry entry'
+else
+    fail 'the corroborated live peer keeps its registry entry'
+fi
+
+# --- D-E: a VM named exactly `vmtest-` is not "held by a live run" --------
+
+printf -- '\n--- D-E: the empty runid must not resolve to the registry root ---\n'
+registry_reset
+write_list "vmtest-:running"
+run_driver t-case-emptyrunid
+assert_rc 10                        'a VM named exactly vmtest- is refused'
+assert_stderr_has 'single-run: orphaned VM(s), no live registry owner: vmtest-(running)' \
+                                    'it is classified as an orphan, not as a live run'
+assert_stderr_has "$CLEAN_ANCHOR"   'and the remedy is to clean it up'
+assert_stderr_lacks "$WAIT_ANCHOR"  'not to wait for a run that cannot exist'
 
 # --- regression: a clean namespace passes the gate ------------------------
 

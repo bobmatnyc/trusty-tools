@@ -123,26 +123,31 @@ but do not build automation on the assumption that the gate serialises for you.
 stale, and the harness tells you how to clear it. This is a real state, not a
 hypothetical: `--keep` leaves its registry entry behind on purpose, macOS reuses
 PIDs once the number wraps, and a finished run's PID can end up belonging to
-something else entirely. The harness checks *what* the process actually is, so it
-normally spots this itself and says so:
+something else entirely.
+
+Each run records **its own command line** when it starts, so a later check can
+ask *is that PID still the process that started this run?* rather than guess.
+When the answer is a clear no, it says so and carries on:
 
 ```
-vmtest: WARN: single-run: registry entry 'nightly' records pid 4711, which is
-alive but is NOT a vmtest process (`/usr/sbin/cupsd`). That pid was REUSED after
-the run ended, so the entry is STALE and is being DISREGARDED.
+vmtest: WARN: single-run: registry entry 'nightly' was acquired by pid 4711
+running `/Users/you/trusty-tools/vmtest-harness/vmtest run local --keep`; that
+pid is alive but is now running `/usr/sbin/cupsd`. The pid was REUSED after the
+run ended, so the entry is STALE and is being DISREGARDED.
 ```
 
-If it cannot tell — no `ps`, or a command line it cannot read — it refuses
-conservatively and prints both escapes:
+When it cannot tell — no `ps`, an unreadable command line, or an entry written
+before this check existed — it refuses conservatively and prints both escapes:
 
 ```sh
-vmtest clean --include-kept          # the supported way: removes kept VMs and their entries
+vmtest clean --include-kept          # the supported way
 rm -rf ~/.local/state/vmtest-harness/runs/<runid>    # the entry alone
 ```
 
-`clean --include-kept` deliberately outranks the "a live run owns this" check for
-a **stopped** kept VM — that pairing is exactly what `--keep` leaves behind. It
-never overrides the refusal for a `running` or `suspended` VM.
+`clean --include-kept` reaches both shapes this produces: a **stopped** kept VM
+whose entry still answers, and a leftover entry with **no VM at all**. It never
+overrides the refusal for a `running` or `suspended` VM, and it never removes the
+entry of a run it can positively confirm is alive.
 
 ### `vmtest --check-table`
 
@@ -449,9 +454,11 @@ vmtest-harness/
 ```
 
 `tests/test-preflight-single-run.sh` is the one part of the harness you can check
-without a VM: `bash vmtest-harness/tests/test-preflight-single-run.sh` takes about
-a second, boots nothing, touches no network, and writes only inside its own
-temporary directory. Run it after any change to preflight or the run registry.
+without a VM: `bash vmtest-harness/tests/test-preflight-single-run.sh` takes
+**about 15 seconds** (measured 14.7–15.1 s; most of it is deliberate waits for
+the live fixture processes it needs), boots nothing, touches no network, and
+writes only inside its own temporary directories. Run it after any change to
+preflight, the run registry, or `clean`.
 
 A scenario is **a sequence of install steps plus the expectations that follow from
 them**. It composes `lib/` functions and contains no `tart` calls, no `PATH`
