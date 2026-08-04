@@ -20,13 +20,26 @@
 //! rev-parse --git-path`, which correctly follows a linked worktree's gitlink
 //! back to the shared common git dir) so the secret is gitignore-safe
 //! regardless of the repo's own tracked `.gitignore`. Every step is
-//! best-effort: a missing source root, an unreadable file, an oversized file,
-//! or a failed exclude-append is `warn!`-logged and skipped — this function
-//! NEVER returns an error and NEVER panics, matching the "sync failure must
-//! not fail the spawn" contract from [`try_inproject_spawn`]'s call site.
+//! best-effort: a missing source root, an unreadable file, or an oversized file
+//! is `warn!`-logged and skipped — this function NEVER returns an error and
+//! NEVER panics, matching the "sync failure must not fail the spawn" contract
+//! from [`try_inproject_spawn`]'s call site.
+//!
+//! 🔴 Best-effort applies to COPYING, never to the exclusion guarantee (#4733).
+//! Until #4733 the exclude-append ran AFTER the copy and a failure was only a
+//! `warn!`, so a `git rev-parse` that merely declined to answer — a stale
+//! worktree gitlink, `detected dubious ownership`, an unreadable `.git` — left
+//! the operator's `.env` sitting unregistered in a live worktree where a later
+//! `git add -A && git commit` stages it into history. The order is now inverted:
+//! register first, ask `git check-ignore` (git's own authority, mirroring
+//! [`crate::core::session_launch::native_mcp::is_env_local_actually_ignored`])
+//! whether each path is genuinely ignored, and copy only what it confirms. A
+//! destination with no repository at all has no history to leak into and is
+//! copied to freely; anything in between refuses.
 //! Test: `tests` submodule — pattern matching, the size cap, the path-escape
-//! guard, the `node_modules/`-is-a-directory-so-never-matches case, and the
-//! `.git/info/exclude` append for a real linked worktree.
+//! guard, the `node_modules/`-is-a-directory-so-never-matches case, the
+//! `.git/info/exclude` append for a real linked worktree, and the #4733
+//! broken-repo / verification-failure refusals.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,19 +60,34 @@ pub const MAX_SYNC_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// Why: the single seam that turns a resolved pattern allowlist into actual
 /// copied files, called once per in-project spawn right after the session
 /// worktree is created (`lifecycle::reserve_inproject_worktree`).
-/// What: for each pattern in `patterns`, resolves candidate files via
-/// [`collect_matches`] (top-level of `source`, or one explicit subdirectory
-/// when the pattern contains `/`), skips anything over
-/// [`MAX_SYNC_FILE_BYTES`], copies the rest to
-/// `<dest_worktree>/<relative_path>` (creating parent dirs as needed), and
-/// appends every successfully-copied relative path to the worktree's real
-/// `info/exclude` file via [`append_to_git_exclude`]. Duplicate matches
-/// across overlapping patterns are copied once. Never panics, never returns
-/// an error — every failure is a `warn!` and the loop continues.
+///
+/// What: resolves candidate files via [`collect_matches`] for every pattern
+/// (top-level of `source`, or one explicit subdirectory when the pattern
+/// contains `/`), drops anything over [`MAX_SYNC_FILE_BYTES`], and then — before
+/// writing a single byte into the worktree — settles the exclusion guarantee:
+///
+/// 1. [`resolve_git_exclude`] classifies the destination in three states.
+///    [`ExcludeTarget::Unknown`] (git failed, or the destination is a repository
+///    git could not read) copies NOTHING; [`ExcludeTarget::NoRepo`] has no
+///    history to leak into, so it copies with no registration.
+/// 2. For a real repository, every candidate path is appended to the worktree's
+///    real `info/exclude` via [`append_paths_to_exclude`] FIRST — registration
+///    is what MAKES a path ignored.
+/// 3. Each path is then re-verified with [`is_path_git_ignored`] — `git
+///    check-ignore`, git's own authority, which is what PROVES it, and which
+///    also answers "not ignored" for a path the repo already TRACKS. Only
+///    confirmed paths are copied, so a failure in step 2 costs at most the
+///    paths the repo's own ignore rules did not already cover.
+///
+/// Duplicate matches across overlapping patterns are copied once. Never panics,
+/// never returns an error — every failure is a `warn!` (#4733: refusing to copy
+/// is the failure mode, never copying unregistered).
 /// Test: `tests::syncs_matching_files_only`, `tests::disabled_copies_nothing`
 /// (caller-side gate — this function itself has no `enabled` concept, the
 /// caller skips calling it entirely when disabled),
-/// `tests::missing_source_file_is_non_fatal`.
+/// `tests::missing_source_file_is_non_fatal`,
+/// `tests::broken_repo_copies_nothing`,
+/// `tests::tracked_secret_is_not_overwritten_in_worktree`.
 pub fn sync_untracked_files(source: &Path, dest_worktree: &Path, patterns: &[String]) {
     if patterns.is_empty() {
         return;
@@ -76,25 +104,57 @@ pub fn sync_untracked_files(source: &Path, dest_worktree: &Path, patterns: &[Str
             }
         }
     }
+    candidates.retain(|(abs_path, _)| within_size_cap(abs_path));
+    if candidates.is_empty() {
+        return;
+    }
 
-    let mut copied: Vec<String> = Vec::new();
-    for (abs_path, rel_path) in candidates {
-        let size = match fs::metadata(&abs_path) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                warn!(
-                    file = %abs_path.display(),
-                    "untracked_sync: could not stat candidate file (non-fatal, skipping): {e}"
-                );
-                continue;
-            }
-        };
-        if size > MAX_SYNC_FILE_BYTES {
+    // #4733: settle the exclusion guarantee BEFORE any secret is written.
+    let in_repo = match resolve_git_exclude(dest_worktree) {
+        ExcludeTarget::NoRepo => false,
+        ExcludeTarget::Unknown(reason) => {
             warn!(
-                file = %abs_path.display(),
-                size,
-                cap = MAX_SYNC_FILE_BYTES,
-                "untracked_sync: file exceeds size cap, skipping"
+                worktree = %dest_worktree.display(),
+                "untracked_sync: refusing to copy {} allowlisted file(s) — a git \
+                 repository could not be ruled out and its exclude file could not be \
+                 resolved ({reason}); copying now would leave secrets stageable by a \
+                 later `git add -A` (issue #4733)",
+                candidates.len(),
+            );
+            return;
+        }
+        ExcludeTarget::Registered(exclude_path) => {
+            let rels: Vec<String> = candidates.iter().map(|(_, rel)| rel.clone()).collect();
+            if let Err(e) = append_paths_to_exclude(&exclude_path, &rels) {
+                // Not fatal on its own: registration is what MAKES a path
+                // ignored, but `is_path_git_ignored` below is what PROVES it,
+                // and a repo whose own `.gitignore` already covers the path
+                // needs no entry here. Anything this failure leaves unignored
+                // is refused per-file (#4733).
+                warn!(
+                    worktree = %dest_worktree.display(),
+                    "untracked_sync: could not register {} allowlisted file(s) in the \
+                     worktree's git exclude file ({e}) — each will be copied only if \
+                     `git check-ignore` confirms it is already ignored (issue #4733)",
+                    rels.len(),
+                );
+            }
+            true
+        }
+    };
+
+    for (abs_path, rel_path) in candidates {
+        // #4733: git itself confirms the registration took effect. A `.gitignore`
+        // negation elsewhere, or a path the repo already TRACKS, both report
+        // "not ignored" here — and both would be staged by `git add -A`.
+        if in_repo && !is_path_git_ignored(dest_worktree, &rel_path) {
+            warn!(
+                worktree = %dest_worktree.display(),
+                file = %rel_path,
+                "untracked_sync: refusing to copy — `git check-ignore` does not \
+                 recognise this path as ignored in the session worktree (it may \
+                 already be tracked, or an ignore-negation overrides the exclude \
+                 entry); this session launches without it (issue #4733)"
             );
             continue;
         }
@@ -111,32 +171,45 @@ pub fn sync_untracked_files(source: &Path, dest_worktree: &Path, patterns: &[Str
         }
 
         match fs::copy(&abs_path, &dest_path) {
-            Ok(_) => {
-                info!(
-                    from = %abs_path.display(),
-                    to = %dest_path.display(),
-                    "untracked_sync: copied allowlisted untracked file into session worktree"
-                );
-                copied.push(rel_path);
-            }
-            Err(e) => {
-                warn!(
-                    from = %abs_path.display(),
-                    to = %dest_path.display(),
-                    "untracked_sync: copy failed (non-fatal, skipping): {e}"
-                );
-            }
+            Ok(_) => info!(
+                from = %abs_path.display(),
+                to = %dest_path.display(),
+                "untracked_sync: copied allowlisted untracked file into session worktree"
+            ),
+            Err(e) => warn!(
+                from = %abs_path.display(),
+                to = %dest_path.display(),
+                "untracked_sync: copy failed (non-fatal, skipping): {e}"
+            ),
         }
     }
+}
 
-    if !copied.is_empty()
-        && let Err(e) = append_to_git_exclude(dest_worktree, &copied)
-    {
-        warn!(
-            worktree = %dest_worktree.display(),
-            "untracked_sync: failed to append copied files to git exclude (non-fatal, \
-             copied files may show as untracked in `git status`): {e}"
-        );
+/// Whether `path` is a statable file at or under [`MAX_SYNC_FILE_BYTES`].
+///
+/// Why: the size cap has to run before the exclude registration (#4733) so a
+/// file that will never be copied does not earn an exclude entry.
+/// What: `false` for an unstatable path or one over the cap, each `warn!`-logged.
+/// Test: `tests::oversized_file_is_skipped`.
+fn within_size_cap(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(m) if m.len() <= MAX_SYNC_FILE_BYTES => true,
+        Ok(m) => {
+            warn!(
+                file = %path.display(),
+                size = m.len(),
+                cap = MAX_SYNC_FILE_BYTES,
+                "untracked_sync: file exceeds size cap, skipping"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                file = %path.display(),
+                "untracked_sync: could not stat candidate file (non-fatal, skipping): {e}"
+            );
+            false
+        }
     }
 }
 
@@ -253,61 +326,205 @@ fn glob_match_from(p: &[char], n: &[char]) -> bool {
     }
 }
 
-/// Append copied relative paths to the worktree's real `info/exclude` file.
+/// What the destination worktree's git exclude file resolved to.
 ///
-/// Why: a linked git worktree's `.git` is a FILE (a gitlink to
-/// `<common-git-dir>/worktrees/<name>`), not a directory — `info/exclude` is
-/// a repo-wide (not per-worktree) file that lives in the SHARED common git
-/// dir. Naively joining `<worktree>/.git/info/exclude` would try to create a
-/// directory inside that gitlink file and fail. `git rev-parse --git-path
-/// info/exclude`, run with the worktree as cwd, is git's own resolver for
-/// this — it returns the correct shared path for both a plain repo and a
-/// linked worktree, mirroring how [`super::ensure_worktrees_gitignored`]
-/// appends to the analogous file for the base clone itself.
-/// What: resolves the real exclude-file path via `git -C <dest_worktree>
-/// rev-parse --git-path info/exclude`, creates its parent dir, and appends
-/// each of `relative_paths` that is not already present (idempotent, mirrors
-/// [`super::ensure_worktrees_gitignored`]'s read-then-append style).
-/// Test: `tests::append_to_git_exclude_resolves_shared_worktree_path`,
-/// `tests::append_to_git_exclude_is_idempotent`.
-fn append_to_git_exclude(dest_worktree: &Path, relative_paths: &[String]) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+/// Why: #4733 — "there is no repository here" and "git could not be asked" are
+/// different facts with opposite safe answers. A destination with no repository
+/// has no history for a secret to leak into, so copying is fine; a destination
+/// that IS (or may be) a repository whose exclude file could not be resolved
+/// must be left alone entirely.
+/// What: [`Registered`](Self::Registered) carries the real `info/exclude` path
+/// (shared common dir for a linked worktree); [`NoRepo`](Self::NoRepo) is a
+/// corroborated absence; [`Unknown`](Self::Unknown) carries the reason no
+/// conclusion was available.
+/// Test: `tests::broken_repo_copies_nothing`,
+/// `tests::plain_directory_destination_still_copies`.
+enum ExcludeTarget {
+    /// A repository was found; this is its real `info/exclude` path.
+    Registered(PathBuf),
+    /// Corroborated: no git repository at or above the destination.
+    NoRepo,
+    /// git could not be consulted. Carries the reason for the operator log.
+    Unknown(String),
+}
+
+/// The only git stderr CONSISTENT with "there is genuinely no repository here".
+///
+/// Why: the parenthesised clause is load-bearing. Git emits
+/// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
+/// shorter phrase `not a git repository` matches a broken repo and a
+/// genuinely-absent one alike — and the broken repo is the one with real history
+/// a secret can be committed into.
+///
+/// Consistent with, NOT proof of: git emits the same text for an unreadable
+/// `.git`, where the repository is real. [`classify_rev_parse_failure`]
+/// corroborates it with a filesystem witness first.
+///
+/// What: verified byte-identical against git 2.54.0. Any wording drift falls
+/// through to [`ExcludeTarget::Unknown`] — the fail-closed direction. Mirrors
+/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727); #4735
+/// extracts the shared probe both will call.
+/// Test: `tests::broken_repo_copies_nothing`.
+const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+
+/// Resolve the destination's real `info/exclude` path, in three states (#4733).
+///
+/// Why: this is the gate the whole exclusion guarantee turns on, so it must
+/// answer WHY a `rev-parse` failed rather than collapsing every failure into
+/// "just warn and carry on copying".
+///
+/// It asks git rather than joining `<dest_worktree>/.git/info/exclude` because a
+/// linked worktree's `.git` is a FILE (a gitlink to
+/// `<common-git-dir>/worktrees/<name>`) while `info/exclude` is repo-wide and
+/// lives in the SHARED common git dir — the naive join would try to create a
+/// directory inside that gitlink file and fail. This mirrors how
+/// [`super::ensure_worktrees_gitignored`] reaches the analogous file for the
+/// base clone.
+///
+/// 🔴 THE EXIT CODE ALONE IS NOT A CLASSIFIER. Git exits 128 for "not a
+/// repository" AND for `detected dubious ownership`, a stale worktree gitlink,
+/// a broken `repositoryformatversion`, or any failing `git` shim on `PATH`.
+///
+/// What: runs `git -C <dest_worktree> rev-parse --git-path info/exclude`. A
+/// spawn failure or an empty stdout is [`ExcludeTarget::Unknown`]; a non-zero
+/// exit is delegated to [`classify_rev_parse_failure`]; success resolves a
+/// relative result (plain repo) against `dest_worktree` and uses an absolute one
+/// (linked worktree, pointing at the shared common dir) as-is.
+/// Test: `tests::copied_files_are_added_to_shared_worktree_exclude`,
+/// `tests::broken_repo_copies_nothing`,
+/// `tests::plain_directory_destination_still_copies`,
+/// `tests::missing_git_binary_copies_nothing`.
+fn resolve_git_exclude(dest_worktree: &Path) -> ExcludeTarget {
+    resolve_git_exclude_with(dest_worktree, "git")
+}
+
+/// [`resolve_git_exclude`] with an injectable git program name.
+///
+/// Why: the spawn-failure arm (no `git` on `PATH`) is a real, security-relevant
+/// branch — it must refuse to copy — and the only alternative for reaching it is
+/// mutating `PATH`, which is process-global and racy under a parallel test
+/// runner. A program-name parameter makes it reachable hermetically.
+/// What: identical to [`resolve_git_exclude`]; `git_bin` names the program.
+/// Test: `tests::missing_git_binary_copies_nothing`.
+fn resolve_git_exclude_with(dest_worktree: &Path, git_bin: &str) -> ExcludeTarget {
+    let out = match std::process::Command::new(git_bin)
         .arg("-C")
         .arg(dest_worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])
         .output()
-        .map_err(|e| format!("untracked_sync: git rev-parse failed to spawn: {e}"))?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            return ExcludeTarget::Unknown(format!(
+                "untracked_sync: git rev-parse failed to spawn: {e}"
+            ));
+        }
+    };
 
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!(
-            "untracked_sync: git rev-parse --git-path info/exclude failed ({}): {stderr}",
-            out.status
-        ));
+        return classify_rev_parse_failure(dest_worktree, &String::from_utf8_lossy(&out.stderr));
     }
 
     let raw_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if raw_path.is_empty() {
-        return Err("untracked_sync: git rev-parse returned an empty path".to_string());
+        return ExcludeTarget::Unknown(
+            "untracked_sync: git rev-parse returned an empty path".to_string(),
+        );
     }
-    // `--git-path` may return a path relative to the worktree cwd (plain-repo
-    // case) or an absolute path (linked-worktree case, pointing at the
-    // shared common dir) — resolve relative results against dest_worktree.
-    let exclude_path = {
-        let p = PathBuf::from(&raw_path);
-        if p.is_absolute() {
-            p
-        } else {
-            dest_worktree.join(p)
-        }
-    };
+    let p = PathBuf::from(&raw_path);
+    ExcludeTarget::Registered(if p.is_absolute() {
+        p
+    } else {
+        dest_worktree.join(p)
+    })
+}
 
+/// Why a failed `rev-parse` failed — the gate copying turns on.
+///
+/// Why: git's "no repository" message is not proof there is no repository. It
+/// emits [`NO_REPO_STDERR`] whenever discovery never got far enough to conclude
+/// otherwise — an unreadable `.git`, an unreadable `.git/HEAD`, or
+/// `GIT_CEILING_DIRECTORIES` stopping the upward walk. In every one of those the
+/// repository, and the history a committed secret would land in, are real.
+/// `symlink_metadata` on an ancestor `.git` needs only the parent's search bit,
+/// so it is a witness git does not use; a disagreement between the two IS the
+/// "cannot be asked" state.
+/// What: [`ExcludeTarget::NoRepo`] only when the message matches AND no ancestor
+/// carries a `.git` entry; [`ExcludeTarget::Unknown`] otherwise.
+///
+/// 🔴 The `.canonicalize()` is load-bearing, not tidiness. `Path::ancestors`
+/// walks the path LEXICALLY, so an uncanonicalised relative path or one reached
+/// through a symlink yields a chain that is not the real one — the project's
+/// `.git` is never visited and the permissive answer wins, putting a secret in a
+/// live worktree. A canonicalisation failure is itself
+/// [`ExcludeTarget::Unknown`].
+/// Test: `tests::classify_rev_parse_failure_corroborates_the_no_repo_message`,
+/// `tests::classify_rev_parse_failure_canonicalises_before_walking_ancestors`,
+/// `tests::broken_repo_copies_nothing`.
+fn classify_rev_parse_failure(dest_worktree: &Path, stderr: &str) -> ExcludeTarget {
+    if !stderr.contains(NO_REPO_STDERR) {
+        return ExcludeTarget::Unknown(format!(
+            "untracked_sync: git rev-parse --git-path info/exclude failed: {}",
+            stderr.trim()
+        ));
+    }
+    match dest_worktree.canonicalize() {
+        Ok(abs)
+            if !abs
+                .ancestors()
+                .any(|p| p.join(".git").symlink_metadata().is_ok()) =>
+        {
+            ExcludeTarget::NoRepo
+        }
+        _ => ExcludeTarget::Unknown(
+            "untracked_sync: git reported no repository, but a `.git` entry exists at or \
+             above the destination — the repository is real and could not be read"
+                .to_string(),
+        ),
+    }
+}
+
+/// Ask git itself whether `relative_path` is ignored inside `dest_worktree`.
+///
+/// Why: appending to `info/exclude` succeeds unconditionally and proves nothing
+/// — a `.gitignore` negation elsewhere can override it, and a path the repo
+/// already TRACKS is never ignored no matter what the exclude file says (git
+/// deliberately reports tracked paths as not-ignored here). `git check-ignore`
+/// is git's OWN authority on whether `git add -A` would stage the path, which is
+/// exactly the question. Mirrors
+/// [`crate::core::session_launch::native_mcp::is_env_local_actually_ignored`]
+/// rather than inventing a second mechanism (#4733).
+/// What: runs `git -C <dest_worktree> check-ignore -q -- <relative_path>` via
+/// `.output()` (NOT `.status()`) so nothing the child writes can reach this
+/// process's stdout, which must stay clean for MCP JSON-RPC framing. Any
+/// non-zero exit — "not ignored", not a repo, no `git` binary — is `false`.
+/// Never panics.
+/// Test: `tests::copied_files_are_added_to_shared_worktree_exclude`,
+/// `tests::tracked_secret_is_not_overwritten_in_worktree`.
+fn is_path_git_ignored(dest_worktree: &Path, relative_path: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dest_worktree)
+        .args(["check-ignore", "-q", "--", relative_path])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// Append `relative_paths` to an already-resolved `info/exclude` file.
+///
+/// Why: split from [`append_to_git_exclude`] so the sync flow resolves the
+/// exclude path exactly once (#4733 moved that resolution ahead of the copy).
+/// What: creates the file's parent dir and appends each path not already
+/// present, preserving the read-then-append idempotency
+/// [`super::ensure_worktrees_gitignored`] uses.
+/// Test: `tests::append_to_git_exclude_is_idempotent`.
+fn append_paths_to_exclude(exclude_path: &Path, relative_paths: &[String]) -> Result<(), String> {
     if let Some(parent) = exclude_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("untracked_sync: could not create {}: {e}", parent.display()))?;
     }
 
-    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+    let existing = fs::read_to_string(exclude_path).unwrap_or_default();
     let mut to_append = String::new();
     for rel in relative_paths {
         if !existing.lines().any(|line| line.trim() == rel.as_str()) {
@@ -329,7 +546,7 @@ fn append_to_git_exclude(dest_worktree: &Path, relative_paths: &[String]) -> Res
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&exclude_path)
+        .open(exclude_path)
         .map_err(|e| {
             format!(
                 "untracked_sync: could not open {}: {e}",

@@ -657,4 +657,22 @@ pub struct ReconcileSummary {
     /// `stuck_unwalked_non_git_index_is_retried_not_skipped` in
     /// `service/reconcile_tests.rs`.
     pub stuck_retried: usize,
+    /// Issue #4733: count of indexes left untouched because git could not be
+    /// asked whether the mtime catch-up walk would be safe.
+    ///
+    /// Why: that walk honours `SKIP_DIRS` but NOT `.gitignore`, so it may only
+    /// run on a root with a corroborated absence of any repository. When the
+    /// probe says otherwise — a work tree with no HEAD to compare against
+    /// (unborn HEAD), or a repository git declined to read — reconcile has no
+    /// safe, cheap signal and does nothing. This is a distinct fact from
+    /// `skipped_no_data`, which means "there is a baseline mechanism, it just
+    /// has no data yet"; folding the two would report a security refusal as
+    /// ordinary emptiness and hide it from the operator.
+    /// What: incremented by `reconcile_one_index` on the refuse branch. These
+    /// indexes still serve (with `results_may_be_stale`), the live watcher
+    /// still tracks them, and the #4680 never-walked guard still re-drives them.
+    /// Test: `broken_git_repo_refuses_rather_than_mtime_walking` and
+    /// `unborn_head_repo_is_refused_once_not_reindexed_every_boot` in
+    /// `service/reconcile_tests.rs`.
+    pub skipped_unresolvable_git: usize,
 }

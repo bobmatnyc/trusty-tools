@@ -4,13 +4,18 @@
 //! substantive; its LoC counting, language attribution, file count, and manifest
 //! framework detection must be pinned against a real fixture repository.
 //! What: builds a tiny git repo in a temp dir (via `git init`/`add`) and asserts
-//! the computed baseline; also covers the non-repo and empty-dir degradations.
+//! the computed baseline; also covers the non-repo and empty-dir degradations,
+//! plus the #4733 git-fail-open guard (a broken repo must refuse the walk, never
+//! downgrade to a `.gitignore`-blind directory walk).
 //! Test: included as `#[cfg(test)] mod tests` from `scan.rs`.
 
 use std::path::Path;
 use std::process::Command;
 
-use super::scan_repo;
+use super::{
+    Corpus, NO_REPO_STDERR, classify_ls_files_failure, git_ls_files_with, list_tracked_files,
+    scan_repo,
+};
 
 /// Initialise a git repo at `dir` and stage everything, best-effort.
 fn git_init_add(dir: &Path) {
@@ -116,4 +121,178 @@ fn scan_non_git_dir_uses_walk_fallback() {
     let scan = scan_repo(tmp.path()).expect("walk fallback scan");
     assert_eq!(scan.total_loc, 2);
     assert_eq!(scan.by_language[0].language, "Python");
+}
+
+// ── #4733: a failed git probe must not downgrade to a gitignore-blind walk ──
+
+/// Why: this corpus is sent to an LLM. Before #4733, ANY `git ls-files` failure
+/// fell through to a walk that consults `SKIP_DIRS` and nothing else — so a repo
+/// whose `.git` is a stale worktree pointer (git still exits 128, but its
+/// `.gitignore` is entirely real) contributed its ignored `.env` to the corpus.
+/// What: builds a repo with `.env` gitignored, then replaces `.git` with a
+/// gitlink pointing nowhere — git 2.54.0 answers `fatal: not a git repository:
+/// (null)`, which contains the shorter phrase `not a git repository` while
+/// meaning the opposite of "there is no repository here". Asserts the scanner
+/// refuses outright rather than walking.
+/// Test: this test itself.
+#[test]
+fn scan_refuses_when_git_is_broken_rather_than_walking() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::write(dir.join("lib.rs"), "pub fn f() {}\n").expect("rs");
+    std::fs::write(dir.join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.join(".env"), "AWS_SECRET_ACCESS_KEY=hunter2\n").expect("env");
+    // A stale worktree pointer: `.git` is a FILE naming a gitdir that is gone.
+    std::fs::write(dir.join(".git"), "gitdir: /nonexistent/xyz-4733\n").expect("gitlink");
+
+    let files = list_tracked_files(dir);
+    assert!(
+        !files.iter().any(|p| p.to_string_lossy().contains(".env")),
+        "a gitignored .env must never reach the LLM corpus when git merely \
+         failed to answer: {files:?}"
+    );
+    assert!(
+        files.is_empty(),
+        "an unreadable repository yields no corpus at all, not a walked one: {files:?}"
+    );
+    assert!(
+        scan_repo(dir).is_none(),
+        "the scan degrades to no measured baseline rather than a leaky one"
+    );
+}
+
+/// Why: a repository with nothing committed yet has an EMPTY tracked corpus and
+/// a fully live `.gitignore`. Treating "git listed zero files" as "not a git
+/// repo" (the pre-#4733 `if files.is_empty() { None }` branch) walked it and
+/// swept up every untracked, ignored file.
+/// What: `git init`s a repo, writes a gitignored `.env` and an unstaged source
+/// file, and asserts the scanner reports no corpus rather than walking.
+/// Test: this test itself.
+#[test]
+fn scan_empty_git_repo_does_not_walk_untracked_files() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    let init = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("init")
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    std::fs::write(dir.join(".gitignore"), ".env\n").expect("gitignore");
+    std::fs::write(dir.join(".env"), "OPENROUTER_API_KEY=sk-live\n").expect("env");
+    std::fs::write(dir.join("lib.rs"), "pub fn f() {}\n").expect("rs");
+
+    let files = list_tracked_files(dir);
+    assert!(
+        files.is_empty(),
+        "an empty tracked corpus is an empty corpus, not a walk trigger: {files:?}"
+    );
+    assert!(scan_repo(dir).is_none(), "no tracked files → no baseline");
+}
+
+/// Why: git prints [`NO_REPO_STDERR`] for an unreadable `.git` just as readily
+/// as for a genuinely empty directory, so the message alone is a necessary
+/// condition and never a sufficient one. The filesystem witness is what makes it
+/// decidable.
+/// What: asserts the classifier refuses when an ancestor carries a `.git` entry
+/// despite the "no repository" wording, and only concedes `NoRepo` when no such
+/// witness exists.
+/// Test: this test itself.
+#[test]
+fn classify_ls_files_failure_corroborates_the_no_repo_message() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+
+    assert!(
+        matches!(
+            classify_ls_files_failure(dir, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            Corpus::NoRepo
+        ),
+        "no ancestor .git witness → the message is believed"
+    );
+
+    std::fs::write(dir.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    assert!(
+        matches!(
+            classify_ls_files_failure(dir, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            Corpus::Refused
+        ),
+        "a .git entry contradicts the message — a disagreement is 'cannot be asked'"
+    );
+}
+
+/// Why: `fatal: not a git repository: (null)` (stale worktree pointer) contains
+/// the substring `not a git repository` while meaning the opposite. Matching the
+/// short phrase is the trap; only the parenthesised form is diagnostic.
+/// What: asserts the stale-pointer wording classifies as `Refused` even in a
+/// directory with no `.git` witness at all, and that an unrelated fatal
+/// (`dubious ownership`) does too.
+/// Test: this test itself.
+#[test]
+fn classify_ls_files_failure_rejects_near_miss_and_unknown_wordings() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    for stderr in [
+        "fatal: not a git repository: (null)",
+        "fatal: detected dubious ownership in repository at '/x'",
+        "",
+    ] {
+        assert!(
+            matches!(
+                classify_ls_files_failure(tmp.path(), stderr),
+                Corpus::Refused
+            ),
+            "unrecognised failure must refuse, not walk: {stderr:?}"
+        );
+    }
+}
+
+/// Why: git is not always on `PATH` — a stripped container, a broken shim, a
+/// service started with a sanitised environment. A spawn failure tells us
+/// nothing about whether a repository exists, so it must refuse rather than
+/// hand the LLM a `.gitignore`-blind directory walk.
+/// What: a real git repo (so the only variable is the binary) probed with a
+/// program name that cannot be spawned. Asserts `Refused`, not `NoRepo`.
+/// Test: this test itself.
+#[test]
+fn git_ls_files_refuses_when_the_git_binary_is_missing() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    let init = Command::new("git").arg("-C").arg(dir).arg("init").output();
+    assert!(init.expect("git init").status.success(), "git init failed");
+
+    assert!(
+        matches!(
+            git_ls_files_with(dir, "trusty-no-such-git-binary-4733"),
+            Corpus::Refused
+        ),
+        "an unspawnable git answers nothing — it must never be read as 'no repository'"
+    );
+}
+
+/// Why: `Path::ancestors` walks LEXICALLY. Without `.canonicalize()` a path
+/// reached through a symlink (or a relative one like `.`, which `scan_repo`
+/// genuinely receives from operators) yields a chain that is not its real
+/// parentage, so the project's `.git` is never visited and the permissive
+/// `NoRepo` wins. Dropping the call passes every other test in this file —
+/// this is the one that fails.
+/// What: `link -> repo/sub`, with `.git` on `repo` only. The lexical ancestors
+/// of `link` never include `repo`; the canonicalised ones do.
+/// Test: this test itself.
+#[test]
+fn classify_ls_files_failure_canonicalises_before_walking_ancestors() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).expect("mkdir repo/sub");
+    std::fs::write(repo.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(repo.join("sub"), &link).expect("symlink");
+
+    assert!(
+        matches!(
+            classify_ls_files_failure(&link, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            Corpus::Refused
+        ),
+        "the real parent carries a .git — only a canonicalised ancestor walk sees it"
+    );
 }

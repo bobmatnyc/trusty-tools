@@ -5,8 +5,9 @@
 //! 1500-SLOC test-file cap (mirrors `inproject/tests.rs`).
 //! What: glob-matcher unit tests, `collect_matches`/`sync_untracked_files`
 //! behaviour against real temp directories, the size cap, the path-escape
-//! guard, and a real-git-worktree round trip proving `.git/info/exclude`
-//! resolution survives the linked-worktree gitlink indirection.
+//! guard, a real-git-worktree round trip proving `.git/info/exclude` resolution
+//! survives the linked-worktree gitlink indirection, and the #4733 refusals (a
+//! broken repo copies nothing; a tracked path is never overwritten).
 //! Test: this IS the test module.
 
 use std::path::Path;
@@ -343,8 +344,12 @@ fn append_to_git_exclude_is_idempotent() {
     )
     .expect("create_session_worktree must succeed");
 
-    append_to_git_exclude(&worktree, &[".env".to_string()]).expect("first append");
-    append_to_git_exclude(&worktree, &[".env".to_string()]).expect("second append");
+    let exclude = match resolve_git_exclude(&worktree) {
+        ExcludeTarget::Registered(p) => p,
+        _ => panic!("a real linked worktree must resolve its shared info/exclude path"),
+    };
+    append_paths_to_exclude(&exclude, &[".env".to_string()]).expect("first append");
+    append_paths_to_exclude(&exclude, &[".env".to_string()]).expect("second append");
 
     let exclude_out = std::process::Command::new("git")
         .arg("-C")
@@ -365,5 +370,248 @@ fn append_to_git_exclude_is_idempotent() {
     assert_eq!(
         count, 1,
         "repeated appends must not duplicate the entry: {content}"
+    );
+}
+
+// ── #4733: a failed git probe must not leave a secret unregistered ──────────
+
+/// Regression guard for #4733, git-history leg.
+///
+/// Why: before this fix the exclude-append ran AFTER the copy and a failure was
+/// only a `warn!`. A destination whose `.git` git merely declined to read — a
+/// stale worktree gitlink, `detected dubious ownership`, an unreadable `.git` —
+/// therefore ended up holding the operator's `.env` with no exclude entry, where
+/// a later `git add -A && git commit` stages it into history. Against the
+/// pre-fix implementation this test fails on its first assertion (`.env` IS
+/// copied).
+/// What: a destination whose `.git` is a gitlink pointing nowhere — git 2.54.0
+/// answers `fatal: not a git repository: (null)`, which contains the shorter
+/// phrase `not a git repository` while meaning the opposite. Asserts nothing is
+/// copied at all.
+/// Test: this test itself.
+#[test]
+fn broken_repo_copies_nothing() {
+    let src = make_source_fixture();
+    let dest = tempfile::TempDir::new().expect("dest tmp dir");
+    std::fs::write(dest.path().join(".git"), "gitdir: /nonexistent/xyz-4733\n")
+        .expect("write stale gitlink");
+
+    sync_untracked_files(src.path(), dest.path(), &default_patterns());
+
+    assert!(
+        !dest.path().join(".env").exists(),
+        "a secret must never be written into a repository git could not confirm \
+         would ignore it (#4733)"
+    );
+    assert!(
+        !dest.path().join(".env.local").exists(),
+        ".env.local must be refused for the same reason (#4733)"
+    );
+}
+
+/// Why: the guard must not over-refuse. A destination with no repository at all
+/// has no history for a secret to leak into, and this is the shape every
+/// existing caller-level test uses.
+/// What: a plain temp directory still receives the allowlisted files.
+/// Test: this test itself.
+#[test]
+fn plain_directory_destination_still_copies() {
+    let src = make_source_fixture();
+    let dest = tempfile::TempDir::new().expect("dest tmp dir");
+
+    sync_untracked_files(src.path(), dest.path(), &default_patterns());
+
+    assert!(
+        dest.path().join(".env").is_file(),
+        "a non-repository destination has no history to leak into — copying stays allowed"
+    );
+}
+
+/// Why: appending to `info/exclude` succeeds unconditionally and proves nothing
+/// about a path the repo already TRACKS — git deliberately reports tracked paths
+/// as not-ignored, and `git add -A` stages their modifications regardless. The
+/// `check-ignore` re-verification is what catches that, mirroring
+/// `native_mcp::is_env_local_actually_ignored`.
+/// What: commits a `.env` into the base repo, then syncs a DIFFERENT `.env` from
+/// a source checkout. Asserts the tracked file is left untouched.
+/// Test: this test itself.
+#[test]
+fn tracked_secret_is_not_overwritten_in_worktree() {
+    let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
+    let base = base_tmp.path();
+    init_base_repo(base);
+    std::fs::write(base.join(".env"), b"COMMITTED=placeholder").expect("write tracked .env");
+    for args in [vec!["add", "-A"], vec!["commit", "-m", "track env"]] {
+        let ok = std::process::Command::new("git")
+            .args(["-C", base.to_str().expect("utf8")])
+            .args(&args)
+            .status()
+            .expect("git");
+        assert!(ok.success(), "git {args:?} failed");
+    }
+
+    let worktree = super::super::create_session_worktree(
+        base,
+        "untracked-sync-tracked-test",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
+
+    let src = make_source_fixture();
+    sync_untracked_files(src.path(), &worktree, &default_patterns());
+
+    assert_eq!(
+        std::fs::read(worktree.join(".env")).expect("tracked .env present in worktree"),
+        b"COMMITTED=placeholder",
+        "a TRACKED path is never ignored no matter what info/exclude says — \
+         overwriting it would stage the operator's real secret (#4733)"
+    );
+    assert!(
+        worktree.join(".env.local").is_file(),
+        "the untracked sibling is still delivered — the refusal is per-path"
+    );
+}
+
+/// Why: git prints [`NO_REPO_STDERR`] for an unreadable `.git` just as readily
+/// as for a genuinely empty directory, so the message is a necessary and never a
+/// sufficient condition; the filesystem witness decides.
+/// What: asserts the classifier refuses when an ancestor carries a `.git` entry
+/// despite the "no repository" wording, concedes `NoRepo` only without one, and
+/// never believes the stale-worktree near-miss wording.
+/// Test: this test itself.
+#[test]
+fn classify_rev_parse_failure_corroborates_the_no_repo_message() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let msg = format!("fatal: {NO_REPO_STDERR}: .git");
+
+    assert!(
+        matches!(
+            classify_rev_parse_failure(tmp.path(), &msg),
+            ExcludeTarget::NoRepo
+        ),
+        "no ancestor .git witness → the message is believed"
+    );
+    assert!(
+        matches!(
+            classify_rev_parse_failure(tmp.path(), "fatal: not a git repository: (null)"),
+            ExcludeTarget::Unknown(_)
+        ),
+        "the stale-worktree near-miss contains the short phrase but means the opposite"
+    );
+
+    std::fs::write(tmp.path().join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    assert!(
+        matches!(
+            classify_rev_parse_failure(tmp.path(), &msg),
+            ExcludeTarget::Unknown(_)
+        ),
+        "a .git witness contradicts the message — a disagreement is 'cannot be asked'"
+    );
+}
+
+/// Why: registration and verification are different jobs, and a broken
+/// `info/exclude` defeats both — `git check-ignore` refuses to run at all
+/// (`fatal: cannot use .git/info/exclude as an exclude file`), so the question
+/// "would `git add -A` stage this?" becomes unanswerable. An unanswerable
+/// question must be a refusal, not a copy. Against an implementation that
+/// treats the append as best-effort and copies regardless, this test fails:
+/// `.env` lands in the worktree unignored.
+/// What: a real linked worktree whose resolved `info/exclude` path is replaced
+/// by a DIRECTORY. Asserts nothing is copied.
+/// Test: this test itself.
+#[test]
+fn broken_exclude_file_still_refuses_unignored_paths() {
+    let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
+    let base = base_tmp.path();
+    init_base_repo(base);
+    let worktree = super::super::create_session_worktree(
+        base,
+        "untracked-sync-broken-exclude-test",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
+
+    let exclude = match resolve_git_exclude(&worktree) {
+        ExcludeTarget::Registered(p) => p,
+        _ => panic!("a real linked worktree must resolve its shared info/exclude path"),
+    };
+    let _ = std::fs::remove_file(&exclude);
+    std::fs::create_dir_all(&exclude).expect("replace info/exclude with a directory");
+
+    let src = make_source_fixture();
+    sync_untracked_files(src.path(), &worktree, &default_patterns());
+
+    assert!(
+        !worktree.join(".env").exists(),
+        "with registration broken and no .gitignore covering it, `git check-ignore` \
+         is the only remaining guarantee and it must refuse (#4733)"
+    );
+    assert!(
+        !worktree.join(".env.local").exists(),
+        ".env.local must be refused for the same reason (#4733)"
+    );
+}
+
+/// Why: git is not always on `PATH` — a stripped container, a broken shim, a
+/// daemon started with a sanitised environment. A spawn failure tells us
+/// nothing about whether the destination is a repository, so it must refuse.
+/// This gate runs BEFORE any copy and before `is_path_git_ignored`, so an
+/// unspawnable git means nothing is written at all.
+/// What: a real linked worktree (so the only variable is the binary) resolved
+/// with a program name that cannot be spawned. Asserts `Unknown` — which
+/// `broken_repo_copies_nothing` separately pins as "copy nothing".
+/// Test: this test itself.
+#[test]
+fn missing_git_binary_copies_nothing() {
+    let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
+    let base = base_tmp.path();
+    init_base_repo(base);
+    let worktree = super::super::create_session_worktree(
+        base,
+        "untracked-sync-missing-git-test",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
+
+    // Sanity: with a real git this worktree resolves its exclude file.
+    assert!(
+        matches!(resolve_git_exclude(&worktree), ExcludeTarget::Registered(_)),
+        "sanity: a real linked worktree resolves with a working git"
+    );
+
+    assert!(
+        matches!(
+            resolve_git_exclude_with(&worktree, "trusty-no-such-git-binary-4733"),
+            ExcludeTarget::Unknown(_)
+        ),
+        "an unspawnable git answers nothing — it must never be read as 'no repository', \
+         which would let a secret be copied into a live worktree (#4733)"
+    );
+}
+
+/// Why: `Path::ancestors` walks LEXICALLY. Without `.canonicalize()` a path
+/// reached through a symlink (or a relative one) yields a chain that is not its
+/// real parentage, so the destination's `.git` is never visited and the
+/// permissive `NoRepo` wins — which copies the operator's `.env` into a live
+/// repository unregistered. Dropping the call passes every other test in this
+/// file; this is the one that fails.
+/// What: `link -> repo/sub`, with `.git` on `repo` only. The lexical ancestors
+/// of `link` never include `repo`; the canonicalised ones do.
+/// Test: this test itself.
+#[test]
+fn classify_rev_parse_failure_canonicalises_before_walking_ancestors() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).expect("mkdir repo/sub");
+    std::fs::write(repo.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(repo.join("sub"), &link).expect("symlink");
+
+    assert!(
+        matches!(
+            classify_rev_parse_failure(&link, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            ExcludeTarget::Unknown(_)
+        ),
+        "the real parent carries a .git — only a canonicalised ancestor walk sees it"
     );
 }
