@@ -2046,3 +2046,58 @@ fn attach_mcp_attribution_dedupes_hand_written_ws_claim_tag() {
         "non-overlapping creator tags must still be appended; got {tags:?}"
     );
 }
+
+/// Why (ADR-0027 T3 / D4.1): the MCP surface used to carry its own
+/// exact-case, alias-free room parser while HTTP used `RoomType::parse`, so
+/// `room="backend"` named `Custom("backend")` over MCP and `Backend` over
+/// HTTP — two rooms, two ids, each invisible to the other's filter. There is
+/// now one parser, and this test is what stops the fork coming back.
+/// What: writes over MCP with the lowercase spelling, lists with the
+/// canonical spelling, and asserts the drawer comes back. Also pins the
+/// documented alias behaviour the old MCP parser lacked (`docs` ->
+/// `Documentation`).
+/// Test: itself.
+#[tokio::test]
+async fn mcp_room_parse_matches_http() {
+    use trusty_common::memory_core::palace::RoomType;
+
+    // The parser contract itself, shared by both transports.
+    assert_eq!(RoomType::parse("backend"), RoomType::Backend);
+    assert_eq!(RoomType::parse("Backend"), RoomType::Backend);
+    assert_eq!(RoomType::parse("docs"), RoomType::Documentation);
+
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "roomparity"}))
+        .await
+        .expect("palace_create");
+
+    let _ = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "roomparity",
+            "text": "The scheduler retries a failed job with exponential backoff",
+            "room": "backend",
+            "tags": ["scheduler"],
+        }),
+    )
+    .await
+    .expect("memory_remember");
+
+    for spelling in ["Backend", "backend"] {
+        let listed = dispatch_tool(
+            &state,
+            "memory_list",
+            json!({"palace": "roomparity", "room": spelling, "limit": 10}),
+        )
+        .await
+        .expect("memory_list");
+        let drawers = listed["drawers"].as_array().expect("drawers");
+        assert!(
+            drawers
+                .iter()
+                .any(|d| d["content"].as_str().unwrap_or("").contains("scheduler")),
+            "room={spelling} must find the drawer written as room=backend; got {drawers:?}"
+        );
+    }
+}

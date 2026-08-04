@@ -183,7 +183,10 @@ base64 = "0.22"
 # (RUSTSEC-2023-0071 Marvin advisory). `use_pem` stays on via default features
 # for `EncodingKey::from_rsa_pem`. See #2765 (GHSA-h395-gr6q-cpjc).
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+# v5 (ADR-0027): room ids are minted as name-based UUIDv5 over a canonical
+# key so they are reproducible across processes without coordination and carry
+# a full SHA-1 digest rather than the colliding 16-byte fold they replace.
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sha2 = "0.10"
 # Cross-process advisory file locking for trusty-gworkspace's tokens.json
 # read-modify-write critical section (issue #3502) — small, actively

@@ -57,7 +57,7 @@ understand about the codebase — see [ADR-0001](../decisions/0001-frontend-core
 ┌──────────────────────────────────────────────────────────────────────┐
 │  trusty-common :: memory_core   (the CORE — storage + retrieval)       │
 │  ─────────────────────────────────────────────────────────────────    │
-│  • Palace data model          palace.rs (Palace→Wing→Room→Closet→Drawer)│
+│  • Palace data model          palace.rs (Palace→Wing→Room→Drawer)      │
 │  • Concurrent registry         registry.rs (DashMap<PalaceId, Arc<…>>)  │
 │  • 4-layer retrieval (L0–L3)   retrieval.rs (PalaceHandle)              │
 │  • Vector store (HNSW/redb)    store/hnsw_store.rs, store/vector.rs     │
@@ -359,7 +359,7 @@ browser. ✅
 | Module | Responsibility |
 |---|---|
 | `mod.rs` | Re-exports the palace hierarchy, registry, retrieval handle, consolidation types. Gated behind the `memory-core` feature. |
-| `palace.rs` | Data model: `PalaceId`, `Palace` → `Wing` → `Room` → Closet → `Drawer`. |
+| `palace.rs` | Data model: `PalaceId`, `Palace` → `Wing` → `Room` → `Drawer`. A *closet* is not a level — it is the keyword → drawer-ids inverted index on `PalaceHandle` (ADR-0027 D3). |
 | `registry.rs` | `PalaceRegistry` — concurrent `DashMap<PalaceId, Arc<PalaceHandle>>`. |
 | `retrieval.rs` | 4-layer (L0–L3) progressive retrieval; the canonical `PalaceHandle`. |
 | `dream.rs` | `Dreamer` / `dream_cycle` — idle consolidation (prune/dedup/compact/closet) + optional semantic phase. |
