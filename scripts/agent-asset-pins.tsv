@@ -19,7 +19,7 @@
 #
 # Regenerate a pin (only after manually reconciling the tcode copy with the
 # new upstream content) with: scripts/check_agent_assets.sh --update
-crates/trusty-mpm/src/assets/agents/code-analyzer.md	de345cc4775625d0c1953bd8cf06f8701d068ebac138c69dd4cb15cc163b02bc
-crates/trusty-mpm/src/assets/agents/code-critic.md	e68065861132e1684392e15fc3a718ffae3e0b398aecdb36460e7ca16a153d63
-crates/trusty-mpm/src/assets/agents/qa.md	1878ecb3773296fb5e2d659b1d28a044608511bad2cf7c294870bd67aa1fc353
-crates/trusty-mpm/src/assets/agents/web-qa.md	50f913c1291d3f5b118413abc35c3d6bcf125ca06fa06b3351315781b5b60b97
+crates/trusty-mpm/src/assets/agents/code-analyzer.md	55d810bc4f3524740165aeb75f687bf21c2d07597401e278e8aa17077727bad0
+crates/trusty-mpm/src/assets/agents/code-critic.md	539e7a8d5fa2969dd7a4d29a092d178b84bd98bf965a413d11df13c9625dfaa9
+crates/trusty-mpm/src/assets/agents/qa.md	40d4b79e9ecfd934fd77012a249396a80fefd43a9ccc7f0e347755e922366ca2
+crates/trusty-mpm/src/assets/agents/web-qa.md	339ba6d85e2024ea7b5683249bf5c53feff2d45f610d998cd286b198a638d31a
