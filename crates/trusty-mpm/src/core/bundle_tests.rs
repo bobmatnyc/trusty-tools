@@ -129,7 +129,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm.md",
         "skills/tm-issues-prune.md",
         "skills/tm-cli-operations.md",
-        "skills/tm-slack-canvas-delivery.md",
+        "skills/tm-slack.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -204,7 +204,7 @@ fn tm_skills_have_frontmatter() {
         ("tm", TM_OVERVIEW),
         ("tm-issues-prune", TM_ISSUES_PRUNE),
         ("tm-cli-operations", TM_CLI_OPERATIONS),
-        ("tm-slack-canvas-delivery", TM_SLACK_CANVAS_DELIVERY),
+        ("tm-slack", TM_SLACK),
     ];
     for (name, content) in skills {
         assert!(
@@ -404,6 +404,9 @@ fn bundle_table_is_complete() {
     //   that same on-disk path with the assembled system prompt in the same
     //   call, so the stub's content never reached a live session; the
     //   `FRAMEWORK_INSTRUCTIONS` constant it backed is gone too. 179 - 1 = 178.
+    // Issue #4761 (+/-0): tm-slack-canvas-delivery's entry (#4447) is swapped
+    //   1-for-1 for tm-slack — same flat-file shape, general Slack delivery
+    //   coverage replacing canvas-only scope. Count unchanged at 178.
     assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
