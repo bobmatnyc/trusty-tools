@@ -295,8 +295,8 @@ pub fn assemble_system_prompt() -> String {
 /// What: `INSTRUCTIONS-COMPILED.md`, resolved directly under the framework root
 /// by [`crate::core::paths::FrameworkPaths::instructions_compiled`] — NOT under
 /// `framework/instructions/`.
-/// Test: `compiled_prompt_file_is_not_the_bundled_instructions_name`,
-/// `no_other_writer_targets_the_compiled_prompt_path`.
+/// Test: `compiled_prompt_path_is_distinct_from_the_bundled_instructions_path`,
+/// `no_bundled_artifact_targets_the_compiled_prompt_path`.
 pub const COMPILED_PROMPT_FILE: &str = "INSTRUCTIONS-COMPILED.md";
 
 /// Write an already-composed prompt to the compiled-prompt path.
