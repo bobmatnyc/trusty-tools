@@ -25,8 +25,8 @@ use super::bm25::{
 };
 use super::helpers::{
     attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate, mcp_remember_opts,
-    open_palace_handle, parse_room, parse_tags, resolve_palace, room_label, skipped_envelope,
-    write_drawer, WriteDrawerParams,
+    open_palace_handle, parse_tags, resolve_palace, room_label, skipped_envelope, write_drawer,
+    WriteDrawerParams,
 };
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -94,7 +94,12 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             ));
         }
     };
-    let room = parse_room(args.get("room").and_then(|v| v.as_str()));
+    // ADR-0027 T3: one room parser for every transport (`RoomType::parse`).
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(RoomType::parse)
+        .unwrap_or(RoomType::General);
     let mut tags = parse_tags(&args);
     // Submission-logging Part B: attach `creator:*` attribution so every
     // MCP-origin drawer carries the writer identity (client =
@@ -370,7 +375,7 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
     let room = args
         .get("room")
         .and_then(|v| v.as_str())
-        .map(|s| parse_room(Some(s)));
+        .map(RoomType::parse);
     let tag = args
         .get("tag")
         .and_then(|v| v.as_str())

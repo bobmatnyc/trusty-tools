@@ -14,6 +14,8 @@
 
 mod import;
 mod read_ops;
+// ADR-0027 T1: ROOMS / ROOM_KEYS accessors (insert-only writes).
+mod room_ops;
 mod store;
 mod tests;
 mod types;

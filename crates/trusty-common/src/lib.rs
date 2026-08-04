@@ -257,8 +257,9 @@ pub mod symgraph;
 
 /// Memory Palace storage engine (formerly the `trusty-memory-core` crate).
 ///
-/// Why: Centralises the Memory Palace data model (`Palace` / `Wing` /
-/// `Room` / `Drawer`), storage backends (usearch vector index + SQLite
+/// Why: Centralises the Memory Palace data model (`Palace` -> `Wing` ->
+/// `Room` -> `Drawer`; "closet" is the keyword -> drawer-ids inverted index,
+/// not a level — ADR-0027 D3), storage backends (usearch vector index + SQLite
 /// knowledge graph + chat-session log + payload store), retrieval handle,
 /// and the dream / decay / analytics / git-history surfaces so every
 /// trusty-* binary that talks to a palace reuses the same types. Absorbed

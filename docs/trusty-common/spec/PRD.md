@@ -240,7 +240,7 @@ parentheses.
 **FR-MEM-1 — Palace data model + storage + retrieval** ✅
 - *Vision:* the entire Memory-Palace storage engine, consumed by `trusty-memory`,
   living behind one feature so chat/MCP-only consumers pay nothing (#5 phase 2d).
-- *Current:* the 5-level hierarchy (`Palace`/`Wing`/`Room`/`Drawer`,
+- *Current:* the 4-level hierarchy (`Palace` → `Wing` → `Room` → `Drawer`,
   `src/memory_core/palace.rs`), `PalaceRegistry`, `PalaceHandle` 4-layer
   progressive retrieval (L0 identity → L1 essential → L2 vector → L3 deep,
   `retrieval.rs`), the storage backends (HNSW vector store, redb KG, payload
