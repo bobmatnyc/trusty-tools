@@ -343,16 +343,32 @@ pub enum PrepError {
 /// matches the live launch prompt byte-for-byte (issue #1409), and returns a
 /// [`PrepReport`].
 ///
-/// ORDERING CONTRACT (#4752): the same prompt is ALSO written to
+/// COMPILED PROMPT (#4752): the same prompt is ALSO written to
 /// `~/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
-/// ([`crate::core::paths::FrameworkPaths::instructions_compiled`]) before this
-/// function returns, and a failed write aborts the preparation. Every caller
-/// spawns `claude` only after `Ok`, so "prepare returned" is exactly "the
-/// compiled prompt on disk is the prompt this session is about to run with".
+/// ([`crate::core::paths::FrameworkPaths::instructions_compiled`]) as this
+/// function's LAST step, and a failed write returns `Err`.
+///
+/// That `Err` does NOT block any launch, and this doc deliberately does not
+/// claim otherwise. Since #2149 every production caller treats a prep failure
+/// as non-fatal and spawns anyway — `commands/launch.rs::connect`, the
+/// managed-clone block in `commands/launch.rs`, `commands/meta/launch.rs`,
+/// `commands/session/start.rs::start_session_in_place`,
+/// `client/http_client/session_connect.rs`,
+/// `daemon/managed_routes/lifecycle.rs::prepare_inproject_session`, and
+/// `provisioner/workspace.rs` all log and continue. The only caller that
+/// propagates, `core/standalone/load.rs::run_prepare_session`, spawns no
+/// `claude` at all, so the fatality's sole live effect is hard-failing
+/// `tm load <alias>`.
+///
+/// What actually keeps the artifact current at every launch is
+/// `runtime::claude_code::build_prompt_file`, which rewrites it from the exact
+/// bytes it hands to `--append-system-prompt-file` — including on the resume
+/// path, which never calls this function. See #4752 and spec §10.3.
 /// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
 /// `prepare_session_stash_reflects_override`,
 /// `prepare_session_writes_the_compiled_prompt_before_returning`,
-/// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`.
+/// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`,
+/// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
     prepare_session_with_style(fw, project_dir, None)
 }
@@ -824,25 +840,6 @@ fn prepare_session_inner(
         source,
     })?;
 
-    // #4752: the framework-level compiled prompt must be on disk and CURRENT
-    // before `claude` is spawned — every caller of `prepare_session` starts the
-    // process only after this function returns `Ok`, so a blocking write here IS
-    // the ordering guarantee. Deliberately fatal (`?`), not best-effort: a
-    // launch that proceeds past a failed write would leave the operator reading
-    // a stale prompt while the session runs a different one, which is the exact
-    // class of defect #4752 closes.
-    //
-    // Cost is one `write` of a string already in memory — `resolved_prompt` is
-    // the SAME text just stashed above and about to be passed to
-    // `claude --append-system-prompt-file`. No second composition pass; adding
-    // one here would be the thing to eliminate, not to accept.
-    let compiled = fw.instructions_compiled();
-    crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
-        .map_err(|source| PrepError::Io {
-            path: compiled.clone(),
-            source,
-        })?;
-
     // Resolve the active output style for settings.json using the same
     // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
     // An unknown id is logged and falls back to the professional default rather
@@ -1150,6 +1147,27 @@ fn prepare_session_inner(
     } else {
         None
     };
+
+    // #4752: refresh the framework-level compiled prompt with the text this
+    // session will actually receive (`resolved_prompt`, the same string stashed
+    // to `.trusty-mpm/last-instructions.md` above).
+    //
+    // POSITION IS LOAD-BEARING, and it is deliberately the LAST step. An earlier
+    // revision of this change put the write immediately after the stash, where
+    // its `?` sat upstream of `write_output_style`, `write_project_hooks`, the
+    // workspace trust pre-seed, and all four MCP injectors — including
+    // `inject_trusty_mpm_mcp`/`inject_trusty_review_mcp`, the content-pinning
+    // defense against the #3918/#3950 MCP name-squatting class. Because every
+    // production caller treats a prep failure as non-fatal (#2149, see this
+    // function's doc comment), a failed compiled write would have SKIPPED those
+    // injectors and let the session launch anyway. Nothing below this line may
+    // depend on the write succeeding — keep it last.
+    let compiled = fw.instructions_compiled();
+    crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
+        .map_err(|source| PrepError::Io {
+            path: compiled.clone(),
+            source,
+        })?;
 
     Ok(PrepReport {
         deploy,

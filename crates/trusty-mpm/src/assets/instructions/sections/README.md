@@ -172,7 +172,7 @@ than smoothed over.
    name describes nothing true. Renaming it is mechanical and was left out of
    #4286 to keep that change reviewable.
 
-3. **The `project-addendum` generator is declared but unfeedable.** Its only
+2. **The `project-addendum` generator is declared but unfeedable.** Its only
    production input was the retired `.trusty-mpm/INSTRUCTIONS.md`. The block
    stays declared in the manifest (marked `optional`, so it emits nothing) and
    the composer always passes `None`.
@@ -183,3 +183,16 @@ than smoothed over.
   Resolved by the ruling, not by a fix: **nothing** outside `core` is protected
   now, so this stopped being an anomaly and became the documented model. See
   "Why there is no framework floor" above.
+
+- *"Two writers target one path."* — `bundle_all.rs` wrote a 4-line stub to
+  `instructions/INSTRUCTIONS.md` while `install_system_prompt` wrote the full
+  composed prompt to the same path, last writer winning. Resolved by #4752, in
+  two parts. The stub half was already gone: #4286 split A removed the
+  `instructions/INSTRUCTIONS.md` entry from `bundle::ALL` and deleted the
+  `FRAMEWORK_INSTRUCTIONS` constant, so by the time this finding was acted on
+  only one writer remained. The surviving half — the compiled OUTPUT sharing a
+  path with the pipeline INPUT `build_instructions` reads — was fixed by giving
+  the compiled prompt its own file, `framework/INSTRUCTIONS-COMPILED.md`
+  (`FrameworkPaths::instructions_compiled`), which nothing else writes. `tm
+  install` now also deletes a stale pre-#4752 `instructions/INSTRUCTIONS.md`,
+  since no writer could refresh it but the pipeline still read it.

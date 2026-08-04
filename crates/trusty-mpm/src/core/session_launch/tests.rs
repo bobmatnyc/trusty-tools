@@ -350,6 +350,58 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
 
 #[test]
 #[serial_test::serial]
+fn compiled_write_failure_does_not_skip_the_mcp_injectors() {
+    // Why (#4752 review, HIGH 1): an earlier revision put the compiled write —
+    // and its fatal `?` — immediately after the `last-instructions.md` stash,
+    // UPSTREAM of `write_output_style`, `write_project_hooks`, the workspace
+    // trust pre-seed, and all four MCP injectors. Because every production
+    // caller treats a prep failure as non-fatal (#2149) and spawns anyway, a
+    // failed compiled write would have launched a session with NO
+    // `inject_trusty_mpm_mcp` / `inject_trusty_review_mcp` content pinning —
+    // silently removing the #3918/#3950 MCP name-squatting defense.
+    //
+    // FIXTURE: the compiled write is forced to fail (directory planted at its
+    // path) and we assert the security-relevant side effects STILL happened.
+    // This fails if the write is ever moved back above them.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(fw.instructions_compiled()).unwrap();
+
+    // The compiled write fails, so preparation reports Err …
+    prepare_session(&fw, project).expect_err("compiled write is expected to fail here");
+
+    // … but everything a launching caller depends on must already be on disk,
+    // because the failing step is last and nothing below it is skipped.
+    let mcp_json = project.join(".mcp.json");
+    assert!(
+        mcp_json.exists(),
+        ".mcp.json must be written even when the compiled prompt write fails — \
+         the MCP injectors must not sit downstream of it"
+    );
+    let mcp = std::fs::read_to_string(&mcp_json).expect("read .mcp.json");
+    for server in ["trusty-mpm", "trusty-review"] {
+        assert!(
+            mcp.contains(server),
+            "`{server}` MCP entry missing from .mcp.json — the #3918/#3950 \
+             content-pinning injector was skipped by the compiled-write failure"
+        );
+    }
+    assert!(
+        project.join(".claude/output-styles/trusty-mpm.md").exists(),
+        "the output style must still be deployed"
+    );
+    assert!(
+        project.join(".claude/settings.json").exists(),
+        "project settings/hooks must still be written"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn prepare_session_deploys_project_tier_output_style() {
     // Why (#2125 item 2): the daemon managed-spawn path launches `claude`
     // with `--setting-sources project,local`, excluding the `user` tier the

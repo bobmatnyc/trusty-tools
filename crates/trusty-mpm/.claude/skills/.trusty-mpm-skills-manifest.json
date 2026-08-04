@@ -1,0 +1,533 @@
+{
+  "version": 1,
+  "managed": {
+    "api-documentation": {
+      "checksum": "4670d70f61900cebb6e5373725d2ce7c0ea6afa9e4b93020e1d873a18471c961",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "root-cause-tracing/references/integration.md": {
+      "checksum": "e09072a66f26f42dc072c6eaaa396695191a48be15adab8b44354e3ec33452f2",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "env-manager/references/frameworks.md": {
+      "checksum": "8569ad2a1bc87016d4345a2f3219853d2a7d3bea12b68d4c34291341354496f3",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "root-cause-tracing": {
+      "checksum": "f22fdc0868b3c0a311a61cb26e1cded4567dc4d97964a25d650355f7551a737c",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities": {
+      "checksum": "fc77155d0406e13b120185bec5c680d819688aad3f7a00aa1885f669c43f2529",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "rust-build-performance": {
+      "checksum": "530aac10699b88a0c51ac2b1160c700dc1cc870bbfade12912d9c59f23d6491f",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "writing-plans/references/best-practices.md": {
+      "checksum": "512852ea08450b685a2aaba68073618bca451ec9ec7ca9f393fcaed65d110dac",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "api-design-patterns/references/grpc-patterns.md": {
+      "checksum": "b01d7e7dbafaa0b98bc0550c601212821a44c1756c240303fced390f8b6fff24",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "testing-anti-patterns/references/python-examples.md": {
+      "checksum": "5b6fcedcaedf36989ed646c83bb3a81109b8df9828a0e355f8294388c0b603ae",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "verification-before-completion/references/integration-and-workflows.md": {
+      "checksum": "4202099131717855789e764af8b07db9be1fe2fd15b88ecc59189112e816c351",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "testing-anti-patterns/references/detection-guide.md": {
+      "checksum": "682dfb9b1389a1b3a2cd48d92664d8b4b10193a730d1546a9367ed0a7e846748",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "env-manager/references/synchronization.md": {
+      "checksum": "67746098d01dc90f31ec9781223ab1747e476a407716e72303d57be51a8cb653",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities/references/doctor.md": {
+      "checksum": "4c3e31630f53ae7f3265d75e578fb773526a4ef3ba1083dbc5b80b443a556d34",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "artifacts-builder": {
+      "checksum": "cfed6fc2df33eb54e35eb0e733e0497994cda6cb9ec1e6b5f326863da78d12cd",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style/references/spec.md": {
+      "checksum": "ed2ba3e493896ba18ac59865d9ec17883c05dd2f9a3956d83da15acee20ecd3b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/skip-rules.md": {
+      "checksum": "fbe900865cc34c48066b6de29782b5d14332c59e71bdf35b491237e1f5b6065d",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "brainstorming": {
+      "checksum": "25a9c8d6e12e091b68169bfed3f40a0daf3dee1e5934af14e55b34512915bd72",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "api-design-patterns/references/rest-patterns.md": {
+      "checksum": "bcdfaea6f43735f214c98b2224b7a14c1f31d7d4c8bc4511f433a9d6e14704af",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning/references/tooling-matrix.md": {
+      "checksum": "c6c3b0d81c7a841700a9cef6b972e8c1d7864a1e258f9b426f38de073de0fcc9",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns/references/examples.md": {
+      "checksum": "abf9b794e8237778874dedd903f3015136070dfe52c1104f6586137f5745d5f9",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-ticketing": {
+      "checksum": "70c4171a5e30c00ead60219d77f7ec73eef3b866a72c4396607f9db109e1c8f3",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-teaching-templates": {
+      "checksum": "aa1e43eafb4309ef0f78cf621b575c08e29ce6f4dee53943a174372d95ba0233",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "env-manager/references/troubleshooting.md": {
+      "checksum": "0bc905c4fcc8ba5316fcc514d605d1d8569708a507eb024da2c409ce51de528a",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "api-design-patterns/references/versioning-strategies.md": {
+      "checksum": "d2200d246b493e5f9bc19ad3f94d1e836b332dfaebdd7ea9e123905a3ff7bcac",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "condition-based-waiting": {
+      "checksum": "3e06ac9f5ce4548e1cc1c529688616a9f21383e8df3c69ad87b87edf4c79ac29",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities/references/agents.md": {
+      "checksum": "713ea926482282dbda70d22caabf293645dcaf12a6e2c98ea6f69c3c0e555e4f",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "verification-before-completion": {
+      "checksum": "c8b462131fe78d942735e38b357ca1ea23ba500ff123d2123ae629c26171c9d4",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "api-design-patterns": {
+      "checksum": "55f975e283bd14355963ae5cb4cf1709be562e4a9e3a6fe29996aa6991705fb0",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-pr-workflow": {
+      "checksum": "85a412e5f1d1c3c6706145f3588b83f503fae5f196ae655c967d271df1354d99",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning/references/open-source-safety.md": {
+      "checksum": "4811539a1123a8e9e2e17257525eba3f2473d9c0b154938bd966fa5a8499468c",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "root-cause-tracing/references/examples.md": {
+      "checksum": "c25cd5cafc62487773e351ae87780e73df9a56f1a2083d87e05d2325b6ee7ed8",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "systematic-debugging/references/troubleshooting.md": {
+      "checksum": "164efe96b9bf9e07161499e92a5992959801566df2ded5c0e1c07a138cf1dcf9",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-slack-canvas-delivery": {
+      "checksum": "3ee192c257cf40248d101e9ac3896067402e726fb19a2e94373f7f7599dea96e",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization/references/framework-specific.md": {
+      "checksum": "f0daaffe92daaab755afa8de87b898815d98139dcdd314d439fa0d1b5352bfbf",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/stage-critic.md": {
+      "checksum": "3f442230c79d1b141369774f5ac8ace730288cc0789e963ae0600f9a657bd899",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "testing-anti-patterns/references/tdd-connection.md": {
+      "checksum": "03700da2041124971b30d8ba620828f8ae371703016c1ab0ffe24dff1536115f",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-quality-inspector/references/assertion-quality.md": {
+      "checksum": "8a54ab1fbc1e2e282fab037883835e69b94e0e348a712b573030d5eedb2ae486",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-postmortem": {
+      "checksum": "f04c5d74a502df819fb379e287ef6b50e3b9d3fab69fd6f561134c05b87174f2",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "env-manager": {
+      "checksum": "9ffd4d4a51f29fe146d0e9101bfbe4ef03dd69beee27eeb330c2712df9065af4",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-circuit-breaker": {
+      "checksum": "4d9a5367905676c93cbbac67e97849db0871a91962236d5531b4dfc228a9ca12",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-review-standards": {
+      "checksum": "238854dc2babe0c2bde020c6d56f0065d6736771d1a3c1accc44445f3008ef10",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-workflow": {
+      "checksum": "be8101c26a3af8e8a489a28c6d6e442af987f71379373383675aed2c95a9f7b9",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "root-cause-tracing/references/advanced-techniques.md": {
+      "checksum": "283d9b1409805a738513714c82b3840ed7f2888ec15062a6cc677682d0b9182b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning/references/common-findings-and-fixes.md": {
+      "checksum": "b289cf795e4f67457b99503ff6d2e2a80a14c104ae76e0105f0c9c09c8a77275",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/stage-architect.md": {
+      "checksum": "30f3f9d745a21320bbb5f0b02e85f52709029838cace1b003abe0df1cded8e43",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-adr": {
+      "checksum": "a40c8470d329c193d94fa6cc8d44e054f795e613efcff6a086a9ae49de39d594",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-quality-inspector": {
+      "checksum": "beeb317c5245fb5bba3f413af7ad5f5c007597f070032d6e94c7320123962252",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "verification-before-completion/references/red-flags-and-failures.md": {
+      "checksum": "96f73d3e5b320fb3f749455f863364627d4d53db1450301501190050d27b50a0",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization": {
+      "checksum": "63d1987d06523407cc958462b62461226fa1fc7a21acf4f991ed3501120444b4",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "contract-driven-testing": {
+      "checksum": "9efeb1b8591ceff37f2fa595b8e94670c6f54ec1562126c5133b2993f7a194e2",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "api-design-patterns/references/authentication.md": {
+      "checksum": "0048dbb5f52cfe0d40a8d23ad58cda30d6cdfcddc029bc380ec6ed81e2ec5223",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "webapp-testing": {
+      "checksum": "e6791adc319e7008fd7474dc9e91deb3a9835f8e2c6f4f13de08edc12d145264",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning/references/supply-chain-and-sbom.md": {
+      "checksum": "4fc2a2e3406ca4dd2d63371b6abeb4f06e822c453c395decd8046e695e20c75f",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities/references/mcp-tools.md": {
+      "checksum": "e3375a3960021538985e1c945bec8a4e94f42a49deb7cca43ae129949fcb67cb",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style/references/method-function.md": {
+      "checksum": "ba6d6b53f6dd9516bad3addb11f3d13ec9991a25f016385feff2299a633d872e",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "database-migration/references/decision-trees.md": {
+      "checksum": "2b26516c24c51b3d166a72c6d8ef49d6d2c29813eed437b97e3556868ab28791",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-quality-inspector/references/red-flags.md": {
+      "checksum": "cda9440a20780b71acb93b44f0c53b2a0fb77cd8f4d5d24ba529fdc709c4f954",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm": {
+      "checksum": "caa8ea5e1b8b47ecefcc1d919142e4c41085479cd058cab218e4c0545e27c524",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-verification-protocols": {
+      "checksum": "ed007d3bc0beac74107e39fb931baca20cbda3bb92e3cbc5d1975bca47785e98",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-doctor": {
+      "checksum": "717c75cb3ee29ab59de23f1610653176a3c64571d7d213c1590bba1e6de99eee",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style/references/block-inline.md": {
+      "checksum": "e556bd5217bbf9e37b988895c035961ec7f37a93c967b5900bc99001049e7dcd",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/stage-implement.md": {
+      "checksum": "7580167006d3e6f7aff84cf2809de1269e82a46be13a3f04a976ef8c78069f36",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-driven-development/references/examples.md": {
+      "checksum": "0a454b6049952eec28271cfcee3e59629b370cf0df54d6f95d17d749bec4007b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/stage-research.md": {
+      "checksum": "cfe27abfbd8b189a204a02c80c1afa6e42f381cb2039496be2eecb269ebf6f7c",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities/references/workflows.md": {
+      "checksum": "cf22f0cbd0883f6a232d16973571decb0f027075485f1143660f722c810f036f",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-session-resume": {
+      "checksum": "41406d224c85776d22e84af21f163472152def4af60fcb3f073b811c000160e1",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "condition-based-waiting/references/patterns-and-implementation.md": {
+      "checksum": "33708418d6742aa2c69546eef33c37411535248b16b5b5d451793172803a590e",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-tool-usage-guide": {
+      "checksum": "cc2b485da59f2619dfa227c27504297a5c41720ab08b596e7ac917fe39d1f747",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style/references/class.md": {
+      "checksum": "a692ae8c2795121dbb3f89c28b149a04eebf021c73254df9e9580de5e1a5da67",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-agent-architecture": {
+      "checksum": "6b3805a33bc0cd1226d5a10f9ba723a7b9dfb012e7f56425636b8f55b580bf43",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "requesting-code-review": {
+      "checksum": "efe508a721634c6d793ef1ec6f7a7704c2f4be10423dab949d8a6d1564264849",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns/references/anti-patterns.md": {
+      "checksum": "72e38820f241d654b9b407173229190659f236df0c9d01623d5486db0232d65b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-quality-inspector/references/inspection-checklist.md": {
+      "checksum": "712d37ee96982905a1c3b3d269bf6a5363ca7ae104f9fdf9f1bfa26dcbbc5a0d",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-bug-reporting": {
+      "checksum": "6c5cfaf4cb88ea75c84b89a1ee64a1d99e150f2353e74f22684c6579aa54a5be",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "xlsx": {
+      "checksum": "e7496d9cc22602a936f75103359c26608bc55601e1feb646c179fbe55e7b6c8f",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning/references/triage-and-remediation.md": {
+      "checksum": "0536215d754efa8f7cf22e4d427f1bb9184e644761214bb023ca77d4d32e3174",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns/references/foundational-patterns.md": {
+      "checksum": "9757639ee82cb068609094deb929b80cfef100fc27d43173b0d59e49db9f8381",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-session-pause": {
+      "checksum": "cf9f410d53a23a04f73478002f4fd269bb846fba19d43627407eea37ac19d5e8",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities/references/skills.md": {
+      "checksum": "ea3b65f5a75a202092be878eacd6bac82602f9d547080ec659de5708d3a0afcc",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization/references/core-web-vitals.md": {
+      "checksum": "78d368fdbfc45ca5ab9fbeefb9f57fe1e4b9f96ed6e66fce3a5c79f96b13710a",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-git-file-tracking": {
+      "checksum": "bb28e2a1107d01e63b76270a67e37da5d5bc97fd61c71e6d00a85aeff13e6df6",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning": {
+      "checksum": "dfe794d69558af44c178bf3df6c74be537b081d7a2feec30b7d1d4c6a2c82f03",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style/references/file-level.md": {
+      "checksum": "add53b551d8075969d8149ddceede7c383340e6b76e2d830742443a61d93e8fd",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-driven-development/references/workflow.md": {
+      "checksum": "eee31c8e8fcd6ffe960024b0fb8a9c73f501ff01d9ab4f10fbf7dbf1574b0651",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-capabilities/references/cli.md": {
+      "checksum": "bbf5416009a714cf1b014f624d683ce2203aa462a4004720e957c0d4a6f4b28d",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-init": {
+      "checksum": "5585976e172875c48adea6cf0196375a6a1f5d0a7a2582722a26b1ca5cb8c9b7",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process": {
+      "checksum": "af009b52ee49e2a11f575d0194d57a53d8dbbe03f70012783aa0b0436cdaeb7c",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "requesting-code-review/references/code-reviewer-template.md": {
+      "checksum": "7f5328dca12cb200005ae9d4386f63a9b0acb735ece57f82db206b4a3189ccae",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "verification-before-completion/references/gate-function.md": {
+      "checksum": "3c0d27d83bf9fb9095613fec4e0f57d15796ab3093d69ac48a5f15eb4f6cb707",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "model-context-builder": {
+      "checksum": "65e16b6d39ae252e13a271f574c488447c81b766ff96aff610b0bbf06c4258dc",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "root-cause-tracing/references/tracing-techniques.md": {
+      "checksum": "e7f46fa13cf363cc9268335dd064313d9487deae7aa348b120a1eae10ac0994c",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "systematic-debugging/references/anti-patterns.md": {
+      "checksum": "594209f32d11c87c9503cd94cd96f39ba3793e62c19b1fcda2051f9e03db8928",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "env-manager/references/security.md": {
+      "checksum": "8d150fa70c2135f3433d463ea4cd22d98f869b415302199a7995d6903e4ec268",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style/references/readme.md": {
+      "checksum": "af083dc4da326bb71c1b8657f8a2f135cb73ec945908314c2e26b9dd1cbc17b5",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "internal-comms": {
+      "checksum": "7aa734c61990702c84af8871cadb3760e337ccd94bbb2849d9629a87963f99e0",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "testing-anti-patterns/references/core-anti-patterns.md": {
+      "checksum": "eea50825bb37256a6e46ea3ea1aec485bc2fcf575aa4679ad163a751a9a6677b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-driven-development/references/philosophy.md": {
+      "checksum": "b3ec75685875f3147b69623a870771a8d3f9379b24689c4a869f6c6472fd2f6d",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/stage-security.md": {
+      "checksum": "dbf04954875b6e2bc9bbd9af3de9ba1b29bec67ff066b671e8411b4668fcf5ef",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns": {
+      "checksum": "c3828fb35ea5d4a5750df3dada6c4aa246d2832598f25fa2d51ec33a71782530",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "documentation-style": {
+      "checksum": "30df0432caf01fc93c3b106a9de890aa3f91e2104797e53b626bbe195fdbca10",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "database-migration/references/troubleshooting.md": {
+      "checksum": "31cf9a5e0696dff85069606a9641d4e6de116459f0bf9770f2a67ba8ebbada7d",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-driven-development/references/anti-patterns.md": {
+      "checksum": "111b0f344ca2d95830f40a4fced3f641e10dd3f960ff212e3712a8ea6a8cb8e0",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "security-scanning/references/ci-workflows.md": {
+      "checksum": "7f68514dd92fd5cecf836c120ca4f43d716c20bc6a40389abb8725ae30ed8192",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization/references/quick-wins.md": {
+      "checksum": "8d0a9215bf6cc471c1cfdfe5986cade7a35bca43f9e6bfc81803ed3f6f71eeca",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-delegation-patterns": {
+      "checksum": "7d91c02649d55360c7c188bc80d5932e6c6d6e9d4122563f10745908a2a2246c",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns/references/situational-patterns.md": {
+      "checksum": "dd0af3fb13dccee1026df3572e65d65ce69ce10ca42eade8794437dfd11f74d1",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/stage-tests.md": {
+      "checksum": "7f6fca08b22b587081c92d0722c37e327e5a878d5a7d0e3125263edc5f50b08b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "writing-plans": {
+      "checksum": "75f5711966c4a0527a9814c4df819772be61c3ec323d5d394dd442b247203f48",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "writing-plans/references/plan-structure-templates.md": {
+      "checksum": "4f9840a9739d6334d73f032b925b540a7fad6cf123c9bb52aacc98baec97279b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "code-production-process/references/critic-isolation.md": {
+      "checksum": "da4f401e0eb9fca9719607e66c0b6f01483fdcaf626ade2be614481512a43dc4",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "json-data-handling": {
+      "checksum": "53598c1c1a2368a473cb4c0fd5312287ffbbef29f98d3bc5bec34ad2585dfb87",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-issues-prune": {
+      "checksum": "7789da5d70847243a6c9580b4dc41cfa353a3cbebc6d3ab80064c71b80af8c89",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "api-design-patterns/references/graphql-patterns.md": {
+      "checksum": "889a4ecc7fafadfb41128b8c9e7e8c89bd3776f9bae119a32482bf7418628a3a",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-cli-operations": {
+      "checksum": "016291538fa4a97023524b7cbe707766919175e47c723ec73101b9fbe48498cc",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "tm-session-management": {
+      "checksum": "9fff05b4a014249e6042a859c6c7aa459d8452e62f07184beda8316529b81fbd",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns/references/decision-trees.md": {
+      "checksum": "50640f5c65513750cbb0cfc15d0fcbf4dea0f3157865428fde92b1cae8072051",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "testing-anti-patterns/references/completeness-anti-patterns.md": {
+      "checksum": "664bd922b7bd7275a764c566a029b0479c90409562c0ae8aa47784c50be4c833",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization/references/optimization-techniques.md": {
+      "checksum": "7e5530fb18756162cd5b3e68af973e2f5d9b5e7fede80cb2f77b0b74651bb436",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "systematic-debugging/references/workflow.md": {
+      "checksum": "4de7d1355a27da7f47b2e55827b0beb6cf4f17ef14f744f2967eec7016a9e227",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-driven-development/references/integration.md": {
+      "checksum": "b07e2b7cd8a9a3cb8149bd26254969812747bd49216ed26cfca152a979925f0b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "software-patterns/references/code-smell-signals.md": {
+      "checksum": "254761b59f40fda82da88f0687a574fc4f2a2e518264f02cf5ac1aada2b88f23",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "verification-before-completion/references/verification-patterns.md": {
+      "checksum": "52f28a9a702466aca93a27709ca88b3ed75118bfc35c905e5772fb2d563bad55",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "requesting-code-review/references/review-examples.md": {
+      "checksum": "235502c667af72a35955849b99d681b88e3bc7f3776a580a36500dd614aa7b39",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "systematic-debugging": {
+      "checksum": "a860122285e82e8928c2dfe6360f76956db15b06b0e3de5aba437fdc63400695",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "systematic-debugging/references/examples.md": {
+      "checksum": "d1879bde968dd696baf421b2b7c60d3f108ac678a9396a78f1dd4a77520bea40",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "git-workflow": {
+      "checksum": "ed90d8d6c88a5ddc285bd2cf64aaebe9c5e043d282290858c7306e805cc137d5",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "env-manager/references/validation.md": {
+      "checksum": "e3e9bdd984868dcde8b39a530cf2a690180674c0cc603db4addd881e26f7da9b",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization/references/monitoring.md": {
+      "checksum": "d4ce3de4d067290aa3b82df858f64ae67604057925dba10d287dd431a3e8b284",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "web-performance-optimization/references/modern-patterns-2025.md": {
+      "checksum": "b3d190a49bcfa4df87efd765098f7c1cc38b9ef35aa796baa3ae831e087b51fd",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "testing-anti-patterns": {
+      "checksum": "4d204a159e3427f1a8881562fdb640aa0a35299b1dd41c0fb6ef7e57c4dfd481",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "database-migration": {
+      "checksum": "73b6b276b1e1c8f348f94b67c82e5015849c66516cd777fbdbfc9064dd2fa1bf",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    },
+    "test-driven-development": {
+      "checksum": "f1cbb3ffe0c5e03ae596953f93aaf25d5d66a33fadeec8f2c6ca794a51fcf0fa",
+      "deployed_at": "2026-08-04T14:36:44.484568+00:00"
+    }
+  }
+}
