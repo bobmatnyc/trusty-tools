@@ -12,6 +12,9 @@ pub(crate) mod path_match;
 mod tests;
 mod types;
 mod usearch_impl;
+// Issue #4707: snapshot-adoption recovery for the #1711 guard. Kept in its own
+// file so `usearch_store.rs` stays under the 500-SLOC production cap.
+mod usearch_recover;
 mod usearch_store;
 
 pub use self::types::{VectorHit, VectorStore};

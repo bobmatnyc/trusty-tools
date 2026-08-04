@@ -165,6 +165,11 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
             // replaced) across every rebuild. Checking `stages.semantic.status`
             // under the SAME write lock the `Ready` write uses makes
             // disable-wins-over-a-racing-embed-pass airtight.
+            // Issue #4707: same honesty gate the fast pass applies — a pass
+            // that finishes with the live store still empty must publish
+            // `Failed`, not `Ready`. Gathered before the stages write lock so
+            // the indexer lock is never nested inside it.
+            let broken = super::stages::semantic_health_reason(&handle).await;
             {
                 let mut stages = handle.stages.write().await;
                 if stages.semantic.status == StageStatus::Skipped {
@@ -174,6 +179,9 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                          Ready, issue #2984 Phase 1 finding 4)",
                         index_id.0,
                     );
+                } else if let Some(reason) = broken {
+                    tracing::error!("deferred_embed[{}]: {reason}", index_id.0);
+                    stages.semantic = StageState::failed(&reason);
                 } else {
                     stages.semantic.status = StageStatus::Ready;
                     stages.semantic.completed_at = Some(now_rfc3339());

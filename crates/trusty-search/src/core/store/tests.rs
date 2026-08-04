@@ -1173,3 +1173,159 @@ async fn test_filtered_search_excludes_non_matching_keys() {
         "no repoB chunk may leak through the filter: {hits:?}"
     );
 }
+
+/// Build a REAL populated snapshot on disk whose `.usearch` binary exceeds
+/// `POPULATED_SNAPSHOT_THRESHOLD_BYTES`, so the #1711 guard will fire against
+/// it. Returns `(path, chunk_ids, query_vector)`.
+///
+/// Why (issue #4707): the pre-existing #1711 test writes a byte-filler file,
+/// which is enough to prove the guard REFUSES but can never prove recovery —
+/// there is no loadable snapshot to recover from. Reproducing the reported
+/// state needs the real thing: a valid, populated binary + sidecar pair that
+/// `UsearchStore::load_from` accepts, paired with a live store holding zero
+/// vectors. That is exactly the partial warm-boot in the incident.
+/// What: upserts `n` distinct dim-4 vectors and saves. Asserts the resulting
+/// file really is over the guard threshold, so a future change to usearch's
+/// on-disk layout makes this fixture fail loudly instead of silently
+/// producing a sub-threshold file that never trips the guard under test.
+async fn populated_snapshot_over_guard_threshold(
+    dir: &std::path::Path,
+    n: usize,
+) -> (std::path::PathBuf, Vec<String>, Vec<f32>) {
+    let path = dir.join("hnsw.usearch");
+    let store = UsearchStore::new(4).expect("store init");
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let id = format!("src/file{i}.rs:1:9");
+        let f = i as f32;
+        store
+            .upsert(&id, vec![1.0 + f, 0.5 - f, 0.25, 2.0 + f])
+            .await
+            .expect("upsert");
+        ids.push(id);
+    }
+    store.save(&path).await.expect("save populated snapshot");
+
+    let size = std::fs::metadata(&path).expect("stat snapshot").len();
+    assert!(
+        size > POPULATED_SNAPSHOT_THRESHOLD_BYTES,
+        "fixture precondition: the snapshot must exceed the #1711 guard \
+         threshold ({POPULATED_SNAPSHOT_THRESHOLD_BYTES} bytes) or the guard \
+         under test never fires; got {size} bytes for {n} vectors"
+    );
+    assert!(
+        path.with_extension("keys.json").exists(),
+        "fixture precondition: sidecar must exist"
+    );
+    (path, ids, vec![1.0, 0.5, 0.25, 2.0])
+}
+
+/// Why (issue #4707): THE regression test. An index whose vector layer
+/// warm-boots empty while a populated snapshot sits on disk must recover from
+/// that snapshot rather than stay permanently vectorless. Before this fix the
+/// #1711 guard refused the overwrite (correctly, preserving the data) and then
+/// nothing else happened — the empty store kept serving zero vectors forever.
+/// What: builds a real populated snapshot, then simulates the partial warm-boot
+/// by pointing a FRESH EMPTY store at that same path and saving. Asserts three
+/// things at once: the guard still preserved the on-disk bytes (the #1711
+/// contract is NOT weakened), the live store recovered its vectors, and a real
+/// search against the recovered store returns the original chunk ids.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_save_refusal_adopts_populated_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, ids, query) = populated_snapshot_over_guard_threshold(dir.path(), 900).await;
+    let before = std::fs::read(&path).expect("read snapshot");
+
+    // The partial warm-boot: a fresh EMPTY store bound to a populated path.
+    let empty = UsearchStore::new(4).expect("store init");
+    assert_eq!(
+        empty.len().await.unwrap(),
+        0,
+        "precondition: the store must start empty (this is the warm-boot fallback state)"
+    );
+
+    empty.save(&path).await.expect("save must return Ok(())");
+
+    // 1. The #1711 contract is intact: nothing was written over the snapshot.
+    assert_eq!(
+        std::fs::read(&path).expect("re-read snapshot"),
+        before,
+        "the #1711 guard must still preserve the on-disk snapshot byte-for-byte — \
+         recovery must never come at the cost of the data-loss guard"
+    );
+
+    // 2. The store recovered rather than staying empty.
+    assert_eq!(
+        empty.len().await.unwrap(),
+        ids.len(),
+        "the store must have adopted the on-disk snapshot's vectors (issue #4707); \
+         0 here means the pre-fix behaviour — refused, then permanently vectorless"
+    );
+
+    // 3. The recovered store actually answers queries with the real chunk ids.
+    let hits = empty
+        .search(&query, 5)
+        .await
+        .expect("search recovered store");
+    assert!(
+        !hits.is_empty(),
+        "a recovered store must return hits, not an empty result set"
+    );
+    assert!(
+        hits.iter().all(|h| ids.contains(&h.chunk_id)),
+        "recovered hits must resolve to the original chunk ids (the key sidecar \
+         must have been rehydrated too, not just the vector graph): {hits:?}"
+    );
+}
+
+/// Why (issue #4707): recovery must be honest about its own failure. When the
+/// on-disk snapshot is NOT adoptable — here, its sidecar is gone, so
+/// `load_from` discards it — the store must stay empty and report so, never
+/// claim a recovery it did not perform. A silent false-positive here would be
+/// worse than the original bug: it would mark the semantic lane healthy.
+/// What: builds a real populated snapshot, deletes the sidecar, then saves an
+/// empty store over it. Asserts the guard preserved the binary AND the store
+/// is still empty.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_adopt_declines_when_snapshot_is_unrecoverable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _ids, _query) = populated_snapshot_over_guard_threshold(dir.path(), 900).await;
+    std::fs::remove_file(path.with_extension("keys.json")).expect("remove sidecar");
+    let before = std::fs::read(&path).expect("read snapshot");
+
+    let empty = UsearchStore::new(4).expect("store init");
+    empty.save(&path).await.expect("save must return Ok(())");
+
+    assert_eq!(
+        std::fs::read(&path).expect("re-read snapshot"),
+        before,
+        "the on-disk binary must still be preserved when recovery declines"
+    );
+    assert_eq!(
+        empty.len().await.unwrap(),
+        0,
+        "an unrecoverable snapshot must leave the store empty — never a phantom recovery"
+    );
+}
+
+/// Why (issue #4707): adopting a snapshot built for a different embedding
+/// dimension would wire vectors the query path cannot search. Recovery must
+/// decline rather than corrupt the store.
+/// What: builds a dim-4 snapshot, then attempts recovery into a dim-8 store.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_adopt_declines_on_dim_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, _ids, _query) = populated_snapshot_over_guard_threshold(dir.path(), 900).await;
+
+    let empty = UsearchStore::new(8).expect("store init");
+    empty.save(&path).await.expect("save must return Ok(())");
+
+    assert_eq!(
+        empty.len().await.unwrap(),
+        0,
+        "a dim-mismatched snapshot must never be adopted"
+    );
+}

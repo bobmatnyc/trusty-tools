@@ -10,6 +10,8 @@
 //! - `now_rfc3339` — RFC-3339 timestamp helper.
 //! - `reset_stages_for_reindex` — wipe stages at reindex start.
 //! - `mark_lexical_ready_semantic_in_progress` — after the BM25 phase drains.
+//! - `semantic_health_reason` — live-store honesty gate for the two places
+//!   that publish `semantic: Ready` (#4707).
 //! - `mark_semantic_ready_graph_in_progress` — after embed phase completes.
 //! - `mark_reindex_failed` — on zero-vector embed failure (#601).
 //! - `mark_graph_ready` — after KG rebuild.
@@ -17,7 +19,7 @@
 //! - `refresh_context_embedding` — refresh per-index routing embedding (#112).
 //!
 //! Test: covered indirectly by the reindex integration tests; direct unit
-//! coverage in the validate module tests.
+//! coverage in the validate module tests and in `tests` below (#4707).
 
 use crate::core::registry::{IndexHandle, IndexId, IndexStages, StageState, StageStatus};
 use dashmap::DashMap;
@@ -143,6 +145,37 @@ pub(crate) async fn mark_lexical_ready_semantic_in_progress(
     }
 }
 
+/// Read the live signals that decide whether the semantic stage may honestly
+/// be marked `Ready`, and apply
+/// [`super::validate::semantic_stage_broken_reason`] to them (issue #4707).
+///
+/// Why: both places that publish `semantic: Ready` — the fast pass's
+/// [`mark_semantic_ready_graph_in_progress`] and the deferred-embed pass in
+/// `super::defer_embed` — need the same check against the same ground truth,
+/// and neither may hold the `stages` write lock while acquiring the indexer
+/// lock. Centralising the gather here keeps the lock ordering (indexer read,
+/// then stages write) identical at both call sites.
+/// What: takes ONE indexer read lock, reads `has_embedder`, the durable corpus
+/// chunk count (falling back to the in-memory count when no corpus is wired),
+/// and the live vector count; returns the predicate's verdict.
+/// Test: `tests::semantic_stage_reports_failed_when_live_store_is_empty` and
+/// `tests::semantic_stage_still_ready_when_store_is_populated` below.
+pub(super) async fn semantic_health_reason(handle: &Arc<IndexHandle>) -> Option<String> {
+    let indexer = handle.indexer.read().await;
+    let embedder_present = indexer.has_embedder();
+    let corpus_chunks = indexer
+        .corpus_arc()
+        .and_then(|c| c.chunk_count().ok())
+        .unwrap_or_else(|| indexer.chunk_count());
+    let live_vector_count = indexer.vector_count().await;
+    drop(indexer);
+    super::validate::semantic_stage_broken_reason(
+        embedder_present,
+        corpus_chunks,
+        live_vector_count,
+    )
+}
+
 /// Flip the semantic stage to `Ready` and stamp `embedded` counter. Stage
 /// 3 (graph) is set to `InProgress` since the post-batch KG rebuild always
 /// follows immediately.
@@ -159,6 +192,9 @@ pub(crate) async fn mark_semantic_ready_graph_in_progress(
     embedded: usize,
     total: usize,
 ) {
+    // Issue #4707: gather the live-store signals BEFORE taking the stages
+    // write lock — never nest an indexer lock inside it.
+    let broken = semantic_health_reason(handle).await;
     let mut stages = handle.stages.write().await;
     if handle.lexical_only {
         // No work for semantic / graph on a lexical-only index. Leave the
@@ -169,10 +205,16 @@ pub(crate) async fn mark_semantic_ready_graph_in_progress(
     // in its pre-marked Skipped state (set by `reset_stages_for_reindex`)
     // rather than flipping it Ready. Orthogonal to the graph transition below.
     if !handle.skip_vector {
-        stages.semantic.status = StageStatus::Ready;
-        stages.semantic.completed_at = Some(now_rfc3339());
-        stages.semantic.embedded = Some(embedded);
-        stages.semantic.total = Some(total);
+        // Issue #4707: never publish `Ready` for a lane that holds no vectors.
+        if let Some(reason) = broken {
+            tracing::error!("reindex[{}]: {reason}", handle.id.0);
+            stages.semantic = StageState::failed(&reason);
+        } else {
+            stages.semantic.status = StageStatus::Ready;
+            stages.semantic.completed_at = Some(now_rfc3339());
+            stages.semantic.embedded = Some(embedded);
+            stages.semantic.total = Some(total);
+        }
     }
     // Issue #313: skip_kg holds graph in Skipped — do not flip to InProgress.
     if !handle.skip_kg && stages.graph.status == StageStatus::Pending {
@@ -300,5 +342,146 @@ pub(super) async fn refresh_context_embedding(handle: &Arc<IndexHandle>) {
             *handle.context_embedding.write().await = None;
             *handle.context_summary.write().await = Some(display);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::chunker::{ChunkType, RawChunk};
+    use crate::core::embed::Embedder;
+    use crate::core::indexer::{CodeIndexer, ParsedBatch};
+    use crate::core::store::{UsearchStore, VectorStore};
+
+    /// A test-only embedder that works. Its presence is what makes a
+    /// zero-vector store a REAL failure rather than the BM25-only steady state.
+    struct WorkingEmbedder;
+
+    #[async_trait::async_trait]
+    impl Embedder for WorkingEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5; 8])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.5; 8]).collect())
+        }
+        fn dimension(&self) -> usize {
+            8
+        }
+    }
+
+    fn synthetic_chunk(id: &str) -> RawChunk {
+        RawChunk {
+            id: id.into(),
+            file: "test.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            content: "fn test_fn() {}".into(),
+            function_name: None,
+            language: Some("rust".into()),
+            chunk_type: ChunkType::Code,
+            calls: vec![],
+            inherits_from: vec![],
+            chunk_depth: 0,
+            parent_chunk_id: None,
+            child_chunk_ids: vec![],
+            nlp_keywords: vec![],
+            nlp_code_refs: vec![],
+            virtual_terms: vec![],
+        }
+    }
+
+    /// Build a handle whose corpus holds one chunk and whose vector store is
+    /// wired with a working embedder. When `populate_store` is false the store
+    /// is left EMPTY — reproducing the reported partial warm-boot, where the
+    /// HNSW snapshot was discarded and replaced by a fresh empty store while
+    /// the corpus (and therefore the lexical lane) restored fine.
+    async fn handle_with(populate_store: bool) -> Arc<IndexHandle> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(8).expect("usearch new"));
+        let store_handle = Arc::clone(&store);
+        let indexer = CodeIndexer::new("stage-health-test", root.clone())
+            .with_components(Arc::new(WorkingEmbedder), store);
+        // Commit the chunk WITHOUT an embedding so the corpus is populated
+        // independently of the vector store — exactly the split the incident
+        // produced (lexical ready, vector empty).
+        let parsed = ParsedBatch {
+            chunks: vec![synthetic_chunk("test:1:1")],
+            embeddings: vec![None],
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        };
+        indexer.commit_parsed_batch(parsed, false).await.ok();
+        // Seed the vector AFTER the commit: `commit_parsed_batch` replaces the
+        // committed file's vectors, so a pre-seeded one would be dropped and
+        // the "healthy" fixture would silently be the broken one.
+        if populate_store {
+            store_handle
+                .upsert("test:1:1", vec![0.5; 8])
+                .await
+                .expect("upsert");
+        }
+        assert_eq!(
+            store_handle.len().await.expect("len"),
+            usize::from(populate_store),
+            "fixture precondition: the store must be in the intended state"
+        );
+        Arc::new(IndexHandle::bare(
+            IndexId::new("stage-health-test"),
+            Arc::new(tokio::sync::RwLock::new(indexer)),
+            root,
+        ))
+    }
+
+    /// Why (issue #4707): THE honesty regression test. An all-hash-skipped
+    /// incremental reindex reaches `mark_semantic_ready_graph_in_progress` with
+    /// `embedded = 0`, which is legitimate (#868) — but when the live store is
+    /// ALSO empty the lane is not usable, and publishing `Ready` is what makes
+    /// `search_capabilities` advertise `"vector"`, stops the search handler
+    /// down-shifting to the lexical lane, and turns every query into a
+    /// query-embed call that can hard-fail with `500 internal search error`.
+    /// The stage must report `Failed` instead.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn semantic_stage_reports_failed_when_live_store_is_empty() {
+        let handle = handle_with(false).await;
+        mark_semantic_ready_graph_in_progress(&handle, 0, 0).await;
+        let stages = handle.stages.read().await;
+        assert_eq!(
+            stages.semantic.status,
+            StageStatus::Failed,
+            "a semantic lane backed by an EMPTY vector store must never be published \
+             as ready (issue #4707)"
+        );
+        let reason = stages
+            .semantic
+            .failure
+            .as_ref()
+            .expect("Failed stage must carry an actionable reason");
+        assert!(reason.contains("0 vectors"), "reason: {reason}");
+        assert!(
+            !stages.search_capabilities().contains(&"vector"),
+            "the vector lane must not be advertised as queryable"
+        );
+    }
+
+    /// Why (issue #4707): the honesty gate must not regress the healthy path —
+    /// a populated store with zero NEWLY embedded chunks (the ordinary
+    /// no-change incremental reindex, #868) must still be `Ready`.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn semantic_stage_still_ready_when_store_is_populated() {
+        let handle = handle_with(true).await;
+        mark_semantic_ready_graph_in_progress(&handle, 0, 0).await;
+        let stages = handle.stages.read().await;
+        assert_eq!(
+            stages.semantic.status,
+            StageStatus::Ready,
+            "an all-hash-skipped reindex over a populated store must stay Ready (#868)"
+        );
+        assert!(stages.search_capabilities().contains(&"vector"));
     }
 }
