@@ -291,21 +291,42 @@ fn language_engineers_still_gate_on_detection() {
 
 #[test]
 fn framework_engineers_gate_on_detection() {
-    // `react-engineer` fires on package.json today (its only marker); a Rust
-    // project does not get it.
-    let js = TempDir::new().unwrap();
-    touch(js.path(), "package.json");
+    // #4760: `react-engineer` requires a DECLARED react dependency, not merely
+    // a `package.json`. A framework-free JS project and a Rust project both
+    // miss it, while the language engineers in the same call still fire.
+    let react = TempDir::new().unwrap();
+    std::fs::write(
+        react.path().join("package.json"),
+        "{\"dependencies\": {\"react\": \"^18.0.0\"}}",
+    )
+    .unwrap();
     assert!(deploys(
-        &agent_scope_from(&parsed_fake(), js.path()),
+        &agent_scope_from(&parsed_fake(), react.path()),
         "react-engineer"
     ));
 
+    let bare_js = TempDir::new().unwrap();
+    std::fs::write(
+        bare_js.path().join("package.json"),
+        "{\"dependencies\": {\"lodash\": \"^4.0.0\"}}",
+    )
+    .unwrap();
+    assert!(
+        !deploys(
+            &agent_scope_from(&parsed_fake(), bare_js.path()),
+            "react-engineer"
+        ),
+        "a framework-free JS project must not receive react-engineer"
+    );
+
     let rust = TempDir::new().unwrap();
     touch(rust.path(), "Cargo.toml");
-    assert!(!deploys(
-        &agent_scope_from(&parsed_fake(), rust.path()),
-        "react-engineer"
-    ));
+    let scope = agent_scope_from(&parsed_fake(), rust.path());
+    assert!(!deploys(&scope, "react-engineer"));
+    assert!(
+        deploys(&scope, "rust-engineer"),
+        "the same call still selects the detected stack engineer"
+    );
 }
 
 #[test]

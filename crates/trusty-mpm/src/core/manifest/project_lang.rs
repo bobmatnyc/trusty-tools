@@ -88,8 +88,20 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
         markers: &["pubspec.yaml"],
     },
     LangEngineer {
-        stem: "phoenix-engineer",
+        stem: "elixir-engineer",
+        // `mix.exs` is the Elixir project manifest — every Mix project has one.
+        // Before #4760 this marker selected `phoenix-engineer`, which meant a
+        // plain Elixir project got a Phoenix specialist and nothing else.
         markers: &["mix.exs"],
+    },
+    LangEngineer {
+        stem: "phoenix-engineer",
+        // #4760: narrowed from the bare `mix.exs` Elixir marker. Phoenix has no
+        // config file of its own that plain Elixir lacks, so the only reliable
+        // signal is the dependency declaration itself. `{:phoenix,` is the
+        // canonical `mix format` spelling of the dep tuple and does not match
+        // `{:phoenix_live_view,` or any other `phoenix_*` package.
+        markers: &["mix.exs::{:phoenix,"],
     },
     LangEngineer {
         stem: "dotnet-engineer",
@@ -114,20 +126,37 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
     },
     LangEngineer {
         stem: "react-engineer",
-        markers: &["package.json"],
+        // #4760: narrowed from a bare `package.json`, which selected React for
+        // every JavaScript project. React ships no config file of its own, so
+        // the dependency declaration is the only reliable signal. The quotes
+        // make it an exact key match: `"react"` does not match `"react-dom"`,
+        // `"react-native"`, or `"@types/react"`.
+        markers: &["package.json::\"react\""],
     },
     LangEngineer {
         stem: "nextjs-engineer",
+        // #4760: the `package.json` fallback is gone. The config file is the
+        // primary signal, but `next.config.*` is OPTIONAL in Next.js, so the
+        // dependency declaration backstops it. `"next"` does not match
+        // `"next-auth"` or `"next-themes"`.
         markers: &[
             "next.config.js",
             "next.config.mjs",
             "next.config.ts",
-            "package.json",
+            "package.json::\"next\"",
         ],
     },
     LangEngineer {
         stem: "svelte-engineer",
-        markers: &["svelte.config.js", "svelte.config.ts", "package.json"],
+        // #4760: the `package.json` fallback is gone. `svelte.config.*` is
+        // present in every SvelteKit app and most plain Svelte ones; the dep
+        // declaration backstops the rest. `"svelte"` does not match
+        // `"svelte-check"` or `"@sveltejs/kit"`.
+        markers: &[
+            "svelte.config.js",
+            "svelte.config.ts",
+            "package.json::\"svelte\"",
+        ],
     },
     LangEngineer {
         stem: "tauri-engineer",
@@ -135,30 +164,74 @@ const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
     },
 ];
 
-/// Whether a single marker (exact path or `*.<ext>` glob) is present in `project_dir`.
+/// The largest marker file this module will read when probing its contents.
 ///
-/// Why: most language markers are fixed filenames, but .NET projects are
-/// identified by extension globs — `*.csproj`, `*.sln`, `*.vbproj` — that no
-/// single fixed name captures, so marker matching must support a leading `*.`
-/// extension glob in addition to exact-path probes.
-/// What: for a marker of the form `*.<ext>` returns `true` when any direct child
-/// file of `project_dir` ends with `.<ext>`; otherwise tests `project_dir.join(marker)`
-/// for existence. A failed directory read (missing/unreadable dir) yields `false`.
-/// Test: `dotnet_csproj_scopes_to_dotnet_engineer` (glob branch); every other
-/// scope test exercises the exact-path branch.
+/// Why: a content probe must not be a denial-of-service vector on a pathological
+/// or hostile `package.json`. Real dependency manifests are kilobytes; 1 MiB is
+/// far above any legitimate one and bounds the read.
+/// What: 1 MiB, in bytes.
+/// Test: `content_probe_ignores_an_oversized_file`.
+const MAX_MARKER_PROBE_BYTES: u64 = 1024 * 1024;
+
+/// Whether a single marker is present in `project_dir`.
+///
+/// Why: three marker kinds are needed, because three kinds of project actually
+/// exist. Most stacks are identified by a fixed filename. .NET projects are
+/// identified by extension globs (`*.csproj`, `*.sln`, `*.vbproj`) that no fixed
+/// name captures. And React and Phoenix (#4760) are identified by NEITHER — React
+/// ships no config file at all, and Phoenix ships nothing that plain Elixir
+/// lacks, so for those the dependency declaration inside the project manifest is
+/// the only reliable signal.
+/// What: three forms, in precedence order.
+///
+/// * `<path>::<needle>` — a CONTENT PROBE. True when `<path>` exists, is at most
+///   [`MAX_MARKER_PROBE_BYTES`], and contains `<needle>` as a literal substring.
+///   This is a deliberate, bounded read of a declaration the project wrote about
+///   itself — not an inference. Needles are written with their surrounding
+///   syntax (`"react"` with quotes, `{:phoenix,` with the tuple brace) so a
+///   substring match is an exact declaration match and cannot catch a
+///   longer-named sibling package.
+/// * `*.<ext>` — an extension glob over the direct children of `project_dir`.
+/// * anything else — an exact path, tested for existence.
+///
+/// Any I/O failure (missing or unreadable path, non-UTF-8 contents) yields
+/// `false`: a marker that cannot be read is a marker that is not present.
+/// Test: `content_probe_matches_a_declared_dependency`,
+/// `content_probe_does_not_match_a_longer_named_sibling`,
+/// `content_probe_ignores_an_oversized_file`,
+/// `dotnet_csproj_detects_dotnet_engineer` (glob branch); every other detection
+/// test exercises the exact-path branch.
 fn marker_present(project_dir: &Path, marker: &str) -> bool {
+    if let Some((path, needle)) = marker.split_once("::") {
+        return file_contains(&project_dir.join(path), needle);
+    }
     if let Some(ext) = marker.strip_prefix("*.") {
         let suffix = format!(".{ext}");
-        std::fs::read_dir(project_dir)
+        return std::fs::read_dir(project_dir)
             .map(|entries| {
                 entries
                     .flatten()
                     .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(&suffix)))
             })
-            .unwrap_or(false)
-    } else {
-        project_dir.join(marker).exists()
+            .unwrap_or(false);
     }
+    project_dir.join(marker).exists()
+}
+
+/// Whether `path` is a readable, size-bounded file containing `needle`.
+///
+/// Why: factored out of [`marker_present`] so the size guard and the
+/// failure-is-absence rule are stated once and testable on their own.
+/// What: `false` unless `path` is a regular file of at most
+/// [`MAX_MARKER_PROBE_BYTES`] whose UTF-8 contents contain `needle`.
+/// Test: `content_probe_matches_a_declared_dependency`,
+/// `content_probe_ignores_an_oversized_file`.
+fn file_contains(path: &Path, needle: &str) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_MARKER_PROBE_BYTES => {}
+        _ => return false,
+    }
+    std::fs::read_to_string(path).is_ok_and(|body| body.contains(needle))
 }
 
 /// The set of language-engineer stems whose markers are present in `project_dir`.
@@ -270,11 +343,22 @@ mod tests {
     use tempfile::TempDir;
 
     fn touch(dir: &Path, name: &str) {
+        write(dir, name, "");
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) {
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
-        fs::write(path, "").unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    /// A `package.json` declaring exactly `deps` — the fixture the tightened
+    /// JS-framework gates are written against.
+    fn package_json(deps: &[&str]) -> String {
+        let entries: Vec<String> = deps.iter().map(|d| format!("    \"{d}\": \"1.0.0\"")).collect();
+        format!("{{\n  \"dependencies\": {{\n{}\n  }}\n}}\n", entries.join(",\n"))
     }
 
     #[test]
@@ -295,6 +379,7 @@ mod tests {
             "ruby-engineer",
             "php-engineer",
             "dart-engineer",
+            "elixir-engineer",
             "phoenix-engineer",
             "react-engineer",
             "nextjs-engineer",
@@ -319,28 +404,164 @@ mod tests {
     }
 
     #[test]
-    fn js_project_detects_js_family() {
-        // A package.json project detects the whole JS/TS family and no non-JS
-        // engineer. This pins TODAY'S marker behavior: react/nextjs/svelte fire
-        // on a bare package.json, with no framework-specific marker required.
+    fn bare_js_project_detects_no_framework_engineer() {
+        // #4760 behavior change: a plain `package.json` with no framework
+        // dependency selects the LANGUAGE engineers only. Before #4760 it also
+        // selected react/nextjs/svelte, which is the accident this closes.
         let tmp = TempDir::new().unwrap();
-        touch(tmp.path(), "package.json");
+        write(tmp.path(), "package.json", &package_json(&["lodash"]));
 
         let detected = detected_engineers(tmp.path());
-        for kept in [
-            "javascript-engineer",
-            "typescript-engineer",
-            "react-engineer",
-            "nextjs-engineer",
-            "svelte-engineer",
-        ] {
+        assert!(detected.contains("javascript-engineer"));
+        assert!(detected.contains("typescript-engineer"));
+        for framework in ["react-engineer", "nextjs-engineer", "svelte-engineer"] {
             assert!(
-                detected.contains(kept),
-                "{kept} must be detected for a package.json project"
+                !detected.contains(framework),
+                "{framework} must NOT fire on a framework-free package.json"
             );
         }
         assert!(!detected.contains("rust-engineer"));
         assert!(!detected.contains("python-engineer"));
+    }
+
+    #[test]
+    fn react_dependency_detects_react_engineer() {
+        // The declared dependency is the signal, and it is exact.
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "package.json", &package_json(&["react", "react-dom"]));
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("react-engineer"));
+        assert!(detected.contains("javascript-engineer"), "language engineers still fire");
+        assert!(!detected.contains("nextjs-engineer"));
+        assert!(!detected.contains("svelte-engineer"));
+    }
+
+    #[test]
+    fn content_probe_does_not_match_a_longer_named_sibling() {
+        // `"react-dom"`/`"react-native"`/`"@types/react"` must NOT satisfy the
+        // `"react"` probe — the quotes make it an exact key match. This is the
+        // assertion that makes the probe a declaration match, not a heuristic.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            &package_json(&["react-dom", "react-native", "@types/react"]),
+        );
+        assert!(!detected_engineers(tmp.path()).contains("react-engineer"));
+
+        // Same rule on the other three probes.
+        let nx = TempDir::new().unwrap();
+        write(nx.path(), "package.json", &package_json(&["next-auth", "next-themes"]));
+        assert!(!detected_engineers(nx.path()).contains("nextjs-engineer"));
+
+        let sv = TempDir::new().unwrap();
+        write(sv.path(), "package.json", &package_json(&["svelte-check"]));
+        assert!(!detected_engineers(sv.path()).contains("svelte-engineer"));
+    }
+
+    #[test]
+    fn nextjs_detects_by_config_or_dependency() {
+        // `next.config.*` is the primary signal, but it is OPTIONAL in Next.js,
+        // so the dependency declaration must also work on its own.
+        for marker in ["next.config.js", "next.config.mjs", "next.config.ts"] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            assert!(
+                detected_engineers(tmp.path()).contains("nextjs-engineer"),
+                "{marker} must select nextjs-engineer"
+            );
+        }
+        let dep_only = TempDir::new().unwrap();
+        write(dep_only.path(), "package.json", &package_json(&["next", "react"]));
+        assert!(detected_engineers(dep_only.path()).contains("nextjs-engineer"));
+    }
+
+    #[test]
+    fn svelte_detects_by_config_or_dependency() {
+        for marker in ["svelte.config.js", "svelte.config.ts"] {
+            let tmp = TempDir::new().unwrap();
+            touch(tmp.path(), marker);
+            assert!(
+                detected_engineers(tmp.path()).contains("svelte-engineer"),
+                "{marker} must select svelte-engineer"
+            );
+        }
+        let dep_only = TempDir::new().unwrap();
+        write(dep_only.path(), "package.json", &package_json(&["svelte"]));
+        assert!(detected_engineers(dep_only.path()).contains("svelte-engineer"));
+    }
+
+    #[test]
+    fn plain_elixir_detects_elixir_engineer_only() {
+        // #4760: `mix.exs` alone is the ELIXIR marker. Before this change it
+        // selected `phoenix-engineer`, giving a plain Elixir project a Phoenix
+        // specialist and no general Elixir engineer at all.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "mix.exs",
+            "defmodule My.MixProject do\n  defp deps, do: [{:jason, \"~> 1.4\"}]\nend\n",
+        );
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("elixir-engineer"));
+        assert!(
+            !detected.contains("phoenix-engineer"),
+            "a non-Phoenix Elixir project must not get the Phoenix specialist"
+        );
+    }
+
+    #[test]
+    fn phoenix_dependency_detects_both_elixir_and_phoenix() {
+        // A Phoenix app is an Elixir app, so it gets both. `{:phoenix,` must not
+        // be satisfied by `{:phoenix_live_view,` alone.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "mix.exs",
+            "defp deps do\n  [{:phoenix, \"~> 1.7.14\"}, {:phoenix_live_view, \"~> 1.0\"}]\nend\n",
+        );
+        let detected = detected_engineers(tmp.path());
+        assert!(detected.contains("phoenix-engineer"));
+        assert!(detected.contains("elixir-engineer"), "Phoenix apps are Elixir apps");
+
+        let live_only = TempDir::new().unwrap();
+        write(
+            live_only.path(),
+            "mix.exs",
+            "defp deps do\n  [{:phoenix_live_view, \"~> 1.0\"}]\nend\n",
+        );
+        assert!(
+            !detected_engineers(live_only.path()).contains("phoenix-engineer"),
+            "the phoenix_live_view dep alone must not satisfy the phoenix probe"
+        );
+    }
+
+    #[test]
+    fn content_probe_matches_a_declared_dependency() {
+        // The probe helper on its own: present-and-matching vs present-and-not.
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "mix.exs", "[{:phoenix, \"~> 1.7\"}]");
+        assert!(file_contains(&tmp.path().join("mix.exs"), "{:phoenix,"));
+        assert!(!file_contains(&tmp.path().join("mix.exs"), "{:ecto,"));
+        assert!(
+            !file_contains(&tmp.path().join("absent.exs"), "{:phoenix,"),
+            "a missing file is an absent marker, never an error"
+        );
+        assert!(
+            !file_contains(tmp.path(), "{:phoenix,"),
+            "a directory is not a readable marker file"
+        );
+    }
+
+    #[test]
+    fn content_probe_ignores_an_oversized_file() {
+        // The size guard must win even when the needle IS present, so a
+        // pathological manifest cannot be read into memory.
+        let tmp = TempDir::new().unwrap();
+        let mut body = String::from("{:phoenix, \"~> 1.7\"}");
+        body.push_str(&"x".repeat(MAX_MARKER_PROBE_BYTES as usize + 1));
+        write(tmp.path(), "mix.exs", &body);
+        assert!(!file_contains(&tmp.path().join("mix.exs"), "{:phoenix,"));
     }
 
     #[test]
@@ -395,10 +616,10 @@ mod tests {
         assert!(detected.contains("tauri-engineer"));
 
         let bare_js = TempDir::new().unwrap();
-        touch(bare_js.path(), "package.json");
+        write(bare_js.path(), "package.json", &package_json(&["react"]));
         assert!(
             !detected_engineers(bare_js.path()).contains("tauri-engineer"),
-            "tauri must NOT fire on a bare package.json"
+            "tauri must NOT fire on a package.json without a Tauri config"
         );
     }
 
