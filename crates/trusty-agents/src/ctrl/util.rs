@@ -71,13 +71,18 @@ pub fn detect_self_project() -> Option<PathBuf> {
 /// `checkpoint_resume.rs` again, regardless of which file adds a new
 /// env-mutating test in the future.
 /// What: Tries three strategies in order:
-///   1. `hint`, if `Some` and it canonicalizes to a path carrying the
-///      `.trusty-agents/agents/pm.toml` self-project marker.
-///   2. Walk up from `current_exe()` looking for the same marker.
-///   3. Use `current_dir()` if it contains the same marker.
-/// Returns the first match, or `None` when no strategy succeeds.
+///   1. `hint`, if `Some` and it canonicalizes to an existing directory. An
+///      explicitly-set hint is an operator declaration, so it wins outright —
+///      the `.trusty-agents/agents/pm.toml` marker is NOT required of it
+///      (#4826).
+///   2. Walk up from `current_exe()` looking for the marker.
+///   3. Use `current_dir()` if it contains the marker.
+/// Returns the first match, or `None` when no strategy succeeds. The marker is
+/// only ever a heuristic for strategies 2 and 3, which run when nobody told us
+/// where the project is.
 /// Test: `detect_self_project_finds_via_env_var`,
-/// `detect_self_project_returns_none_when_no_marker`.
+/// `detect_self_project_hint_beats_exe_inference`,
+/// `detect_self_project_ignores_unresolvable_hint`.
 pub fn detect_self_project_with_hint(hint: Option<&str>) -> Option<PathBuf> {
     fn looks_like_self(p: &Path) -> bool {
         p.join(".trusty-agents")
@@ -96,11 +101,19 @@ pub fn detect_self_project_with_hint(hint: Option<&str>) -> Option<PathBuf> {
         None
     }
 
-    if let Some(p) = hint
-        && let Ok(canon) = PathBuf::from(p).canonicalize()
-        && looks_like_self(&canon)
-    {
-        return Some(canon);
+    // #4826: an explicit hint outranks exe-path inference. It used to be
+    // dropped silently unless it carried the marker, so under launchd the
+    // walk-up from `~/.cargo/bin/tagent` found `~/.trusty-agents/agents/pm.toml`
+    // and resolved $HOME as the project — the Slack gateway then answered users
+    // against the wrong corpus instead of failing.
+    if let Some(p) = hint {
+        match PathBuf::from(p).canonicalize() {
+            Ok(canon) if canon.is_dir() => return Some(canon),
+            _ => tracing::warn!(
+                hint = %p,
+                "project-dir hint does not resolve to a directory; falling back to inference"
+            ),
+        }
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()

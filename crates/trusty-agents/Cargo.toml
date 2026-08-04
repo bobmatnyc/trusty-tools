@@ -159,6 +159,8 @@ aws-smithy-types = "1"
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 teloxide = { version = "0.17", features = ["macros"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+# #4825: needed by `tls::install_crypto_provider` — see the workspace entry.
+rustls = { workspace = true }
 flate2 = "1"
 rand = "0.8"
 similar = { version = "2", features = ["text"] }
@@ -207,6 +209,11 @@ serial_test = "3"
 # tests so credential-resolution tests can assert on the actual value that
 # reaches the request builder, not just "no panic" (see #3431 follow-up).
 secrecy = "0.10"
+# #4825: `tests/slack_wss_crypto_provider.rs` drives the real Socket Mode
+# connector and inspects the installed provider, so both must be reachable
+# from an integration-test binary.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+rustls = { workspace = true }
 
 [lints.clippy]
 doc_lazy_continuation = "allow"
