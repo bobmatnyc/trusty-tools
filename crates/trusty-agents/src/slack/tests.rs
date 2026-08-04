@@ -567,3 +567,120 @@ mod eventstream_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// #4703: the two PRODUCTION entry points. Everything above this line exercises
+// the injectable helpers UNDERNEATH `handle_command` / `handle_message`; these
+// two drive the handlers themselves, which is the coverage that could not
+// exist before — both used to resolve `$HOME` internally, so the natural
+// assertion could only be made against the developer's real
+// `~/.trusty-agents/attendance/<persona>.json`.
+// ---------------------------------------------------------------------------
+
+/// A persona name no roster can resolve, so `run_pm_task_with_persona` fails
+/// on the agent lookup (a filesystem read) instead of reaching an LLM. Also
+/// distinctive enough that finding it in a record proves it came from here.
+const PROBE_PERSONA: &str = "attendance-probe-4703";
+
+/// A Slack user id the RBAC table below knows, so the sender-identity gate
+/// both handlers apply is satisfied.
+const PROBE_USER: &str = "U4703PROBE";
+
+/// RBAC config whose only user is [`PROBE_USER`] and whose default persona is
+/// [`PROBE_PERSONA`] — the name both handlers will record against when no
+/// session has been established for the channel.
+fn probe_rbac() -> Arc<SlackRbacConfig> {
+    Arc::new(SlackRbacConfig {
+        users: parse_rbac_users(&format!("{PROBE_USER}:Probe:ALL:*")),
+        default_persona: PROBE_PERSONA.to_string(),
+    })
+}
+
+/// A paired channel map containing exactly `channel`.
+async fn paired_with(channel: &str) -> super::PairedChannels {
+    let paired: super::PairedChannels =
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    paired
+        .write()
+        .await
+        .insert(channel.to_string(), Instant::now());
+    paired
+}
+
+/// #4703 regression: `handle_command` records attendance under the root it is
+/// GIVEN, not one it resolves from `$HOME`.
+///
+/// Why: this is the assertion the old inline `default_attendance_root()` made
+/// impossible. Removing the `note_command_turn(...)` call from `handle_command`
+/// must fail this test — confirmed by doing exactly that.
+/// What: drives the real handler on a paired channel with a known RBAC user.
+/// The command is deliberately one the dispatch table does not know, so it
+/// lands in the `other` arm and returns `Ok(())` without touching the network —
+/// the attendance hook runs before that match either way.
+#[tokio::test]
+async fn slack_handle_command_records_attendance_under_the_injected_root() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = Arc::new(crate::attendance::attendance_root(dir.path()));
+    let channel = "C4703";
+
+    super::handlers::handle_command(
+        "", // no bot token: nothing here may reach the network
+        channel.to_string(),
+        PROBE_USER.to_string(),
+        "/slack-no-such-command".to_string(),
+        String::new(),
+        Arc::new(Mutex::new(std::collections::HashMap::new())),
+        Arc::new(std::path::PathBuf::from(dir.path())),
+        paired_with(channel).await,
+        new_pending_pairs(),
+        probe_rbac(),
+        Some(Arc::clone(&root)),
+    )
+    .await
+    .expect("an unknown slash command is a no-op, not an error");
+
+    assert!(
+        recorded_turn(&root, PROBE_PERSONA).is_some(),
+        "handle_command must record the human turn under the INJECTED root; \
+         finding nothing here means the hook resolved $HOME again (#4703)"
+    );
+}
+
+/// #4703 regression: `handle_message` records attendance under the injected
+/// root — the site that called the now-deleted `$HOME`-resolving `note_turn`.
+///
+/// Why: same trap, the other Slack entry point. Removing the
+/// `note_command_turn_in(...)` call from `handle_message` must fail this test —
+/// confirmed by doing exactly that.
+/// What: drives the real handler past the pairing and RBAC gates. `msg_ts` is
+/// `None` so the eventstream mirror is skipped, the bot token is empty so
+/// `post_message` short-circuits, and the persona cannot be resolved by any
+/// roster so the ctrl dispatch fails on a file lookup rather than an LLM call.
+#[tokio::test]
+async fn slack_handle_message_records_attendance_under_the_injected_root() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let root = Arc::new(crate::attendance::attendance_root(dir.path()));
+    let channel = "C4703";
+
+    let _ = super::handlers::handle_message(
+        "", // no bot token: `post_message` refuses to leave the process
+        channel.to_string(),
+        PROBE_USER.to_string(),
+        "how is it going?".to_string(),
+        None,
+        None, // no `ts`: skip the eventstream mirror, which writes real state
+        "im".to_string(),
+        Arc::new(Mutex::new(std::collections::HashMap::new())),
+        Arc::new(std::path::PathBuf::from(dir.path())),
+        paired_with(channel).await,
+        probe_rbac(),
+        Some(Arc::clone(&root)),
+    )
+    .await;
+
+    assert!(
+        recorded_turn(&root, PROBE_PERSONA).is_some(),
+        "handle_message must record the human turn under the INJECTED root; \
+         finding nothing here means the hook resolved $HOME again (#4703)"
+    );
+}

@@ -94,6 +94,10 @@ pub(super) async fn handle_command(
     paired: PairedChannels,
     pending: PendingPairs,
     rbac: Arc<SlackRbacConfig>,
+    // #4703: injected by `run_slack_bot`, not resolved here. The inline
+    // `default_attendance_root()` this replaced is what made this handler's
+    // attendance hook unobservable to any test.
+    attendance_root: crate::attendance::AttendanceRoot,
 ) -> Result<()> {
     // Gate every command except /slack-start and /slack-pair behind the
     // pairing check. Unpaired channels get a uniform prompt.
@@ -118,7 +122,7 @@ pub(super) async fn handle_command(
             .unwrap_or_else(|| rbac.default_persona.clone())
     };
     note_command_turn(
-        crate::attendance::default_attendance_root().ok().as_deref(),
+        attendance_root.as_deref().map(PathBuf::as_path),
         &persona_for_attendance,
         // #4685: an inbound Slack command is a person typing.
         crate::attendance::TurnOrigin::Human,
@@ -333,6 +337,9 @@ pub(super) async fn handle_message(
     project_path: Arc<PathBuf>,
     paired: PairedChannels,
     rbac: Arc<SlackRbacConfig>,
+    // #4703: injected by `run_slack_bot`. This handler used the
+    // `$HOME`-resolving `note_turn`, so no test could observe its hook.
+    attendance_root: crate::attendance::AttendanceRoot,
 ) -> Result<()> {
     // Gate behind pairing.
     if !paired.read().await.contains_key(&channel) {
@@ -426,7 +433,16 @@ pub(super) async fn handle_message(
 
     // #4652: past the pairing and RBAC gates, this is a known human speaking —
     // record it as attendance for the persona they addressed.
-    crate::attendance::note_turn(&active_persona, crate::attendance::TurnOrigin::Human);
+    // #4703: through the injected root. Both gates above have already answered
+    // "is this sender entitled to assert presence", so the paired argument is
+    // `true` here; `origin` answers "was this a person at all".
+    crate::attendance::note_command_turn_in(
+        attendance_root.as_deref().map(PathBuf::as_path),
+        &active_persona,
+        crate::attendance::TurnOrigin::Human,
+        true,
+        chrono::Utc::now(),
+    );
 
     let result = ctrl::run_pm_task_with_persona(
         &path,
@@ -574,6 +590,17 @@ pub(super) async fn post_message(
     text: &str,
     thread_ts: Option<&str>,
 ) -> Result<()> {
+    // #4703: refuse to issue a request that cannot succeed. `chat.postMessage`
+    // without a bearer token always answers `not_authed`, and the client built
+    // here carries NO timeout — so on a network that blackholes rather than
+    // refuses, a doomed request does not fail, it hangs, and it hangs holding
+    // whichever handler called it. Failing closed locally is strictly better
+    // than that, and it is what lets a test drive `handle_message` end to end
+    // without reaching for the network at all.
+    if bot_token.is_empty() {
+        warn!(channel, "chat.postMessage skipped: no bot token configured");
+        return Ok(());
+    }
     let mut body = serde_json::Map::new();
     body.insert("channel".to_string(), Value::String(channel.to_string()));
     body.insert("text".to_string(), Value::String(text.to_string()));

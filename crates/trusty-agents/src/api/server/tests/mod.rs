@@ -13,6 +13,7 @@ mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod agent_subagents;
+mod attendance;
 mod cancel;
 mod costs;
 mod ctrl_sessions;

@@ -283,24 +283,27 @@ pub fn note_turn_in(
     }
 }
 
-/// [`note_turn_in`] over [`default_attendance_root`] and the system clock —
-/// the form the live call sites use.
-///
-/// The root and `now` are injectable one layer down (rather than sandboxed via
-/// `$HOME`) for the reason `test_env` states outright: injection is the durable
-/// fix, `HOME_LOCK` is the legacy one. So every test drives [`note_turn_in`]
-/// against a temp directory and this wrapper stays a two-line delegation with
-/// nothing of its own to get wrong. `origin` is threaded through rather than
-/// assumed here for the reason [`note_turn_in`] documents.
-/// Test: covered through [`note_turn_in`]; the root resolution it adds is
-/// pinned by `default_root_is_under_the_app_state_tree`.
-pub fn note_turn(instance: &str, origin: TurnOrigin) -> bool {
-    let Ok(root) = default_attendance_root() else {
-        tracing::debug!(instance, "no home directory; not recording turn");
-        return false;
-    };
-    note_turn_in(root, instance, origin, Utc::now())
-}
+// #4703: a `note_turn(instance, origin)` wrapper used to live here — it
+// resolved `$HOME` internally and recorded at `Utc::now()`, so a call site
+// that reached for it was UNTESTABLE BY CONSTRUCTION: the natural regression
+// test ("call the handler, assert the record") could only write into the
+// developer's real `~/.trusty-agents/attendance/<persona>.json`, where it had
+// nothing to assert against. PR #4695 caught that live — a first-draft test
+// passed against known-broken code for exactly this reason.
+//
+// It is DELETED rather than hidden behind `#[cfg(not(test))]`, which was the
+// other shape #4703 proposed. `cfg(not(test))` only closes the trap for unit
+// tests compiled INTO this crate; integration tests, doc-tests and every
+// downstream consumer compile the library without `cfg(test)`, so the
+// $HOME-resolving function would still exist and still be reachable for them.
+// Deleting it removes the trap from every build configuration for every
+// caller, and turns "I forgot to inject a root" from a silent, unobservable
+// test into a compile error naming a function that does not exist.
+//
+// Resolving `$HOME` is still necessary in production — it just moved OUT of
+// the recording call and UP to construction (`AppState::default`,
+// `run_slack_bot`, `run_telegram_bot`, `Repl::new`), each of which stores
+// `default_attendance_root()` in a field a test can overwrite with a tempdir.
 
 /// Record an inbound SLASH COMMAND as a human turn, but only from an
 /// authenticated sender (#4683).
