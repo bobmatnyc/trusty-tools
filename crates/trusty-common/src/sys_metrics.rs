@@ -225,7 +225,7 @@ const WALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 ///
 /// Test: `dir_size_sums_files` (known totals), `dir_size_missing_dir_is_zero`
 ///      (absent path), `dir_size_survives_concurrent_mutation` (the TOCTOU
-///      hypothesis from #4764 made executable), `dir_size_respects_depth_cap`.
+///      hypothesis from #4764 made executable), `dir_size_depth_cap_boundary_is_exact`.
 #[must_use]
 pub fn dir_size_bytes(dir: &std::path::Path) -> u64 {
     // #4764: keep the accumulator outside the unwind boundary so a panic
@@ -258,7 +258,7 @@ pub fn dir_size_bytes(dir: &std::path::Path) -> u64 {
 /// directories onto the stack), then drops the handle at the end of the loop
 /// body — before any child is opened. Bails out on [`WALK_BUDGET`]; refuses to
 /// descend past [`MAX_WALK_DEPTH`].
-/// Test: `dir_size_survives_concurrent_mutation`, `dir_size_respects_depth_cap`.
+/// Test: `dir_size_survives_concurrent_mutation`, `dir_size_depth_cap_boundary_is_exact`.
 fn walk_bounded(root: &std::path::Path, total: &std::cell::Cell<u64>) {
     let started = std::time::Instant::now();
     let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
