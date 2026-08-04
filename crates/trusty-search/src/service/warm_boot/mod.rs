@@ -33,8 +33,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::service::persistence::PersistedIndex;
-pub use restore::restore_one_index_bounded;
-pub use stages::{derive_warm_boot_stages, WarmBootInputs};
+pub use restore::{restore_one_index_bounded, BoundedRestoreOutcome};
+pub use stages::{derive_warm_boot_stages, index_is_stuck_unwalked, WarmBootInputs};
 
 /// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
 /// form on success or the original path on failure.

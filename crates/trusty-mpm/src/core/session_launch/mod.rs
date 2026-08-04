@@ -17,7 +17,10 @@
 mod custom_mcp;
 mod native_mcp;
 mod palace_alias;
+// #4448: the ONE wiring of the shadowing-agent quarantine, shared by
+// `prepare_session_inner` and `sync_session_assets`.
 mod project_hooks;
+mod quarantine_shadows;
 mod search_index;
 mod settings;
 mod sync_assets;
@@ -78,6 +81,13 @@ mod tests_manifest_toggle_trust_3934;
 #[cfg(test)]
 #[path = "tests_claude_json_concurrency_4072.rs"]
 mod tests_claude_json_concurrency_4072;
+// Issue #4448 — call-site coverage for the shadowing-agent quarantine. Its own
+// file for the same reason as the split above, and because these tests exist
+// specifically to fail when the MOVE-authorising call site is deleted,
+// reordered, or re-aimed at the operator's own `~/.claude/agents`.
+#[cfg(test)]
+#[path = "tests_quarantine_4448.rs"]
+mod tests_quarantine_4448;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -613,6 +623,39 @@ fn prepare_session_inner(
                  copies may shadow the canonical roster until this is resolved."
             );
             roster_errors.push(format!("agent retraction failed: {err}"));
+        }
+    }
+
+    // #4448: retraction's blind spot. It can only delete what its ownership
+    // ledger names, so a copy written before that ledger existed survives it,
+    // outranks the canonical user tier, and is never refreshed again. This
+    // sweep reaches those — but only when all four gates agree the file is tm's
+    // (see `trusty_agents_common::agents::quarantine`): it never touches a
+    // git-tracked file, a claude-mpm artifact, an operator-owned ledger entry,
+    // or anything hand-authored, and it never deletes. Runs AFTER retraction:
+    // both target the same directory and retraction is the ledger-proven half.
+    // Non-fatal, like every other roster step here.
+    // Test: `prepare_session_quarantines_a_shadowing_workspace_agent`,
+    // `prepare_session_never_quarantines_the_operator_home_agents_tier`.
+    match quarantine_shadows::quarantine_workspace_shadows(fw, project_dir) {
+        Ok(report) => {
+            if let Some(summary) = quarantine_shadows::summarize(&report) {
+                tracing::warn!(project_dir = %project_dir.display(), "{summary}");
+            }
+            if !report.failed.is_empty() {
+                roster_errors.push(format!(
+                    "agent quarantine could not move {} shadowing file(s)",
+                    report.failed.len()
+                ));
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                project_dir = %project_dir.display(),
+                "shadowing-agent quarantine refused to run: {err}. Untracked project-tier \
+                 copies may still shadow the canonical roster."
+            );
+            roster_errors.push(format!("agent quarantine refused: {err}"));
         }
     }
 

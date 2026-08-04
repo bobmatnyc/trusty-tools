@@ -183,7 +183,8 @@ pub(crate) async fn restore_index_on_demand(
 
     // Issue #1158: read corpus_open_failed before chunk_count so a redb
     // incompatible-format failure surfaces as Failed instead of InProgress.
-    let corpus_open_failed = indexer.corpus_open_failed;
+    // #4333: see `commands::start_restore` — the kind, not a bool.
+    let corpus_open_failure = indexer.corpus_open_failure;
     let chunk_count = indexer
         .corpus_store()
         .and_then(|c| c.chunk_count().ok())
@@ -204,12 +205,12 @@ pub(crate) async fn restore_index_on_demand(
         lexical_only,
         skip_kg,
         skip_vector,
-        corpus_open_failed,
+        corpus_open_failure,
     });
 
     tracing::info!(
         "lazy-load: index '{}' restored — chunks={} hnsw_snapshot={} \
-         graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failed={}",
+         graph_nodes={} lexical_only={} skip_kg={} skip_vector={} corpus_open_failure={:?}",
         entry.id,
         chunk_count,
         hnsw_snapshot_ready,
@@ -217,7 +218,7 @@ pub(crate) async fn restore_index_on_demand(
         lexical_only,
         skip_kg,
         skip_vector,
-        corpus_open_failed,
+        corpus_open_failure,
     );
 
     let handle = IndexHandle {

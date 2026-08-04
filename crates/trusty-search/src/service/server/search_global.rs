@@ -181,6 +181,8 @@ pub(super) async fn global_search_handler(
             "indexes_searched": Vec::<String>::new(),
             "total_indexes": 0_usize,
             "cold_indexes_skipped": cold_indexes_skipped,
+            // #4087: no index was searched at all, so none could be corpus-failed.
+            "corpus_failed_indexes_skipped": 0_usize,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         })));
@@ -298,11 +300,29 @@ pub(super) async fn global_search_handler(
         "global search: bounded fan-out"
     );
     let registry = state.registry.clone();
+    // #4087: exclude indexes whose durable corpus failed to open, and COUNT
+    // them. Their lane can only ever be empty, so leaving them in fused a
+    // silent zero-result contribution into the response and told the caller
+    // its fan-out was complete when one of its corpora was entirely absent.
+    // Reported alongside `cold_indexes_skipped` so an incomplete fan-out is
+    // always visible in the payload rather than only in the daemon log.
+    let corpus_failed_indexes_skipped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let futures = active_ids.into_iter().map(|id| {
         let registry = registry.clone();
         let query = per_index_query.clone();
+        let failed_counter = std::sync::Arc::clone(&corpus_failed_indexes_skipped);
         async move {
             let handle = registry.get(&id)?;
+            if super::degraded::is_corpus_failed(&handle).await {
+                failed_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    index_id = %id,
+                    "global search: skipping index '{id}' — its durable corpus failed to \
+                     open, so it can only contribute an empty lane; reported as \
+                     corpus_failed_indexes_skipped (issue #4087)"
+                );
+                return None;
+            }
             let indexer = handle.indexer.read().await;
             match indexer.search(&query).await {
                 Ok(results) => Some((id, results)),
@@ -319,6 +339,8 @@ pub(super) async fn global_search_handler(
             .filter_map(|opt| async move { opt })
             .collect()
             .await;
+    let corpus_failed_indexes_skipped =
+        corpus_failed_indexes_skipped.load(std::sync::atomic::Ordering::Relaxed);
     // `buffer_unordered` yields in completion order; sort by index id so the
     // fused output is deterministic regardless of which lanes finished first
     // (RRF is a per-lane rank sum, but stable lane ordering keeps score ties
@@ -405,6 +427,10 @@ pub(super) async fn global_search_handler(
         // per-index `POST /indexes/:id/search` to trigger a cold-index load, or
         // wait until the index appears in `registry.list()`.
         "cold_indexes_skipped": cold_indexes_skipped,
+        // #4087: indexes excluded from the fan-out because their durable corpus
+        // failed to open — they can only contribute an empty lane, so folding
+        // them in silently reported a complete fan-out over a missing corpus.
+        "corpus_failed_indexes_skipped": corpus_failed_indexes_skipped,
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,

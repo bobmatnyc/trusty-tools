@@ -16,14 +16,24 @@
 //!
 //! CONTRACT — this module is the SINGLE definition of "tm owns this file"
 //! outside the canonical tier, deliberately shared by two consumers: `tm
-//! doctor`'s `asset_tier` probe (#4442), which REPORTS what it returns, and the
-//! quarantine/repair counterpart (#4448), which MOVES what it returns.
+//! doctor`'s `asset_tier` probe (#4442), which REPORTS what it returns, and
+//! [`crate::agents::quarantine`] (#4448), which MOVES a SUBSET of it.
 //!
-//! Report and repair must agree file-for-file. If either side re-derives the
-//! predicate locally they will drift, and the drift is asymmetric harm: doctor
-//! flags a file the repair refuses to touch (noise operators learn to ignore),
-//! or repair quarantines a file doctor never flagged (a project's own agent
-//! silently disappears). Extend this module; do not fork it.
+//! Report and repair must agree file-for-file on this predicate. If either side
+//! re-derives it locally they will drift, and the drift is asymmetric harm:
+//! doctor flags a file the repair refuses to touch (noise operators learn to
+//! ignore), or repair quarantines a file doctor never flagged (a project's own
+//! agent silently disappears). Extend this module; do not fork it.
+//!
+//! A SUBSET, not the whole set, because moving is a higher bar than reporting.
+//! The quarantine adds two further gates of its own — is the file git-tracked
+//! (#4448 gate 3, standing in for the closed `Origin::Project`), and is its
+//! frontmatter tm's own composer output rather than claude-mpm's (#4448 gate 4)
+//! — and refuses on either. Those gates live there, not here, precisely because
+//! doctor SHOULD still report a shadowing file it declines to move: the
+//! operator needs to know about it either way. The direction of the difference
+//! is fixed and load-bearing: everything the quarantine moves, doctor reports;
+//! never the reverse.
 //!
 //! Two invariants make that second hazard structurally hard, not merely
 //! documented:
@@ -53,7 +63,10 @@
 //!    untracked copy on a bundled name is exactly what retraction cannot reach
 //!    and what #4448 exists to quarantine. Do not read this invariant as a
 //!    proof that untracked files are safe from the sweep; only the user-owned
-//!    ledger entry is such a proof.
+//!    ledger entry is such a proof HERE. The sweep itself adds two more
+//!    (`crate::agents::vcs_claim`, `crate::agents::agent_schema`), but they are
+//!    the MOVER's gates and nothing in this module may be read as promising
+//!    them.
 //!
 //! [`TierResidentClass::Custom`] is the exclusion seam for everything else.
 //! Project-tier agents tm never authored are legitimate — hand-placed today,

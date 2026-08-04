@@ -40,17 +40,24 @@ pub struct WarmBootInputs {
     /// `skip_vector` flag (issue #2984 Phase 1): forces semantic stage to
     /// `Skipped`, independently of `skip_kg`.
     pub skip_vector: bool,
-    /// Issue #1158: `true` when the redb corpus file existed but could not be
-    /// opened (e.g. incompatible redb page-format, corrupted file).
+    /// Issue #1158: `Some(kind)` when the redb corpus file existed but could
+    /// not be opened; `None` when the open succeeded.
     ///
-    /// Why: before this flag, a failed corpus open caused `chunk_count = 0`
+    /// Why: before this signal, a failed corpus open caused `chunk_count = 0`
     /// (no corpus store → `unwrap_or(0)`), which the classifier treated as
     /// `InProgress` — indistinguishable from a freshly-created, never-indexed
     /// handle. Operators saw `chunks=0` in the warm-boot log and the index
-    /// looked healthy-ish when it was silently broken. This flag lets the
+    /// looked healthy-ish when it was silently broken. This lets the
     /// classifier emit `StageStatus::Failed` with an actionable reason
     /// instead of the misleading `InProgress` state.
-    pub corpus_open_failed: bool,
+    ///
+    /// #4333: widened from a bare `bool` to the classified failure kind. The
+    /// bool could only produce ONE reason string, so a transient open timeout
+    /// under warm-boot contention was reported as "incompatible or corrupted
+    /// format; run `--force` to rebuild" — the destructive remedy for a
+    /// corpus that was never even read. Carrying the kind lets each state
+    /// report its own remedy.
+    pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 }
 
 /// Pure classifier: given on-disk signals, derive the [`IndexStages`] for a
@@ -87,10 +94,14 @@ pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
     // on the same durable corpus for chunk text, so both must fail together
     // with it — this is the `search_capabilities`/corpus-resolvability
     // consistency guard.
-    if inputs.corpus_open_failed {
-        let reason = "redb corpus could not be opened (incompatible or corrupted format); \
-             run `trusty-search index <path> --force` to rebuild from source \
-             (issues #1158, #1870, #2203)";
+    if let Some(kind) = inputs.corpus_open_failure {
+        // #4333: the reason is now derived from the CLASSIFIED failure kind
+        // instead of one hardcoded string. The old string named the only
+        // permanent cause ("incompatible or corrupted format") and prescribed
+        // the only destructive remedy (`--force`) for every case, including a
+        // 30 s open timeout under warm-boot contention where the corpus was
+        // never read and was verifiably intact (201,206 chunks, 2026-07-29).
+        let reason = kind.stage_reason();
         return IndexStages {
             lexical: StageState::failed(reason),
             semantic: StageState::failed(reason),
@@ -148,4 +159,47 @@ pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
         semantic,
         graph,
     }
+}
+
+/// Issue #4680: `true` when an index's stage surface claims lexical work is
+/// still owed but no walk has ever been driven for it in this daemon's
+/// lifetime — i.e. the index is STUCK, not working.
+///
+/// Why: [`derive_warm_boot_stages`] rule 3 stamps `lexical = InProgress` for
+/// every restored index whose durable corpus is empty, and `IndexStages::
+/// lifecycle_status` renders that as `"walking"`. Nothing in the restore path
+/// actually schedules a walk, so the label is a claim the daemon never backs
+/// up: a production deployment ran 7.6 days with 221 of 222 indexes reporting
+/// `lexical: in_progress` / `last_walk_files_seen: 0` / `last_walk_error:
+/// null` — the exact byte-for-byte signature of `WalkDiagnostics::default()`
+/// on a handle no walk ever touched. Boot reconcile then classified those
+/// indexes as `up_to_date` (git path: the HEAD SHA is re-derived from live git
+/// at restore, so `stored == current` always — issue #4391) or
+/// `skipped_no_data` (mtime path: `last_indexed_unix` has no production
+/// writer), so they were never re-driven either. This predicate is the shared
+/// definition of that state, consumed by boot reconcile (to retry the walk)
+/// and by `GET /health` (to stop reporting such a daemon as healthy).
+///
+/// What: pure two-signal test.
+///   - `lexical == InProgress` — the index CLAIMS a walk is underway. `Ready`
+///     means the corpus has chunks; `Failed` means a real failure is already
+///     surfaced with an actionable reason (retrying it would loop); `Skipped`
+///     is an explicit config choice. `Pending` is deliberately excluded: it is
+///     what `create_index` stamps for a brand-new empty index (issue #4110,
+///     "at registration nothing has started yet"), a legitimate state whose
+///     owner is the API caller about to POST a reindex — and it is also
+///     `IndexStages::default()`, so treating it as stuck would flag every
+///     bare handle. Only a restore-derived `InProgress` claims work that is
+///     not happening, which is the whole defect.
+///   - `walk_started == false` — `WalkDiagnostics::last_walk_started_at` is
+///     `None`, so no reindex has walked this root since the daemon started.
+///     This is what distinguishes "never walked" from "walked and legitimately
+///     found zero indexable files" (the latter sets both `last_walk_started_at`
+///     and `last_walk_error`), and it bounds the reconcile retry to at most one
+///     walk per index per daemon lifetime.
+///
+/// Test: `stuck_unwalked_matches_only_a_never_walked_in_progress_lane` and
+/// `stuck_unwalked_clears_once_a_walk_has_started` in `warm_boot_tests.rs`.
+pub fn index_is_stuck_unwalked(lexical: StageStatus, walk_started: bool) -> bool {
+    !walk_started && matches!(lexical, StageStatus::InProgress)
 }

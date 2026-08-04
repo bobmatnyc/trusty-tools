@@ -31,9 +31,73 @@ use crate::core::corpus::CorpusStore;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::persistence::PersistedIndex;
-use serial_test::serial;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+/// Marker env var identifying the isolated child process. Set by
+/// [`isolate_in_child_process`] on the spawned command, never in-process.
+const CHILD_MARKER: &str = "TRUSTY_SEARCH_ROOT_HIJACK_ISOLATED_CHILD";
+
+/// Run this test's body in a dedicated child process whose `TRUSTY_DATA_DIR`
+/// is set at spawn time, and which runs this one test alone.
+///
+/// Why (issue #4213): both tests below need `indexes.toml` pointed at a
+/// throwaway directory, because the #2178 gate they exercise reads the
+/// durably persisted registry entry. The previous mechanism —
+/// `unsafe { std::env::set_var("TRUSTY_DATA_DIR", …) }` guarded by
+/// `#[serial]` — was green by luck: `#[serial]` only excludes other
+/// `#[serial]` tests from the same group, so any of the binary's many
+/// non-serial tests could still read (or, via its own `remove_var`, clobber)
+/// the process-global variable inside the window. `load_index_registry` then
+/// found no entry for this index, the gate saw an absent persisted root, and
+/// the core assertion flipped `Failed` → `Complete`. That was observed once
+/// under a full `cargo test --workspace` run. This guard is the *P0
+/// data-loss* regression for #2178, so "usually green" is not good enough:
+/// a test that is green by luck is indistinguishable from a test that is
+/// green by correctness.
+/// What: in the parent, re-executes the current test binary with this test's
+/// exact name (`--exact`, `--test-threads=1`) and `TRUSTY_DATA_DIR` supplied
+/// through [`Command::env`] — a per-process value, so no in-process
+/// `set_var` and nothing for a sibling to race — then asserts the child
+/// exited successfully and returns `false` so the parent skips the body. In
+/// the child (identified by [`CHILD_MARKER`]) returns `true`: it is the only
+/// test running in that process, so its data dir is inviolate for the whole
+/// run. The child's output is replayed on the parent's streams, so a failing
+/// assertion prints exactly as it would in-process.
+///
+/// The parent additionally asserts the child ran EXACTLY one test. `--exact`
+/// with a stale name (a renamed test) would otherwise match nothing, exit 0,
+/// and turn this guard into a silent no-op — a vacuum failure worse than the
+/// race it replaces.
+/// Test: both tests in this module route through it.
+fn isolate_in_child_process(test_name: &str) -> bool {
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        return true;
+    }
+    let exe = std::env::current_exe().expect("current test binary path");
+    let data_dir = tempfile::tempdir().expect("isolated data dir");
+    let out = std::process::Command::new(&exe)
+        .args([test_name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD_MARKER, "1")
+        .env("TRUSTY_DATA_DIR", data_dir.path())
+        .output()
+        .unwrap_or_else(|e| panic!("spawn isolated child {}: {e}", exe.display()));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprint!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "isolated child run of `{test_name}` failed ({}) — see its output \
+         above for the actual assertion failure",
+        out.status
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "isolated child for `{test_name}` did not run exactly one test — the \
+         name passed to isolate_in_child_process is stale (test renamed?), so \
+         the body never executed and this guard proved nothing"
+    );
+    false
+}
 
 /// Minimal `RawChunk` fixture — mirrors the helper duplicated across
 /// `tests.rs` / `prune_tests.rs`.
@@ -80,13 +144,18 @@ fn chunk(file: &str, id: &str) -> RawChunk {
 /// chunks are still present in the corpus afterward.
 /// Test: this test.
 #[tokio::test]
-#[serial]
 async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
-    // Isolate `indexes.toml` so this test's persisted config can't collide
-    // with other tests or the developer's real data dir. `#[serial]` is
-    // required because `TRUSTY_DATA_DIR` is shared process (env) state.
+    // #4213: run alone in a child process whose TRUSTY_DATA_DIR is set at
+    // spawn — deterministic isolation, not `#[serial]` + a racy global.
+    if !isolate_in_child_process(
+        "service::reindex::root_hijack_tests::\
+         reindex_refuses_untrusted_root_move_and_preserves_corpus",
+    ) {
+        return;
+    }
+    // `indexes.toml` resolves under the child's own TRUSTY_DATA_DIR; the
+    // corpus and roots below get their own tempdirs within it.
     let data_dir = tempfile::tempdir().expect("data dir");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
 
     // root_a: the index's REAL, persisted root (simulates
     // `/Users/masa/Duetto/cto`).
@@ -180,8 +249,6 @@ async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
          the corpus was wrongly pruned)",
         surviving.len()
     );
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 }
 
 /// The surviving legitimate case: a root move whose candidate root DOES
@@ -199,10 +266,16 @@ async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
 /// normally and the walk ran.
 /// Test: this test.
 #[tokio::test]
-#[serial]
 async fn reindex_accepts_root_move_that_matches_persisted_config() {
+    // #4213: same deterministic child-process isolation as the hijack test —
+    // it shares the identical `TRUSTY_DATA_DIR` dependency and race.
+    if !isolate_in_child_process(
+        "service::reindex::root_hijack_tests::\
+         reindex_accepts_root_move_that_matches_persisted_config",
+    ) {
+        return;
+    }
     let data_dir = tempfile::tempdir().expect("data dir");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
 
     let old_root = tempfile::tempdir().expect("old root");
     let new_root = tempfile::tempdir().expect("new root");
@@ -259,6 +332,4 @@ async fn reindex_accepts_root_move_that_matches_persisted_config() {
         1,
         "the trusted move must proceed to walk the new root normally"
     );
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 }

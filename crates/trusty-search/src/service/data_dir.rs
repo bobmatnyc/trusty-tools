@@ -33,6 +33,10 @@ use std::path::PathBuf;
 /// creates the directory, and returns it. Emits `tracing::error!` when HOME
 /// is also absent.
 /// Test: `data_dir_home_fallback_path_is_absolute` in this module.
+// #4094: in test builds `persistence::default_data_dir` resolves to the
+// isolated per-process directory instead, so this production-only fallback has
+// no caller there. It is fully live in every non-test build.
+#[cfg_attr(test, allow(dead_code))]
 pub(super) fn data_dir_home_fallback() -> Result<PathBuf> {
     tracing::warn!(
         "data_dir: dirs::data_local_dir() returned None (launchd / supervised spawn?); \
@@ -166,10 +170,121 @@ fn passwd_home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Issue #4094: the data directory this crate's UNIT TESTS resolve to when
+/// they have not set `TRUSTY_DATA_DIR` — never the developer's live data dir.
+///
+/// Why: `persistence::data_dir`'s production fallback is the real, well-known
+/// user data location, so any unit test that exercised a persisting handler
+/// without setting `TRUSTY_DATA_DIR` registered its throwaway fixture index in
+/// the developer's live `indexes.toml`. Those entries outlive the test's
+/// `TempDir` and kept `search_health` reporting `degraded`. This function is
+/// what `persistence::default_data_dir` resolves to under `cfg(test)`, so the
+/// real location is unreachable from the unit-test binary by construction —
+/// no per-test discipline to forget, and no process-global env var for a
+/// concurrently-running sibling test to race (issue #4213's failure mode).
+/// What: `<temp_dir>/trusty-search-unit-test-data/pid-<pid>`, resolved once
+/// per process and created on demand. Directories from previous runs older
+/// than [`TEST_DATA_STALE_AFTER`] are opportunistically swept, since a process
+/// that is SIGKILLed cannot clean up after itself.
+/// Test: `unit_test_data_dir_is_isolated_from_real_user_data_dir`.
+#[cfg(test)]
+pub(super) fn unit_test_data_dir() -> Result<PathBuf> {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let base = std::env::temp_dir().join("trusty-search-unit-test-data");
+        let _ = std::fs::create_dir_all(&base);
+        sweep_stale_test_data_dirs(&base);
+        base.join(format!("pid-{}", std::process::id()))
+    });
+    std::fs::create_dir_all(dir).context("create isolated unit-test data dir (issue #4094)")?;
+    Ok(dir.clone())
+}
+
+/// How long an abandoned per-process unit-test data dir survives before the
+/// next test process sweeps it.
+#[cfg(test)]
+const TEST_DATA_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Best-effort removal of unit-test data dirs left behind by earlier runs.
+/// Failures (a concurrent test process removing the same entry, permissions)
+/// are swallowed — this is tidiness, never correctness.
+#[cfg(test)]
+fn sweep_stale_test_data_dirs(base: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let is_stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > TEST_DATA_STALE_AFTER);
+        if is_stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// Issue #4094: the un-overridden data-dir fallback must, in test builds,
+    /// resolve somewhere isolated — never the developer's live data dir.
+    ///
+    /// Why: this is the guard that keeps unit tests from registering fixture
+    /// indexes in the real `indexes.toml`. It asserts the *routing*
+    /// (`persistence::default_data_dir` resolving to [`unit_test_data_dir`]),
+    /// not just the helper in isolation, so reverting the `cfg(test)` arm in
+    /// `persistence.rs` fails here.
+    /// What: calls `persistence::default_data_dir()` directly — no
+    /// `TRUSTY_DATA_DIR` read, no env mutation, therefore nothing a
+    /// concurrently-running sibling test can perturb — and asserts the result
+    /// is absolute, exists, lives under the per-process unit-test base, and is
+    /// not the real user data location on either supported platform.
+    /// Test: this test.
+    #[test]
+    fn unit_test_data_dir_is_isolated_from_real_user_data_dir() {
+        let dir = crate::service::persistence::default_data_dir()
+            .expect("test-build data dir must resolve");
+        assert!(
+            dir.is_absolute() && dir.is_dir(),
+            "isolated unit-test data dir must be an existing absolute dir; got {}",
+            dir.display()
+        );
+        let base = std::env::temp_dir().join("trusty-search-unit-test-data");
+        assert!(
+            dir.starts_with(&base),
+            "#4094: the un-overridden test-build data dir must live under {} \
+             (got {}) — otherwise unit tests write index entries into a shared \
+             or real registry",
+            base.display(),
+            dir.display()
+        );
+        for real in [
+            dirs::data_local_dir().map(|b| b.join("trusty-search")),
+            dirs::home_dir().map(|h| {
+                h.join("Library")
+                    .join("Application Support")
+                    .join("trusty-search")
+            }),
+            dirs::home_dir().map(|h| h.join(".local").join("share").join("trusty-search")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert_ne!(
+                dir,
+                real,
+                "#4094: unit tests must never resolve to the developer's real \
+                 trusty-search data dir ({})",
+                real.display()
+            );
+        }
+    }
 
     /// Issue #718: `data_dir()` must always return an absolute cwd-independent
     /// path via TRUSTY_DATA_DIR override.

@@ -84,6 +84,22 @@ pub(crate) const META_KEY_SCHEMA_VERSION: &str = "schema_version";
 /// of every successful reindex.
 pub(crate) const META_KEY_INDEXED_ROOT: &str = "indexed_root";
 
+/// redb `_meta` key for the in-progress reindex checkpoint record (#3979).
+///
+/// Why: a crash mid-reindex used to discard every committed batch, because the
+/// staging corpus (`index.redb.tmp`) that held them was unconditionally deleted
+/// and recreated by `CorpusStore::open_fresh` at the start of the next run. This
+/// key stamps the staging corpus with the identity of the run that is building
+/// it, so the next run can decide — from durable evidence, not inference —
+/// whether adopting that partial corpus is equivalent to starting over.
+/// What: a UTF-8 JSON blob (`service::reindex::checkpoint::ReindexCheckpoint`)
+/// written into the STAGING corpus right after it is opened, and cleared just
+/// before the staging corpus is promoted. It is deliberately absent from
+/// `CorpusStore::copy_all_from`'s copied-key allow-list so a checkpoint can
+/// never leak from a live corpus into a fresh staging corpus.
+/// Test: `service::reindex::checkpoint::tests` and `resume_tests`.
+pub(crate) const META_KEY_REINDEX_CHECKPOINT: &str = "reindex_checkpoint";
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Structured errors from the migration subsystem.

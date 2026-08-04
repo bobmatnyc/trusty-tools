@@ -3,7 +3,13 @@
 //! Why: the live filesystem watcher catches changes made while the daemon is
 //! running, but there is no hook for changes made while the daemon was DOWN.
 //! After a warm-boot restore, every index may be stale. This module closes
-//! that gap via two complementary paths:
+//! that gap via three complementary paths:
+//!
+//! **Never-walked path** (issue #4680, checked first): an index whose lexical
+//! stage is still owed and which no walk has touched in this daemon's lifetime
+//! is stuck, not up-to-date — it gets a full (non-force, data-preserving)
+//! background reindex without consulting either staleness marker below, since
+//! both markers describe drift and neither can describe "was never populated".
 //!
 //! **Git path** (issue #1670): indexes whose `indexed_head_sha` is set are
 //! reconciled via `git diff --name-only <stored>..HEAD`. Per-file or full-reindex
@@ -34,6 +40,7 @@ use crate::core::registry::IndexHandle;
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress};
 use crate::service::server::ReconcileSummary;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
+use crate::service::warm_boot::index_is_stuck_unwalked;
 use crate::service::SearchAppState;
 
 /// Maximum number of changed files before we fall back to a full reindex
@@ -300,16 +307,62 @@ pub async fn reconcile_stale_indexes(state: &SearchAppState) {
 /// Also called on the query-wake path (`server::search`) when an idle-suspended
 /// or lazily-restored index is served without a watcher, to catch edits missed
 /// while the watcher was off — hence `pub(crate)`.
-/// What: reads the stored + current HEAD SHAs (git path), or falls back to the
-/// mtime path for non-git / missing-SHA indexes. Updates `summary` with the
-/// outcome so `GET /health` reports reconcile progress.
-/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`
-/// in reconcile_tests.rs.
+/// What: first checks the never-walked guard (issue #4680) and re-drives the
+/// walk if it fires; otherwise reads the stored + current HEAD SHAs (git path),
+/// or falls back to the mtime path for non-git / missing-SHA indexes. Updates
+/// `summary` with the outcome so `GET /health` reports reconcile progress.
+/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`,
+/// `stuck_unwalked_git_index_is_retried_not_marked_up_to_date`,
+/// `stuck_unwalked_non_git_index_is_retried_not_skipped` in reconcile_tests.rs.
 pub(crate) async fn reconcile_one_index(
     handle: Arc<IndexHandle>,
     summary: Arc<std::sync::Mutex<ReconcileSummary>>,
 ) {
     let index_id = handle.id.0.clone();
+
+    // #4680: a never-walked index is stuck, not up-to-date — re-drive the walk
+    // before any staleness marker is consulted.
+    //
+    // Why this must come FIRST: both marker paths below answer "has the source
+    // moved since we last looked?", and both answer "no" for an index that was
+    // never populated at all. The git path compares a HEAD SHA that restore
+    // re-derives from live git (#4391), so `stored == current` holds
+    // unconditionally → `up_to_date`. The mtime path reads `last_indexed_unix`,
+    // whose writer has no production callers (#4391), so it is always `None` →
+    // `skipped_no_data`. Either way the index is recorded as needing nothing,
+    // forever: 221 of 222 production indexes sat at `chunk_count = 0` for 44
+    // days behind exactly this. Emptiness has to be a reconcile INPUT, not a
+    // conclusion drawn from markers that only describe drift.
+    //
+    // Data safety: `trigger_full_reindex` runs with `force = false`, so the
+    // incremental hash cache and the staged-corpus carryover both apply — this
+    // re-walks and re-adds, it never clears or rebuilds a corpus from scratch.
+    // Recovery here is strictly additive.
+    //
+    // Bounded: the predicate keys off `last_walk_started_at`, which the reindex
+    // runner stamps before it walks, so an index gets at most ONE retry per
+    // daemon lifetime and a walk that legitimately finds zero indexable files
+    // (`last_walk_error` set, corpus still empty) is never re-driven in a loop.
+    if index_is_stuck_unwalked(
+        handle.stages.read().await.lexical.status,
+        handle
+            .walk_diagnostics
+            .read()
+            .await
+            .last_walk_started_at
+            .is_some(),
+    ) {
+        tracing::warn!(
+            "reconcile[{index_id}]: index has never been walked in this daemon's \
+             lifetime and its lexical stage is still owed — triggering a full \
+             background reindex instead of comparing staleness markers (issue #4680)"
+        );
+        trigger_full_reindex(&handle);
+        if let Ok(mut s) = summary.lock() {
+            s.stuck_retried += 1;
+        }
+        return;
+    }
 
     // Read the stored indexed SHA and the current HEAD.
     let stored_sha = handle.indexed_head_sha.read().await.clone();
