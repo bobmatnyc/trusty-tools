@@ -612,31 +612,53 @@ registry_release() {
     fi
 }
 
-# WARN — do not fail — when another run directory holds a live pid (§4.3).  The
-# mechanisms above make two simultaneous runs collision-free; they do not make
-# them a good idea, because each guest is sized at 8 vCPU / 16 GB.  Refusing a
-# legitimate second run on a large machine would be worse than a warning
-# ignored on a small one, and the harness cannot know the operator's host.
-registry_warn_live_peers() {
-    local dir peer
-    for dir in "$REGISTRY_ROOT"/*/; do
-        [ -d "$dir" ] || continue
-        peer=$(basename "$dir")
-        [ "$peer" != "$VMTEST_RUNID" ] || continue
-        [ -f "$dir/pid" ] || continue
-        if kill -0 "$(cat "$dir/pid")" 2>/dev/null; then
-            warn "another run '$peer' holds a live pid $(cat "$dir/pid"). Concurrency is safe (§4.3) but not advised: each guest is sized at $(conf_get cpu) vCPU / $(conf_get memory_mib) MiB."
-        fi
-    done
-}
-
 # registry_owner_alive <runid> — §5.1 condition 3.  Absent directory or dead
-# pid both mean "no live owner".
+# pid both mean "no live owner".  THIS IS THE ONLY PLACE THE HARNESS ASKS
+# WHETHER A RUN IS ALIVE: `clean`, `registry_live_owners` and preflight all
+# route through it, so the pid-reuse trade recorded at `cmd_clean` is made once
+# rather than in three drifting copies.
 registry_owner_alive() {
     local dir="$REGISTRY_ROOT/$1"
     [ -d "$dir" ] || return 1
     [ -f "$dir/pid" ] || return 1
     kill -0 "$(cat "$dir/pid")" 2>/dev/null
+}
+
+# registry_live_owners — emits `runid<TAB>pid`, one line per registry entry
+# whose recorded pid is still alive, EXCLUDING this run's own runid.
+#
+# This is what survives of `registry_warn_live_peers`, which was deleted with
+# §4.3's concurrency contract (issue #15).  The iteration was the useful half;
+# the warning was the half that was wrong.  It does not repeat `kill -0` — that
+# lives in `registry_owner_alive` above and nowhere else.
+registry_live_owners() {
+    local dir peer
+    for dir in "$REGISTRY_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        peer=$(basename "$dir")
+        [ "$peer" != "${VMTEST_RUNID:-}" ] || continue
+        registry_owner_alive "$peer" || continue
+        printf '%s\t%s\n' "$peer" "$(cat "$REGISTRY_ROOT/$peer/pid")"
+    done
+}
+
+# harness_vm_disposition <vm_name> <state> — THE classifier for a `vmtest-*` VM
+# that is not `stopped`.  Emits exactly one word:
+#
+#   wedged  suspended, which DOC-1 §8.2 records as unrecoverable-by-retry —
+#           it is nobody's live run, whatever the registry says;
+#   live    a run with a live registry owner is using it;
+#   orphan  no live registry owner: a prior run died without tearing down.
+#
+# ONE mechanism, two callers.  `cmd_clean` had this distinction right from the
+# start (`IN-USE (live run, skipped)` vs `REFUSED (running, no live registry
+# entry)`) while preflight collapsed both into a single "wedged" message; the
+# fix is for preflight to call clean's classifier, not to grow a second one.
+harness_vm_disposition() {
+    case "$2" in
+        suspended) printf 'wedged\n'; return 0 ;;
+    esac
+    if registry_owner_alive "${1#vmtest-}"; then printf 'live\n'; else printf 'orphan\n'; fi
 }
 
 registry_has_keep() { [ -f "$REGISTRY_ROOT/$1/keep" ]; }
@@ -691,6 +713,90 @@ preflight_pin() {
     log "pin OK: ${PIN_OCI_REF}@${PIN_DIGEST}"
 }
 
+# ---------------------------------------------------------------------------
+# THE SINGLE-RUN GATE (DOC-2 §4.3 as amended 2026-08-04; issue #15)
+#
+# THE HARNESS SUPPORTS EXACTLY ONE RUN AT A TIME.  Concurrency is RETIRED as a
+# supported mode: §4.3's "concurrency is safe but not advised … preflight
+# therefore warns (does not fail)" is RETRACTED, and `registry_warn_live_peers`
+# was deleted with it.  Refusing a second run is correct behaviour.
+#
+# TWO THINGS WERE WRONG BEFORE, AND ONLY ONE OF THEM WAS THE POLICY.
+#
+#   1. The refusal was INFERRED FROM VM STATE, not held as a lock.  The
+#      registry — the harness's actual record of what is running — was
+#      consulted only afterwards, by a warn path ordered *after* the refusal
+#      that made it unreachable.
+#   2. BOTH refusals shared ONE message, and it was case (b)'s.  A peer's VM is
+#      `running` for ~85% of a 9-16 minute run, so the common case told the
+#      operator the namespace might be "wedged" — the wrong diagnosis, pointing
+#      at the wrong remedy.  The remedies are opposites:
+#
+#        (a) a live registry owner  -> a peer run is in progress; WAIT for it.
+#        (b) a `vmtest-*` VM that is not `stopped` with NO live registry owner
+#            -> a prior run crashed; CLEAN IT UP.
+#
+# BOTH CAN BE TRUE IN ONE SCAN, so both are collected and both are reported
+# before anything dies.  The FAIL line carries (a) when (a) applies, because
+# waiting is the only action that is correct in both worlds: `vmtest clean`
+# while a peer is live would be acting on a false picture of the host.
+#
+# Exit code is 10 for both, unchanged: DOC-2 §2 defines 10 as "preflight
+# refused … no VM was created", which both of these are.  A new code would
+# describe the same event with a number no §2 row explains.
+#
+# CLASSIFICATION IS `harness_vm_disposition` — the same helper `clean` uses.
+#
+# RESIDUAL RACE, RECORDED RATHER THAN PAPERED OVER: two invocations started in
+# the same instant can both pass this gate before either has written a registry
+# entry, because auto-generated runids embed the pid and therefore never
+# collide in `registry_acquire` either.  Closing it needs a registry-root-wide
+# lock that §4.3 does not define, and a post-acquire re-check would let two
+# racers refuse *each other*.  For an ad-hoc, manually-run, single-operator
+# harness the gate is the operator's mistake-catcher, not a mutex.
+# ---------------------------------------------------------------------------
+
+preflight_single_run() {
+    local peers live_vms orphans wedged name state disp pname ppid
+
+    peers=$(registry_live_owners)
+
+    live_vms=''; orphans=''; wedged=''
+    while IFS='	' read -r name state _source; do
+        case "$name" in vmtest-*) ;; *) continue ;; esac
+        [ "$state" != 'stopped' ] || continue
+        disp=$(harness_vm_disposition "$name" "$state")
+        case "$disp" in
+            live)   live_vms="${live_vms}${name}(${state}) " ;;
+            wedged) wedged="${wedged}${name}(${state}) " ;;
+            *)      orphans="${orphans}${name}(${state}) " ;;
+        esac
+    done < "$VMTEST_TMPDIR/vm-list.tsv"
+
+    # Report every finding BEFORE dying: an operator holding both a live peer
+    # and an orphan needs both remedies, and `die` prints one line and exits.
+    if [ -n "$peers" ]; then
+        printf '%s\n' "$peers" | while IFS='	' read -r pname ppid; do
+            log "single-run: peer run '${pname}' is LIVE (pid ${ppid}); registry entry ${REGISTRY_ROOT}/${pname}"
+        done
+    fi
+    [ -z "$live_vms" ] || log "single-run: VM(s) held by a live run: ${live_vms}"
+    [ -z "$orphans" ]  || log "single-run: orphaned VM(s), no live registry owner: ${orphans}"
+    [ -z "$wedged" ]   || log "single-run: suspended VM(s), wedged per DOC-1 §8.2: ${wedged}"
+
+    # (a) — a peer run is in progress.
+    if [ -n "$peers" ] || [ -n "$live_vms" ]; then
+        die 10 "another vmtest run is already in progress: ${peers:+peer runid(s) $(printf '%s' "$peers" | awk -F'\t' '{ printf "%s(pid %s) ", $1, $2 }')}${live_vms:+VM(s) ${live_vms}}— the harness supports exactly ONE run at a time (DOC-2 §4.3, single-run policy; concurrency was retired 2026-08-04). WAIT for that run to finish, then retry. Do not stop it, do not \`vmtest clean\` it, do not retry now."
+    fi
+
+    # (b) — a prior run crashed and left its VM behind.
+    if [ -n "$orphans" ] || [ -n "$wedged" ]; then
+        die 10 "harness-namespace VM(s) left behind by a run that is no longer alive: ${orphans}${wedged}— no live registry owner, so a prior run crashed without tearing down. CLEAN IT UP before retrying: run \`vmtest clean\`, which classifies every vmtest-* VM and deletes the ones it can; one still in state 'running' or 'suspended' is refused there by design and clean prints the exact manual command for it. Refuse; do not repair (DOC-1 §4.1/§8.3)."
+    fi
+
+    log 'single-run: no peer run is live and no vmtest-* VM is left over'
+}
+
 preflight_vm_states() {
     local state
     state=$(awk -F'\t' -v n="$PIN_LOCAL_NAME" '$1 == n { print $2 }' "$VMTEST_TMPDIR/vm-list.tsv")
@@ -706,13 +812,9 @@ preflight_vm_states() {
         die 10 "a VM named '$VMTEST_VM' already exists — runid collision (DOC-1 §4.1)"
     fi
 
-    # Every existing VM the harness would touch must be `stopped`.  The harness
-    # namespace is `vmtest-*` and nothing else is ever a candidate.
-    local wedged
-    wedged=$(awk -F'\t' '$1 ~ /^vmtest-/ && $2 != "stopped" { printf "%s(%s) ", $1, $2 }' \
-        "$VMTEST_TMPDIR/vm-list.tsv")
-    [ -z "$wedged" ] \
-        || die 10 "harness-namespace VM(s) not in state 'stopped': ${wedged}— refusing (DOC-1 §4.1/§8.3). A running VM would make a clone inconsistent; a suspended one is wedged (§8.2). Refuse; do not repair."
+    # The `vmtest-*` namespace scan that used to live here is now
+    # `preflight_single_run`, which runs BEFORE this function.  It was moved
+    # rather than copied: one scan, one classification, two distinct remedies.
 }
 
 # §8.4's four rows.  Total physical memory HARD-FAILS; available memory and
@@ -751,9 +853,12 @@ preflight() {
     log '--- preflight (DOC-1 §4.1) ---'
     preflight_host_deps
     preflight_pin
+    # BEFORE the VM-state checks, and that order is the fix (issue #15): the
+    # registry is the harness's record of what is running, so the single-run
+    # refusal is read from it rather than inferred from a VM's state.
+    preflight_single_run
     preflight_vm_states
     registry_acquire
-    registry_warn_live_peers
     preflight_capacity
     log 'preflight OK'
 }
@@ -1037,30 +1142,32 @@ cmd_clean() {
         candidates=$(( candidates + 1 ))
         runid="${name#vmtest-}"
 
-        case "$state" in
-        suspended)
-            # §5.4 row 2 / DOC-1 §8.2 — refuse and flag it as wedged.
-            out "$name  $state  WEDGED (refusing)"
-            vm_manual_hint suspended "$name"
-            refusals=$(( refusals + 1 ))
-            continue
-            ;;
-        stopped) ;;
-        *)
-            if registry_owner_alive "$runid"; then
+        # Every state but `stopped` is classified by the SAME helper preflight
+        # uses (issue #15).  The verdict strings are unchanged; what changed is
+        # that there is now one classifier instead of two copies of one.
+        if [ "$state" != 'stopped' ]; then
+            case "$(harness_vm_disposition "$name" "$state")" in
+            wedged)
+                # §5.4 row 2 / DOC-1 §8.2 — refuse and flag it as wedged.
+                out "$name  $state  WEDGED (refusing)"
+                vm_manual_hint suspended "$name"
+                refusals=$(( refusals + 1 ))
+                ;;
+            live)
                 # Protected by §5.1 condition 3: a live run owns it.
                 out "$name  $state  IN-USE (live run, skipped)"
-            else
+                ;;
+            *)
                 # §5.4 row 1 — clean cannot distinguish "another user's run"
                 # from "crashed run, registry wiped", and both are cases where
                 # deleting is destructive.
                 out "$name  $state  REFUSED (running, no live registry entry)"
                 vm_manual_hint running "$name"
                 refusals=$(( refusals + 1 ))
-            fi
+                ;;
+            esac
             continue
-            ;;
-        esac
+        fi
 
         # From here the state is `stopped`.
         if registry_owner_alive "$runid"; then

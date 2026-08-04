@@ -49,8 +49,10 @@ ready.
 | ≥ 24 GiB RAM | 16 GiB guest + 8 GiB host | yes — **hard fail** |
 | ≥ 8 physical cores | `hw.physicalcpu`, not `hw.ncpu` | warn only |
 
-Roughly 100 GiB of free disk is needed per concurrent run; the clone itself is
-APFS copy-on-write and costs ~0.3 s, but the guest grows as it builds.
+Roughly 100 GiB of free disk is needed for a run; the clone itself is
+APFS copy-on-write and costs ~0.3 s, but the guest grows as it builds. It is
+**one run at a time** — see [Only one run at a time](#only-one-run-at-a-time)
+below — so that figure is not multiplied by anything.
 
 ---
 
@@ -91,6 +93,24 @@ you deliberately preserved with `--keep`.
 `clean` never issues a stop. That is deliberate: deciding to stop someone else's VM
 is a human's call, not a cleanup tool's.
 
+### Only one run at a time
+
+**The harness runs exactly one guest at a time, and preflight refuses a second
+one.** Each guest is sized at 8 vCPU / 16 GiB, and two of them on one host only
+contend. Concurrency was a supported mode until 2026-08-04; it is not any more.
+
+Preflight reads this from **the run registry** — the harness's own record of what
+is running — not from whether a VM happens to be booted. The two refusals it can
+give have **opposite remedies**, and it will tell you which one you have:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `another vmtest run is already in progress: … WAIT for that run to finish` | a peer run is live and healthy; it names the runid and PID | **wait.** Do not stop it, do not `vmtest clean` it |
+| `harness-namespace VM(s) left behind by a run that is no longer alive … CLEAN IT UP before retrying` | a previous run crashed without tearing down | run **`vmtest clean`** |
+
+If both are true at once you get both reports, and the failure line is the first
+one — because waiting is the only thing that is safe while a peer is live.
+
 ### `vmtest --check-table`
 
 No VM, no guest, ~1 second. Diffs `expected-binaries.tsv` against the workspace's
@@ -109,7 +129,7 @@ from "the install is broken" without reading the log.
 |---|---|---|
 | **0** | — | Success. Scenario ran, every assertion passed, teardown completed. |
 | **2** | arguments | Usage error — unknown subcommand, bad `--runid`, unknown pattern. **No VM was touched.** |
-| **10** | preflight | Host refused: `tart` or `jq` missing, digest mismatch, a VM not `stopped`, runid collision, insufficient memory. **No VM was created.** |
+| **10** | preflight | Host refused: `tart` or `jq` missing, digest mismatch, a VM not `stopped`, runid collision, another run already in progress or a crashed run's VM left behind, insufficient memory. **No VM was created.** |
 | **20** | VM lifecycle | `tart clone`/`set`/`run` failed, or boot-ready polling timed out. |
 | **30** | negative probe | A precondition probe did not produce its expected result. |
 | **40** | provisioning | Toolchain provisioning failed or timed out. |
@@ -390,8 +410,15 @@ vmtest-harness/
 │   ├── install-local.sh       # pattern (c)
 │   ├── install-branch.sh      # pattern (b)
 │   └── install-released.sh    # pattern (a)
-└── tests/                     # fixtures (the dirty-worktree sentinel)
+└── tests/
+    ├── test-preflight-single-run.sh   # the single-run gate, proved with a stub CLI
+    └── dirty-check-fixture.txt        # the dirty-worktree sentinel
 ```
+
+`tests/test-preflight-single-run.sh` is the one part of the harness you can check
+without a VM: `bash vmtest-harness/tests/test-preflight-single-run.sh` takes about
+a second, boots nothing, touches no network, and writes only inside its own
+temporary directory. Run it after any change to preflight or the run registry.
 
 A scenario is **a sequence of install steps plus the expectations that follow from
 them**. It composes `lib/` functions and contains no `tart` calls, no `PATH`

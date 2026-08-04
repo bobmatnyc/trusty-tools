@@ -692,7 +692,7 @@ every failure makes both impossible.
 |---|---|---|
 | **0** | — | Success. Scenario ran, every assertion passed, teardown completed. |
 | **2** | argument parsing | Usage error — unknown subcommand, bad `--runid` format (§4.2), unknown scenario name. No VM was touched. |
-| **10** | preflight | Preflight refused (DOC-1 §4.1): `tart` missing, base-image digest mismatch (§3), a VM not in `stopped` state, runid collision (§4.3), host capacity assertion failed (§8.4), `jq` missing (§JSON parsing). **No VM was created.** |
+| **10** | preflight | Preflight refused (DOC-1 §4.1): `tart` missing, base-image digest mismatch (§3), a VM not in `stopped` state, runid collision (§4.3), **another run already in progress or a crashed run's VM left behind (§4.3a)**, host capacity assertion failed (§8.4), `jq` missing (§JSON parsing). **No VM was created.** |
 | **20** | VM lifecycle | `tart clone` / `set` / `run` failed, or boot-ready polling timed out (§10.1). |
 | **30** | negative probe | The cargo-absent probe did not produce its expected result (§6). |
 | **40** | provisioning | `provision.sh` failed or timed out — including the mise-detection failures of §11. |
@@ -910,15 +910,70 @@ The run directory is removed by the cleanup trap on normal and abnormal exit,
 **except** when `keep` is present. Lock and registry are the same object: there is
 no separate lock file to get out of sync with the registry entry.
 
-**Concurrency is safe but not advised.** The mechanisms above make two simultaneous
-runs collision-free. They do not make them a good idea: DOC-1 §8.5 sizes each guest
-at 8 vCPU / 16 GB, and the research host was 18 logical cores / 64 GB
+#### 4.3a Single-run policy — **the concurrency contract is RETRACTED** (2026-08-04, issue #15)
+
+> **RETRACTION, stated before the replacement so nothing is read out of an old
+> copy.** §4.3 previously ended with a paragraph headed *"Concurrency is safe but
+> not advised"*, which specified that **preflight warns and does not fail** when
+> another run directory holds a live PID. **That paragraph is withdrawn in
+> full.** The `registry_warn_live_peers` function written to implement it has
+> been **deleted** from the driver, and `vmtest-harness/README.md` no longer
+> sizes disk "per concurrent run".
+
+**The harness supports exactly ONE run at a time.** A second run is **refused**,
+not warned about. Exit **10**, which is §2's existing "preflight refused; no VM
+was created" — no new exit code is introduced, because no new *kind* of event
+happened.
+
+*Why the retraction.* The warn-don't-fail contract was never reachable. Preflight
+refused a running `vmtest-*` VM before it ever consulted the registry, and a
+peer's VM is `running` for roughly 85% of a 9–16 minute run — so the specified
+warning could not fire in the case it was written for, and the operator instead
+received a refusal whose text said the namespace might be **wedged**. That is the
+wrong diagnosis for a healthy peer and points at the wrong remedy. Two artifacts
+disagreed with the implementation for an entire phase; retiring concurrency
+resolves the disagreement in the direction the owner chose.
+
+*Where the refusal comes from.* **The registry, not the VM listing.** The
+registry is the harness's own record of what is running; a VM's state is a
+symptom. `preflight_single_run` runs **before** the §4.1 VM-state checks, reads
+every registry entry through `registry_owner_alive` (the one place `kill -0` is
+issued), and classifies each non-`stopped` `vmtest-*` VM with
+`harness_vm_disposition` — the **same** helper `vmtest clean` (§5) uses.
+
+*The two refusals are distinct and must stay distinct*, because their remedies
+are opposites:
+
+| Case | Condition | Remedy in the message |
+|---|---|---|
+| **(a)** | a registry entry holds a live PID (and/or a `vmtest-*` VM has a live registry owner) | **WAIT** for that run to finish; do not stop it and do not `vmtest clean` it |
+| **(b)** | a `vmtest-*` VM is not `stopped` and its runid has **no** live registry owner — including `suspended`, which DOC-1 §8.2 records as wedged | **CLEAN IT UP**: run `vmtest clean`, which names the manual command for anything it refuses |
+
+Both can hold in one scan. Preflight therefore **reports every finding** before
+it dies; the `FAIL` line carries **(a)** whenever (a) applies, because waiting is
+the only action that is correct in both worlds — `clean` run beside a live peer
+acts on a false picture of the host.
+
+*The mechanisms of (a) and (b) above are unchanged and still do their jobs:*
+PID-embedded runids and the `mkdir` lock still make two runs collision-**free**;
+what has changed is that being collision-free is no longer treated as permission
+to proceed. The original sizing argument survives as the reason the policy is
+single-run at all: DOC-1 §8.5 sizes each guest at 8 vCPU / 16 GB against a
+research host of 18 logical cores / 64 GB
 (`vm-install-probe-findings.md:842-843`), which accommodates one such guest with
-"ample headroom" and two only by contending. Preflight therefore **warns** (does
-not fail) when another run directory holds a live PID. Warning rather than failing
-is a judgment call: the harness cannot know the operator's host, and refusing a
-legitimate second run on a large machine would be worse than a warning ignored on
-a small one.
+"ample headroom" and two only by contending.
+
+*One residual, recorded rather than papered over.* Two invocations started in the
+same instant can both pass the gate before either has written a registry entry,
+and their auto-generated runids never collide in `registry_acquire` either.
+Closing that window needs a registry-root-wide lock this section does not define,
+and a post-acquire re-check would let two racers refuse *each other*. For an
+ad-hoc, manually-run, single-operator harness the gate is the operator's
+mistake-catcher, not a mutex.
+
+*Coverage.* `vmtest-harness/tests/test-preflight-single-run.sh` exercises (a),
+(b), (b) via a **dead** registry PID, `suspended`, the **mixed** scan, and two
+clean-namespace regressions — against a stub CLI, with no VM and no network.
 
 ---
 
