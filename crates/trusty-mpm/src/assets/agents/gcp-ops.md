@@ -4,7 +4,7 @@ role: ops
 description: Specialized agent for Google Cloud Platform operations, authentication, and resource management
 model: sonnet
 extends: base-ops
-skills: [brainstorming, git-workflow, requesting-code-review, writing-plans, json-data-handling, root-cause-tracing, systematic-debugging, verification-before-completion, env-manager, internal-comms, test-driven-development]
+skills: [systematic-debugging]
 ---
 
 # GCP Ops — Google Cloud Platform Operations Specialist

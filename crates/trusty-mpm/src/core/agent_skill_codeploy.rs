@@ -148,6 +148,131 @@ mod tests {
         assert!(co_deploy_skill_set(&map).is_empty());
     }
 
+    // ---- bundled-asset gates (#4642, #4643) --------------------------------
+    //
+    // The harness renders every skill named in an agent's `skills:` frontmatter
+    // as a FULL SKILL.md body into that agent's system prompt at dispatch,
+    // before the Skill tool is ever called. `skills:` is therefore a RESIDENT
+    // cost paid on every dispatch, not a capability list — a skill left out is
+    // still invokable on demand. These three gates pin the shipped assets:
+    // every declared skill resolves, the resident cost stays bounded, and no
+    // foundation layer silently adds to a leaf agent's list.
+
+    use std::path::{Path, PathBuf};
+    use trusty_agents_common::agents::builder::compose_agent;
+    use trusty_agents_common::agents::metadata::agent_metadata_from_str;
+
+    fn agents_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/agents")
+    }
+
+    fn skills_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/skills")
+    }
+
+    /// Every bundled non-`BASE-*` agent stem, sorted.
+    fn bundled_agent_stems() -> Vec<String> {
+        let mut stems: Vec<String> = std::fs::read_dir(agents_dir())
+            .expect("bundled agent assets dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+            .filter(|stem| !stem.to_ascii_lowercase().starts_with("base"))
+            .collect();
+        stems.sort();
+        stems
+    }
+
+    /// The COMPOSED (deployed) `skills:` list for a bundled agent.
+    fn composed_skills(stem: &str) -> Vec<String> {
+        let composed = compose_agent(stem, &agents_dir())
+            .unwrap_or_else(|e| panic!("compose bundled agent `{stem}`: {e}"));
+        agent_metadata_from_str(&composed).skills
+    }
+
+    #[test]
+    fn bundled_agent_declared_skills_all_resolve() {
+        // #4642/#4643 keep the existing `agent_skills` doctor check green: a
+        // trimmed list must never leave a dangling reference behind, and a
+        // typo'd rename must fail here rather than as a runtime WARN.
+        let mut dangling: Vec<String> = Vec::new();
+        for stem in bundled_agent_stems() {
+            for skill in composed_skills(&stem) {
+                if !skills_dir().join(format!("{skill}.md")).is_file() {
+                    dangling.push(format!("{stem} declares `{skill}`"));
+                }
+            }
+        }
+        assert!(
+            dangling.is_empty(),
+            "bundled agents declare skills with no bundled asset: {dangling:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_agent_resident_skill_cost_stays_within_budget() {
+        // #4642 REGRESSION GATE. Before the trim the worst agent (`qa`, 15
+        // skills) rendered 84,343 bytes (~21,085 tokens) of skill body into
+        // every single dispatch, and `research` 55,894 (~13,974). The budget is
+        // deliberately just above today's worst case so that adding a skill to
+        // a bundled agent is a decision someone has to make on purpose.
+        const BUDGET_BYTES: u64 = 24_000;
+
+        let mut over: Vec<String> = Vec::new();
+        for stem in bundled_agent_stems() {
+            let total: u64 = composed_skills(&stem)
+                .iter()
+                .filter_map(|s| std::fs::metadata(skills_dir().join(format!("{s}.md"))).ok())
+                .map(|m| m.len())
+                .sum();
+            if total > BUDGET_BYTES {
+                over.push(format!("{stem}: {total} bytes (~{} tokens)", total / 4));
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "resident skill-body cost exceeds the {BUDGET_BYTES}-byte per-dispatch \
+             budget (#4642). Drop the skill from `skills:` — it stays invokable \
+             via the Skill tool on demand: {over:?}"
+        );
+    }
+
+    #[test]
+    fn no_foundation_layer_silently_adds_skills_except_base_engineer() {
+        // #4643. `skills:` UNIONS across the `extends:` chain, so a declaration
+        // on a BASE-* template silently appears in every descendant's DEPLOYED
+        // frontmatter while its own source file shows a shorter list. That is
+        // exactly the source/deployed divergence #4643 reported: `research.md`
+        // declared 11, the deployed copy carried 12 (`tm-capabilities`, from
+        // BASE-AGENT). Only BASE-ENGINEER contributes a skill now, and it does
+        // so deliberately — `documentation-style` shapes every doc comment an
+        // engineer writes in this repo.
+        for base in ["BASE-AGENT", "BASE-QA", "BASE-OPS", "BASE-RESEARCH"] {
+            let raw = std::fs::read_to_string(agents_dir().join(format!("{base}.md")))
+                .unwrap_or_else(|e| panic!("read {base}.md: {e}"));
+            assert!(
+                agent_metadata_from_str(&raw).skills.is_empty(),
+                "{base} declares `skills:`, which every descendant then pays for \
+                 on every dispatch while its own source file does not show it (#4643)"
+            );
+        }
+        assert_eq!(
+            composed_skills("research"),
+            Vec::<String>::new(),
+            "the deployed `research` skills list must equal its source declaration (#4643)"
+        );
+        assert_eq!(
+            composed_skills("engineer"),
+            vec![
+                "documentation-style".to_string(),
+                "systematic-debugging".to_string(),
+                "test-driven-development".to_string(),
+            ],
+            "BASE-ENGINEER's `documentation-style` is the one deliberate inherited skill"
+        );
+    }
+
     #[test]
     fn log_declared_skills_resolves_all_tiers() {
         let map = declared(&[(
