@@ -50,7 +50,10 @@ pub struct ManifestSources {
     /// Why: the bundled `framework-manifest.toml` declares WHICH agents always
     /// deploy and which are gated on a detected language, framework, or
     /// platform; composing that declaration with this project's detected markers
-    /// yields the explicit allowlist below every operator-authored layer.
+    /// yields the framework-tier selection below every operator-authored layer.
+    /// That selection states its gate as an `exclude` list, deliberately — see
+    /// [`super::framework::agent_scope_from`] for why an `include` allowlist
+    /// would silently drop the `BASE-*` fragments and every catalog-only agent.
     /// [`ManifestSources::resolve`] ALWAYS fills this from
     /// [`super::framework::framework_agent_scope`]; [`resolve_manifest`] applies
     /// it as the lowest override layer (above the compiled default, below the
@@ -363,10 +366,10 @@ mod tests {
 
     /// Selection outcome for `stem` under a fully resolved manifest.
     ///
-    /// Why: since #4760 the framework tier states an explicit `include`
-    /// allowlist rather than an `exclude` complement, so asserting on list
-    /// SHAPE would pin the mechanism instead of the behaviour. These tests
-    /// assert the behaviour: is this agent selected for deploy?
+    /// Why: the framework tier states its gate as an `exclude` list derived
+    /// from the declared categories, so asserting on list SHAPE would pin the
+    /// mechanism instead of the behaviour. These tests assert the behaviour:
+    /// is this agent selected for deploy?
     fn selected(m: &HarnessManifest, stem: &str) -> bool {
         let agents = m.agents.as_ref().expect("agents section present");
         super::super::schema::selection_matches(stem, &agents.include, &agents.exclude)

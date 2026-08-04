@@ -12,11 +12,20 @@
 //! a `HarnessManifest` document in the SAME format, parsed by the SAME
 //! [`HarnessManifest::from_toml`], differing only in tier. Its
 //! `[agent_categories]` section partitions the bundled catalog into `universal`
-//! (no detection), `language` / `framework` / `platform` (marker-gated), and
-//! `deprecated` (never deployed). [`parse_framework_manifest`] validates that
-//! partition against the bundled catalog and the marker tables;
-//! [`agent_scope_from`] composes it with `project_lang`'s detection into the
+//! (no detection), `language` / `framework` / `platform` (marker-gated, each
+//! entry carrying its OWN markers since #4765), and `deprecated` (never
+//! deployed); its `[skill_categories]` section declares the bundled skill
+//! roster. [`parse_framework_manifest`] and [`parse_framework_skills`] validate
+//! those declarations against the bundled catalogs; [`agent_scope_from`]
+//! composes the agent side with `project_lang`'s marker evaluation into the
 //! [`AgentSet`] `ManifestSources::resolve` applies as its lowest override layer.
+//!
+//! **One authority.** Owner ruling 2026-08-04: "authoritative agent/skill
+//! bundling should be in framework-manifest.toml or project manifest.toml.
+//! That's it." Membership, category, and gate condition are all manifest fields.
+//! No bundled document restates them; `assets/skills/tm.md` and
+//! `assets/instructions/sections/agent-delegation.md` point at the manifest, and
+//! `tm generate capabilities` renders it mechanically.
 //!
 //! **Naming caution.** ADR-0025's "four-category agent model" (universal
 //! bundled / stack-specific bundled / project custom / user custom) is a
@@ -31,10 +40,10 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
-use super::project_lang::{
-    detected_engineers, detected_platforms, language_engineer_stems, platform_agent_stems,
+use super::project_lang::MarkerProbe;
+use super::schema::{
+    AgentCategories, AgentSet, ContentSource, GatedAgent, HarnessManifest, SkillCategories,
 };
-use super::schema::{AgentCategories, AgentSet, ContentSource, HarnessManifest};
 
 /// File name of the bundled framework-tier manifest.
 ///
@@ -67,8 +76,9 @@ const FRAMEWORK_MANIFEST_TOML: &str = include_str!("../../assets/framework-manif
 /// Test: `malformed_manifest_is_an_error`, `missing_section_is_an_error`,
 /// `empty_universal_is_an_error`, `unknown_stem_is_an_error`,
 /// `undeclared_bundled_agent_is_an_error`, `duplicate_declaration_is_an_error`,
-/// `stack_stem_without_markers_is_an_error`,
-/// `platform_stem_without_markers_is_an_error`.
+/// `gated_entry_without_markers_is_an_error`,
+/// `missing_skill_section_is_an_error`, `unknown_skill_is_an_error`,
+/// `undeclared_bundled_skill_is_an_error`, `duplicate_skill_is_an_error`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameworkManifestError {
     /// The document is not valid TOML, or does not match the manifest schema.
@@ -113,25 +123,44 @@ pub enum FrameworkManifestError {
     #[error("{FRAMEWORK_MANIFEST_FILE} declares `{0}` in more than one category")]
     DuplicateDeclaration(String),
 
-    /// A `language`/`framework` stem has no row in `LANGUAGE_ENGINEERS`, so it
-    /// could never be detected and would never deploy.
+    /// A gated entry declares no markers, so it could never be detected and
+    /// would never deploy (#4765 — markers are a manifest field now, so the
+    /// "gated but ungated" state is representable and must be rejected here).
     #[error(
-        "{FRAMEWORK_MANIFEST_FILE} gates `{stem}` on `{category}` detection, \
-         but it has no marker row in LANGUAGE_ENGINEERS — it could never deploy"
+        "{FRAMEWORK_MANIFEST_FILE} gates `{stem}` on `{category}` detection \
+         but declares no markers — it could never deploy"
     )]
-    UndetectableStack {
-        /// `language` or `framework`.
+    UngatedEntry {
+        /// `language`, `framework`, or `platform`.
         category: &'static str,
         /// The offending stem.
         stem: String,
     },
 
-    /// A `platform` stem has no row in `PLATFORM_AGENTS`.
+    /// The document parsed but carries no `[skill_categories]` section.
     #[error(
-        "{FRAMEWORK_MANIFEST_FILE} gates `{0}` on platform detection, \
-         but it has no marker row in PLATFORM_AGENTS — it could never deploy"
+        "{FRAMEWORK_MANIFEST_FILE} has no [skill_categories] section — \
+         the bundled skill roster is undeclared"
     )]
-    UndetectablePlatform(String),
+    MissingSkillCategories,
+
+    /// A declared skill stem has no corresponding bundled skill file.
+    #[error(
+        "{FRAMEWORK_MANIFEST_FILE} declares skill `{0}`, \
+         but no bundled skill by that name exists"
+    )]
+    UnknownSkill(String),
+
+    /// A bundled skill is not declared.
+    #[error(
+        "bundled skill(s) {0:?} are not declared in {FRAMEWORK_MANIFEST_FILE} — \
+         add each to [skill_categories]"
+    )]
+    UndeclaredSkills(Vec<String>),
+
+    /// A skill stem is declared more than once.
+    #[error("{FRAMEWORK_MANIFEST_FILE} declares skill `{0}` more than once")]
+    DuplicateSkill(String),
 }
 
 /// Every bundled agent stem the binary can actually deploy.
@@ -188,17 +217,15 @@ pub fn parse_framework_manifest(
 
     // (a) + (b) + (c): the five lists must exactly partition `catalog`.
     let mut declared: HashSet<&str> = HashSet::new();
-    for (label, list) in labelled_lists(&categories) {
-        for stem in list {
-            if !catalog.contains(stem) {
-                return Err(FrameworkManifestError::UnknownAgent {
-                    category: label,
-                    stem: stem.clone(),
-                });
-            }
-            if !declared.insert(stem.as_str()) {
-                return Err(FrameworkManifestError::DuplicateDeclaration(stem.clone()));
-            }
+    for (label, stem) in labelled_stems(&categories) {
+        if !catalog.contains(stem) {
+            return Err(FrameworkManifestError::UnknownAgent {
+                category: label,
+                stem: stem.clone(),
+            });
+        }
+        if !declared.insert(stem.as_str()) {
+            return Err(FrameworkManifestError::DuplicateDeclaration(stem.clone()));
         }
     }
     let undeclared: Vec<String> = catalog
@@ -210,46 +237,131 @@ pub fn parse_framework_manifest(
         return Err(FrameworkManifestError::UndeclaredAgents(undeclared));
     }
 
-    // (d): a gated stem with no marker row could never deploy.
-    let stack_markers = language_engineer_stems();
-    for (label, list) in [
-        ("language", &categories.language),
-        ("framework", &categories.framework),
-    ] {
-        for stem in list {
-            if !stack_markers.contains(stem.as_str()) {
-                return Err(FrameworkManifestError::UndetectableStack {
+    // (d): a gated entry with no markers could never deploy.
+    for (label, list) in gated_lists(&categories) {
+        for entry in list {
+            if entry.markers.is_empty() {
+                return Err(FrameworkManifestError::UngatedEntry {
                     category: label,
-                    stem: stem.clone(),
+                    stem: entry.stem.clone(),
                 });
             }
-        }
-    }
-    let platform_markers = platform_agent_stems();
-    for stem in &categories.platform {
-        if !platform_markers.contains(stem.as_str()) {
-            return Err(FrameworkManifestError::UndetectablePlatform(stem.clone()));
         }
     }
 
     Ok(categories)
 }
 
-/// The five category lists paired with their TOML key, in declaration order.
+/// Every declared stem paired with the TOML key that declared it.
 ///
-/// Why: three validation passes iterate the same five lists; naming them once
-/// keeps a newly added category from being silently skipped by one pass.
-/// What: `(key, list)` pairs for `universal`, `language`, `framework`,
-/// `platform`, `deprecated`.
+/// Why: the partition passes must walk ALL five lists — the two plain stem lists
+/// and the three gated ones — and naming them once keeps a newly added category
+/// from being silently skipped by one pass.
+/// What: `(key, stem)` pairs, in declaration order.
 /// Test: covered by every partition-invariant test.
-fn labelled_lists(categories: &AgentCategories) -> [(&'static str, &Vec<String>); 5] {
+fn labelled_stems(categories: &AgentCategories) -> Vec<(&'static str, &String)> {
+    let mut out: Vec<(&'static str, &String)> = categories
+        .universal
+        .iter()
+        .map(|stem| ("universal", stem))
+        .collect();
+    for (label, list) in gated_lists(categories) {
+        out.extend(list.iter().map(|entry| (label, &entry.stem)));
+    }
+    out.extend(
+        categories
+            .deprecated
+            .iter()
+            .map(|stem| ("deprecated", stem)),
+    );
+    out
+}
+
+/// The three marker-gated category lists paired with their TOML key.
+///
+/// Why/What/Test: as [`labelled_stems`], for the passes that need the markers
+/// rather than only the stem.
+fn gated_lists(categories: &AgentCategories) -> [(&'static str, &Vec<GatedAgent>); 3] {
     [
-        ("universal", &categories.universal),
         ("language", &categories.language),
         ("framework", &categories.framework),
         ("platform", &categories.platform),
-        ("deprecated", &categories.deprecated),
     ]
+}
+
+/// Every bundled skill stem the binary can actually deploy.
+///
+/// Why: the skill roster gets the same guarantee the agent roster does — a
+/// bundled skill nobody declared is a hard error, not a silent default.
+/// What: the top-level `skills/<stem>.md` entries of [`crate::core::bundle::ALL`].
+/// A nested `skills/<name>/references/*.md` is a skill's own reference material,
+/// not a catalog entry, and is excluded — the same predicate
+/// `tm generate capabilities` uses for its skill count.
+/// Test: `bundled_skill_stems_excludes_reference_files`.
+pub fn bundled_skill_stems() -> BTreeSet<String> {
+    crate::core::bundle::ALL
+        .iter()
+        .filter_map(|artifact| {
+            let rest = artifact.rel_path.strip_prefix("skills/")?;
+            if rest.contains('/') {
+                return None;
+            }
+            Some(rest.strip_suffix(".md")?.to_string())
+        })
+        .collect()
+}
+
+/// Parse and fully validate a framework-tier manifest's SKILL roster (#4765).
+///
+/// Why: the owner ruling makes `framework-manifest.toml` the authority for skill
+/// bundling as well as agent bundling. Validating exhaustively against the real
+/// bundle is what makes the declaration load-bearing rather than decorative:
+/// adding a `skills/*.md` row to `bundle_all.rs` without declaring it here fails
+/// the build's test gate.
+/// What: pure over `(raw, catalog)`, like [`parse_framework_manifest`]. Returns
+/// `Err` for a malformed document, a missing `[skill_categories]` section, an
+/// unknown stem, a duplicate, or any bundled skill left undeclared.
+/// Test: `bundled_skill_roster_is_valid`, `missing_skill_section_is_an_error`,
+/// `unknown_skill_is_an_error`, `undeclared_bundled_skill_is_an_error`,
+/// `duplicate_skill_is_an_error`.
+pub fn parse_framework_skills(
+    raw: &str,
+    catalog: &BTreeSet<String>,
+) -> Result<SkillCategories, FrameworkManifestError> {
+    let manifest = HarnessManifest::from_toml(raw)
+        .map_err(|err| FrameworkManifestError::Malformed(err.to_string()))?;
+    let skills = manifest
+        .skill_categories
+        .ok_or(FrameworkManifestError::MissingSkillCategories)?;
+
+    let mut declared: HashSet<&str> = HashSet::new();
+    for stem in &skills.universal {
+        if !catalog.contains(stem) {
+            return Err(FrameworkManifestError::UnknownSkill(stem.clone()));
+        }
+        if !declared.insert(stem.as_str()) {
+            return Err(FrameworkManifestError::DuplicateSkill(stem.clone()));
+        }
+    }
+    let undeclared: Vec<String> = catalog
+        .iter()
+        .filter(|stem| !declared.contains(stem.as_str()))
+        .cloned()
+        .collect();
+    if !undeclared.is_empty() {
+        return Err(FrameworkManifestError::UndeclaredSkills(undeclared));
+    }
+
+    Ok(skills)
+}
+
+/// The validated skill roster declared by the bundled framework manifest.
+///
+/// Why/What/Test: [`parse_framework_skills`] over [`FRAMEWORK_MANIFEST_TOML`]
+/// and the real [`bundled_skill_stems`] catalog. Test:
+/// `bundled_skill_roster_is_valid`.
+pub fn framework_skill_categories() -> Result<SkillCategories, FrameworkManifestError> {
+    parse_framework_skills(FRAMEWORK_MANIFEST_TOML, &bundled_skill_stems())
 }
 
 /// The validated categories declared by the bundled framework manifest.
@@ -306,8 +418,12 @@ pub fn framework_agent_categories() -> Result<AgentCategories, FrameworkManifest
 /// `unknown_project_keeps_every_stack_engineer`,
 /// `undeclared_source_agents_still_deploy`.
 pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> AgentSet {
-    let stacks = detected_engineers(project_dir);
-    let platforms = detected_platforms(project_dir);
+    // One probe — so the stack and platform questions share ONE read budget and
+    // one workspace-member resolution, not two of each.
+    let probe = MarkerProbe::new(project_dir);
+    let mut stacks = probe.detect(&categories.language);
+    stacks.extend(probe.detect(&categories.framework));
+    let platforms = probe.detect(&categories.platform);
 
     // Declared-as-retired: excluded unconditionally, for every project.
     let mut exclude: BTreeSet<String> = categories.deprecated.iter().cloned().collect();
@@ -320,8 +436,8 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
                 .language
                 .iter()
                 .chain(categories.framework.iter())
-                .filter(|stem| !stacks.contains(stem.as_str()))
-                .cloned(),
+                .filter(|entry| !stacks.contains(&entry.stem))
+                .map(|entry| entry.stem.clone()),
         );
     }
 
@@ -330,8 +446,8 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
         categories
             .platform
             .iter()
-            .filter(|stem| !platforms.contains(stem.as_str()))
-            .cloned(),
+            .filter(|entry| !platforms.contains(&entry.stem))
+            .map(|entry| entry.stem.clone()),
     );
 
     AgentSet {
@@ -340,6 +456,30 @@ pub fn agent_scope_from(categories: &AgentCategories, project_dir: &Path) -> Age
         ignore_staleness: Vec::new(),
         source: ContentSource::Bundled,
     }
+}
+
+/// The stack engineers `project_dir`'s markers select, per the bundled manifest.
+///
+/// Why: `core::stack_profile` primes the PM prompt with the project's actual
+/// stack and must read the SAME declaration the deployer reads — a prompt that
+/// names `rust-engineer` for a project that never received it is the drift #1971
+/// exists to prevent. Before #4765 it imported `project_lang`'s marker table
+/// directly; that table is now a manifest field, so this is the entry point.
+/// What: the union of the declared `language` and `framework` stems whose
+/// markers are present. An unusable manifest yields an EMPTY set, which
+/// `stack_profile_section` renders as its neutral "detect before routing"
+/// block — the safe answer for a prompt. The DEPLOY path does not share that
+/// leniency: [`framework_agent_scope`] refuses to resolve at all.
+/// Test: `detected_stack_engineers_matches_the_manifest`,
+/// `core::stack_profile::tests::detected_rust_lists_rust_engineer`.
+pub fn detected_stack_engineers(project_dir: &Path) -> BTreeSet<String> {
+    let Ok(categories) = framework_agent_categories() else {
+        return BTreeSet::new();
+    };
+    let probe = MarkerProbe::new(project_dir);
+    let mut detected = probe.detect(&categories.language);
+    detected.extend(probe.detect(&categories.framework));
+    detected
 }
 
 /// The framework-tier agent selection for `project_dir`.

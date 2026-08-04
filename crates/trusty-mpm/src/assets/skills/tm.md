@@ -30,53 +30,35 @@ Documentation. See `tm-delegation-patterns` for the concrete chains and
 
 ## Agent Roster (Bundled)
 
-Verified against `bundle_all.rs`'s `ALL` table — this is not exhaustive of
-every possible custom agent a project may add, but every name below is
-really bundled. For the mechanically generated version, including each
-agent's DEPLOYMENT CATEGORY, see `tm-capabilities`'s
-`references/agents.md`; the categories themselves are declared in the
-bundled `framework-manifest.toml` (#4760).
+**This document does not carry the roster.** Which agents are bundled, which
+deploy to a given project, and what condition gates each one are DATA, declared
+in the bundled `framework-manifest.toml` — the framework tier of the
+`manifest.toml` format. That file is the authority; a prose copy of it here
+would drift, and did (#4760: `ops` sat "DEPRECATED" in prose for months while
+still reaching every roster). Read it two ways:
 
-**Not every bundled agent deploys to every project.** `universal` agents
-always do; `language`, `framework`, and `platform` agents deploy only when
-the project shows a matching marker. Ask for the roster the CURRENT project
-actually received rather than assuming this whole list is available.
+- **`tm-capabilities`'s `references/agents.md`** — the manifest rendered as a
+  table, one row per agent, with its category, its exact deploy condition, and
+  its declared skills. Mechanically regenerated; never hand-edited.
+- **The project's own deployed roster** — what THIS project actually received.
+  The launch prompt's generated roster section is that answer; use it rather
+  than assuming any agent is present.
 
-**Core** (universal): `engineer`, `research`, `qa`, `security`,
-`documentation`, `ticketing`, `code-analyzer`, `data-engineer`,
-`version-control`
-
-**Language engineers** (deploy on a language marker): `rust-engineer`,
-`python-engineer`, `typescript-engineer`, `javascript-engineer`,
-`golang-engineer`, `java-engineer`, `php-engineer`, `ruby-engineer`,
-`dart-engineer`, `dotnet-engineer`, `elixir-engineer`
-
-**Framework specialists** (deploy on a framework marker):
-`react-engineer`, `nextjs-engineer`, `svelte-engineer`, `tauri-engineer`,
-`phoenix-engineer`
-
-**QA** (universal): `web-qa`, `api-qa`, `code-critic`
-
-**Ops**: `local-ops` (universal); `vercel-ops` and `gcp-ops` deploy only on
-a Vercel or GCP marker
-
-**Specialized** (universal): `refactoring-engineer`, `prompt-engineer`,
-`web-ui-engineer`, `memory-manager`, `mpm-agent-manager`,
-`mpm-skills-manager`
-
-See `tm-agent-architecture` for how these are built (the `extends:` compose
-chain) and how to update one safely.
+See `tm-agent-architecture` for how agents are built (the `extends:` compose
+chain) and how to update one safely, and `tm-delegation-patterns` for which
+agent to route a given task to.
 
 ## Skills System
 
 Skills are Markdown files at `.claude/skills/<name>/SKILL.md` providing
 reusable knowledge/procedures. User-invocable skills respond to `/skill-name`;
-others load automatically on context triggers. The full `/tm-*` portfolio:
-`tm-circuit-breaker`, `tm-verification-protocols`, `tm-tool-usage-guide`,
-`tm-git-file-tracking`, `tm-adr`, `tm-workflow`, `tm-agent-architecture`,
-`tm-postmortem`, `tm-bug-reporting`, `tm-teaching-templates`, `tm-ticketing`,
-`tm-pr-workflow`, `tm-delegation-patterns`, `tm-session-management`,
-`tm-doctor`.
+others load automatically on context triggers.
+
+**The bundled skill roster is declared in `framework-manifest.toml`, not
+here** — same authority, same reason, as the agent roster above. Every declared
+skill is `universal`: it deploys to every project. For the list with each
+skill's description and whether it is user-invocable, see `tm-capabilities`'s
+`references/skills.md`.
 
 ## Memory System
 

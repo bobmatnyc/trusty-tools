@@ -268,6 +268,35 @@ fn member_count_is_capped() {
 }
 
 #[test]
+fn pattern_count_is_capped() {
+    // The declaration bound, exercised past its limit. A manifest declaring
+    // more member globs than MAX_WORKSPACE_PATTERNS has its tail truncated, so
+    // a directory reachable ONLY through a pattern past the cap is not probed.
+    // Fail-closed, like every other bound here.
+    let tmp = TempDir::new().unwrap();
+    let over = MAX_WORKSPACE_PATTERNS + 5;
+    let globs: Vec<String> = (0..over).map(|i| format!("\"g{i:04}/*\"")).collect();
+    write(
+        tmp.path(),
+        "package.json",
+        &format!("{{\"workspaces\":[{}]}}", globs.join(",")),
+    );
+    // One member behind the FIRST declared pattern, one behind the LAST.
+    mkdir(tmp.path(), "g0000/first");
+    mkdir(tmp.path(), &format!("g{:04}/last", over - 1));
+
+    let found = members(tmp.path());
+    assert!(
+        found.iter().any(|p| p.ends_with("first")),
+        "a member behind an in-cap pattern is still probed: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|p| p.ends_with("last")),
+        "a member reachable only past the pattern cap is NOT probed: {found:?}"
+    );
+}
+
+#[test]
 fn oversized_manifest_is_not_read() {
     // The per-file cap wins even though the declaration is present and valid.
     let tmp = TempDir::new().unwrap();

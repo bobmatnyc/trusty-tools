@@ -156,11 +156,17 @@ different precedence tier.
 
 ## 4. The Four Deployment Categories {#SPEC-UNIVAGENT-04~draft}
 
-Deployment is decided in two halves that must not be conflated: the bundled
-`framework-manifest.toml` declares WHICH CATEGORY each agent is in, and
-`crates/trusty-mpm/src/core/manifest/project_lang.rs` owns the MARKER TABLES
-that answer whether a category's gate is satisfied for a given project.
-`core::manifest::framework::agent_scope_from` composes the two:
+Deployment is DECLARED in one place and EVALUATED in another, and the split is
+declaration-vs-mechanism, not authority-vs-authority. The bundled
+`framework-manifest.toml` declares which category each agent is in AND the
+`markers` that gate it — issue #4765 moved the former `LANGUAGE_ENGINEERS` /
+`PLATFORM_AGENTS` Rust tables into it, per the owner ruling of 2026-08-04
+("authoritative agent/skill bundling should be in framework-manifest.toml or
+project manifest.toml"). `crates/trusty-mpm/src/core/manifest/project_lang.rs`
+retains only the marker EVALUATOR: how a marker string is tested against a
+directory, bounded and fail-closed.
+`core::manifest::framework::agent_scope_from` composes declaration with
+evaluation:
 
 ```text
 exclude = deprecated
@@ -183,10 +189,10 @@ forgotten into deploying.
 
 ### 4.1 `language` and `framework` — two declarations, two real gates
 
-Both resolve through `detected_engineers`, which probes the project root
-against `LANGUAGE_ENGINEERS` — now 16 stems: 11 declared `language`, 5
-declared `framework`. The two categories gate on genuinely different
-evidence.
+Both resolve through `MarkerProbe::detect`, which probes the project root (and
+every declared workspace member) against each entry's own declared `markers` —
+16 gated stems: 11 `language`, 5 `framework`. The two categories gate on
+genuinely different evidence.
 
 The original split was a declaration the markers did not honour: four of the
 five framework stems fired on a marker that identified a *language*, not a
@@ -278,10 +284,9 @@ relying on recursion deeper than one level resolves only its first level.
 
 ### 4.2 `platform` — a genuinely new gate
 
-`gcp-ops` and `vercel-ops` are gated on `PLATFORM_AGENTS`
-(`project_lang.rs`), a table introduced with this category. Markers are
-deliberately narrow — files the platform's own tooling creates or requires,
-not inferred heuristics:
+`gcp-ops` and `vercel-ops` are the two `platform` entries, each declaring its
+own markers in `framework-manifest.toml`. Markers are deliberately narrow —
+files the platform's own tooling creates or requires, not inferred heuristics:
 
 | Stem | Markers |
 |---|---|
@@ -515,18 +520,21 @@ not an extension of an existing one.** Reasoning:
   declaration §4 describes.
 - `crates/trusty-mpm/src/core/manifest/framework.rs` —
   `parse_framework_manifest`, `framework_agent_categories`,
-  `agent_scope_from`, `framework_agent_scope`, `bundled_agent_stems` — the
-  declaration's parser, its validation invariants, and the composition with
-  detected markers.
-- `crates/trusty-mpm/src/core/manifest/schema.rs` — `AgentCategories`, the
-  one additive section this work adds to the shared manifest schema.
-- `crates/trusty-mpm/src/core/manifest/project_lang.rs` —
-  `LANGUAGE_ENGINEERS` (16 stems), `PLATFORM_AGENTS` (2), `detected_engineers`,
-  `detected_platforms`, `marker_present` (exact path, `*.<ext>` glob, and the
-  `<path>::<needle>` content probe), `file_contains` — the marker tables the
-  gated categories are evaluated against. (`language_agent_scope`, the
-  exclude-by-complement function this document's original text described, was
-  removed by #4760.)
+  `agent_scope_from`, `framework_agent_scope`, `bundled_agent_stems`,
+  `detected_stack_engineers`, plus the #4765 skill-roster half
+  (`parse_framework_skills`, `framework_skill_categories`,
+  `bundled_skill_stems`) — the declaration's parser, its validation invariants,
+  and the composition with evaluated markers.
+- `crates/trusty-mpm/src/core/manifest/schema.rs` — `AgentCategories`,
+  `GatedAgent`, `SkillCategories` — the additive sections this work adds to the
+  shared manifest schema.
+- `crates/trusty-mpm/src/core/manifest/project_lang.rs` — `MarkerProbe`,
+  `marker_present` (exact path, `*.<ext>` glob, and the `<path>::<needle>`
+  content probe), `file_contains` — the marker EVALUATOR the declared gates are
+  tested with. (`LANGUAGE_ENGINEERS` and `PLATFORM_AGENTS`, the marker tables
+  this module used to own, moved into `framework-manifest.toml` in #4765;
+  `language_agent_scope`, the exclude-by-complement function this document's
+  original text described, was removed by #4760.)
 - `crates/trusty-mpm/src/core/delegation_authority.rs` —
   `deployed_agent_dirs`, `roster_from_dirs`, `resolve_roster`,
   `deployed_roster_section`, `is_foundation_file` — the roster resolver
@@ -579,3 +587,17 @@ not an extension of an existing one.** Reasoning:
   the bundle, not kept-but-not-deployed, leaving `deprecated` empty by design.
   Counts: 37 dispatchable agents = 19 + 11 + 5 + 2 + 0, unchanged in total
   (−`ops`, +`elixir-engineer`); `ALL` unchanged at 178 for the same reason.
+- 2026-08-04 — Owner ruling of 2026-08-04 ("authoritative agent/skill bundling
+  should be in framework-manifest.toml or project manifest.toml. That's it")
+  applied, issue #4765. The manifest is now the SINGLE authority for three
+  things, not one: which agents and skills are bundled, which category each is
+  in, and the marker condition that gates it. `LANGUAGE_ENGINEERS` and
+  `PLATFORM_AGENTS` are deleted; each gated entry declares its own `markers`,
+  and a gated entry declaring none is a hard error. A new `[skill_categories]`
+  section declares the bundled skill roster under the same exhaustiveness
+  invariant. §4 preamble, §4.1, §4.2 and §7 updated for the moved tables. The
+  bundled documents that used to restate the roster or its gates
+  (`assets/skills/tm.md`, `assets/skills/tm-delegation-patterns.md`,
+  `assets/instructions/sections/agent-delegation.md`) now POINT at the manifest
+  and at the mechanically generated `tm-capabilities/references/agents.md`,
+  which gains a **Deploys When** column rendered from the manifest.

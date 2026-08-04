@@ -6,8 +6,9 @@
 //! SYNTHETIC categories (so a behaviour test cannot pass by accident of what the
 //! real manifest happens to contain).
 //! What: validation-failure coverage for every [`FrameworkManifestError`]
-//! variant, composition coverage for each of the four deployment categories, and
-//! the "no marker detected" vs "manifest is broken" distinction.
+//! variant, composition coverage for each of the four deployment categories, the
+//! skill-roster declaration (#4765), and the "no marker detected" vs "manifest
+//! is broken" distinction.
 //! Test: this file.
 
 use super::*;
@@ -17,25 +18,56 @@ use tempfile::TempDir;
 /// A synthetic catalog whose names are deliberately NOT real bundled agents, so
 /// a composition test can never pass because of what the shipped manifest says.
 fn fake_catalog() -> BTreeSet<String> {
-    ["rust-engineer", "react-engineer", "vercel-ops", "qa", "ops"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    [
+        "rust-engineer",
+        "js-engineer",
+        "react-engineer",
+        "vercel-ops",
+        "qa",
+        "ops",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 /// A synthetic manifest over [`fake_catalog`], exercising all five categories.
+///
+/// Since #4765 the markers are part of the fixture, so every composition test
+/// below is independent of the SHIPPED markers as well as of the shipped roster.
 fn fake_manifest() -> String {
     r#"
 version = 1
 
 [agent_categories]
 universal = ["qa"]
-language = ["rust-engineer"]
-framework = ["react-engineer"]
-platform = ["vercel-ops"]
 deprecated = ["ops"]
+
+[[agent_categories.language]]
+stem = "rust-engineer"
+markers = ["Cargo.toml"]
+
+[[agent_categories.language]]
+stem = "js-engineer"
+markers = ["package.json"]
+
+[[agent_categories.framework]]
+stem = "react-engineer"
+markers = ["package.json::\"react\""]
+
+[[agent_categories.platform]]
+stem = "vercel-ops"
+markers = ["vercel.json"]
+
+[skill_categories]
+universal = ["tm"]
 "#
     .to_string()
+}
+
+/// A synthetic skill catalog, deliberately not the real bundled one.
+fn fake_skill_catalog() -> BTreeSet<String> {
+    ["tm"].iter().map(|s| (*s).to_string()).collect()
 }
 
 fn parsed_fake() -> AgentCategories {
@@ -61,18 +93,31 @@ fn bundled_framework_manifest_is_valid() {
     let categories = framework_agent_categories().expect("bundled manifest must validate");
     assert!(!categories.universal.is_empty());
     assert_eq!(
-        categories.platform,
-        vec!["gcp-ops".to_string(), "vercel-ops".to_string()],
+        categories
+            .platform
+            .iter()
+            .map(|entry| entry.stem.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gcp-ops", "vercel-ops"],
         "the two platform-ops agents are platform-gated"
     );
-    assert!(
-        categories.language.contains(&"elixir-engineer".to_string()),
+    // #4765: the markers are the manifest's too, so the shipped gate is pinned
+    // here rather than in a Rust table nobody reads next to the category.
+    let entry = |list: &[GatedAgent], stem: &str| {
+        list.iter()
+            .find(|e| e.stem == stem)
+            .unwrap_or_else(|| panic!("{stem} must be declared"))
+            .markers
+            .clone()
+    };
+    assert_eq!(
+        entry(&categories.language, "elixir-engineer"),
+        vec!["mix.exs".to_string()],
         "elixir-engineer is language-gated on mix.exs"
     );
-    assert!(
-        categories
-            .framework
-            .contains(&"phoenix-engineer".to_string()),
+    assert_eq!(
+        entry(&categories.framework, "phoenix-engineer"),
+        vec!["mix.exs::{:phoenix,".to_string()],
         "phoenix-engineer is framework-gated on the phoenix dependency"
     );
     // #4760: `deprecated` is EMPTY and that is correct. `ops` was its only
@@ -118,10 +163,10 @@ fn bundled_manifest_partitions_the_whole_catalog() {
     // Every bundled agent is declared exactly once — the invariant that makes a
     // newly added agent fail loudly instead of quietly never deploying.
     let categories = framework_agent_categories().expect("valid");
-    let mut declared: Vec<String> = Vec::new();
-    for (_, list) in labelled_lists(&categories) {
-        declared.extend(list.iter().cloned());
-    }
+    let declared: Vec<String> = labelled_stems(&categories)
+        .into_iter()
+        .map(|(_, stem)| stem.clone())
+        .collect();
     let mut sorted = declared.clone();
     sorted.sort();
     sorted.dedup();
@@ -217,6 +262,7 @@ fn undeclared_bundled_agent_is_an_error() {
             assert_eq!(
                 missing,
                 vec![
+                    "js-engineer".to_string(),
                     "ops".to_string(),
                     "react-engineer".to_string(),
                     "rust-engineer".to_string(),
@@ -239,29 +285,103 @@ fn duplicate_declaration_is_an_error() {
 }
 
 #[test]
-fn stack_stem_without_markers_is_an_error() {
-    // `qa` has no row in LANGUAGE_ENGINEERS, so gating it on language detection
-    // would make it undeployable. That must be loud, not silent.
-    let raw = "[agent_categories]\nuniversal = [\"ops\"]\nlanguage = [\"qa\", \"rust-engineer\"]\n\
-               framework = [\"react-engineer\"]\nplatform = [\"vercel-ops\"]\n";
-    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("undetectable stack");
+fn gated_entry_without_markers_is_an_error() {
+    // #4765: markers moved into the manifest, so "gated but with no condition"
+    // is now representable — and undeployable. That must be loud, not silent.
+    let raw = r#"
+[agent_categories]
+universal = ["ops"]
+
+[[agent_categories.language]]
+stem = "qa"
+markers = []
+
+[[agent_categories.language]]
+stem = "rust-engineer"
+markers = ["Cargo.toml"]
+
+[[agent_categories.language]]
+stem = "js-engineer"
+markers = ["package.json"]
+
+[[agent_categories.framework]]
+stem = "react-engineer"
+markers = ["package.json"]
+
+[[agent_categories.platform]]
+stem = "vercel-ops"
+markers = ["vercel.json"]
+"#;
+    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("ungated entry");
     assert_eq!(
         err,
-        FrameworkManifestError::UndetectableStack {
+        FrameworkManifestError::UngatedEntry {
             category: "language",
             stem: "qa".to_string(),
         }
     );
 }
 
+// ---------------------------------------------------------------------------
+// The skill roster (#4765)
+// ---------------------------------------------------------------------------
+
 #[test]
-fn platform_stem_without_markers_is_an_error() {
-    let raw = "[agent_categories]\nuniversal = [\"ops\"]\nlanguage = [\"rust-engineer\"]\n\
-               framework = [\"react-engineer\"]\nplatform = [\"qa\", \"vercel-ops\"]\n";
-    let err = parse_framework_manifest(raw, &fake_catalog()).expect_err("undetectable platform");
+fn bundled_skill_roster_is_valid() {
+    // The shipped `[skill_categories]` must exactly cover the bundled skills.
+    let skills = framework_skill_categories().expect("bundled skill roster must validate");
+    assert_eq!(
+        skills.universal.len(),
+        bundled_skill_stems().len(),
+        "every bundled skill is declared exactly once"
+    );
+    assert!(skills.universal.contains(&"tm".to_string()));
+}
+
+#[test]
+fn bundled_skill_stems_excludes_reference_files() {
+    let stems = bundled_skill_stems();
+    assert!(stems.contains("systematic-debugging"));
+    assert!(
+        !stems.iter().any(|s| s.contains('/')),
+        "a skill's own references/*.md are not catalog entries"
+    );
+}
+
+#[test]
+fn missing_skill_section_is_an_error() {
+    let err = parse_framework_skills("version = 1\n", &fake_skill_catalog())
+        .expect_err("a manifest with no skill section declares nothing");
+    assert_eq!(err, FrameworkManifestError::MissingSkillCategories);
+}
+
+#[test]
+fn unknown_skill_is_an_error() {
+    let raw = "[skill_categories]\nuniversal = [\"tm\", \"no-such-skill\"]\n";
+    let err = parse_framework_skills(raw, &fake_skill_catalog()).expect_err("unknown skill");
     assert_eq!(
         err,
-        FrameworkManifestError::UndetectablePlatform("qa".to_string())
+        FrameworkManifestError::UnknownSkill("no-such-skill".to_string())
+    );
+}
+
+#[test]
+fn undeclared_bundled_skill_is_an_error() {
+    let raw = "[skill_categories]\nuniversal = []\n";
+    let err = parse_framework_skills(raw, &fake_skill_catalog()).expect_err("undeclared skill");
+    assert_eq!(
+        err,
+        FrameworkManifestError::UndeclaredSkills(vec!["tm".to_string()])
+    );
+}
+
+#[test]
+fn duplicate_skill_is_an_error() {
+    let raw = "[skill_categories]\nuniversal = [\"tm\", \"tm\"]\n";
+    let err = parse_framework_skills(raw, &fake_skill_catalog()).expect_err("duplicate skill");
+    assert_eq!(
+        err,
+        FrameworkManifestError::DuplicateSkill("tm".to_string())
     );
 }
 
@@ -282,7 +402,11 @@ fn universal_agents_deploy_with_no_markers() {
 
 #[test]
 fn language_engineers_still_gate_on_detection() {
-    // A Cargo project keeps rust-engineer; a Python-marker project does not.
+    // A Cargo project keeps rust-engineer; a project whose detected stack is a
+    // DIFFERENT declared language does not. The negative case must detect
+    // something — a project matching no fixture marker at all takes the
+    // unknown-project fallback and keeps everything, which is
+    // `unknown_project_keeps_every_stack_engineer`'s subject, not this one.
     let rust = TempDir::new().unwrap();
     touch(rust.path(), "Cargo.toml");
     let scope = agent_scope_from(&parsed_fake(), rust.path());
@@ -292,12 +416,16 @@ fn language_engineers_still_gate_on_detection() {
         "universal is unaffected by stack gating"
     );
 
-    let py = TempDir::new().unwrap();
-    touch(py.path(), "pyproject.toml");
-    let scope = agent_scope_from(&parsed_fake(), py.path());
+    let js = TempDir::new().unwrap();
+    touch(js.path(), "package.json");
+    let scope = agent_scope_from(&parsed_fake(), js.path());
+    assert!(
+        deploys(&scope, "js-engineer"),
+        "the JS project detects its own engineer"
+    );
     assert!(
         !deploys(&scope, "rust-engineer"),
-        "a Python project must not get the Rust engineer"
+        "a JS project must not get the Rust engineer"
     );
     assert!(
         deploys(&scope, "qa"),

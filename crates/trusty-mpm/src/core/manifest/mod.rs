@@ -25,10 +25,13 @@ mod workspace;
 
 pub use apply::HarnessPlan;
 pub use default::default_manifest;
-pub use framework::{FRAMEWORK_MANIFEST_FILE, FrameworkManifestError, framework_agent_categories};
+pub use framework::{
+    FRAMEWORK_MANIFEST_FILE, FrameworkManifestError, framework_agent_categories,
+    framework_skill_categories,
+};
 pub use resolve::{MANIFEST_FILE, ManifestSources, resolve_manifest};
 pub use schema::{
-    AgentCategories, AgentSet, ContentSource, CustomMcpServer, HarnessManifest, InstructionLayers,
-    MANIFEST_VERSION, McpServers, ModelTiers, SkillSet, StyleSelection, matches_any,
-    selection_matches,
+    AgentCategories, AgentSet, ContentSource, CustomMcpServer, GatedAgent, HarnessManifest,
+    InstructionLayers, MANIFEST_VERSION, McpServers, ModelTiers, SkillCategories, SkillSet,
+    StyleSelection, matches_any, selection_matches,
 };

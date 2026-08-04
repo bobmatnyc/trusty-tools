@@ -6,6 +6,14 @@
 
 use super::*;
 
+/// A [`GatedAgent`] fixture — stem plus its declared markers (#4765).
+fn gated(stem: &str, markers: &[&str]) -> GatedAgent {
+    GatedAgent {
+        stem: stem.to_string(),
+        markers: markers.iter().map(|m| (*m).to_string()).collect(),
+    }
+}
+
 #[test]
 fn manifest_roundtrip() {
     // A fully-populated manifest must survive a serialize → parse round-trip
@@ -20,10 +28,13 @@ fn manifest_roundtrip() {
         }),
         agent_categories: Some(AgentCategories {
             universal: vec!["qa".into()],
-            language: vec!["rust-engineer".into()],
-            framework: vec!["react-engineer".into()],
-            platform: vec!["vercel-ops".into()],
+            language: vec![gated("rust-engineer", &["Cargo.toml"])],
+            framework: vec![gated("react-engineer", &["package.json::\"react\""])],
+            platform: vec![gated("vercel-ops", &["vercel.json"])],
             deprecated: vec!["ops".into()],
+        }),
+        skill_categories: Some(SkillCategories {
+            universal: vec!["tm".into()],
         }),
         skills: Some(SkillSet {
             include: vec!["example-skill".into()],
@@ -429,18 +440,44 @@ fn agent_categories_roundtrip() {
     // #4760: the framework tier's five category lists must survive a TOML
     // round-trip through the SAME parser every other manifest layer uses —
     // that shared parser is the whole point of extending `manifest.toml`
-    // rather than inventing a second format.
-    let raw = "version = 1\n\
-               [agent_categories]\n\
-               universal = [\"qa\"]\n\
-               language = [\"rust-engineer\"]\n\
-               framework = [\"react-engineer\"]\n\
-               platform = [\"vercel-ops\"]\n\
-               deprecated = [\"ops\"]\n";
+    // rather than inventing a second format. #4765: each gated entry now
+    // carries its own markers, in the array-of-tables form the shipped asset
+    // uses.
+    let raw = r#"
+version = 1
+
+[agent_categories]
+universal = ["qa"]
+deprecated = ["ops"]
+
+[[agent_categories.language]]
+stem = "rust-engineer"
+markers = ["Cargo.toml"]
+
+[[agent_categories.platform]]
+stem = "vercel-ops"
+markers = ["vercel.json", ".vercelignore"]
+
+[skill_categories]
+universal = ["tm"]
+"#;
     let parsed = HarnessManifest::from_toml(raw).expect("parses");
     let cats = parsed.agent_categories.clone().expect("section present");
     assert_eq!(cats.universal, vec!["qa".to_string()]);
     assert_eq!(cats.deprecated, vec!["ops".to_string()]);
+    assert_eq!(cats.language, vec![gated("rust-engineer", &["Cargo.toml"])]);
+    assert_eq!(
+        cats.platform,
+        vec![gated("vercel-ops", &["vercel.json", ".vercelignore"])]
+    );
+    assert_eq!(
+        parsed
+            .skill_categories
+            .clone()
+            .expect("skill section present")
+            .universal,
+        vec!["tm".to_string()]
+    );
 
     let round =
         HarnessManifest::from_toml(&parsed.to_toml().expect("serializes")).expect("re-parses");

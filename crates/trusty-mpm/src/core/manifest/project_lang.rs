@@ -1,20 +1,28 @@
-//! Per-project stack and platform MARKER DETECTION (#1941 / HR-2, #4760).
+//! Per-project MARKER EVALUATION for the framework manifest's gated categories
+//! (#1941 / HR-2, #4760, #4765).
 //!
-//! Why: deploying the FULL polyglot agent roster (every `*-engineer` —
-//! javascript/typescript/python/php/java/golang/dart/ruby/svelte/react/nextjs/
-//! tauri/phoenix/dotnet + rust) plus every platform-ops agent to every project
-//! regardless of stack is pure noise in the delegation surface and a contributor
-//! to the catalog-drift false positives (#1940). This module answers the two
-//! detection questions the framework manifest's gated categories depend on:
-//! *which stacks does this project use* and *which platforms does it target*.
-//! What: [`detected_engineers`] probes `project_dir` for the
-//! [`LANGUAGE_ENGINEERS`] markers; [`detected_platforms`] probes it for the
-//! [`PLATFORM_AGENTS`] markers. Both return a possibly-EMPTY set — an empty
-//! result is a valid answer, never an error. `super::framework` composes those
-//! answers with the framework manifest's declared categories into the final
-//! [`super::schema::AgentSet`]; this module owns markers only, never selection
-//! policy. (#4760 replaced this module's former `language_agent_scope`, which
-//! computed an exclude-list by complement, with that declarative composition.)
+//! Why: deploying the FULL polyglot agent roster (every `*-engineer`) plus every
+//! platform-ops agent to every project regardless of stack is pure noise in the
+//! delegation surface and a contributor to the catalog-drift false positives
+//! (#1940). This module answers one question — *are this entry's declared
+//! markers present in this project?* — for the gated categories
+//! `framework-manifest.toml` declares.
+//!
+//! **What this module no longer owns (#4765).** It used to carry the marker
+//! TABLES themselves (`LANGUAGE_ENGINEERS`, `PLATFORM_AGENTS`), which made the
+//! gate a Rust constant while the category that used it was a manifest
+//! declaration — two authorities for one entry, and two places to drift. The
+//! owner ruling of 2026-08-04 ("authoritative agent/skill bundling should be in
+//! framework-manifest.toml or project manifest.toml") moved the tables into the
+//! manifest as [`super::schema::GatedAgent::markers`]. What is left here is the
+//! MECHANISM: how a marker string is evaluated against a directory, bounded and
+//! fail-closed. Declaration lives in the manifest; evaluation lives here.
+//! What: [`MarkerProbe`] resolves a project's probe roots (the project dir plus
+//! every declared workspace member) and a single shared [`ProbeBudget`] once,
+//! then answers [`MarkerProbe::detect`] for any list of declared entries. A
+//! possibly-EMPTY result is a valid answer, never an error — `super::framework`
+//! composes it with the declared categories into the final
+//! [`super::schema::AgentSet`]; this module never decides selection policy.
 //! Test: `rust_workspace_detects_only_rust_engineer`, `js_project_detects_js_family`,
 //! `unknown_project_detects_nothing`, `vercel_marker_detects_vercel_ops`,
 //! `gcp_marker_detects_gcp_ops`, `no_platform_marker_detects_nothing`.
@@ -22,149 +30,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::schema::GatedAgent;
 use super::workspace::{ProbeBudget, probe_roots};
-
-/// A bundled language-specific engineer agent and the marker files that select it.
-///
-/// Why: scoping keys the "is this engineer relevant?" decision on cheap
-/// filesystem probes of conventional project root files; pairing each engineer
-/// stem with its markers keeps that mapping in one auditable table.
-/// What: `stem` is the agent filename without `.md`; `markers` are paths (relative
-/// to the project root) whose existence implies this engineer's language/framework
-/// is in use.
-/// Test: exercised by every scope test below.
-struct LangEngineer {
-    /// Agent stem (filename without `.md`), e.g. `rust-engineer`.
-    stem: &'static str,
-    /// Marker paths (relative to the project root) that select this engineer.
-    markers: &'static [&'static str],
-}
-
-/// The bundled language engineers and their project-root marker files.
-///
-/// Why: this is the single source of truth for which agents are "language
-/// specific" (and thus subject to scoping) versus language-agnostic (always kept).
-/// Any agent stem NOT listed here is treated as agnostic and never excluded.
-/// What: one entry per bundled `*-engineer`. The JS/TS ecosystem engineers
-/// (javascript/typescript/react/nextjs/svelte/tauri) all key off `package.json`
-/// (plus framework-specific configs) so a JS project keeps the whole family.
-/// Test: `js_project_keeps_js_family`, `rust_workspace_scopes_to_rust_engineer`.
-const LANGUAGE_ENGINEERS: &[LangEngineer] = &[
-    LangEngineer {
-        stem: "rust-engineer",
-        markers: &["Cargo.toml"],
-    },
-    LangEngineer {
-        stem: "python-engineer",
-        markers: &[
-            "pyproject.toml",
-            "setup.py",
-            "setup.cfg",
-            "requirements.txt",
-            "Pipfile",
-        ],
-    },
-    LangEngineer {
-        stem: "golang-engineer",
-        markers: &["go.mod"],
-    },
-    LangEngineer {
-        stem: "java-engineer",
-        markers: &[
-            "pom.xml",
-            "build.gradle",
-            "build.gradle.kts",
-            "settings.gradle",
-        ],
-    },
-    LangEngineer {
-        stem: "ruby-engineer",
-        markers: &["Gemfile", "Gemfile.lock", ".ruby-version"],
-    },
-    LangEngineer {
-        stem: "php-engineer",
-        markers: &["composer.json"],
-    },
-    LangEngineer {
-        stem: "dart-engineer",
-        markers: &["pubspec.yaml"],
-    },
-    LangEngineer {
-        stem: "elixir-engineer",
-        // `mix.exs` is the Elixir project manifest — every Mix project has one.
-        // Before #4760 this marker selected `phoenix-engineer`, which meant a
-        // plain Elixir project got a Phoenix specialist and nothing else.
-        markers: &["mix.exs"],
-    },
-    LangEngineer {
-        stem: "phoenix-engineer",
-        // #4760: narrowed from the bare `mix.exs` Elixir marker. Phoenix has no
-        // config file of its own that plain Elixir lacks, so the only reliable
-        // signal is the dependency declaration itself. `{:phoenix,` is the
-        // canonical `mix format` spelling of the dep tuple and does not match
-        // `{:phoenix_live_view,` or any other `phoenix_*` package.
-        markers: &["mix.exs::{:phoenix,"],
-    },
-    LangEngineer {
-        stem: "dotnet-engineer",
-        // C#/.NET and legacy VB.NET: project/solution files are extension globs
-        // (`*.csproj`/`*.sln`/`*.vbproj`), matched by `marker_present`'s `*.<ext>`
-        // support; `global.json` and `Directory.Build.props` are exact filenames.
-        markers: &[
-            "*.sln",
-            "*.csproj",
-            "*.vbproj",
-            "global.json",
-            "Directory.Build.props",
-        ],
-    },
-    LangEngineer {
-        stem: "javascript-engineer",
-        markers: &["package.json"],
-    },
-    LangEngineer {
-        stem: "typescript-engineer",
-        markers: &["tsconfig.json", "package.json"],
-    },
-    LangEngineer {
-        stem: "react-engineer",
-        // #4760: narrowed from a bare `package.json`, which selected React for
-        // every JavaScript project. React ships no config file of its own, so
-        // the dependency declaration is the only reliable signal. The quotes
-        // make it an exact key match: `"react"` does not match `"react-dom"`,
-        // `"react-native"`, or `"@types/react"`.
-        markers: &["package.json::\"react\""],
-    },
-    LangEngineer {
-        stem: "nextjs-engineer",
-        // #4760: the `package.json` fallback is gone. The config file is the
-        // primary signal, but `next.config.*` is OPTIONAL in Next.js, so the
-        // dependency declaration backstops it. `"next"` does not match
-        // `"next-auth"` or `"next-themes"`.
-        markers: &[
-            "next.config.js",
-            "next.config.mjs",
-            "next.config.ts",
-            "package.json::\"next\"",
-        ],
-    },
-    LangEngineer {
-        stem: "svelte-engineer",
-        // #4760: the `package.json` fallback is gone. `svelte.config.*` is
-        // present in every SvelteKit app and most plain Svelte ones; the dep
-        // declaration backstops the rest. `"svelte"` does not match
-        // `"svelte-check"` or `"@sveltejs/kit"`.
-        markers: &[
-            "svelte.config.js",
-            "svelte.config.ts",
-            "package.json::\"svelte\"",
-        ],
-    },
-    LangEngineer {
-        stem: "tauri-engineer",
-        markers: &["src-tauri/tauri.conf.json", "tauri.conf.json"],
-    },
-];
 
 /// Whether a single marker is present in `dir`.
 ///
@@ -244,125 +111,96 @@ fn marker_present_in_any(roots: &[PathBuf], marker: &str, budget: &ProbeBudget) 
         .any(|root| marker_present(root, marker, budget))
 }
 
-/// The set of language-engineer stems whose markers are present in `project_dir`.
+/// A project's resolved probe roots and shared read budget (#4765).
 ///
-/// Why: both the public scope function and its tests need the "which language
-/// engineers are relevant here" decision in one place.
-/// What: returns the stems from [`LANGUAGE_ENGINEERS`] for which at least one
-/// marker file exists directly under `project_dir`. Sorted/de-duplicated via the
-/// `BTreeSet`.
-/// Test: `rust_workspace_scopes_to_rust_engineer`, `polyglot_project_keeps_both`.
-pub(crate) fn detected_engineers(project_dir: &Path) -> BTreeSet<&'static str> {
-    let budget = ProbeBudget::new();
-    let roots = probe_roots(project_dir, &budget);
-    LANGUAGE_ENGINEERS
-        .iter()
-        .filter(|le| {
-            le.markers
-                .iter()
-                .any(|m| marker_present_in_any(&roots, m, &budget))
-        })
-        .map(|le| le.stem)
-        .collect()
+/// Why: detection asks the same two questions of the same project — which
+/// stacks, which platforms — and both must share ONE budget. Two independent
+/// `ProbeBudget::new()` calls (what the two former free functions did) let a
+/// pathological monorepo spend the aggregate cap twice. Resolving the roots
+/// once also avoids re-reading the root manifest's workspace declaration per
+/// category.
+/// What: holds the probe roots from [`probe_roots`] (project dir first, then
+/// every declared workspace member) and one [`ProbeBudget`] for the whole
+/// detection call. Construct once per project, then call [`Self::detect`] for
+/// each declared category.
+/// Test: `budget_is_shared_across_members`, `npm_monorepo_member_declares_react`.
+pub(crate) struct MarkerProbe {
+    /// The project dir followed by every declared workspace member.
+    roots: Vec<PathBuf>,
+    /// One aggregate read budget for the whole detection call.
+    budget: ProbeBudget,
 }
 
-/// A bundled platform-ops agent and the marker files that select it (#4760).
-///
-/// Why: `gcp-ops` and `vercel-ops` are gated on a detected PLATFORM, which is a
-/// third axis alongside language and framework — a Rust API deployed to Vercel
-/// is neither a "JavaScript project" nor a "Next.js project", so
-/// [`LANGUAGE_ENGINEERS`] cannot express the gate. Before #4760 they were
-/// ungated and deployed to every project.
-/// What: same shape as [`LangEngineer`], probed by the same [`marker_present`].
-/// Test: `vercel_marker_detects_vercel_ops`, `gcp_marker_detects_gcp_ops`,
-/// `no_platform_marker_detects_nothing`.
-struct PlatformAgent {
-    /// Agent stem (filename without `.md`), e.g. `vercel-ops`.
-    stem: &'static str,
-    /// Marker paths (relative to the project root) that select this agent.
-    markers: &'static [&'static str],
-}
+impl MarkerProbe {
+    /// Resolve `project_dir`'s probe roots under a fresh shared budget.
+    pub(crate) fn new(project_dir: &Path) -> Self {
+        let budget = ProbeBudget::new();
+        let roots = probe_roots(project_dir, &budget);
+        Self { roots, budget }
+    }
 
-/// The bundled platform-ops agents and their project-root marker files.
-///
-/// Why: the single source of truth for which agents are "platform specific".
-/// The marker sets are deliberately narrow — each entry is a file the platform's
-/// own tooling creates or requires, not an inferred heuristic — because a false
-/// positive puts an irrelevant agent in every roster, which is the exact noise
-/// #1941 built language scoping to remove.
-/// What: one entry per bundled `*-ops` agent that targets a single cloud
-/// platform. `local-ops` is deliberately absent: it is platform-agnostic and
-/// stays universal.
-/// Test: `vercel_marker_detects_vercel_ops`, `gcp_marker_detects_gcp_ops`.
-const PLATFORM_AGENTS: &[PlatformAgent] = &[
-    PlatformAgent {
-        stem: "gcp-ops",
-        // `app.yaml` (App Engine), `cloudbuild.yaml`/`.yml` (Cloud Build), and
-        // `.gcloudignore` (every `gcloud` deploy) are created by GCP tooling.
-        markers: &[
-            "app.yaml",
-            "cloudbuild.yaml",
-            "cloudbuild.yml",
-            ".gcloudignore",
-        ],
-    },
-    PlatformAgent {
-        stem: "vercel-ops",
-        // `vercel.json` is the project config; `.vercel/project.json` is written
-        // by `vercel link`; `.vercelignore` by the deploy flow.
-        markers: &["vercel.json", ".vercelignore", ".vercel/project.json"],
-    },
-];
+    /// Whether any of `entry`'s declared markers is present at any probe root.
+    ///
+    /// Why: a declared entry deploys on ANY of its markers, not all — a Java
+    /// project is Maven OR Gradle, never required to be both.
+    /// What: the OR over [`marker_present_in_any`] for `entry.markers`. An entry
+    /// with no markers can never match; `parse_framework_manifest` rejects that
+    /// case up front so it is unreachable from the bundled manifest.
+    /// Test: `java_project_detects_java_engineer`,
+    /// `content_probe_does_not_match_a_longer_named_sibling`.
+    fn selects(&self, entry: &GatedAgent) -> bool {
+        entry
+            .markers
+            .iter()
+            .any(|marker| marker_present_in_any(&self.roots, marker, &self.budget))
+    }
 
-/// The set of platform-agent stems whose markers are present in `project_dir`.
-///
-/// Why: the platform category needs the same "which of these are relevant here"
-/// probe the language/framework categories get from [`detected_engineers`].
-/// What: returns the stems from [`PLATFORM_AGENTS`] for which at least one
-/// marker exists under `project_dir`. An EMPTY result is a valid, expected
-/// answer meaning "this project targets no known platform" — it is never
-/// confused with a manifest error, which is a distinct `Err` on a different
-/// code path (`core::manifest::framework::parse_framework_manifest`).
-/// Test: `no_platform_marker_detects_nothing`, `vercel_marker_detects_vercel_ops`.
-pub(crate) fn detected_platforms(project_dir: &Path) -> BTreeSet<&'static str> {
-    let budget = ProbeBudget::new();
-    let roots = probe_roots(project_dir, &budget);
-    PLATFORM_AGENTS
-        .iter()
-        .filter(|pa| {
-            pa.markers
-                .iter()
-                .any(|m| marker_present_in_any(&roots, m, &budget))
-        })
-        .map(|pa| pa.stem)
-        .collect()
-}
-
-/// Every stem [`LANGUAGE_ENGINEERS`] carries markers for.
-///
-/// Why: the framework manifest declares which stems are language- or
-/// framework-gated; that declaration is only meaningful if each declared stem
-/// actually HAS a marker row here. Exposing the stem set lets
-/// `core::manifest::framework` enforce that as a loud invariant instead of
-/// letting a typo silently produce an agent that can never deploy.
-/// What: the `stem` column of [`LANGUAGE_ENGINEERS`].
-/// Test: `language_and_framework_stems_all_have_markers`.
-pub(crate) fn language_engineer_stems() -> BTreeSet<&'static str> {
-    LANGUAGE_ENGINEERS.iter().map(|le| le.stem).collect()
-}
-
-/// Every stem [`PLATFORM_AGENTS`] carries markers for.
-///
-/// Why/What/Test: as [`language_engineer_stems`], for the platform table.
-pub(crate) fn platform_agent_stems() -> BTreeSet<&'static str> {
-    PLATFORM_AGENTS.iter().map(|pa| pa.stem).collect()
+    /// The stems of `entries` whose declared markers this project shows.
+    ///
+    /// Why: the one detection primitive `super::framework::agent_scope_from`
+    /// calls, once per gated category.
+    /// What: a sorted, de-duplicated set of matching stems. An EMPTY result is a
+    /// valid, expected answer meaning "this project shows none of these markers"
+    /// — never confused with a manifest error, which is a distinct `Err` on a
+    /// different code path (`super::framework::parse_framework_manifest`).
+    /// Test: `rust_workspace_detects_only_rust_engineer`,
+    /// `no_platform_marker_detects_nothing`.
+    pub(crate) fn detect(&self, entries: &[GatedAgent]) -> BTreeSet<String> {
+        entries
+            .iter()
+            .filter(|entry| self.selects(entry))
+            .map(|entry| entry.stem.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::manifest::framework::framework_agent_categories;
     use std::fs;
     use tempfile::TempDir;
+
+    /// The stack (`language` + `framework`) stems the BUNDLED manifest's markers
+    /// select for `dir`.
+    ///
+    /// Why: every detection test below asserts against the real shipped
+    /// declaration, not a fixture — that is what makes them a check on
+    /// `framework-manifest.toml`'s markers rather than on a second copy of them.
+    /// Test: this helper IS the test surface for the tests that call it.
+    fn detected_engineers(dir: &Path) -> BTreeSet<String> {
+        let categories = framework_agent_categories().expect("bundled manifest must be valid");
+        let probe = MarkerProbe::new(dir);
+        let mut detected = probe.detect(&categories.language);
+        detected.extend(probe.detect(&categories.framework));
+        detected
+    }
+
+    /// The `platform` stems the BUNDLED manifest's markers select for `dir`.
+    fn detected_platforms(dir: &Path) -> BTreeSet<String> {
+        let categories = framework_agent_categories().expect("bundled manifest must be valid");
+        MarkerProbe::new(dir).detect(&categories.platform)
+    }
 
     fn touch(dir: &Path, name: &str) {
         write(dir, name, "");
@@ -764,10 +602,19 @@ mod tests {
     }
 
     #[test]
-    fn stem_accessors_match_their_tables() {
-        assert_eq!(language_engineer_stems().len(), LANGUAGE_ENGINEERS.len());
-        assert_eq!(platform_agent_stems().len(), PLATFORM_AGENTS.len());
-        assert!(platform_agent_stems().contains("gcp-ops"));
-        assert!(platform_agent_stems().contains("vercel-ops"));
+    fn an_entry_with_no_markers_never_selects() {
+        // #4765: markers are a manifest field now, so "declared but ungated" is
+        // representable in the type. It must select nothing — and
+        // `parse_framework_manifest` rejects it, so it can never ship.
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "Cargo.toml");
+        let ungated = GatedAgent {
+            stem: "ungated-engineer".to_string(),
+            markers: Vec::new(),
+        };
+        assert!(
+            MarkerProbe::new(tmp.path()).detect(&[ungated]).is_empty(),
+            "an entry declaring no markers can never be selected"
+        );
     }
 }

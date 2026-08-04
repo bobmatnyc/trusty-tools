@@ -4,27 +4,45 @@
 # the same `HarnessManifest::from_toml` every other manifest layer uses
 # (`<project>/.trusty-mpm/manifest.toml`, `~/.trusty-mpm/manifest.toml`, the
 # catalog manifest). It differs only in tier: it is compiled into the binary and
-# declares the FRAMEWORK'S OWN agent catalog, which no project authors.
+# declares the FRAMEWORK'S OWN agent and skill catalogs, which no project authors.
 #
 # Owner ruling 2026-08-01: "extend manifest.toml, do NOT add a second file
-# format." Owner ruling 2026-08-04: the catalog declares FOUR deployment
-# categories.
+# format." Owner ruling 2026-08-04a: the catalog declares FOUR deployment
+# categories. Owner ruling 2026-08-04b: "authoritative agent/skill bundling
+# should be in framework-manifest.toml or project manifest.toml. That's it."
 #
 # ---------------------------------------------------------------------------
-# What this file decides
+# THIS FILE IS THE AUTHORITY
+# ---------------------------------------------------------------------------
+#
+# It answers three questions, and it is the only place any of them is answered:
+#
+#   1. WHICH agents and skills are bundled.
+#   2. WHETHER each one deploys to a given project (its category).
+#   3. WHAT CONDITION gates it (its `markers`).
+#
+# No bundled document restates any of that. `assets/skills/tm.md` and
+# `assets/instructions/sections/agent-delegation.md` POINT here; they used to
+# enumerate the roster in prose, which drifted silently — #4760 found `ops`
+# sitting "DEPRECATED" in prose while still reaching every roster.
+# `tm generate capabilities` renders the human-readable view of this file into
+# `assets/skills/tm-capabilities/references/agents.md`, mechanically.
+#
+# ---------------------------------------------------------------------------
+# Agent deployment categories
 # ---------------------------------------------------------------------------
 #
 #   universal  — deploy to every project, no detection.
-#   language   — deploy only when the project's LANGUAGE is detected.
-#   framework  — deploy only when the project's FRAMEWORK is detected.
-#   platform   — deploy only when the project's PLATFORM is detected.
+#   language   — deploy only when the entry's own `markers` show a LANGUAGE.
+#   framework  — deploy only when the entry's own `markers` show a FRAMEWORK.
+#   platform   — deploy only when the entry's own `markers` show a PLATFORM.
 #   deprecated — never deploy. Declared so the agent stays accounted for.
 #
 # Composition (see `core::manifest::framework::agent_scope_from`):
 #
 #   include = universal
-#           ∪ ((language ∪ framework) ∩ detected stacks)
-#           ∪ (platform ∩ detected platforms)
+#           u ((language u framework) n detected stacks)
+#           u (platform n detected platforms)
 #
 # with ONE zero-regression fallback: when NO stack marker at all is recognized
 # (unknown project type), every `language` and `framework` stem is included —
@@ -32,17 +50,34 @@
 # such fallback for `platform`: no platform marker means no platform agent.
 #
 # ---------------------------------------------------------------------------
+# Marker forms (evaluated by `core::manifest::project_lang::marker_present`)
+# ---------------------------------------------------------------------------
+#
+#   "path/to/file"   exact path — true when it exists.
+#   "*.ext"          extension glob over the direct children of the root.
+#   "path::needle"   CONTENT PROBE — true when `path` exists, is within the size
+#                    cap, is affordable under the shared probe budget, and
+#                    contains `needle` as a literal substring.
+#
+# Every marker is evaluated at the project root AND at every workspace member
+# the root manifest declares (npm/yarn/pnpm workspaces, Elixir umbrella
+# `apps_path`) — see `core::manifest::workspace`. All probing is bounded and
+# fails closed: an unreadable, oversized, or unaffordable marker reads as ABSENT,
+# never as an error.
+#
+# ---------------------------------------------------------------------------
 # Editing rules — all mechanically enforced, all LOUD on violation
 # ---------------------------------------------------------------------------
 #
 #   * Every bundled agent (every `agents/*.md` in `core::bundle::ALL` that is not
-#     a `BASE-*` foundation template) MUST appear in EXACTLY ONE list below.
-#     Omitting one is an error; listing one twice is an error.
-#   * Every stem in `language` / `framework` MUST have a marker row in
-#     `LANGUAGE_ENGINEERS` (`core::manifest::project_lang`).
-#   * Every stem in `platform` MUST have a marker row in `PLATFORM_AGENTS`.
-#   * `universal` MUST be non-empty — an empty catalog would silently deploy
-#     nothing.
+#     a `BASE-*` foundation template) MUST appear in EXACTLY ONE agent list
+#     below. Omitting one is an error; listing one twice is an error.
+#   * Every bundled skill (every top-level `skills/*.md` in `core::bundle::ALL`)
+#     MUST appear exactly once in `[skill_categories]`.
+#   * Every `language` / `framework` / `platform` entry MUST declare at least one
+#     marker — a gated entry with no condition could never deploy.
+#   * `universal` MUST be non-empty in both sections — an empty catalog would
+#     silently deploy nothing.
 #
 # Deprecating an agent is an edit to THIS FILE: move its stem into `deprecated`.
 # The deploy filter then never selects it. (It does not retract an already-
@@ -75,47 +110,6 @@ universal = [
   "web-ui-engineer",
 ]
 
-# --- language: gated on a detected LANGUAGE ----------------------------------
-language = [
-  "dart-engineer",
-  "dotnet-engineer",
-  "elixir-engineer",
-  "golang-engineer",
-  "java-engineer",
-  "javascript-engineer",
-  "php-engineer",
-  "python-engineer",
-  "ruby-engineer",
-  "rust-engineer",
-  "typescript-engineer",
-]
-
-# --- framework: gated on a detected FRAMEWORK --------------------------------
-#
-# These gate on FRAMEWORK evidence, not language evidence. React and Phoenix
-# ship no config file that distinguishes them, so they gate on a bounded content
-# probe of the project's own dependency declaration (`package.json::"react"`,
-# `mix.exs::{:phoenix,`) — see `project_lang.rs::marker_present`. Markers are
-# evaluated at the project root AND at every workspace member the root manifest
-# declares, so a monorepo that keeps its framework one directory down still
-# matches (`workspace.rs`).
-framework = [
-  "nextjs-engineer",
-  "phoenix-engineer",
-  "react-engineer",
-  "svelte-engineer",
-  "tauri-engineer",
-]
-
-# --- platform: gated on a detected PLATFORM ----------------------------------
-#
-# These deployed to EVERY project before this file existed. They now deploy only
-# where a platform marker is present. That is an intended behavior change.
-platform = [
-  "gcp-ops",
-  "vercel-ops",
-]
-
 # --- deprecated: never deployed ----------------------------------------------
 #
 # Currently EMPTY, and that is the correct state — not a leftover.
@@ -133,3 +127,188 @@ platform = [
 # synthetic catalog, which is a stronger test than one riding on whichever agent
 # happens to be retired today.
 deprecated = []
+
+# --- language: gated on a detected LANGUAGE ----------------------------------
+
+[[agent_categories.language]]
+stem = "dart-engineer"
+markers = ["pubspec.yaml"]
+
+[[agent_categories.language]]
+stem = "dotnet-engineer"
+# C#/.NET and legacy VB.NET: project/solution files are extension globs;
+# `global.json` and `Directory.Build.props` are exact filenames.
+markers = ["*.sln", "*.csproj", "*.vbproj", "global.json", "Directory.Build.props"]
+
+[[agent_categories.language]]
+stem = "elixir-engineer"
+# `mix.exs` is the Elixir project manifest — every Mix project has one. Before
+# #4760 this marker selected `phoenix-engineer`, which meant a plain Elixir
+# project got a Phoenix specialist and nothing else.
+markers = ["mix.exs"]
+
+[[agent_categories.language]]
+stem = "golang-engineer"
+markers = ["go.mod"]
+
+[[agent_categories.language]]
+stem = "java-engineer"
+markers = ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle"]
+
+[[agent_categories.language]]
+stem = "javascript-engineer"
+markers = ["package.json"]
+
+[[agent_categories.language]]
+stem = "php-engineer"
+markers = ["composer.json"]
+
+[[agent_categories.language]]
+stem = "python-engineer"
+markers = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"]
+
+[[agent_categories.language]]
+stem = "ruby-engineer"
+markers = ["Gemfile", "Gemfile.lock", ".ruby-version"]
+
+[[agent_categories.language]]
+stem = "rust-engineer"
+markers = ["Cargo.toml"]
+
+[[agent_categories.language]]
+stem = "typescript-engineer"
+markers = ["tsconfig.json", "package.json"]
+
+# --- framework: gated on a detected FRAMEWORK --------------------------------
+#
+# These gate on FRAMEWORK evidence, not language evidence. React and Phoenix
+# ship no config file that distinguishes them, so they gate on a bounded content
+# probe of the project's own dependency declaration. Every needle carries its
+# surrounding syntax, so a substring match is an exact declaration match.
+
+[[agent_categories.framework]]
+stem = "nextjs-engineer"
+# `next.config.*` is OPTIONAL in Next.js, so the dependency declaration backstops
+# it. `"next"` does not match `"next-auth"` or `"next-themes"`.
+markers = [
+  "next.config.js",
+  "next.config.mjs",
+  "next.config.ts",
+  "package.json::\"next\"",
+]
+
+[[agent_categories.framework]]
+stem = "phoenix-engineer"
+# #4760: narrowed from the bare `mix.exs` Elixir marker. Phoenix has no config
+# file of its own that plain Elixir lacks, so the only reliable signal is the
+# dependency declaration itself. `{:phoenix,` is the canonical `mix format`
+# spelling of the dep tuple and does not match `{:phoenix_live_view,`.
+markers = ["mix.exs::{:phoenix,"]
+
+[[agent_categories.framework]]
+stem = "react-engineer"
+# #4760: narrowed from a bare `package.json`, which selected React for every
+# JavaScript project. React ships no config file of its own. The quotes make it
+# an exact key match: `"react"` does not match `"react-dom"`, `"react-native"`,
+# or `"@types/react"`.
+markers = ["package.json::\"react\""]
+
+[[agent_categories.framework]]
+stem = "svelte-engineer"
+# `svelte.config.*` is present in every SvelteKit app and most plain Svelte ones;
+# the dep declaration backstops the rest. `"svelte"` does not match
+# `"svelte-check"` or `"@sveltejs/kit"`.
+markers = ["svelte.config.js", "svelte.config.ts", "package.json::\"svelte\""]
+
+[[agent_categories.framework]]
+stem = "tauri-engineer"
+markers = ["src-tauri/tauri.conf.json", "tauri.conf.json"]
+
+# --- platform: gated on a detected PLATFORM ----------------------------------
+#
+# These deployed to EVERY project before this file existed. They now deploy only
+# where a platform marker is present. That is an intended behavior change. The
+# marker sets are deliberately narrow — each entry is a file the platform's own
+# tooling creates or requires, not an inferred heuristic — because a false
+# positive puts an irrelevant agent in every roster, which is the exact noise
+# #1941 built scoping to remove.
+
+[[agent_categories.platform]]
+stem = "gcp-ops"
+# `app.yaml` (App Engine), `cloudbuild.yaml`/`.yml` (Cloud Build), and
+# `.gcloudignore` (every `gcloud` deploy) are created by GCP tooling.
+markers = ["app.yaml", "cloudbuild.yaml", "cloudbuild.yml", ".gcloudignore"]
+
+[[agent_categories.platform]]
+stem = "vercel-ops"
+# `vercel.json` is the project config; `.vercel/project.json` is written by
+# `vercel link`; `.vercelignore` by the deploy flow.
+markers = ["vercel.json", ".vercelignore", ".vercel/project.json"]
+
+# =============================================================================
+# Skills
+# =============================================================================
+#
+# Every bundled skill deploys to every project — skills have exactly ONE deploy
+# rule today, so `universal` is the only list. That is a declaration, not an
+# omission: when a skill first needs a marker gate, it gets gated entries of the
+# same shape the agent categories use above.
+#
+# This list is the authority for WHICH skills are bundled. `tm.md` used to carry
+# a hand-maintained `/tm-*` roll-call; it now points here.
+
+[skill_categories]
+universal = [
+  "api-design-patterns",
+  "api-documentation",
+  "artifacts-builder",
+  "brainstorming",
+  "code-production-process",
+  "code-review-standards",
+  "condition-based-waiting",
+  "contract-driven-testing",
+  "database-migration",
+  "documentation-style",
+  "env-manager",
+  "git-workflow",
+  "internal-comms",
+  "json-data-handling",
+  "model-context-builder",
+  "requesting-code-review",
+  "root-cause-tracing",
+  "rust-build-performance",
+  "security-scanning",
+  "software-patterns",
+  "systematic-debugging",
+  "test-driven-development",
+  "test-quality-inspector",
+  "testing-anti-patterns",
+  "tm",
+  "tm-adr",
+  "tm-agent-architecture",
+  "tm-bug-reporting",
+  "tm-capabilities",
+  "tm-circuit-breaker",
+  "tm-cli-operations",
+  "tm-delegation-patterns",
+  "tm-doctor",
+  "tm-git-file-tracking",
+  "tm-init",
+  "tm-issues-prune",
+  "tm-postmortem",
+  "tm-pr-workflow",
+  "tm-session-management",
+  "tm-session-pause",
+  "tm-session-resume",
+  "tm-slack",
+  "tm-teaching-templates",
+  "tm-ticketing",
+  "tm-tool-usage-guide",
+  "tm-verification-protocols",
+  "tm-workflow",
+  "verification-before-completion",
+  "web-performance-optimization",
+  "webapp-testing",
+  "writing-plans",
+  "xlsx",
+]
