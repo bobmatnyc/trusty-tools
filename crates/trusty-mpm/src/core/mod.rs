@@ -68,6 +68,7 @@ pub mod frontmatter;
 pub mod gh_account;
 pub mod gh_identity;
 pub mod git_identity;
+pub mod harness_root;
 pub mod home_trust_seed;
 pub mod hook;
 pub mod idle_nudge;

@@ -4,27 +4,31 @@
 //! framework instructions and the dynamic delegation routing context; doing
 //! that merge ad-hoc at each launch site invites drift in ordering and
 //! content.
-//! What: [`build_instructions`] loads `INSTRUCTIONS.md`, generates the
-//! delegation authority section from the deployed agents, and concatenates
-//! the two sections in the fixed order 3 → 4 (framework → delegation). It
-//! also seeds a project `CLAUDE.md` stub as a side effect (so a fresh
-//! workspace always has a place for project notes), but — as of the #382 fix
-//! — that project-notes content was never actually part of the text
-//! delivered to `claude --append-system-prompt-file` (the real launch prompt
-//! comes from [`crate::core::instruction_overrides::resolve_pm_prompt`] /
-//! [`crate::core::session_launch::build_system_prompt_for`], neither of which
-//! reads `PipelineOutput::merged`). Concatenating `CLAUDE.md` into `merged`
-//! was therefore dead code that only risked a FUTURE accidental re-wiring of
-//! a duplicate prompt payload (Claude Code already memory-loads `CLAUDE.md`
-//! natively); it has been removed so `merged` cannot silently regrow that
-//! duplication.
-//! Test: `cargo test -p trusty-mpm-core instruction_pipeline` covers the
-//! merge, a missing `INSTRUCTIONS.md`, and stub creation.
+//! What: [`build_instructions`] resolves the project's agent roster, seeds a
+//! project `CLAUDE.md` stub when absent, and reports what it found;
+//! [`compiled_prompt_path`] resolves where a session's compiled prompt lands and
+//! [`write_compiled_prompt_to`] is the one writer of it.
+//!
+//! #4832 removed this pipeline's last text output. `build_instructions` used to
+//! read `<framework_root>/instructions/INSTRUCTIONS.md` and concatenate it with
+//! the delegation-authority section into `PipelineOutput::merged` — a field with
+//! zero call sites, because the real launch prompt comes from
+//! [`crate::core::instruction_overrides::resolve_pm_prompt`] /
+//! [`crate::core::session_launch::build_system_prompt_for`]. #4752 had already
+//! retired the file: nothing writes it, and `tm install` deletes a stale copy.
+//! What survived was a read whose content was never used but whose failure —
+//! anything other than `NotFound`: a permissions error, a directory at that
+//! path, invalid UTF-8 — became `PrepError::Instructions`, the one variant
+//! `is_fatal()` returns true for. It could only ever kill a session over unread
+//! bytes, so the read, the field, and the merge helper are gone. The fatal gate
+//! on the compiled-prompt WRITE is deliberate (#4752) and stays.
+//! Test: `cargo test -p trusty-mpm instruction_pipeline` covers roster
+//! resolution, stub creation, and compiled-prompt path/write behaviour.
 
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::core::delegation_authority::{generate_authority, resolve_roster};
+use crate::core::delegation_authority::resolve_roster;
 use crate::core::instruction_package::SectionId;
 
 /// Separator placed between merged instruction sections.
@@ -292,36 +296,35 @@ pub fn assemble_system_prompt() -> String {
 /// and with the pipeline's own input file, so the on-disk answer to "what
 /// instructions is my session running?" depended on which writer ran last —
 /// the regression #383 already fixed once and #4752 closes structurally.
-/// What: `INSTRUCTIONS-COMPILED.md`, resolved per PROJECT by
+/// What: `INSTRUCTIONS-COMPILED.md`, resolved per SESSION by
 /// [`compiled_prompt_path`] — never under the global framework root.
 /// Test: `compiled_prompt_path_is_project_local`,
 /// `compiled_prompt_path_is_not_the_bundled_instructions_path`.
 pub const COMPILED_PROMPT_FILE: &str = "INSTRUCTIONS-COMPILED.md";
 
-/// Resolve a project's compiled-prompt path.
+/// Resolve a session's compiled-prompt path.
 ///
-/// Why (#4752, owner ruling 2026-08-04): the compiled prompt is the text ONE
-/// project's session runs with, so it belongs to that project. A single global
-/// file could not answer "what is MY session running" — `FrameworkPaths`
-/// deliberately keeps `framework` at the shared managed root
-/// (`for_managed_project_keeps_framework_source_at_managed_root`) and
-/// `for_managed_workspace` resolves it from the real `$HOME`, so concurrent
-/// sessions across projects overwrote each other. Project-local scoping removes
-/// that collision by construction rather than by slug disambiguation — there is
-/// no shared root to race on and no slug to collide.
+/// Why (#4752, then #4832): the compiled prompt answers "what instructions is
+/// MY session running", so it is per-SESSION output, not per-project config.
+/// #4752 moved it off the shared `~/.trusty-mpm/framework/` file, where every
+/// project overwrote every other; #4832 finishes the job on both remaining
+/// axes. Project-scoping still let two concurrent sessions in one project
+/// overwrite each other, so the file now sits under `sessions/<id>/`. And the
+/// project directory a caller hands in is frequently a WORKTREE — resolving
+/// against it gave one project a `.trusty-mpm/` per branch, which the owner
+/// ruled out (a worktree carries code, config and docs; harness state belongs
+/// to the project). [`crate::core::harness_root::session_dir`] resolves both.
 ///
 /// This is why the accessor does NOT live on `FrameworkPaths`: that type models
-/// the global framework INSTALL layout, and this file is per-project session
-/// state. It sits beside `last-instructions.md` and `sessions/`, in the
-/// `.trusty-mpm/` directory `tm` already writes on every launch.
-/// What: `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`.
+/// the global framework INSTALL layout, and this file is per-session state.
+/// What: `<harness-root>/.trusty-mpm/sessions/<session_id>/INSTRUCTIONS-COMPILED.md`,
+/// where the harness root is the checkout that owns `project_dir` — the main
+/// checkout, never a worktree of it.
 /// Test: `compiled_prompt_path_is_project_local`,
-/// `compiled_prompt_path_is_beside_the_session_stash`.
-pub fn compiled_prompt_path(project_dir: &std::path::Path) -> std::path::PathBuf {
-    project_dir
-        .join(".trusty-mpm")
-        .join("framework")
-        .join(COMPILED_PROMPT_FILE)
+/// `compiled_prompt_path_is_per_session`,
+/// `compiled_prompt_path_never_lands_inside_a_worktree`.
+pub fn compiled_prompt_path(project_dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+    crate::core::harness_root::session_dir(project_dir, session_id).join(COMPILED_PROMPT_FILE)
 }
 
 /// The operator-facing explanation for a failed instruction write.
@@ -392,16 +395,55 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
 /// [`instructions_failure_message`] — callers refuse the launch with it.
 /// Test: `refresh_compiled_prompt_writes_the_project_local_file`,
 /// `refresh_compiled_prompt_reports_an_actionable_failure`.
-pub fn refresh_compiled_prompt(project_dir: &std::path::Path) -> Result<(), String> {
+pub fn refresh_compiled_prompt(
+    project_dir: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
         project_dir,
         None,
         native,
     );
-    let dest = compiled_prompt_path(project_dir);
+    let dest = compiled_prompt_path(project_dir, session_id);
     write_compiled_prompt_to(&dest, &prompt)
         .map_err(|source| instructions_failure_message(&dest, &source))
+}
+
+/// Delete a pre-#4832 per-project compiled prompt and its `framework/` dir.
+///
+/// Why: #4832 moved the compiled prompt from
+/// `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` to
+/// `<harness-root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`. An
+/// upgraded install keeps the old file forever with no writer left to refresh
+/// it, and it is the file an operator inspects to answer "what is my session
+/// running" — a stale answer there is worse than no answer. Every worktree of
+/// an upgraded project also holds one, since the old path resolved against the
+/// worktree. Nothing but tm ever wrote it, so removing it takes nothing from
+/// the operator. `manifest.toml` — the one operator-authored file that now
+/// lives in `framework/` — is deliberately NOT touched: the directory is only
+/// removed when it is empty.
+/// What: removes `<project_dir>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`
+/// if present, then removes the now-possibly-empty `framework/` directory
+/// (ignoring the not-empty error). Returns whether a file was removed. Resolves
+/// against `project_dir` VERBATIM, not the harness root: the point is to clean
+/// the worktree-local copies the old path created.
+/// Test: `migrate_removes_a_legacy_compiled_prompt`,
+/// `migrate_keeps_a_sibling_manifest`,
+/// `migrate_is_a_noop_when_absent`.
+pub fn remove_legacy_compiled_prompt(project_dir: &std::path::Path) -> std::io::Result<bool> {
+    let framework = project_dir
+        .join(crate::core::harness_root::HARNESS_DIR)
+        .join(crate::core::harness_root::FRAMEWORK_DIR);
+    let removed = match std::fs::remove_file(framework.join(COMPILED_PROMPT_FILE)) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(err),
+    };
+    // Best-effort: `remove_dir` refuses a non-empty directory, which is exactly
+    // the guard that preserves a sibling `manifest.toml`.
+    let _ = std::fs::remove_dir(&framework);
+    Ok(removed)
 }
 
 /// Delete a stale `instructions/INSTRUCTIONS.md` left by a pre-#4752 install.
@@ -570,15 +612,13 @@ pub fn strip_delegation_block(content: &str) -> String {
 
 /// Inputs to the instruction merge pipeline.
 ///
-/// Why: bundles the three source locations so callers pass one value instead
-/// of three loosely-related paths.
-/// What: the framework `INSTRUCTIONS.md`, the project the roster is resolved
-/// for, and the project `CLAUDE.md`.
+/// Why: bundles the source locations so callers pass one value instead of
+/// several loosely-related paths.
+/// What: the project the roster is resolved for, and the project `CLAUDE.md`.
+/// #4832 removed `framework_instructions_path` with the read that consumed it.
 /// Test: every `pipeline_*` test constructs one of these.
 #[derive(Debug, Clone)]
 pub struct PipelineInput {
-    /// Path to the framework `INSTRUCTIONS.md`.
-    pub framework_instructions_path: PathBuf,
     /// The project whose agent roster this session will receive.
     ///
     /// #4588: this replaced a single `agents_dir`. Callers used to name one
@@ -594,23 +634,13 @@ pub struct PipelineInput {
 
 /// Result of a successful instruction merge.
 ///
-/// Why: callers need both the composed text and a few flags describing what
-/// happened (was a stub created? was `INSTRUCTIONS.md` present?) so they can
-/// report it to the operator.
-/// What: the merged instruction text plus per-source status flags.
+/// Why: callers need the flags describing what happened (how many agents will
+/// the PM get? was a stub created?) so they can report it to the operator.
+/// What: per-source status flags. #4832 removed the `merged` text field with
+/// the dead read that produced it — see the module docs.
 /// Test: asserted by every `pipeline_*` test.
 #[derive(Debug, Clone)]
 pub struct PipelineOutput {
-    /// The composed framework + delegation-authority instruction text.
-    ///
-    /// Deliberately excludes the project `CLAUDE.md` body (removed as dead
-    /// code — see the module docs): Claude Code loads `CLAUDE.md` natively,
-    /// and the actual launch prompt is built by
-    /// [`crate::core::instruction_overrides::resolve_pm_prompt`], not this
-    /// field.
-    pub merged: String,
-    /// False if `INSTRUCTIONS.md` was missing (treated as an empty section).
-    pub instructions_loaded: bool,
     /// How many delegatable agents were found.
     pub agent_count: usize,
     /// True if the `CLAUDE.md` stub was created during this run.
@@ -658,54 +688,35 @@ impl std::error::Error for PipelineError {
 /// routing context. It also needs the project `CLAUDE.md` to exist (Claude
 /// Code loads it natively), so this still seeds the stub as a side effect.
 ///
-/// What: loads INSTRUCTIONS.md (falls back to empty string if missing),
-/// generates delegation authority from the roster
-/// [`crate::core::delegation_authority::resolve_roster`] resolves for
-/// `project_dir`, concatenates the two in order 3→4, and returns the merged
-/// string. Separately ensures the project `CLAUDE.md` exists (creating the stub
-/// if absent) purely for its side effect — its content is intentionally NOT
-/// folded into `merged` (dead code removed; see module docs).
+/// What: resolves the project's agent roster via
+/// [`crate::core::delegation_authority::resolve_roster`] for its count, and
+/// ensures the project `CLAUDE.md` exists (creating the stub if absent) purely
+/// for its side effect.
 ///
-/// Test: `pipeline_full`, `pipeline_missing_instructions`,
-/// `pipeline_creates_claude_md`,
+/// #4832: this no longer reads `<framework_root>/instructions/INSTRUCTIONS.md`.
+/// Nothing has written that file since #4752, its content fed only the unread
+/// `PipelineOutput::merged`, and any read error other than `NotFound` became
+/// the one fatal `PrepError` variant — a session refused over bytes nobody
+/// used. See the module docs.
+///
+/// Test: `pipeline_full`, `pipeline_creates_claude_md`,
+/// `pipeline_does_not_read_the_retired_framework_instructions`,
 /// `session_start_count_matches_the_delivered_delegation_roster`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
-    // Section 3: framework instructions. A missing file is not fatal — the
-    // session can still launch with delegation context.
-    let (framework, instructions_loaded) =
-        match std::fs::read_to_string(&input.framework_instructions_path) {
-            Ok(text) => (text, true),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
-            Err(err) => {
-                return Err(PipelineError::Io {
-                    path: input.framework_instructions_path.clone(),
-                    source: err,
-                });
-            }
-        };
-
-    // Section 4: delegation authority, built fresh from the deployed agents.
     // #4588: resolved by `resolve_roster` — the SAME function that renders the
     // delegation section delivered to the PM — so `agent_count`, which
     // `tm session start` prints verbatim, cannot describe a different set of
     // agents than the PM received.
-    let agents = resolve_roster(&input.project_dir);
-    let agent_count = agents.len();
-    let authority = generate_authority(&agents);
+    let agent_count = resolve_roster(&input.project_dir).len();
 
     // Side effect only: ensure the project CLAUDE.md stub exists so a fresh
-    // workspace always has a place for project notes. The content is
-    // deliberately discarded here rather than folded into `merged` — Claude
-    // Code already memory-loads `CLAUDE.md` natively, and the real launch
-    // prompt is built by `resolve_pm_prompt`/`build_system_prompt_for`, not
-    // this pipeline's `merged` output.
+    // workspace always has a place for project notes. Claude Code memory-loads
+    // `CLAUDE.md` natively and the real launch prompt is built by
+    // `resolve_pm_prompt`/`build_system_prompt_for`, so the content is read
+    // back only to report whether this call created it.
     let (_claude_md, claude_md_created) = load_or_create_claude_md(&input.claude_md_path)?;
 
-    let merged = merge_sections(&framework, &authority);
-
     Ok(PipelineOutput {
-        merged,
-        instructions_loaded,
         agent_count,
         claude_md_created,
     })
@@ -748,28 +759,9 @@ fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineEr
     }
 }
 
-/// Concatenate the two instruction sections in the fixed 3 → 4 order.
-///
-/// Why: the merge order is part of the framework contract; isolating it keeps
-/// the ordering rule in one auditable place. A third "project CLAUDE.md"
-/// section previously existed here (dead code removed — see module docs):
-/// Claude Code loads `CLAUDE.md` natively and the real launch prompt never
-/// read this function's output for that content.
-/// What: joins framework and delegation authority with a `---` rule, skipping
-/// empty sections so a missing `INSTRUCTIONS.md` does not leave a dangling
-/// separator.
-/// Test: `pipeline_full`, `pipeline_missing_instructions`.
-fn merge_sections(framework: &str, authority: &str) -> String {
-    let sections: Vec<&str> = [framework.trim(), authority.trim()]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect();
-    let mut merged = sections.join(SECTION_SEPARATOR);
-    if !merged.is_empty() {
-        merged.push('\n');
-    }
-    merged
-}
+// #4832: `merge_sections` lived here. It joined the framework `INSTRUCTIONS.md`
+// text with the delegation-authority section into `PipelineOutput::merged`,
+// which had zero call sites — both the field and its only producer are gone.
 
 #[cfg(test)]
 #[path = "instruction_pipeline_tests.rs"]

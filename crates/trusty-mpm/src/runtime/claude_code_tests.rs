@@ -891,7 +891,7 @@ fn build_prompt_file_writes_resolved_prompt_for_project() {
     // developer's real `~/.trusty-mpm` (the #2459/#2460/#2461 hazard class).
     let _home = HomeGuard::set();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = build_prompt_file(tmp.path()).expect("prompt file written");
+    let path = build_prompt_file(tmp.path(), Some("sess-1")).expect("prompt file written");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
         content.contains("# PM Agent -- Trusty MPM"),
@@ -916,12 +916,12 @@ fn build_prompt_file_refreshes_the_compiled_prompt() {
     // text the session runs with.
     let _home = HomeGuard::set();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path());
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path(), "sess-1");
     std::fs::create_dir_all(compiled.parent().unwrap()).expect("create framework dir");
     const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
     std::fs::write(&compiled, STALE).expect("seed stale compiled prompt");
 
-    let path = build_prompt_file(tmp.path()).expect("prompt file written");
+    let path = build_prompt_file(tmp.path(), Some("sess-1")).expect("prompt file written");
 
     let on_disk = std::fs::read_to_string(&compiled).expect("compiled prompt readable");
     assert_ne!(
@@ -952,11 +952,11 @@ fn build_prompt_file_compiled_write_failure_does_not_block_the_spawn() {
     // real PM prompt.
     let _home = HomeGuard::set();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path());
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(tmp.path(), "sess-1");
     std::fs::create_dir_all(&compiled).expect("plant a directory at the compiled path");
 
-    let path =
-        build_prompt_file(tmp.path()).expect("spawn must still get its prompt file (non-fatal)");
+    let path = build_prompt_file(tmp.path(), Some("sess-1"))
+        .expect("spawn must still get its prompt file (non-fatal)");
     let content = std::fs::read_to_string(&path).expect("prompt file readable");
     assert!(
         content.contains("# PM Agent -- Trusty MPM"),

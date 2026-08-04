@@ -163,7 +163,8 @@ fn validate_filtered_but_manifest_matching_workspace_has_no_gaps() {
     seed_agent_source(&fw, &["engineer", "rust-engineer"]);
     seed_skill_source(&fw, &["tm-doctor"]);
 
-    let manifest_dir = workspace.join(".trusty-mpm");
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let manifest_dir = workspace.join(".trusty-mpm").join("framework");
     std::fs::create_dir_all(&manifest_dir).unwrap();
     std::fs::write(
         manifest_dir.join("manifest.toml"),

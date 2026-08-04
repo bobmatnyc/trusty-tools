@@ -465,7 +465,33 @@ pub fn prepare_session_with_repo_url(
     repo_url: Option<&str>,
 ) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
-    prepare_session_inner(fw, project_dir, None, native, repo_url)
+    prepare_session_inner(fw, project_dir, None, native, repo_url, None)
+}
+
+/// Prepare a session whose managed id is already known (#4832).
+///
+/// Why: the compiled prompt is now per-SESSION
+/// (`.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`), and the two callers
+/// that provision a managed session — `WorkspaceProvisioner::provision_in` and
+/// the daemon's in-project `prepare_inproject_session` — hold that id before
+/// they call here. Without it, preparation would write into the unmanaged
+/// `local` bucket while the spawn (which does know the id) refreshed the real
+/// per-session file, leaving a stale copy no writer ever updates again — the
+/// exact defect shape #4832 removes.
+/// What: [`prepare_session_with_repo_url`] with the managed session id threaded
+/// down to [`crate::core::harness_root::session_scope`]. Callers with no
+/// session identity keep using the id-less entry points, which resolve the
+/// scope from `TM_MANAGED_SESSION_ID` or fall back to
+/// [`crate::core::harness_root::UNMANAGED_SESSION_SCOPE`].
+/// Test: `prepare_session_for_managed_writes_the_per_session_compiled_prompt`.
+pub fn prepare_session_for_managed(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    repo_url: Option<&str>,
+    session_id: &str,
+) -> Result<PrepReport, PrepError> {
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    prepare_session_inner(fw, project_dir, None, native, repo_url, Some(session_id))
 }
 
 /// The deploy layout for a session whose harness is spawned with
@@ -595,7 +621,14 @@ pub fn prepare_session_with_style_and_native(
     explicit_style: Option<&str>,
     native_supported: bool,
 ) -> Result<PrepReport, PrepError> {
-    prepare_session_inner(fw, project_dir, explicit_style, native_supported, None)
+    prepare_session_inner(
+        fw,
+        project_dir,
+        explicit_style,
+        native_supported,
+        None,
+        None,
+    )
 }
 
 /// Shared body for every `prepare_session*` entry point.
@@ -627,6 +660,7 @@ fn prepare_session_inner(
     explicit_style: Option<&str>,
     native_supported: bool,
     repo_url: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<PrepReport, PrepError> {
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
@@ -649,7 +683,7 @@ fn prepare_session_inner(
     // `[manifest]` config / `TRUSTY_MPM_CATALOG_*` env catalog-source overrides.
     let catalog_root = crate::content::catalog_root_for(&fw.root);
     let manifest_sources =
-        crate::core::manifest::ManifestSources::resolve(project_dir, &fw.root, &catalog_root);
+        crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&manifest_sources);
     let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
 
@@ -858,7 +892,6 @@ fn prepare_session_inner(
         crate::core::provisioning_stage::ProvisioningStage::BuildingInstructions,
     );
     let input = PipelineInput {
-        framework_instructions_path: fw.framework_instructions_path(),
         // #4588: the roster is resolved from the project by the one shared
         // resolver (project tier + the tm-managed `CLAUDE_CONFIG_DIR` tier
         // #4409 deploys into + the operator's generic `~/.claude/agents`), so
@@ -924,7 +957,9 @@ fn prepare_session_inner(
     // launch. What matters is that it cannot take the fatal write down with it.
     // See the ordering contract on `prepare_session`.
     // Test: `stash_write_failure_does_not_skip_the_fatal_instruction_write`.
-    let stash_dir = project_dir.join(".trusty-mpm");
+    // #4832: the harness ROOT, not `project_dir` — a worktree must never grow
+    // its own `.trusty-mpm/`.
+    let stash_dir = crate::core::harness_root::harness_dir(project_dir);
     let stash = stash_dir.join("last-instructions.md");
     match std::fs::create_dir_all(&stash_dir)
         .and_then(|()| std::fs::write(&stash, &resolved_prompt))
@@ -1253,7 +1288,31 @@ fn prepare_session_inner(
     // half-provisioned workspace: everything the session needs is already on
     // disk by the time this can fail. Nothing below this line may depend on the
     // write succeeding — keep it last.
-    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir);
+    // #4832 migration, best-effort: retire the pre-#4832 per-project compiled
+    // prompt so an upgraded install is not left with a file nothing refreshes.
+    // Run against BOTH the directory handed in (which is the worktree on a
+    // managed session — every worktree of an upgraded project holds one) and
+    // the harness root. A failure here is logged, never fatal: the migration is
+    // housekeeping and must not cost anyone a launch.
+    for legacy_base in [
+        project_dir,
+        &crate::core::harness_root::harness_root(project_dir),
+    ] {
+        match crate::core::instruction_pipeline::remove_legacy_compiled_prompt(legacy_base) {
+            Ok(true) => tracing::info!(
+                base = %legacy_base.display(),
+                "removed the pre-#4832 per-project compiled prompt"
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                base = %legacy_base.display(),
+                "could not remove the pre-#4832 compiled prompt (non-fatal): {e}"
+            ),
+        }
+    }
+
+    let scope = crate::core::harness_root::session_scope(session_id);
+    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
     crate::core::instruction_pipeline::write_compiled_prompt_to(&compiled, &resolved_prompt)
         .map_err(|source| PrepError::Instructions {
             path: compiled.clone(),

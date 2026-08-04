@@ -103,7 +103,7 @@ pub fn session_plan(record: &SessionRecord) -> (FrameworkPaths, HarnessPlan) {
     let workdir = session_workdir(record);
     let fw = FrameworkPaths::for_managed_workspace(workdir);
     let catalog_root = crate::content::catalog_root_for(&fw.root);
-    let sources = crate::core::manifest::ManifestSources::resolve(workdir, &fw.root, &catalog_root);
+    let sources = crate::core::manifest::ManifestSources::resolve(workdir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = HarnessPlan::from_manifest(&manifest, &fw, &catalog_root);
     (fw, plan)
