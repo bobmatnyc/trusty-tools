@@ -142,18 +142,22 @@ pub struct CollectionRow {
     pub kg_count: u64,
     /// Drawer count for memory palaces (zero for search collections).
     ///
-    /// Why: the INDEX tab on memory focus surfaces drawer + wing counts as
+    /// Why: the INDEX tab on memory focus surfaces drawer + room counts as
     /// part of the palace's graph/storage stats; centralising the read on the
     /// row keeps the renderer pure.
     /// What: the `drawer_count` field from `GET /api/v1/palaces`.
     /// Test: `project_palace_rows_reads_palaces`.
     pub drawer_count: u64,
-    /// Wing count for memory palaces (zero for search collections).
+    /// Room count for memory palaces (zero for search collections).
     ///
-    /// Why: distinct rooms across drawers — surfaced in the INDEX detail panel.
-    /// What: the `wing_count` field from `GET /api/v1/palaces`.
+    /// Why (#4811): this panel rendered "Wings: N" from a field that has always
+    /// carried a ROOM count — see ADR-0027 C3.4. It now reads the truthful
+    /// `room_count` the daemon added in ADR-0027 T8.
+    /// What: the `room_count` field from `GET /api/v1/palaces`, falling back to
+    /// the legacy `wing_count` when talking to an older daemon (where that
+    /// field held exactly this number).
     /// Test: `project_palace_rows_reads_palaces`.
-    pub wing_count: u64,
+    pub room_count: u64,
     /// RFC 3339 timestamp of the most recent palace write, if any.
     ///
     /// Why: drives the per-palace activity indicator (idle / active / indexing)

@@ -25,6 +25,7 @@ pub mod monitor;
 pub mod note;
 pub mod port;
 pub mod prompt_context;
+pub mod rooms;
 pub mod send_message;
 pub mod serve_stdio_bridge;
 pub mod service;
