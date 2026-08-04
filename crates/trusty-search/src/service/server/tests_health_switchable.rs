@@ -135,3 +135,57 @@ async fn health_reports_embedder_bootstrap_state() {
         );
     }
 }
+
+/// Why (#4125): a permanent embedder capability downgrade reached NO field a
+/// monitor gates on. `embedder_bootstrap: "failed"` (the graceful python
+/// bootstrap gave up for this daemon's lifetime) and `"fell_back_to_ort"` (the
+/// swap-back watchdog abandoned a dead python/MPS sidecar) both sat next to
+/// `status: "ok"` forever, so a silent MPS -> CPU regression was
+/// indistinguishable from a healthy daemon. `embedder: "ready"` is not the
+/// misreport — it describes the currently-active backend, which really is
+/// ready; nothing aggregated "we did not get the backend we asked for".
+/// What: drives every `BootstrapState` through `/health` and asserts the exact
+/// degraded/ok partition — the two terminal downgrades degrade, while
+/// `Bootstrapping` (transient, every Apple-Silicon boot passes through it),
+/// `Ready`, and `NotApplicable` stay `"ok"`. Against the pre-fix aggregation
+/// the first two assertions fail; the last three pin the fix against
+/// over-flagging. A daemon with no switchable handle installed yet is checked
+/// too, since that path reports `"n/a"` through a different branch.
+/// Test: this test.
+#[tokio::test]
+async fn health_is_degraded_when_the_embedder_backend_permanently_downgraded() {
+    for (bootstrap, expected_status) in [
+        (BootstrapState::Failed, "degraded"),
+        (BootstrapState::FellBackToOrt, "degraded"),
+        (BootstrapState::Bootstrapping, "ok"),
+        (BootstrapState::Ready, "ok"),
+        (BootstrapState::NotApplicable, "ok"),
+    ] {
+        let state = SearchAppState::new(IndexRegistry::new());
+        let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
+        let active = ActiveBackend {
+            kind: BackendKind::Ort,
+            provider: trusty_common::embedder::ExecutionProvider::Cpu,
+            model: "all-MiniLM-L6-v2".to_string(),
+            quantized: false,
+            bootstrap,
+        };
+        let switchable = Arc::new(SwitchableEmbedder::new(inner, active));
+        state.install_switchable_embedder(Arc::clone(&switchable));
+
+        let state_arc = Arc::new(state);
+        let Json(resp) = health_handler(State(state_arc)).await;
+        assert_eq!(
+            resp.status, expected_status,
+            "BootstrapState::{bootstrap:?} must drive status {expected_status:?}, \
+             got {:?} (embedder_bootstrap={:?})",
+            resp.status, resp.embedder_bootstrap
+        );
+    }
+
+    // No switchable handle installed at all — the `"n/a"` branch must stay ok.
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let Json(resp) = health_handler(State(state)).await;
+    assert_eq!(resp.embedder_bootstrap, "n/a");
+    assert_eq!(resp.status, "ok");
+}
