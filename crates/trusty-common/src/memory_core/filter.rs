@@ -412,9 +412,9 @@ fn mask_git_shas(s: &str) -> String {
         .join(" ")
 }
 
-/// Scan `content` for the first whitespace token that looks like a genuine
-/// high-entropy secret (API key, access token, long base64/JWT-ish blob),
-/// explicitly allowlisting git-SHA-shaped hex tokens.
+/// Scan `content` for the first token that looks like a genuine high-entropy
+/// secret (API key, access token, long base64/JWT-ish blob), explicitly
+/// allowlisting git-SHA-shaped hex tokens.
 ///
 /// Why (issue #1481): credentials must never be stored, but git SHAs (the most
 /// common "high-entropy-looking" token in engineering prose) must be. A pure
@@ -422,14 +422,36 @@ fn mask_git_shas(s: &str) -> String {
 /// the SHA allowlist and keys "secret" on the character-class mix that real
 /// credentials exhibit (mixed upper+lower+digit, or known credential prefixes,
 /// or symbol-bearing base64) which a SHA never does.
-/// What: returns `Some(<redacted preview>)` for the first secret-looking token,
-/// else `None`. The preview shows the leading characters and masks the tail so
-/// the secret itself is not echoed back verbatim. Tokens are stripped of
-/// surrounding punctuation before classification.
+///
+/// Why the backtick is a delimiter (issue #4312, the FOURTH recurrence of one
+/// false-positive shape after #1667, #2800, #4216): splitting on whitespace
+/// alone made two adjacent Markdown inline-code spans joined by a bare `/` —
+/// `` `foo`/`bar` `` — arrive as ONE token. [`redact_token`]'s caller trims
+/// punctuation only from the OUTER boundary, so the interior backticks
+/// survived, every `/`-segment failed `is_word_segment`, and the token fell to
+/// the base64 branch of [`looks_like_secret`] (`/` sets the b64 symbol, a
+/// lowercase letter sets the case bit) and was flagged. Each previous fix
+/// added another allowlist predicate for one content shape; this one removes
+/// the cause. A backtick appears in no credential alphabet (base64,
+/// base64url, hex, base32) and in no known provider key format, so treating it
+/// as a delimiter cannot split a genuine credential — and it strictly tightens
+/// detection for a credential written flush against a backtick, which
+/// previously polluted the token and defeated
+/// [`is_plausible_credential_charset`].
+///
+/// What: returns `Some(<redacted preview>)` for the first secret-looking
+/// token, else `None`. Tokens are delimited by whitespace or a backtick, then
+/// stripped of surrounding punctuation before classification. The preview
+/// shows the leading characters and masks the tail so the secret itself is not
+/// echoed back verbatim.
 /// Test: `secret_token_is_blocked`, `git_sha_prose_is_accepted`,
-/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`.
+/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`,
+/// `backtick_joined_spans_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4312_backtick_split`.
 pub fn find_secret_token(content: &str) -> Option<String> {
-    for raw in content.split_whitespace() {
+    // #4312: backticks delimit Markdown inline-code spans and never occur
+    // inside a credential, so split on them alongside whitespace.
+    for raw in content.split(|c: char| c.is_whitespace() || c == '`') {
         let tok =
             raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
         if looks_like_secret(tok) {

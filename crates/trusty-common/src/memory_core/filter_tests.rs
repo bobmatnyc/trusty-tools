@@ -1030,3 +1030,105 @@ fn real_secrets_still_blocked_after_2800_exemption() {
         "connection-string-shaped token must still be flagged: {conn}"
     );
 }
+
+// ---- Issue #4312: backtick-joined Markdown inline-code spans ----
+
+/// Why (issue #4312, fourth recurrence of this shape after #1667, #2800,
+/// #4216): `find_secret_token` split only on whitespace, so two Markdown
+/// inline-code spans joined by a bare `/` — `` `foo`/`bar` `` — arrived at the
+/// heuristic as ONE token. `trim_matches` strips punctuation only from the
+/// outer boundary, so the interior backticks survived, `is_word_segment`
+/// rejected every `/`-segment (backtick is in neither its charset nor
+/// `is_issue_number_list`'s), and the token fell to the base64 branch: `/`
+/// sets `has_b64_sym`, a lowercase letter sets `has_lower` → flagged.
+/// What: asserts the three shapes from the issue — a backtick-joined
+/// identifier pair, a backtick-joined path, and a backtick-wrapped issue list
+/// (the #4216 regression) — all pass `find_secret_token` and the end-to-end
+/// gate.
+/// Test: itself.
+#[test]
+fn backtick_joined_spans_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for content in [
+        // 1. Two backtick-joined identifiers, 34 chars combined.
+        "`stale_skills`/`doctor_staleness.rs`",
+        // 2. Two backtick-joined path spans, ~51 chars combined.
+        "`crates/trusty-common/src/memory_core`/`filter_tests.rs`",
+        // 3. Backtick-wrapped issue-number list — straight regression of the
+        //    #4216 exemption, which recurs the moment the list is quoted.
+        "`#4601`/`#4602`/`#4603`",
+    ] {
+        assert!(
+            find_secret_token(content).is_none(),
+            "backtick-joined span must NOT be flagged: {content}; got {:?}",
+            find_secret_token(content)
+        );
+        let prose = format!("Checkpoint: touched {content} in this pass");
+        assert!(
+            find_secret_token(&prose).is_none(),
+            "backtick-joined span in prose must NOT be flagged: {prose}; got {:?}",
+            find_secret_token(&prose)
+        );
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "gate must ACCEPT backtick-joined prose; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4312): treating the backtick as a token delimiter must not open
+/// a hole. A backtick never appears in any credential alphabet (base64,
+/// base64url, hex, base32) nor in any known provider key format, so no genuine
+/// credential can be split by it — but that claim has to be proven, not
+/// asserted. These cases pin the three detection layers (known prefix, base64
+/// blob, mixed-case entropy) while a backtick is present in the same content.
+/// What: asserts a GitHub token, an OpenAI-style key, an AWS access key ID, a
+/// padded base64 blob, and a bare mixed-case credential all remain rejected
+/// when quoted in backticks or sitting beside backtick-quoted prose.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4312_backtick_split() {
+    let cfg = FilterConfig::default();
+
+    // 1. Credentials wrapped in backticks — the commonest way a leaked key
+    //    actually reaches a memory write (someone quotes it as code).
+    for tok in [
+        "`ghp_abcdefghijklmnopqrstuvwxyz0123456789`", // pragma: allowlist secret
+        "`sk-abcdefghijklmnopqrstuvwxyz01234567890123`", // pragma: allowlist secret
+        "`AKIAIOSFODNN7EXAMPLE`",                     // pragma: allowlist secret
+        "`dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=`", // pragma: allowlist secret
+        "`AbCd1234EfGh5678IjKl9012`",                 // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "backtick-quoted credential must STILL be flagged: {tok}"
+        );
+    }
+
+    // 2. LOAD-BEARING: a real credential sharing content with the exact
+    //    backtick-joined shape #4312 exempts. The delimiter change must not
+    //    shadow other tokens in the same memory.
+    let mixed = "Touched `stale_skills`/`doctor_staleness.rs`; deploy key \
+                 ghp_abcdefghijklmnopqrstuvwxyz0123456789"; // pragma: allowlist secret
+    assert!(
+        matches!(
+            cfg.apply(mixed, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "credential beside a backtick-joined span must still reject; got {:?}",
+        cfg.apply(mixed, false)
+    );
+
+    // 3. LOAD-BEARING (detection TIGHTENED, not loosened): a credential
+    //    written flush against surrounding text and a backtick. Under
+    //    whitespace-only splitting this arrived as one token whose backtick
+    //    defeated `is_plausible_credential_charset`, silently disabling the
+    //    mixed-case fallback — the secret was NOT flagged. Splitting on the
+    //    backtick isolates the 24-char credential and catches it.
+    let adjacent = "token`AbCd1234EfGh5678IjKl9012`)"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(adjacent).is_some(),
+        "credential flush against a backtick must be flagged: {adjacent}"
+    );
+}
