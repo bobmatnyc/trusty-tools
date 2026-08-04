@@ -575,14 +575,18 @@ jobs:
                   "al2023_features": "",
               }
 
-          def native_linux_entry(target):
-              # Original (pre-#2037) native x86_64 build: plain `cargo build`
-              # on ubuntu-latest, no zig. Reserved for ORT-bundling crates'
-              # x86_64 leg (see comment below) — NOT a regression, this is
-              # exactly what shipped before this issue.
+          def native_linux_entry(target, use_al2023_features=False):
+              # Original (pre-#2037) native build: plain `cargo build` with the
+              # runner's own GCC, no zig. Used by ORT-bundling crates for BOTH
+              # Linux legs (see the comments at each call site) — NOT a
+              # regression on x86_64, this is exactly what shipped before
+              # #2037.
+              entry_features = al_feats if use_al2023_features else feats
+              entry_no_def   = al_no_def if use_al2023_features else no_def
+              runner, _ = LINUX_RUNNERS[target]
               return {
                   **common,
-                  "runner": "ubuntu-latest",
+                  "runner": runner,
                   "host_multiarch": "",
                   "target": target,
                   "variant": "standard",
@@ -590,8 +594,8 @@ jobs:
                   "container": "",
                   "zig_target": "",
                   "best_effort": False,
-                  "cargo_features": feats,
-                  "no_default_features": no_def,
+                  "cargo_features": entry_features,
+                  "no_default_features": entry_no_def,
                   "al2023_no_default": False,
                   "al2023_features": "",
               }
@@ -619,6 +623,42 @@ jobs:
               else linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
           )
 
+          # 2533: aarch64 Linux mirrors the x86_64 leg's toolchain choice for
+          # the same crate, on a native arm64 runner.
+          #
+          #   ORT-bundling crates (al2023 True) -> plain `cargo build` with the
+          #   runner's GCC. These crates pull in `numkong` (usearch's SIMD
+          #   backend), whose build.rs probes CPU features by compiling C
+          #   probe files with whatever compiler cc-rs is handed. Under zig's
+          #   clang those probes disagree with the sources they gate: clang
+          #   rejects GCC's `__attribute__((target("neon")))` spelling on
+          #   AArch64, so the baseline NEON probe reports NK_TARGET_NEON=0
+          #   while the dependent NK_TARGET_NEONSDOT / NK_TARGET_SVE* probes
+          #   still report 1 — and those code paths need the `arm_neon.h`
+          #   include that only the NEON path pulls in. The build then dies on
+          #   ~20 `call to undeclared function 'vdupq_n_s32'` errors (observed:
+          #   run 30941401868, job 92100578898). This is the same probe/source
+          #   desync already documented for AL2023's GCC 11 below, and the
+          #   available zig workaround — forcing NK_TARGET_*=0 — would compile
+          #   the arm64 binary with the SIMD paths of a vector search engine
+          #   switched off. Using the platform GCC avoids the whole class.
+          #
+          #   All other crates keep the glibc-2.17 zigbuild leg, which is
+          #   unaffected (no numkong in their graph) and is now a NATIVE zig
+          #   build rather than a cross build.
+          #
+          # Consequence, stated plainly: for ORT-bundling crates the
+          # `aarch64-unknown-linux-gnu` asset carries the runner's glibc floor
+          # (Ubuntu 24.04 / 2.39) — the SAME floor its `x86_64-unknown-linux-gnu`
+          # sibling has always carried, not a new class of limitation. An
+          # `aarch64-linux-al2023` counterpart to the existing x86_64 AL2023
+          # asset is the portable-arm64 follow-up; it is deliberately NOT
+          # bundled into this fix.
+          aarch64_entry = (
+              native_linux_entry("aarch64-unknown-linux-gnu", use_al2023_features=True) if al2023
+              else linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
+          )
+
           includes = [
               {**common,
                "runner": "macos-14",
@@ -636,12 +676,10 @@ jobs:
               x86_64_entry,
               # aarch64 Linux (issue #2037). 2533: built natively on
               # `ubuntu-24.04-arm` and BLOCKING (best_effort=False) — see the
-              # file-header comment. For
-              # ORT-bundling crates this reuses the load-dynamic feature set
-              # (see linux_zigbuild_entry) — proven working in CI, since it
-              # never links ONNX Runtime at build time and so never hits the
-              # libstdc++-ABI problem above.
-              linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=False, use_al2023_features=al2023),
+              # file-header comment and the aarch64_entry comment above. For
+              # ORT-bundling crates it still uses the load-dynamic feature set,
+              # since bundled-ort has no aarch64 build-time binary to download.
+              aarch64_entry,
           ]
 
           if al2023:
@@ -867,11 +905,13 @@ jobs:
       # so build-essential/pkg-config/libssl-dev are still needed for crates
       # whose build.rs shells out to a C compiler or pkg-config directly.
       - name: Install build prerequisites (Ubuntu)
-        # `standard` here means the ORT-bundling-crate native x86_64 leg
-        # (see native_linux_entry in the matrix-generation step) — the only
-        # `standard`-variant entry that runs on ubuntu-latest; the OTHER
-        # `standard` entry is macOS (guarded out by the runner check).
-        if: matrix.variant == 'linux-zigbuild' || (matrix.variant == 'standard' && matrix.runner == 'ubuntu-latest')
+        # `standard` here means an ORT-bundling-crate native Linux leg (see
+        # native_linux_entry in the matrix-generation step); the OTHER
+        # `standard` entry is macOS, which the runner check guards out.
+        # 2533: keyed off the runner PREFIX, not the literal `ubuntu-latest`,
+        # so the arm64 runner (`ubuntu-24.04-arm`) is covered too — matching on
+        # the exact string silently skipped apt on the whole arm64 leg.
+        if: matrix.container == '' && startsWith(matrix.runner, 'ubuntu')
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
