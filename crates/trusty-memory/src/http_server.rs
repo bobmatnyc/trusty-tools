@@ -192,9 +192,9 @@ pub(crate) fn dotfile_http_addr_path() -> Option<PathBuf> {
 /// manual: `curl http://127.0.0.1:<port>/health` returns `ok` with `addr`.
 #[cfg(feature = "axum-server")]
 pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> Result<()> {
-    // Issue #35: recompute the `data_root` disk footprint every 10 s on a
-    // background task so `GET /health` reports `disk_bytes` without doing a
-    // recursive directory walk on the request path.
+    // Issue #35: recompute the `data_root` disk footprint on a background
+    // task so `GET /health` reports `disk_bytes` without doing a recursive
+    // directory walk on the request path. Cadence: `DISK_SIZE_INTERVAL`.
     spawn_disk_size_ticker(state.clone());
 
     // Issue #228: emit aggregate `StatusChanged` on a fixed cadence rather
@@ -331,14 +331,20 @@ pub async fn run_http_dynamic(state: AppState) -> Result<()> {
     run_http_on(state, listener).await
 }
 
+/// Interval between recomputations of the data-root disk footprint.
+///
+/// Why (#4764): see the cadence note inside [`spawn_disk_size_ticker`].
+#[cfg(feature = "axum-server")]
+const DISK_SIZE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Spawn a background ticker that recomputes the `data_root` disk footprint
-/// every 10 seconds and stores it in `state.disk_bytes` (issue #35).
+/// on a fixed cadence and stores it in `state.disk_bytes` (issue #35).
 ///
 /// Why: `GET /health` reports `disk_bytes`. Walking the data directory on
 /// every health request would turn a frequent health poll into unbounded
 /// recursive I/O. Computing it off the request path on a fixed cadence keeps
-/// `/health` cheap and bounds the staleness to ~10 s — fine for an
-/// at-a-glance footprint figure.
+/// `/health` cheap and bounds the staleness to [`DISK_SIZE_INTERVAL`] — fine
+/// for an at-a-glance footprint figure.
 /// What: spawns a detached tokio task. `AppState` is cheap to `Clone` (all
 /// `Arc` fields), so the task holds a full clone; the daemon process lives
 /// for the lifetime of the server anyway, so no `Weak` downgrade is needed.
@@ -349,7 +355,11 @@ pub async fn run_http_dynamic(state: AppState) -> Result<()> {
 #[cfg(feature = "axum-server")]
 fn spawn_disk_size_ticker(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        // #4764: 10 s → 60 s, matching trusty-search. trusty-search aborted 40
+        // times on this shared walk; trusty-memory runs the identical ticker
+        // against the identical function and shares the exposure, so it gets
+        // the identical cadence reduction.
+        let mut interval = tokio::time::interval(DISK_SIZE_INTERVAL);
         loop {
             interval.tick().await;
             let dir = state.data_root.clone();
