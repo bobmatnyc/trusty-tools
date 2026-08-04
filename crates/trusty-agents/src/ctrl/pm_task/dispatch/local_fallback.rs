@@ -95,12 +95,27 @@ pub(crate) fn local_failure_action(
 /// Why: #3766 — keeps the (long) retry call out of `history.rs`, which sits
 /// against the 500-SLOC production cap, and guarantees the retry uses the
 /// agent's REMOTE sampling knobs rather than the local route's overrides.
-/// What: one `chat_with_tools_gated` call with an empty tool registry — a
-/// conversational reply needs no tools. `remote_model` is whatever
-/// [`local_failure_action`] returned as `RetryRemote`, so it is never local.
+/// What: one `chat_with_tools_gated` call with an empty tool registry.
+/// `remote_model` is whatever [`local_failure_action`] returned as
+/// `RetryRemote`, so it is never local.
+///
+/// The empty registry is a SAFETY property, not just an observation that a
+/// conversational reply needs no tools (#4788). The retry re-sends the
+/// ORIGINAL prompt — it carries no record of tool calls the failed attempt
+/// already made, because that attempt failed mid-loop (`max_turns > 1` means
+/// turn 0 can execute a tool before turn 1's transport dies). Handing the
+/// retry a live registry would let a remote model re-solve the same request
+/// and re-invoke an already-executed MUTATING tool: duplicate commit,
+/// duplicate ticket, duplicate CI trigger. Callers whose registries carry
+/// immediate-effect tools — `ctrl_turn::dispatch::run_ctrl_turn_via_rest`
+/// arms ~20 of them — MUST route their retry through here rather than reusing
+/// their own registry. Deferred, pending-slot side effects are unaffected:
+/// they survive the failed attempt and drain normally.
 /// Test: covered indirectly by the ctrl integration tests; the model-selection
-/// decision itself is unit-tested in `local_fallback_tests.rs`.
-pub(super) async fn retry_remote(
+/// decision itself is unit-tested in `local_fallback_tests.rs`, and the
+/// ctrl_turn wiring end-to-end by
+/// `ctrl_turn::dispatch::tests::ctrl_turn_rest_recovers_from_a_real_local_transport_failure`.
+pub(crate) async fn retry_remote(
     client: &async_openai::Client<async_openai::config::OpenAIConfig>,
     remote_model: &str,
     messages: Vec<async_openai::types::ChatCompletionRequestMessage>,

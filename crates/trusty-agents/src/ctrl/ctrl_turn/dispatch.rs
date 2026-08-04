@@ -22,7 +22,9 @@ use super::super::config::{
     SessionOverrides, apply_credential_routing, resolve_overridden_credentials,
 };
 // #4788: the ONE local-failure recovery policy, shared with the PM route.
-use super::super::pm_task::local_fallback::{LocalFailureAction, local_failure_action};
+use super::super::pm_task::local_fallback::{
+    LocalFailureAction, local_failure_action, retry_remote,
+};
 use super::super::state::{Ctrl, PmMsg};
 use super::super::util::drain_slot;
 use super::CtrlTurnSideEffects;
@@ -231,7 +233,7 @@ pub(crate) async fn run_ctrl_turn_via_rest(
         &effective_model,
         &*adapter,
         messages.clone(),
-        registry_arc.clone(),
+        registry_arc,
         None,
         0.2,
         effective_max_tokens,
@@ -276,30 +278,21 @@ pub(crate) async fn run_ctrl_turn_via_rest(
             };
             tracing::warn!(error = %e, %remote_model, "local failed, retrying remote: {e:#}");
             used_remote_fallback = true;
-            // Not `local_fallback::retry_remote`: that helper deliberately
-            // retries with an EMPTY registry (the PM route's conversational
-            // fast path needs no tools), whereas this route's tools drive the
-            // end-of-turn side-effect drain (start_pm / initiate_self_task /
-            // stop_task). The retry keeps `registry_arc`.
-            let remote_adapter = llm::adapter::adapter_for_model(&remote_model);
-            llm::chat_with_tools_gated(
-                client,
-                &remote_model,
-                &*remote_adapter,
-                messages,
-                registry_arc,
-                None,
-                0.2,
-                routed_cfg.llm.max_tokens.max(1024),
-                2,
-                false,
-                None,
-                false,
-                routed_cfg.llm.strict_tool_discipline(),
-                routed_cfg.llm.use_anthropic_direct,
-                &routed_cfg.llm.stop_sequences,
-            )
-            .await?
+            // The retry runs with an EMPTY tool registry (`retry_remote`), NOT
+            // this route's `registry_arc`. A full-registry retry would be a
+            // DOUBLE-EXECUTION hazard: `build_ctrl_registry` arms ~20 tools
+            // with IMMEDIATE effects (git commit/push, ticket create/update,
+            // actions_trigger, MCP add/remove, MoveFile/CreateDir, …), and
+            // with `max_turns = 2` the failed attempt may already have
+            // executed one — turn 0 runs a tool, turn 1 dies on transport.
+            // Because `messages` is the ORIGINAL prompt (the first call took a
+            // clone), the retry re-asks the same question with no record of
+            // that tool call, so a remote model re-solving it re-invokes the
+            // tool: duplicate commit, duplicate ticket, duplicate CI trigger.
+            // The deferred side effects are unaffected — start_pm /
+            // initiate_self_task / stop_task write to pending slots that
+            // survive the failed attempt and still drain after this returns.
+            retry_remote(client, &remote_model, messages, routed_cfg).await?
         }
     };
     let text = if used_remote_fallback {
@@ -527,6 +520,8 @@ mod tests {
 
     const OLLAMA_SLUG: &str = "ollama/qwen3:30b";
     const HOST: &str = "http://localhost:11434";
+    /// Reserved port, never listening — a real `Connection refused`.
+    const DEAD_LOCAL_HOST: &str = "http://127.0.0.1:1";
     /// The call failed at the transport level (`Connection refused`).
     const TRANSPORT: bool = true;
 
@@ -595,6 +590,90 @@ mod tests {
             effective_ctrl_turn_model(true, "ollama/llama3", OLLAMA_SLUG),
             "ollama/llama3"
         );
+    }
+
+    /// The test that actually pins the fix. Everything above is a decision
+    /// test — it re-derives the inputs and would keep passing against the
+    /// pre-fix guard. This one drives the REAL `run_ctrl_turn_via_rest`:
+    /// `OLLAMA_HOST` points at a dead port, so `chat_with_tools_gated` returns
+    /// a genuine `Connection refused` transport `Err`, and the assertion is
+    /// that the user gets an explanatory `Ok` instead of that error.
+    ///
+    /// Restore the pre-fix arm (`Err(e) if local_qualifies &&
+    /// local_cfg.fallback_on_error` + `Err(e) => return Err(e)`) and this test
+    /// fails: `local_inference.enabled = false` forces `local_qualifies =
+    /// false`, so the guard never matches and the raw error propagates.
+    // The env guard MUST outlive the awaited call — `OLLAMA_HOST` has to stay
+    // set for the whole dispatch. Sound here for the reason `test_env.rs`
+    // documents: the default `#[tokio::test]` flavor is current-thread, so
+    // every await stays on the one OS thread, and `#[serial]` keeps any other
+    // env-touching test out of the window.
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "#4788: env must stay set across the awaited dispatch; current-thread runtime + #[serial]"
+    )]
+    #[tokio::test]
+    #[serial]
+    async fn ctrl_turn_rest_recovers_from_a_real_local_transport_failure() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_creds_env();
+        // SAFETY: ENV_LOCK held for the whole test body.
+        unsafe {
+            // A credential must resolve or `create_client` bails before the
+            // code under test runs. Never used: the local call fails at the
+            // transport layer and the agent's model is local, so the recovery
+            // is `Explain` — no remote request is ever issued.
+            std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
+            // Port 1 is reserved and never listening: a real `Connection
+            // refused` from the local adapter, not a simulated error.
+            std::env::set_var("OLLAMA_HOST", DEAD_LOCAL_HOST);
+        }
+
+        // The owner's live shape: ctrl's own model is a local slug, and local
+        // inference is DISABLED — the combination the old guard could not
+        // recover from.
+        let mut cfg = AgentConfig::ctrl_default();
+        cfg.agent.model = OLLAMA_SLUG.to_string();
+        cfg.llm.use_anthropic_direct = false;
+        let mut mcp_cfg = crate::mcp::GlobalConfig::default();
+        mcp_cfg.local_inference.enabled = false;
+        // Proves no preference flag can switch recovery off — the old arm
+        // required this to be true AND `enabled` to be true.
+        mcp_cfg.local_inference.fallback_on_error = false;
+
+        let client = llm::create_client().expect("client construction");
+        let result = run_ctrl_turn_via_rest(
+            &client,
+            "what is my status?",
+            "You are ctrl.",
+            &cfg,
+            ToolRegistry::new(),
+            &mcp_cfg,
+            std::time::Instant::now(),
+        )
+        .await;
+
+        let reply = result.expect("a local transport failure must not reach the user as Err");
+        assert!(
+            !reply.contains("Connection refused") && !reply.contains("os error"),
+            "must not leak transport-error text as the assistant's reply: {reply}"
+        );
+        assert!(
+            reply.contains(DEAD_LOCAL_HOST),
+            "must name the unreachable host: {reply}"
+        );
+        assert!(
+            reply.contains("[agent] model"),
+            "must name the config key to change: {reply}"
+        );
+
+        // SAFETY: ENV_LOCK still held.
+        unsafe {
+            std::env::remove_var("OLLAMA_HOST");
+        }
+        clear_creds_env();
     }
 
     /// The fix must not swallow real errors: a REMOTE transport failure, and a

@@ -12,8 +12,9 @@ mod classification;
 mod history;
 // #3766: pure local-failure recovery policy split out of `history.rs`,
 // which sits against the 500-SLOC production cap.
-// #4788: `pub(crate)` (re-exported by `pm_task/mod.rs`) so the ctrl_turn REPL
-// route shares the one decision function rather than copying it.
+// #4788: `pub(crate)` is REQUIRED, not redundant with the `pm_task/mod.rs`
+// re-export that carries it to the ctrl_turn REPL route — `pub(crate) use` of
+// a `pub(super)` module is E0365 ("private, and cannot be re-exported").
 pub(crate) mod local_fallback;
 mod persona;
 // #4171 (epic #4167): pure gating helpers split out of `persona.rs`, which
