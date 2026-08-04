@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # check-ci-helpers-selftest.sh — regression fixtures for the CI helper scripts
-# (issues #4179, #4468, #4421).
+# (issues #4179, #4468, #4421, #4688).
 #
 # Why: the three helpers this covers each encode a decision that is invisible
 #   until it is WRONG in production — a cancelled run reported as green, a
@@ -14,7 +14,11 @@
 # What: asserts the exact mapping each helper produces:
 #   classify-ci-results: every conclusion value, alone and in precedence pairs
 #   detect-docs-only:    docs-only / code-only / mixed / embedded-asset / empty
-#   check-pr-version-bump: registry-decision branches, via the stub oracle
+#   check-pr-version-bump: registry-decision branches, via the stub oracle, plus
+#                        the #4688 attribution pair — one tree run twice, once
+#                        from a frozen stale base (misattributes) and once from
+#                        the live base branch (does not) — and the workflow
+#                        wiring that decides which of the two CI gets.
 #
 # Usage: bash scripts/check-ci-helpers-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
@@ -164,13 +168,14 @@ EOF
   git -C "${dir}" commit -qm head
 }
 
+# run_gate <dir> <stub> [base-ref]  — base defaults to the `base-ref` branch.
 run_gate() {
-  local dir="$1" stub="$2"
+  local dir="$1" stub="$2" base="${3:-base-ref}"
   mkdir -p "${dir}/scripts"
   cp scripts/check-pr-version-bump.sh "${dir}/scripts/check-pr-version-bump.sh"
   (
     cd "${dir}" &&
-      PR_VERSION_BUMP_BASE=base-ref \
+      PR_VERSION_BUMP_BASE="${base}" \
         PR_VERSION_BUMP_REGISTRY_STUB="${stub}" \
         bash scripts/check-pr-version-bump.sh >/dev/null 2>&1
     echo "$?"
@@ -196,6 +201,70 @@ assert_eq "publish = false -> skipped, pass" "0" \
 make_fixture_repo "${STUB_DIR}/offline" "1.0.0" ""
 assert_eq "registry unreachable -> warn, pass" "0" \
   "$(run_gate "${STUB_DIR}/offline" "${STUB_DIR}/unreachable.sh")"
+
+# --- Attribution (#4688) ------------------------------------------------------
+# The shape that failed docs-only PR #4666: the base branch itself changes a
+# published crate's src, and an unrelated branch is checked out as a MERGE REF
+# (`refs/pull/N/merge`) whose first parent is that same base tip. The PR's own
+# diff contains no crate source at all, so the gate must clear it. It used to
+# fail, because the base it diffed from was a frozen `base.sha` predating the
+# base branch's own commits rather than the branch tip.
+make_misattribution_repo() {
+  local dir="$1"
+  rm -rf "${dir}"
+  mkdir -p "${dir}/crates/pinned-crate/src" "${dir}/docs"
+  git -C "${dir}" init -q -b base-ref
+  git -C "${dir}" config user.email ci@example.com
+  git -C "${dir}" config user.name ci
+  cat >"${dir}/crates/pinned-crate/Cargo.toml" <<'EOF'
+[package]
+name = "pinned-crate"
+version = "1.0.0"
+EOF
+  echo "// base" >"${dir}/crates/pinned-crate/src/lib.rs"
+  echo "docs" >"${dir}/docs/readme.md"
+  git -C "${dir}" add -A
+  git -C "${dir}" commit -qm "shared ancestor"
+  # An unrelated branch forks HERE, touching documentation only...
+  git -C "${dir}" branch -q pr-branch
+  # ...and this is the base tip a `base.sha` snapshot would have frozen.
+  git -C "${dir}" branch -q shared-ancestor
+  # ...then the base branch drifts pinned-crate's src with no version bump.
+  echo "// changed on the base branch" >>"${dir}/crates/pinned-crate/src/lib.rs"
+  git -C "${dir}" add -A
+  git -C "${dir}" commit -qm "base branch changes pinned-crate/src"
+  git -C "${dir}" checkout -q pr-branch
+  echo "more docs" >>"${dir}/docs/readme.md"
+  git -C "${dir}" add -A
+  git -C "${dir}" commit -qm "docs only"
+  # What actions/checkout hands the job on a pull_request event.
+  git -C "${dir}" checkout -q --detach base-ref
+  git -C "${dir}" merge -q --no-ff --no-edit pr-branch
+}
+
+make_misattribution_repo "${STUB_DIR}/misattributed"
+# The two halves of #4688, on ONE tree, so the difference is the base ref alone.
+# `shared-ancestor` stands in for a frozen `github.event.pull_request.base.sha`
+# that the base branch has since moved past: the gate then sweeps the base
+# branch's own commit into the PR's diff and blames it. Asserted as a FAILURE on
+# purpose — it is the defect, and it is why the workflow must never pass a
+# frozen SHA (guarded below by `workflow passes a base BRANCH, not base.sha`).
+assert_eq "frozen stale base -> misattributes (the #4688 defect)" "1" \
+  "$(run_gate "${STUB_DIR}/misattributed" "${STUB_DIR}/published.sh" shared-ancestor)"
+assert_eq "live base branch -> docs-only PR not blamed" "0" \
+  "$(run_gate "${STUB_DIR}/misattributed" "${STUB_DIR}/published.sh" base-ref)"
+
+# Wiring guard: the behavioural fix above is only delivered if the workflow
+# actually hands the gate a branch. Assert the wiring, not just the script.
+version_parity_wf=".github/workflows/version-parity.yml"
+assert_eq "workflow passes a base BRANCH, not base.sha" "1" \
+  "$(grep -c 'PR_VERSION_BUMP_BASE: origin/\${{ github.event.pull_request.base.ref }}' \
+    "${version_parity_wf}" || true)"
+assert_eq "workflow no longer passes the frozen base.sha" "0" \
+  "$(grep -c 'PR_VERSION_BUMP_BASE: \${{ github.event.pull_request.base.sha }}' \
+    "${version_parity_wf}" || true)"
+assert_eq "main-side parity also runs on a schedule (#4688)" "1" \
+  "$(grep -c '^  schedule:' "${version_parity_wf}" || true)"
 
 echo
 if [ "${FAILURES}" -gt 0 ]; then
