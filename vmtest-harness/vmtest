@@ -141,11 +141,61 @@ PIN_KEYS='oci_ref digest local_name pinned_on pinned_by note enforcement'
 # failure wins": a scenario failure (50) followed by a teardown failure does not
 # become 70, because the operator needs to know what broke, not what broke last.
 # Verbatim from DOC-2 §12.4.
+#
+# THE SLOT IS FILE-BACKED, NOT JUST A GLOBAL (#16).  A shell global cannot cross
+# a fork, so every `die` that fired inside `$( )`, `<( )`, a for-list or a
+# heredoc substitution wrote its verdict into a child that then died with it —
+# the parent's slot stayed unset, the MEASURE line reported `exit 0` for a run
+# that failed 50, and a later teardown `die 70` could claim the slot §2 reserves
+# for the FIRST failure.  A FILE is not forked away, so the classification
+# survives at any subshell depth.  `set -o noclobber` makes the create an
+# `O_EXCL` one, so write-once is now atomic rather than merely true-because-
+# single-threaded — it holds even against `run_watchdog`'s backgrounded
+# children.  The option is set INSIDE `( … )` so the driver's own shell options
+# are untouched.
+#
+# THE WRITE IS FOLLOWED BY A READ-BACK, and without it the file would be
+# write-once without being AUTHORITATIVE.  `die` tested only the in-shell global,
+# so a second, parent-side `die` still claimed a slot the first failure already
+# held on disk: a subshell `die 50` then a `die 70` left the file holding 50 and
+# exited 70 — §2's override, by a longer route.  Adopting the file here is what
+# makes the O_EXCL create decide the verdict, rather than merely record it.
 die() {
   _code=$1; shift
   printf 'vmtest: FAIL[%s]: %s\n' "$_code" "$*" >&2
+  # The slot is file-backed: a shell global cannot cross a fork, a file can.
+  # Write first, then ADOPT — so a `die` in this shell loses to an earlier one
+  # that was recorded in a child, which is what makes the file authoritative.
+  if [ -n "${VMTEST_TMPDIR:-}" ]; then
+    ( set -o noclobber; printf '%s\n' "$_code" > "$VMTEST_TMPDIR/exit-code" ) 2>/dev/null || :
+    _reconcile_exit_from_side_channel
+  fi
   if [ -z "${VMTEST_EXIT:-}" ]; then VMTEST_EXIT=$_code; fi
   exit "$VMTEST_EXIT"
+}
+
+# _reconcile_exit_from_side_channel
+# #16: adopt the verdict a subshell `die` recorded, when nothing in this shell
+# claimed the slot first.  Write-once is preserved: an already-set VMTEST_EXIT
+# is never overwritten, so §2's "first classified failure wins" is what this
+# restores rather than what it bends.
+#
+# ORDERING IS LOAD-BEARING.  Every caller must run this AFTER cleanup has
+# captured `$?` and BEFORE both the MEASURE line and the `rm -rf` that removes
+# the tmpdir the file lives in.
+_reconcile_exit_from_side_channel() {
+    [ -n "${VMTEST_TMPDIR:-}" ] || return 0
+    local _file="$VMTEST_TMPDIR/exit-code"
+    [ -s "$_file" ] || return 0
+    if [ -z "${VMTEST_EXIT:-}" ]; then
+        VMTEST_EXIT=$(cat "$_file")
+    fi
+    # Under --keep the tmpdir still goes away but the run directory is kept for
+    # postmortem, so the verdict is copied where the operator will look for it.
+    if [ "${VMTEST_KEEP:-0}" -eq 1 ] \
+       && [ -n "${VMTEST_RUNDIR:-}" ] && [ -d "${VMTEST_RUNDIR:-}" ]; then
+        cp "$_file" "$VMTEST_RUNDIR/exit-code" 2>/dev/null || :
+    fi
 }
 
 log()  { printf 'vmtest: %s\n' "$*" >&2; }
@@ -204,8 +254,20 @@ _tsv_rows() {
     awk -F'\t' '$1 !~ /^#/ && $1 != "package" && NF == 9' "$1"
 }
 
-# tsv_scope_crate_dirs — unique `crate_dir` (column 2) over the `in_scope=yes`
-# rows, in FIRST-APPEARANCE order (§F-3's decision rule, unchanged).
+# tsv_scope_crate_dirs <out_path> — unique `crate_dir` (column 2) over the
+# `in_scope=yes` rows, in FIRST-APPEARANCE order (§F-3's decision rule,
+# unchanged), WRITTEN TO <out_path> rather than emitted on stdout.
+#
+# THE OUT-PATH IS WHAT MAKES THE POSTCONDITION BELOW REAL (#16).  It emitted on
+# stdout until 2026-08-04, and every one of its ten call sites was therefore a
+# `$( )`, a `<( )`, a for-list or a heredoc substitution — so the `die 60` below
+# fired inside a fork at 100% of them, classifying nothing, and at six of them
+# `set -e` never fired either: the caller read an empty list and carried on.
+# DOC-2 §12.1's own escape hatch ("a function that needs to return several
+# values writes a TSV to a path given as an argument") is the fix, and
+# `vm_list <out_tsv_path>` is the in-tree precedent.  Emitting on stdout and
+# classifying via `die` are jointly unimplementable in bash: capturing stdout
+# REQUIRES a fork, and a fork is exactly what the global cannot cross.
 #
 # WHY IT DEDUPLICATES, stated correctly because §F-3's original rationale was
 # false and was corrected on 2026-07-31: NOT because an undeduped loop would
@@ -229,27 +291,42 @@ _tsv_rows() {
 # without knowing which.  This runs on the host with no VM, so the failure
 # arrives seconds into a run rather than minutes.
 tsv_scope_crate_dirs() {
-    local _dirs _dups
+    local _out="${1:-}" _dirs _dups
+    # #16: the out_path is REQUIRED, so a call site missed by the conversion is
+    # a loud failure rather than a silent write to a file named the empty string.
+    [ -n "$_out" ] \
+        || die 60 'tsv_scope_crate_dirs: called with no <out_path>. It writes to a file, not to stdout (DOC-2 §12.1) — a `$(tsv_scope_crate_dirs)` runs its `die` in a fork and classifies nothing (issue #16).'
     # Declare first, assign second: `local x=$(cmd)` swallows cmd's status.
     _dirs=$(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes" && !seen[$2]++ { print $2 }')
-    [ -n "$_dirs" ] || return 0
+    if [ -z "$_dirs" ]; then
+        : > "$_out" || die 60 "tsv_scope_crate_dirs: cannot write <out_path> '${_out}'"
+        return 0
+    fi
     _dups=$(printf '%s\n' "$_dirs" | sort | uniq -d)
     [ -z "$_dups" ] || die 60 "tsv_scope_crate_dirs emitted duplicates: $(printf '%s' "$_dups" | tr '\n' ' ')"
-    printf '%s\n' "$_dirs"
+    printf '%s\n' "$_dirs" > "$_out" \
+        || die 60 "tsv_scope_crate_dirs: cannot write <out_path> '${_out}'"
 }
 
-# tsv_scope_packages — unique `package` (column 1) over the `in_scope=yes` rows,
-# first-appearance order.  Same postcondition, same reasoning: §12.5 calls
-# `verify_single_install` once per multi-binary in-scope package and §F-10(e)
-# scopes `stack doctor`'s assertion to exactly these values, so a repeat is a
-# double assertion and a miscount.
+# tsv_scope_packages <out_path> — unique `package` (column 1) over the
+# `in_scope=yes` rows, first-appearance order, written to <out_path>.  Same
+# postcondition, same reasoning: §12.5 calls `verify_single_install` once per
+# multi-binary in-scope package and §F-10(e) scopes `stack doctor`'s assertion
+# to exactly these values, so a repeat is a double assertion and a miscount.
+# Same out-path reasoning as its sibling above (#16).
 tsv_scope_packages() {
-    local _pkgs _dups
+    local _out="${1:-}" _pkgs _dups
+    [ -n "$_out" ] \
+        || die 60 'tsv_scope_packages: called with no <out_path>. It writes to a file, not to stdout (DOC-2 §12.1) — a `$(tsv_scope_packages)` runs its `die` in a fork and classifies nothing (issue #16).'
     _pkgs=$(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes" && !seen[$1]++ { print $1 }')
-    [ -n "$_pkgs" ] || return 0
+    if [ -z "$_pkgs" ]; then
+        : > "$_out" || die 60 "tsv_scope_packages: cannot write <out_path> '${_out}'"
+        return 0
+    fi
     _dups=$(printf '%s\n' "$_pkgs" | sort | uniq -d)
     [ -z "$_dups" ] || die 60 "tsv_scope_packages emitted duplicates: $(printf '%s' "$_dups" | tr '\n' ' ')"
-    printf '%s\n' "$_pkgs"
+    printf '%s\n' "$_pkgs" > "$_out" \
+        || die 60 "tsv_scope_packages: cannot write <out_path> '${_out}'"
 }
 
 # tsv_scope_binaries — emits `package<TAB>binary`, one line per `in_scope=yes`
@@ -425,13 +502,21 @@ harness_tmpdir() {
 
 vmtest_cleanup() {
     # Property 1: capture $? on the VERY FIRST LINE, before anything else can
-    # clobber it.
-    _cleanup_rc=$?
+    # clobber it.  #16: the callers now PASS it, because `on_exit`'s own
+    # `local rc=$?` is itself a command — by the time this function sampled `$?`
+    # it was reading that assignment's status, structurally always 0.  The
+    # `${1:-$?}` form keeps property 1 intact for a bare `vmtest_cleanup`.
+    _cleanup_rc="${1:-$?}"
 
     # Property 2: idempotent.  EXIT fires after the INT handler runs, so
     # cleanup is entered twice on SIGINT.
     if [ "${VMTEST_CLEANUP_DONE:-0}" -eq 1 ]; then return 0; fi
     VMTEST_CLEANUP_DONE=1
+
+    # #16: AFTER the `$?` capture, BEFORE the MEASURE line and before the
+    # `rm -rf "$VMTEST_TMPDIR"` at the foot of this function.  Both anchors are
+    # in this function and both are below this point.
+    _reconcile_exit_from_side_channel
 
     # THE TOTAL WALL CLOCK IS LOGGED HERE, NOT AT THE END OF `run_lifecycle`,
     # AND THAT PLACEMENT IS THE POINT (P5-T8).  DOC-1 §9 asks for the first
@@ -442,14 +527,19 @@ vmtest_cleanup() {
     # emitted before teardown so that teardown's own seconds are excluded — the
     # figure is the run, not the run plus the guest's removal.
     if [ -n "${RUN_T0_EPOCH:-}" ]; then
-        # The code reported is VMTEST_EXIT when a `die` classified the failure,
-        # and `$?` otherwise.  `$?` ALONE IS WRONG HERE and was observed to be:
-        # `on_exit` runs `local rc=$?` before calling this function, and `local`
-        # is itself a command, so by the time cleanup samples `$?` it is reading
-        # the status of that assignment — always 0.  A failed run therefore
-        # logged "exit 0" beside its own FAIL line.  The write-once VMTEST_EXIT
-        # (§12.4) is the authoritative classification and is what the process
-        # will actually exit with.
+        # The code reported is VMTEST_EXIT when anything classified the failure,
+        # and the real exit status otherwise.  BOTH HALVES HAD TO BE FIXED:
+        #   - VMTEST_EXIT was unset whenever the `die` fired inside a subshell,
+        #     because a shell global cannot cross a fork (#16).  It is now
+        #     file-backed and reconciled above, so it is set at any depth.
+        #   - `$?` ALONE IS WRONG HERE and was observed to be: `on_exit` runs
+        #     `local rc=$?` before calling this function, and `local` is itself a
+        #     command, so cleanup sampling `$?` read that assignment's status —
+        #     always 0.  A failed run therefore logged "exit 0" beside its own
+        #     FAIL line.  The rc is now PASSED IN (#16), restoring §Shell
+        #     discipline's cleanup property 1, so the fallback is live rather
+        #     than dead: it is what reports a run that failed under `set -e`
+        #     with no `die` and no signal to classify it.
         log "MEASURE run_wall_clock_s $(( $(date '+%s') - RUN_T0_EPOCH )) (exit ${VMTEST_EXIT:-$_cleanup_rc}; excludes teardown) — DOC-1 §9's replacement measurement"
     fi
 
@@ -547,10 +637,28 @@ vmtest_cleanup() {
 # the operator needs to know what broke, not what broke last.  The literal
 # `exit` codes stay unconditional — they are the OS-level abort contract of §2,
 # a separate thing from the run's classification.
+#
+# #16: `_reconcile_exit_from_side_channel` runs BEFORE `_abort_classify` on both
+# signal paths, for the same write-once reason — a scenario that already died 50
+# inside a subshell classified FIRST, and a SIGINT arriving during the unwind
+# must not take the slot from it.
+#
+# #16: the rc is PASSED to cleanup rather than left for it to sample, restoring
+# §Shell discipline's cleanup property 1 (see `vmtest_cleanup`'s own note).
+#
+# `on_exit` STILL EXITS WITH `$rc`, NOT WITH VMTEST_EXIT, and that is deliberate.
+# An `exit "${VMTEST_EXIT:-$rc}"` here was tried and reverted: `on_int` exits 130,
+# which fires this trap, so the override made a SIGINT during an already-
+# classified failure exit 50 instead of 130 — silently repealing the paragraph
+# directly above and §2's user-abort rows.  The case that motivated it (rc 0 while
+# VMTEST_EXIT is set) needs a construct that discards a die-capable function's
+# status; Part 2 removed all of them and `tests/check-no-swallowed-die.sh` fails
+# the build if one returns.  A gate that goes red before the code ships is a
+# stronger guarantee than a runtime override that costs the abort contract.
 _abort_classify() { [ -n "${VMTEST_EXIT:-}" ] || VMTEST_EXIT=$1; }
-on_exit() { local rc=$?; vmtest_cleanup; exit "$rc"; }
-on_int()  { log 'SIGINT — tearing down';  _abort_classify 130; vmtest_cleanup; exit 130; }
-on_term() { log 'SIGTERM — tearing down'; _abort_classify 143; vmtest_cleanup; exit 143; }
+on_exit() { local rc=$?; vmtest_cleanup "$rc"; exit "$rc"; }
+on_int()  { log 'SIGINT — tearing down';  _reconcile_exit_from_side_channel; _abort_classify 130; vmtest_cleanup 130; exit 130; }
+on_term() { log 'SIGTERM — tearing down'; _reconcile_exit_from_side_channel; _abort_classify 143; vmtest_cleanup 143; exit 143; }
 
 trap on_exit EXIT
 trap on_int  INT
@@ -996,6 +1104,10 @@ scenario_dispatch() {
     log "scenario budget: $(conf_get install_timeout)s (vmtest.defaults key install_timeout; DOC-2 §10.2 full-stack row), enforced as a deadline re-checked before each install step"
 
     log "--- scenario ${VMTEST_PATTERN} (${fn}) ---"
+    # swallowed-die-check: indirect — `$fn` is the scenario entry point, proven
+    # to exist by the `command -v` above.  It is called PLAINLY and deliberately
+    # not wrapped in `run_watchdog` (see the block above), which is the whole
+    # reason a `die` inside a scenario unwinds the driver rather than a subshell.
     "$fn"
 }
 
@@ -1263,14 +1375,20 @@ cmd_check_table() {
     # --- steps 3-5: diff on the (package, binary) key -----------------------
     awk -F'\t' "$CHECK_TABLE_AWK" "$actual" "$declared" | LC_ALL=C sort > "$findings"
 
-    local ndeclared nactual nfindings
+    local ndeclared nactual nfindings scope_dirs scope_pkgs
     ndeclared=$(awk 'END { print NR }' "$declared")
     nactual=$(awk 'END { print NR }' "$actual")
     nfindings=$(awk 'END { print NR }' "$findings")
+    # #16: both accessors write to a path; counting their output inside a `$( )`
+    # put their `die 60` in a fork, where it classified nothing.
+    scope_dirs="$VMTEST_TMPDIR/check-table-crate-dirs.txt"
+    scope_pkgs="$VMTEST_TMPDIR/check-table-packages.txt"
+    tsv_scope_crate_dirs "$scope_dirs"
+    tsv_scope_packages "$scope_pkgs"
     # Diagnostics to stderr; the FINDINGS are the command's product and are the
     # only thing on stdout, so "exits 0 printing no findings" is literally true.
     log "declared rows: ${ndeclared}; workspace [[bin]] targets: ${nactual}"
-    log "in scope: $(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes"' | wc -l | tr -d ' ') binaries, $(tsv_scope_crate_dirs | wc -l | tr -d ' ') crate directories, $(tsv_scope_packages | wc -l | tr -d ' ') packages"
+    log "in scope: $(_tsv_rows "$EXPECTED_TSV" | awk -F'\t' '$6 == "yes"' | wc -l | tr -d ' ') binaries, $(wc -l < "$scope_dirs" | tr -d ' ') crate directories, $(wc -l < "$scope_pkgs" | tr -d ' ') packages"
 
     # --- step 6 -------------------------------------------------------------
     if [ "$nfindings" -gt 0 ]; then

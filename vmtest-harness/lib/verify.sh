@@ -361,8 +361,9 @@ negative_probe_n2() {
 
 # verify_rustc <vm_name> <crate_abs_dir> <expected>
 # DOC-1 §8.4's per-build-step assertion. Called from `install_from_path`
-# immediately before the build. 0, or dies 50. EMITS the `rustc --version` line
-# on stdout (§12.1's single-value channel); diagnostics go to stderr.
+# immediately before the build. 0, or dies 50 — §12.2's declared signature, with
+# NO stdout emit. Diagnostics go to stderr; the resolved `rustc --version` line
+# is handed back in the global RUSTC_LAST_LINE (#16).
 #
 # An EMPTY <expected> means "assert that rustc resolves here and reports a
 # version, do not assert WHICH" — the caller uses it for a crate that declares
@@ -390,7 +391,16 @@ verify_rustc() {
     fi
 
     log "rustc(${dir}): ${line}   [emitted from INSIDE ${dir}, because rustup resolves by directory; expected='${expected:-<crate-local override: any>}']"
-    printf '%s\n' "$line"
+    # #16: NOT a stdout emitter. DOC-2 §12.2 declares this function "0 or dies
+    # 50" with no emit; the `printf '%s\n' "$line"` that used to close it was an
+    # undeclared value channel, and its one consumer captured it with
+    # `rustc_line=$(verify_rustc …)` — which put all three `die 50` calls above
+    # in a fork, where they classified nothing. The resolved line is handed back
+    # through a global instead, exactly as `_verify_daemon_set` hands back
+    # LIVENESS_DAEMONS and for the reason that function's banner already gives.
+    # NOT named `VMTEST_*`: §12.3 rule 2 reserves that spelling for §8.2's
+    # override channel.
+    RUSTC_LAST_LINE="$line"
 }
 
 # _verify_resolve <vm_name> <binary...>
@@ -686,7 +696,7 @@ _verify_package_expectation() {
 # ===========================================================================
 verify_stack_doctor() {
     local vm="$1" pattern="$2"
-    local json verdict pkg expect health on_path version plist accepted bad extra n unreported
+    local json verdict pkg expect health on_path version plist accepted bad extra n unreported scope
 
     log "--- verify_stack_doctor (pattern ${pattern}; DOC-2 §1.1, §12.2) ---"
 
@@ -710,8 +720,15 @@ verify_stack_doctor() {
     # is LOGGED, NOT ASSERTED — it is a `--check-table` finding, not a run
     # failure. The assertion runs over `tsv_scope_packages`' values and nothing
     # else.
+    # #16: the in-scope set is materialised ONCE, to a file, before either use.
+    # As a `<(tsv_scope_packages)` its `die 60` ran in a fork that `<( )` has no
+    # status channel for, so a failed accessor silently turned `extra` into
+    # doctor's entire member list — and the heredoc below into an empty one.
+    scope="$VMTEST_TMPDIR/doctor-scope-packages.txt"
+    tsv_scope_packages "$scope"
+
     extra=$(printf '%s' "$json" | jq -r '.members[].member' \
-        | grep -v -x -F -f <(tsv_scope_packages) || :)
+        | grep -v -x -F -f "$scope" || :)
     if [ -n "$extra" ]; then
         log "stack doctor reports member(s) the expectation table does not carry: $(printf '%s' "$extra" | tr '\n' ' ')  [LOGGED, NOT ASSERTED — plan §F-10(e)]"
     fi
@@ -796,9 +813,12 @@ verify_stack_doctor() {
                 [ "$on_path" = 'false' ] || bad="${bad}
     ${pkg}: on_path=${on_path}, expected false" ;;
         esac
-    done <<EOF
-$(tsv_scope_packages)
-EOF
+    done < "$scope"
+    # #16: reads the materialised file. This loop used to be driven by a heredoc
+    # containing `$(tsv_scope_packages)` — heredoc expansion is redirection
+    # setup and has no status channel at all, so an accessor that died ran the
+    # loop ZERO times, left `n=0` and `bad` empty, and this function logged
+    # `verify_stack_doctor PASS: all 0 in-scope package(s) …` on a green run.
 
     if [ -n "$unreported" ]; then
         log "in-scope package(s) \`stack doctor\` does not report as members:${unreported}  [NO HEALTH OBLIGATION — DOC-2 §1.1a(a): doctor iterates stable_set() filtered to daemon members. Their presence is asserted by verify_binaries and verify_single_install.]"
@@ -806,6 +826,16 @@ EOF
 
     [ -z "$bad" ] \
         || die 60 "verify_stack_doctor FAILED under pattern ${pattern} — §1.1's per-member predicate (as amended 2026-08-03, §1.1a) does not hold for the following of the ${n} in-scope packages doctor reports:${bad}"
+
+    # FAILS CLOSED (#16), matching `verify_binaries` and `_verify_daemon_set`.
+    # §1.1's predicate is a UNIVERSAL quantifier over
+    # `tsv_scope_packages ∩ report.members`, and a universal over the empty set
+    # is vacuously true — so a PASS over zero members was formally conformant
+    # and still asserted nothing. Recorded in §1.1 as a deliberate strengthening,
+    # on DOC-2 §9.6's own doctrine: "a table that rewrites itself to match
+    # reality asserts nothing".
+    [ "$n" -gt 0 ] \
+        || die 60 "verify_stack_doctor: the assertion set is EMPTY under pattern ${pattern} — no in-scope package from the expectation table appears in \`tctl stack doctor --json\`'s member table, so every clause of §1.1's predicate is vacuously true and a PASS here would assert nothing. Either doctor produced no parseable member table or the expectation table and \`stable_set()\` have diverged."
 
     log "verify_stack_doctor PASS: all ${n} in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern ${pattern}, AND every launchd member among them is plist_installed=false — asserted directly since 2026-08-04, not inferred (verdict '${verdict}' logged but not asserted)"
 }
@@ -1056,9 +1086,14 @@ verify_daemon_liveness() {
 # with it — `trusty-console` is a `stable_set` daemon too and is correctly
 # excluded here, by the intersection, because the TSV marks it out of scope.
 _verify_daemon_set() {
-    local vm="$1"
+    local vm="$1" scope
+    # #16: this function's own banner names the hazard — "`die` inside a `$(…)`
+    # command substitution kills only the subshell" — and the `<( )` on the next
+    # line was an instance of it. The accessor now writes to a path.
+    scope="$VMTEST_TMPDIR/liveness-scope-packages.txt"
+    tsv_scope_packages "$scope"
     LIVENESS_DAEMONS=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
-        | grep -x -F -f <(tsv_scope_packages) | tr '\n' ' ') || :
+        | grep -x -F -f "$scope" | tr '\n' ' ') || :
     LIVENESS_DAEMONS=${LIVENESS_DAEMONS% }
     # FAILS CLOSED. An empty set would make every assertion below vacuous and
     # still print a PASS line — the false pass this whole oracle exists to avoid.

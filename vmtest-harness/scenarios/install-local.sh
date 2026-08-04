@@ -46,9 +46,16 @@ scenario_install_local() {
     #    directory immediately before building (DOC-1 §8.4), and installs at
     #    PACKAGE granularity — never `--bin` (DOC-2 §12.2). The shared
     #    CARGO_TARGET_DIR (DOC-1 §8.6) rides in $VMTEST_GUEST_ENV (§7.3).
-    for _dir in $(tsv_scope_crate_dirs); do
+    #    #16: `for _dir in $(tsv_scope_crate_dirs)` discarded the accessor's
+    #    status outright — a `die 60` inside the for-list neither classified nor
+    #    aborted, and the loop simply ran zero times. It writes to a path now,
+    #    and `while read < file` runs in THIS shell, not a subshell.
+    _scope="$VMTEST_TMPDIR/scope-crate-dirs.txt"
+    tsv_scope_crate_dirs "$_scope"
+    while IFS= read -r _dir; do
+        [ -n "$_dir" ] || continue
         install_from_path "$VMTEST_VM" "$_guest_src" "$_dir"
-    done
+    done < "$_scope"
 
     # 2b. THE RUN-LEVEL TRIPWIRE (P5-T8) — the counterpart to P4-T4's host-level
     #     postcondition on the helper itself. P4-T4 catches a helper that stops

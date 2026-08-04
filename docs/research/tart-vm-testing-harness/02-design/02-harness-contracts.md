@@ -104,7 +104,36 @@ PASS  iff  for every in-scope package p:
              H_P(p) := {healthy, stale}
                      ∪ {unknown}  if member(p).plist_installed == null
                      ∪ {down}     if P ∈ {b, c} and member(p).plist_installed == false
+
+           and, since 2026-08-04, PASS additionally requires
+             |health_scope| > 0
 ```
+
+> **Amendment, 2026-08-04 — the emptiness guard, recorded as a deliberate
+> STRENGTHENING rather than a bug fix
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+>
+> The predicate above is a **universal quantifier** over `health_scope`, and a
+> universal over the empty set is **vacuously true**. So `verify_stack_doctor`
+> reporting `PASS: all 0 in-scope package(s) …` was **formally conformant with
+> this section** — which is exactly why it needs an owner decision and a note here
+> rather than a quiet edit. Note also that **§1.1a is not the governing text**: it
+> scopes *which* members carry a health obligation, not what happens when there
+> are none.
+>
+> It stopped being hypothetical. `tsv_scope_packages` fed this predicate through a
+> heredoc substitution, whose expansion has no status channel at all; when the
+> accessor died, the `while read` loop ran **zero** times, `n` stayed 0, `bad`
+> stayed empty, and the oracle logged a PASS on a green run. Issue #16 removed
+> that construct — but an oracle that can report PASS over nothing is a defect
+> independent of how the set came to be empty.
+>
+> The guard is `n > 0`, failing 60. It brings this oracle in line with its two
+> siblings, which already had one: `verify_binaries` refuses an expectation table
+> that yields no in-scope rows, and `_verify_daemon_set` refuses an empty derived
+> daemon set with the comment **"FAILS CLOSED"**. It also applies §9.6's own
+> doctrine — *"a table that rewrites itself to match reality asserts nothing"* —
+> to the assertion set rather than to the table.
 
 #### 1.1a Health is quantified over doctor's daemon-member set, not over the TSV
 
@@ -148,7 +177,8 @@ can never satisfy a predicate quantified over `member(p)`.
 **The two causes reach one conclusion**, which is why the original single-cause
 text could be wrong about the mechanism and still land on the correct predicate:
 none of the three is in doctor's member set, so no health obligation can attach
-to any of them. **This correction has zero runtime effect.** `verify.sh:659`
+to any of them. **This correction has zero runtime effect.** `lib/verify.sh:747`
+(cited as `verify.sh:659` until 2026-08-04; the function has grown since)
 tests membership **dynamically** —
 `jq -e --arg m "$pkg" 'any(.members[]; .member == $m)'` — so the oracle asks the
 report what it actually contains rather than deriving it from a stated cause, and
@@ -706,8 +736,22 @@ every failure makes both impossible.
 wins** and is what the driver exits with — a scenario failure (50) followed by a
 teardown failure does **not** become 70, because the operator needs to know what
 broke, not what broke last. Teardown failure is reported on stderr regardless, and
-is only *returned* as 70 when nothing earlier failed. Implementation: a single
-global `VMTEST_EXIT`, written once by the first `die()` and never overwritten.
+is only *returned* as 70 when nothing earlier failed. Implementation: a write-once
+slot claimed by the first `die()` and never overwritten — held in the global
+`VMTEST_EXIT` **and, since 2026-08-04, backed by a file** (`$VMTEST_TMPDIR/exit-code`,
+created `O_EXCL`) that `vmtest_cleanup` reconciles into the global.
+
+> **Amendment, 2026-08-04 — the implementation sentence, not the rule
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).** This
+> paragraph previously read *"a single global `VMTEST_EXIT`"*. **The rule above is
+> unchanged and is exactly what the amendment restores:** a global cannot cross a
+> fork, so a `die` inside a command substitution, a for-list, a heredoc
+> substitution or a process substitution wrote the slot in a child and lost it —
+> and the second failure, arriving in the parent, then took a slot the first
+> failure should already have held. The observed shape was `FAIL[50]` → `MEASURE
+> exit 0` → `FAIL[70]` → process exit **70**, which is precisely the override this
+> section forbids, with a code whose own row disclaims the run result. See §12.4
+> for the mechanism and §12.1 for the structural half of the fix.
 
 **Why the gaps.** Codes are spaced by ten so a phase can gain a sub-code without
 renumbering the table. Every harness code is `<= 70`, deliberately below the shell's
@@ -2145,13 +2189,43 @@ testing. No signature is given for anything.
 - **Arguments are positional strings.** bash 3.2 has no associative arrays and no
   namerefs (§Shell discipline), so there is no options-hash idiom available.
 - **The return channel is the exit status.** `0` = success, non-zero = failure.
-- **The value channel is stdout, and carries at most one value.** A function that
-  needs to return several values writes a TSV to a path given as an argument
-  (§7.1's `toolchain.tsv` is the pattern).
+- **The value channel is stdout, and carries at most one value** — but **only for
+  a function that cannot `die`.** A function that needs to return several values,
+  **or that can `die`, whatever it returns**, writes to a path given as an
+  argument (§7.1's `toolchain.tsv` is the pattern; `vm_list <out_tsv_path>` is the
+  in-tree precedent).
 - **Diagnostics go to stderr, always.** stdout must stay clean because §1's oracle
   parses it. DOC-1 §5.1 records that `tart exec` keeps the streams separate, which
   is what makes this discipline possible at all.
 - **Functions do not call `exit` — they call `die`,** except where noted.
+
+> **Amendment, 2026-08-04 — the out-path convention is widened from "several
+> values" to "any value, when the function can `die`"
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+>
+> **The two conventions as originally written were jointly unimplementable.** In
+> bash, the only way to capture a function's stdout is a command substitution,
+> and a command substitution **forks**. §12.4's `die` classifies by writing a
+> shell variable, which the fork cannot carry back. So *"emits a value on stdout"*
+> and *"classifies its own failure via `die`"* could not both hold for the same
+> function — and §12.2 paired them anyway, one line each, for
+> `provision_detect_mise` and `source_deliver_local`.
+>
+> This was not a theoretical clash. Seventeen call sites captured a die-capable
+> function's stdout; at every one the classification was lost, and at six the
+> failure was not even aborted, because `for x in $(f)`, a heredoc substitution
+> and `<(f)` **discard the child's exit status outright**. §12.4's file-backed
+> side channel recovers the *classification* at all of them; **no side channel and
+> no `set -e` variant can recover the *abort*.** Removing the fork is the only
+> mechanism that does, and the out-path is how this document already said to
+> remove it — the escape hatch existed, it was merely scoped to "several values".
+>
+> Two accessors were converted under this rule: `tsv_scope_crate_dirs <out_path>`
+> and `tsv_scope_packages <out_path>`. Both are driver-local, outside §12.2's four
+> module surfaces, so no signature table changed. `provision_detect_mise` and
+> `source_deliver_local` keep their declared `emits` and rely on the §12.4
+> backstop — their failures abort correctly today, only the classification was
+> lost, and converting them would change §12.2. That is deferred, deliberately.
 - **`lib/` files define functions and nothing else.** No top-level statements, no
   `set`, no side effects at source time.
 
@@ -2464,10 +2538,61 @@ One rule, one function:
 die() {
   _code=$1; shift
   printf 'vmtest: FAIL[%s]: %s\n' "$_code" "$*" >&2
+  # The slot is file-backed: a shell global cannot cross a fork, a file can.
+  # Write first, then ADOPT — so a `die` in this shell loses to an earlier one
+  # that was recorded in a child, which is what makes the file authoritative.
+  if [ -n "${VMTEST_TMPDIR:-}" ]; then
+    ( set -o noclobber; printf '%s\n' "$_code" > "$VMTEST_TMPDIR/exit-code" ) 2>/dev/null || :
+    _reconcile_exit_from_side_channel
+  fi
   if [ -z "${VMTEST_EXIT:-}" ]; then VMTEST_EXIT=$_code; fi
   exit "$VMTEST_EXIT"
 }
 ```
+
+> **Amendment, 2026-08-04 — the side-channel write ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+> The body above carried only the `VMTEST_EXIT` assignment until this date, and
+> the implementation was character-identical to it. **A shell global cannot cross
+> a fork**, so every `die` that fired inside `$( )`, `<( )`, a for-list or a
+> heredoc substitution assigned the slot in a child that then died with it. The
+> parent's slot stayed unset, with three consequences: the MEASURE line reported
+> `exit 0` for a run that failed 50; a later teardown `die 70` could claim the
+> slot §2 reserves for the FIRST failure; and at the constructs that discard the
+> child's status outright the failure was **swallowed entirely**. Seventeen call
+> sites were affected, and one of them — `verify_stack_doctor`'s heredoc — turned
+> a dead assertion loop into a green `PASS: all 0 in-scope package(s)`.
+>
+> A file is not forked away, so the write survives at any subshell depth.
+> `set -o noclobber` makes the create an `O_EXCL` one, which **strengthens**
+> write-once rather than merely preserving it: the previous `if [ -z … ]` was a
+> read-then-write, write-once only because the harness is single-threaded, and
+> the file version holds even against `run_watchdog`'s backgrounded children. The
+> option is set inside `( … )`, so the driver's own shell options are untouched.
+> `VMTEST_TMPDIR` exists from `conf_load` onward, i.e. before every affected
+> site; the guard covers the `die 2` / `die 10` paths that precede it, which fire
+> in the parent where the global already worked.
+>
+> **The write is immediately followed by a READ-BACK, and the two together are
+> the mechanism — neither alone is sufficient.** `die` tested only the in-shell
+> global, so a second, parent-side `die` still claimed a slot the first failure
+> already held on disk: a subshell `die 50` followed by a `die 70` left the file
+> holding 50 and exited **70**, which is the override this document forbids,
+> reached by a longer route. Adopting the file inside `die` is what makes the
+> `O_EXCL` create *decide* the verdict rather than merely record it — and it is
+> what makes the claim above about backgrounded children true rather than
+> aspirational.
+>
+> **The side channel is a backstop, not the whole fix.** It restores
+> classification everywhere, but it cannot restore an *abort* at the three
+> constructs that discard the status (for-list, heredoc, `<( )`) — nothing can,
+> which is why §12.1's out-path convention was widened in the same change.
+
+`vmtest_cleanup` reconciles the two, adopting the file's value only when nothing
+in the driver's own shell claimed the slot first. **The ordering is load-bearing:**
+reconciliation runs *after* cleanup captures the exit status and *before* both the
+MEASURE line and the `rm -rf` that removes the directory the file lives in. Under
+`--keep` the verdict is also copied into the run directory, which survives for
+postmortem.
 
 The chain is: `die` → `exit` → the `EXIT` trap → `vmtest_cleanup` → teardown → the
 process exits with `VMTEST_EXIT`. Nothing else terminates the run, and the write-once
@@ -2489,6 +2614,9 @@ Pseudocode. Signatures and composition only; **this is not runnable and no part 
 
 scenario_install_local() {
     # 1. Deliver source. Byte count is logged per DOC-1 §6.1's precision note.
+    #    A BARE assignment: the substitution's status IS the assignment's, so
+    #    `set -e` still aborts, and §12.4's side channel carries the
+    #    classification back out of the fork.
     _bytes=$(source_deliver_local "$VMTEST_VM" "$PWD" "$VMTEST_GUEST_SRC")
     log "streamed ${_bytes} bytes of git-tracked + untracked-unignored source"
 
@@ -2496,9 +2624,12 @@ scenario_install_local() {
     #    install_from_path asserts `rustc --version` in the crate directory
     #    immediately before building (DOC-1 §8.4). Shared CARGO_TARGET_DIR
     #    rides in VMTEST_GUEST_ENV (DOC-1 §8.6, §7.3).
-    for _dir in $(tsv_scope_crate_dirs); do          # column 2 where in_scope=yes
+    #    NEVER `for _dir in $(tsv_scope_crate_dirs)` — see the amendment below.
+    tsv_scope_crate_dirs "$VMTEST_TMPDIR/scope-crate-dirs.txt"   # in_scope=yes
+    while IFS= read -r _dir; do
+        [ -n "$_dir" ] || continue
         install_from_path "$VMTEST_VM" "$VMTEST_GUEST_SRC" "$_dir"
-    done
+    done < "$VMTEST_TMPDIR/scope-crate-dirs.txt"
 
     # 3. Negative probe N2 — guide-and-abort now that tctl exists (§6.2/§6.3).
     negative_probe_n2 "$VMTEST_VM"
@@ -2525,6 +2656,24 @@ scenario_install_local() {
 > would have asserted that **one** `cargo install trusty-mpm` is what produced
 > them. Every multi-binary in-scope package now gets a call; single-binary packages
 > do not need one, because for them `verify_binaries` already is the whole claim.
+
+> **Amendment, 2026-08-04 — the skeleton was prescribing the defect
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).** The loop
+> above read `for _dir in $(tsv_scope_crate_dirs)` until this date, and all three
+> shipped scenario files were faithful implementations of it. **A for-list's exit
+> status is discarded outright**: a `die 60` inside that substitution neither
+> classified the run nor aborted it — the loop simply ran zero times and the
+> scenario carried on having installed nothing. Every call site of both
+> `tsv_scope_*` accessors was a construct of this kind, so the P4-T4 postcondition
+> tripwires were **100% non-functional as classifiers and 60% non-functional even
+> as aborts**. The accessors now take an out_path (§12.1 as amended), and the loop
+> reads a file — `while read < file` runs in the current shell, so a `die` reaches
+> the driver and `set -e` catches a non-zero return.
+>
+> Step 1 is left as a bare assignment on purpose, and the distinction is the point:
+> `x=$(f)` **does** propagate the child's status, so it aborts correctly; only the
+> classification was lost, and §12.4's side channel is what returns it. Fixing a
+> construct that is not broken would have obscured which one was.
 
 Note what the skeleton does **not** contain: no `tart`, no `PATH`, no timeout, no
 exit code, no `if` around a lib call. Every one of those lives in a `lib/` module or
