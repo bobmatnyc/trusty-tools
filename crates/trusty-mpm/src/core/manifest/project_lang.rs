@@ -357,8 +357,14 @@ mod tests {
     /// A `package.json` declaring exactly `deps` — the fixture the tightened
     /// JS-framework gates are written against.
     fn package_json(deps: &[&str]) -> String {
-        let entries: Vec<String> = deps.iter().map(|d| format!("    \"{d}\": \"1.0.0\"")).collect();
-        format!("{{\n  \"dependencies\": {{\n{}\n  }}\n}}\n", entries.join(",\n"))
+        let entries: Vec<String> = deps
+            .iter()
+            .map(|d| format!("    \"{d}\": \"1.0.0\""))
+            .collect();
+        format!(
+            "{{\n  \"dependencies\": {{\n{}\n  }}\n}}\n",
+            entries.join(",\n")
+        )
     }
 
     #[test]
@@ -428,10 +434,17 @@ mod tests {
     fn react_dependency_detects_react_engineer() {
         // The declared dependency is the signal, and it is exact.
         let tmp = TempDir::new().unwrap();
-        write(tmp.path(), "package.json", &package_json(&["react", "react-dom"]));
+        write(
+            tmp.path(),
+            "package.json",
+            &package_json(&["react", "react-dom"]),
+        );
         let detected = detected_engineers(tmp.path());
         assert!(detected.contains("react-engineer"));
-        assert!(detected.contains("javascript-engineer"), "language engineers still fire");
+        assert!(
+            detected.contains("javascript-engineer"),
+            "language engineers still fire"
+        );
         assert!(!detected.contains("nextjs-engineer"));
         assert!(!detected.contains("svelte-engineer"));
     }
@@ -451,7 +464,11 @@ mod tests {
 
         // Same rule on the other three probes.
         let nx = TempDir::new().unwrap();
-        write(nx.path(), "package.json", &package_json(&["next-auth", "next-themes"]));
+        write(
+            nx.path(),
+            "package.json",
+            &package_json(&["next-auth", "next-themes"]),
+        );
         assert!(!detected_engineers(nx.path()).contains("nextjs-engineer"));
 
         let sv = TempDir::new().unwrap();
@@ -472,7 +489,11 @@ mod tests {
             );
         }
         let dep_only = TempDir::new().unwrap();
-        write(dep_only.path(), "package.json", &package_json(&["next", "react"]));
+        write(
+            dep_only.path(),
+            "package.json",
+            &package_json(&["next", "react"]),
+        );
         assert!(detected_engineers(dep_only.path()).contains("nextjs-engineer"));
     }
 
@@ -522,7 +543,10 @@ mod tests {
         );
         let detected = detected_engineers(tmp.path());
         assert!(detected.contains("phoenix-engineer"));
-        assert!(detected.contains("elixir-engineer"), "Phoenix apps are Elixir apps");
+        assert!(
+            detected.contains("elixir-engineer"),
+            "Phoenix apps are Elixir apps"
+        );
 
         let live_only = TempDir::new().unwrap();
         write(

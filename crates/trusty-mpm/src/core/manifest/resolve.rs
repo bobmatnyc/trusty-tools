@@ -396,8 +396,8 @@ mod tests {
         );
         assert!(selected(&m, "qa"), "universal agents are never stack-gated");
         assert!(
-            !selected(&m, "ops"),
-            "the deprecated agent must not be selected"
+            !selected(&m, "elixir-engineer") && !selected(&m, "phoenix-engineer"),
+            "a Rust project gets neither the Elixir nor the Phoenix engineer"
         );
         assert!(
             !selected(&m, "vercel-ops"),
@@ -420,7 +420,9 @@ mod tests {
         for stem in [
             "rust-engineer",
             "python-engineer",
+            "elixir-engineer",
             "react-engineer",
+            "phoenix-engineer",
             "tauri-engineer",
             "engineer",
             "qa",
@@ -430,8 +432,10 @@ mod tests {
                 "{stem} must deploy to an unknown project"
             );
         }
-        assert!(!selected(&m, "gcp-ops"));
-        assert!(!selected(&m, "ops"));
+        assert!(
+            !selected(&m, "gcp-ops") && !selected(&m, "vercel-ops"),
+            "platform has no unknown-project fallback"
+        );
     }
 
     #[test]

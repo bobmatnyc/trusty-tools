@@ -151,7 +151,7 @@ mod tests {
             ("rust-engineer", "language"),
             ("react-engineer", "framework"),
             ("vercel-ops", "platform"),
-            ("ops", "deprecated"),
+            ("elixir-engineer", "language"),
         ] {
             assert!(
                 rendered.contains(&format!("| `{stem}` | {category} |")),

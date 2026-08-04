@@ -79,6 +79,7 @@ universal = [
 language = [
   "dart-engineer",
   "dotnet-engineer",
+  "elixir-engineer",
   "golang-engineer",
   "java-engineer",
   "javascript-engineer",
@@ -91,11 +92,10 @@ language = [
 
 # --- framework: gated on a detected FRAMEWORK --------------------------------
 #
-# NOTE for reviewers: `language` and `framework` are two DECLARED categories but
-# ONE gating MECHANISM today — both resolve through `detected_engineers`, whose
-# `LANGUAGE_ENGINEERS` markers are unchanged by this file. Splitting the gate
-# itself (so that, e.g., `react-engineer` needs a React marker rather than any
-# `package.json`) is a behavior change and is NOT made here. See the PR body.
+# These gate on FRAMEWORK evidence, not language evidence. React and Phoenix
+# ship no config file that distinguishes them, so they gate on a bounded content
+# probe of the project's own dependency declaration (`package.json::"react"`,
+# `mix.exs::{:phoenix,`) — see `project_lang.rs::marker_present`.
 framework = [
   "nextjs-engineer",
   "phoenix-engineer",
@@ -115,9 +115,18 @@ platform = [
 
 # --- deprecated: never deployed ----------------------------------------------
 #
-# `ops` was superseded by `local-ops`. `agent-delegation.md` has said so in prose
-# since before this file existed, with zero code-level effect — it still reached
-# every roster. Listing it here is that missing code-level effect.
-deprecated = [
-  "ops",
-]
+# Currently EMPTY, and that is the correct state — not a leftover.
+#
+# `ops` was the category's first and only occupant: superseded by `local-ops`,
+# marked DEPRECATED in `agent-delegation.md` prose with zero code-level effect,
+# and still reaching every roster. The owner ruled on 2026-08-04 to delete the
+# asset outright rather than keep-but-not-deploy, so it is gone from the bundle
+# and needs no declaration.
+#
+# The category stays because it is the mechanism, not the instance: retiring a
+# future agent that must remain bundled (a stable name other tooling references,
+# or one kept for a deprecation window) is an edit to this list. The behavior is
+# still proven — `deprecated_agent_never_deploys` exercises it against a
+# synthetic catalog, which is a stronger test than one riding on whichever agent
+# happens to be retired today.
+deprecated = []

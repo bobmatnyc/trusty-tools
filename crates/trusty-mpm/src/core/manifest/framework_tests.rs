@@ -60,15 +60,28 @@ fn bundled_framework_manifest_is_valid() {
     // on. If this fails, the shipped asset is corrupt and the panic is live.
     let categories = framework_agent_categories().expect("bundled manifest must validate");
     assert!(!categories.universal.is_empty());
-    assert!(
-        categories.deprecated.contains(&"ops".to_string()),
-        "`ops` must be declared deprecated, not merely omitted"
-    );
     assert_eq!(
         categories.platform,
         vec!["gcp-ops".to_string(), "vercel-ops".to_string()],
         "the two platform-ops agents are platform-gated"
     );
+    assert!(
+        categories.language.contains(&"elixir-engineer".to_string()),
+        "elixir-engineer is language-gated on mix.exs"
+    );
+    assert!(
+        categories
+            .framework
+            .contains(&"phoenix-engineer".to_string()),
+        "phoenix-engineer is framework-gated on the phoenix dependency"
+    );
+    // #4760: `deprecated` is EMPTY and that is correct. `ops` was its only
+    // occupant and the owner ruled it deleted from the bundle outright, so it
+    // needs no declaration. The category remains as the MECHANISM for retiring
+    // a future agent that must stay bundled; its behaviour is proven against a
+    // synthetic catalog by `deprecated_agent_never_deploys`, which does not
+    // depend on whichever agent happens to be retired today.
+    assert!(categories.deprecated.is_empty());
 }
 
 #[test]
@@ -78,7 +91,14 @@ fn bundled_agent_stems_excludes_foundations() {
         stems.contains("engineer"),
         "dispatchable agents are included"
     );
-    assert!(stems.contains("ops"), "a deprecated agent is still bundled");
+    assert!(
+        stems.contains("elixir-engineer"),
+        "#4760 added elixir-engineer to the bundle"
+    );
+    assert!(
+        !stems.contains("ops"),
+        "#4760 deleted the deprecated `ops` agent from the bundle"
+    );
     for base in [
         "BASE-AGENT",
         "BASE-ENGINEER",
@@ -130,10 +150,6 @@ fn framework_agent_scope_selects_universal_agents() {
     let scope = framework_agent_scope(tmp.path());
     assert!(deploys(&scope, "engineer"));
     assert!(deploys(&scope, "qa"));
-    assert!(
-        !deploys(&scope, "ops"),
-        "the deprecated agent must never be selected"
-    );
     assert_eq!(scope.source, ContentSource::Bundled);
 }
 

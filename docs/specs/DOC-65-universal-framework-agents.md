@@ -44,17 +44,18 @@ agents into five disjoint lists:
 | Category | Count | Gate |
 |---|---|---|
 | `universal` | 19 | Deploys to every project. No detection at all. |
-| `language` | 10 | Deploys only when a LANGUAGE marker is detected. |
+| `language` | 11 | Deploys only when a LANGUAGE marker is detected. |
 | `framework` | 5 | Deploys only when a FRAMEWORK marker is detected. |
 | `platform` | 2 | Deploys only when a PLATFORM marker is detected. |
-| `deprecated` | 1 | Never deploys. Declared so a retired agent stays accounted for. |
+| `deprecated` | 0 | Never deploys. Empty today — see §6.1. |
 
 The previous definition — "universal iff its stem is **absent** from
 `LANGUAGE_ENGINEERS`" — was a mechanical complement, not a decision, and it
-is what let `ops` stay deprecated in prose while reaching every roster. Its
-22-agent result equals this document's 19 universal + 2 platform + 1
-deprecated; nothing was added or removed from the catalog, the same agents
-are now sorted by an explicit rule instead of by omission from one table.
+is what let `ops` stay deprecated in prose while reaching every roster. That
+definition produced 22 "universal" agents against 15 stack-specific ones. The
+catalog is still 37 dispatchable agents: `ops` was deleted (§6.1) and
+`elixir-engineer` added (§4.1), a net zero, and the remainder are now sorted
+by an explicit rule instead of by omission from one table.
 `core::manifest::framework::parse_framework_manifest` enforces that the five
 lists exactly partition the bundled catalog, so an agent can no longer be
 forgotten into (or out of) deploying — a bundled agent nobody classified is a
@@ -180,27 +181,59 @@ them. The exhaustiveness invariant buys what the allowlist would have — a
 bundled agent absent from the manifest is a hard error, so it cannot be
 forgotten into deploying.
 
-### 4.1 `language` and `framework` — two declarations, one gate today
+### 4.1 `language` and `framework` — two declarations, two real gates
 
 Both resolve through `detected_engineers`, which probes the project root
-against `LANGUAGE_ENGINEERS` (15 stems: 10 declared `language`, 5 declared
-`framework`). The split is a DECLARATION of intent that the markers do not
-yet fully honour, and this is stated plainly rather than implied:
+against `LANGUAGE_ENGINEERS` — now 16 stems: 11 declared `language`, 5
+declared `framework`. The two categories gate on genuinely different
+evidence.
 
-| Stem | Category | Markers today | Genuinely framework-gated? |
-|---|---|---|---|
-| `tauri-engineer` | framework | `src-tauri/tauri.conf.json`, `tauri.conf.json` | **Yes** — framework markers only |
-| `nextjs-engineer` | framework | `next.config.{js,mjs,ts}` **and** `package.json` | No — the `package.json` fallback fires for any JS project |
-| `svelte-engineer` | framework | `svelte.config.{js,ts}` **and** `package.json` | No — same fallback |
-| `react-engineer` | framework | `package.json` only | No — has no framework marker at all |
-| `phoenix-engineer` | framework | `mix.exs` | No — `mix.exs` is the ELIXIR language marker; every Elixir project has one, and there is no `elixir-engineer` |
+The original split was a declaration the markers did not honour: four of the
+five framework stems fired on a marker that identified a *language*, not a
+framework. The owner ruled on 2026-08-04 to tighten them. What changed:
 
-Tightening those four gates so a framework agent requires a framework marker
-is a **behavior change** (a plain JS project would stop receiving
-`react-engineer`/`nextjs-engineer`/`svelte-engineer`; a non-Phoenix Elixir
-project would stop receiving `phoenix-engineer`, with nothing to replace it).
-It is deliberately NOT made here, and neither is the question of whether
-Elixir needs its own `language` entry.
+| Stem | Markers before | Markers now |
+|---|---|---|
+| `tauri-engineer` | `src-tauri/tauri.conf.json`, `tauri.conf.json` | unchanged — already framework-only |
+| `nextjs-engineer` | `next.config.*` **or `package.json`** | `next.config.*` or `package.json::"next"` |
+| `svelte-engineer` | `svelte.config.*` **or `package.json`** | `svelte.config.*` or `package.json::"svelte"` |
+| `react-engineer` | `package.json` | `package.json::"react"` |
+| `phoenix-engineer` | `mix.exs` | `mix.exs::{:phoenix,` |
+| `elixir-engineer` | *(did not exist)* | `mix.exs` |
+
+**React and Phoenix could not be gated on a fixed path at all.** React ships
+no configuration file — it is a library, and Vite, CRA, and Next.js projects
+share nothing React-specific on disk. Phoenix ships nothing plain Elixir
+lacks: `mix.exs`, `config/*.exs`, and `priv/` all exist in ordinary Mix
+projects, and the directory that *would* identify a Phoenix app
+(`lib/<app>_web/`) is named after the application, so no fixed path reaches
+it. Next.js has the same shape in miniature — `next.config.*` is genuinely
+optional, so a config-only gate would miss real Next.js projects.
+
+Rather than infer from a proxy, `marker_present` gained a third marker form:
+a **content probe**, written `<path>::<needle>`, true when the file exists, is
+at most 1 MiB, and contains `<needle>` as a literal substring. Every needle
+carries its surrounding syntax, so a substring match is an exact declaration
+match: `"react"` (with both quotes) does not match `"react-dom"`,
+`"react-native"`, or `"@types/react"`; `{:phoenix,` does not match
+`{:phoenix_live_view,`. This reads a dependency declaration the project wrote
+about itself. It is not a heuristic, and it is bounded — any I/O failure, an
+oversized file, or a directory yields "marker absent", never an error.
+
+**`elixir-engineer` is new, and it is the other half of the Phoenix change.**
+`mix.exs` was `phoenix-engineer`'s marker, which meant a plain Elixir project
+received a Phoenix specialist and no general Elixir engineer at all. Narrowing
+Phoenix without adding Elixir would have left Elixir with no coverage, so the
+two land together. A Phoenix project detects both — Phoenix apps are Elixir
+apps — and `phoenix-engineer`'s description narrowed to the web layer
+(Router, Controllers, LiveView, Channels, HEEx) so the two roles do not
+overlap.
+
+**This is a deliberate behavior change, not accidental scope loss.** A plain
+JavaScript project no longer receives `react-engineer`, `nextjs-engineer`, or
+`svelte-engineer`. A non-Phoenix Elixir project no longer receives
+`phoenix-engineer`. All four were deploying by accident, on a marker that
+identified the language rather than the framework.
 
 ### 4.2 `platform` — a genuinely new gate
 
@@ -263,9 +296,8 @@ unconditionally selected.
 
 ### 5.2 Category 2 — stack-specific bundled
 
-The 18 marker-gated agents: 10 declared `language`, 5 declared `framework`,
-2 declared `platform`, plus the 1 declared `deprecated`, which is bundled but
-gated out unconditionally. Same deploy target as category 1 — selection, not
+The 18 marker-gated agents: 11 declared `language`, 5 declared `framework`,
+2 declared `platform`. Same deploy target as category 1 — selection, not
 a separate directory, is what distinguishes ADR-0025's categories 1 and 2
 (ADR-0025 addendum §B3's own point). ADR-0025 assumed this set was exactly
 `LANGUAGE_ENGINEERS`; §4.2 adds the platform gate it did not anticipate.
@@ -315,16 +347,21 @@ deliberately so the reasoning stays auditable.
 ### 6.1 Undocumented, duplicated, or deprecated-but-still-deployed agents
 
 - **RESOLVED (#4760) — `ops` is deprecated in prose but still a full,
-  still-deployed bundled asset.** It is now declared in
-  `framework-manifest.toml`'s `deprecated` list, which
-  `agent_scope_from` places in the exclude term unconditionally, for every
-  project. Deprecating an agent is now an edit to that file rather than a
-  note in prose. Two limits, stated so neither is mistaken for done: the
-  `ops.md` asset is still bundled (whether to delete it is a separate
-  decision — the `deprecated` list is exactly the mechanism that makes
-  "keep it, do not deploy it" expressible), and an `ops.md` ALREADY deployed
-  to a machine is not retracted, because orphan retraction is issue #391 /
-  ADR-0025 clause 9 and has not shipped. Original evidence: `agent-delegation.md` states twice — "Generic `ops` is
+  still-deployed bundled asset.** The owner ruled on 2026-08-04 that it is
+  **deleted from the bundle**, not kept-but-not-deployed: the asset, its
+  `OPS_AGENT` constant, its `bundle_all.rs` registration, and its test
+  fixtures are all gone. `ALL` is unchanged at 178 because
+  `elixir-engineer` was added in the same change (§4.1).
+
+  Two consequences, stated so neither is mistaken for done. **An `ops.md`
+  ALREADY deployed to a machine is not retracted** — orphan retraction is
+  issue #391 / ADR-0025 clause 9 and has not shipped, so existing machines
+  keep an orphan copy until it does. And the `deprecated` category is now
+  **empty**, which is its correct state rather than a leftover: it remains as
+  the mechanism for retiring a future agent that must stay bundled, and its
+  behaviour is proven against a synthetic catalog by
+  `deprecated_agent_never_deploys`, which does not depend on whichever agent
+  happens to be retired today. Original evidence: `agent-delegation.md` states twice — "Generic `ops` is
   DEPRECATED; use `local-ops` for localhost/PM2/docker" and "**NOTE**: Generic `ops` agent is
   DEPRECATED. Use platform-specific agents." — but
   `crates/trusty-mpm/src/assets/agents/ops.md` is a 63-line, fully-formed
@@ -431,7 +468,7 @@ not an extension of an existing one.** Reasoning:
 
 - `crates/trusty-mpm/src/assets/agents/*.md` — the 42-file bundled agent
   catalog: 5 `BASE-*` templates plus 37 dispatchable agents (19 `universal`,
-  10 `language`, 5 `framework`, 2 `platform`, 1 `deprecated`).
+  11 `language`, 5 `framework`, 2 `platform`, 0 `deprecated`).
 - `crates/trusty-mpm/src/assets/framework-manifest.toml` — the framework tier
   of the `manifest.toml` format; its `[agent_categories]` section is the
   declaration §4 describes.
@@ -443,9 +480,10 @@ not an extension of an existing one.** Reasoning:
 - `crates/trusty-mpm/src/core/manifest/schema.rs` — `AgentCategories`, the
   one additive section this work adds to the shared manifest schema.
 - `crates/trusty-mpm/src/core/manifest/project_lang.rs` —
-  `LANGUAGE_ENGINEERS`, `PLATFORM_AGENTS`, `detected_engineers`,
-  `detected_platforms`, `marker_present` — the marker tables the gated
-  categories are evaluated against. (`language_agent_scope`, the
+  `LANGUAGE_ENGINEERS` (16 stems), `PLATFORM_AGENTS` (2), `detected_engineers`,
+  `detected_platforms`, `marker_present` (exact path, `*.<ext>` glob, and the
+  `<path>::<needle>` content probe), `file_contains` — the marker tables the
+  gated categories are evaluated against. (`language_agent_scope`, the
   exclude-by-complement function this document's original text described, was
   removed by #4760.)
 - `crates/trusty-mpm/src/core/delegation_authority.rs` —
@@ -491,5 +529,12 @@ not an extension of an existing one.** Reasoning:
   number; §6.1 and §6.2 mark the `ops`, `gcp-ops`/`vercel-ops`, and
   ellipsis-boundary findings RESOLVED, and the four undocumented agents
   PARTIALLY resolved (classified, still unrouted), each keeping its original
-  evidence. Counts restated: 37 dispatchable agents = 19 + 10 + 5 + 2 + 1,
-  equal to the previously stated 15 stack-specific + 22 universal.
+  evidence.
+- 2026-08-04 — Owner rulings of the same day folded in. §4.1 rewritten: the
+  `react`/`nextjs`/`svelte`/`phoenix` gates are TIGHTENED to framework
+  evidence via a new bounded content-probe marker form, and `elixir-engineer`
+  is added so narrowing Phoenix does not leave Elixir uncovered — a deliberate
+  behavior change. §6.1's `ops` finding re-resolved: the agent is DELETED from
+  the bundle, not kept-but-not-deployed, leaving `deprecated` empty by design.
+  Counts: 37 dispatchable agents = 19 + 11 + 5 + 2 + 0, unchanged in total
+  (−`ops`, +`elixir-engineer`); `ALL` unchanged at 178 for the same reason.
