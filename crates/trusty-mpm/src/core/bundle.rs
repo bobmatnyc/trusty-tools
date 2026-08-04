@@ -53,9 +53,6 @@ pub const QA_AGENT: &str = include_str!("../assets/agents/qa.md");
 /// Concrete research agent (`extends: base-research`).
 pub const RESEARCH_AGENT: &str = include_str!("../assets/agents/research.md");
 
-/// Concrete ops agent — local operations specialist (`extends: base-ops`).
-pub const OPS_AGENT: &str = include_str!("../assets/agents/ops.md");
-
 /// Concrete security agent (`extends: base-agent`).
 pub const SECURITY_AGENT: &str = include_str!("../assets/agents/security.md");
 
@@ -115,7 +112,10 @@ pub const API_QA_AGENT: &str = include_str!("../assets/agents/api-qa.md");
 /// Concrete javascript-engineer agent (`extends: base-engineer`).
 pub const JAVASCRIPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/javascript-engineer.md");
 
-/// Concrete phoenix-engineer agent — Elixir/Phoenix (`extends: base-engineer`).
+/// Concrete elixir-engineer agent — Elixir/OTP/Mix (`extends: base-engineer`).
+pub const ELIXIR_ENGINEER_AGENT: &str = include_str!("../assets/agents/elixir-engineer.md");
+
+/// Concrete phoenix-engineer agent — the Phoenix web layer (`extends: base-engineer`).
 pub const PHOENIX_ENGINEER_AGENT: &str = include_str!("../assets/agents/phoenix-engineer.md");
 
 /// Concrete dart-engineer agent — Flutter/Dart (`extends: base-engineer`).

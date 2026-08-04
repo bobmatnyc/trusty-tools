@@ -225,7 +225,11 @@ Error handling: Attempt 1 re-delegate with more context -> Attempt 2 escalate to
 
 ### Language Detection (before impl)
 
-Check project root: `Cargo.toml`=Rust, `tsconfig.json`=TypeScript, `pyproject.toml`/`setup.py`=Python, `go.mod`=Go, `pom.xml`/`build.gradle`=Java, `.csproj`=C#. `.mise.toml` or `mise.toml` → mise-managed project; inspect `[tools]` section to confirm active runtimes (e.g. `python = "3.12"` → Python, `node = "22"` → Node). If unknown -> MANDATORY Research (no assumptions, no defaulting to Python).
+**This prompt already contains the answer** — the auto-derived **Detected Project Stack** section names the engineers this project's markers actually selected. Read it rather than re-deriving the stack by hand.
+
+The markers themselves are declared in the bundled `framework-manifest.toml` and rendered in the **Deploys When** column of `tm-capabilities`'s `references/agents.md`. Do not keep a copy of that table here; a prose copy goes stale the moment a marker changes (#4765).
+
+`.mise.toml` or `mise.toml` → mise-managed project; inspect the `[tools]` section to confirm active runtimes (e.g. `python = "3.12"` → Python, `node = "22"` → Node). If the stack is still unknown -> MANDATORY Research (no assumptions, no defaulting to Python).
 
 ### Autonomous Execution
 
@@ -780,15 +784,41 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 |-------|---------------|------------------|---------------|
 | `research` | Understanding codebase, investigating approaches, analyzing files | Grep, Glob, Read multiple files, WebSearch | Investigation tools |
 | `engineer` | Writing/modifying code, implementing features, refactoring | Edit, Write, codebase knowledge, testing workflows | Prefer the language-specific engineer when one exists (`rust-engineer`, `python-engineer`, `typescript-engineer`, …) |
-| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Generic `ops` is DEPRECATED; use `local-ops` for localhost/PM2/docker |
+| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Use for localhost/PM2/docker |
 | `qa`, `web-qa`, `api-qa` | Testing implementations, verifying deployments, regression tests, browser testing | Playwright (web), fetch (APIs), verification protocols | For browser: use `web-qa` (never use chrome-devtools, claude-in-chrome, or playwright directly) |
 | `code-analyzer` | Reviewing a proposed solution before implementation; static analysis, correctness and architectural health | Static analysis, APPROVED/NEEDS_IMPROVEMENT/BLOCKED verdict | This is the phase-2 "Code Analysis" agent. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
-| `code-critic` | Adversarial code review with rubric-based verdict (APPROVE/WARN/BLOCK). Universal qa-tier agent — code review, design critique, adversarial verdict on any engineer dispatch | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal) |
+| `code-critic` | Adversarial code review with a rubric-based verdict (APPROVE/WARN/BLOCK) on code that already exists and passes its tests. NOT for design critique, NOT for every engineer dispatch — dispatch is gated, see "code-critic Dispatch Standard" below | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | dispatch-gated |
 | `documentation` | Creating/updating docs, README, API docs, guides | Style consistency, organization standards | - |
 | `ticketing` | Issue/ticket bookkeeping: create, update, close, label, triage, comment (P6) | `gh issue` surface, scope validation, workflow state | Required by P6 — ticket bookkeeping never goes to `version-control` |
 | `version-control` | Creating PRs, managing branches, complex git ops (P7) | PR workflows, branch management | Check git user for main branch access |
 | `security` | Pre-push credential scan, vulnerability assessment | Secret scanning, attack-vector detection | - |
 | `mpm-skills-manager` | Creating/improving skills, recommending skills, stack detection | manifest.json access, validation tools, GitHub PR integration | Triggers: "skill", "stack", "framework" |
+
+## code-critic Dispatch Standard
+
+The critic tier keys off the project's test-ladder rung (this repo's Rust
+Test Ladder in `CLAUDE.md`) — never a parallel risk axis invented for this
+decision.
+
+| Rung | Change class | Dispatch code-critic? |
+|---|---|---|
+| 1–2 | Docs, comments, changelog, test-only stabilization | Never |
+| 3 | Localized behavior inside one crate | No — the PM reviews the diff |
+| 4 | Cross-crate, public API, shared library | Only if a contract changes. Mechanical propagation does not qualify |
+| 5–6 | Cross-crate contract, persistence, security, process lifecycle, release tooling, UI/API surface | Required |
+
+Enum changes and spelling fixes are rung 1–3. No critic.
+
+**Escalate to required regardless of rung:**
+- the change can start, refuse, or gate a session
+- it touches a trust boundary or an injection defense
+- it rewrites history or force-pushes
+- the PR is already at review round 3+ — evidence something is being missed
+
+**Not a reason to dispatch:**
+- a design question — send it to the owner, or the PM decides
+- the PM is unsure and wants a second opinion
+- confirming green CI
 
 ## Ops Agent Routing
 
@@ -800,7 +830,12 @@ These are EXAMPLES of routing, not an exhaustive list. Default to delegation for
 | version, release, publish, bump, pyproject.toml, package.json | `local-ops` | Version management, releases |
 | Unknown/ambiguous | `local-ops` | Default fallback |
 
-**NOTE**: Generic `ops` agent is DEPRECATED. Use platform-specific agents.
+**NOTE**: This table routes tasks to agents; it is NOT a statement of which
+agents this project has. Which agents are bundled, and what condition deploys
+each one, is declared in the bundled `framework-manifest.toml` and rendered in
+`tm-capabilities`'s `references/agents.md`. The generated roster appended to
+this section is what THIS project actually received — route to a name only if
+it appears there.
 
 ## Make / Mise Command Routing
 

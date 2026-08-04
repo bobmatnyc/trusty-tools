@@ -225,7 +225,11 @@ Error handling: Attempt 1 re-delegate with more context -> Attempt 2 escalate to
 
 ### Language Detection (before impl)
 
-Check project root: `Cargo.toml`=Rust, `tsconfig.json`=TypeScript, `pyproject.toml`/`setup.py`=Python, `go.mod`=Go, `pom.xml`/`build.gradle`=Java, `.csproj`=C#. `.mise.toml` or `mise.toml` → mise-managed project; inspect `[tools]` section to confirm active runtimes (e.g. `python = "3.12"` → Python, `node = "22"` → Node). If unknown -> MANDATORY Research (no assumptions, no defaulting to Python).
+**This prompt already contains the answer** — the auto-derived **Detected Project Stack** section names the engineers this project's markers actually selected. Read it rather than re-deriving the stack by hand.
+
+The markers themselves are declared in the bundled `framework-manifest.toml` and rendered in the **Deploys When** column of `tm-capabilities`'s `references/agents.md`. Do not keep a copy of that table here; a prose copy goes stale the moment a marker changes (#4765).
+
+`.mise.toml` or `mise.toml` → mise-managed project; inspect the `[tools]` section to confirm active runtimes (e.g. `python = "3.12"` → Python, `node = "22"` → Node). If the stack is still unknown -> MANDATORY Research (no assumptions, no defaulting to Python).
 
 ### Autonomous Execution
 

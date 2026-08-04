@@ -14,9 +14,18 @@ use crate::log_buffer;
 /// What: `verbose_count` maps `0 → warn`, `1 → info`, `2 → debug`, `3+ →
 /// trace`. If `RUST_LOG` is set in the environment it wins. Logs go to
 /// stderr so stdout stays clean for MCP JSON-RPC.
+/// Also installs the shared panic hook (`crate::panic_hook`) so panic
+/// payloads land in this subscriber rather than only on raw stderr (#4764).
 /// Test: side-effecting (global subscriber) — covered by integration with
 /// `cargo run -- -v status` in downstream crates.
 pub fn init_tracing(verbose_count: u8) {
+    // #4764: route panic payloads through this subscriber. A macOS `.ips`
+    // crash report carries mangled symbols but not the panic message, so a
+    // daemon abort is otherwise undiagnosable in production. Installing here
+    // rather than in each `main` binds the hook to the moment logging becomes
+    // available, and covers every trusty-* binary uniformly.
+    crate::panic_hook::install_panic_logger();
+
     let default_filter = match verbose_count {
         0 => "warn",
         1 => "info",
@@ -46,6 +55,8 @@ pub fn init_tracing(verbose_count: u8) {
 /// returned [`log_buffer::LogBuffer`]. Uses `try_init`, so a process that has
 /// already installed a subscriber keeps it; the returned buffer is still
 /// valid (just empty) in that case.
+/// Also installs the shared panic hook (`crate::panic_hook`) so panic
+/// payloads land in this subscriber rather than only on raw stderr (#4764).
 /// Test: `cargo test -p trusty-common log_buffer` covers the layer; the
 /// daemon `/logs/tail` integration tests cover the wired path end-to-end.
 #[must_use]
@@ -53,6 +64,13 @@ pub fn init_tracing_with_buffer(verbose_count: u8, capacity: usize) -> log_buffe
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+
+    // #4764: route panic payloads through this subscriber. A macOS `.ips`
+    // crash report carries mangled symbols but not the panic message, so a
+    // daemon abort is otherwise undiagnosable in production. Installing here
+    // rather than in each `main` binds the hook to the moment logging becomes
+    // available, and covers every trusty-* binary uniformly.
+    crate::panic_hook::install_panic_logger();
 
     let default_filter = match verbose_count {
         0 => "warn",
@@ -99,6 +117,8 @@ pub fn init_tracing_with_buffer(verbose_count: u8, capacity: usize) -> log_buffe
 ///      All capture is to a JSONL file under `<dirs::data_dir()>/<app_name>/`
 ///      and an in-memory ring — nothing is written to stdout, so this is
 ///      MCP-safe. Honours `TRUSTY_NO_BUG_CAPTURE` for opt-out.
+/// Also installs the shared panic hook (`crate::panic_hook`) so panic
+/// payloads land in this subscriber rather than only on raw stderr (#4764).
 /// Test: `cargo test -p trusty-common --features bug-capture -- init_tracing_with_capture`.
 #[cfg(feature = "bug-capture")]
 #[must_use]
@@ -111,6 +131,13 @@ pub fn init_tracing_with_buffer_and_capture(
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+
+    // #4764: route panic payloads through this subscriber. A macOS `.ips`
+    // crash report carries mangled symbols but not the panic message, so a
+    // daemon abort is otherwise undiagnosable in production. Installing here
+    // rather than in each `main` binds the hook to the moment logging becomes
+    // available, and covers every trusty-* binary uniformly.
+    crate::panic_hook::install_panic_logger();
 
     let default_filter = match verbose_count {
         0 => "warn",

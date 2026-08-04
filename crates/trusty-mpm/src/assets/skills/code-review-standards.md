@@ -58,19 +58,23 @@ Notes section rather than asserting a severity you can't back up.
 ## Finding Disposition
 
 Every finding ends in exactly one of three states, and the review STATES which
-one. This extends the shipped review-finding rule — fix it in the surfacing PR
-or drop it — by naming the third exit that rule left implicit: work that is
-genuinely separable.
+one. **The default is the framework's existing rule: a review finding is
+fixed in the surfacing PR, or dropped.** `Promote` is the narrow third exit
+that rule leaves implicit — work that is genuinely separable, not a home for
+every LOW or MEDIUM finding that doesn't obviously fit the first two.
 
 1. **`Fix here`** — corrected in the surfacing PR. The default for correctness,
    security, acceptance criteria, regression coverage, and any small in-scope
    repair.
 2. **`Parent`** — kept with the work already in flight, as a PR comment or a
    checklist item on the parent issue. No durable artifact is created.
-3. **`Promote`** — recommended for a standalone issue. The reviewer only
-   recommends. Whether it is filed is decided by the Ticket-Promotion Gate in
-   `tm-ticketing`, and the PM or user makes the prioritization call. Do not
-   re-derive that gate's criteria here.
+3. **`Promote`** — reserved for a defect that is genuinely separable work
+   someone would schedule on its own, never the default landing spot for a
+   LOW finding that just doesn't feel worth fixing right now. The critic only
+   *recommends* `Promote` — it does not file the issue itself and does not
+   instruct anyone else to file one. Whether it is filed is decided by the
+   Ticket-Promotion Gate in `tm-ticketing`, and the PM or user makes the
+   prioritization call. Do not re-derive that gate's criteria here.
 
 **An APPROVE verdict does not generate tickets.** Approving means zero CRITICAL
 and zero HIGH findings; the MEDIUM/LOW observations that remain default to
@@ -148,8 +152,12 @@ correct, and complete outcome — do not manufacture findings to look thorough.
   as HIGH or CRITICAL — see the guard rail above. LOW at most.
 - Do not leave a finding without a disposition. "Noted" is not one of the
   three.
-- Do not file issues for your own LOW/MEDIUM polish after an APPROVE. Mark
-  them `Promote` and hand the decision to the PM.
+- Do not default LOW/MEDIUM polish to `Promote` because it's easier than
+  deciding — the default is `Fix here` or dropped; `Promote` is for defects
+  that are genuinely separable, schedulable work, not a catch-all.
+- Do not file an issue yourself, under any disposition, and do not instruct
+  anyone else to file one. `Promote` is a recommendation to the PM — never an
+  action the critic takes.
 - A zero-finding APPROVE is correct and complete. Do not feel pressure to
   find issues that aren't there.
 
