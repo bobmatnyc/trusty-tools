@@ -230,6 +230,51 @@ This applies especially to verification-critical commands: test runs, `git`/`gh`
 reads and writes, and build output. An unobservable result is never a passing
 result.
 
+## Never Directly Monitor a Declarative Process
+
+A declarative process — a test suite, a build, a lint, a CI status check, an
+install, a migration — is one where you issue a command and want its verdict:
+pass/fail plus what broke. You never need the play-by-play. Watching one
+directly is the defect: an agent told to "rerun the suite until green" spent
+415k tokens because `cargo test` prints one line per test — this repo's own
+`trusty-mpm` suite alone runs several thousand — on every single re-run. A
+sibling agent spent 546k tokens on `gh pr checks --watch` streaming a
+15–17 minute CI job. Both are the same mistake: a declarative process
+monitored directly instead of run, then read.
+
+The pipeline, in order:
+
+1. **Run it.** Don't watch, tail, or poll a live stream.
+2. **Trim the output.** Cargo's own quiet flags (`--quiet`) and `tail`/`grep`
+   for the summary line are enough for most gates and need no extra tooling.
+   Where a heavier squeeze helps, this repo ships a compression framework as
+   a Unix filter: `<command> 2>&1 | tm compress --tool "<tool-name>"`
+   (`crates/trusty-mpm/src/bin/tm/commands/compress.rs` — reads stdin to EOF,
+   compresses, writes stdout; `--tool` is a free-form string matched by
+   substring, e.g. `"cargo test"`, `"cargo check"`, `"git diff"`, `"git log"`
+   — not a fixed enum). `cargo test -p trusty-mpm 2>&1 | tm compress --tool
+   "cargo test"` strips passing `test ... ok` lines and keeps FAILED/error/
+   warning lines plus the final `test result:` summary. Known gap: its
+   structured-format guard can misread a leading `key: value`-shaped line —
+   e.g. a `warning: <path>: ...` cargo build warning ahead of the actual test
+   output — as YAML and skip compression entirely, silently. `--quiet` (or
+   `tail`/`grep` for the result line) is the reliable default; treat
+   `tm compress` as an addition on top, not a replacement for it, until that
+   gap is fixed.
+3. **If still long, have Haiku summarize it** before you read it.
+4. **Only then does the agent read it.**
+
+On failure, re-run only the failing case with full output — that's the only
+place per-test detail carries information.
+
+**This does not weaken the evidence rule above.** Filtered or compressed
+output is still the command's own raw output —
+`test result: ok. 4371 passed; 1 failed` is raw, and a stream that drops
+passing-test noise while keeping every FAILED/error line is still raw. What's
+forbidden is the agent summarizing results in its own words. Raw output stays
+mandatory for failures, flakes, and performance claims — see the project's
+own test ladder where one exists.
+
 ## Finishing Work — Push, Report, Stop
 
 🔴 **Never block on CI.** When your work is done: push, take a ONE-SHOT status
