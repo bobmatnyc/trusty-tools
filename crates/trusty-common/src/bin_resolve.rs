@@ -111,9 +111,30 @@ pub fn daemon_path_env() -> String {
 /// an existing `dir/name`; the first hit is returned. Returns `None` if nothing
 /// matches.
 /// Test: `resolve_binary_finds_in_well_known_dir`,
+/// `resolve_binary_finds_a_binary_outside_the_process_path`,
 /// `resolve_binary_returns_none_for_missing`,
 /// `resolve_binary_accepts_absolute_path`.
 pub fn resolve_binary(name: &str) -> Option<PathBuf> {
+    resolve_binary_in(name, &daemon_path_dirs())
+}
+
+/// [`resolve_binary`] with the fallback directory list supplied by the caller.
+///
+/// Why (#4125): the fallback half of [`resolve_binary`] — the half that makes a
+/// launchd-spawned daemon able to find a Homebrew binary its minimal `PATH`
+/// omits — had no test that actually exercised it. The existing
+/// `resolve_binary_finds_in_well_known_dir` deliberately avoids mutating the
+/// process-global `PATH` (that races the parallel harness), so it could only
+/// test [`candidate`] and the explicit-path branch; the real
+/// "found somewhere the process `PATH` does not list" behaviour went unproven,
+/// which is exactly the behaviour `locate_uv` was missing when it hard-failed
+/// the py-embedder bootstrap on a daemon whose `PATH` lacked
+/// `/opt/homebrew/bin`. Parameterizing the fallback list makes that branch
+/// directly testable against a temp dir with no `PATH` mutation at all.
+/// What: identical to [`resolve_binary`] except `fallback_dirs` replaces
+/// [`daemon_path_dirs`] as step 2's search list.
+/// Test: `resolve_binary_finds_a_binary_outside_the_process_path`.
+fn resolve_binary_in(name: &str, fallback_dirs: &[PathBuf]) -> Option<PathBuf> {
     // An explicit path (absolute or relative with a separator) is used verbatim.
     if name.contains(std::path::MAIN_SEPARATOR) {
         let p = PathBuf::from(name);
@@ -130,8 +151,8 @@ pub fn resolve_binary(name: &str) -> Option<PathBuf> {
     }
 
     // 2) Fall back to the well-known daemon dirs (covers launchd's minimal PATH).
-    for dir in daemon_path_dirs() {
-        if let Some(hit) = candidate(&dir, name) {
+    for dir in fallback_dirs {
+        if let Some(hit) = candidate(dir, name) {
             return Some(hit);
         }
     }
@@ -549,6 +570,39 @@ mod tests {
         // mutation required.
         let explicit = bin.to_str().expect("utf8 temp path");
         assert_eq!(resolve_binary(explicit).as_deref(), Some(bin.as_path()));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Why (#4125): this is the branch that makes a launchd-spawned daemon
+    /// able to run a binary its inherited `PATH` never mentions —
+    /// `/opt/homebrew/bin/uv` being the case that broke the py-embedder
+    /// bootstrap, because `locate_uv` used a bare `which::which("uv")` with no
+    /// fallback at all. Nothing previously asserted that fallback works:
+    /// `resolve_binary_finds_in_well_known_dir` avoids `PATH` mutation and so
+    /// only reaches [`candidate`] and the explicit-path branch.
+    /// What: plants an executable in a temp dir that is NOT on the process
+    /// `PATH`, confirms a plain [`resolve_binary`] therefore misses it (the
+    /// `which`-equivalent answer), then confirms [`resolve_binary_in`] finds it
+    /// once that dir is in the fallback list. Against a PATH-only resolver the
+    /// second assertion fails.
+    /// Test: this test.
+    #[test]
+    fn resolve_binary_finds_a_binary_outside_the_process_path() {
+        let tmp = make_temp_dir("outside_path");
+        let name = "trusty-fake-uv-4125";
+        let bin = tmp.join(name);
+        write_executable(&bin);
+
+        assert!(
+            resolve_binary(name).is_none(),
+            "fixture dir must not be on the process PATH for this test to mean anything"
+        );
+        assert_eq!(
+            resolve_binary_in(name, std::slice::from_ref(&tmp)).as_deref(),
+            Some(bin.as_path()),
+            "a binary outside the process PATH must still resolve from the fallback dirs"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }

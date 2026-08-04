@@ -175,7 +175,13 @@ pub(super) struct HealthResponse {
     /// no [`SwitchableEmbedder`] handle is installed yet (the same
     /// deferred-init gap `embedder_info` falls back for — see
     /// `current_switchable_embedder`'s ordering note).
-    /// Test: `health_reports_embedder_bootstrap_state`.
+    ///
+    /// #4125: `"failed"` and `"fell_back_to_ort"` also force the top-level
+    /// `status` to `"degraded"` — both are permanent for this daemon's
+    /// lifetime, so search runs on a backend the operator did not configure
+    /// until someone restarts it.
+    /// Test: `health_reports_embedder_bootstrap_state`,
+    /// `health_is_degraded_when_the_embedder_backend_permanently_downgraded`.
     pub(super) embedder_bootstrap: &'static str,
 }
 
@@ -416,6 +422,28 @@ pub(super) async fn health_handler(
         .as_ref()
         .map(|sw| bootstrap_state_str(sw.active().bootstrap))
         .unwrap_or("n/a");
+    // #4125: a permanent embedder capability downgrade must reach `status`.
+    //
+    // Why: `embedder_bootstrap` was reported and then aggregated nowhere, so
+    // `BootstrapState::Failed` (the graceful python bootstrap gave up for this
+    // daemon's lifetime) and `FellBackToOrt` (the swap-back watchdog abandoned a
+    // dead python/MPS sidecar) sat next to `status: "ok"` forever. Note that
+    // `embedder: "ready"` alongside them is not wrong — it reports the
+    // CURRENTLY-ACTIVE backend, which genuinely is ready. What nothing reported
+    // was "we did not get the backend we asked for": search silently runs on
+    // CPU/ort instead of MPS/python, a real and permanent performance
+    // regression, on the one field monitors gate on.
+    // What: `Failed` and `FellBackToOrt` are terminal for this daemon (neither
+    // path ever re-attempts), so both are degraded. `Bootstrapping` is
+    // transient and deliberately excluded — flagging it would make every
+    // Apple-Silicon boot report degraded for its first few seconds.
+    // `NotApplicable`/`Ready` are the healthy states.
+    let embedder_capability_degraded = switchable.as_ref().is_some_and(|sw| {
+        matches!(
+            sw.active().bootstrap,
+            BootstrapState::Failed | BootstrapState::FellBackToOrt
+        )
+    });
     // Issue #282: sample the sidecar's current RSS (None when not running).
     let embedderd_rss_mb = state
         .current_embedderd_pid()
@@ -615,9 +643,13 @@ pub(super) async fn health_handler(
     // walked is not healthy — that is a silent, total search outage for every
     // such index and it was previously invisible on every field of this
     // response. Same `status != "ok"` channel as #1870 / #3408.
+    // #4125: an embedder that permanently failed to reach the backend it was
+    // configured for (or fell back off it) is the same class of capability gap
+    // as #3408's refused watcher — see `embedder_capability_degraded` above.
     let overall_status = if warmboot_summary.warm_boot_degraded
         || indexes_watcher_network_degraded > 0
         || indexes_stuck_empty > 0
+        || embedder_capability_degraded
     {
         "degraded"
     } else {
