@@ -399,3 +399,68 @@ async fn purge_expired_leaves_tier_c_drawers_alone() {
     assert!(remaining.contains(&tier_c_id), "D6: demoted, never deleted");
     assert!(!remaining.contains(&ordinary_id));
 }
+
+/// The same exemption on the OTHER sweep — the inline prune inside
+/// `PalaceHandle::open_with_intent`.
+///
+/// Why this is the one that matters: `purge_expired` has no non-test call site,
+/// while the open-time prune runs on every palace open and is the only sweep a
+/// production daemon actually executes. It also deletes from redb directly
+/// (`delete_drawer_sync`), so an unexempted Tier C fact would be gone from disk,
+/// not merely dropped from the in-memory table. Covering only `purge_expired`
+/// would leave the live deletion path untested (#4909 review).
+#[tokio::test]
+async fn expired_tier_c_drawer_survives_the_open_time_sweep() {
+    let dir = tempdir().unwrap();
+    let data_dir = dir.path().join("sweep-palace");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let room_id = Uuid::new_v4();
+
+    // Seed redb directly so the drawers are already durable when the palace is
+    // opened — the open-time prune reads `kg.load_drawers()`, so a drawer
+    // written through a handle after the fact would never meet that sweep.
+    let mut tier_c = Drawer::new(room_id, "an expired current fact");
+    tier_c.fact_key = Some(SLOT.to_string());
+    tier_c.expires_at = Some(Utc::now() - Duration::days(1));
+    let tier_c_id = tier_c.id;
+
+    let mut ordinary = Drawer::new(room_id, "an expired ordinary drawer");
+    ordinary.expires_at = Some(Utc::now() - Duration::days(1));
+    let ordinary_id = ordinary.id;
+
+    {
+        let kg = KnowledgeGraph::open(&data_dir.join("kg.db")).unwrap();
+        kg.upsert_drawer_sync(&tier_c).unwrap();
+        kg.upsert_drawer_sync(&ordinary).unwrap();
+    }
+
+    let palace = Palace {
+        id: PalaceId::new("sweep-palace"),
+        name: "Sweep".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir,
+    };
+    let handle = PalaceHandle::open(&palace).expect("open palace");
+
+    let loaded: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        loaded.contains(&tier_c_id),
+        "D6: the open-time sweep must not delete a Tier C fact"
+    );
+    assert!(
+        !loaded.contains(&ordinary_id),
+        "an ordinary expired drawer is still reclaimed — the exemption is \
+         narrow, not a disabling of the sweep"
+    );
+
+    // And the exemption is a real reprieve on disk, not just in memory.
+    let rows = handle.kg.load_drawers().unwrap();
+    assert!(rows.iter().any(|d| d.id == tier_c_id), "row must survive");
+    assert!(!rows.iter().any(|d| d.id == ordinary_id));
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key(SLOT).unwrap(),
+        Some(tier_c_id),
+        "the surviving fact keeps its slot"
+    );
+}

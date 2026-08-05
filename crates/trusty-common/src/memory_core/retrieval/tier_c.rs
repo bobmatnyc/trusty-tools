@@ -18,12 +18,11 @@
 //! the incumbent's retirement and the newcomer's arrival in ONE redb
 //! transaction, so no reader and no crash can observe a slot with two claimants
 //! or with an incumbent retired and no replacement landed.
-//! Test: `tests.rs` in this module covers admission; the retirement invariant
-//! and the concurrency guarantee are covered by
+//! Test: the inline `tests` module below covers admission; the retirement
+//! invariant and the concurrency guarantee live in `retrieval::tier_c_tests` —
 //! `tier_c_write_retires_the_prior_slot_occupant`,
 //! `tier_c_retirement_clears_the_displaced_drawers_own_fact_key`, and
-//! `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant` in
-//! `retrieval::tests`.
+//! `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
