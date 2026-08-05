@@ -272,13 +272,11 @@ fn provision_in_leaves_an_existing_dot_base_store_untouched() {
         msg.contains(crate::core::harness_root::BASE_CLONE_DIRNAME),
         "the refusal must name the legacy store, got: {msg}"
     );
-    for forbidden in ["rm -rf", "rm -fr", "    mv "] {
-        assert!(
-            !msg.contains(forbidden),
-            "the refusal must not suggest moving or deleting a live store, but it \
-             contains {forbidden:?}: {msg}"
-        );
-    }
+    assert_no_recursive_delete(&msg);
+    assert!(
+        !msg.contains("    mv "),
+        "the refusal must not suggest moving a live store, got: {msg}"
+    );
 
     assert_eq!(
         std::fs::read_to_string(&marker).expect("the pre-existing worktree must still be there"),
@@ -677,6 +675,69 @@ fn assert_no_destructive_hint(msg: &str) {
     assert!(
         msg.contains("SHARED"),
         "recovery message must warn that the base is shared across sessions, got: {msg}"
+    );
+}
+
+/// #4270: `git clean -ffd` in the base clone must not delete session worktrees.
+///
+/// Why: the two review rounds contradicted each other on whether the missing
+/// `.git/info/exclude` entry was cosmetic, and the disagreement was a data-loss
+/// question, so it is settled here in the suite rather than by hand. Measured
+/// against real git: single-force `clean` reports `Skipping repository` and is
+/// safe, which is what makes this look harmless — but `-ff` removes
+/// `.worktrees/` outright, uncommitted session work included. The exclude entry
+/// is therefore a safety guard, and the in-project path has always written it.
+/// The provisioner producing the identical topology must too.
+/// What: builds the shipping topology with the production
+/// `ensure_base_checkout` and `worktree_add`, writes an uncommitted file into
+/// the worktree, then runs a real `git clean -ffd` in the base and asserts the
+/// file survives. Skips gracefully when git is unavailable.
+/// Test: this function IS the test.
+#[test]
+fn worktrees_exclude_entry_protects_against_double_force_clean() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        eprintln!("worktrees_exclude_entry_protects_against_double_force_clean: no git, skipping");
+        return;
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("owner").join("repo");
+    let backend = RealGitBackend::default();
+    backend
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed");
+
+    let worktree = base_dir.join(".worktrees").join("sess-1");
+    backend
+        .worktree_add(&base_dir, "main", &worktree, "sess-1")
+        .expect("worktree_add must succeed");
+    let wip = worktree.join("WIP.txt");
+    std::fs::write(&wip, b"uncommitted session work").unwrap();
+
+    // The guard itself: `.worktrees/` must be excluded in the base clone.
+    let exclude = std::fs::read_to_string(base_dir.join(".git").join("info").join("exclude"))
+        .expect("the base clone must have a .git/info/exclude");
+    assert!(
+        exclude.lines().any(|l| l.trim() == ".worktrees/"),
+        "ensure_base_checkout must exclude .worktrees/, got: {exclude}"
+    );
+
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&base_dir)
+        .args(["clean", "-ffd"])
+        .output()
+        .expect("git clean -ffd");
+    let said = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        wip.exists(),
+        "#4270: `git clean -ffd` in the base DELETED a session worktree's \
+         uncommitted work — git said: {said}"
+    );
+    assert!(
+        !said.contains(".worktrees"),
+        "`git clean -ffd` must not touch .worktrees/ at all, got: {said}"
     );
 }
 

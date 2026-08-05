@@ -22,9 +22,9 @@
 //! #4270 moved the base checkout from `<project_dir>/.base` (bare) to
 //! `<project_dir>` itself (non-bare), converging on the shape the in-project
 //! spawn path already produces. The detection predicate moved with it, and
-//! [`legacy_base_store_error`] guards the one case that move introduces: a
-//! project directory that still holds a legacy `.base` store whose worktrees
-//! are live.
+//! [`protected_dir_error`] guards the cases that move introduces: a project
+//! directory already holding git or trusty-mpm state, whose worktrees may be
+//! live.
 //! Test: `ensure_base_checkout_recovers_from_concurrent_race`,
 //! `ensure_base_checkout_rejects_stale_directory`,
 //! `base_checkout_lock_recovers_stale_lock_marker`,
@@ -113,6 +113,15 @@ pub(super) use crate::core::harness_root::BASE_CLONE_DIRNAME as LEGACY_BASE_DIRN
 /// failure, a missing `git` binary, and a dubious-ownership rejection alike, so
 /// a momentary hiccup lands here with `.git` present. Naming that state and
 /// stopping is right in every one of those; suggesting a rename is not.
+///
+/// KNOWN REGRESSION, accepted. A crashed `git clone` leaves a partial `.git`,
+/// so the half-clone #1937 item 1 was written for now lands here and gets NO
+/// quarantine command — on the pre-#4270 code it reached the `mv` hint, because
+/// a partial BARE clone writes no `.git`. Recovery for that case is genuinely
+/// worse. It is accepted because a half-clone and a healthy checkout whose git
+/// probe just failed are indistinguishable from here, and one of them holds
+/// live worktrees: guessing wrong in the recoverable direction destroys work,
+/// guessing wrong in this direction costs the operator one manual decision.
 /// What: returns `Some(ProvisionError::Git(..))` naming `project_dir` and the
 /// protected entry [`crate::core::harness_root::protected_state_in`] found;
 /// `None` otherwise, leaving the caller on its normal path.

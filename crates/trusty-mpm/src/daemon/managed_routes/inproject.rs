@@ -698,60 +698,19 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
     }
 }
 
-/// Best-effort-idempotent: add `.worktrees/` to the base clone's `.git/info/exclude`.
+/// Keep the base clone's `.worktrees/` out of `git status` AND out of reach of
+/// `git clean -ffd`.
 ///
-/// Why: per-session worktrees live at `<base>/.worktrees/<session-id>/`; without
-/// a gitignore entry `git status` inside the base clone reports the `.worktrees/`
-/// directory as untracked, polluting the output for every harness that runs there.
-/// Adding to `.git/info/exclude` (not `.gitignore`) keeps the entry local to the
-/// clone and does not affect any committed `.gitignore`.
-/// What: creates `<base>/.git/info/` if absent, then reads the current exclude
-/// file and appends `.worktrees/` only when the entry is absent. The read-then-
-/// append window means concurrent callers racing at first launch may each observe
-/// an absent entry and both append — resulting in a duplicate line. Git tolerates
-/// duplicate patterns (same set is matched), so this is safe; single-caller
-/// invocations are strictly idempotent. Returns `Ok(())` on success or when the
-/// entry already exists; propagates I/O errors.
-/// Test: `ensure_worktrees_gitignored_idempotent`.
-pub fn ensure_worktrees_gitignored(base_path: &Path) -> Result<(), String> {
-    let info_dir = base_path.join(".git").join("info");
-    std::fs::create_dir_all(&info_dir).map_err(|e| {
-        format!(
-            "inproject: could not create .git/info/ at {}: {e}",
-            info_dir.display()
-        )
-    })?;
-
-    let exclude_path = info_dir.join("exclude");
-    let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-
-    // Idempotent: skip if the entry is already present.
-    if existing.lines().any(|line| line.trim() == ".worktrees/") {
-        return Ok(());
-    }
-
-    // Append with a leading newline when the file does not already end with one.
-    let entry = if existing.is_empty() || existing.ends_with('\n') {
-        ".worktrees/\n".to_string()
-    } else {
-        "\n.worktrees/\n".to_string()
-    };
-
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude_path)
-        .map_err(|e| format!("inproject: could not open .git/info/exclude: {e}"))?;
-    file.write_all(entry.as_bytes())
-        .map_err(|e| format!("inproject: could not write .git/info/exclude: {e}"))?;
-
-    info!(
-        path = %exclude_path.display(),
-        "inproject: added .worktrees/ to .git/info/exclude"
-    );
-    Ok(())
-}
+/// Why: re-exported here (rather than defined here) so this module's existing
+/// callers keep the short spelling, exactly like [`worktree_branch_for`] above.
+/// The single source of truth moved to [`crate::core::worktree_naming`] in
+/// #4270 because `provisioner::workspace` — which is NOT gated behind the
+/// `daemon` feature — now produces the identical topology and needs the same
+/// entry. See that module for the `git clean` evidence.
+/// What: appends `.worktrees/` to `<base>/.git/info/exclude`, idempotently.
+/// Test: `ensure_worktrees_gitignored_idempotent`,
+/// `worktrees_exclude_entry_protects_against_double_force_clean`.
+pub use crate::core::worktree_naming::ensure_worktrees_gitignored;
 
 /// Read the `remote.origin.url` from a git repository at `path`.
 ///

@@ -339,8 +339,9 @@ impl GitBackend for RealGitBackend {
     /// An occupied path yields an actionable error rather than a cryptic clone
     /// failure or any auto-delete: [`stale_base_dir_error`], whose recovery
     /// hint is a non-destructive `mv`-aside quarantine (#1937 item 1, #3605)
-    /// and which answers a live legacy `.base` store with a refusal that moves
-    /// nothing (#4270).
+    /// and which answers a directory already holding git or trusty-mpm state
+    /// with a refusal that moves nothing (#4270 — including, deliberately, the
+    /// half-clone that #1937 wrote the hint for; see `protected_dir_error`).
     /// Test: `ensure_base_checkout_recovers_from_concurrent_race` (spawns
     /// real threads racing on the same `base_dir`, asserts every one returns
     /// `Ok` and exactly one valid checkout results),
@@ -356,7 +357,10 @@ impl GitBackend for RealGitBackend {
         // named after the session id.
         if is_established_checkout(base_dir) {
             debug!(path = %base_dir.display(), "base checkout already present, reusing");
-            return Ok(());
+            // #4270: self-heal on reuse, exactly as `inproject::ensure_base_clone`
+            // does — a base established before this call site existed still owes
+            // its worktrees the `git clean -ffd` guard.
+            return exclude_worktrees(base_dir);
         }
         if let Some(parent) = base_dir.parent() {
             std::fs::create_dir_all(parent)?;
@@ -419,7 +423,10 @@ impl GitBackend for RealGitBackend {
             // operator via `tm repair push-guard`, which `tm doctor`'s
             // `push_guard` check names when it finds a clone unprotected.
             crate::core::push_guard::install_and_log(base_dir);
-            Ok(())
+            // #4270: without this, `git clean -ffd` in the base DELETES every
+            // session worktree, uncommitted work included — see
+            // `core::worktree_naming::ensure_worktrees_gitignored`.
+            exclude_worktrees(base_dir)
         } else {
             Err(ProvisionError::Git(format!(
                 "git clone failed: {}",
@@ -749,7 +756,7 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
     /// in-project path resolve to the SAME base clone for the same repo
     /// instead of keeping two stores side by side. A project directory that
     /// still holds the retired `.base` store is refused rather than cloned
-    /// over — see `base_lock::legacy_base_store_error`.
+    /// over — see `base_lock::protected_dir_error`.
     /// What: computes `base_dir = project_dir` and
     /// `workspace_path = project_dir/.worktrees/<session_id>`; ensures the base
     /// checkout exists, fetches `git_ref` fresh from `origin` into an isolated
@@ -970,6 +977,16 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
             branch: git_ref.to_owned(),
         })
     }
+}
+
+/// Add the base clone's `.worktrees/` exclude entry, as a [`ProvisionError`].
+///
+/// Why: [`crate::core::worktree_naming::ensure_worktrees_gitignored`] is shared
+/// with the in-project path and reports `String`; this adapts it to the
+/// provisioner's error type at the one place that needs it (#4270).
+/// Test: `worktrees_exclude_entry_protects_against_double_force_clean`.
+fn exclude_worktrees(base_dir: &Path) -> Result<(), ProvisionError> {
+    crate::core::worktree_naming::ensure_worktrees_gitignored(base_dir).map_err(ProvisionError::Git)
 }
 
 /// Derive a filesystem-safe slug from a repository URL.
