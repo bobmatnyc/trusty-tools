@@ -1,6 +1,6 @@
 Fixed
 
-- A crafted spreadsheet can no longer force unbounded decompression: xlsx/xlsm packages are now capped at 256 MiB of total uncompressed content and 4096 entries before calamine opens them (closes [#4894](https://github.com/bobmatnyc/trusty-tools/issues/4894))
+- A crafted spreadsheet can no longer force unbounded decompression: xlsx/xlsm packages are now capped at 256 MiB of total uncompressed content and 16384 entries before calamine opens them (closes [#4894](https://github.com/bobmatnyc/trusty-tools/issues/4894))
   - a 511 KB adversarial workbook used to extract *successfully* in 143 ms while peaking at 529.8 MiB RSS. `MAX_OFFICE_FILE_BYTES` (10 MiB) bounds the container rather than the decompressed payload, and `EXTRACT_TIMEOUT` (30 s) is a time bound the attack never approaches — so neither existing mitigation applied
   - calamine exposes no size limit and the zip layer bounds an entry read by its *compressed* length, so the check runs outside calamine: declared sizes are summed from the central directory first (rejecting a declared bomb with zero decompression), then every entry is drained through `Read::take` into a sink so a lying size field is caught too. The guard itself allocates O(1) regardless of the cap
   - the document is read into memory once and both the guard and calamine parse those same bytes. Validating a path and then reopening it let an attacker with write access to a watched directory swap a benign workbook for a bomb between the two opens, with the watcher supplying unlimited retries
