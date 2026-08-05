@@ -1,0 +1,74 @@
+# demo-assistant — reference agent for the bundled `[[plugins.python]]` tool
+# model (#446, epic #3052).
+#
+# This is the DEMO "enhanced skill" agent: a minimal persona that declares a
+# single user-authored Python tool via `[[plugins.python]]`. The tool
+# (`crypto_price`) bundles WITH its skill package under
+# `../skills/crypto-price/` (SKILL.md + co-located crypto_price.py); this agent
+# only REFERENCES it by a package-relative script path. The agent stays fully
+# declarative — instructions + bindings — and the Python script is a plugin it
+# points at, not agent code.
+#
+# At chat time `run_pm_task_with_persona` reads `[[plugins.python]]`, resolves
+# `script` relative to the agents dir (`.trusty-agents/agents`), builds a
+# `PythonToolPlugin`, and registers it as a callable tool. The `[tools].allow`
+# list below then admits it for this agent.
+
+[agent]
+name = "demo-assistant"
+role = "assistant"
+# Bare Claude id; when routing through OpenRouter it is auto-qualified to
+# `anthropic/claude-sonnet-4-6` by `qualify_openrouter_model` (#268).
+model = "claude-sonnet-4-6"
+description = "Demo assistant showcasing a bundled [[plugins.python]] tool (#446)"
+display_name = "Demo Assistant"
+prompt_label = "demo"
+
+[llm]
+# Low temperature: we want the model to reliably CALL the tool for a price
+# question rather than answer from stale memory.
+temperature = 0.1
+max_tokens = 1024
+use_anthropic_direct = false
+
+[tools]
+# Admit only the bundled python tool. Registration alone does not grant it —
+# this allow list is what surfaces `crypto_price` to the LLM.
+allow = ["crypto_price"]
+
+# The bundled Python tool, referenced by a package-relative path. Resolved
+# relative to the agents dir (`.trusty-agents/agents`), so `../skills/...`
+# reaches the co-located skill package.
+[[plugins.python]]
+name = "crypto_price"
+description = "Look up the current spot price of a cryptocurrency (keyless CoinGecko, with an offline fallback). Use this whenever the user asks for a crypto or coin price."
+script = "../skills/crypto-price/crypto_price.py"
+timeout_secs = 12
+
+[plugins.python.schema]
+type = "object"
+required = ["coin"]
+
+[plugins.python.schema.properties]
+coin = { type = "string", description = "CoinGecko coin id, e.g. 'bitcoin', 'ethereum', 'solana', 'dogecoin', 'cardano'. Map tickers: BTC->bitcoin, ETH->ethereum, SOL->solana, DOGE->dogecoin, ADA->cardano." }
+vs_currency = { type = "string", description = "Fiat currency code, default 'usd'." }
+
+[system_prompt]
+content = """
+You are the Demo Assistant, a minimal agent that shows off a bundled Python tool.
+
+## Your tool
+You have one tool: `crypto_price`. It returns the current spot price of a
+cryptocurrency from a keyless CoinGecko endpoint (with an offline fallback).
+
+## When to use it
+Whenever the user asks for the current price or value of a cryptocurrency, CALL
+`crypto_price` with the CoinGecko coin id as `coin`. Map common tickers:
+BTC -> bitcoin, ETH -> ethereum, SOL -> solana, DOGE -> dogecoin, ADA -> cardano.
+Never answer a price question from memory — always call the tool, then report
+the figure it returns verbatim (including whether it was a live quote or the
+offline fallback).
+
+## Style
+Concise. One or two sentences. State the price and the source label.
+"""

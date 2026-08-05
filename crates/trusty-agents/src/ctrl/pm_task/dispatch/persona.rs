@@ -106,6 +106,52 @@ fn persona_allowed_tools(names: Vec<String>) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// #446: wire `[[plugins.python]]` into the persona registry (epic #3052).
+///
+/// Why: The `PythonToolPlugin` primitive (spawn `python3 <script>`, one NDJSON
+/// `tool_call` in / one `tool_result` out, per-call timeout + RBAC tier guard)
+/// was fully built and tested, but `run_pm_task_with_persona` never read
+/// `persona_cfg.plugins.python` — so an agent/skill package declaring a
+/// `[[plugins.python]]` tool silently got nothing registered. This function is
+/// that missing wiring: each declared entry becomes a registered, callable
+/// tool alongside the native/delegation/MCP surface.
+/// What: Builds each entry via `PythonToolPlugin::from_config`, resolving a
+/// relative `script` / `schema_file` against `base_dir` — the agent/skill
+/// package dir, i.e. `<project>/.trusty-agents/agents` (a user-authored python
+/// tool bundles WITH its skill package and is referenced by a package-relative
+/// path). A single malformed entry (e.g. an unknown `restricted_tiers` string,
+/// which `from_config` rejects fail-closed) is logged and SKIPPED rather than
+/// failing the whole chat turn. Registering a tool here does NOT by itself
+/// grant it: the `[tools].allow` glob filter (`filter_persona_tool_names`)
+/// downstream still decides whether it is advertised to the LLM.
+/// Test: `persona_python_plugin_registers_callable_tool`,
+/// `persona_python_plugin_bad_config_is_skipped`.
+fn register_python_plugins(
+    registry: &mut ToolRegistry,
+    plugins: &[crate::plugins::PythonPluginConfig],
+    base_dir: &Path,
+    persona_name: &str,
+) {
+    for cfg in plugins {
+        let plugin_name = cfg.name.clone();
+        match crate::plugins::PythonToolPlugin::from_config(cfg.clone(), base_dir) {
+            Ok(plugin) => {
+                tracing::info!(
+                    persona = %persona_name,
+                    plugin = %plugin_name,
+                    "registered [[plugins.python]] tool"
+                );
+                registry.register(Arc::new(plugin));
+            }
+            Err(e) => tracing::warn!(
+                persona = %persona_name,
+                plugin = %plugin_name,
+                "skipping [[plugins.python]] entry: {e}"
+            ),
+        }
+    }
+}
+
 /// Run a single conversation turn against a persona agent (#254).
 ///
 /// Why: The REPL `/agent` command lets the user switch the active ctrl
@@ -299,6 +345,18 @@ pub async fn run_pm_task_with_persona(
                     registry.register(std::sync::Arc::clone(tool));
                 }
             }
+
+            // #446: wire [[plugins.python]] into persona registry (epic #3052).
+            // The subprocess python-tool primitive was built + tested but never
+            // read here — this closes the gap. `config_dir` (the agent/skill
+            // package dir) resolves each entry's package-relative `script`; the
+            // `[tools].allow` filter below still gates whether it is advertised.
+            register_python_plugins(
+                &mut registry,
+                &persona_cfg.plugins.python,
+                &config_dir,
+                persona_name,
+            );
 
             // #3238: live-discover MCP servers (`[[mcp.services]] discover =
             // true` and `.mcp.json`) and register whatever tools they

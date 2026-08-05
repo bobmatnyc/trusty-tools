@@ -370,3 +370,137 @@ async fn persona_allowed_tools_permits_dispatch_when_non_empty() {
     assert!(!result.is_error(), "permitted tool must still dispatch");
     assert_eq!(result.content(), "search results");
 }
+
+/// Whether `python3` is invokable; the callable-tool test below is skipped
+/// when it is not, mirroring the primitive's own `python_available` guard so
+/// a Rust-only CI box without Python does not fail the suite (#446).
+fn python3_available() -> bool {
+    let python = crate::env_compat::env_var("TAGENT_PYTHON", "OPEN_MPM_PYTHON")
+        .unwrap_or_else(|_| "python3".to_string());
+    std::process::Command::new(&python)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Collect the registered tool names from a registry (schema `function.name`).
+fn registered_tool_names(registry: &crate::tools::ToolRegistry) -> Vec<String> {
+    registry
+        .schemas()
+        .into_iter()
+        .filter_map(|s| {
+            s.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .collect()
+}
+
+/// #446 (epic #3052) — the core Task-1 guarantee: a `[[plugins.python]]` entry
+/// declared with a PACKAGE-RELATIVE `script` path (the co-located-with-the-skill
+/// layout the design mandates) becomes a REGISTERED, CALLABLE tool that runs
+/// the bundled script and returns its real NDJSON `tool_result` content.
+///
+/// Why: without this the wiring could compile yet register nothing callable.
+/// It exercises the exact helper `run_pm_task_with_persona` now calls
+/// (`register_python_plugins`) with `base_dir` = a stand-in agent/skill package
+/// dir, proving both the relative-`script` resolution (against `base_dir`, i.e.
+/// `config_dir`) AND end-to-end dispatch through the production `ToolRegistry`.
+/// What: writes a tiny NDJSON-contract python script into a temp package dir,
+/// registers it via a relative `script` path + that dir as `base_dir`, asserts
+/// it appears under its declared name, then dispatches it and asserts the
+/// echoed content. Skipped when `python3` is unavailable.
+#[tokio::test]
+async fn persona_python_plugin_registers_callable_tool() {
+    if !python3_available() {
+        eprintln!("skipping persona_python_plugin_registers_callable_tool: python3 not on PATH");
+        return;
+    }
+    use crate::plugins::PythonPluginConfig;
+
+    let pkg_dir = std::env::temp_dir().join(format!(
+        "t446-persona-pkg-{}-{}",
+        std::process::id(),
+        "callable"
+    ));
+    std::fs::create_dir_all(&pkg_dir).expect("create temp package dir");
+    // Minimal NDJSON-contract script: read one `tool_call` line, echo one
+    // `tool_result` line embedding the `symbol` param.
+    let script = "import sys, json\n\
+line = sys.stdin.readline()\n\
+call = json.loads(line)\n\
+sym = call.get('params', {}).get('symbol', '?')\n\
+print(json.dumps({'type': 'tool_result', 'id': call.get('id'), 'status': 'success', 'content': 'price of ' + sym + ': 42'}))\n";
+    std::fs::write(pkg_dir.join("price.py"), script).expect("write script");
+
+    // Package-relative `script`, exactly as an agent.toml co-located with its
+    // skill package would declare it.
+    let cfg: PythonPluginConfig = toml::from_str(
+        "name = \"coin_price\"\n\
+description = \"Get a coin price\"\n\
+script = \"price.py\"\n",
+    )
+    .expect("plugin config parses");
+
+    let mut registry = crate::tools::ToolRegistry::new();
+    register_python_plugins(
+        &mut registry,
+        std::slice::from_ref(&cfg),
+        &pkg_dir,
+        "demo-assistant",
+    );
+
+    let names = registered_tool_names(&registry);
+    assert!(
+        names.iter().any(|n| n == "coin_price"),
+        "python plugin must register under its declared name, got {names:?}"
+    );
+
+    let result = registry
+        .dispatch("coin_price", serde_json::json!({"symbol": "bitcoin"}))
+        .await;
+    assert!(
+        !result.is_error(),
+        "python plugin dispatch errored: {}",
+        result.content()
+    );
+    assert_eq!(result.content(), "price of bitcoin: 42");
+
+    let _ = std::fs::remove_dir_all(&pkg_dir);
+}
+
+/// #446 — a malformed `[[plugins.python]]` entry (here an unknown
+/// `restricted_tiers` string, which `PythonToolPlugin::from_config` rejects
+/// fail-closed per #3236) must be SKIPPED with a warning, never abort the
+/// whole persona chat turn. The registry ends up with the tool absent rather
+/// than the turn failing.
+#[test]
+fn persona_python_plugin_bad_config_is_skipped() {
+    use crate::plugins::PythonPluginConfig;
+
+    let cfg: PythonPluginConfig = toml::from_str(
+        "name = \"broken\"\n\
+description = \"bad tier\"\n\
+script = \"x.py\"\n\
+restricted_tiers = [\"not_a_real_tier\"]\n",
+    )
+    .expect("config itself parses; only from_config rejects the bad tier");
+
+    let mut registry = crate::tools::ToolRegistry::new();
+    register_python_plugins(
+        &mut registry,
+        std::slice::from_ref(&cfg),
+        std::path::Path::new("/tmp"),
+        "demo-assistant",
+    );
+
+    let names = registered_tool_names(&registry);
+    assert!(
+        !names.iter().any(|n| n == "broken"),
+        "a plugin with an invalid config must be skipped, not registered: {names:?}"
+    );
+}
