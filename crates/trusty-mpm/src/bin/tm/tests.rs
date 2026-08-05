@@ -277,6 +277,8 @@ fn cli_parses_doctor() {
             flags: DoctorFlags {
                 prune_stale_skills: false,
                 fix_skills: false,
+                fix: false,
+                yes: false,
                 include_frozen: false,
             }
         }
@@ -292,6 +294,8 @@ fn cli_parses_doctor_prune_stale_skills() {
             flags: DoctorFlags {
                 prune_stale_skills: true,
                 fix_skills: false,
+                fix: false,
+                yes: false,
                 include_frozen: false,
             }
         }
@@ -314,6 +318,8 @@ fn cli_parses_doctor_fix_skills() {
             flags: DoctorFlags {
                 prune_stale_skills: false,
                 fix_skills: true,
+                fix: false,
+                yes: false,
                 include_frozen: false,
             }
         }
@@ -336,6 +342,60 @@ fn cli_parses_doctor_fix_skills() {
         Cli::try_parse_from(["trusty-mpm", "doctor", "--include-frozen"]).is_err(),
         "--include-frozen without --fix-skills must be rejected"
     );
+}
+
+/// #4948: `--fix` is a DRY RUN, and writing needs `--yes` on top of it.
+///
+/// Why: `--fix` rewrites project settings files and deployed skills. The CLI
+/// is where "the default cannot write" is actually enforced, so it gets a test
+/// — a `--yes` that parses without `--fix` would let a future refactor reach a
+/// write path from a flag the operator thinks is inert.
+/// Test: this test.
+#[test]
+fn cli_parses_doctor_fix() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix: true,
+                yes: false,
+                fix_skills: false,
+                ..
+            }
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix", "--yes"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix: true,
+                yes: true,
+                ..
+            }
+        }
+    ));
+
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err(),
+        "--yes without --fix must be rejected"
+    );
+
+    // `--include-frozen` requires EITHER repair flag (issue #4948 widened the
+    // `requires` from `--fix-skills` alone to the `repair` group).
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix", "--include-frozen"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix: true,
+                include_frozen: true,
+                ..
+            }
+        }
+    ));
 }
 
 #[test]
