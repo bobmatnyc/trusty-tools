@@ -65,6 +65,44 @@ pub const SESSIONS_DIR: &str = "sessions";
 /// `provision_in_leaves_an_existing_dot_base_store_untouched`.
 pub(crate) const BASE_CLONE_DIRNAME: &str = ".base";
 
+/// Name the protected state `dir` holds, or `None` when it holds none.
+///
+/// Why (#4270): two call sites decide whether a directory may be renamed aside
+/// — `provisioner::workspace`'s stale-base recovery hint and
+/// `daemon::managed_routes::inproject::migrate_old_layout_aside`. Both used to
+/// ask a narrower question (is there a `.base`? is there a `.git`?) and both
+/// were wrong in the same way: the thing that must never be moved is any
+/// directory git or trusty-mpm keeps real state in. Renaming one orphans every
+/// worktree beneath it, which is the #3605 failure with the project directory
+/// as its target. One predicate means the two guards cannot drift apart.
+///
+/// The probe is deliberately fail-SAFE rather than accurate. `Path::exists`
+/// answers `false` for a directory it lacks permission to stat, so an EACCES
+/// blip on `.git` reads exactly like a project with no git directory at all —
+/// and the caller then renames live work. Anything that is not a definite
+/// `NotFound` therefore counts as present: the cost of a false positive is a
+/// refusal the operator can act on, the cost of a false negative is lost work.
+/// What: returns the first of `.git`, `.base`, or `.worktrees` found under
+/// `dir`, so the caller's message can name what it found; `None` only when all
+/// three are definitely absent.
+/// Test: `protected_state_in_names_each_protected_entry`,
+/// `protected_state_in_is_none_for_a_foreign_directory`,
+/// `protected_state_in_treats_an_unreadable_entry_as_present`.
+pub(crate) fn protected_state_in(dir: &Path) -> Option<&'static str> {
+    [
+        ".git",
+        BASE_CLONE_DIRNAME,
+        crate::session_manager::decommission::WORKTREES_DIRNAME,
+    ]
+    .into_iter()
+    .find(|name| {
+        !matches!(
+            std::fs::symlink_metadata(dir.join(name)),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+    })
+}
+
 /// Environment variable carrying the managed session id inside a tm pane.
 const MANAGED_SESSION_ID_ENV: &str = "TM_MANAGED_SESSION_ID";
 

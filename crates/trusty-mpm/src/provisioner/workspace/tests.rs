@@ -663,14 +663,13 @@ fn ensure_base_checkout_rejects_stale_directory() {
 /// Test: used by `ensure_base_checkout_rejects_stale_directory`,
 /// `fake_ensure_base_checkout_rejects_stale_directory`, and
 /// `stale_base_dir_error_suggests_quarantine_not_deletion`.
+///
+/// The recursive-delete half is split into [`assert_no_recursive_delete`]
+/// because it applies to EVERY operator-facing refusal, while the `mv`
+/// requirement applies only to the foreign-debris case — a message aimed at a
+/// directory holding live worktrees must offer no `mv` at all (#4270).
 fn assert_no_destructive_hint(msg: &str) {
-    for forbidden in ["rm -rf", "rm -fr", "rm -r ", "remove_dir_all", "rmdir"] {
-        assert!(
-            !msg.contains(forbidden),
-            "recovery message must never suggest a recursive delete of the SHARED \
-             base checkout (#3605), but it contains {forbidden:?}: {msg}"
-        );
-    }
+    assert_no_recursive_delete(msg);
     assert!(
         msg.contains("    mv "),
         "recovery message must offer the non-destructive quarantine command, got: {msg}"
@@ -679,6 +678,66 @@ fn assert_no_destructive_hint(msg: &str) {
         msg.contains("SHARED"),
         "recovery message must warn that the base is shared across sessions, got: {msg}"
     );
+}
+
+/// Assert an operator-facing message names no recursive delete (#3605).
+///
+/// Why: the delete prohibition binds every refusal this code emits, not only
+/// the ones that also offer a quarantine. Splitting it out lets the refusals
+/// that deliberately suggest NOTHING (#4270) still be checked for the thing
+/// that caused the 2026-07-21 incident.
+/// What: fails if the message names any recursive-delete form.
+/// Test: used by `assert_no_destructive_hint` and
+/// `stale_base_dir_error_never_offers_to_move_a_dir_holding_live_worktrees`.
+fn assert_no_recursive_delete(msg: &str) {
+    for forbidden in ["rm -rf", "rm -fr", "rm -r ", "remove_dir_all", "rmdir"] {
+        assert!(
+            !msg.contains(forbidden),
+            "recovery message must never suggest a recursive delete (#3605), but it \
+             contains {forbidden:?}: {msg}"
+        );
+    }
+}
+
+/// #4270: the quarantine hint must never be aimed at a directory that holds
+/// git or trusty-mpm state.
+///
+/// Why: before #4270 `base_dir` was `<project_dir>/.base`, which an
+/// in-project-shaped project does not have — `stale_base_dir_error` returned
+/// `None` and its `mv` hint was unreachable there. Pointing `base_dir` at the
+/// project directory made it reachable, aimed at the directory holding
+/// `.worktrees/<id>` for every live session. That is the #3605 string with a
+/// bigger target. The trigger is loose enough to matter: `is_established_checkout`
+/// reports `false` for a transient git spawn failure just as it does for a
+/// non-repo, so a momentary hiccup on a healthy project reaches this message.
+/// What: builds the error for a project dir holding `.worktrees/sess-1`, then
+/// for one holding `.git`, and asserts neither offers a `mv` — while the
+/// foreign-debris case in the sibling test still does, so the #1937 recovery
+/// path is not lost.
+/// Test: this function IS the test.
+#[test]
+fn stale_base_dir_error_never_offers_to_move_a_dir_holding_live_worktrees() {
+    let root = crate::test_support::hermetic_temp_dir();
+
+    for (label, entry) in [("live worktrees", ".worktrees"), ("a git dir", ".git")] {
+        let dir = root.path().join(label.replace(' ', "-")).join("repo");
+        std::fs::create_dir_all(dir.join(entry).join("sess-1")).unwrap();
+
+        let msg = super::base_lock::stale_base_dir_error(&dir)
+            .unwrap_or_else(|| panic!("an occupied project dir holding {label} must error"))
+            .to_string();
+
+        assert!(
+            !msg.contains("    mv "),
+            "#4270: the quarantine hint must never target a directory holding {entry} — \
+             moving it orphans every session under it, got: {msg}"
+        );
+        assert!(
+            msg.contains(entry),
+            "the refusal must name what it found, got: {msg}"
+        );
+        assert_no_recursive_delete(&msg);
+    }
 }
 
 /// #3605 regression guard: `stale_base_dir_error`'s message must recover the
@@ -957,17 +1016,28 @@ fn provisioner_worktree_add_writes_no_foreign_branch_merge() {
         return; // git unavailable
     };
     let repo_url = format!("file://{}", bare.display());
-    let base_dir = scratch.path().join("base.git");
+    // #4270: exercise the SHIPPING topology with real git — a non-bare base at
+    // the project dir and the worktree NESTED inside it at
+    // `<project_dir>/.worktrees/<id>`, not a sibling under a bare base. Whether
+    // real `git worktree add` accepts a path inside its own base's working tree
+    // is the load-bearing question of this change, and a `FakeGitBackend` whose
+    // `worktree_add` is a `create_dir_all` cannot answer it.
+    let base_dir = scratch.path().join("owner").join("repo");
     let backend = RealGitBackend::default();
     backend
         .ensure_base_checkout(&repo_url, &base_dir)
         .expect("ensure_base_checkout must succeed against a local bare origin");
 
-    let worktree = scratch.path().join("wt");
     let branch = "session/tm-2867-01";
+    let worktree = base_dir.join(".worktrees").join(branch.replace('/', "-"));
     backend
         .worktree_add(&base_dir, "main", &worktree, branch)
-        .expect("worktree_add must succeed");
+        .expect("worktree_add must succeed into <project_dir>/.worktrees/<id>");
+    assert!(
+        worktree.join(".git").exists(),
+        "real git must produce a working worktree nested under its own base at {}",
+        worktree.display()
+    );
 
     // Every branch.<name>.merge in the whole config must name its own branch.
     let listed = std::process::Command::new("git")

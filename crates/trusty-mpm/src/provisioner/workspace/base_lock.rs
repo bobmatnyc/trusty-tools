@@ -95,42 +95,47 @@ pub(super) fn is_established_checkout(dir: &Path) -> bool {
 /// Test: `provision_in_leaves_an_existing_dot_base_store_untouched`.
 pub(super) use crate::core::harness_root::BASE_CLONE_DIRNAME as LEGACY_BASE_DIRNAME;
 
-/// Build the refusal for a project directory still occupied by a legacy
-/// `.base` store — or `None` when no such store is present.
+/// Build the refusal for a project directory holding git or trusty-mpm state —
+/// or `None` when it holds none.
 ///
 /// Why (#4270): provisioning now clones the base into `<project_dir>` itself,
-/// and `git clone` refuses a non-empty destination. A project provisioned only
-/// through the pre-#4270 clone path holds `<project_dir>/.base` — a bare
-/// repository that owns every `.base/.worktrees/<id>` worktree still checked
-/// out and, quite possibly, still running a live session. The generic
-/// [`stale_base_dir_error`] would tell the operator to `mv` that whole
-/// directory aside, which orphans all of them: precisely the #3605 blast
-/// radius, aimed at a bigger target. This refusal names the situation instead
-/// and suggests nothing that moves or deletes anything, because the owner
-/// ruling (#4270) makes `.base` cleanup a manual step taken once no session
-/// needs it.
-/// What: returns `Some(ProvisionError::Git(..))` naming `project_dir` and its
-/// `.base` store when that store exists; `None` otherwise, leaving the caller
-/// on its normal path.
-/// Test: `provision_in_leaves_an_existing_dot_base_store_untouched`.
-fn legacy_base_store_error(project_dir: &Path) -> Option<ProvisionError> {
-    let legacy = project_dir.join(LEGACY_BASE_DIRNAME);
-    if !legacy.exists() {
-        return None;
-    }
+/// and `git clone` refuses a non-empty destination. Before #4270 `base_dir` was
+/// `<project_dir>/.base`, which for an in-project-shaped project does not
+/// exist, so [`stale_base_dir_error`] returned `None` and its `mv` hint was
+/// unreachable there. Pointing `base_dir` at the project directory made that
+/// hint reachable — aimed at the directory holding `.worktrees/<id>` for every
+/// live session, and at `.base` with every worktree beneath it. That is the
+/// #3605 string with a bigger target, so the whole class is diverted here to a
+/// refusal that suggests nothing which moves or deletes anything.
+///
+/// Reaching this on a HEALTHY repository is the case that makes it matter:
+/// [`is_established_checkout`] reports `false` for a transient git spawn
+/// failure, a missing `git` binary, and a dubious-ownership rejection alike, so
+/// a momentary hiccup lands here with `.git` present. Naming that state and
+/// stopping is right in every one of those; suggesting a rename is not.
+/// What: returns `Some(ProvisionError::Git(..))` naming `project_dir` and the
+/// protected entry [`crate::core::harness_root::protected_state_in`] found;
+/// `None` otherwise, leaving the caller on its normal path.
+/// Test: `provision_in_leaves_an_existing_dot_base_store_untouched`,
+/// `stale_base_dir_error_never_offers_to_move_a_dir_holding_live_worktrees`.
+fn protected_dir_error(project_dir: &Path) -> Option<ProvisionError> {
+    let found = crate::core::harness_root::protected_state_in(project_dir)?;
     Some(ProvisionError::Git(format!(
-        "cannot establish the base checkout at {project} because it still holds the \
-         legacy {legacy} store retired by #4270.\n\
+        "cannot establish the base checkout at {project}: it holds {found}, so it \
+         already carries git or trusty-mpm state.\n\
          \n\
-         That store is a real git repository owning every {legacy}/.worktrees/<id> \
-         worktree under it, and one of those sessions may be live right now. \
-         trusty-mpm will not move, rename, or delete it. Retiring it is a manual step \
-         for once no session needs it.\n\
+         Anything under it may be in use — a `{worktrees}/<id>` worktree, or a \
+         `{legacy}` store owning worktrees of its own — and one of those sessions may \
+         be live right now. trusty-mpm will not move, rename, or delete any of it, and \
+         neither should you while a session is running.\n\
          \n\
-         Until then, spawn this project's sessions from a local checkout (the \
-         in-project path), which uses the same {project} base clone this path wants.",
+         If this project has a `{legacy}` store, retiring it is a manual step for once \
+         no session needs it (#4270). If `.git` is present, this path expected git to \
+         recognise a checkout here and it did not — check that `git -C {project} \
+         rev-parse --show-toplevel` succeeds before retrying.",
         project = project_dir.display(),
         legacy = LEGACY_BASE_DIRNAME,
+        worktrees = crate::session_manager::decommission::WORKTREES_DIRNAME,
     )))
 }
 
@@ -180,13 +185,14 @@ pub(super) fn stale_base_quarantine_path(base_dir: &Path) -> PathBuf {
 /// `Some(ProvisionError::Git(..))` whose message names the exact path, warns
 /// that the path is shared across sessions, and gives a single non-destructive
 /// `mv <path> <path>.stale-<timestamp>` command. It never emits a recursive
-/// delete. One case is answered ahead of that, via [`legacy_base_store_error`]:
-/// a directory hosting a live `.base` store gets a refusal that suggests moving
-/// nothing (#4270), because the `mv` hint aimed at a project directory would
-/// rename every worktree under that store out from under its session. Callers
-/// MUST invoke this only AFTER confirming the path is not already a valid
-/// checkout (via [`is_established_checkout`]) so a healthy base is never
-/// flagged.
+/// delete. A whole class is answered ahead of that, via [`protected_dir_error`]:
+/// a directory holding git or trusty-mpm state gets a refusal that suggests
+/// moving nothing (#4270), because the `mv` hint aimed at a project directory
+/// would rename live worktrees out from under their sessions. Only foreign
+/// debris — no `.git`, no `.base`, no `.worktrees` — still gets the quarantine
+/// hint. Callers MUST invoke this only AFTER confirming the path is not already
+/// a valid checkout (via [`is_established_checkout`]) so a healthy base is
+/// never flagged.
 /// Test: `ensure_base_checkout_rejects_stale_directory`,
 /// `fake_ensure_base_checkout_rejects_stale_directory` (both assert
 /// the message names the path and carries the quarantine hint), and
@@ -208,9 +214,10 @@ pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
     if !non_empty {
         return None;
     }
-    // #4270: a live legacy `.base` store is occupied, but nothing about it is
-    // stale — and the quarantine hint below must never be aimed at it.
-    if let Some(err) = legacy_base_store_error(base_dir) {
+    // #4270: a directory holding git or trusty-mpm state is occupied, but
+    // nothing about it is stale — and the quarantine hint below must never be
+    // aimed at it. Only foreign debris reaches the `mv` suggestion.
+    if let Some(err) = protected_dir_error(base_dir) {
         return Some(err);
     }
     Some(ProvisionError::Git(format!(
