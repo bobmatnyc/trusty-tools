@@ -33,7 +33,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::agents::manifest::{Result, checksum};
-use crate::skills::manifest::{SkillManifest, SkillManifestEntry, with_skill_manifest_lock};
+use crate::skills::manifest::{
+    SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
+};
 use crate::skills::unmanaged::{UnmanagedBundledSkill, unmanaged_bundled_skills};
 
 /// Filename of the per-backup-root ledger of what was copied where.
@@ -122,6 +124,8 @@ fn adopt_locked(
     }
 
     let mut manifest = SkillManifest::load(dest);
+    // #4881: the snapshot the merging save replays this run's delta against.
+    let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();
     let mut adopted = Vec::with_capacity(found.len());
 
@@ -150,7 +154,15 @@ fn adopt_locked(
         });
     }
 
-    manifest.save(dest)?;
+    // #4881: backups are already on disk and the whole point of adoption is the
+    // manifest record, so this save must publish — see `save_merging`.
+    if manifest.save_merging(dest, &base)? == SkillManifestSave::Merged {
+        tracing::warn!(
+            dest = %dest.display(),
+            "the skill manifest changed during adoption — a writer bypassed the \
+             ledger lock; its entries were merged rather than dropped"
+        );
+    }
     Ok(adopted)
 }
 

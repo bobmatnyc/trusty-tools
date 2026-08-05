@@ -12,6 +12,7 @@
 //! `cargo test -p trusty-agents-common -- skills::deployer`.
 
 use super::*;
+use crate::agents::manifest::ManifestError;
 use std::fs;
 use tempfile::TempDir;
 
@@ -423,4 +424,82 @@ fn deploy_blocks_while_the_skill_ledger_lock_is_held() {
         SkillManifest::load(tgt.path()).is_managed("tm-doctor"),
         "the released deploy must have recorded its entries"
     );
+}
+
+#[test]
+fn a_racing_writer_freezes_nothing_on_either_side() {
+    // #4881 — the invariant a save must uphold once files are on disk. This is
+    // the regression test for a CAS that returned `Err` after `atomic_write`
+    // had already published every `SKILL.md`: the bytes were newer than their
+    // recorded checksums, so the next deploy read all of them as hand-edits and
+    // skipped the whole tier forever — manufacturing the freeze this issue
+    // exists to prevent.
+    //
+    // The interleaving is CONSTRUCTED, not raced: it replays the deployer's own
+    // ordering (load, write files, save against the base loaded earlier) with a
+    // competing writer publishing in between. The assertion that matters is
+    // made by the REAL deployer afterwards — its classifier is what freezes.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    // A first, uncontended deploy. This is the `base` an in-flight deploy loads.
+    deploy_skills(src.path(), tgt.path()).unwrap();
+    let base = SkillManifest::load(tgt.path());
+
+    // A writer that does NOT take the ledger lock — an older installed `tm`
+    // during a rollout — publishes its own entry after our base was loaded.
+    let mut racer = base.clone();
+    racer.managed.insert(
+        "racing-writer-skill".into(),
+        SkillManifestEntry {
+            checksum: checksum("racer content"),
+            deployed_at: "2026-08-05T00:00:00Z".into(),
+        },
+    );
+    let racer_dir = tgt.path().join("racing-writer-skill");
+    fs::create_dir_all(&racer_dir).unwrap();
+    fs::write(racer_dir.join("SKILL.md"), "racer content").unwrap();
+    racer.save(tgt.path()).unwrap();
+
+    // Our in-flight deploy: new content for every source skill is written to
+    // disk FIRST (as `deploy_one_file` does), then the ledger is saved against
+    // the now-stale `base`.
+    let mut ours = base.clone();
+    for stem in ["tm-doctor", "example-skill"] {
+        let content = format!("---\nname: {stem}\n---\n\nv2 content\n");
+        let dir = tgt.path().join(stem);
+        fs::write(dir.join("SKILL.md"), &content).unwrap();
+        fs::write(src.path().join(format!("{stem}.md")), &content).unwrap();
+        ours.managed.insert(
+            stem.to_string(),
+            SkillManifestEntry {
+                checksum: checksum(&content),
+                deployed_at: "2026-08-05T00:00:01Z".into(),
+            },
+        );
+    }
+    assert_eq!(
+        ours.save_merging(tgt.path(), &base).unwrap(),
+        SkillManifestSave::Merged
+    );
+
+    // Nothing is frozen on OUR side: the real deployer sees content it wrote,
+    // matching its recorded checksum — `unchanged`, never `skipped`.
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+    assert!(
+        stats.skipped.is_empty(),
+        "a racing writer must freeze nothing: skipped={:?}",
+        stats.skipped
+    );
+    assert_eq!(stats.unchanged.len(), 2, "both skills must stay writable");
+
+    // Nothing is frozen on the RACER's side either: a blind save would have
+    // dropped its entry, leaving its file untracked and skipped from then on.
+    let final_manifest = SkillManifest::load(tgt.path());
+    assert!(
+        final_manifest.is_managed("racing-writer-skill"),
+        "the racing writer's entry must survive, or ITS file freezes instead"
+    );
+    assert!(final_manifest.checksum_matches("racing-writer-skill", "racer content"));
 }

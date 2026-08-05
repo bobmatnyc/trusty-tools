@@ -145,10 +145,11 @@ fn skill_manifest_lock_releases_so_a_second_acquisition_succeeds() {
 }
 
 #[test]
-fn skill_manifest_save_if_current_refuses_a_stale_snapshot() {
-    // #4881, defence in depth behind the lock: a writer whose snapshot went
-    // stale must be refused, never allowed to clobber the newer record. The
-    // staleness is constructed directly — no scheduling involved.
+fn skill_manifest_save_merging_folds_in_a_concurrent_writer() {
+    // #4881: a writer whose snapshot went stale must publish a document holding
+    // BOTH its own delta and the racing writer's — never one at the other's
+    // expense, and never nothing. Staleness is constructed directly; no
+    // scheduling is involved.
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
 
@@ -169,20 +170,58 @@ fn skill_manifest_save_if_current_refuses_a_stale_snapshot() {
     ours.managed.insert("ours".into(), sample_entry());
 
     assert_eq!(
-        ours.save_if_current(dir, &base).unwrap(),
-        SkillManifestSave::RefusedStale
+        ours.save_merging(dir, &base).unwrap(),
+        SkillManifestSave::Merged
     );
 
-    // Nothing was written: the other writer's entry survives and ours is absent.
     let on_disk = SkillManifest::load(dir);
-    assert!(on_disk.is_managed("from-the-other-writer"));
-    assert!(!on_disk.is_managed("ours"));
+    assert!(on_disk.is_managed("ours"), "our own entry must be recorded");
+    assert!(
+        on_disk.is_managed("from-the-other-writer"),
+        "the racing writer's entry must survive"
+    );
+    assert!(on_disk.is_managed("shared"));
 }
 
 #[test]
-fn skill_manifest_save_if_current_writes_when_unchanged() {
-    // The CAS must not be a permanent refusal: an unraced save proceeds, and a
-    // first-ever save (no file on disk, snapshot = empty default) proceeds too.
+fn skill_manifest_save_merging_applies_this_runs_removals() {
+    // The prune path's delta is REMOVALS. Merging must apply them to the
+    // current on-disk document, not silently revert them, and must still leave
+    // a concurrent writer's inserts alone.
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    let mut base = SkillManifest::default();
+    base.managed.insert("keep".into(), sample_entry());
+    base.managed.insert("prune-me".into(), sample_entry());
+    base.save(dir).unwrap();
+
+    let mut newer = base.clone();
+    newer.managed.insert("arrived-later".into(), sample_entry());
+    newer.save(dir).unwrap();
+
+    // Our delta: drop `prune-me`.
+    let mut ours = base.clone();
+    ours.managed.remove("prune-me");
+
+    assert_eq!(
+        ours.save_merging(dir, &base).unwrap(),
+        SkillManifestSave::Merged
+    );
+
+    let on_disk = SkillManifest::load(dir);
+    assert!(!on_disk.is_managed("prune-me"), "our removal must apply");
+    assert!(on_disk.is_managed("keep"));
+    assert!(
+        on_disk.is_managed("arrived-later"),
+        "the racing writer's insert must survive a prune merge"
+    );
+}
+
+#[test]
+fn skill_manifest_save_merging_writes_when_unchanged() {
+    // The uncontended path: an unraced save publishes as-is, and a first-ever
+    // save (no file on disk, snapshot = empty default) publishes too.
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
 
@@ -190,7 +229,7 @@ fn skill_manifest_save_if_current_writes_when_unchanged() {
     let mut first = base.clone();
     first.managed.insert("tm-doctor".into(), sample_entry());
     assert_eq!(
-        first.save_if_current(dir, &base).unwrap(),
+        first.save_merging(dir, &base).unwrap(),
         SkillManifestSave::Written
     );
     assert!(SkillManifest::load(dir).is_managed("tm-doctor"));
@@ -199,7 +238,7 @@ fn skill_manifest_save_if_current_writes_when_unchanged() {
     let mut second = base.clone();
     second.managed.insert("tm-workflow".into(), sample_entry());
     assert_eq!(
-        second.save_if_current(dir, &base).unwrap(),
+        second.save_merging(dir, &base).unwrap(),
         SkillManifestSave::Written
     );
     let on_disk = SkillManifest::load(dir);

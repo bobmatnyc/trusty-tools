@@ -76,19 +76,22 @@ where
 
 /// Outcome of a compare-and-swap manifest save.
 ///
-/// Why (#4881): a refused save is not a failure the caller may ignore — it means
-/// the ledger moved under an unlocked writer, which is the exact condition that
-/// freezes skills. `#[must_use]` makes dropping the answer a compile error.
-/// What: `Written` when the snapshot was still current and the document was
-/// published; `RefusedStale` when it was not and NOTHING was written.
-/// Test: `skill_manifest_save_if_current_refuses_a_stale_snapshot`.
+/// Why (#4881): a merge means an UNLOCKED writer published between this
+/// writer's load and its save. The ledger is intact either way, but the
+/// condition is worth a log line — it says the advisory lock was bypassed.
+/// `#[must_use]` keeps that answer from being silently dropped.
+/// What: `Written` when the snapshot was still current; `Merged` when a
+/// concurrent writer's entries were folded in first. Both mean the manifest
+/// WAS published — there is deliberately no variant meaning "nothing written".
+/// Test: `skill_manifest_save_merging_folds_in_a_concurrent_writer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub enum SkillManifestSave {
-    /// The snapshot was current; the manifest was written.
+    /// The snapshot was current; the manifest was written as-is.
     Written,
-    /// On-disk state had moved on since the snapshot; nothing was written.
-    RefusedStale,
+    /// A concurrent writer had published; its entries were folded in and the
+    /// merged document written.
+    Merged,
 }
 
 /// Current on-disk skill manifest schema version.
@@ -165,36 +168,57 @@ impl SkillManifest {
         Ok(())
     }
 
-    /// Save only if the on-disk manifest is still the one `base` was loaded from.
+    /// Publish `self`, folding in anything a concurrent writer added since `base`.
     ///
-    /// Why (#4881): defence in depth behind [`with_skill_manifest_lock`]. The
-    /// lock is ADVISORY, so it protects only writers that take it; a future
-    /// caller that reaches for plain [`SkillManifest::save`] silently reinstates
-    /// the lost-update race. Under the owner's lifecycle ruling this ledger is
-    /// the durable record of what the user customized, so a stale write no
-    /// longer merely freezes a file — it corrupts that record. Comparing against
-    /// disk turns the clobber into a refusal the caller must handle.
-    /// What: re-reads the manifest at `target_dir` and writes `self` only when
-    /// it equals `base` (the snapshot this manifest was derived from), returning
-    /// [`SkillManifestSave::Written`]. Otherwise nothing is written and
-    /// [`SkillManifestSave::RefusedStale`] is returned. An absent file loads as
-    /// the empty default, so a first-ever deploy compares equal and proceeds.
+    /// Why (#4881): defence in depth behind [`with_skill_manifest_lock`], which
+    /// is ADVISORY and so protects only writers that take it — during a rollout
+    /// the older installed `tm` binaries do not. Every caller writes SKILL FILES
+    /// before it saves, which forces one invariant: **a save must never fail, or
+    /// refuse, after files are on disk.** Bytes newer than the recorded checksum
+    /// are precisely what `deployer::deploy_one_file` reads as a hand-edit and
+    /// skips forever, so a refusal here would manufacture the freeze this issue
+    /// exists to prevent — across the whole tier, not one file. Merging is also
+    /// strictly better than a plain [`SkillManifest::save`]: a blind save drops
+    /// the racing writer's entries and freezes ITS files instead.
+    /// What: a three-way merge. When the on-disk manifest still equals `base`,
+    /// writes `self` and returns [`SkillManifestSave::Written`]. Otherwise it
+    /// starts from the CURRENT on-disk document and applies this run's delta
+    /// relative to `base` — every key `self` added or changed is inserted, every
+    /// key `base` had and `self` dropped is removed — then writes that and
+    /// returns [`SkillManifestSave::Merged`]. Both outcomes publish. An absent
+    /// file loads as the empty default, so a first-ever save compares equal.
     ///
-    /// This is a CAS, not a merge: it refuses, it never reconciles. Deploy is
-    /// idempotent, so the correct response to a refusal is to surface it and let
-    /// the next run redo the cycle.
-    /// Test: `skill_manifest_save_if_current_refuses_a_stale_snapshot`,
-    /// `skill_manifest_save_if_current_writes_when_unchanged`.
-    pub fn save_if_current(
+    /// The delta, not `self`, is what gets applied: `self` is `base` plus this
+    /// run's changes, so replaying only the difference is what preserves the
+    /// other writer's work instead of overwriting it.
+    /// Test: `skill_manifest_save_merging_folds_in_a_concurrent_writer`,
+    /// `skill_manifest_save_merging_applies_this_runs_removals`,
+    /// `skill_manifest_save_merging_writes_when_unchanged`.
+    pub fn save_merging(
         &self,
         target_dir: &Path,
         base: &SkillManifest,
     ) -> Result<SkillManifestSave> {
-        if &Self::load(target_dir) != base {
-            return Ok(SkillManifestSave::RefusedStale);
+        let on_disk = Self::load(target_dir);
+        if on_disk == *base {
+            self.save(target_dir)?;
+            return Ok(SkillManifestSave::Written);
         }
-        self.save(target_dir)?;
-        Ok(SkillManifestSave::Written)
+
+        let mut merged = on_disk;
+        merged.version = self.version;
+        for (key, entry) in &self.managed {
+            if base.managed.get(key) != Some(entry) {
+                merged.managed.insert(key.clone(), entry.clone());
+            }
+        }
+        for key in base.managed.keys() {
+            if !self.managed.contains_key(key) {
+                merged.managed.remove(key);
+            }
+        }
+        merged.save(target_dir)?;
+        Ok(SkillManifestSave::Merged)
     }
 
     /// Whether `filename` is a trusty-mpm-managed skill file.

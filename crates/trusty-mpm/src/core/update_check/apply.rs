@@ -22,7 +22,9 @@ use crate::core::agent_manifest::{
 };
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest, with_skill_manifest_lock};
+use crate::core::skill_manifest::{
+    SKILL_MANIFEST_FILE, SkillManifest, SkillManifestSave, with_skill_manifest_lock,
+};
 use crate::core::skill_tiers::deploy_all_skill_tiers;
 use crate::provisioner::GitBackend;
 
@@ -266,6 +268,10 @@ fn prune_skills(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyE
 /// Test: `apply_prune_removes_deselected`.
 fn prune_skills_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
     let mut manifest = SkillManifest::load(target);
+    // #4881: the snapshot the merging save replays this run's delta against —
+    // here the delta is REMOVALS, which `save_merging` applies to the current
+    // on-disk document rather than reverting a concurrent writer's inserts.
+    let base = manifest.clone();
     let mut pruned: Vec<String> = Vec::new();
 
     let candidates: Vec<String> = manifest.managed.keys().cloned().collect();
@@ -282,9 +288,19 @@ fn prune_skills_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>,
     }
 
     if !pruned.is_empty() {
-        manifest
-            .save(target)
-            .map_err(|e| ApplyError::Prune(e.to_string()))?;
+        // #4881: the skill DIRECTORIES are already removed, so this save must
+        // publish or the manifest keeps listing files that no longer exist.
+        if manifest
+            .save_merging(target, &base)
+            .map_err(|e| ApplyError::Prune(e.to_string()))?
+            == SkillManifestSave::Merged
+        {
+            tracing::warn!(
+                target = %target.display(),
+                "the skill manifest changed during prune — a writer bypassed the \
+                 ledger lock; its entries were merged rather than dropped"
+            );
+        }
         debug_assert!(target.join(SKILL_MANIFEST_FILE).exists());
     }
     pruned.sort_unstable();

@@ -46,7 +46,9 @@ use crate::core::skill_deploy_tiers::{SkillDeployTier, skill_deploy_tiers};
 use crate::core::skill_drift::{
     ManifestState, SkillDrift, SkillReference, audit_deployed_skills, deployed_path,
 };
-use crate::core::skill_manifest::{SkillManifest, SkillManifestEntry, with_skill_manifest_lock};
+use crate::core::skill_manifest::{
+    SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
+};
 
 /// What the repair did — or deliberately did not do — to one skill.
 ///
@@ -187,6 +189,8 @@ fn repair_tier_locked(
     }
 
     let mut manifest = SkillManifest::load(&tier.dir);
+    // #4881: the snapshot the merging save replays this run's delta against.
+    let base = manifest.clone();
     let mut manifest_dirty = false;
 
     for finding in audit.findings {
@@ -231,12 +235,24 @@ fn repair_tier_locked(
         });
     }
 
-    if manifest_dirty && let Err(e) = manifest.save(&tier.dir) {
-        outcomes.push(RepairOutcome {
-            tier: tier.label,
-            stem: "<manifest>".to_string(),
-            action: RepairAction::Failed(format!("could not save the deploy manifest: {e}")),
-        });
+    // #4881: `rewrite_and_verify` already wrote and re-read every repaired file,
+    // so this save must publish or the repair leaves each one reading as
+    // hand-edited — the exact state it was invoked to clear. `save_merging`
+    // folds in a writer that bypassed the lock rather than dropping it.
+    if manifest_dirty {
+        match manifest.save_merging(&tier.dir, &base) {
+            Ok(SkillManifestSave::Written) => {}
+            Ok(SkillManifestSave::Merged) => tracing::warn!(
+                tier = tier.label,
+                "the skill manifest changed during repair — a writer bypassed the \
+                 ledger lock; its entries were merged rather than dropped"
+            ),
+            Err(e) => outcomes.push(RepairOutcome {
+                tier: tier.label,
+                stem: "<manifest>".to_string(),
+                action: RepairAction::Failed(format!("could not save the deploy manifest: {e}")),
+            }),
+        }
     }
     outcomes
 }

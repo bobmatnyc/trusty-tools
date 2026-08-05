@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use crate::agents::manifest::{ManifestError, Result, atomic_write, checksum};
+use crate::agents::manifest::{Result, atomic_write, checksum};
 use crate::skills::manifest::{
     SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
 };
@@ -275,19 +275,17 @@ fn deploy_skills_locked(
         }
     }
 
-    // #4881: refuse rather than clobber if the ledger moved under us. Holding
-    // the lock makes that impossible among writers that take it, so a refusal
-    // here means an UNLOCKED writer exists — a bug to surface, not to paper
-    // over. Deploy is idempotent, so the next run redoes this cycle intact.
-    match manifest.save_if_current(dest, &base)? {
-        SkillManifestSave::Written => {}
-        SkillManifestSave::RefusedStale => {
-            return Err(ManifestError::Io(std::io::Error::other(format!(
-                "the skill manifest at {} changed during this deploy — an unlocked \
-                 writer bypassed `with_skill_manifest_lock`; nothing was written",
-                dest.display()
-            ))));
-        }
+    // #4881: every file above is ALREADY on disk, so this save must publish —
+    // failing or refusing here would leave bytes newer than their recorded
+    // checksums, which is exactly what the classifier above reads as a hand-edit
+    // and skips forever. `save_merging` folds in anything an unlocked writer
+    // published mid-deploy rather than dropping it.
+    if manifest.save_merging(dest, &base)? == SkillManifestSave::Merged {
+        tracing::warn!(
+            dest = %dest.display(),
+            "the skill manifest changed during this deploy — a writer bypassed the \
+             ledger lock; its entries were merged rather than dropped"
+        );
     }
 
     Ok(stats)
