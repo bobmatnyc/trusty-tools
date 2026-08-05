@@ -111,8 +111,11 @@ pub(super) fn push_section(out: &mut String, section: &str) {
 /// what's available and lets it pull more via MCP recall if needed.
 /// What: whitespace-collapses and truncates to [`DRAWER_PREVIEW_CHARS`]
 /// chars with a trailing `…` when cut.
-/// Test: indirectly via `prompt_context_recalls_palace_drawers`.
-pub(super) fn drawer_preview(content: &str) -> String {
+/// Test: indirectly via `prompt_context_recalls_palace_drawers`; the exactness
+/// the backfill report depends on is pinned by `preview_matches_injection_bullet`.
+// #4891: `pub(crate)` so `commands::backfill_report` reuses this exact
+// truncation when joining drawers back to the hook logs.
+pub(crate) fn drawer_preview(content: &str) -> String {
     let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalised.chars().count() <= DRAWER_PREVIEW_CHARS {
         normalised
