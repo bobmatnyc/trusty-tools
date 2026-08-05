@@ -542,14 +542,16 @@ async fn main() -> anyhow::Result<()> {
         // DOC-24: standalone managed driver commands.
         // Each command resolves ManagedPaths once at entry (closes #1566):
         // --root flag > TRUSTY_MPM_ROOT env > XDG config file > default.
+        // #4912: positionals are `<url> [alias]`, with the legacy `<alias> <url>`
+        // order still accepted — the handler detects which one is the URL.
         Some(Command::Register {
-            alias,
             url,
+            alias,
             force,
             root,
         }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
-            commands::standalone::register_cmd(&paths, &alias, &url, force)
+            commands::standalone::register_cmd(&paths, &url, alias.as_deref(), force)
         }
         Some(Command::Ls {
             terms,

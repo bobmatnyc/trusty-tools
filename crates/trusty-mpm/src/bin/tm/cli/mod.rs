@@ -783,18 +783,33 @@ pub(crate) enum Command {
         cmd: WatchCmd,
     },
 
-    /// Register a GitHub repo alias for the standalone managed driver (DOC-24).
+    /// Register a repo alias for the standalone managed driver (DOC-24).
     ///
     /// Why: declares an alias→URL mapping without cloning so users can register
     /// their fleet cheaply and `tm load <alias>` lazily.
-    /// What: persists `{alias, url}` to `<root>/registry.json` and
-    /// prints `registered <alias> → <url>`.
-    /// Test: `cli_parses_register`.
+    /// What: `tm register <owner/repo> [alias]`. `owner/repo` is the primary
+    /// form and GitHub is assumed, so `tm register bobmatnyc/trusty-tools`
+    /// registers `https://github.com/bobmatnyc/trusty-tools`. A full URL is the
+    /// alternative form and any host works there. With no alias, one is derived
+    /// as hyphen-joined `owner-repo` (`bobmatnyc-trusty-tools`). The legacy
+    /// `tm register <alias> <url>` order still works — whichever positional
+    /// names a repo is taken as the repo (#4912). Browser paths into a repo
+    /// (`.../tree/main`, `.../pull/123`) and relative paths are refused.
+    /// Persists `{alias, url}` to `<root>/registry.json` and prints
+    /// `registered <alias> → <url>`.
+    /// Test: `register_args_tests.rs`.
     Register {
-        /// Short alias identifier (e.g. `my-project`).
-        alias: String,
-        /// Clone-able GitHub URL (HTTPS or SSH).
+        /// Repo to register: `<owner>/<repo>` (GitHub assumed), or a full URL
+        /// such as `https://github.com/<owner>/<repo>` or
+        /// `git@github.com:<owner>/<repo>.git` for any host.
+        ///
+        /// #4912: this position also accepts the legacy alias-first form; the
+        /// repo is detected by shape, so `tm register <alias> <url>` still works.
         url: String,
+        /// Short alias identifier (e.g. `my-project`).
+        ///
+        /// Optional — defaults to `owner-repo` derived from the repo.
+        alias: Option<String>,
         /// Overwrite an existing alias with a different URL.
         #[arg(long)]
         force: bool,

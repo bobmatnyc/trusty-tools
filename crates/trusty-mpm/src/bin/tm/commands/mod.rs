@@ -67,6 +67,9 @@ pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod push_guard;
 pub(crate) mod reconcile_worktrees;
+// #4912: `tm register` positional resolution — URL first, alias optional, with
+// the legacy alias-first order still accepted.
+pub(crate) mod register_args;
 pub(crate) mod rename;
 pub(crate) mod repair;
 pub(crate) mod serve_stdio;
