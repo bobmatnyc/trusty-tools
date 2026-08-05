@@ -497,6 +497,40 @@ fn deployed_agent_dirs_puts_project_tier_first() {
 }
 
 #[test]
+fn deployed_agent_dirs_from_is_pure_and_ordered() {
+    // #4946: this exact ordering is what `tm generate capabilities` renders
+    // into the tm-capabilities skill. Change it and the committed skill drifts.
+    let dirs = deployed_agent_dirs_from(
+        Path::new("/proj"),
+        Some(Path::new("/managed/claude-config")),
+        Path::new("/home/u/.claude/agents"),
+    );
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/proj/.claude/agents"),
+            PathBuf::from("/managed/claude-config/agents"),
+            PathBuf::from("/home/u/.claude/agents"),
+        ]
+    );
+}
+
+#[test]
+fn deployed_agent_dirs_from_skips_absent_managed_tier() {
+    // A stripped environment resolves no managed config dir; the remaining two
+    // tiers must keep their relative order rather than shifting a placeholder in.
+    let dirs =
+        deployed_agent_dirs_from(Path::new("/proj"), None, Path::new("/home/u/.claude/agents"));
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/proj/.claude/agents"),
+            PathBuf::from("/home/u/.claude/agents"),
+        ]
+    );
+}
+
+#[test]
 fn roster_from_dirs_dedupes_with_first_dir_winning() {
     // The same agent is normally deployed into more than one tier; the
     // higher-precedence copy must be the one described, exactly once.

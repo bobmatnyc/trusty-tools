@@ -21,6 +21,7 @@ mod agents;
 mod cli_tree;
 mod doctor;
 mod entry;
+mod framework;
 mod mcp_tools;
 mod skills;
 
@@ -43,11 +44,11 @@ pub(crate) type GeneratedSet = BTreeMap<&'static str, String>;
 /// Why: a single function is the one place that knows the full generated
 /// file set — the entry point plus five references files — so [`write`] and
 /// [`diff`] share it and can never disagree about which files exist.
-/// What: returns 6 entries: `tm-capabilities.md` (the entry file) plus
-/// `tm-capabilities/references/{cli,mcp-tools,agents,skills,doctor}.md`.
+/// What: returns 7 entries: `tm-capabilities.md` (the entry file) plus
+/// `tm-capabilities/references/{cli,mcp-tools,agents,skills,doctor,framework}.md`.
 /// `references/workflows.md` is deliberately absent from this set — it is
 /// hand-authored (issue #2913 brief §E) and never regenerated or diffed.
-/// Test: `generated_set_has_six_entries`, `generated_set_is_deterministic`.
+/// Test: `generated_set_has_seven_entries`, `generated_set_is_deterministic`.
 pub(crate) fn generate() -> GeneratedSet {
     let mut set = GeneratedSet::new();
     set.insert("tm-capabilities.md", entry::render());
@@ -59,6 +60,10 @@ pub(crate) fn generate() -> GeneratedSet {
     set.insert("tm-capabilities/references/agents.md", agents::render());
     set.insert("tm-capabilities/references/skills.md", skills::render());
     set.insert("tm-capabilities/references/doctor.md", doctor::render());
+    set.insert(
+        "tm-capabilities/references/framework.md",
+        framework::render(),
+    );
     set
 }
 
@@ -166,15 +171,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_set_has_six_entries() {
+    fn generated_set_has_seven_entries() {
         let set = generate();
-        assert_eq!(set.len(), 6);
+        assert_eq!(set.len(), 7);
         assert!(set.contains_key("tm-capabilities.md"));
         assert!(set.contains_key("tm-capabilities/references/cli.md"));
         assert!(set.contains_key("tm-capabilities/references/mcp-tools.md"));
         assert!(set.contains_key("tm-capabilities/references/agents.md"));
         assert!(set.contains_key("tm-capabilities/references/skills.md"));
         assert!(set.contains_key("tm-capabilities/references/doctor.md"));
+        assert!(set.contains_key("tm-capabilities/references/framework.md"));
     }
 
     #[test]
