@@ -1,6 +1,11 @@
 //! Unit tests for the per-turn file-change budget (`super`), relocated out of
 //! `mod.rs` (issue #2918) so the production file stays under the 500-SLOC cap.
 //! `tests.rs` is classified as a test file (1500-SLOC cap).
+//!
+//! Temp dirs come from `crate::test_support::hermetic_temp_dir`, never a bare
+//! `tempfile::tempdir()`: the bare constructor honors `$TMPDIR`, so any sibling
+//! test in this binary that mutates it reddens these tests instead. That is how
+//! five of them failed on PR #4914 (run 31023632348) — see `test_support`.
 
 use super::*;
 
@@ -81,7 +86,7 @@ fn sanitize_session_id_replaces_unsafe_bytes() {
 
 #[test]
 fn record_file_change_allows_first_three_then_exhausts() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let now = 5000;
     for expected_used in 1..=3 {
         let decision = record_file_change_at(dir.path(), "sess-a", 3, now);
@@ -99,7 +104,7 @@ fn record_file_change_allows_first_three_then_exhausts() {
 
 #[test]
 fn record_file_change_isolates_by_session() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let now = 5000;
     for _ in 1..=3 {
         record_file_change_at(dir.path(), "sess-a", 3, now);
@@ -117,7 +122,7 @@ fn record_file_change_denies_on_persist_failure() {
     // record_file_change_at will try to std::fs::write the state JSON to —
     // the write then fails ("Is a directory"). Before the fix, this scenario
     // silently returned Allowed{used:1,..} forever (unlimited fail-open).
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let now = 5000;
     let sanitized = sanitize_session_id("sess-fail");
     std::fs::create_dir_all(dir.path().join(format!("{sanitized}.json")))
@@ -143,7 +148,7 @@ fn record_file_change_denies_on_corrupt_state_json() {
     // record_file_change_at will try to read the state from. Before the fix,
     // `.ok()` collapsed a parse failure into `prev = None`, silently granting
     // a fresh window (Allowed) with zero telemetry.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let now = 5000;
     let sanitized = sanitize_session_id("sess-corrupt");
     std::fs::write(
@@ -165,7 +170,7 @@ fn record_file_change_denies_on_unreadable_state_file() {
     // Pre-create a DIRECTORY at the state-file path so the read
     // (`std::fs::read_to_string`) fails with a non-NotFound error ("Is a
     // directory"), not the legitimate "file doesn't exist yet" case.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let now = 5000;
     let sanitized = sanitize_session_id("sess-unreadable");
     std::fs::create_dir_all(dir.path().join(format!("{sanitized}.json")))
@@ -183,7 +188,7 @@ fn record_file_change_denies_on_unreadable_state_file() {
 fn record_file_change_allows_fresh_window_when_file_absent() {
     // The legitimate case `read_prev_state` must still short-circuit to
     // `Ok(None)` for: no state file has ever been written for this session.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let now = 5000;
     assert!(
         !dir.path()
@@ -203,7 +208,7 @@ fn record_file_change_allows_fresh_window_when_file_absent() {
 
 #[test]
 fn persist_and_verify_round_trips() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let file = dir.path().join("state.json");
     let state = BudgetState {
         count: 2,
@@ -254,7 +259,7 @@ fn verify_roundtrip_detects_parse_failure() {
 
 #[test]
 fn with_session_lock_acquires_when_free() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let lock_path = dir.path().join("sess.lock");
     assert!(!lock_path.exists());
     let guard = with_session_lock(&lock_path);
@@ -269,7 +274,7 @@ fn with_session_lock_acquires_when_free() {
 
 #[test]
 fn with_session_lock_serializes_against_a_held_lock() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let lock_path = dir.path().join("sess.lock");
     let held = with_session_lock(&lock_path).expect("first acquire must succeed");
 
@@ -288,7 +293,7 @@ fn with_session_lock_serializes_against_a_held_lock() {
 
 #[test]
 fn with_session_lock_clears_a_stale_lock() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let lock_path = dir.path().join("sess.lock");
     // Simulate an abandoned lock left behind by a crashed/killed
     // `tm hook --pm-guard` process: create it, then backdate its mtime past
@@ -314,7 +319,7 @@ fn with_session_lock_concurrent_stale_clear_is_race_free() {
     // winner's freshly-recreated lock file purely by path, letting a THIRD
     // racer also acquire — a double acquisition. The atomic rename-based claim
     // guarantees at most one racer ever wins the clear-and-reacquire.
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
     let lock_path = std::sync::Arc::new(dir.path().join("sess.lock"));
 
     // Pre-stale the lock: simulate an abandoned lock left by a crashed/killed
