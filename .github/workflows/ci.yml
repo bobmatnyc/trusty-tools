@@ -8,7 +8,7 @@
 #   fmt      – cargo fmt --all --check (stable)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
 #   test     – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
-#   msrv     – cargo check --workspace (toolchain 1.91, SKIP_UI_BUILD=1)
+#   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
@@ -72,10 +72,12 @@
 # with local branch refs and commit history. The test job uses fetch-depth: 0
 # to ensure a full (non-shallow) clone is present.
 #
-# MSRV NOTE: the effective MSRV is 1.91, declared as [workspace.package]
-# rust-version = "1.91" in the root Cargo.toml. It is driven by indirect
-# aws-sdk-* / aws-smithy-* crates that declare rust-version = "1.91.1". The
-# msrv job below pins dtolnay/rust-toolchain@1.91 to enforce this floor.
+# MSRV NOTE: the effective MSRV is 1.94, declared as [workspace.package]
+# rust-version = "1.94" in the root Cargo.toml. It is driven by aws-config
+# >= 1.9.0 / aws-sdk-bedrockruntime >= 1.136.0 (published 2026-07-08), which
+# declare rust-version = "1.94.1". The msrv job below pins
+# dtolnay/rust-toolchain@1.94 to enforce this floor. See
+# docs/adr/0029-msrv-1-94-and-edition-policy.md.
 
 name: CI
 
@@ -139,7 +141,7 @@ jobs:
   #
   # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
   # are REQUIRED by branch protection (Format check, Clippy, Test, MSRV check
-  # (1.91), trusty-search daemon smoke test). GitHub does not create check runs
+  # (1.94), trusty-search daemon smoke test). GitHub does not create check runs
   # for a workflow its path/branch filters skipped, so a required context would
   # sit pending forever and a docs-only PR would become unmergeable instead of
   # fast — the trap #4468 calls out and the one
@@ -891,14 +893,14 @@ jobs:
   # is that the code *compiles* on the minimum toolchain, not that tests pass.
   # trusty-mpm-gui, trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
   #
-  # Toolchain is 1.91, matching [workspace.package].rust-version = "1.91" in the
-  # root Cargo.toml. The current Cargo.lock pulls aws-sdk-*/aws-smithy-* at
-  # versions that require rustc >= 1.91.1, which sets the effective MSRV. This
-  # job pins the toolchain to that floor so the workspace is guaranteed to
-  # compile on the declared minimum.
+  # Toolchain is 1.94, matching [workspace.package].rust-version = "1.94" in the
+  # root Cargo.toml. The AWS SDK entries (aws-config, aws-sdk-bedrockruntime)
+  # resolve to versions that require rustc >= 1.94.1, which sets the effective
+  # MSRV. This job pins the toolchain to that floor so the workspace is
+  # guaranteed to compile on the declared minimum.
   # --------------------------------------------------------------------------
   msrv:
-    name: MSRV check (1.91)
+    name: MSRV check (1.94)
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
@@ -945,9 +947,9 @@ jobs:
           fi
           echo "After:"; df -h /
 
-      - name: Install Rust 1.91 toolchain
+      - name: Install Rust 1.94 toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@1.91
+        uses: dtolnay/rust-toolchain@1.94
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -962,7 +964,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1-91
+          key: msrv-1-94
 
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'

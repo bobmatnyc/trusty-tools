@@ -281,7 +281,7 @@ rm -f ~/Library/LaunchAgents/com.trusty.*.plist
    tctl install trusty-mpm 2>&1 | tee install.log
    ```
 
-4. **Fall back to cargo install:** If prebuilts fail, the installer falls back to `cargo install`. Ensure Rust 1.91+ is installed:
+4. **Fall back to cargo install:** If prebuilts fail, the installer falls back to `cargo install`. Ensure Rust 1.94+ is installed:
    ```bash
    rustc --version
    cargo --version

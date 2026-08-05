@@ -320,7 +320,7 @@ vmtest-harness/                      # project root, bash, OUTSIDE the Cargo wor
 ├── vmtest                           # driver CLI
 ├── lib/
 │   ├── vm.sh                        # tart lifecycle — the OS boundary for future Linux support
-│   ├── provision.sh                 # mise + rust@1.91 + uv + gh  (~30s)
+│   ├── provision.sh                 # mise + rust@1.94 + uv + gh  (~30s)
 │   ├── source.sh                    # source delivery per pattern
 │   └── verify.sh                    # JSON-only assertion oracle
 ├── scenarios/
@@ -364,8 +364,9 @@ Exports (illustrative): `vm_clone`, `vm_size`, `vm_boot`, `vm_wait_ready`,
 
 #### 3.3 `lib/provision.sh` — toolchain
 
-Installs `mise`, `rust@1.91`, `uv`, and `gh` in the guest. Measured at **~30s**
-(finding K2). Runs *after* the negative probe (§4.2), because the negative probe's
+Installs `mise`, `rust@1.94`, `uv`, and `gh` in the guest. The Rust version
+tracks the workspace MSRV (ADR-0029); it was `rust@1.91` when finding K2 was
+measured. Measured at **~30s** (finding K2). Runs *after* the negative probe (§4.2), because the negative probe's
 entire value is that the guest has no Rust toolchain yet.
 
 Provisioning must end by **exporting the resolved absolute toolchain paths** — in
@@ -871,7 +872,7 @@ meaningful claim rather than a file-existence check.
 |---|---|---|
 | `trusty-search` build from source | **112s** | 409 crates, 8 vCPU / 16 GB, **cold registry**, thin LTO applied, `ort-sys` ONNX download working in-guest |
 | `cargo install tga --locked` | **131s** | 211 deps, **4 vCPU** |
-| Provisioning (`mise` + `rust@1.91` + `uv` + `gh`) | **30s** | finding K2 |
+| Provisioning (`mise` + `rust@1.91` + `uv` + `gh`) | **30s** | finding K2; measured on `rust@1.91`, the MSRV pin at the time — provisioning installs `rust@1.94` today (ADR-0029) and this figure has not been re-measured |
 | CoW clone (`tart clone`) | **0.31s** | APFS copy-on-write |
 | First boot to `tart exec` responding | **~34s** | |
 | Subsequent boots | ~~**~18s**~~ **12–34 s, indistinguishable from a first boot** | *(amended 2026-08-04, P8-T4 — see below)* |

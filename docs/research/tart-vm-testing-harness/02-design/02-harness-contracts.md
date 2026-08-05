@@ -2336,7 +2336,7 @@ is available.
 
 ### 11. Provisioning vs preinstalled `mise`
 
-DOC-1 §3.3 says provisioning "installs `mise`, `rust@1.91`, `uv`, and `gh` in the
+DOC-1 §3.3 says provisioning "installs `mise`, `rust@1.94`, `uv`, and `gh` in the
 guest". The research says three of those four statements are wrong, and getting
 this wrong has broken an image before.
 
@@ -2369,7 +2369,7 @@ And the two prohibitions, stated in the research as instructions:
 |---|---|---|
 | `mise` | **detect and reuse. Never install.** | detection below |
 | `gh` | **detect and reuse. Never install.** | `command -v gh` under `base_path` |
-| `rust@1.91` | **install fresh** | `mise use -g rust@1.91` (measured 20.778 s, `:854`) |
+| `rust@<msrv>` | **install fresh** | `mise use -g rust@1.94` — tracks the workspace MSRV (ADR-0029); measured 20.778 s on `rust@1.91`, `:854` |
 | `uv` | **install fresh** | `mise use -g uv@latest` (measured 7.947 s, `:855`) |
 
 **Detection command for `mise`**, run under the measured base PATH (§7.1):
@@ -2427,8 +2427,8 @@ explicit or someone will delete one or trust the other:
 
 #### 11.5 Amendment to DOC-1 §3.3
 
-DOC-1 §3.3's phrasing — "installs `mise`, `rust@1.91`, `uv`, and `gh`" — is
-accurate for `rust@1.91` and `uv`, and **wrong for `mise` and `gh`**, both of which
+DOC-1 §3.3's phrasing — "installs `mise`, `rust@1.94`, `uv`, and `gh`" — is
+accurate for `rust@1.94` and `uv`, and **wrong for `mise` and `gh`**, both of which
 are preinstalled and must be reused. The measured 30 s provisioning total (DOC-1 §9,
 `vm-install-probe-findings.md:858`) already reflects reuse: it is composed of
 20.778 s of rust, 7.947 s of uv, 0.616 s of gh-already-present, and 0.617 s of

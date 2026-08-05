@@ -1,4 +1,7 @@
 # Aligned with rust-version in Cargo.toml and the workspace MSRV.
 # Bumped from 1.80 to 1.88 in issue #254 to eliminate the MSRV mismatch
-# warning from clippy ("MSRV in clippy.toml and Cargo.toml differ").
-msrv = "1.88.0"
+# warning from clippy ("MSRV in clippy.toml and Cargo.toml differ"); this file
+# was then missed by the 1.88 -> 1.91 bump and re-introduced that warning.
+# Now 1.94.0, matching rust-version = "1.94" (clippy normalises "1.94" to
+# 1.94.0). See docs/adr/0029-msrv-1-94-and-edition-policy.md.
+msrv = "1.94.0"

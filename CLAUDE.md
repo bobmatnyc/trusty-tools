@@ -11,9 +11,10 @@ This is a **Rust workspace** (Cargo workspace, resolver v2, glob members
 `[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
 and `authors` but no longer carries a version field (see #343).
 
-**MSRV**: `1.91` — driven by indirect `aws-smithy-*` dependencies that declare
-`rust-version = "1.91.1"`; the let-chain stabilisation floor (1.88) is lower.
-CI enforces this with `dtolnay/rust-toolchain@1.91`.
+**MSRV**: `1.94` — driven by `aws-config` >= 1.9.0 / `aws-sdk-bedrockruntime`
+>= 1.136.0, which declare `rust-version = "1.94.1"`; the let-chain
+stabilisation floor (1.88) is lower. CI enforces this with
+`dtolnay/rust-toolchain@1.94`. See `docs/adr/0029-msrv-1-94-and-edition-policy.md`.
 
 ## Role & Scope
 
@@ -596,7 +597,7 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 
 ### Required Tools
 
-- **Rust**: `rustup` with the toolchain pinned to MSRV `1.91` or later.
+- **Rust**: `rustup` with the toolchain pinned to MSRV `1.94` or later.
   Install: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 - **Node / pnpm**: only needed if working on the Svelte UIs embedded in
   `trusty-search` or `trusty-memory`. Install pnpm via `npm i -g pnpm`.
@@ -636,7 +637,7 @@ For extended explanations, see [docs/reference/common-pitfalls.md](docs/referenc
 - **SLOC cap:** respect 500/3000 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
 - **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
 - **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
-- **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.91"`
+- **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.94"`
 - **Edition mismatch:** 2024 crates (mpm, agents, mpm-gui, agents-common, agents-local) may use let-chains; 2021 crates cannot
 
 ## Reference Documentation
