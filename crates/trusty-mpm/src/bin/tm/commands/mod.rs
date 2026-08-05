@@ -50,6 +50,7 @@ pub(crate) mod managed_route;
 pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
+pub(crate) mod memory;
 pub(crate) mod meta;
 pub(crate) mod misc;
 pub(crate) mod pane_identity;

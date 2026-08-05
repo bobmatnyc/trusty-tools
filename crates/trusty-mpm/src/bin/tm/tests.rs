@@ -15,7 +15,7 @@ use clap::Parser;
 
 use crate::cli::{
     AgentAction, CatalogAction, Cli, Command, DEFAULT_URL, DoctorFlags, McpCmd, McpTransportArg,
-    MetaAction, ProjectAction, SessionAction, SlackCmd, TelegramCmd,
+    MemoryAction, MetaAction, ProjectAction, SessionAction, SlackCmd, TelegramCmd,
 };
 use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
@@ -2017,4 +2017,79 @@ fn non_git_dir_fallback_prints_help_hint() {
         "NON_GIT_FALLBACK_HINT must reference --help for discoverability: \
          {NON_GIT_FALLBACK_HINT:?}"
     );
+}
+
+/// Why (#4837): `tm memory import` is the zero-inference bulk-load path;
+/// its required `--palace` and the default (write-enabled) mode must parse.
+#[test]
+fn cli_parses_memory_import() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "import",
+        "/tmp/mem",
+        "--palace",
+        "trusty-tools",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Import {
+                    dir,
+                    palace,
+                    dry_run,
+                    json,
+                    allow_secret_like,
+                    memory_url,
+                },
+        } => {
+            assert_eq!(dir, std::path::PathBuf::from("/tmp/mem"));
+            assert_eq!(palace, "trusty-tools");
+            assert!(!dry_run, "writes are the default mode");
+            assert!(!json);
+            assert!(!allow_secret_like);
+            assert!(memory_url.is_none(), "URL defaults to daemon discovery");
+        }
+        other => panic!("expected Memory/Import, got {other:?}"),
+    }
+}
+
+/// Why (#4837): `--dry-run` is the safety flag an operator reaches for first,
+/// and `--json` is the machine-readable report a caller verifies with — both
+/// must round-trip, together with the explicit `--memory-url` override.
+#[test]
+fn cli_parses_memory_import_dry_run_json() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "import",
+        "/tmp/mem",
+        "--palace",
+        "p",
+        "--dry-run",
+        "--json",
+        "--allow-secret-like",
+        "--memory-url",
+        "http://127.0.0.1:7070",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Import {
+                    dry_run,
+                    json,
+                    allow_secret_like,
+                    memory_url,
+                    ..
+                },
+        } => {
+            assert!(dry_run);
+            assert!(json);
+            assert!(allow_secret_like);
+            assert_eq!(memory_url.as_deref(), Some("http://127.0.0.1:7070"));
+        }
+        other => panic!("expected Memory/Import, got {other:?}"),
+    }
 }

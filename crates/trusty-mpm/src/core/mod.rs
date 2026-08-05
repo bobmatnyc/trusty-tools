@@ -90,6 +90,7 @@ pub mod manifest;
 pub mod mcp_config;
 pub mod mcp_test;
 pub mod memory;
+pub mod memory_import;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
