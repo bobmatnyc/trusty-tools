@@ -2918,3 +2918,187 @@ async fn dispatch_kg_assert_cap_does_not_apply_to_cold_predicates() {
     .await
     .expect("cold predicates are unaffected by the Tier S budget");
 }
+
+/// Why (#4888): the cap is only a cap if it cannot be raced past. Counting
+/// active facts and then writing is two steps, and nothing else serializes
+/// them — the KG's single-writer actor orders writes only within one palace,
+/// while the count spans all of them. Before the admission lock, N callers
+/// that all observed 19 would all pass and the surface would land above 20.
+/// Every other Tier S test is sequential and cannot catch this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn tier_s_cap_holds_under_concurrent_writes() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "race"}))
+        .await
+        .expect("palace_create");
+
+    // One free slot, then many writers contend for it at once.
+    fill_tier_s(&state, "race", crate::prompt_facts::TIER_S_MAX_FACTS - 1).await;
+
+    let state = std::sync::Arc::new(state);
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            dispatch_tool(
+                &state,
+                "kg_assert",
+                json!({
+                    "palace": "race",
+                    "subject": format!("racer-{i}"),
+                    "predicate": "has_convention",
+                    "object": format!("contender {i}"),
+                }),
+            )
+            .await
+            .is_ok()
+        }));
+    }
+
+    let mut admitted = 0usize;
+    for h in handles {
+        if h.await.expect("task joined") {
+            admitted += 1;
+        }
+    }
+
+    assert_eq!(admitted, 1, "exactly one writer should win the last slot");
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(
+        facts.len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "concurrent writers must never push the surface past the cap",
+    );
+}
+
+/// Why (#4888): the chat `kg_assert` tool takes `predicate` and `object`
+/// straight from the model's tool call and writes them directly, so an
+/// ordinary chat turn could push the always-injected surface past 20 or land
+/// an unbounded fact. This is the routinely-hit surface, not an admin one.
+#[tokio::test]
+async fn chat_kg_assert_tool_enforces_tier_s_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "chatcap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "chatcap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let args = json!({
+        "palace_id": "chatcap",
+        "subject": "chat-rule",
+        "predicate": "has_convention",
+        "object": "a rule the assistant tried to add when the surface was full",
+    })
+    .to_string();
+    let res = crate::chat::tools::execute_tool("kg_assert", &args, &state).await;
+
+    let err = res["error"].as_str().unwrap_or_default();
+    assert!(err.contains("Tier S is full"), "{res}");
+    assert!(err.contains("remove_prompt_fact"), "{res}");
+    assert!(
+        res.get("status").is_none(),
+        "must not report success: {res}"
+    );
+
+    // Fail-closed: nothing landed.
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(!facts.iter().any(|(s, _, _)| s == "chat-rule"), "{facts:?}");
+}
+
+/// Why (#4888): the chat tool must enforce the form constraint too — an
+/// unbounded object is injected verbatim into every turn.
+#[tokio::test]
+async fn chat_kg_assert_tool_enforces_form_constraint() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "chatform"}))
+        .await
+        .expect("palace_create");
+
+    let args = json!({
+        "palace_id": "chatform",
+        "subject": "verbose",
+        "predicate": "is_fact",
+        "object": "q".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1),
+    })
+    .to_string();
+    let res = crate::chat::tools::execute_tool("kg_assert", &args, &state).await;
+
+    let err = res["error"].as_str().unwrap_or_default();
+    assert!(err.contains("81 characters"), "{res}");
+    assert!(err.contains("limit is 80"), "{res}");
+
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert!(facts.is_empty(), "rejected write must not land: {facts:?}");
+}
+
+/// Why (#4888): the chat tool must stay usable for cold predicates — the gate
+/// is scoped to the injected surface, not to the knowledge graph.
+#[tokio::test]
+async fn chat_kg_assert_tool_allows_cold_predicates_at_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "chatcold"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "chatcold", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let args = json!({
+        "palace_id": "chatcold",
+        "subject": "alice",
+        "predicate": "works_at",
+        "object": "z".repeat(200),
+    })
+    .to_string();
+    let res = crate::chat::tools::execute_tool("kg_assert", &args, &state).await;
+    assert_eq!(res["status"], "asserted", "{res}");
+}
+
+/// Why (#4888): `kuzu-migrate` asserts `relation_type` verbatim from a legacy
+/// file, so a legacy vocabulary colliding with a hot predicate would import
+/// straight past both limits. The sync gate closes that; a cold relation type
+/// (every one in practice) must pass through untouched.
+#[tokio::test]
+async fn kuzu_migrate_gate_rejects_hot_predicate_over_limits() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "kuzu"}))
+        .await
+        .expect("palace_create");
+    let handle = crate::tools::helpers::open_palace_handle(&state, "kuzu").expect("handle");
+    let store = handle.kg.store();
+
+    // Cold relation type — the ordinary case, admitted regardless of length.
+    crate::prompt_facts::check_tier_s_admission_sync(
+        &store,
+        "entity:a",
+        "relates_to",
+        &"z".repeat(300),
+    )
+    .expect("cold relation types are unaffected");
+
+    // Hot predicate over the form limit — refused.
+    let err = crate::prompt_facts::check_tier_s_admission_sync(
+        &store,
+        "entity:a",
+        "is_fact",
+        &"z".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1),
+    )
+    .expect_err("an over-long hot predicate must be refused");
+    assert!(format!("{err:#}").contains("limit is 80"), "{err:#}");
+
+    // Hot predicate at the cap — refused.
+    fill_tier_s(&state, "kuzu", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+    let err = crate::prompt_facts::check_tier_s_admission_sync(
+        &store,
+        "entity:b",
+        "is_fact",
+        "short enough",
+    )
+    .expect_err("a hot predicate at the cap must be refused");
+    assert!(format!("{err:#}").contains("Tier S is full"), "{err:#}");
+}

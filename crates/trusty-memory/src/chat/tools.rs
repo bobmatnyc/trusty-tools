@@ -514,6 +514,14 @@ async fn execute_create_memory(
     }
 }
 
+/// Assert a KG triple on behalf of the chat assistant.
+///
+/// #4888: `predicate` and `object` come straight from the model's tool call,
+/// so this can write any of the four hot predicates at any length. Without the
+/// admission gate an ordinary chat turn could push the always-injected surface
+/// past 20 facts, or land an unbounded one — defeating both limits through the
+/// path users hit most routinely. The refusal is returned as `{"error": …}`
+/// like every other failure here, so the model sees it and can retire a fact.
 async fn execute_kg_assert(
     state: &AppState,
     palace_id: &str,
@@ -528,6 +536,15 @@ async fn execute_kg_assert(
     {
         Ok(h) => h,
         Err(e) => return json!({ "error": format!("open palace {palace_id}: {e:#}") }),
+    };
+    // Bound to `_admission` so the admission lock is held across `kg.assert`.
+    let _admission = match crate::prompt_facts::check_tier_s_admission(
+        state, &handle, subject, predicate, object,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(e) => return json!({ "error": format!("{e:#}") }),
     };
     let triple = Triple {
         subject: subject.to_string(),

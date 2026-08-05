@@ -48,7 +48,8 @@ impl MemoryService {
     /// read as protection while leaving the surface writable.
     pub async fn kg_assert(&self, id: &str, body: KgAssertBody) -> ServiceResult<()> {
         let handle = self.open_handle(id)?;
-        crate::prompt_facts::check_tier_s_admission(
+        // `_admission` holds the admission lock until after `kg.assert` below.
+        let _admission = crate::prompt_facts::check_tier_s_admission(
             &self.state,
             &handle,
             &body.subject,

@@ -395,6 +395,22 @@ pub struct AppState {
     /// Test: `get_prompt_context_returns_cached_or_hint`,
     /// `get_prompt_context_filters_by_query`.
     pub prompt_context_cache: Arc<RwLock<prompt_facts::PromptFactsCache>>,
+    /// Serializes the Tier S check-then-write sequence (#4888).
+    ///
+    /// Why: the 20-fact cap is only a cap if it cannot be raced past.
+    /// `check_tier_s_admission` counts active facts across every palace and
+    /// then the caller writes — two callers that both observe 19 would both
+    /// pass and the surface would land at 21. Nothing else serializes them:
+    /// the KG's single-writer actor orders writes only *within* one palace,
+    /// and the count spans all of them. "Usually 20, occasionally 21" is not
+    /// the invariant ADR-0028 D8 asks for.
+    /// What: an async mutex whose guard is acquired by
+    /// `check_tier_s_admission` and returned to the caller, which must hold it
+    /// until its `kg.assert` is enqueued. Cold predicates never acquire it, so
+    /// ordinary knowledge-graph writes stay fully concurrent; hot writes are
+    /// deliberate and rare, so serializing them costs nothing measurable.
+    /// Test: `tier_s_cap_holds_under_concurrent_writes`.
+    pub tier_s_admission_lock: Arc<tokio::sync::Mutex<()>>,
     /// Persistent activity log (issue #96).
     ///
     /// Why: the dashboard activity feed used to be a pure live-stream over
@@ -644,6 +660,7 @@ impl AppState {
             )),
             bound_addr: Arc::new(OnceLock::new()),
             prompt_context_cache: Arc::new(RwLock::new(prompt_facts::PromptFactsCache::default())),
+            tier_s_admission_lock: Arc::new(tokio::sync::Mutex::new(())),
             activity_log,
             bm25_client: None,
             bm25_supervisor: None,

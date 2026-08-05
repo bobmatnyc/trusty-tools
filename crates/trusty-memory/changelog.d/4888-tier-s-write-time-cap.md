@@ -14,14 +14,28 @@ Added
   - both rejections are fail-closed — the write does not reach storage
   - enforced on every path that can create a hot triple, not just the two obvious
     ones: the `kg_assert` and `add_alias` MCP tools, the `discover_aliases`
-    auto-discovery loop, `POST /api/v1/palaces/{id}/kg`, and `POST /api/v1/kg/aliases`.
-    The HTTP KG endpoint is the path `trusty-mpm`'s provisioner uses to seed its
-    identity fact, so it was a live bypass rather than a hypothetical one
+    auto-discovery loop, the **chat assistant's `kg_assert` tool** (`POST /api/v1/chat`),
+    `POST /api/v1/palaces/{id}/kg`, `POST /api/v1/kg/aliases`, and the offline
+    `kuzu-migrate` relation import. Two of these were live bypasses rather than
+    hypothetical ones: the chat tool takes `predicate`/`object` straight from the
+    model on a surface users hit every turn, and the HTTP KG endpoint is where
+    `trusty-mpm`'s provisioner seeds its identity fact
+  - the cap cannot be raced past: counting active facts and then writing is two
+    steps, and nothing else serialized them — the KG's single-writer actor orders
+    writes only within one palace while the count spans all of them. A new
+    admission mutex is held from the count through the write. Measured before the
+    fix: 16 concurrent writers contending for 1 free slot were all admitted,
+    landing the surface at 35
+  - `kuzu-migrate` refusals join the existing warn-and-skip path, so a legacy
+    relation colliding with a hot predicate is skipped and counted rather than
+    aborting the import mid-way
   - `discover_aliases` is the one bulk writer, and it stops at the cap instead of
     aborting: aliases that fit are written, the rest come back in a new `rejected`
-    array with a single `rejected_reason`. A workspace with more crates than Tier S
-    has slots is ordinary — this one has — so aborting would both make the tool
-    unusable there and strand the aliases written before the refusal
+    array with a single `rejected_reason`, alongside a `complete` flag so a caller
+    reading only `new`/`already_known` cannot mistake a partial batch for a whole
+    one. A workspace with more crates than Tier S has slots is ordinary — this one
+    has — so aborting would both make the tool unusable there and strand the
+    aliases written before the refusal
   - the cap counts ACTIVE facts only: retracting a fact frees its slot immediately,
     since retraction closes the interval rather than deleting the row
   - re-asserting an already-active `(subject, predicate)` in the same palace is a

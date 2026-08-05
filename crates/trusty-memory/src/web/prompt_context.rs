@@ -235,7 +235,8 @@ pub(super) async fn add_alias_handler(
     let handle = open_handle(&state, &palace_name)?;
     // #4888: the HTTP alias endpoint writes `is_alias_for` directly, so it
     // needs the same Tier S gate as the `add_alias` MCP tool it mirrors.
-    crate::prompt_facts::check_tier_s_admission(
+    // `_admission` holds the admission lock until after `kg.assert` below.
+    let _admission = crate::prompt_facts::check_tier_s_admission(
         &state,
         &handle,
         &req.short,

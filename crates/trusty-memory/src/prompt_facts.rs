@@ -255,6 +255,19 @@ fn render_tier_s_inventory(triples: &[(String, String, String)]) -> String {
     out
 }
 
+/// Proof that a hot-predicate write was admitted, and the lock that keeps the
+/// decision true until the write lands.
+///
+/// Why (#4888): the admission decision is only valid while no other writer can
+/// consume the slot it counted. Returning the mutex guard rather than dropping
+/// it inside the check makes "hold the lock across your write" a property the
+/// borrow checker enforces at the call site instead of a comment nobody reads.
+/// What: a newtype over the guard. Callers bind it (`let _admission = …?;`)
+/// and let it drop at end of scope, after `kg.assert`. Cold predicates get
+/// `None` and never touch the lock.
+/// Test: `tier_s_cap_holds_under_concurrent_writes`.
+pub struct TierSAdmission<'a>(#[allow(dead_code)] tokio::sync::MutexGuard<'a, ()>);
+
 /// Gate a prospective hot-predicate write against the Tier S budget.
 ///
 /// Why (#4888): Tier S reaches every turn of every agent session, so its size
@@ -264,11 +277,16 @@ fn render_tier_s_inventory(triples: &[(String, String, String)]) -> String {
 /// refused write, because the author never learns their rule is not in effect.
 /// The gate therefore fails closed and says exactly what to do next.
 ///
-/// What: a no-op for non-hot predicates. For a hot predicate it enforces two
-/// rules in order:
+/// What: returns `Ok(None)` for non-hot predicates without taking any lock.
+/// For a hot predicate it takes the Tier S admission lock, then enforces:
 /// 1. **Form** — `object` must be at most [`TIER_S_MAX_OBJECT_CHARS`] chars.
 /// 2. **Cap** — at most [`TIER_S_MAX_FACTS`] facts may be simultaneously
 ///    active across *every* palace, since the surface spans all of them.
+///
+/// On success it returns `Some(TierSAdmission)` holding that lock. **The
+/// caller must keep the returned guard alive until its `kg.assert` is
+/// enqueued** — dropping it early reopens the check-then-write race the lock
+/// exists to close.
 ///
 /// The cap counts only **active** triples: `gather_hot_triples` reads through
 /// `list_active`, and retraction closes an interval by setting `valid_to`, so a
@@ -287,29 +305,28 @@ fn render_tier_s_inventory(triples: &[(String, String, String)]) -> String {
 /// `dispatch_kg_assert_rejection_names_existing_facts`,
 /// `dispatch_kg_assert_allows_replacing_existing_fact_at_cap`,
 /// `dispatch_kg_assert_retracted_fact_frees_a_slot`,
-/// `dispatch_kg_assert_rejects_object_over_char_limit`.
-pub async fn check_tier_s_admission(
-    state: &AppState,
+/// `dispatch_kg_assert_rejects_object_over_char_limit`,
+/// `tier_s_cap_holds_under_concurrent_writes`.
+pub async fn check_tier_s_admission<'a>(
+    state: &'a AppState,
     handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
     subject: &str,
     predicate: &str,
     object: &str,
-) -> Result<()> {
+) -> Result<Option<TierSAdmission<'a>>> {
     if !is_hot_predicate(predicate) {
-        return Ok(());
+        return Ok(None);
     }
+
+    // Held for the rest of this function AND, via the returned guard, across
+    // the caller's write. Acquired before the count is read so no other
+    // admission can consume the slot this one is about to claim.
+    let admission = state.tier_s_admission_lock.lock().await;
 
     // Rule 1 — form. Checked first and independently of occupancy so an
     // over-long rule is reported as over-long even when the surface is full.
-    let len = object.chars().count();
-    if len > TIER_S_MAX_OBJECT_CHARS {
-        return Err(anyhow!(
-            "Tier S fact rejected: object is {len} characters, limit is \
-             {TIER_S_MAX_OBJECT_CHARS} (ADR-0028 D2). A standing rule that does not fit \
-             in {TIER_S_MAX_OBJECT_CHARS} characters is a document — put it in CLAUDE.md \
-             (or a spec) and store a short pointer to it here instead. \
-             Rejected object: {object:?}"
-        ));
+    if let Some(e) = tier_s_form_error(object) {
+        return Err(e);
     }
 
     // Rule 2 — occupancy. A replacement of an already-active
@@ -321,24 +338,120 @@ pub async fn check_tier_s_admission(
         .await
         .context("kg.query_active (Tier S admission)")?;
     if existing.iter().any(|t| t.predicate == predicate) {
-        return Ok(());
+        return Ok(Some(TierSAdmission(admission)));
     }
 
     let active = gather_hot_triples(state).await?;
-    if active.len() >= TIER_S_MAX_FACTS {
-        return Err(anyhow!(
-            "Tier S is full: {} of {TIER_S_MAX_FACTS} standing facts are active, so \
-             `{subject} {predicate}` cannot be admitted (ADR-0028 D8). Tier S is injected \
-             into every turn of every session, so the cap is a hard budget and promotion \
-             is zero-sum: retire one of the facts below before adding another. \
-             Retire with the `remove_prompt_fact` tool, passing the `subject` and \
-             `predicate` of the row you are dropping. Currently active Tier S facts:{}",
-            active.len(),
-            render_tier_s_inventory(&active),
-        ));
+    if let Some(e) = tier_s_cap_error(&active, subject, predicate) {
+        return Err(e);
     }
-    Ok(())
+    Ok(Some(TierSAdmission(admission)))
 }
+
+/// The form rule (ADR-0028 D2), as a pure function.
+///
+/// Why: the async daemon gate and the offline `kuzu-migrate` gate must apply
+/// the same rule and produce the same message. Two hand-written copies would
+/// drift; one primitive cannot.
+/// What: `Some(error)` when `object` exceeds [`TIER_S_MAX_OBJECT_CHARS`]
+/// chars, naming the actual length and the limit. `None` when it fits.
+/// Test: `dispatch_kg_assert_rejects_object_over_char_limit`,
+/// `dispatch_kg_assert_accepts_object_at_char_limit`.
+fn tier_s_form_error(object: &str) -> Option<anyhow::Error> {
+    let len = object.chars().count();
+    if len <= TIER_S_MAX_OBJECT_CHARS {
+        return None;
+    }
+    Some(anyhow!(
+        "Tier S fact rejected: object is {len} characters, limit is \
+         {TIER_S_MAX_OBJECT_CHARS} (ADR-0028 D2). A standing rule that does not fit \
+         in {TIER_S_MAX_OBJECT_CHARS} characters is a document — put it in CLAUDE.md \
+         (or a spec) and store a short pointer to it here instead. \
+         Rejected object: {object:?}"
+    ))
+}
+
+/// The cap rule (ADR-0028 D8), as a pure function over the active facts.
+///
+/// Why: same single-source-of-truth reason as [`tier_s_form_error`] — and the
+/// actionable inventory is the expensive part of the message to get right, so
+/// it is built in exactly one place.
+/// What: `Some(error)` when `active` already holds [`TIER_S_MAX_FACTS`] or
+/// more facts, naming every occupant and the tool that retires one. `None`
+/// when there is room.
+/// Test: `dispatch_kg_assert_rejects_twenty_first_fact`,
+/// `dispatch_kg_assert_rejection_names_existing_facts`.
+fn tier_s_cap_error(
+    active: &[(String, String, String)],
+    subject: &str,
+    predicate: &str,
+) -> Option<anyhow::Error> {
+    if active.len() < TIER_S_MAX_FACTS {
+        return None;
+    }
+    Some(anyhow!(
+        "Tier S is full: {} of {TIER_S_MAX_FACTS} standing facts are active, so \
+         `{subject} {predicate}` cannot be admitted (ADR-0028 D8). Tier S is injected \
+         into every turn of every session, so the cap is a hard budget and promotion \
+         is zero-sum: retire one of the facts below before adding another. \
+         Retire with the `remove_prompt_fact` tool, passing the `subject` and \
+         `predicate` of the row you are dropping. Currently active Tier S facts:{}",
+        active.len(),
+        render_tier_s_inventory(active),
+    ))
+}
+
+/// Tier S gate for the offline `kuzu-migrate` import path.
+///
+/// Why (#4888): the migration asserts `relation.relation_type` verbatim from a
+/// legacy redb file. A legacy vocabulary that happens to contain one of the
+/// four hot predicates would import straight onto the always-injected surface,
+/// past both limits. Unlikely, but the gate is cheap and an enforcement point
+/// with a known hole is worse than none.
+/// What: the same two rules as [`check_tier_s_admission`], applied
+/// synchronously because the importer is blocking and has no `AppState`. It
+/// therefore counts within the palace being imported rather than across the
+/// registry, and takes no admission lock — sound here because the importer is
+/// operator-run, offline, and single-writer. Returns `Ok(())` immediately for
+/// cold predicates, which is every relation type in practice.
+/// Test: `kuzu_migrate_gate_rejects_hot_predicate_over_limits`.
+pub fn check_tier_s_admission_sync(
+    store: &trusty_common::memory_core::store::kg_redb::KgStoreRedb,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+) -> Result<()> {
+    if !is_hot_predicate(predicate) {
+        return Ok(());
+    }
+    if let Some(e) = tier_s_form_error(object) {
+        return Err(e);
+    }
+    // Same replacement rule as the async gate: superseding an active
+    // `(subject, predicate)` does not grow the surface.
+    let existing = store.query_active(subject).unwrap_or_default();
+    if existing.iter().any(|t| t.predicate == predicate) {
+        return Ok(());
+    }
+    let active: Vec<(String, String, String)> = store
+        .list_active(TIER_S_SYNC_SCAN_LIMIT, 0)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| is_hot_predicate(&t.predicate))
+        .map(|t| (t.subject, t.predicate, t.object))
+        .collect();
+    match tier_s_cap_error(&active, subject, predicate) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Scan window for the synchronous gate's active-fact count.
+///
+/// Why: `list_active` needs a finite limit. Tier S is capped at 20, so any
+/// window comfortably above that answers "is it full?" correctly; 1024 matches
+/// the per-palace limit `gather_hot_triples` already uses.
+const TIER_S_SYNC_SCAN_LIMIT: usize = 1024;
 
 /// Refresh `AppState.prompt_context_cache` from the live palace registry.
 ///

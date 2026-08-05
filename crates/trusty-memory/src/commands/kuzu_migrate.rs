@@ -373,6 +373,24 @@ pub fn handle_kuzu_data_migrate(
             triples_skipped += 1;
             continue;
         }
+        // #4888: `relation_type` is imported verbatim from the legacy file, so
+        // it can collide with a hot predicate and land on the always-injected
+        // surface past both Tier S limits. Refusals join the existing
+        // warn-and-skip path so a bad relation never aborts the import.
+        if let Err(e) = crate::prompt_facts::check_tier_s_admission_sync(
+            &store,
+            &triple.subject,
+            &triple.predicate,
+            &triple.object,
+        ) {
+            tracing::warn!(
+                from = %relation.from, to = %relation.to,
+                predicate = %triple.predicate,
+                "kuzu-migrate: triple refused by the Tier S gate, skipping: {e:#}"
+            );
+            triples_skipped += 1;
+            continue;
+        }
         match handle.kg.assert_sync(&triple) {
             Ok(()) => triples_written += 1,
             Err(e) => {
