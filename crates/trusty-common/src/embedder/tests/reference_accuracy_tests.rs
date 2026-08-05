@@ -132,7 +132,7 @@ fn default_model_matches_sentence_transformers_reference() {
 
     // #3711: pin model selection for the whole construct-and-embed window
     // — an unlocked read raced a sibling test's TRUSTY_EMBEDDER_MODEL=int8.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock();
     let _model_env = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
 
     let rt = tokio::runtime::Builder::new_current_thread()
