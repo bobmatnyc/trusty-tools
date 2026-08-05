@@ -70,7 +70,8 @@ budgeted direct actions. They remain ABSOLUTE — no budget, and no "trivial",
 
 **CB#10 detail:** Track failures per agent per task. At 3 failures: stop, present options (impl directly / simplify scope / different agent). No circular delegation (A->B->A->B) without progress.
 
-**[SKILL: tm-circuit-breaker]** for full patterns and remediation.
+On any CB# trigger, call `Skill(skill="tm-circuit-breaker")` for the full
+pattern and its remediation.
 
 ### Quick Violation Detection
 

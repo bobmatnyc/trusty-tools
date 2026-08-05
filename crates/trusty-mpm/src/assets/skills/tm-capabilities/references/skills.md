@@ -37,7 +37,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
 | `tm-circuit-breaker` | pm-framework | no | Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM |
 | `tm-cli-operations` | pm-reference | yes | Operate the tm / trusty-mpm CLI — set up and manage MCP servers, drive session lifecycle, and run health diagnostics |
-| `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM |
+| `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it |
 | `tm-doctor` |  | no | Run a full trusty-mpm system diagnostic checking instructions, agents, skills, memory, and search services |
 | `tm-git-file-tracking` | pm-workflow | no | Protocol for tracking files immediately after agent creation, before marking work complete |
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
