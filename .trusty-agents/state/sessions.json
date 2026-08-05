@@ -1,0 +1,88 @@
+{
+  "sessions": [
+    {
+      "id": "cefb91ef-4060-41e4-bbe0-0e5359b74060",
+      "started_at": "2026-07-28T22:11:30.403826Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "f0623550-5487-411b-b8ca-a75034e4ac04",
+      "started_at": "2026-07-31T13:18:12.830247Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "2f1ea529-7f6e-44e6-a6fe-2263c3b9b33f",
+      "started_at": "2026-08-04T15:41:16.915977Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "73923167-47e5-4598-bed6-b90b7f25a58b",
+      "started_at": "2026-08-04T15:42:42.042471Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "c82ecade-19c8-4029-8c05-943b394b890b",
+      "started_at": "2026-08-04T15:43:25.839009Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "8d545ef1-4821-4ea2-b3bc-51cd20a13fb0",
+      "started_at": "2026-08-04T20:29:50.621071Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "8e58fe5c-4ca1-4b85-96f4-4ab1a3b0c576",
+      "started_at": "2026-08-04T20:29:59.373700Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "83e4c217-9e81-42fc-8007-3fed9c131708",
+      "started_at": "2026-08-04T20:30:20.548356Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "bcc6936d-9272-4fa7-b194-83b73be3ead9",
+      "started_at": "2026-08-04T20:30:20.959178Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "40a92993-b7a1-4759-ab83-88289ba6550e",
+      "started_at": "2026-08-04T22:15:18.235410Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "fa25bd7c-e80d-45ae-84d8-1ec90a3ec85b",
+      "started_at": "2026-08-04T22:15:54.469303Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "0189c578-d962-44e0-9474-4aed51489c92",
+      "started_at": "2026-08-05T00:04:27.787550Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "06d031c5-5ce8-499d-9cb3-a6dbc8aa32d1",
+      "started_at": "2026-08-05T01:43:47.921232Z",
+      "workflow": "pending",
+      "status": "running"
+    },
+    {
+      "id": "0f821af8-0cde-428b-9005-f665f6b5d7e5",
+      "started_at": "2026-08-05T01:43:52.935814Z",
+      "workflow": "pending",
+      "status": "running"
+    }
+  ]
+}

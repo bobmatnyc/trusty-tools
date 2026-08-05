@@ -1,32 +1,57 @@
 {
   "mcpServers": {
-    "trusty-search": {
-      "type": "stdio",
-      "command": "trusty-search",
+    "gworkspace-mcp": {
+      "args": [],
+      "command": "/Users/masa/.cargo/bin/trusty-gworkspace-mcp",
+      "type": "stdio"
+    },
+    "slack-mcp": {
       "args": [
         "serve"
-      ]
-    },
-    "trusty-mpm": {
-      "type": "stdio",
-      "command": "trusty-mpm",
-      "args": [
-        "serve",
-        "--stdio"
-      ]
-    },
-    "trusty-memory": {
-      "type": "stdio",
-      "command": "trusty-memory",
-      "args": [
-        "serve",
-        "--stdio"
-      ]
+      ],
+      "command": "slack-mcp",
+      "type": "stdio"
     },
     "tickets-mcp": {
-      "type": "stdio",
+      "args": [],
       "command": "tickets-mcp",
-      "args": []
+      "type": "stdio"
+    },
+    "trusty-memory": {
+      "args": [
+        "serve",
+        "--stdio"
+      ],
+      "command": "trusty-memory",
+      "env": {
+        "TRUSTY_MEMORY_PALACE": "bobmatnyc-trusty-tools"
+      },
+      "type": "stdio"
+    },
+    "trusty-mpm": {
+      "args": [
+        "serve",
+        "--stdio"
+      ],
+      "command": "trusty-mpm",
+      "type": "stdio"
+    },
+    "trusty-review": {
+      "args": [
+        "serve",
+        "--stdio"
+      ],
+      "command": "trusty-review",
+      "type": "stdio"
+    },
+    "trusty-search": {
+      "args": [
+        "serve",
+        "--index",
+        "tm-trusty-tools-02"
+      ],
+      "command": "trusty-search",
+      "type": "stdio"
     }
   }
 }
