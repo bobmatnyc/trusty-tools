@@ -560,22 +560,47 @@ _verify_package_expectation() {
 #       §F-10(e) resolved the OPPOSITE direction (a doctor member the TSV does
 #       not carry -> logged, not asserted); this is its missing counterpart.
 #
-#   (b) `unknown` IS ACCEPTED FOR A MEMBER THE PRODUCT DECLINES TO PROBE.
-#       `probe_member_health` (commands/probe.rs:141-158) returns
-#       `ProbeOutcome::Unprobeable` for `ManageStrategy::OwnVerb`, which
-#       `probe_http.rs:211` maps to `unknown`. The source comment is explicit
-#       that this is a DECISION, not a gap — #4246: "trusty-mpm (`OwnVerb`) is
-#       DELIBERATELY left unprobed and reported `unknown`, even though it does
-#       answer /health on 7880 […] Enabling it is a separate, user-visible
-#       policy change, tracked separately." Rejecting `unknown` asserts against
-#       a documented product decision.
+#   (b) A NON-LAUNCHD MEMBER (`plist_installed == null`) IS ACCEPTED
+#       `unknown` OR `down`.
 #
-#       THE CONDITION IS `plist_installed == null`, NOT A MEMBER NAME. `null`
-#       means "not a launchd member" (§1.1's field table) — exactly the
-#       `OwnVerb`/`None` set `probe_member_health` returns `Unprobeable` for. So
-#       the acceptance is DERIVED FROM THE JSON and follows the product by
-#       itself if another member ever changes strategy. Hardcoding `trusty-mpm`
-#       here would freeze today's `stable_set` into the oracle.
+#       PREMISE REVERSED BY THE PRODUCT, 2026-08-05 (#4925). This bullet used to
+#       read "`unknown` IS ACCEPTED FOR A MEMBER THE PRODUCT DECLINES TO PROBE",
+#       and quoted `probe.rs`'s own comment as the warrant: "#4246: trusty-mpm
+#       (`OwnVerb`) is DELIBERATELY left unprobed and reported `unknown`, even
+#       though it does answer /health on 7880 […] Enabling it is a separate,
+#       user-visible policy change, tracked separately." THAT CARVE-OUT IS GONE.
+#       #4925 is the separate, argued policy change it referred to:
+#       `probe_member_health` now routes `ManageStrategy::OwnVerb` through the
+#       SAME HTTP transport as `Launchd`, because probeability is a property of
+#       the daemon's HTTP transport and not of its lifecycle-management strategy
+#       — the two axes diverged when #4246 moved the probe from
+#       `<binary> health --json` to HTTP `/health`. Only `ManageStrategy::None`
+#       (a non-daemon, which `stack doctor` does not report on) is still
+#       `Unprobeable`.
+#
+#       WHAT THAT MEANS FOR THE ORACLE. trusty-mpm — the only member this
+#       clause has ever fired for — now reports a REAL verdict: `healthy` when
+#       serving on 7880, `down` when not. So:
+#         - `unknown` is retained in the accepted set but is now VESTIGIAL: no
+#           member of the shipped stable set produces it. It is kept rather than
+#           deleted so a member that genuinely cannot be probed does not turn
+#           into a red run before anyone has decided that it should (that is
+#           #4847's open policy question, and this oracle does not pre-empt it).
+#         - `down` IS NOW ACCEPTED FOR `plist_installed == null` TOO, for
+#           EXACTLY the reason (c) accepts it for `plist_installed == false`:
+#           nothing in this harness's install path starts a daemon before the
+#           oracle reads `doctor`. mpm is process-managed (`OwnVerb`), so no
+#           plist and no `service install` step is even applicable to it — its
+#           pre-start `down` is the same structural artefact of the ordering,
+#           not a packaging defect. `verify_daemon_liveness` runs
+#           `tctl start --json` and asserts mpm SERVING afterwards; that is
+#           where a genuinely dead mpm fails, and it still does.
+#
+#       THE CONDITION IS STILL `plist_installed == null`, NOT A MEMBER NAME.
+#       `null` means "not a launchd member" (§1.1's field table). Hardcoding
+#       `trusty-mpm` here would freeze today's `stable_set` into the oracle; the
+#       acceptance stays DERIVED FROM THE JSON and follows the product by itself
+#       if another member ever changes strategy.
 #
 #   (c) `down` IS ACCEPTED WHEN `plist_installed == false`, UNDER ALL THREE
 #       PATTERNS — WIDENED FROM {b,c} ON 2026-08-04, BY OBSERVATION, AND ONLY
@@ -743,14 +768,26 @@ verify_stack_doctor() {
             present)
                 # H_P(p) — the accepted health set, DERIVED FROM THE JSON, never
                 # from a member name (§1.1a). Base {healthy, stale}; plus
-                # `unknown` when `plist_installed == null` (a non-launchd member,
-                # which is exactly the OwnVerb/None set `probe_member_health`
-                # returns `Unprobeable` for, #4246); plus `down` when
-                # `plist_installed == false` under the source-install patterns,
-                # where DOC-1 §6.5 bans the only step that writes a plist.
+                # {unknown, down} when `plist_installed == null` (a non-launchd
+                # member); plus `down` when `plist_installed == false`, where
+                # DOC-1 §6.5 bans the only step that writes a plist.
+                #
+                # #4925 CHANGED WHAT THE `null` BRANCH IS FOR — see §1.1a(b).
+                # `unknown` used to be the point of it: `probe_member_health`
+                # returned `Unprobeable` for `ManageStrategy::OwnVerb`, so
+                # trusty-mpm reported `unknown` by product decision. That
+                # carve-out is gone — `OwnVerb` now takes the same HTTP `/health`
+                # transport as `Launchd`, so mpm reports `healthy` or `down` like
+                # any other daemon. `unknown` is kept but is VESTIGIAL (no
+                # shipped member produces it); `down` is added because nothing in
+                # this harness's install path starts a daemon before doctor is
+                # read, and a process-managed member has no plist for the `false`
+                # branch to key off. A genuinely dead mpm still fails the run —
+                # at `verify_daemon_liveness`, which probes it directly AFTER
+                # `tctl start --json`.
                 accepted='healthy stale'
                 if [ "$plist" = 'null' ]; then
-                    accepted="${accepted} unknown"
+                    accepted="${accepted} unknown down"
                 fi
                 # An explicit `if`, NOT `[ … ] && accepted=…`: a bare AND-list
                 # whose left side fails is the `set -e` gotcha the driver warns
@@ -978,16 +1015,24 @@ verify_versions() {
 # `{"command","members":[{"member","health"}],"verdict":"ready"|"degraded"}`,
 # exit 0/2, over `stable_set()` filtered to `m.daemon` (stack/health.rs:96),
 # body-classified and 503-tolerant through the same `probe_member_health` this
-# correction is modelled on. It is tempting AND IT WOULD LOSE AN ASSERTION THIS
-# ORACLE ALREADY MAKES: `trusty-mpm` is DELIBERATELY LEFT UNPROBED by
-# `probe_member_health` (`ManageStrategy::OwnVerb` -> `Unprobeable` ->
-# `unknown`, #4246), so delegating would downgrade a daemon this loop PROVES is
-# serving on 7880 into a verdict nothing can assert on. It also drops `version`
-# and carries no `service` discriminator, so it closes nothing RC-1 opens. The
-# product's CLASSIFICATION RULE is adopted here; the product's COMMAND is not
-# substituted for the probe. (§1.1's warning against swapping `stack health` in
-# for `stack doctor` is a different question and is untouched — `verify_stack_doctor`
-# still uses `stack doctor`.)
+# correction is modelled on.
+#
+# THE PRIMARY REASON FOR DECLINING IT WAS WITHDRAWN 2026-08-05 (#4925). It used
+# to be that delegating WOULD LOSE AN ASSERTION THIS ORACLE ALREADY MAKES:
+# `trusty-mpm` was DELIBERATELY LEFT UNPROBED by `probe_member_health`
+# (`ManageStrategy::OwnVerb` -> `Unprobeable` -> `unknown`, #4246), so `stack
+# health` could not speak to a daemon this loop PROVES is serving on 7880. #4925
+# removed that carve-out — `OwnVerb` takes the same HTTP `/health` transport as
+# `Launchd` now, so `stack health` DOES cover mpm and no assertion would be lost
+# on that account.
+#
+# THE DECISION STANDS ANYWAY, on the reasons that were always independent of mpm:
+# `stack health --json` drops `version`, drops each daemon's raw body, and carries
+# no `service` discriminator, so it closes nothing RC-1 opens and leaves the #3364
+# squatter-collision class open. The product's CLASSIFICATION RULE is adopted
+# here; the product's COMMAND is not substituted for the probe. (§1.1's warning
+# against swapping `stack health` in for `stack doctor` is a different question and
+# is untouched — `verify_stack_doctor` still uses `stack doctor`.)
 # ===========================================================================
 #
 # §F-7 — DAEMON START AND PORT DISCOVERY, RESOLVED BY OBSERVATION (step 2, not
@@ -1257,9 +1302,10 @@ verify_snapshot_inputs() {
     done
 
     # `tctl stack health --json` — RECORDED, NEVER ASSERTED ON, and deliberately
-    # not the liveness probe (see `verify_daemon_liveness`'s header for why:
-    # `trusty-mpm` is `Unprobeable` -> `unknown` there, which would LOSE an
-    # assertion this harness already makes). It is logged because it is the
+    # not the liveness probe (see `verify_daemon_liveness`'s header for why: it
+    # drops `version`, the raw body, and any `service` discriminator. The mpm
+    # `Unprobeable` -> `unknown` reason that used to head that list was withdrawn
+    # by #4925 — mpm is probed over HTTP now.) It is logged because it is the
     # product's own body-based rollup over the same member set, so a divergence
     # between it and the oracle's own probe is the single most informative thing
     # a reader of a failed run could have. Read at snapshot time, i.e. BEFORE

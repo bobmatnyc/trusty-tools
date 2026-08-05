@@ -68,6 +68,15 @@ impl Kickstarter for FakeKickstarter {
 /// Why: only a CONFIRMED-down LAUNCHD daemon is the #2498 failure signature.
 /// #4246 changed the input from a hand-typed string to a typed `ProbeOutcome`
 /// and the condition to `is_confirmed_down` — a transport-level observation.
+///
+/// #4925 MADE THE `OwnVerb` ROW LOAD-BEARING FOR A LIVE CODE PATH. It used to be
+/// hypothetical: `probe_member_health` returned `Unprobeable` for trusty-mpm, so
+/// no `OwnVerb` member could reach `is_confirmed_down()` and this row asserted
+/// about a state production never produced. mpm is now probed over HTTP, so a
+/// genuinely-stopped mpm DOES arrive here as `Refused` — and this row is the
+/// assertion that it is still refused a `launchctl kickstart -k` against
+/// `com.trusty.mpm`, a label that does not exist on any host. Flipping it green
+/// would mean firing a destructive repair at a nonexistent launchd job.
 /// What: asserts the truth table across outcome x manage-strategy, including the
 /// mirror property that a genuinely-refusing daemon IS still repaired.
 /// Test: This is the test.
@@ -78,7 +87,12 @@ fn needs_kickstart_only_for_confirmed_down_launchd() {
             needs_kickstart(&confirmed, ManageStrategy::Launchd),
             "{confirmed:?} on a launchd member must still be repaired"
         );
-        assert!(!needs_kickstart(&confirmed, ManageStrategy::OwnVerb));
+        assert!(
+            !needs_kickstart(&confirmed, ManageStrategy::OwnVerb),
+            "#4925: a confirmed-down mpm is now REACHABLE and must never be \
+             eligible for `launchctl kickstart -k com.trusty.mpm` — no such label \
+             exists ({confirmed:?})"
+        );
         assert!(!needs_kickstart(&confirmed, ManageStrategy::None));
     }
 
@@ -254,9 +268,18 @@ fn verified_requires_ensure_and_health() {
     assert!(both_ok.verified);
 }
 
-/// Why: `stale` (running, below version floor) and `unknown`
-/// (process-managed, unprobeable — trusty-mpm) must NOT fail verification
-/// — mirrors `stack::health::HealthReport`'s degrade policy exactly.
+/// Why: `stale` (running, below version floor) and `unknown` (no probeable
+/// transport) must NOT fail verification — mirrors
+/// `stack::health::HealthReport`'s degrade policy exactly.
+///
+/// #4925: the POLICY under test is unchanged and still live, but its trusty-mpm
+/// EXEMPLAR is now hypothetical. mpm is probed over HTTP, so production no longer
+/// hands this function an `unknown` mpm row — a stopped mpm arrives as `down` and
+/// correctly fails (see `required_mpm_reporting_down_fails_verification`). The row
+/// is kept rather than swapped for a `None`-strategy member because this is a pure
+/// test of `build`'s string policy over hand-written rows: it asserts that
+/// `unknown` is tolerated whoever reports it, which is exactly the property #4847
+/// is still arguing about and which must not be lost by accident here.
 /// What: a report with only stale/unknown members still verifies.
 /// Test: This is the test.
 #[test]
@@ -269,6 +292,42 @@ fn verified_tolerates_stale_and_unknown() {
         ],
     );
     assert!(report.verified);
+}
+
+/// Why (#4925): THE gate that was unreachable before this change. `verify_tail`
+/// filters on `m.daemon` and trusty-mpm is `daemon: true`, so mpm was always
+/// probed and always landed a row here — but the row read `unknown`, and
+/// `build`'s required-member gate rejects only `down`/`not_installed`. mpm being
+/// `required: true` was therefore inert: an install that left mpm dead printed
+/// VERIFIED and exited 0. Now that the probe yields `down`, mpm's `required` flag
+/// finally has effect, and this test is what pins the accepted consequence.
+/// What: a REQUIRED trusty-mpm row reporting `down` flips `verified` to `false`;
+/// the same row `healthy` verifies, so it is the health and not the member name
+/// doing the work.
+/// Test: This is the test.
+#[test]
+fn required_mpm_reporting_down_fails_verification() {
+    let dead_mpm = VerifyTailReport::build(
+        true,
+        vec![
+            row("trusty-search", health_str::HEALTHY),
+            row("trusty-mpm", health_str::DOWN),
+        ],
+    );
+    assert!(
+        !dead_mpm.verified,
+        "a required member reporting `down` must fail verification — mpm is \
+         `required: true` and is no longer exempt via `unknown` (#4925)"
+    );
+
+    let live_mpm = VerifyTailReport::build(
+        true,
+        vec![
+            row("trusty-search", health_str::HEALTHY),
+            row("trusty-mpm", health_str::HEALTHY),
+        ],
+    );
+    assert!(live_mpm.verified);
 }
 
 /// Why: THE demo-critical fix — an OPTIONAL daemon member (e.g.

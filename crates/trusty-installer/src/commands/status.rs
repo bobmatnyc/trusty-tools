@@ -217,8 +217,10 @@ mod tests {
         assert_eq!(incomplete.exit_code(), 0);
     }
 
-    /// Why: A process-managed member (mpm) reports `unknown` health, which must
-    /// NOT degrade the verdict (it is not a `down` daemon).
+    /// Why: an `unknown` health must NOT degrade the verdict (it is not a `down`
+    /// daemon). A generic policy pin, not an assertion about any one member —
+    /// #4925 made mpm probeable, so the `trusty-mpm` name below is only a label on
+    /// a hand-written row; the policy it pins is unchanged.
     /// What: Builds a report with an `unknown` daemon; asserts `ready`.
     /// Test: This is the test.
     #[test]

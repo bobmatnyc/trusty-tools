@@ -222,11 +222,13 @@ impl ProbeOutcome {
     /// Map to the `tctl up` orchestration vocabulary.
     ///
     /// Why: `ensure_member` (DOC-12 §3.4) branches on `MemberHealth`, not on a
-    /// string. `Unprobeable` maps to `Down` here — NOT to a health verdict —
-    /// deliberately preserving today's `tctl up` behaviour for trusty-mpm (it
-    /// falls through to `start`, which is idempotent). `ensure_member` treats
-    /// `Down` and `HealthyStale` identically, so nothing in `up`'s action set
-    /// turns on that choice.
+    /// string. `Unprobeable` maps to `Down` here — NOT to a health verdict — so a
+    /// member whose health could not be established falls through to `start`,
+    /// which is idempotent. `ensure_member` treats `Down` and `HealthyStale`
+    /// identically, so nothing in `up`'s action set turns on that choice.
+    /// (#4925: trusty-mpm is no longer the example. It is probed over HTTP now,
+    /// so it reaches a real `Serving`/`Refused` verdict and only a NON-daemon
+    /// still arrives here as `Unprobeable`.)
     /// What: `Serving` via [`classify_status`]; `NotInstalled` preserved; every
     /// other variant `Down`.
     /// Test: `tests::member_health_maps_every_variant`.
