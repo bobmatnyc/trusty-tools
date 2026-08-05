@@ -281,11 +281,20 @@ pub fn is_persistence_tool(tool_name: &str) -> bool {
 /// command, so `git commit -m "fix $ISSUE"` is denied — and a deny with no hint
 /// is precisely the retry burn this text exists to prevent. Naming the rule and
 /// the single-quote fix turns that dead end into one retry.
+///
+/// The `::` rule is named for the same reason (#4850 review, MEDIUM 1). The
+/// classifier rejects `::` anywhere in an argument because git reads it as a
+/// remote-helper transport, and it does not exempt a quoted `-m` value — so in
+/// a Rust workspace `git commit -m 'refactor: use std::process::Command'` is
+/// denied, on ordinary commit-message content, with no hint. Naming the rule
+/// costs one reword instead of a retry loop; narrowing the rule itself is
+/// tracked separately (#4869).
 /// What: a one-line reason naming `context_tokens`, `max_tokens`, the tools
-/// that remain available, the metacharacter restriction on those tools, and the
-/// config key to raise.
+/// that remain available, the metacharacter and `::` restrictions on those
+/// tools, and the config key to raise.
 /// Test: `stop_reason_names_the_numbers_and_the_escape_hatch`,
-/// `stop_reason_names_the_metacharacter_rule`.
+/// `stop_reason_names_the_metacharacter_rule`,
+/// `stop_reason_names_the_double_colon_rule`.
 pub fn stop_reason(context_tokens: u64, max_tokens: u64) -> String {
     let git = PERSISTENCE_GIT_SUBCOMMANDS.join(", git ");
     format!(
@@ -295,8 +304,10 @@ pub fn stop_reason(context_tokens: u64, max_tokens: u64) -> String {
          Still permitted so you never lose work: SendMessage, and Bash running only git {git} \
          (every segment of a composed command must be one of those). Those git commands must be \
          plain: no shell metacharacters — $, backtick, ( ) < > — outside single quotes, so write \
-         git commit -m 'literal text' and never -m \"fix $ISSUE\"; and no exotic long flags, only \
-         the ordinary ones like -m, -A, -u, --amend, --force-with-lease, --stat, --short. \
+         git commit -m 'literal text' and never -m \"fix $ISSUE\"; no :: in any argument, even \
+         inside a quoted message, because git reads :: as a remote-helper transport, so reword a \
+         commit message that would say std::process::Command; and no exotic long flags, only the \
+         ordinary ones like -m, -A, -u, --amend, --force-with-lease, --stat, --short. \
          Everything else — including Write, Edit, Read, and any other Bash — is denied until the \
          PM re-dispatches you. Commit and push what you have, then SendMessage the PM: what you \
          completed, what remains, and what a fresh agent needs to finish it. To raise the ceiling \
@@ -660,6 +671,28 @@ mod tests {
         // Same shape for the option surface: the flags that still work are
         // named, so a rejected exotic flag costs one retry rather than a guess.
         assert!(reason.contains("--force-with-lease"));
+    }
+
+    #[test]
+    fn stop_reason_names_the_double_colon_rule() {
+        // #4850 review MEDIUM 1: the classifier denies `::` anywhere in an
+        // argument, quoted `-m` values included, so in a Rust workspace
+        // `git commit -m 'refactor: use std::process::Command'` denies on
+        // ordinary message content. Naming the rule costs one reword; leaving
+        // it unnamed costs the retry loop this text exists to prevent.
+        // Narrowing the rule itself is #4869, not this PR.
+        let reason = stop_reason(622_200, 400_000);
+        assert!(
+            reason.contains("::"),
+            "the deny text must name the rule that rejects `-m 'use std::process::Command'`"
+        );
+        // The rule applies inside quotes too — the single-quote fix the
+        // metacharacter sentence teaches does NOT rescue this one, and an
+        // agent that assumes it does burns the retry anyway.
+        assert!(
+            reason.contains("quoted message"),
+            "naming `::` without saying quotes do not exempt it still costs a retry"
+        );
     }
 
     #[test]

@@ -62,18 +62,24 @@
 //! token is not abbreviatable, so there is no unrecognised-prefix class there,
 //! and none of the short options on these five subcommands names a program.
 //!
-//! Residual, documented rather than hidden: git reads exec-capable settings from
-//! the config and attributes of whatever repository it is pointed at
-//! (`diff.external` via the default `--ext-diff`, `textconv`, `core.editor`), and
-//! `-C` / `--git-dir` / `--work-tree` are allowed globals — so the repository is
-//! *attacker-choosable within the same command*: `git -C /tmp/evil diff` runs the
-//! `diff.external` configured in `/tmp/evil/.git/config`. Both the agent's own
-//! repo and any path it wrote before hitting the ceiling are in reach. Rules 3
-//! and 4 close the argument-supplied route; closing the on-disk one would mean
-//! reading and judging repo config from inside a `PreToolUse` hook, which is
-//! neither fast nor side-effect-free. `PATH` is the same class — a bare `git`
-//! resolves through it and no argv-level check can see it. Same posture as this
-//! module's sibling bypass notes on `evaluate_worktree_add_command`.
+//! Residual, documented rather than hidden: git executes programs named by the
+//! on-disk state of whatever repository it is pointed at, and `-C` /
+//! `--git-dir` / `--work-tree` are allowed globals — so the repository is
+//! *attacker-choosable within the same command*: `git -C /tmp/evil diff` runs
+//! the `diff.external` configured in `/tmp/evil/.git/config`. Both the agent's
+//! own repo and any path it wrote before hitting the ceiling are in reach.
+//! The routes are config settings (`diff.external` via the default
+//! `--ext-diff`, `textconv`, `core.editor`, and `core.fsmonitor`, which fires
+//! on something as plain as `git -C /tmp/evil status`) and **hooks** — a
+//! planted `.git/hooks/pre-commit` runs on `git commit -am hooked` while this
+//! classifier ALLOWs the command, which the #4850 review demonstrated and which
+//! is the cheapest of these to plant. Treat the list as instances of the class,
+//! not its boundary. Rules 3 and 4 close the argument-supplied route; closing
+//! the on-disk one would mean reading and judging repo config, hooks, and
+//! attributes from inside a `PreToolUse` hook, which is neither fast nor
+//! side-effect-free. `PATH` is the same class — a bare `git` resolves through it
+//! and no argv-level check can see it. Same posture as this module's sibling
+//! bypass notes on `evaluate_worktree_add_command`.
 //!
 //! What: [`command_is_persistence_only`] is the whole public surface.
 //! Test: `command_is_persistence_only_*` in the sibling `tests` module.
