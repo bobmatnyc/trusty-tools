@@ -93,6 +93,19 @@ pub struct RememberOptions {
     /// Test: `remember_force_still_blocks_secret`,
     /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`.
     pub allow_secret_like: bool,
+    /// Wing the drawer's room belongs to (ADR-0027 T9).
+    ///
+    /// Why: without this a non-default wing could never receive a drawer, and
+    /// wing-scoped recall would be permanently empty outside the default wing
+    /// — a level nobody can write to is the same defect as a level nobody
+    /// reads. This is the write half of the "who" axis.
+    /// What: `None` (the default) resolves the room in the palace's default
+    /// wing, which is byte-identical to the pre-T9 behaviour every existing
+    /// caller gets. `Some(wing_id)` resolves it in that wing instead, so
+    /// `engineer`/`Planning` and `pm`/`Planning` are two distinct rooms.
+    /// Test: `wing_scoped_recall_returns_only_that_wing`,
+    /// `unscoped_write_still_lands_in_the_default_wing`.
+    pub wing_id: Option<uuid::Uuid>,
 }
 
 impl Default for RememberOptions {
@@ -104,6 +117,7 @@ impl Default for RememberOptions {
             classify_as: None,
             defer_embedding: false,
             allow_secret_like: false,
+            wing_id: None,
         }
     }
 }
@@ -127,6 +141,7 @@ impl RememberOptions {
             classify_as: Some(DrawerType::UserFact),
             defer_embedding: false,
             allow_secret_like: false,
+            wing_id: None,
         }
     }
 

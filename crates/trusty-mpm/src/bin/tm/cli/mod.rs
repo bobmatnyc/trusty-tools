@@ -465,6 +465,20 @@ pub(crate) enum Command {
         #[arg(long)]
         pm_guard: bool,
     },
+    /// Deterministic trusty-memory palace maintenance (issue #4837).
+    ///
+    /// Why: bulk-loading a directory of memory files into a palace is ETL —
+    /// read file, map frontmatter onto drawer fields, write. Routing it
+    /// through an agent cost 622k tokens for 120 files, because every tool
+    /// round re-sends the agent's accumulated context. This group is the
+    /// zero-inference path, and the prerequisite for issue #4834.
+    /// What: the `tm memory <action>` command group (currently `import`).
+    /// Test: `cli_parses_memory_import*` in `tests.rs`.
+    Memory {
+        /// Action to run.
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Compress a piped command's stdout — the `tm hook` PreToolUse Bash
     /// command-rewrite spike's filter stage (issue #1956, Option 0).
     ///

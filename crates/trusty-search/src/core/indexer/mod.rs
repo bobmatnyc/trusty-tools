@@ -350,14 +350,16 @@ pub struct CodeIndexer {
     /// `service::server::tests_4087`.
     pub corpus_open_failure: Option<crate::core::corpus::CorpusOpenFailure>,
 
-    /// Issue #4122: monotonic count of incremental writes refused because
-    /// [`Self::corpus_open_failed`] was set.
+    /// Issue #4122: monotonic count of writes refused because
+    /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
+    /// incremental writes alone to every refused durable write.
     ///
     /// Why: the refusal needs an observable surface that is not a log line —
     /// tests need a deterministic condition to await instead of a sleep, and
     /// operators need "how many saves were dropped?" answered numerically.
-    /// What: bumped by `refuse_incremental_write`, reset to 0 by
-    /// `clear_corpus_open_failure`. Read via
+    /// What: bumped by `refuse_incremental_write` (ingest family) and
+    /// `refuse_durable_write` (snapshot family: `chunks.json`, HNSW),
+    /// reset to 0 by `clear_corpus_open_failure`. Read via
     /// [`Self::refused_incremental_writes`]. Atomic because `index_file`
     /// takes `&self`.
     /// Test: `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`

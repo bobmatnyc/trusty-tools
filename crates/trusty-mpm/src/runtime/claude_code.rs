@@ -139,10 +139,14 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// strips the API key so Claude Code falls back to OAuth, preventing key leakage
 /// through pane history. (2) When a managed `CLAUDE_CONFIG_DIR` is resolved,
 /// `env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='<dir>'` points the session at the tm-owned config home
-/// (`~/.trusty-tools/trusty-mpm/claude-config/`). Under the retained
-/// `--setting-sources project,local` flag (see [`spawn_command`]) this config
-/// home does NOT supply the agent roster/skills/hooks — those load from the
-/// project layer — but it DOES isolate the session's auth: with the API key
+/// (`~/.trusty-tools/trusty-mpm/claude-config/`). #4873: this config home DOES
+/// supply the agent roster and skills. Every command builder resolves its flag
+/// through [`crate::core::model_inject::setting_sources_flag`], which returns
+/// `--setting-sources user,project,local` whenever a config dir is present —
+/// and `user` is the tier this directory relocates (see [`spawn_command`]'s
+/// #4451 note). The older text here claimed `project,local` and "loads from the
+/// project layer"; that predates the relocation. It also isolates the session's
+/// auth, which was always true: with the API key
 /// scrubbed, `claude` authenticates via the keychain/`.credentials.json` keyed to
 /// this config-dir path (the tm-managed login), never touching the operator's
 /// `~/.claude`. (3) On macOS the Keychain entry Claude Code reads is keyed by a
@@ -324,10 +328,7 @@ fn spawn_command(
 /// into the daemon managed-spawn command via `--append-system-prompt-file`
 /// (issue #2125 item 3 — the daemon-adapter carrier).
 ///
-/// Why: this module's own DOC-34 audit trail established that under
-/// `--setting-sources project,local` the framework roster/instructions load
-/// from the PROJECT layer, not the `CLAUDE_CONFIG_DIR` [`prepare_managed_config`]
-/// provisions — but `spawn` never actually passed `--append-system-prompt-file`
+/// Why: `spawn` never actually passed `--append-system-prompt-file`
 /// at all, so the one thing that turns a bare `claude` process into a
 /// trusty-mpm PM never reached the daemon's default managed-spawn path,
 /// leaving every bare-`tm` session running vanilla Claude Code (#2125). This
@@ -632,14 +633,23 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// authenticates via the keychain/`.credentials.json` keyed to this config-dir
 /// path, and its per-workspace trust is seeded into `<config_dir>/.claude.json`
 /// (NEVER `~/.claude.json`), so a managed session never reads or writes the
-/// operator's `~/.claude`. NOTE (DOC-34 review): under the retained
-/// `--setting-sources project,local` flag the config home's provisioned
-/// agents/skills/settings.json are NOT loaded (that flag excludes the `user`
-/// tier this dir relocates); the framework roster/skills/hooks are delivered by
-/// the PROJECT layer via `session_launch::prepare_session`. The full-roster
-/// provisioning here is therefore belt-and-suspenders (it would load only if the
-/// flag were ever dropped) — the load-bearing effect of the config dir is auth +
-/// trust isolation. This centralises the three coupled steps — resolve the path,
+/// operator's `~/.claude`.
+///
+/// #4873 CORRECTION — the provisioning here is LOAD-BEARING, not
+/// belt-and-suspenders. This doc used to say the config home's provisioned
+/// agents/skills/settings.json "are NOT loaded" because `--setting-sources
+/// project,local` excludes the `user` tier this dir relocates, and that the
+/// framework roster arrived via the PROJECT layer instead. That stopped being
+/// true when the flag became conditional: all three command builders
+/// (`spawn_command`, `resume_command`, `compose_inplace_args`) resolve it
+/// through [`crate::core::model_inject::setting_sources_flag`], which returns
+/// `--setting-sources user,project,local` whenever `config_dir` is `Some` — and
+/// every managed path reaches here with `Some`. The `user` tier IS read. See
+/// `spawn_command`'s #4451 note, which already stated this correctly while
+/// this comment contradicted it. Auth + trust isolation remains true and is now
+/// one of two load-bearing effects, not the only one.
+///
+/// This centralises the three coupled steps — resolve the path,
 /// provision it, and seed workspace trust — so `spawn` and `spawn_resume` stay
 /// identical and cannot drift.
 /// What: resolves [`crate::core::trusty_tools_config::managed_claude_config_dir`].
@@ -1094,9 +1104,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         );
         // Point the session at the tm-owned CLAUDE_CONFIG_DIR for auth + trust
         // isolation and seed trust there — never at `~/.claude.json` (DOC-34).
-        // The framework roster/skills/hooks load from the PROJECT layer under
-        // `--setting-sources project,local`, not from this config dir (see
-        // `prepare_managed_config`). Non-fatal throughout (closes #1696).
+        // #4873: the framework roster and skills load FROM this config dir —
+        // `setting_sources_flag` yields `user,project,local` whenever it is
+        // present, and `user` is the tier it relocates. The older comment here
+        // claimed the project layer under `project,local`; see
+        // `prepare_managed_config`. Non-fatal throughout (closes #1696).
         let config_dir = prepare_managed_config(tmux_name, cwd);
         // Build and inject the PM system prompt (issue #2125 item 3) so this,
         // the default daemon on-ramp, can no longer silently spawn vanilla

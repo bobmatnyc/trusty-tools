@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use super::chat_definitions::chat_tool_definitions;
 use super::room_definitions::room_tool_definitions;
 use super::task_definitions::task_tool_definitions;
+use super::wing_definitions::wing_tool_definitions;
 
 /// Marker server type. Reserved for future stateful MCP server impls.
 ///
@@ -112,6 +113,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "palace":  {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
                         "text":    {"type": "string", "description": "Memory content"},
                         "room":    {"type": "string", "description": "Room type (optional)"},
+                        "wing":    {"type": "string", "description": "ADR-0027: optional wing (scope/ownership) id or label that OWNS this room — e.g. an agent type such as `engineer`. Omit for the palace's default wing, which is the pre-wing behaviour. With it, `engineer`+`Planning` and `pm`+`Planning` are two distinct rooms. Errors if the wing does not exist; create it with wing_create or list wings with wing_list."},
                         "tags":    {"type": "array", "items": {"type": "string"}},
                         "force":   {"type": "boolean", "description": "Explicit operator override: bypasses the content-QUALITY gates for this write — the blocklist (auto-capture noise patterns), the short-content check, the dedup window, and the noise-pattern filter. Issue #2520: does NOT bypass secret/credential detection — a force=true write of secret-shaped content (API keys, tokens) is still rejected. Use sparingly; intended for app-managed writers (e.g. session/turn recorders) that need deterministic storage regardless of heuristic false positives.", "default": false},
                         "allow_secret_like": {"type": "boolean", "description": "DANGEROUS, rarely needed: bypasses the secret/credential heuristic gate specifically, on top of whatever `force` already bypasses. Only set this when you are DELIBERATELY storing content that looks like a credential (e.g. a redacted example or test fixture) and have confirmed it contains no real secret. Automated writers (turn recorders, auto-capture hooks) must NOT set this — it exists for rare, explicit human/operator overrides only.", "default": false},
@@ -141,14 +143,15 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall",
-                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room (ADR-0027).",
+                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room, or `wing` to scope it to one owner's rooms (ADR-0027).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace": {"type": "string"},
                         "query":  {"type": "string"},
                         "room":   {"type": "string", "description": "ADR-0027: restrict the semantic layer to this room. The always-on identity/essential layers (L0/L1) are still returned — they are the palace's baseline grounding, not search results. Use room_list to discover a palace's rooms."},
-                        "top_k":  {"type": "integer", "default": 10}
+                        "top_k":  {"type": "integer", "default": 10},
+                        "wing":   {"type": "string", "description": "ADR-0027: optional wing (scope) id or label. Restricts the L2 search to the rooms that wing owns — 'recall everything the engineer wing has learned' in one query. Palace identity/essentials (L0/L1) are always included since they are not any one wing's property. Mutually exclusive with `room`. Omit for an unscoped recall. Errors if the wing does not exist (see wing_list)."}
                     },
                     "required": memory_recall_required,
                 }
@@ -240,12 +243,13 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_list",
-                "description": "List drawers in a palace, optionally filtered by room type or tag.",
+                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace": {"type": "string"},
                         "room":   {"type": "string", "description": "Filter by room type (Frontend, Backend, Testing, Planning, Documentation, Research, Configuration, Meetings, General, or custom)"},
+                        "wing":   {"type": "string", "description": "ADR-0027: filter by wing (scope) id or label — every drawer in every room that wing owns. Mutually exclusive with `room` for now; passing both is an error rather than a silently-ignored filter. Errors if the wing does not exist (see wing_list)."},
                         "tag":    {"type": "string", "description": "Filter by tag"},
                         "limit":  {"type": "integer", "description": "Max results (default 50)"}
                     },
@@ -415,9 +419,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     let metrics = tools.pop().expect("console_metrics sentinel");
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
-    // ADR-0027 T6 (#4805): the room surface, in its own sibling module for the
-    // same 500-SLOC reason as the task and chat groups.
+    // ADR-0027 T6 (#4805) / T9 (#4809): the room and wing surfaces, each in its
+    // own sibling module for the same 500-SLOC reason as the task and chat groups.
     tools.extend(room_tool_definitions(has_default));
+    tools.extend(wing_tool_definitions(has_default));
     tools.push(metrics);
     result
 }

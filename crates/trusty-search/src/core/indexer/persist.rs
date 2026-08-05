@@ -34,10 +34,22 @@ impl CodeIndexer {
     /// and the symbol graph without re-parsing the source tree. Pairs with
     /// [`VectorStore::save_to`] which persists the HNSW vectors.
     /// What: copies chunks + entities under read locks (releasing them before
-    /// the I/O), then writes JSON atomically via tmp + rename. Empty corpus
-    /// is still written so the on-disk file accurately reflects state.
-    /// Test: see `tests::test_save_chunks_roundtrip`.
+    /// the I/O), then writes JSON atomically via tmp + rename. An empty corpus
+    /// is still written so the on-disk file accurately reflects state — EXCEPT
+    /// on a write-quarantined index, where "empty" means "the corpus never
+    /// opened", not "the corpus is empty" (issue #4226; see the guard below).
+    /// Test: see `tests::test_save_chunks_roundtrip`, and
+    /// `quarantined_shutdown_flush_does_not_destroy_chunks_json` in
+    /// `tests/quarantine_durable_writes_4226.rs` for the quarantine guard.
     pub async fn save_chunks_to_disk(&self, path: &std::path::Path) -> Result<()> {
+        // #4226: a write-quarantined index's in-memory corpus is empty because
+        // the durable corpus never opened — writing it out would replace the
+        // legacy chunks.json snapshot with nothing. The guard sits on the
+        // primitive, not only on `flush_corpus_to_disk`, so no future caller
+        // can reopen the hole.
+        if self.refuse_durable_write("save_chunks_to_disk", &path.display().to_string()) {
+            return Ok(());
+        }
         // Snapshot under read locks, then drop them before doing I/O so
         // concurrent searches never block on the JSON serialize.
         let chunks_vec: Vec<RawChunk> = {
@@ -485,9 +497,23 @@ impl CodeIndexer {
     /// What: when a `CorpusStore` is wired, snapshots the in-memory corpus and
     /// upserts it into redb in a single atomic transaction (issue #29);
     /// otherwise delegates to `save_chunks_to_disk`.
+    ///
+    /// Issue #4226: the `None` arm below is not only the legacy-index case —
+    /// it is also the write-quarantine case, because
+    /// `corpus_open_failed ⇒ corpus == None`. Before the guard, the shutdown
+    /// flush of a quarantined index landed here and wrote its empty in-memory
+    /// corpus over `chunks.json`, which the warm-boot
+    /// `chunks.json → index.redb` migration still reads.
     /// Test: covered by the corpus roundtrip integration test plus the
-    /// existing shutdown integration test.
+    /// existing shutdown integration test;
+    /// `quarantined_shutdown_flush_does_not_destroy_chunks_json` covers the
+    /// quarantine guard.
     pub async fn flush_corpus_to_disk(&self, path: &std::path::Path) -> Result<()> {
+        // #4226: refuse the whole flush, not just its JSON arm — a quarantined
+        // index performs no durable write of any kind.
+        if self.refuse_durable_write("flush_corpus_to_disk", &path.display().to_string()) {
+            return Ok(());
+        }
         let Some(corpus) = self.corpus.clone() else {
             // Legacy path: no redb store wired — write the JSON snapshot.
             return self.save_chunks_to_disk(path).await;

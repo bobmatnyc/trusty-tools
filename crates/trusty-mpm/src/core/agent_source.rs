@@ -188,8 +188,13 @@ pub fn ensure_agent_source_fresh(agents_dir: &Path) -> Result<bool> {
 ///
 /// What: joins the first `limit` entries with `, `, appending `, …` when more
 /// were elided. Pure.
-/// Test: exercised through `deploy_summary_lines_*`.
-fn preview(items: &[String], limit: usize) -> String {
+///
+/// #4873: shared with `managed_config::skill_skip_summary`, which needs the
+/// identical count-plus-preview shape for the SKILL half of the same warning
+/// policy — a second copy would drift from this one.
+/// Test: exercised through `deploy_summary_lines_*` and
+/// `skill_skip_summary_*`.
+pub(crate) fn preview(items: &[String], limit: usize) -> String {
     let head = items
         .iter()
         .take(limit)

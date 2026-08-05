@@ -641,6 +641,23 @@ pub mod slack_format;
 /// Test: `cargo test -p trusty-common -- data_dir::tests`.
 pub mod data_dir;
 
+/// Runtime "am I a `cargo test` process?" detection (issue #4255).
+///
+/// Why: every existing guard against a test run mutating the operator's live
+/// state was either compile-time (`cfg(test)`, which does not reach a crate's
+/// `tests/` or `[[bin]]` targets) or a per-test convention someone had to
+/// remember. Both were forgotten, and the live `indexes.toml` accumulated
+/// throwaway fixture roots as a result. A runtime check is the only one that
+/// also covers the cross-process case, where a test POSTs to a REAL daemon.
+/// Unconditional (not feature-gated) because trusty-search consumes it from a
+/// path that no feature flag governs.
+/// What: exposes [`test_harness::running_under_test_harness`] plus the
+/// [`test_harness::FORCE_ENV`] / [`test_harness::ALLOW_PRODUCTION_ENV`]
+/// override names.
+/// Test: `cargo test -p trusty-common -- test_harness::tests`.
+pub mod test_harness;
+pub use test_harness::running_under_test_harness;
+
 /// Cross-process locked read-modify-write for whole-file JSON documents.
 ///
 /// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`

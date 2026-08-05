@@ -29,6 +29,7 @@ pub mod reconcile;
 pub mod reindex;
 pub mod roots_registry;
 pub mod server;
+pub mod shutdown_budget;
 pub mod shutdown_flush;
 pub mod stall_tracker;
 pub mod ui;
