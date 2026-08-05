@@ -1,0 +1,7 @@
+Security
+
+- agent-cost persistence hatch: close the git option-abbreviation bypass ([#4850](https://github.com/bobmatnyc/trusty-tools/pull/4850))
+  - git's `parse-options` resolves any unambiguous prefix of a long option, so `--exe` is `--exec` and `--rece` is `--receive-pack`. The exec-option deny list matched names exactly, so `git push --exe=<program> …` and `--rece=<program>` classified as "persistence only" past the context ceiling and ran the named program. The post-subcommand long-option surface is now default-deny against a safe allowlist, so an abbreviation of a dangerous option — and any construct nobody has thought of — is rejected without being enumerated.
+  - the program check compared the basename, so `./git`, `/tmp/evil/git`, and `../../tmp/evil/git` all passed as "git". It now requires the literal token `git`; a path-qualified `git` is rejected.
+  - the deny text an agent sees at the ceiling now names the shell-metacharacter rule and the single-quote fix, so `git commit -m "fix $ISSUE"` no longer denies without a hint.
+  - corrected the module's residual note: `-C` / `--git-dir` are allowed globals, so the repository whose config supplies `diff.external` is attacker-choosable in the same command, not confined to the agent's own repo.

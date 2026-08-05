@@ -275,9 +275,17 @@ pub fn is_persistence_tool(tool_name: &str) -> bool {
 /// made it true. It now enumerates the exact escape hatch rather than gesturing
 /// at one, because an agent that believes a closed channel is open will retry
 /// into it instead of reporting back.
+///
+/// It also names the metacharacter rule (#4850 review, LOW 2). The classifier
+/// rejects `$`, a backtick, and unquoted `(`, `)`, `<`, `>` anywhere in the
+/// command, so `git commit -m "fix $ISSUE"` is denied — and a deny with no hint
+/// is precisely the retry burn this text exists to prevent. Naming the rule and
+/// the single-quote fix turns that dead end into one retry.
 /// What: a one-line reason naming `context_tokens`, `max_tokens`, the tools
-/// that remain available, and the config key to raise.
-/// Test: `stop_reason_names_the_numbers_and_the_escape_hatch`.
+/// that remain available, the metacharacter restriction on those tools, and the
+/// config key to raise.
+/// Test: `stop_reason_names_the_numbers_and_the_escape_hatch`,
+/// `stop_reason_names_the_metacharacter_rule`.
 pub fn stop_reason(context_tokens: u64, max_tokens: u64) -> String {
     let git = PERSISTENCE_GIT_SUBCOMMANDS.join(", git ");
     format!(
@@ -285,11 +293,14 @@ pub fn stop_reason(context_tokens: u64, max_tokens: u64) -> String {
          of context, at or past the {max_tokens}-token cap. Every further tool call re-sends all \
          of it, so continuing costs more per step than starting over. SAVE AND REPORT BACK NOW. \
          Still permitted so you never lose work: SendMessage, and Bash running only git {git} \
-         (every segment of a composed command must be one of those). Everything else — including \
-         Write, Edit, Read, and any other Bash — is denied until the PM re-dispatches you. Commit \
-         and push what you have, then SendMessage the PM: what you completed, what remains, and \
-         what a fresh agent needs to finish it. To raise the ceiling instead, set \
-         agent_cost.max_tokens in ~/.trusty-mpm/config.toml."
+         (every segment of a composed command must be one of those). Those git commands must be \
+         plain: no shell metacharacters — $, backtick, ( ) < > — outside single quotes, so write \
+         git commit -m 'literal text' and never -m \"fix $ISSUE\"; and no exotic long flags, only \
+         the ordinary ones like -m, -A, -u, --amend, --force-with-lease, --stat, --short. \
+         Everything else — including Write, Edit, Read, and any other Bash — is denied until the \
+         PM re-dispatches you. Commit and push what you have, then SendMessage the PM: what you \
+         completed, what remains, and what a fresh agent needs to finish it. To raise the ceiling \
+         instead, set agent_cost.max_tokens in ~/.trusty-mpm/config.toml."
     )
 }
 
@@ -619,6 +630,36 @@ mod tests {
         assert!(reason.contains("Write, Edit"));
         // The operator must be told how to widen it rather than fight it.
         assert!(reason.contains("agent_cost.max_tokens"));
+    }
+
+    #[test]
+    fn stop_reason_names_the_metacharacter_rule() {
+        // #4850 review LOW 2: naming `git commit` as permitted while the
+        // classifier silently rejects every unquoted `$`, backtick, `(`, `)`,
+        // `<`, and `>` sends the agent into exactly the retry burn this text
+        // exists to prevent — `git commit -m "fix $ISSUE"` denies with no hint.
+        // The rule and its fix (single quotes) must both be in the text.
+        let reason = stop_reason(622_200, 400_000);
+        assert!(
+            reason.contains("metacharacter"),
+            "the deny text must name the rule that rejects `-m \"fix $ISSUE\"`"
+        );
+        assert!(
+            reason.contains("single quotes"),
+            "naming the rule without the fix still costs a retry"
+        );
+        // Every character SUBSTITUTION_METACHARS/SYNTAX_METACHARS reject must be
+        // named. The backtick is spelled out rather than shown: a lone ` in a
+        // one-paragraph deny string reads as stray punctuation.
+        for ch in ["$", "backtick", "(", ")", "<", ">"] {
+            assert!(
+                reason.contains(ch),
+                "the deny text must name the rejected character {ch:?}"
+            );
+        }
+        // Same shape for the option surface: the flags that still work are
+        // named, so a rejected exotic flag costs one retry rather than a guess.
+        assert!(reason.contains("--force-with-lease"));
     }
 
     #[test]
