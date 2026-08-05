@@ -440,17 +440,10 @@ fn ensure_managed_config_dir_preserves_a_project_custom_skill() {
 fn ensure_managed_config_dir_skips_a_frozen_skill() {
     let tmp = TempDir::new().unwrap();
     let fw = seed_framework(tmp.path());
-    pin_skill_source_stamp(&fw);
-    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
-    let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-    let deployed = config_dir.join("skills/probe-skill/SKILL.md");
+    // Deployed once, then hand-edited, with the source now at V2 — the
+    // manifest checksum records V1 while disk holds the edit.
+    let (config_dir, deployed) = frozen_skill_fixture(&tmp, &fw);
 
-    // Deploy once so the skill becomes MANAGED, then hand-edit it: the
-    // manifest checksum now records V1 while disk holds the edit.
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-    std::fs::write(&deployed, "HAND EDITED BY THE OPERATOR\n").unwrap();
-
-    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
     ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
 
     assert_eq!(
@@ -461,28 +454,110 @@ fn ensure_managed_config_dir_skips_a_frozen_skill() {
     );
 }
 
-/// #4873's own fix: the frozen skip above is no longer silent.
+/// Drive the fixture to the state the #4873 warning describes: one bundled
+/// skill deployed, then hand-edited, with the source moved on beyond it.
 ///
-/// Why: silence is what turned three correctly-declined skills into a report
-/// that "skill deployment never runs on resume". The deploy DID run; nothing
-/// said so. Asserted through the pure summary rather than a log capture so the
-/// test pins the message contract, not `tracing`'s plumbing.
-/// Test: itself.
-#[test]
-fn ensure_managed_config_dir_warns_when_a_frozen_skill_is_skipped() {
-    let tmp = TempDir::new().unwrap();
-    let fw = seed_framework(tmp.path());
-    pin_skill_source_stamp(&fw);
-    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
+/// Why: three cases below need the same checksum-frozen shape, and building it
+/// takes two provisioning runs plus a write — duplicating that setup is how the
+/// three would drift apart.
+/// What: seeds `probe-skill` at V1, provisions once so the skill becomes
+/// MANAGED with V1's checksum recorded, overwrites the deployed copy by hand,
+/// then advances the source to V2. Returns the config dir and the deployed
+/// path. Leaves the NEXT provisioning run to the caller — that run is what each
+/// test is actually measuring.
+/// Test: used by `ensure_managed_config_dir_skips_a_frozen_skill`,
+/// `ensure_managed_config_dir_emits_the_frozen_skill_warning`,
+/// `a_declined_skill_reaches_skill_skip_summary_from_a_real_deploy`.
+fn frozen_skill_fixture(
+    tmp: &TempDir,
+    fw: &FrameworkPaths,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    pin_skill_source_stamp(fw);
+    seed_skill(fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let deployed = config_dir.join("skills/probe-skill/SKILL.md");
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-    std::fs::write(&deployed, "HAND EDITED\n").unwrap();
-    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
+    ensure_managed_config_dir_with_root(fw, &config_dir).unwrap();
+    std::fs::write(&deployed, "HAND EDITED BY THE OPERATOR\n").unwrap();
+    seed_skill(fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
 
-    // Re-run the same deploy the provisioning path runs, and inspect what it
-    // declined — the value `ensure_managed_config_dir_with_root` now warns on.
+    (config_dir, deployed)
+}
+
+/// #4873's own fix, AT THE CALL SITE: `ensure_managed_config_dir_with_root`
+/// actually emits the warning when the deploy declines a skill.
+///
+/// Why (PR #4876 review): the three `skill_skip_summary_*` cases below cover
+/// the pure function, and the case after this one covers the deploy that feeds
+/// it — but deleting the entire `if let Some(line) = …` emit block left all of
+/// them green. The wiring was the whole production change and nothing tested
+/// it. This is the test that fails when that block is removed.
+/// What: installs a capturing subscriber for the duration of one provisioning
+/// run and asserts a `WARN` line carrying the module prefix, the declined
+/// skill's name, and the remedy pointer reaches it. Uses the crate's existing
+/// capture entry point (`trusty_common::log_buffer::LogBufferLayer` +
+/// `tracing::subscriber::with_default`, the pattern `log_buffer`'s own
+/// `layer_captures_events` and `trusty-search`'s
+/// `fallback_logs_build_failure_exactly_once` already use) rather than adding a
+/// capture dependency. `#[serial]` for the same reason that test carries it:
+/// installing a subscriber perturbs the process-global interest cache.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn ensure_managed_config_dir_emits_the_frozen_skill_warning() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    // Build the frozen state OUTSIDE the capture so the only lines recorded
+    // belong to the run under test.
+    let (config_dir, _deployed) = frozen_skill_fixture(&tmp, &fw);
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+
+    tracing::subscriber::with_default(subscriber, || {
+        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    });
+
+    let lines = buffer.tail(64);
+    let hit = lines
+        .iter()
+        .find(|l| l.contains("managed config dir:") && l.contains("probe-skill"));
+    let line = hit.unwrap_or_else(|| {
+        panic!(
+            "provisioning declined `probe-skill` but emitted no warning naming it — \
+             the emit block in `ensure_managed_config_dir_with_root` is missing or \
+             unreachable. Captured lines: {lines:#?}"
+        )
+    });
+    assert!(
+        line.contains("WARN"),
+        "the declined-skill line must be logged at WARN, not a lower level: {line}"
+    );
+    assert!(
+        line.contains("tm doctor --fix-skills --include-frozen"),
+        "the emitted warning must carry the actionable remedy: {line}"
+    );
+}
+
+/// The deploy really does report a frozen skill as `skipped`, so
+/// [`skill_skip_summary`]'s input is the shape production hands it.
+///
+/// Why: the pure-function cases below feed hand-written vectors. This one
+/// closes the gap between "the summary formats a skip list" and "a real
+/// checksum-frozen skill lands in that list" — without it, a change to the
+/// deployer's classification could empty the list and every other case would
+/// still pass.
+/// Test: itself.
+#[test]
+fn a_declined_skill_reaches_skill_skip_summary_from_a_real_deploy() {
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    let (config_dir, _deployed) = frozen_skill_fixture(&tmp, &fw);
+
     let stats = deploy_all_skill_tiers(
         &fw.skill_source_dir(),
         &fw.user_skill_source_dir(),
@@ -491,15 +566,16 @@ fn ensure_managed_config_dir_warns_when_a_frozen_skill_is_skipped() {
     )
     .unwrap();
 
-    let line = skill_skip_summary(&stats.stats.skipped)
-        .expect("a declined skill must produce exactly one warning line");
     assert!(
-        line.contains("probe-skill"),
-        "the warning must name the skill left stale: {line}"
+        stats.stats.skipped.iter().any(|s| s == "probe-skill"),
+        "a checksum-frozen skill must be reported as skipped: {:?}",
+        stats.stats.skipped
     );
+    let line = skill_skip_summary(&stats.stats.skipped)
+        .expect("a declined skill must produce exactly one summary line");
     assert!(
-        line.contains("tm doctor --fix-skills --include-frozen"),
-        "the warning must carry the actionable remedy: {line}"
+        line.contains("probe-skill") && line.contains("tm doctor --fix-skills --include-frozen"),
+        "{line}"
     );
 }
 

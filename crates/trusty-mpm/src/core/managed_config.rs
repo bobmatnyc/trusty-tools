@@ -160,7 +160,7 @@ pub fn ensure_managed_config_dir(config_dir: &Path) -> anyhow::Result<()> {
 /// `ensure_managed_config_dir_skill_deploy_is_a_noop_when_unchanged`,
 /// `ensure_managed_config_dir_preserves_a_project_custom_skill`,
 /// `ensure_managed_config_dir_skips_a_frozen_skill`,
-/// `ensure_managed_config_dir_warns_when_a_frozen_skill_is_skipped`.
+/// `ensure_managed_config_dir_emits_the_frozen_skill_warning`.
 pub fn ensure_managed_config_dir_with_root(
     fw: &FrameworkPaths,
     config_dir: &Path,
@@ -248,7 +248,8 @@ pub fn ensure_managed_config_dir_with_root(
 /// Test: `skill_skip_summary_is_none_on_a_clean_deploy`,
 /// `skill_skip_summary_counts_and_previews`,
 /// `skill_skip_summary_elides_beyond_five`,
-/// `ensure_managed_config_dir_warns_when_a_frozen_skill_is_skipped`.
+/// `a_declined_skill_reaches_skill_skip_summary_from_a_real_deploy`,
+/// `ensure_managed_config_dir_emits_the_frozen_skill_warning` (the call site).
 fn skill_skip_summary(skipped: &[String]) -> Option<String> {
     if skipped.is_empty() {
         return None;
