@@ -549,3 +549,204 @@ fn deploy_records_files_written_before_a_mid_loop_failure() {
     );
     assert!(stats.unchanged.contains(&"aaa-skill".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// #4949 — directory-shaped skills at the user tier
+// ---------------------------------------------------------------------------
+
+/// Write a directory-shaped skill mirroring the real `duetto-design-system`.
+fn write_directory_skill(dir: &Path, stem: &str) {
+    let skill = dir.join(stem);
+    fs::create_dir_all(skill.join("references")).unwrap();
+    fs::write(skill.join("SKILL.md"), format!("# {stem}\n")).unwrap();
+    fs::write(skill.join("metadata.json"), "{\"v\":1}\n").unwrap();
+    fs::write(skill.join("references").join("tokens.md"), "# Tokens\n").unwrap();
+    fs::write(skill.join("references").join("index.md"), "# Index\n").unwrap();
+}
+
+#[test]
+fn deploy_directory_shaped_skill() {
+    // #4949: `~/.trusty-mpm/skills/<stem>/SKILL.md` is a skill. Before the fix
+    // the source scan's `is_file()` test rejected the directory outright and
+    // the deploy reported success having written nothing.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_directory_skill(src.path(), "duetto-design-system");
+
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+    assert!(
+        stats.deployed.contains(&"duetto-design-system".to_string()),
+        "the entry point must deploy: {stats:?}"
+    );
+    // Every file the skill carries lands at the destination.
+    let dest = tgt.path().join("duetto-design-system");
+    assert!(dest.join("SKILL.md").is_file(), "SKILL.md missing");
+    assert!(
+        dest.join("metadata.json").is_file(),
+        "metadata.json missing"
+    );
+    assert!(
+        dest.join("references").join("tokens.md").is_file(),
+        "references/tokens.md missing"
+    );
+    assert!(
+        dest.join("references").join("index.md").is_file(),
+        "references/index.md missing"
+    );
+    assert!(
+        stats.skipped.is_empty(),
+        "nothing may be skipped: {stats:?}"
+    );
+}
+
+#[test]
+fn deploy_directory_skill_records_every_file_in_the_manifest() {
+    // Ownership tracking must cover a multi-file skill, not just its entry
+    // point — an unrecorded file reads as user-owned on the next pass and is
+    // then frozen forever.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_directory_skill(src.path(), "duetto-design-system");
+
+    deploy_skills(src.path(), tgt.path()).unwrap();
+
+    let manifest = SkillManifest::load(tgt.path());
+    for key in [
+        "duetto-design-system",
+        "duetto-design-system/metadata.json",
+        "duetto-design-system/references/tokens.md",
+        "duetto-design-system/references/index.md",
+    ] {
+        assert!(manifest.is_managed(key), "manifest missing key {key}");
+    }
+
+    // The proof the ledger is right: a second deploy changes nothing and
+    // freezes nothing.
+    let again = deploy_skills(src.path(), tgt.path()).unwrap();
+    assert!(again.deployed.is_empty(), "second deploy wrote: {again:?}");
+    assert!(again.skipped.is_empty(), "second deploy froze: {again:?}");
+    assert_eq!(again.unchanged.len(), 4, "{again:?}");
+}
+
+#[test]
+fn deploy_flat_skill_still_works_alongside_a_directory_skill() {
+    // The pre-#4949 flat path must not regress, including its hybrid
+    // `<stem>/references/` companion directory.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path()); // tm-doctor.md + example-skill.md
+    fs::create_dir_all(src.path().join("tm-doctor").join("references")).unwrap();
+    fs::write(
+        src.path()
+            .join("tm-doctor")
+            .join("references")
+            .join("cli.md"),
+        "# CLI\n",
+    )
+    .unwrap();
+    write_directory_skill(src.path(), "duetto-design-system");
+
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+    for stem in ["tm-doctor", "example-skill", "duetto-design-system"] {
+        assert!(
+            tgt.path().join(stem).join("SKILL.md").is_file(),
+            "{stem}/SKILL.md missing: {stats:?}"
+        );
+    }
+    // The flat skill's companion reference file keeps its established key.
+    assert!(
+        tgt.path()
+            .join("tm-doctor")
+            .join("references")
+            .join("cli.md")
+            .is_file()
+    );
+    let manifest = SkillManifest::load(tgt.path());
+    assert!(manifest.is_managed("tm-doctor/references/cli.md"));
+}
+
+#[test]
+fn deploy_reports_a_skill_directory_with_no_entry_point() {
+    // #4949's other half: a source name the deployer cannot use must be
+    // REPORTED, not silently dropped. `stats.skipped` is the channel callers
+    // already summarise for the user (`managed_config::skill_skip_summary`,
+    // `tm sync-assets`), so the rejection rides it alongside a `tracing::warn!`.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::create_dir_all(src.path().join("broken-skill")).unwrap();
+    fs::write(src.path().join("broken-skill").join("notes.md"), "x\n").unwrap();
+
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+    assert!(
+        stats.skipped.contains(&"broken-skill".to_string()),
+        "a malformed skill directory must be reported: {stats:?}"
+    );
+    assert!(stats.deployed.is_empty(), "{stats:?}");
+    assert!(
+        !tgt.path().join("broken-skill").exists(),
+        "a malformed skill must not be partially written"
+    );
+}
+
+#[test]
+fn deploy_directory_skill_respects_the_select_predicate() {
+    // Tier precedence drives deploys through `select`; a directory skill must
+    // be selectable by the same stem the planner derives.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_directory_skill(src.path(), "duetto-design-system");
+    write_directory_skill(src.path(), "cto-kb-ingest");
+
+    let stats =
+        deploy_skills_filtered(src.path(), tgt.path(), |name| name == "cto-kb-ingest").unwrap();
+
+    assert!(stats.deployed.contains(&"cto-kb-ingest".to_string()));
+    assert!(!tgt.path().join("duetto-design-system").exists());
+}
+
+#[test]
+fn deploy_directory_skill_preserves_a_user_edited_reference() {
+    // The ownership rule applies per file, so a hand-edited reference doc is
+    // preserved while the rest of the skill still refreshes.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_directory_skill(src.path(), "duetto-design-system");
+    deploy_skills(src.path(), tgt.path()).unwrap();
+
+    let edited = tgt
+        .path()
+        .join("duetto-design-system")
+        .join("references")
+        .join("tokens.md");
+    fs::write(&edited, "# Tokens (hand-edited)\n").unwrap();
+    fs::write(
+        src.path()
+            .join("duetto-design-system")
+            .join("references")
+            .join("index.md"),
+        "# Index v2\n",
+    )
+    .unwrap();
+
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+    assert!(
+        stats
+            .skipped
+            .contains(&"duetto-design-system/references/tokens.md".to_string()),
+        "{stats:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&edited).unwrap(),
+        "# Tokens (hand-edited)\n"
+    );
+    assert!(
+        stats
+            .deployed
+            .contains(&"duetto-design-system/references/index.md".to_string()),
+        "{stats:?}"
+    );
+}

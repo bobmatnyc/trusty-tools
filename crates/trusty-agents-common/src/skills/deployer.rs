@@ -12,18 +12,21 @@
 //! source compatibility. [`is_skill_file`] and [`skill_stem`] widen from
 //! `pub(crate)` to `pub` (mirroring `agents::deployer::is_agent_file`, #2892)
 //! so trusty-mpm's `skill_staleness` module can keep calling them cross-crate.
-//! What: [`deploy_skills`] reads every `*.md` file from a source directory,
-//! derives the skill name by stripping the `.md` extension, and writes each
-//! one as `~/.claude/skills/<name>/SKILL.md`. It consults the
+//! What: [`deploy_skills`] enumerates the source directory's skills through
+//! [`crate::skills::source_scan::scan_skill_sources`] — which accepts BOTH a
+//! flat `<stem>.md` and a directory-shaped `<stem>/SKILL.md` (#4949) — and
+//! writes each one as `~/.claude/skills/<name>/SKILL.md`. It consults the
 //! [`SkillManifest`] to classify each target file and writes only the files it
-//! safely may. It also mirrors any `references/*.md` sibling files a
-//! multi-file skill carries alongside its entry point (issue #2903, ported
-//! from `trusty-mpm` PR #2915) under the identical ownership rule, keyed as
-//! `<stem>/references/<file>`. It returns a [`DeployStats`] summarising what
-//! happened.
+//! safely may. Every file a multi-file skill carries alongside its entry point
+//! travels with it under the identical ownership rule, keyed as
+//! `<stem>/<relative-path>` (issue #2903 introduced this for
+//! `references/*.md`; #4949 widened it to `metadata.json`, `scripts/`, and any
+//! other carried file). It returns a [`DeployStats`] summarising what
+//! happened, including — since #4949 — the names it could not deploy.
 //! Test: `cargo test -p trusty-agents-common skills::deployer` covers a new
 //! deploy, a skipped user-modified file, an unchanged file, a user-owned
-//! file, and the reference-file mirroring cases.
+//! file, the reference-file mirroring cases, and the directory-shaped-skill
+//! cases (`deploy_directory_shaped_skill` and siblings).
 
 use std::path::Path;
 
@@ -31,6 +34,7 @@ use crate::agents::manifest::{Result, atomic_write, checksum};
 use crate::skills::manifest::{
     SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
 };
+use crate::skills::source_scan::{SourceSkill, scan_skill_sources};
 
 /// Summary of one [`deploy_skills`] run.
 ///
@@ -178,35 +182,48 @@ fn deploy_skills_locked(
     let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Collect skill filenames deterministically so output and tests are stable.
-    let mut names: Vec<String> = Vec::new();
-    let mut source_file_count = 0usize;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        if entry.file_type()?.is_file() && is_skill_file(name) {
-            source_file_count += 1;
-            // Honour the manifest's skill-set selection (HR-2). The stem is the
-            // `.md`-stripped name used as the skill id and target dir name.
-            if select(skill_stem(name)) {
-                names.push(name.to_string());
-            }
-        }
+    // #4949: ONE shared scan answers "what is a skill here?", covering both the
+    // flat `<stem>.md` layout and the directory `<stem>/SKILL.md` layout. The
+    // loop this replaced tested `entry.file_type()?.is_file()`, so a
+    // directory-shaped skill failed it and was dropped with no warning on every
+    // deploy. `skills::tiers::list_source_stems` calls the same scan, so the
+    // planner and this deployer cannot disagree about which stems exist.
+    let scan = scan_skill_sources(source)?;
+
+    // #4949: a directory the scan could not turn into a skill (no `SKILL.md`)
+    // rides `stats.skipped` — the channel callers already summarise for the
+    // user (`managed_config::skill_skip_summary`, `tm sync-assets`) — plus a
+    // warn line, matching how the `mcp`-name rejection below is surfaced.
+    for name in &scan.rejected {
+        tracing::warn!(
+            skill = %name,
+            source = %source.display(),
+            "skill directory has no SKILL.md — it cannot be deployed"
+        );
+        stats.skipped.push(name.clone());
     }
-    names.sort_unstable();
 
     // An existing but empty source directory is just as silent a failure mode
     // as a missing one — e.g. a populated `agents/skills/` submodule checked
-    // out shallow, or a source dir pointed at the wrong path (A2).
-    if source_file_count == 0 {
+    // out shallow, or a source dir pointed at the wrong path (A2). Judged
+    // BEFORE `select` runs, as it always was: a filtered deploy that legitimately
+    // selects nothing (every stem shadowed by a higher tier) is not an empty
+    // source. A directory holding only malformed skills is not empty either —
+    // those were just reported by name.
+    if scan.skills.is_empty() && scan.rejected.is_empty() {
         tracing::warn!(
             source = %source.display(),
             "skill source directory is empty — no skills will be deployed"
         );
     }
+
+    // Honour the manifest's skill-set selection (HR-2). The scan is already
+    // sorted by stem, so output and tests stay deterministic.
+    let selected: Vec<SourceSkill> = scan
+        .skills
+        .into_iter()
+        .filter(|skill| select(&skill.stem))
+        .collect();
 
     // #4881: the write loop's failure sites (an unreadable source file, a failed
     // `atomic_write`) can return AFTER earlier `SKILL.md` files are already on
@@ -216,7 +233,7 @@ fn deploy_skills_locked(
     // held, the ledger is saved either way, and the error propagates after.
     // Pre-existing (it predates this issue's lock work) but fixed here because
     // it violates the same invariant.
-    let write_result = deploy_selected(source, dest, &names, &now, &mut manifest, &mut stats);
+    let write_result = deploy_selected(dest, &selected, &now, &mut manifest, &mut stats);
 
     let save_result = manifest.save_merging(dest, &base);
 
@@ -241,23 +258,23 @@ fn deploy_skills_locked(
 /// whether it returns `Ok` or `Err`, so the caller must save the ledger on BOTH
 /// paths — a shape that is easy to get wrong while the loop and the save share
 /// one function body, and was wrong here before this change.
-/// What: for each name, writes `<dest>/<stem>/SKILL.md` plus any
-/// `references/*.md` siblings through [`deploy_one_file`], recording each in
-/// `manifest` and `stats`. Skills whose stem contains `mcp` are rejected before
-/// any I/O (#2186). Returns the first I/O error; `manifest` and `stats` still
-/// describe everything written up to that point.
-/// Test: `deploy_records_files_written_before_a_mid_loop_failure`, plus every
-/// `deploy_*` test through the public entry point.
+/// What: for each skill, writes `<dest>/<stem>/SKILL.md` plus every file the
+/// skill carries through [`deploy_one_file`], recording each in `manifest` and
+/// `stats`. Skills whose stem contains `mcp` are rejected before any I/O
+/// (#2186). Returns the first I/O error; `manifest` and `stats` still describe
+/// everything written up to that point.
+/// Test: `deploy_records_files_written_before_a_mid_loop_failure`,
+/// `deploy_directory_shaped_skill`, plus every `deploy_*` test through the
+/// public entry point.
 fn deploy_selected(
-    source: &Path,
     dest: &Path,
-    names: &[String],
+    skills: &[SourceSkill],
     now: &str,
     manifest: &mut SkillManifest,
     stats: &mut DeployStats,
 ) -> Result<()> {
-    for filename in names {
-        let stem = skill_stem(filename).to_string();
+    for skill in skills {
+        let stem = skill.stem.clone();
 
         // Claude Code ships a built-in `/mcp` slash command. A deployed skill
         // whose invocable name (the stem, i.e. the directory Claude Code
@@ -273,39 +290,44 @@ fn deploy_selected(
             continue;
         }
 
-        let source_path = source.join(filename);
-        let content = std::fs::read_to_string(&source_path)?;
+        let content = std::fs::read_to_string(&skill.entry)?;
         // Claude Code discovers skills from <dest>/<name>/SKILL.md.
         let skill_dir = dest.join(&stem);
         let target_path = skill_dir.join("SKILL.md");
 
         deploy_one_file(manifest, &stem, &target_path, &content, now, stats)?;
 
-        // Mirror any reference files a multi-file skill carries alongside its
-        // SKILL.md (issue #2903, ported from `trusty-mpm` PR #2915 —
-        // upstream progressive-disclosure skills ship a lean entry point plus
-        // a `references/*.md` subtree loaded on demand). This runs
-        // independent of whether the entry point itself changed this pass,
-        // so a skill that gains a new reference file on a later deploy still
-        // picks it up even when its SKILL.md content is unchanged
-        // (`stats.unchanged`).
-        let refs_source_dir = source.join(&stem).join("references");
-        if refs_source_dir.is_dir() {
-            let mut ref_names: Vec<String> = std::fs::read_dir(&refs_source_dir)?
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let name = e.file_name().to_str()?.to_string();
-                    (e.file_type().ok()?.is_file() && is_skill_file(&name)).then_some(name)
-                })
-                .collect();
-            ref_names.sort_unstable();
-
-            for ref_name in ref_names {
-                let ref_content = std::fs::read_to_string(refs_source_dir.join(&ref_name))?;
-                let ref_key = format!("{stem}/references/{ref_name}");
-                let ref_target = skill_dir.join("references").join(&ref_name);
-                deploy_one_file(manifest, &ref_key, &ref_target, &ref_content, now, stats)?;
+        // Mirror every file the skill carries alongside its entry point — the
+        // `references/*.md` subtree a progressive-disclosure skill ships (issue
+        // #2903), and since #4949 also its `metadata.json`, `scripts/`, and
+        // anything else at any depth. This runs independent of whether the
+        // entry point itself changed this pass, so a skill that gains a file on
+        // a later deploy still picks it up even when its SKILL.md content is
+        // unchanged (`stats.unchanged`).
+        for extra in &skill.extras {
+            // A non-UTF-8 file (an image, a compiled asset) cannot ride the
+            // manifest's text checksum. Report it and carry on — aborting the
+            // whole deploy over one carried asset would be a worse failure than
+            // the one #4949 fixed.
+            let extra_content = match std::fs::read_to_string(&extra.path) {
+                Ok(content) => content,
+                Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                    let key = format!("{stem}/{}", extra.rel);
+                    tracing::warn!(
+                        file = %key,
+                        "skill file is not UTF-8 — it cannot be deployed"
+                    );
+                    stats.skipped.push(key);
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            let key = format!("{stem}/{}", extra.rel);
+            let mut extra_target = skill_dir.clone();
+            for segment in extra.rel.split('/') {
+                extra_target.push(segment);
             }
+            deploy_one_file(manifest, &key, &extra_target, &extra_content, now, stats)?;
         }
     }
 
