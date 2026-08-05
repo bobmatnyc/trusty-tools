@@ -1575,7 +1575,7 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
         );
     }
 
-    // `identity` no longer references the budget AT ALL. It used to restate the
+    // #4969: `identity` no longer references the budget AT ALL. It used to restate the
     // whole PM identity — orchestrator role, delegation default, budget — that
     // `core` already states, so the two sections said the same thing twice in
     // one prompt. `identity` now defers to core's `## Identity` and keeps only
@@ -1604,7 +1604,7 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
 
 #[test]
 fn every_skill_pointer_names_the_call_rather_than_decorating() {
-    // `[SKILL: name]` is DOCUMENTATION STYLE, not a tool call. Nothing about the
+    // #4969: `[SKILL: name]` is DOCUMENTATION STYLE, not a tool call. Nothing about the
     // bracket notation makes the model invoke `Skill(skill="name")`, so a
     // pointer written that way reads as a label and the content it points at
     // gets re-inlined beside it by the next editor. That is exactly what had
@@ -1642,7 +1642,7 @@ fn every_skill_pointer_names_the_call_rather_than_decorating() {
 
 #[test]
 fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
-    // It was stated three times: `core` inlined the evidence table, the QA
+    // #4969: it was stated three times. `core` inlined the evidence table, the QA
     // routing table and the forbidden phrases beside a pointer to the skill
     // that already held all three, and `workflow` restated nearly all of it
     // again with no pointer at all.

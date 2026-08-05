@@ -1001,7 +1001,7 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
         "assembled PM system prompt is missing the Parked-Subagent \
          Re-Engagement section (#2833, #4792)"
     );
-    // The MECHANICS moved to `tm-delegation-patterns` (per-prompt rule: an
+    // #4969: the MECHANICS moved to `tm-delegation-patterns` (per-prompt rule: an
     // instruction not needed on EVERY prompt lives in a skill). The resident
     // text must therefore name the call explicitly — a bare `[SKILL: name]`
     // mention is documentation style, not a tool invocation, and is exactly how
