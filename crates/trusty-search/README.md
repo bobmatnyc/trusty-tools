@@ -50,7 +50,7 @@ Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
 ### From Source with Cargo
 
-Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
+Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
 
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked
@@ -757,9 +757,12 @@ To fix:
    filesystem access as your user account, without the launchd TCC restriction.
    ```bash
    # Stop the launchd agent first, then start manually:
-   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist
+   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.search.plist
    trusty-search start --foreground
    ```
+   The label is `com.trusty.search` — not `com.trusty.trusty-search`, which
+   older installers wrote and which `trusty-search service install` now evicts
+   ([#4868](https://github.com/bobmatnyc/trusty-tools/issues/4868)).
    Note: indexes restored when running manually will NOT be available when the
    daemon is later restarted via launchd unless Full Disk Access is granted.
 

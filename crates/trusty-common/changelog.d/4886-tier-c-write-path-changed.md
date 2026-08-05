@@ -1,0 +1,4 @@
+Changed
+
+- A displaced Tier C drawer now has its own `fact_key` cleared, not just its index entry moved. #4884's storage layer deliberately left the field reading the old slot name, which was correct while nothing read it as a liveness signal; with a write path it would let `load_drawers()` show two drawers claiming one slot. `expires_at` is cleared with it — on a Tier C drawer that field IS the retirement condition D4 demanded, and supersession has discharged it, so the demoted record becomes an ordinary permanent Tier E drawer rather than self-destructing at the next sweep
+- The expiry sweeps (`PalaceHandle::open_with_intent`, `purge_expired`) skip drawers holding a Tier C slot. Read-time expiry (#4885) already stops an expired current fact being served, which is the demotion D6 asks for; hard-deleting the row on top of that would destroy the corrected record D6 preserves and orphan the supersession pointer #4887 will hang off it

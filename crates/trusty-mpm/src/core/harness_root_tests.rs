@@ -333,3 +333,88 @@ fn session_scope_rejects_a_path_traversal_segment() {
         );
     }
 }
+
+/// #4270: the predicate names each protected entry it finds.
+///
+/// Why: two guards refuse a rename based on this answer, and each wants to say
+/// what it found. A predicate that recognised only one of the three names is
+/// exactly the hole the first round of #4270 shipped — `.base` was guarded and
+/// `.worktrees` was not.
+/// What: asserts each of `.git`, `.base`, `.worktrees` is detected on its own.
+/// Test: this function IS the test.
+#[test]
+fn protected_state_in_names_each_protected_entry() {
+    for name in [".git", ".base", ".worktrees"] {
+        let tmp = crate::test_support::hermetic_temp_dir();
+        let dir = tmp.path().join("owner").join("repo");
+        std::fs::create_dir_all(dir.join(name)).expect("create protected entry");
+        assert_eq!(
+            protected_state_in(&dir),
+            Some(name),
+            "{name} must be recognised as protected state"
+        );
+    }
+}
+
+/// #4270: a directory carrying none of the protected entries is not protected.
+///
+/// Why: the guards must still let genuine foreign debris through to the
+/// quarantine path, or the stale-clone recovery #1937 added stops working.
+/// What: a non-empty directory holding only a stray `HEAD` — the crashed-clone
+/// shape — reads as unprotected.
+/// Test: this function IS the test.
+#[test]
+fn protected_state_in_is_none_for_a_foreign_directory() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let dir = tmp.path().join("owner").join("repo");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
+    assert_eq!(protected_state_in(&dir), None);
+}
+
+/// #4270: an entry that cannot be stat'd counts as PRESENT, not absent.
+///
+/// Why: this is the whole reason the probe is not `Path::exists`, which maps
+/// EACCES to `false` — indistinguishable from "no git dir". Under that
+/// spelling a permissions blip on `.git` lets `migrate_old_layout_aside` rename
+/// a live project directory. The failure is silent and the data is gone, so the
+/// fail-safe direction has to be proven, not assumed.
+/// What: chmods the containing directory to 000 so stat'ing a child returns
+/// EACCES, then asserts the probe still reports protected. Skips when running
+/// as root (root bypasses the permission check) or when the platform lets the
+/// stat through anyway.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn protected_state_in_treats_an_unreadable_entry_as_present() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let dir = tmp.path().join("owner").join("repo");
+    std::fs::create_dir_all(dir.join(".git")).expect("create .git");
+
+    let restore = std::fs::metadata(&dir).expect("stat dir").permissions();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+    let unreadable = std::fs::symlink_metadata(dir.join(".git"))
+        .err()
+        .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+    let observed = protected_state_in(&dir);
+
+    // Restore before asserting so a failure cannot leave an undeletable tempdir.
+    std::fs::set_permissions(&dir, restore).expect("restore permissions");
+
+    if !unreadable {
+        eprintln!(
+            "protected_state_in_treats_an_unreadable_entry_as_present: stat still \
+             succeeds (running as root?), skipping"
+        );
+        return;
+    }
+    assert_eq!(
+        observed,
+        Some(".git"),
+        "an entry that cannot be stat'd must count as present — Path::exists would \
+         report false here and the caller would rename live work"
+    );
+}

@@ -12,6 +12,7 @@ tga	trusty-git-analytics	tga	src/main.rs	-	yes	present	present	present
 trusty-mpm	trusty-mpm	tm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-mpm	trusty-mpm	trusty-mpm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-review	trusty-review	trusty-review	src/main.rs	-	yes	present	present	present
+trusty-console	trusty-console	trusty-console	src/main.rs	-	yes	present	present	present
 # --- out of scope per DOC-1 D3; carried so --check-table can detect additions ---
 trusty-agents	trusty-agents	tagent	src/main.rs	-	no	-	-	-
 trusty-agents-ui	trusty-agents/ui/src-tauri	trusty-agents-ui	src/main.rs	-	no	-	-	-
@@ -21,7 +22,6 @@ trusty-channels	trusty-channels	telegram-mcp	src/bin/telegram-mcp.rs	-	no	-	-	-
 trusty-code-gui	trusty-code-gui	trusty-code-gui	src/main.rs	-	no	-	-	-
 trusty-common	trusty-common	candle_metal_bench	src/bin/candle_metal_bench.rs	embedder-candle	no	-	-	-
 trusty-common	trusty-common	tickets-mcp	src/bin/tickets_mcp.rs	tickets	no	-	-	-
-trusty-console	trusty-console	trusty-console	src/main.rs	-	no	-	-	-
 trusty-embedderd-py	trusty-embedderd-py	trusty-embedderd-py	src/main.rs	-	no	-	-	-
 trusty-gworkspace	trusty-gworkspace	trusty-gworkspace-mcp	src/bin/trusty-gworkspace-mcp.rs	-	no	-	-	-
 trusty-kb	trusty-kb	trusty-kb	src/main.rs	-	no	-	-	-

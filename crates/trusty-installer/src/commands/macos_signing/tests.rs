@@ -218,7 +218,7 @@ fn has_developer_id_cert_respects_env() {
     // The env-override path is tested by setting the env var manually.
     let prev = std::env::var("TRUSTY_SIGN_IDENTITY").ok();
     // SAFETY: single-threaded test; environment mutation is process-global
-    // but safe to call in Rust 1.91 (not yet stabilized as unsafe).
+    // but safe to call in Rust 1.94 (not yet stabilized as unsafe).
     unsafe {
         std::env::set_var(
             "TRUSTY_SIGN_IDENTITY",

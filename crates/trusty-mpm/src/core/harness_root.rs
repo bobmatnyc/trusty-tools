@@ -44,20 +44,64 @@ pub const FRAMEWORK_DIR: &str = "framework";
 /// Test: `session_dir_is_per_session_under_the_harness_root`.
 pub const SESSIONS_DIR: &str = "sessions";
 
-/// The shared bare clone trusty-mpm provisions inside a managed project.
+/// The shared bare clone trusty-mpm provisioned inside a managed project
+/// before #4270.
 ///
-/// Why: `provisioner::workspace` clones the shared base into `<project>/.base`
-/// and adds every managed session's worktree from THERE, so those worktrees'
-/// git common dir is the bare clone — a directory INSIDE the project, not the
-/// project. This is not a path guess: it is the same directory name
-/// `provisioner::workspace::BASE_CHECKOUT_DIRNAME` writes and
-/// `session_manager::worktree_registry` interrogates.
+/// Why: `provisioner::workspace` used to clone the shared base into
+/// `<project>/.base` and add every managed session's worktree from THERE, so
+/// those worktrees' git common dir is the bare clone — a directory INSIDE the
+/// project, not the project. #4270 retired that store: provisioning now clones
+/// the base into `<project>` itself and puts worktrees at
+/// `<project>/.worktrees/<id>`, matching the in-project path. Existing `.base`
+/// stores were deliberately NOT migrated, so this mapping stays load-bearing
+/// for every worktree already under one, and the name is also what
+/// `provisioner::workspace`'s own guard checks before refusing to clone over a
+/// live legacy store.
 /// What: `.base`. The name alone is never sufficient — see
 /// [`map_base_clone_to_project`], which also requires the directory to be a
 /// BARE repository before rewriting it.
 /// Test: `harness_root_maps_a_base_clone_back_to_the_project`,
-/// `harness_root_for_a_non_bare_repo_named_base_is_itself`.
-const BASE_CLONE_DIRNAME: &str = ".base";
+/// `harness_root_for_a_non_bare_repo_named_base_is_itself`,
+/// `provision_in_leaves_an_existing_dot_base_store_untouched`.
+pub(crate) const BASE_CLONE_DIRNAME: &str = ".base";
+
+/// Name the protected state `dir` holds, or `None` when it holds none.
+///
+/// Why (#4270): two call sites decide whether a directory may be renamed aside
+/// — `provisioner::workspace`'s stale-base recovery hint and
+/// `daemon::managed_routes::inproject::migrate_old_layout_aside`. Both used to
+/// ask a narrower question (is there a `.base`? is there a `.git`?) and both
+/// were wrong in the same way: the thing that must never be moved is any
+/// directory git or trusty-mpm keeps real state in. Renaming one orphans every
+/// worktree beneath it, which is the #3605 failure with the project directory
+/// as its target. One predicate means the two guards cannot drift apart.
+///
+/// The probe is deliberately fail-SAFE rather than accurate. `Path::exists`
+/// answers `false` for a directory it lacks permission to stat, so an EACCES
+/// blip on `.git` reads exactly like a project with no git directory at all —
+/// and the caller then renames live work. Anything that is not a definite
+/// `NotFound` therefore counts as present: the cost of a false positive is a
+/// refusal the operator can act on, the cost of a false negative is lost work.
+/// What: returns the first of `.git`, `.base`, or `.worktrees` found under
+/// `dir`, so the caller's message can name what it found; `None` only when all
+/// three are definitely absent.
+/// Test: `protected_state_in_names_each_protected_entry`,
+/// `protected_state_in_is_none_for_a_foreign_directory`,
+/// `protected_state_in_treats_an_unreadable_entry_as_present`.
+pub(crate) fn protected_state_in(dir: &Path) -> Option<&'static str> {
+    [
+        ".git",
+        BASE_CLONE_DIRNAME,
+        crate::session_manager::decommission::WORKTREES_DIRNAME,
+    ]
+    .into_iter()
+    .find(|name| {
+        !matches!(
+            std::fs::symlink_metadata(dir.join(name)),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+    })
+}
 
 /// Environment variable carrying the managed session id inside a tm pane.
 const MANAGED_SESSION_ID_ENV: &str = "TM_MANAGED_SESSION_ID";

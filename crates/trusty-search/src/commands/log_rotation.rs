@@ -20,11 +20,17 @@
 #[cfg(target_os = "macos")]
 use anyhow::Result;
 
-/// Reverse-DNS label for the log-rotation LaunchAgent. Distinct from the
-/// daemon's `com.trusty.trusty-search` label so the two agents are managed
-/// independently.
+/// Reverse-DNS label for the log-rotation LaunchAgent. A sub-unit of the
+/// daemon's label, so the two agents are managed independently but named
+/// together.
+///
+/// #4868: this restated the daemon's pre-fix label as a literal, so when that
+/// label was wrong this one was wrong too — and stayed wrong after the daemon's
+/// was corrected. The owner's host still has the resulting orphan,
+/// `com.trusty.trusty-search.logrotate`, loaded with no main unit beside it;
+/// it is recorded as a legacy alias so an install evicts it.
 #[cfg(target_os = "macos")]
-pub const ROTATION_LAUNCHD_LABEL: &str = "com.trusty.trusty-search.logrotate";
+pub const ROTATION_LAUNCHD_LABEL: &str = trusty_common::launchd_labels::SEARCH_LOGROTATE;
 
 /// Rotation policy constants (issue #127 acceptance criteria).
 ///
@@ -204,6 +210,23 @@ pub fn install_rotation() -> Result<()> {
     // RunAtLoad pass rotates immediately if the log already exceeds 1 MB.
     let uid = nix::unistd::getuid().as_raw();
     let domain = format!("gui/{uid}");
+
+    // #4868: evict the labels earlier installs of THIS agent registered. The
+    // owner's host carries `com.trusty.trusty-search.logrotate` loaded with no
+    // main unit beside it — bootstrapping the corrected label without booting
+    // that out leaves two rotation jobs on one log file.
+    for legacy in trusty_common::launchd_labels::legacy_labels_for(ROTATION_LAUNCHD_LABEL) {
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", &format!("{domain}/{legacy}")])
+            .status();
+        if let Some(stale) = plist_path
+            .parent()
+            .map(|p| p.join(format!("{legacy}.plist")))
+        {
+            let _ = std::fs::remove_file(stale);
+        }
+    }
+
     let _ = std::process::Command::new("launchctl")
         .args(["bootout", &domain])
         .arg(&plist_path)

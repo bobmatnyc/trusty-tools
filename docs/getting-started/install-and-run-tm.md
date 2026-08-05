@@ -218,18 +218,26 @@ If you see a warning about FDA, it applies to `trusty-search` only. Run `tm doct
 Use the graceful restart convention (SIGTERM, not SIGKILL):
 
 ```bash
-# On macOS
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist
+# On macOS — each daemon's own `service install` is the restart. It writes the
+# unit, evicts any agent an older installer registered under a different label,
+# reloads only when something actually changed, and puts the previous unit back
+# if the new one fails to load ([#4868]).
+trusty-search service install
+trusty-memory service install
 
-# Reinstall or run: cargo install --path … --locked
-
-# Restart
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist
+# trusty-mpm's daemon is supervised rather than self-installing, so it restarts
+# via kickstart:
+launchctl kickstart -k gui/$(id -u)/com.trusty.mpm
 ```
+
+Do not hand-run a `launchctl bootout` / `bootstrap` pair against a plist path.
+That is what this page used to advise, and it named
+`com.trusty.trusty-search.plist` — a file that no longer exists, because
+`service install` deletes it as a legacy alias of `com.trusty.search`
+([#4868]). A bootout/bootstrap pair also cannot evict a unit registered under a
+different label, and leaves the daemon down if the bootstrap fails.
+
+[#4868]: https://github.com/bobmatnyc/trusty-tools/issues/4868
 
 On Linux, use `systemctl`:
 ```bash
@@ -247,10 +255,12 @@ rm ~/.local/bin/trusty-mpm ~/.local/bin/trusty-memory ~/.local/bin/trusty-search
 
 On macOS, also remove the launchd plists:
 ```bash
-rm ~/Library/LaunchAgents/com.trusty.*.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist 2>/dev/null || true
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist 2>/dev/null || true
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist 2>/dev/null || true
+# Unload first, then remove — a plist deleted while its job is still registered
+# leaves launchd running a daemon you can no longer address by file.
+trusty-search service uninstall 2>/dev/null || true
+launchctl bootout gui/$(id -u)/com.trusty.memory 2>/dev/null || true
+launchctl bootout gui/$(id -u)/com.trusty.mpm 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.trusty.*.plist
 ```
 
 ### Q: Installation failed. What do I do?
@@ -271,7 +281,7 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.plist 2>/de
    tctl install trusty-mpm 2>&1 | tee install.log
    ```
 
-4. **Fall back to cargo install:** If prebuilts fail, the installer falls back to `cargo install`. Ensure Rust 1.91+ is installed:
+4. **Fall back to cargo install:** If prebuilts fail, the installer falls back to `cargo install`. Ensure Rust 1.94+ is installed:
    ```bash
    rustc --version
    cargo --version

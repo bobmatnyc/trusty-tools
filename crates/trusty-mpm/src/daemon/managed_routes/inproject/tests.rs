@@ -201,6 +201,104 @@ fn migrate_old_layout_aside_ignores_empty_and_git_dirs() {
     );
 }
 
+/// #4270: a project directory holding a legacy `.base` store must be refused,
+/// never renamed aside.
+///
+/// Why: `.base` matches the old-layout signature exactly — non-empty, no
+/// top-level `.git` — but it is a real bare repository owning every
+/// `.base/.worktrees/<id>` worktree beneath it, any of which may belong to a
+/// live session. Renaming the parent orphans all of them at once. This is the
+/// same failure #3605 caused one level down, and the owner ruling makes `.base`
+/// cleanup a manual step, so the correct behaviour is a loud refusal that moves
+/// nothing.
+/// What: pre-seeds `<base>/.base/.worktrees/live/IN-USE.txt`, calls
+/// `migrate_old_layout_aside`, and asserts it returns `Err` naming `.base` while
+/// the marker file survives byte-for-byte and no backup sibling was created.
+/// Test: this function IS the test.
+#[test]
+fn migrate_old_layout_aside_refuses_a_dir_holding_a_dot_base_store() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let base = tmp.path().join("owner").join("repo");
+    let live = base.join(".base").join(".worktrees").join("live");
+    std::fs::create_dir_all(&live).expect("create legacy worktree");
+    let marker = live.join("IN-USE.txt");
+    std::fs::write(&marker, b"live session").expect("write marker");
+
+    let err = migrate_old_layout_aside(&base)
+        .expect_err("a dir holding a .base store must be refused, not migrated");
+    assert!(
+        err.contains(".base"),
+        "the refusal must name the legacy store, got: {err}"
+    );
+
+    assert!(
+        base.is_dir(),
+        "the project dir must stay exactly where it is"
+    );
+    assert_eq!(
+        std::fs::read(&marker).expect("the legacy worktree must survive untouched"),
+        b"live session",
+        "#4270: an existing .base worktree must not be disturbed, relocated, or deleted"
+    );
+    let siblings: Vec<_> = std::fs::read_dir(base.parent().unwrap())
+        .expect("read owner dir")
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .collect();
+    assert_eq!(
+        siblings.len(),
+        1,
+        "no backup sibling may be created, got {siblings:?}"
+    );
+}
+
+/// #4270: a project directory holding live worktrees must be refused too, not
+/// just one holding `.base`.
+///
+/// Why: the first round of this fix guarded `.base` and left `.worktrees`
+/// open — the same hole one name over. A project directory whose `.git` is
+/// absent OR merely unreadable still matches the old-layout signature, so it
+/// gets renamed whole, orphaning every session worktree beneath it. The guard
+/// has to key on the class, not on one member of it.
+/// What: pre-seeds `<base>/.worktrees/sess-1/IN-USE.txt` with no `.git` at all,
+/// calls `migrate_old_layout_aside`, and asserts it returns `Err` naming
+/// `.worktrees` while the marker survives and no backup sibling appears.
+/// Test: this function IS the test.
+#[test]
+fn migrate_old_layout_aside_refuses_a_dir_holding_live_worktrees() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let base = tmp.path().join("owner").join("repo");
+    let live = base.join(".worktrees").join("sess-1");
+    std::fs::create_dir_all(&live).expect("create live worktree");
+    let marker = live.join("IN-USE.txt");
+    std::fs::write(&marker, b"live session").expect("write marker");
+
+    let err = migrate_old_layout_aside(&base)
+        .expect_err("a dir holding live worktrees must be refused, not migrated");
+    assert!(
+        err.contains(".worktrees"),
+        "the refusal must name what it found, got: {err}"
+    );
+
+    assert!(
+        base.is_dir(),
+        "the project dir must stay exactly where it is"
+    );
+    assert_eq!(
+        std::fs::read(&marker).expect("the live worktree must survive untouched"),
+        b"live session",
+        "#4270: a live session worktree must not be disturbed, relocated, or deleted"
+    );
+    let siblings: Vec<_> = std::fs::read_dir(base.parent().unwrap())
+        .expect("read owner dir")
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .collect();
+    assert_eq!(
+        siblings.len(),
+        1,
+        "no backup sibling may be created, got {siblings:?}"
+    );
+}
+
 #[test]
 fn try_inproject_spawn_returns_none_for_non_git_path() {
     // A directory that is not a git repo must return Ok(None), not an error.
@@ -921,5 +1019,276 @@ fn push_pin_detection_matches_effective_config() {
         !super::push_is_pinned_to_current(&unpinned),
         "a sibling worktree without the pin must NOT be reported as pinned — \
          the detector must read worktree-scoped config, not the shared repo config"
+    );
+}
+
+// ── #4957: session branches must be cut from origin, not stale local main ──
+
+/// Run a git command in `cwd`, asserting success.
+fn g(cwd: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed: {}",
+        cwd.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Read trimmed stdout of a git command in `cwd`, asserting success.
+fn g_out(cwd: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed: {}",
+        cwd.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Add one commit in `cwd` and return its sha.
+fn commit(cwd: &std::path::Path, name: &str) -> String {
+    std::fs::write(cwd.join(name), name.as_bytes()).expect("write file");
+    g(cwd, &["add", "."]);
+    g(cwd, &["commit", "-q", "-m", name]);
+    g_out(cwd, &["rev-parse", "HEAD"])
+}
+
+/// A base clone whose local `main` is DELIBERATELY behind `origin/main`.
+///
+/// Why: this is the whole point of the #4957 fixture. A test that only checks
+/// "a worktree was created" passes against the pre-fix code; only a base whose
+/// local ref lags the remote can tell `HEAD` and `origin/main` apart.
+/// What: builds a bare `origin` seeded with commit A, clones it into `base`
+/// (so `base`'s local `main` AND `refs/remotes/origin/main` both sit at A),
+/// then pushes commit B to `origin` from a separate seed clone that `base`
+/// never sees. Returns `(base_path, sha_a, sha_b)` plus the TempDir guards
+/// that must stay alive for the duration of the test.
+struct StaleBase {
+    base: std::path::PathBuf,
+    origin: std::path::PathBuf,
+    sha_a: String,
+    sha_b: String,
+    _guards: Vec<tempfile::TempDir>,
+}
+
+fn stale_base_fixture() -> StaleBase {
+    let origin_dir = crate::test_support::hermetic_temp_dir();
+    let origin = origin_dir.path().to_path_buf();
+    let init = std::process::Command::new("git")
+        .args(["init", "--bare", "-q", "-b", "main"])
+        .arg(&origin)
+        .output()
+        .expect("git init --bare");
+    assert!(
+        init.status.success(),
+        "git init --bare failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    // Seed clone: the only checkout that ever pushes to `origin`.
+    let seed_parent = crate::test_support::hermetic_temp_dir();
+    let seed = seed_parent.path().join("seed");
+    let clone = std::process::Command::new("git")
+        .args(["clone", "-q"])
+        .arg(&origin)
+        .arg(&seed)
+        .output()
+        .expect("git clone seed");
+    assert!(
+        clone.status.success(),
+        "git clone seed failed: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    g(&seed, &["config", "user.email", "t@example.com"]);
+    g(&seed, &["config", "user.name", "T"]);
+    let sha_a = commit(&seed, "A");
+    g(&seed, &["push", "-q", "origin", "main"]);
+
+    // Base clone: takes A, then never hears about B.
+    let base_parent = crate::test_support::hermetic_temp_dir();
+    let base = base_parent.path().join("base");
+    let clone_base = std::process::Command::new("git")
+        .args(["clone", "-q"])
+        .arg(&origin)
+        .arg(&base)
+        .output()
+        .expect("git clone base");
+    assert!(
+        clone_base.status.success(),
+        "git clone base failed: {}",
+        String::from_utf8_lossy(&clone_base.stderr)
+    );
+    g(&base, &["config", "user.email", "t@example.com"]);
+    g(&base, &["config", "user.name", "T"]);
+
+    // Advance `origin/main` behind the base clone's back.
+    let sha_b = commit(&seed, "B");
+    g(&seed, &["push", "-q", "origin", "main"]);
+
+    assert_eq!(
+        g_out(&base, &["rev-parse", "HEAD"]),
+        sha_a,
+        "fixture precondition: the base clone's local main must be STALE (at A)"
+    );
+    assert_ne!(sha_a, sha_b, "fixture precondition: A and B must differ");
+
+    StaleBase {
+        base,
+        origin,
+        sha_a,
+        sha_b,
+        _guards: vec![origin_dir, seed_parent, base_parent],
+    }
+}
+
+/// #4957: a new session worktree must start at the FETCHED `origin/<default>`
+/// tip, not at the base checkout's stale local `main`.
+///
+/// Why: the reported failure was eight `session/*` branches and local `main`
+/// all pointing at the same three-week-old commit, 667 behind `origin/main`,
+/// because `git worktree add -b` was given no start-point and no fetch
+/// preceded it. Asserting only "a worktree exists" would have passed against
+/// that code; the fixture's deliberately-stale local `main` is what makes this
+/// test fail before the fix.
+/// What: builds a base clone at commit A while `origin/main` has moved to B,
+/// calls the production `create_session_worktree`, and asserts the new
+/// worktree's `HEAD` is B — and explicitly not A.
+/// Test: this function IS the test.
+#[test]
+fn session_worktree_branches_from_fetched_origin_not_stale_local_main() {
+    let fx = stale_base_fixture();
+
+    let worktree = create_session_worktree(
+        &fx.base,
+        "tm-stale-4957",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed against a real base clone");
+
+    let head = g_out(&worktree, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        head, fx.sha_a,
+        "the session worktree was cut from the STALE local main ({}) — #4957",
+        fx.sha_a
+    );
+    assert_eq!(
+        head, fx.sha_b,
+        "the session worktree must start at the freshly-fetched origin/main tip"
+    );
+}
+
+/// #4957: when the fetch fails, the session branch must still prefer the
+/// last-known `origin/<default>` over the base checkout's local `HEAD`, and
+/// the degradation must not read as a clean success.
+///
+/// Why: falling straight back to local `HEAD` on a failed fetch reintroduces
+/// the exact defect for every offline spawn — the fail-open shape this repo
+/// keeps getting bitten by. The base is given a LOCAL commit C that `origin`
+/// never saw, so `HEAD` and `refs/remotes/origin/main` are distinguishable.
+/// What: removes the `origin` repo so the fetch cannot succeed, adds local
+/// commit C to the base, then asserts the worktree starts at A (the stale
+/// remote-tracking ref) rather than C, and that
+/// `inproject_start_point::resolve` reports a warning rather than `Fresh`.
+/// Test: this function IS the test.
+#[test]
+fn session_worktree_falls_back_to_remote_tracking_ref_when_fetch_fails() {
+    let fx = stale_base_fixture();
+    let sha_c = commit(&fx.base, "C");
+    std::fs::remove_dir_all(&fx.origin).expect("remove origin to break the fetch");
+
+    let resolved = super::super::inproject_start_point::resolve(&fx.base);
+    assert_eq!(
+        resolved.git_ref(),
+        Some("origin/main"),
+        "a failed fetch must still hand back the last-known remote-tracking ref"
+    );
+    let warning = resolved
+        .warning()
+        .expect("a failed fetch must warn — it must never read as a clean success");
+    assert!(
+        warning.contains("git fetch origin main failed"),
+        "the warning must name the failure: {warning}"
+    );
+
+    let worktree = create_session_worktree(
+        &fx.base,
+        "tm-offline-4957",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("an unreachable remote must not fail worktree creation");
+
+    let head = g_out(&worktree, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        head, sha_c,
+        "an offline spawn must not silently fall back to the base checkout's local HEAD"
+    );
+    assert_eq!(
+        head, fx.sha_a,
+        "an offline spawn must start at the last fetched origin/main"
+    );
+}
+
+/// #4957: a repo with no `origin` remote must keep working, branching from
+/// `HEAD` without a spurious staleness warning.
+///
+/// Why: the fix must not turn "purely local repo" into an error or a noisy
+/// warning — there `HEAD` is simply the correct start point.
+/// What: builds a remote-less repo with one commit, asserts
+/// `inproject_start_point::resolve` reports `LocalOnly` with no warning and no
+/// start-point ref, and that the created worktree starts at that commit.
+/// Test: this function IS the test.
+#[test]
+fn session_worktree_without_a_remote_still_branches_from_head() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(&repo)
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    g(&repo, &["config", "user.email", "t@example.com"]);
+    g(&repo, &["config", "user.name", "T"]);
+    let sha = commit(&repo, "only");
+
+    let resolved = super::super::inproject_start_point::resolve(&repo);
+    assert_eq!(
+        resolved.git_ref(),
+        None,
+        "a remote-less repo must let git use HEAD"
+    );
+    assert_eq!(
+        resolved.warning(),
+        None,
+        "a remote-less repo is not a degradation and must not warn"
+    );
+
+    let worktree = create_session_worktree(
+        &repo,
+        "tm-local-4957",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("a repo with no remote must still get a worktree");
+    assert_eq!(
+        g_out(&worktree, &["rev-parse", "HEAD"]),
+        sha,
+        "a remote-less repo's worktree must start at the local HEAD commit"
     );
 }

@@ -1,9 +1,14 @@
 # 0003. MSRV 1.88 and per-crate Rust edition policy
 
-- **Status:** Accepted
+- **Status:** Superseded by [0029](./0029-msrv-1-94-and-edition-policy.md)
 - **Date:** 2026-05-29
 - **Scope:** Workspace-wide
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Superseded by
+  [0029](./0029-msrv-1-94-and-edition-policy.md) — the MSRV moved 1.88 → 1.91
+  (2026-05-31, AWS `aws-smithy-*` drift) and then 1.91 → 1.94 (2026-08-05, AWS
+  `aws-config`/`aws-sdk-bedrockruntime` drift). The edition policy below is
+  carried forward, restated to match the workspace's current 2024-by-default
+  arrangement.
 
 ## Context
 

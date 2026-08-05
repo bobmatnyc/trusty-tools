@@ -783,18 +783,33 @@ pub(crate) enum Command {
         cmd: WatchCmd,
     },
 
-    /// Register a GitHub repo alias for the standalone managed driver (DOC-24).
+    /// Register a repo alias for the standalone managed driver (DOC-24).
     ///
     /// Why: declares an alias→URL mapping without cloning so users can register
     /// their fleet cheaply and `tm load <alias>` lazily.
-    /// What: persists `{alias, url}` to `<root>/registry.json` and
-    /// prints `registered <alias> → <url>`.
-    /// Test: `cli_parses_register`.
+    /// What: `tm register <owner/repo> [alias]`. `owner/repo` is the primary
+    /// form and GitHub is assumed, so `tm register bobmatnyc/trusty-tools`
+    /// registers `https://github.com/bobmatnyc/trusty-tools`. A full URL is the
+    /// alternative form and any host works there. With no alias, one is derived
+    /// as hyphen-joined `owner-repo` (`bobmatnyc-trusty-tools`). The legacy
+    /// `tm register <alias> <url>` order still works — whichever positional
+    /// names a repo is taken as the repo (#4912). Browser paths into a repo
+    /// (`.../tree/main`, `.../pull/123`) and relative paths are refused.
+    /// Persists `{alias, url}` to `<root>/registry.json` and prints
+    /// `registered <alias> → <url>`.
+    /// Test: `register_args_tests.rs`.
     Register {
-        /// Short alias identifier (e.g. `my-project`).
-        alias: String,
-        /// Clone-able GitHub URL (HTTPS or SSH).
+        /// Repo to register: `<owner>/<repo>` (GitHub assumed), or a full URL
+        /// such as `https://github.com/<owner>/<repo>` or
+        /// `git@github.com:<owner>/<repo>.git` for any host.
+        ///
+        /// #4912: this position also accepts the legacy alias-first form; the
+        /// repo is detected by shape, so `tm register <alias> <url>` still works.
         url: String,
+        /// Short alias identifier (e.g. `my-project`).
+        ///
+        /// Optional — defaults to `owner-repo` derived from the repo.
+        alias: Option<String>,
         /// Overwrite an existing alias with a different URL.
         #[arg(long)]
         force: bool,
@@ -1130,10 +1145,18 @@ pub(crate) enum Command {
 /// caller signature widen in step. One flattened struct keeps the dispatch a
 /// single binding and gives the actions a place to be documented together.
 /// What: a clap `Args` group; every field is opt-in and defaults to off, so a
-/// bare `tm doctor` is unchanged and READ-ONLY.
+/// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
+/// the two flags that select a repair (`--fix`, `--fix-skills`) so
+/// `--include-frozen` can require either one without duplicating the check.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
-/// `cli_parses_doctor_fix_skills`.
+/// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`.
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+#[command(group(
+    clap::ArgGroup::new("repair")
+        .args(["fix", "fix_skills"])
+        .multiple(true)
+        .required(false)
+))]
 pub struct DoctorFlags {
     /// Hidden manual escape hatch: force-remove stale pre-rename
     /// `~/.claude/skills/mpm-*` directories.
@@ -1171,13 +1194,41 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_skills: bool,
 
-    /// With `--fix-skills`, also overwrite skills that were HAND-EDITED
-    /// after deployment.
+    /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
+    ///
+    /// Why (#4948): doctor checks were pull-only, so findings persisted
+    /// for weeks — 23 legacy skill copies, 26 project settings files
+    /// carrying tm hook entries, a repairable skill drift — all `Warn`,
+    /// none actionable without a separate command the operator had to know
+    /// existed. This runs the repairs whose target is something tm itself
+    /// wrote: the skill redeploy (`skill_staleness`), the project hook
+    /// cleanup (`hooks_contamination`), and the push-guard retrofit
+    /// (`push_guard`).
+    /// What: on its own it CHANGES NOTHING — it prints, per item and with
+    /// the path, exactly what it would do. `--yes` performs the writes.
+    /// It never deletes: `legacy_sources` findings under `~/.claude` are
+    /// reported as refused, because a copy there may be hand-edited and a
+    /// directory name cannot prove otherwise. Worktree checks stay
+    /// report-only.
+    #[arg(long)]
+    pub fix: bool,
+
+    /// With `--fix`, actually perform the repairs instead of previewing.
+    ///
+    /// Why (#4948): these repairs rewrite files the operator can see and
+    /// care about, so a preview is the default and writing is a second
+    /// deliberate act. Every overwrite is still backed up first.
+    /// What: promotes `--fix` from a dry run to an applied run.
+    #[arg(long, requires = "fix")]
+    pub yes: bool,
+
+    /// With `--fix` or `--fix-skills`, also overwrite skills that were
+    /// HAND-EDITED after deployment.
     ///
     /// Why (#4604): a frozen file is deliberate user customization, not
     /// rot, so overwriting one is an explicit opt-in and never the default
     /// fix path. Every overwrite is still backed up first.
     /// What: promotes `DriftedFrozen` findings into the repair set.
-    #[arg(long, requires = "fix_skills")]
+    #[arg(long, requires = "repair")]
     pub include_frozen: bool,
 }

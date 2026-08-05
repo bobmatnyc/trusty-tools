@@ -60,11 +60,14 @@ pub enum ServiceAction {
 /// Why: launchd identifies agents by their `Label`, which must also be the
 /// plist filename's stem. Centralising the constant keeps install / start /
 /// stop in lockstep.
-/// What: `com.trusty.memory` — matches the naming convention used by
-/// `trusty-search` (`com.trusty.trusty-search`) and follows reverse-DNS.
-/// Test: covered indirectly by `service install` integration runs.
+/// What: the registry's `com.trusty.memory`. #4868: the value is unchanged, but
+/// it was a literal that the installer's mirror table restated separately —
+/// correct today is not the same as safe, since that is precisely the state
+/// trusty-search was in before its own label drifted.
+/// Test: covered indirectly by `service install` integration runs; the registry
+/// itself is pinned by `canonical_consts_match_the_convention`.
 #[cfg(target_os = "macos")]
-pub const LAUNCHD_LABEL: &str = "com.trusty.memory";
+pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MEMORY;
 
 /// Dispatch a `trusty-memory service <action>` invocation.
 ///
@@ -171,6 +174,7 @@ pub(crate) fn build_launchd_config(
         // This is written into the plist on every install/start so a
         // hand-patched plist is never silently reverted.
         fd_limit: Some(LAUNCHD_FD_LIMIT),
+        working_directory: None,
     }
 }
 
@@ -234,22 +238,44 @@ fn service_install() -> Result<()> {
     let log_dir = launchd_log_dir()?;
     let cfg = build_launchd_config(exe, log_dir.clone());
     let plist_path = cfg.plist_path()?;
-    cfg.install()?;
-    println!(
-        "{} Wrote LaunchAgent plist: {}",
-        "✓".green(),
-        plist_path.display()
-    );
     ensure_fastembed_cache_dir();
 
-    cfg.bootstrap()?;
-    let domain = format!("gui/{}", trusty_common::launchd::current_uid());
-    println!(
-        "{} Loaded {} into {} — daemon will start automatically.",
-        "✓".green(),
+    // #4868: the Makefile's `launchctl unload $(PLIST_LEGACY)` + `rm -f` used to
+    // be the only thing evicting `com.trusty.trusty-memory`. Removing that from
+    // the Makefile without moving the job here would have LOST an eviction this
+    // crate already had, leaving a stale unit for a later bootstrap to find.
+    let outcome = cfg.install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
         LAUNCHD_LABEL,
-        domain
-    );
+    ))?;
+    for label in outcome.evicted() {
+        println!(
+            "{} Evicted the stale LaunchAgent {label} — it named this daemon \
+             under an old label.",
+            "⚠".yellow()
+        );
+    }
+    let domain = format!("gui/{}", trusty_common::launchd::current_uid());
+    match outcome {
+        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. } => println!(
+            "{} {} is already loaded in {} with this exact unit — left running.",
+            "·".dimmed(),
+            LAUNCHD_LABEL,
+            domain
+        ),
+        trusty_common::launchd_activate::Activation::Activated { .. } => {
+            println!(
+                "{} Wrote LaunchAgent plist: {}",
+                "✓".green(),
+                plist_path.display()
+            );
+            println!(
+                "{} Loaded {} into {} — daemon will start automatically.",
+                "✓".green(),
+                LAUNCHD_LABEL,
+                domain
+            );
+        }
+    }
     println!(
         "  Logs:    {}\n  Stop:    {}",
         log_dir.display().to_string().dimmed(),

@@ -94,6 +94,13 @@ pub struct LaunchdConfig {
     /// leave this as [`Some(LAUNCHD_FD_LIMIT)`] (the default via
     /// [`LaunchdConfig::new`]).
     pub fd_limit: Option<u32>,
+    /// `WorkingDirectory`, when the agent needs one. `None` omits the key.
+    ///
+    /// #4868: exists so a regenerated unit can carry forward a
+    /// `WorkingDirectory` the installed one had. Before install started
+    /// overwriting the live plist this was invisible; now dropping it would be
+    /// a silent behaviour change on every upgrade.
+    pub working_directory: Option<String>,
 }
 
 impl LaunchdConfig {
@@ -205,6 +212,12 @@ impl LaunchdConfig {
             "  <integer>{}</integer>\n",
             crate::shutdown::TERMINATION_GRACE_SECS
         ));
+
+        // #4868: carried forward from the installed unit when it had one.
+        if let Some(wd) = &self.working_directory {
+            s.push_str("  <key>WorkingDirectory</key>\n");
+            s.push_str(&format!("  <string>{}</string>\n", xml_escape(wd)));
+        }
 
         s.push_str("  <key>StandardOutPath</key>\n");
         s.push_str(&format!("  <string>{}</string>\n", xml_escape(stdout)));
@@ -418,6 +431,7 @@ mod tests {
             throttle_interval: 10,
             env_vars: vec![],
             fd_limit: Some(LAUNCHD_FD_LIMIT),
+            working_directory: None,
         }
     }
 

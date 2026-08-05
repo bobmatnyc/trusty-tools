@@ -30,5 +30,6 @@
 pub mod deployer;
 pub mod manifest;
 pub mod reconcile;
+pub mod source_scan;
 pub mod tiers;
 pub mod unmanaged;

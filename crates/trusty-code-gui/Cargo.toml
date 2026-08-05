@@ -2,7 +2,7 @@
 name = "trusty-code-gui"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.94"
 description = "Tauri desktop shell for trusty-code (tcode) — thin client over the tcode daemon HTTP API"
 publish = false
 license.workspace = true

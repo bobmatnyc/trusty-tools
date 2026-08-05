@@ -126,9 +126,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # MSRV floor is 1.91 (root Cargo.toml rust-version), matching ci.yml.
-      - name: Install Rust toolchain (1.91)
-        uses: dtolnay/rust-toolchain@1.91
+      # MSRV floor is 1.94 (root Cargo.toml rust-version), matching ci.yml.
+      - name: Install Rust toolchain (1.94)
+        uses: dtolnay/rust-toolchain@1.94
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

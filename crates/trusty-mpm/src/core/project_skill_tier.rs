@@ -1,14 +1,30 @@
 //! Deploy the PROJECT skill tier when the project manifest changes (#4880).
 //!
-//! Why: `<workspace>/.claude/skills` is the PROJECT tier, and project outranks
-//! user. It was written by exactly two callers —
-//! `session_launch::prepare_session` and `tm sessions sync-assets` — and neither
-//! runs on a resume or on a bare-`tm` in-place relaunch. The user tier, by
-//! contrast, is refreshed on every run (`managed_config`, #4873). So a
-//! project-tier skill an older binary deployed keeps winning over the current
-//! user-tier copy, silently, for the life of the workspace. That is the #4408
-//! shadowing shape one tier down: there, a 32-byte project-tier stub beat the
-//! real 25KB agent.
+//! Why: `<workspace>/.claude/skills` is the PROJECT tier. It was written by
+//! exactly two callers — `session_launch::prepare_session` and `tm sessions
+//! sync-assets` — and neither runs on a resume or on a bare-`tm` in-place
+//! relaunch, so a skill an older binary deployed here stays stale for the life
+//! of the workspace. The user tier, by contrast, is refreshed on every run
+//! (`managed_config`, #4873).
+//!
+//! WHICH PRECEDENCE (#4958 — two different orders get called that; the earlier
+//! text here conflated them and asserted the wrong one as fact).
+//!
+//! - DEPLOY-TIME SOURCE precedence — which SOURCE tm writes into ONE
+//!   destination: `project-custom > user-custom > bundled`
+//!   ([`crate::core::skill_tiers::plan_skill_tiers`]). This module's deploy
+//!   obeys it, and it says nothing about what Claude Code loads.
+//! - CLAUDE CODE RUNTIME resolution — which on-disk copy loads when the same
+//!   name exists in two directories: `enterprise > personal > project >
+//!   bundled`. For SKILLS personal beats project, so `$CLAUDE_CONFIG_DIR/skills`
+//!   OUTRANKS this destination. AGENTS run the order the other way (project
+//!   beats user), which is why #4408's project-tier stub beat the real 25 KB
+//!   agent — that precedent does NOT transfer to skills.
+//!
+//! So a stale copy here never "beats" the current user-tier one; a same-named
+//! skill under `$CLAUDE_CONFIG_DIR/skills` wins. Refreshing this tier still
+//! matters because it is what loads for every name the managed roster does not
+//! carry — the project-custom case above all.
 //!
 //! WHAT TRIGGERS A REDEPLOY (owner ruling 2026-08-05, refined on PR #4882).
 //! Two things, and deliberately not a third.

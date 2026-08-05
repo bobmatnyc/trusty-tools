@@ -75,7 +75,7 @@ so `cargo search` against the registry index is the evidence of record.)
 **The consequence.** `trusty-mpm` **is** installable by `cargo install trusty-mpm
 --locked` and is therefore **coverable by pattern (a)**. The "documented gap" this
 decision used to record **does not exist and is dissolved.** Pattern (a) covers the
-full eight-crate stack (D3), and the harness makes the same claim for all three
+full nine-crate stack (D3), and the harness makes the same claim for all three
 patterns.
 
 What survives the reversal is the *rule*, not the exception it was invented for:
@@ -94,7 +94,7 @@ count match. That rule now costs nothing, because nothing needs excluding.
 > keeping: a claim about publish status is checkable in one command, and this one
 > was never run until now.
 
-#### D3 — The stack is eight crates
+#### D3 — The stack is nine crates
 
 | # | Crate (workspace directory) | crates.io package | In pattern (a)? |
 |---|---|---|---|
@@ -106,10 +106,11 @@ count match. That rule now costs nothing, because nothing needs excluding.
 | 6 | `trusty-git-analytics` | **`tga`** | yes |
 | 7 | `trusty-installer` | `trusty-installer` | yes |
 | 8 | `trusty-review` | `trusty-review` (v0.10.1, verified 2026-07-31) | yes — **amended**, see below |
+| 9 | `trusty-console` | `trusty-console` (v0.4.0 published, v0.5.0 in tree, verified 2026-08-05) | yes — **amended**, see below |
 
-So **all three patterns cover all eight crates.** Row 5 previously read
+So **all three patterns cover all nine crates.** Row 5 previously read
 "— (`publish = false`)" / "**no** — D2"; that is corrected per the D2 reversal
-above. Row 8 is an addition, recorded immediately below.
+above. Rows 8 and 9 are additions, each recorded immediately below.
 
 > **Amendment, 2026-07-31 — D3 widened to eight crates; `trusty-review` added.**
 > This is a **product-owner decision**, not a correction of a false premise — D3 as
@@ -142,6 +143,40 @@ above. Row 8 is an addition, recorded immediately below.
 > the D2 reversal was: a design whose settled decisions quietly change is a design
 > nobody can audit. What is being reversed here is narrower than D2 — an omission
 > deliberately flagged as an omission, closed on purpose.
+
+> **Amendment, 2026-08-05 — D3 widened to nine crates; `trusty-console` added
+> (#4921).** Like the 2026-07-31 amendment above, this is a **product-owner
+> decision**, not a correction of a false premise: D3 was accurate about the
+> crates it named and simply did not name this one.
+>
+> **What the stack now is.** Nine crates, **fourteen** in-scope binaries (row 9
+> adds exactly one), and **six** liveness-checked daemons.
+>
+> **Verified before deciding, 2026-08-05.** `crates/trusty-console/Cargo.toml`
+> declares no `publish` key, so it publishes by cargo default, and `cargo search
+> trusty-console` returns `trusty-console = "0.4.0"`. It has exactly **one**
+> `[[bin]]` target — `name = "trusty-console"`, `path = "src/main.rs"`, no
+> `required-features` (`Cargo.toml:33-35`) — so it adds one binary, not a sidecar
+> set, and no Single-Install gate of its own (§7.4). Its `/health` route exists at
+> `crates/trusty-console/src/server/mod.rs:318` and is behind **no** feature gate;
+> the crate declares no `[features]` section at all. `stable_set()` has always
+> carried it with `daemon = true`
+> (`crates/trusty-installer/src/commands/stable_set.rs:180`), which is why the
+> harness's derived daemon set picks it up **with no code change** — the TSV's
+> `in_scope` column was the only thing excluding it.
+>
+> **Row 9 has a LARGER version gap than row 8, and it is a known-red one.** The
+> registry has **0.4.0**; the working tree is **0.5.0**, and the published build
+> lacks the `service` subcommand the harness's lifecycle path uses. Pattern (a) is
+> therefore expected to FAIL on this crate until a release lands — tracked as
+> **#4917**, and deliberately not worked around in the harness. Patterns (b) and
+> (c) build from the tree and are unaffected. This is release skew being *found*
+> by the pattern that exists to find it, which is the argument for widening scope
+> rather than against it.
+>
+> Recorded as a dated amendment rather than a silent edit for the same reason the
+> D2 reversal and the 2026-07-31 amendment were: a design whose settled decisions
+> quietly change is a design nobody can audit.
 
 Note the package-name discontinuity on row 6: the workspace directory is
 `crates/trusty-git-analytics`, the published package name and the binary are both
@@ -285,7 +320,7 @@ vmtest-harness/                      # project root, bash, OUTSIDE the Cargo wor
 ├── vmtest                           # driver CLI
 ├── lib/
 │   ├── vm.sh                        # tart lifecycle — the OS boundary for future Linux support
-│   ├── provision.sh                 # mise + rust@1.91 + uv + gh  (~30s)
+│   ├── provision.sh                 # mise + rust@1.94 + uv + gh  (~30s)
 │   ├── source.sh                    # source delivery per pattern
 │   └── verify.sh                    # JSON-only assertion oracle
 ├── scenarios/
@@ -329,8 +364,9 @@ Exports (illustrative): `vm_clone`, `vm_size`, `vm_boot`, `vm_wait_ready`,
 
 #### 3.3 `lib/provision.sh` — toolchain
 
-Installs `mise`, `rust@1.91`, `uv`, and `gh` in the guest. Measured at **~30s**
-(finding K2). Runs *after* the negative probe (§4.2), because the negative probe's
+Installs `mise`, `rust@1.94`, `uv`, and `gh` in the guest. The Rust version
+tracks the workspace MSRV (ADR-0029); it was `rust@1.91` when finding K2 was
+measured. Measured at **~30s** (finding K2). Runs *after* the negative probe (§4.2), because the negative probe's
 entire value is that the guest has no Rust toolchain yet.
 
 Provisioning must end by **exporting the resolved absolute toolchain paths** — in
@@ -537,7 +573,7 @@ per crate. No host→guest source transfer occurs; the host repository is not re
 
 #### 6.3 Pattern (a) — released
 
-`cargo install <crate> --locked` from crates.io, for all eight publishable crates in
+`cargo install <crate> --locked` from crates.io, for all nine publishable crates in
 D3. `--locked` is mandatory — it is what makes the run reproducible against the
 published lockfile rather than against whatever the resolver feels like today.
 
@@ -609,6 +645,7 @@ binaries that install must produce:
 | `tga` | `tga` |
 | `trusty-mpm` | `tm`, `trusty-mpm` |
 | `trusty-review` | `trusty-review` |
+| `trusty-console` | `trusty-console` |
 
 > **Amendment, 2026-07-31 — third `trusty-memory` sidecar added.** The row above
 > originally listed two binaries and **omitted `trusty-memory-mcp-bridge`**.
@@ -630,6 +667,14 @@ binaries that install must produce:
 > `required-features = []` — so it adds one expectation and no sidecar set. Note
 > what that means for §7.4: a single-binary crate has no Single-Install Convention
 > to gate, and none is asserted for it.
+
+> **Amendment, 2026-08-05 — `trusty-console` row added** *(#4921)*. D3 was widened
+> to nine crates by the owner decision recorded there, so the table gains a ninth
+> row. Like `trusty-review` it is a **single-binary** crate — one `[[bin]]`,
+> `name = "trusty-console"`, `path = "src/main.rs"`, no `required-features`
+> (`Cargo.toml:33-35`) — so it adds one expectation, no sidecar set, and no
+> Single-Install Convention gate. The stack is now **fourteen** binaries across
+> nine crates.
 
 **Why a table and not the documentation:** `docs/reference/release-workflow.md`
 (~lines 450–460) is **stale** with respect to `trusty-console`. Asserting against
@@ -827,7 +872,7 @@ meaningful claim rather than a file-existence check.
 |---|---|---|
 | `trusty-search` build from source | **112s** | 409 crates, 8 vCPU / 16 GB, **cold registry**, thin LTO applied, `ort-sys` ONNX download working in-guest |
 | `cargo install tga --locked` | **131s** | 211 deps, **4 vCPU** |
-| Provisioning (`mise` + `rust@1.91` + `uv` + `gh`) | **30s** | finding K2 |
+| Provisioning (`mise` + `rust@1.91` + `uv` + `gh`) | **30s** | finding K2; measured on `rust@1.91`, the MSRV pin at the time — provisioning installs `rust@1.94` today (ADR-0029) and this figure has not been re-measured |
 | CoW clone (`tart clone`) | **0.31s** | APFS copy-on-write |
 | First boot to `tart exec` responding | **~34s** | |
 | Subsequent boots | ~~**~18s**~~ **12–34 s, indistinguishable from a first boot** | *(amended 2026-08-04, P8-T4 — see below)* |
@@ -930,7 +975,7 @@ Per D4:
 3. **Pattern (a) — released.** Adds `scenarios/install-released.sh` only. No new
    infrastructure. *(Amended 2026-07-31: this step previously also called for
    pattern-aware `trusty-mpm` known-absent handling in the oracle. The D2 reversal
-   removes that work item — pattern (a) now expects the same **eight** crates
+   removes that work item — pattern (a) now expects the same **nine** crates
    present as (b) and (c), per §7.5 and D3 as amended.)*
 
 > **Settled:** the architecture sketch annotates `scenarios/install-local.sh` with

@@ -252,11 +252,15 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
     let supervised = crate::commands::launchd_probe::compute_supervised(is_launchd, plist_exists);
     state.set_supervised(supervised);
     if !supervised {
+        // #4868: name the labels from the registry, not from literals. A hint
+        // that prescribes a unit the host does not have is #2827 exactly.
         tracing::warn!(
             "unsupervised trusty-mpm daemon running alongside a launchd unit — \
              likely spawned by a client during a restart race; kill it and use \
-             `launchctl kickstart -k gui/$(id -u)/com.trusty.mpm.supervisor` \
-             (or `com.trusty.mpm`) to let launchd own the daemon."
+             `launchctl kickstart -k gui/$(id -u)/{supervisor}` (or `{daemon}`) \
+             to let launchd own the daemon.",
+            supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR,
+            daemon = trusty_common::launchd_labels::MPM,
         );
     }
     supervised
@@ -280,14 +284,18 @@ fn apply_supervision_signal(state: &trusty_mpm::daemon::DaemonState) -> bool {
 /// both the runtime call site and any future caller.
 /// Test: `unsupervised_daemon_error_names_remedies` below.
 fn unsupervised_daemon_error() -> anyhow::Error {
+    // #4868: labels come from the canonical registry so this remedy always
+    // names units that exist.
     anyhow::anyhow!(
         "refusing to start: a trusty-mpm launchd unit is registered but this \
          process was not started by launchd (issue #2486/#4397) — starting \
          anyway would create a duplicate, unsupervised daemon that can hold a \
          stale binary indefinitely. Use \
-         `launchctl kickstart -k gui/$(id -u)/com.trusty.mpm.supervisor` (or \
-         `com.trusty.mpm`) to let launchd own the daemon, or pass \
-         `tm daemon --force` to start unsupervised anyway."
+         `launchctl kickstart -k gui/$(id -u)/{supervisor}` (or `{daemon}`) to \
+         let launchd own the daemon, or pass `tm daemon --force` to start \
+         unsupervised anyway.",
+        supervisor = trusty_common::launchd_labels::MPM_SUPERVISOR,
+        daemon = trusty_common::launchd_labels::MPM,
     )
 }
 

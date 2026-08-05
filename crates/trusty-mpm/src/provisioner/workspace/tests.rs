@@ -130,8 +130,9 @@ fn provisioner_uses_session_id_subdir() {
 #[serial_test::serial]
 fn provision_in_uses_explicit_project_dir() {
     // The #1220 path: caller supplies a pre-resolved `<owner>/<repo>` project
-    // dir. #1935: the session worktree nests under the project dir's shared
-    // `.base/.worktrees/<session-id>/`, not directly under the project dir.
+    // dir. #1935 nested the session worktree under a shared base checkout;
+    // #4270 made that base the project dir itself, so the worktree is
+    // `<project_dir>/.worktrees/<session-id>/` — the git-standard shape.
     let root = crate::test_support::hermetic_temp_dir();
     let _home = set_home(root.path());
     let prov = make_provisioner(&root);
@@ -148,16 +149,140 @@ fn provision_in_uses_explicit_project_dir() {
         )
         .unwrap();
 
-    // Path must be exactly <project_dir>/.base/.worktrees/<session-id> —
-    // isolated under the project dir, nested under the shared base checkout.
     assert_eq!(
         ws.path,
-        project_dir
-            .join(".base")
-            .join(".worktrees")
-            .join(id.to_string())
+        project_dir.join(".worktrees").join(id.to_string()),
+        "#4270: the worktree must land directly under the project dir's .worktrees/"
     );
     assert!(ws.path.starts_with(&project_dir));
+}
+
+/// #4270 requirement 1: provisioning from a repo URL puts the worktree at
+/// `<project-root>/.worktrees/<name>`, not `<root>/.base/.worktrees/<name>`.
+///
+/// Why: this is the owner ruling ("all new worktrees should be in .worktrees --
+/// we need to follow the git convention here") stated as an executable
+/// assertion. The sibling `provision_in_uses_explicit_project_dir` pins the
+/// exact path; this one pins the NEGATIVE that the ruling is about, so a
+/// regression that restores the `.base/` nesting fails here by name.
+/// What: provisions one session and asserts the worktree path contains no
+/// `.base` component and equals the `.worktrees/<id>` shape.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn provision_in_puts_worktrees_under_the_project_root_not_dot_base() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
+    let prov = make_provisioner(&root);
+    let id = ManagedSessionId::new();
+    let project_dir = root.path().join("owner").join("repo");
+
+    let ws = prov
+        .provision_in(&project_dir, &id, "https://github.com/owner/repo", "", "t")
+        .unwrap();
+
+    assert!(
+        !ws.path
+            .components()
+            .any(|c| c.as_os_str() == crate::core::harness_root::BASE_CLONE_DIRNAME),
+        "#4270: no .base component may appear in a provisioned worktree path, got {}",
+        ws.path.display()
+    );
+    assert_eq!(ws.path, project_dir.join(".worktrees").join(id.to_string()));
+}
+
+/// #4270 requirement 2: the provisioning path creates no `.base` directory.
+///
+/// Why: moving the worktrees out of `.base/` while still cloning a bare store
+/// into it would satisfy the path assertion above and miss the point — the
+/// store itself is what #4270 retires. Asserting on the filesystem after a real
+/// provision is the only way to catch that half-fix.
+/// What: provisions one session and asserts `<project_dir>/.base` does not
+/// exist, while the base checkout markers DO exist at `<project_dir>` itself.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn provision_in_creates_no_dot_base_directory() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
+    let prov = make_provisioner(&root);
+    let id = ManagedSessionId::new();
+    let project_dir = root.path().join("owner").join("repo");
+
+    prov.provision_in(&project_dir, &id, "https://github.com/owner/repo", "", "t")
+        .unwrap();
+
+    assert!(
+        !project_dir
+            .join(crate::core::harness_root::BASE_CLONE_DIRNAME)
+            .exists(),
+        "#4270: provisioning must not create a .base store under {}",
+        project_dir.display()
+    );
+    assert!(
+        project_dir.join(".git").join("config").is_file(),
+        "the base checkout must be established at the project dir itself"
+    );
+}
+
+/// #4270 requirement 3: an EXISTING `.base` worktree survives provisioning
+/// untouched.
+///
+/// Why: this is the requirement that protects live sessions. Existing `.base`
+/// stores were deliberately not migrated, so the new path meets them on real
+/// installations — and the generic stale-directory recovery hint would have told
+/// an agent to `mv` the whole project directory aside, orphaning every worktree
+/// under it (the #3605 shape, one level up). The refusal must be loud, and it
+/// must move nothing.
+/// What: pre-seeds a `.base/.worktrees/live/` worktree holding a marker file,
+/// provisions against that project dir, and asserts (1) the call fails, (2) the
+/// error names `.base` and suggests no `mv`/`rm`, (3) the marker file is still
+/// there with its original content.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn provision_in_leaves_an_existing_dot_base_store_untouched() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
+    let prov = make_provisioner(&root);
+    let project_dir = root.path().join("owner").join("repo");
+
+    let live_worktree = project_dir
+        .join(crate::core::harness_root::BASE_CLONE_DIRNAME)
+        .join(".worktrees")
+        .join("live");
+    std::fs::create_dir_all(&live_worktree).unwrap();
+    let marker = live_worktree.join("IN-USE.txt");
+    std::fs::write(&marker, "a live session is working here").unwrap();
+
+    let result = prov.provision_in(
+        &project_dir,
+        &ManagedSessionId::new(),
+        "https://github.com/owner/repo",
+        "",
+        "t",
+    );
+
+    assert!(
+        result.is_err(),
+        "provisioning over a live legacy .base store must fail loudly, got {result:?}"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains(crate::core::harness_root::BASE_CLONE_DIRNAME),
+        "the refusal must name the legacy store, got: {msg}"
+    );
+    assert_no_recursive_delete(&msg);
+    assert!(
+        !msg.contains("    mv "),
+        "the refusal must not suggest moving a live store, got: {msg}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("the pre-existing worktree must still be there"),
+        "a live session is working here",
+        "#4270: an existing .base worktree must not be disturbed, relocated, or deleted"
+    );
 }
 
 /// #1935: a second session provisioned for the SAME project must reuse the
@@ -169,9 +294,9 @@ fn provision_in_uses_explicit_project_dir() {
 /// that project reuses it via `worktree_add`.
 /// What: provisions two sessions against the same project dir, asserts (1)
 /// `FakeGitBackend::ensure_base_checkout` observed exactly one call whose
-/// `HEAD` marker was absent (the actual clone) — the second call is a no-op
-/// because the marker now exists; (2) the two sessions get DISTINCT
-/// worktree paths sharing the same `.base/` parent.
+/// `.git/config` marker was absent (the actual clone) — the second call is a
+/// no-op because the marker now exists; (2) the two sessions get DISTINCT
+/// worktree paths sharing the same project-dir base.
 /// Test: this function IS the test.
 #[test]
 #[serial_test::serial]
@@ -203,15 +328,15 @@ fn provision_reuses_base_checkout_across_sessions() {
         )
         .unwrap();
 
-    let base_dir = project_dir.join(".base");
-    // Both worktrees share the same base checkout directory...
-    assert!(ws1.path.starts_with(&base_dir));
-    assert!(ws2.path.starts_with(&base_dir));
+    // #4270: both worktrees share the same base checkout — the project dir.
+    let worktrees_dir = project_dir.join(".worktrees");
+    assert!(ws1.path.starts_with(&worktrees_dir));
+    assert!(ws2.path.starts_with(&worktrees_dir));
     // ...but are otherwise distinct, isolated directories.
     assert_ne!(ws1.path, ws2.path);
     // The base checkout itself was established exactly once (idempotent
-    // `HEAD` marker check inside `FakeGitBackend::ensure_base_checkout`).
-    assert!(base_dir.join("HEAD").is_file());
+    // `.git/config` marker check inside `FakeGitBackend::ensure_base_checkout`).
+    assert!(project_dir.join(".git").join("config").is_file());
 }
 
 #[test]
@@ -408,7 +533,7 @@ fn make_local_bare_origin(scratch: &TempDir) -> Option<PathBuf> {
 /// race on `ensure_base_checkout`.
 ///
 /// Why: before the fix, both racing callers observed `base_dir.join("HEAD")`
-/// absent, both attempted `git clone --bare`, and the loser hit git's
+/// absent, both attempted a clone, and the loser hit git's
 /// "destination path ... already exists and is not an empty directory"
 /// error, surfacing as a hard `ProvisionError::Git` and failing that
 /// session's provisioning outright.
@@ -416,10 +541,9 @@ fn make_local_bare_origin(scratch: &TempDir) -> Option<PathBuf> {
 /// `RealGitBackend.ensure_base_checkout(repo_url, &base_dir)` concurrently
 /// against the exact same, not-yet-existing `base_dir`, then asserts (1)
 /// every thread returned `Ok(())` — no race loser propagates the "already
-/// exists" error — and (2) exactly one genuinely established bare checkout
-/// exists at `base_dir` afterward (`git rev-parse --is-bare-repository`
-/// reports `true`). Skips gracefully if the local `git` binary is
-/// unavailable.
+/// exists" error — and (2) exactly one genuinely established checkout
+/// exists at `base_dir` afterward. Skips gracefully if the local `git` binary
+/// is unavailable.
 /// Test: this function IS the test.
 #[test]
 fn ensure_base_checkout_recovers_from_concurrent_race() {
@@ -431,7 +555,8 @@ fn ensure_base_checkout_recovers_from_concurrent_race() {
     let repo_url = format!("file://{}", bare_origin.display());
 
     let root = crate::test_support::hermetic_temp_dir();
-    let base_dir = root.path().join("project").join(".base");
+    // #4270: the base checkout IS the project directory.
+    let base_dir = root.path().join("owner").join("repo");
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
@@ -452,28 +577,27 @@ fn ensure_base_checkout_recovers_from_concurrent_race() {
     }
 
     assert!(
-        is_established_bare_checkout(&base_dir),
-        "base_dir must be a genuinely established bare checkout after the race settles"
+        is_established_checkout(&base_dir),
+        "base_dir must be a genuinely established checkout after the race settles"
     );
 }
 
-/// trusty-review finding #2 (fragile bare-clone detection, PR #1936): a
-/// stale NON-bare directory sitting at the base-checkout path must not be
-/// silently accepted as a valid shared base.
+/// trusty-review finding #2 (fragile clone detection, PR #1936): a stale
+/// directory sitting at the base-checkout path must not be silently accepted
+/// as a valid shared base.
 ///
 /// Why: the previous idempotency guard (`base_dir.join("HEAD").is_file()`)
 /// only checks for a file NAMED `HEAD` at the root of `base_dir` — it never
 /// confirms that directory is actually a valid, complete git repository.
-/// Verified empirically (see this test): a plain non-bare `git init`/`clone`
-/// does NOT put a `HEAD` file at its OWN root (that lives at `.git/HEAD`
-/// instead), but a directory that merely CONTAINS a stray file literally
-/// named `HEAD` — e.g. left over from a `git clone --bare` that crashed
-/// mid-clone (git writes `HEAD` early, before the rest of the object
-/// database/refs), or any other stale/corrupt artifact occupying
-/// `<project_dir>/.base/` — passes the old check and would be silently
-/// treated as an established base, so cloning is skipped and a corrupt
-/// directory is left as the "base"; later `git worktree add` /
-/// `git fetch` calls against it then fail confusingly.
+/// Verified empirically (see this test): a plain `git init`/`clone` does NOT
+/// put a `HEAD` file at its OWN root (that lives at `.git/HEAD` instead), but
+/// a directory that merely CONTAINS a stray file literally named `HEAD` — e.g.
+/// left over from a clone that crashed mid-flight (git writes `HEAD` early,
+/// before the rest of the object database/refs), or any other stale/corrupt
+/// artifact occupying the base path — passes the old check and would be
+/// silently treated as an established base, so cloning is skipped and a corrupt
+/// directory is left as the "base"; later `git worktree add` / `git fetch`
+/// calls against it then fail confusingly.
 /// What: pre-creates `base_dir` containing ONLY a `HEAD` file (no `.git`,
 /// no object database, no refs — the minimum needed to fool the OLD
 /// file-existence check) and calls `RealGitBackend.ensure_base_checkout`
@@ -483,18 +607,16 @@ fn ensure_base_checkout_recovers_from_concurrent_race() {
 /// binary is unavailable.
 /// Test: this function IS the test.
 #[test]
-fn ensure_base_checkout_rejects_stale_non_bare_directory() {
+fn ensure_base_checkout_rejects_stale_directory() {
     let scratch = crate::test_support::hermetic_temp_dir();
     let Some(bare_origin) = make_local_bare_origin(&scratch) else {
-        eprintln!(
-            "ensure_base_checkout_rejects_stale_non_bare_directory: git unavailable, skipping"
-        );
+        eprintln!("ensure_base_checkout_rejects_stale_directory: git unavailable, skipping");
         return;
     };
     let repo_url = format!("file://{}", bare_origin.display());
 
     let root = crate::test_support::hermetic_temp_dir();
-    let base_dir = root.path().join("project").join(".base");
+    let base_dir = root.path().join("owner").join("repo");
     std::fs::create_dir_all(&base_dir).unwrap();
     std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
@@ -503,8 +625,8 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
         "sanity check: the stale directory has a file literally named HEAD"
     );
     assert!(
-        !is_established_bare_checkout(&base_dir),
-        "sanity check: a lone HEAD file with no repo structure must NOT read as bare"
+        !is_established_checkout(&base_dir),
+        "sanity check: a lone HEAD file with no repo structure must NOT read as a checkout"
     );
 
     let result = RealGitBackend::default().ensure_base_checkout(&repo_url, &base_dir);
@@ -536,17 +658,16 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
 /// What: fails if the message names any recursive-delete form, and requires the
 /// non-destructive `mv`-aside quarantine hint plus the shared-ownership warning
 /// that was missing when the destructive hint was followed.
-/// Test: used by `ensure_base_checkout_rejects_stale_non_bare_directory`,
-/// `fake_ensure_base_checkout_rejects_stale_non_bare_directory`, and
+/// Test: used by `ensure_base_checkout_rejects_stale_directory`,
+/// `fake_ensure_base_checkout_rejects_stale_directory`, and
 /// `stale_base_dir_error_suggests_quarantine_not_deletion`.
+///
+/// The recursive-delete half is split into [`assert_no_recursive_delete`]
+/// because it applies to EVERY operator-facing refusal, while the `mv`
+/// requirement applies only to the foreign-debris case — a message aimed at a
+/// directory holding live worktrees must offer no `mv` at all (#4270).
 fn assert_no_destructive_hint(msg: &str) {
-    for forbidden in ["rm -rf", "rm -fr", "rm -r ", "remove_dir_all", "rmdir"] {
-        assert!(
-            !msg.contains(forbidden),
-            "recovery message must never suggest a recursive delete of the SHARED \
-             base checkout (#3605), but it contains {forbidden:?}: {msg}"
-        );
-    }
+    assert_no_recursive_delete(msg);
     assert!(
         msg.contains("    mv "),
         "recovery message must offer the non-destructive quarantine command, got: {msg}"
@@ -555,6 +676,129 @@ fn assert_no_destructive_hint(msg: &str) {
         msg.contains("SHARED"),
         "recovery message must warn that the base is shared across sessions, got: {msg}"
     );
+}
+
+/// #4270: `git clean -ffd` in the base clone must not delete session worktrees.
+///
+/// Why: the two review rounds contradicted each other on whether the missing
+/// `.git/info/exclude` entry was cosmetic, and the disagreement was a data-loss
+/// question, so it is settled here in the suite rather than by hand. Measured
+/// against real git: single-force `clean` reports `Skipping repository` and is
+/// safe, which is what makes this look harmless — but `-ff` removes
+/// `.worktrees/` outright, uncommitted session work included. The exclude entry
+/// is therefore a safety guard, and the in-project path has always written it.
+/// The provisioner producing the identical topology must too.
+/// What: builds the shipping topology with the production
+/// `ensure_base_checkout` and `worktree_add`, writes an uncommitted file into
+/// the worktree, then runs a real `git clean -ffd` in the base and asserts the
+/// file survives. Skips gracefully when git is unavailable.
+/// Test: this function IS the test.
+#[test]
+fn worktrees_exclude_entry_protects_against_double_force_clean() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        eprintln!("worktrees_exclude_entry_protects_against_double_force_clean: no git, skipping");
+        return;
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("owner").join("repo");
+    let backend = RealGitBackend::default();
+    backend
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed");
+
+    let worktree = base_dir.join(".worktrees").join("sess-1");
+    backend
+        .worktree_add(&base_dir, "main", &worktree, "sess-1")
+        .expect("worktree_add must succeed");
+    let wip = worktree.join("WIP.txt");
+    std::fs::write(&wip, b"uncommitted session work").unwrap();
+
+    // The guard itself: `.worktrees/` must be excluded in the base clone.
+    let exclude = std::fs::read_to_string(base_dir.join(".git").join("info").join("exclude"))
+        .expect("the base clone must have a .git/info/exclude");
+    assert!(
+        exclude.lines().any(|l| l.trim() == ".worktrees/"),
+        "ensure_base_checkout must exclude .worktrees/, got: {exclude}"
+    );
+
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&base_dir)
+        .args(["clean", "-ffd"])
+        .output()
+        .expect("git clean -ffd");
+    let said = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        wip.exists(),
+        "#4270: `git clean -ffd` in the base DELETED a session worktree's \
+         uncommitted work — git said: {said}"
+    );
+    assert!(
+        !said.contains(".worktrees"),
+        "`git clean -ffd` must not touch .worktrees/ at all, got: {said}"
+    );
+}
+
+/// Assert an operator-facing message names no recursive delete (#3605).
+///
+/// Why: the delete prohibition binds every refusal this code emits, not only
+/// the ones that also offer a quarantine. Splitting it out lets the refusals
+/// that deliberately suggest NOTHING (#4270) still be checked for the thing
+/// that caused the 2026-07-21 incident.
+/// What: fails if the message names any recursive-delete form.
+/// Test: used by `assert_no_destructive_hint` and
+/// `stale_base_dir_error_never_offers_to_move_a_dir_holding_live_worktrees`.
+fn assert_no_recursive_delete(msg: &str) {
+    for forbidden in ["rm -rf", "rm -fr", "rm -r ", "remove_dir_all", "rmdir"] {
+        assert!(
+            !msg.contains(forbidden),
+            "recovery message must never suggest a recursive delete (#3605), but it \
+             contains {forbidden:?}: {msg}"
+        );
+    }
+}
+
+/// #4270: the quarantine hint must never be aimed at a directory that holds
+/// git or trusty-mpm state.
+///
+/// Why: before #4270 `base_dir` was `<project_dir>/.base`, which an
+/// in-project-shaped project does not have — `stale_base_dir_error` returned
+/// `None` and its `mv` hint was unreachable there. Pointing `base_dir` at the
+/// project directory made it reachable, aimed at the directory holding
+/// `.worktrees/<id>` for every live session. That is the #3605 string with a
+/// bigger target. The trigger is loose enough to matter: `is_established_checkout`
+/// reports `false` for a transient git spawn failure just as it does for a
+/// non-repo, so a momentary hiccup on a healthy project reaches this message.
+/// What: builds the error for a project dir holding `.worktrees/sess-1`, then
+/// for one holding `.git`, and asserts neither offers a `mv` — while the
+/// foreign-debris case in the sibling test still does, so the #1937 recovery
+/// path is not lost.
+/// Test: this function IS the test.
+#[test]
+fn stale_base_dir_error_never_offers_to_move_a_dir_holding_live_worktrees() {
+    let root = crate::test_support::hermetic_temp_dir();
+
+    for (label, entry) in [("live worktrees", ".worktrees"), ("a git dir", ".git")] {
+        let dir = root.path().join(label.replace(' ', "-")).join("repo");
+        std::fs::create_dir_all(dir.join(entry).join("sess-1")).unwrap();
+
+        let msg = super::base_lock::stale_base_dir_error(&dir)
+            .unwrap_or_else(|| panic!("an occupied project dir holding {label} must error"))
+            .to_string();
+
+        assert!(
+            !msg.contains("    mv "),
+            "#4270: the quarantine hint must never target a directory holding {entry} — \
+             moving it orphans every session under it, got: {msg}"
+        );
+        assert!(
+            msg.contains(entry),
+            "the refusal must name what it found, got: {msg}"
+        );
+        assert_no_recursive_delete(&msg);
+    }
 }
 
 /// #3605 regression guard: `stale_base_dir_error`'s message must recover the
@@ -568,7 +812,7 @@ fn assert_no_destructive_hint(msg: &str) {
 /// useless hint is not an improvement), and the quarantine destination must be
 /// a concrete, distinct sibling path — not the base path itself, which would
 /// make the suggested `mv` a no-op.
-/// What: builds the error for a non-empty, non-bare directory and asserts the
+/// What: builds the error for a non-empty, non-repo directory and asserts the
 /// message names the path, carries the quarantine + SHARED warning, offers no
 /// recursive delete, and targets a `.stale-` sibling destination that differs
 /// from the source path.
@@ -581,7 +825,7 @@ fn stale_base_dir_error_suggests_quarantine_not_deletion() {
     std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     let err = super::base_lock::stale_base_dir_error(&base_dir)
-        .expect("a non-empty, non-bare base dir must produce an error");
+        .expect("a non-empty, non-repo base dir must produce an error");
     let msg = err.to_string();
 
     assert!(
@@ -623,30 +867,30 @@ fn stale_base_dir_error_suggests_quarantine_not_deletion() {
 ///
 /// Why: before this fix `FakeGitBackend::ensure_base_checkout` reused any
 /// directory containing a stray `HEAD` file (the same superficial probe the
-/// real backend abandoned), so a future author simulating a stale `.base` with
+/// real backend abandoned), so a future author simulating a stale base with
 /// the fake would get a false-positive "already established" pass instead of
 /// the loud rejection the real backend now produces. This test mirrors
-/// `ensure_base_checkout_rejects_stale_non_bare_directory` against the fake.
-/// What: pre-seeds `base_dir` with ONLY a stray `HEAD` file (no `config`
-/// `bare = true` marker — the fake's stand-in for "not a valid bare checkout")
-/// and asserts `FakeGitBackend::ensure_base_checkout` returns an actionable
-/// `Err` naming the path and the non-destructive quarantine recovery command,
-/// exactly like the real backend — not a silent `Ok` reuse.
+/// `ensure_base_checkout_rejects_stale_directory` against the fake.
+/// What: pre-seeds `base_dir` with ONLY a stray `HEAD` file (no `.git/config`
+/// marker — the fake's stand-in for "not a valid checkout") and asserts
+/// `FakeGitBackend::ensure_base_checkout` returns an actionable `Err` naming
+/// the path and the non-destructive quarantine recovery command, exactly like
+/// the real backend — not a silent `Ok` reuse.
 /// Test: this function IS the test.
 #[test]
-fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
+fn fake_ensure_base_checkout_rejects_stale_directory() {
     let root = crate::test_support::hermetic_temp_dir();
-    let base_dir = root.path().join("project").join(".base");
+    let base_dir = root.path().join("owner").join("repo");
     std::fs::create_dir_all(&base_dir).unwrap();
-    // A lone HEAD file with no `config bare = true` marker is the fake's
-    // stand-in for a stale, non-bare, mid-crash directory.
+    // A lone HEAD file with no `.git/config` marker is the fake's stand-in for
+    // a stale, mid-crash directory.
     std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     let fake = FakeGitBackend::new();
     let result = fake.ensure_base_checkout("https://github.com/owner/repo", &base_dir);
     assert!(
         result.is_err(),
-        "fake must reject a stale non-bare directory loudly, not silently reuse it: {result:?}"
+        "fake must reject a stale directory loudly, not silently reuse it: {result:?}"
     );
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -657,34 +901,33 @@ fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
 }
 
 /// #1937 item 3 (positive path): a FRESH `FakeGitBackend::ensure_base_checkout`
-/// establishes a valid fake bare checkout, and a SECOND call reuses it
+/// establishes a valid fake checkout, and a SECOND call reuses it
 /// idempotently (no error, no clobber).
 ///
 /// Why: locks in that the tightened validity check does not regress the
 /// happy-path reuse contract — the fake must still recognise the base it just
 /// wrote as established on the next call.
 /// What: calls `ensure_base_checkout` twice against an empty base path; asserts
-/// both return `Ok`, the second is recognised via `fake_is_established_bare_checkout`,
-/// and the written markers (`HEAD` + `bare = true` `config`) are present.
+/// both return `Ok`, the second is recognised via `fake_is_established_checkout`,
+/// and the written `.git/config` marker is present.
 /// Test: this function IS the test.
 #[test]
 fn fake_ensure_base_checkout_is_idempotent_on_valid_base() {
     let root = crate::test_support::hermetic_temp_dir();
-    let base_dir = root.path().join("project").join(".base");
+    let base_dir = root.path().join("owner").join("repo");
     let fake = FakeGitBackend::new();
 
     fake.ensure_base_checkout("https://github.com/owner/repo", &base_dir)
         .expect("first ensure must establish the fake base");
     assert!(
-        super::base_lock::fake_is_established_bare_checkout(&base_dir),
-        "a freshly-established fake base must read as a valid bare checkout"
+        super::base_lock::fake_is_established_checkout(&base_dir),
+        "a freshly-established fake base must read as a valid checkout"
     );
 
     // Second call must be an idempotent no-op reuse, not a stale rejection.
     fake.ensure_base_checkout("https://github.com/owner/repo", &base_dir)
         .expect("second ensure must reuse the established fake base");
-    assert!(base_dir.join("HEAD").is_file());
-    assert!(base_dir.join("config").is_file());
+    assert!(base_dir.join(".git").join("config").is_file());
 }
 
 /// A lock marker abandoned by a crashed holder must not permanently deadlock
@@ -699,7 +942,7 @@ fn fake_ensure_base_checkout_is_idempotent_on_valid_base() {
 /// What: writes a lock marker file and backdates its modified time past
 /// `LOCK_STALE_AFTER` via `File::set_modified` (no `filetime` dependency
 /// needed — this has been in `std` since Rust 1.75, well under this
-/// workspace's 1.91 MSRV). Asserts `lock_is_stale` reports it as stale, then
+/// workspace's 1.94 MSRV). Asserts `lock_is_stale` reports it as stale, then
 /// asserts `acquire_base_checkout_lock` recovers PROMPTLY (well under
 /// `LOCK_ACQUIRE_TIMEOUT`) rather than blocking out the full timeout, and
 /// that dropping the returned guard removes the marker file.
@@ -834,17 +1077,28 @@ fn provisioner_worktree_add_writes_no_foreign_branch_merge() {
         return; // git unavailable
     };
     let repo_url = format!("file://{}", bare.display());
-    let base_dir = scratch.path().join("base.git");
+    // #4270: exercise the SHIPPING topology with real git — a non-bare base at
+    // the project dir and the worktree NESTED inside it at
+    // `<project_dir>/.worktrees/<id>`, not a sibling under a bare base. Whether
+    // real `git worktree add` accepts a path inside its own base's working tree
+    // is the load-bearing question of this change, and a `FakeGitBackend` whose
+    // `worktree_add` is a `create_dir_all` cannot answer it.
+    let base_dir = scratch.path().join("owner").join("repo");
     let backend = RealGitBackend::default();
     backend
         .ensure_base_checkout(&repo_url, &base_dir)
         .expect("ensure_base_checkout must succeed against a local bare origin");
 
-    let worktree = scratch.path().join("wt");
     let branch = "session/tm-2867-01";
+    let worktree = base_dir.join(".worktrees").join(branch.replace('/', "-"));
     backend
         .worktree_add(&base_dir, "main", &worktree, branch)
-        .expect("worktree_add must succeed");
+        .expect("worktree_add must succeed into <project_dir>/.worktrees/<id>");
+    assert!(
+        worktree.join(".git").exists(),
+        "real git must produce a working worktree nested under its own base at {}",
+        worktree.display()
+    );
 
     // Every branch.<name>.merge in the whole config must name its own branch.
     let listed = std::process::Command::new("git")

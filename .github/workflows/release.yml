@@ -212,7 +212,7 @@ jobs:
           # ── Tag-prefix aliases (issue #1128) ─────────────────────────────────
           # Some crates publish to crates.io under a SHORT package name that
           # differs from their directory / canonical crate name, and the
-          # documented release convention (.trusty-mpm/INSTRUCTIONS.md "Git Tag / Release
+          # documented release convention (CLAUDE.md "Git Tag / Release
           # Convention", abbreviation table) lets contributors tag with either
           # form. We canonicalize the alias here so every downstream consumer —
           # the per-crate config map, the homebrew-bump case statement, the
@@ -987,18 +987,18 @@ jobs:
       # so we install via rustup directly. Standard (macOS) and linux-zigbuild
       # runners both use the action — zigbuild just needs the target's std lib
       # installed via rustup same as a native build would.
-      - name: Install Rust 1.91 (MSRV) via rustup — AL2023
+      - name: Install Rust 1.94 (MSRV) via rustup — AL2023
         if: matrix.variant == 'al2023'
         shell: bash
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain 1.91 \
+            | sh -s -- -y --profile minimal --default-toolchain 1.94 \
                        --target ${{ matrix.target }}
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Install Rust (MSRV 1.91) — standard + linux-zigbuild runners
+      - name: Install Rust (MSRV 1.94) — standard + linux-zigbuild runners
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
-        uses: dtolnay/rust-toolchain@1.91
+        uses: dtolnay/rust-toolchain@1.94
         with:
           targets: ${{ matrix.target }}
 
@@ -1019,13 +1019,13 @@ jobs:
           # architecture; without this they share one key, so whichever leg
           # saves first hands the other its `target/` — including host-compiled
           # build-script binaries of the wrong architecture. Keeping the old
-          # unqualified `al2023-1.91-` restore-key would reintroduce exactly
+          # unqualified `al2023-1.94-` restore-key would reintroduce exactly
           # that cross-arch restore through the fallback path, so the fallbacks
           # are target-scoped too.
-          key: al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          key: al2023-1.94-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-
-            al2023-1.91-${{ matrix.target }}-
+            al2023-1.94-${{ matrix.target }}-${{ matrix.crate }}-
+            al2023-1.94-${{ matrix.target }}-
 
       - name: Cache cargo registry + artefacts (standard + linux-zigbuild)
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
@@ -1531,8 +1531,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install Rust (MSRV 1.91)
-        uses: dtolnay/rust-toolchain@1.91
+      - name: Install Rust (MSRV 1.94)
+        uses: dtolnay/rust-toolchain@1.94
 
       - name: Cache cargo registry + artefacts
         uses: Swatinem/rust-cache@v2

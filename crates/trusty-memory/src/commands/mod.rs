@@ -12,6 +12,8 @@
 //! in PR3 of the #914 epic.
 //! Test: Each submodule carries its own unit tests.
 
+// #4891: ADR-0028 Migration step 3 — the read-only backfill triage report.
+pub mod backfill_report;
 pub mod daemon_guard;
 pub mod daemon_lock;
 pub mod doctor;

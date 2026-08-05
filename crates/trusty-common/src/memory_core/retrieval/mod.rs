@@ -15,10 +15,14 @@ mod handle;
 mod layers;
 // ADR-0027 T9: room/wing recall scoping, shared by L2 and the list paths.
 mod scope;
+// ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
+mod tier_c;
 mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tier_c_tests;
 #[cfg(test)]
 mod timeout_tests;
 
@@ -39,6 +43,14 @@ pub use handle::PalaceHandle;
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+
+// ADR-0028 Tier C admission (#4886). The write half (`persist_with_retirement`)
+// stays crate-internal — every writer reaches it through
+// `PalaceHandle::remember_with_options`, which is the single enforcement point.
+pub use tier_c::{
+    FACT_KEY_MAX_LEN, TIER_C_DEFAULT_TTL_HOURS, TierCAdmission, TierCRefusal, admit_tier_c,
+    validate_fact_key,
+};
 
 // Layer functions
 pub use layers::{

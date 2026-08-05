@@ -289,3 +289,81 @@ fn deploy_all_no_user_tier_matches_bundled_only() {
     assert!(dest.path().join("a").join("SKILL.md").is_file());
     assert!(dest.path().join("b").join("SKILL.md").is_file());
 }
+
+// ---------------------------------------------------------------------------
+// #4949 — directory-shaped skills reach the tier planner and the deploy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_source_stems_reads_directory_skills() {
+    // The planner must see the same stems the deployer acts on. Before #4949
+    // this function carried its own `is_file()` copy of the scan and returned
+    // an empty set for a directory-shaped tier, so the user tier was planned
+    // as absent and every one of its skills was dropped.
+    let src = TempDir::new().unwrap();
+    let skill = src.path().join("duetto-design-system");
+    fs::create_dir_all(skill.join("references")).unwrap();
+    fs::write(skill.join("SKILL.md"), "# Duetto\n").unwrap();
+    fs::write(skill.join("references").join("tokens.md"), "# T\n").unwrap();
+    write_skill(src.path(), "flat-skill", "F");
+
+    let stems = list_source_stems(src.path()).unwrap();
+
+    assert_eq!(stems, set(&["duetto-design-system", "flat-skill"]));
+}
+
+#[test]
+fn deploy_all_deploys_a_directory_shaped_user_skill() {
+    // End-to-end at the tier the defect was reported at: a user-custom skill
+    // authored as a directory in `~/.trusty-mpm/skills/` must reach the
+    // destination with every file it carries.
+    let bundled = TempDir::new().unwrap();
+    let user = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    write_skill(bundled.path(), "shipped", "S");
+    let skill = user.path().join("cto-kb-ingest");
+    fs::create_dir_all(skill.join("scripts")).unwrap();
+    fs::write(skill.join("SKILL.md"), "# Ingest\n").unwrap();
+    fs::write(skill.join("scripts").join("ingest.sh"), "#!/bin/sh\n").unwrap();
+
+    let deploy =
+        deploy_all_skill_tiers(bundled.path(), user.path(), dest.path(), |_| true).unwrap();
+
+    assert!(
+        deploy.stats.deployed.contains(&"cto-kb-ingest".to_string()),
+        "{:?}",
+        deploy.stats
+    );
+    assert!(dest.path().join("cto-kb-ingest").join("SKILL.md").is_file());
+    assert!(
+        dest.path()
+            .join("cto-kb-ingest")
+            .join("scripts")
+            .join("ingest.sh")
+            .is_file(),
+        "carried script missing"
+    );
+    // The bundled tier is untouched by the addition.
+    assert!(dest.path().join("shipped").join("SKILL.md").is_file());
+}
+
+#[test]
+fn deploy_all_lets_a_directory_user_skill_shadow_a_bundled_one() {
+    // Precedence must hold across layouts: a directory-shaped user skill
+    // outranks a same-named flat bundled skill.
+    let bundled = TempDir::new().unwrap();
+    let user = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    write_skill(bundled.path(), "shared", "BUNDLED");
+    let skill = user.path().join("shared");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), "USER").unwrap();
+
+    let deploy =
+        deploy_all_skill_tiers(bundled.path(), user.path(), dest.path(), |_| true).unwrap();
+
+    let content = fs::read_to_string(dest.path().join("shared").join("SKILL.md")).unwrap();
+    assert_eq!(content, "USER", "user tier must win");
+    assert_eq!(deploy.shadowed.len(), 1);
+    assert_eq!(deploy.shadowed[0].winner, SkillTier::User);
+}

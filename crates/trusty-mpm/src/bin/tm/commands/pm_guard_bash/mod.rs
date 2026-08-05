@@ -596,6 +596,56 @@ const WORKTREE_ADD_FLAGS_WITH_ARG: &[&str] = &["-b", "-B", "--reason"];
 /// in `tests/tm_hook_pm_guard.rs` exercise the end-to-end binary path,
 /// including the `agent_id`-present case this function exists for.
 pub(crate) fn evaluate_worktree_add_command(command: &str, cwd: &Path) -> Option<&'static str> {
+    evaluate_worktree_add_command_in(command, cwd, &PathEnv::from_process())
+}
+
+/// The environment values [`resolve_target_path`] expands `$TMPDIR`/`$TMP`/`~`
+/// from, captured as data instead of read from `std::env` at each use.
+///
+/// Why: the expansion rules can only be tested by controlling those variables,
+/// and the obvious way to do that — `std::env::set_var` in the test — mutates
+/// PROCESS-GLOBAL state that every other test in the `tm` test binary sees for
+/// as long as it is set. `cargo test` runs tests as threads in one process, so
+/// a restore-on-drop guard bounds the leak's lifetime but not its visibility:
+/// concurrent siblings still read the mutated value. That is not hypothetical —
+/// a `TMPDIR` pinned to a macOS-only scratch path reddened five
+/// `pm_guard_budget` tests on a Linux CI runner (PR #4914, run 31023632348)
+/// because `tempfile` honors `$TMPDIR` and the path does not exist there.
+/// Passing the values in removes the global mutation rather than scheduling
+/// around it.
+/// What: the three variables [`resolve_target_path`] expands, each `None` when
+/// unset. [`PathEnv::from_process`] is the one place that reads the real
+/// environment, so production behavior is unchanged — a `Bash` tool call
+/// inherits the guard process's environment, and the guard expands against it.
+/// Test: `evaluate_worktree_add_command_expands_tmpdir_and_home` builds one
+/// directly; every other caller goes through [`PathEnv::from_process`].
+struct PathEnv {
+    tmpdir: Option<String>,
+    tmp: Option<String>,
+    home: Option<String>,
+}
+
+impl PathEnv {
+    /// Read `$TMPDIR`, `$TMP`, and `$HOME` from the guard process.
+    fn from_process() -> Self {
+        Self {
+            tmpdir: std::env::var("TMPDIR").ok(),
+            tmp: std::env::var("TMP").ok(),
+            home: std::env::var("HOME").ok(),
+        }
+    }
+}
+
+/// [`evaluate_worktree_add_command`] against an explicit environment.
+///
+/// Why: see [`PathEnv`] — this is the seam that lets the expansion rules be
+/// asserted end-to-end (same segment splitting, same denylist, same return
+/// value) without any test touching process-global env.
+fn evaluate_worktree_add_command_in(
+    command: &str,
+    cwd: &Path,
+    env: &PathEnv,
+) -> Option<&'static str> {
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -606,7 +656,7 @@ pub(crate) fn evaluate_worktree_add_command(command: &str, cwd: &Path) -> Option
             if let Some(argv) = shlex::split(trimmed)
                 && let Some(dest) = argv.get(1)
             {
-                effective_cwd = resolve_target_path(dest, &effective_cwd);
+                effective_cwd = resolve_target_path(dest, &effective_cwd, env);
             }
             continue;
         }
@@ -625,13 +675,13 @@ pub(crate) fn evaluate_worktree_add_command(command: &str, cwd: &Path) -> Option
             continue;
         };
         let base = match git_dash_c_override(&argv, worktree_idx) {
-            Some(dash_c) => resolve_target_path(dash_c, &effective_cwd),
+            Some(dash_c) => resolve_target_path(dash_c, &effective_cwd, env),
             None => effective_cwd.clone(),
         };
         let Some(target) = worktree_add_target_token(&argv[worktree_idx + 2..]) else {
             continue;
         };
-        let resolved = resolve_target_path(&target, &base);
+        let resolved = resolve_target_path(&target, &base, env);
         if resolves_under_denylisted_tmp(&resolved) {
             return Some(WORKTREE_TMP_REASON);
         }
@@ -693,9 +743,9 @@ fn worktree_add_target_token(tail: &[String]) -> Option<String> {
 }
 
 /// Expand a leading `~`, `$TMPDIR`/`${TMPDIR}`, and `$TMP`/`${TMP}` in a path
-/// token using the current process environment, then resolve it against
-/// `base` if relative, then lexically normalize (collapse `.`/`..` components
-/// WITHOUT touching the filesystem).
+/// token using `env`, then resolve it against `base` if relative, then
+/// lexically normalize (collapse `.`/`..` components WITHOUT touching the
+/// filesystem).
 ///
 /// Why: `shlex::split` does not perform shell variable expansion, so a target
 /// argument like `$TMPDIR/wt-foo` or `~/scratch/wt-foo` reaches this function
@@ -703,25 +753,29 @@ fn worktree_add_target_token(tail: &[String]) -> Option<String> {
 /// points. Filesystem-touching resolution (`fs::canonicalize`) is deliberately
 /// avoided — the worktree target usually does not exist yet, and a
 /// `PreToolUse` hook must stay fast and side-effect-free.
-/// What: string-replaces the env-var forms (guard process env — a `Bash` tool
-/// call inherits it unchanged), expands a `~`/`~/…` prefix via `$HOME`, joins
-/// onto `base` if the result is still relative, then normalizes.
-fn resolve_target_path(token: &str, base: &Path) -> PathBuf {
+/// What: string-replaces the env-var forms, expands a `~`/`~/…` prefix via
+/// `$HOME`, joins onto `base` if the result is still relative, then
+/// normalizes. The values arrive via [`PathEnv`] rather than being read here,
+/// so a test can pin them without mutating process-global state — see
+/// [`PathEnv`] for the CI failure that motivated the seam. In production
+/// [`PathEnv::from_process`] supplies the guard process's own environment,
+/// which a `Bash` tool call inherits unchanged.
+fn resolve_target_path(token: &str, base: &Path, env: &PathEnv) -> PathBuf {
     let mut expanded = token.to_string();
-    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+    if let Some(tmpdir) = env.tmpdir.as_deref() {
         expanded = expanded
-            .replace("${TMPDIR}", &tmpdir)
-            .replace("$TMPDIR", &tmpdir);
+            .replace("${TMPDIR}", tmpdir)
+            .replace("$TMPDIR", tmpdir);
     }
-    if let Ok(tmp) = std::env::var("TMP") {
-        expanded = expanded.replace("${TMP}", &tmp).replace("$TMP", &tmp);
+    if let Some(tmp) = env.tmp.as_deref() {
+        expanded = expanded.replace("${TMP}", tmp).replace("$TMP", tmp);
     }
     if expanded == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            expanded = home;
+        if let Some(home) = env.home.as_deref() {
+            expanded = home.to_string();
         }
     } else if let Some(rest) = expanded.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
+        && let Some(home) = env.home.as_deref()
     {
         expanded = format!("{home}/{rest}");
     }

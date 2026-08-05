@@ -53,7 +53,9 @@
 #   CHANNEL 2 — REACHABILITY. Channel 1 alone is not the assertion §6.2's prose
 #     makes, and the gap is exactly where a real toolchain lands. MANIFEST Phase 3
 #     recorded it with observed output: a guest provisioned by THIS PROJECT'S OWN
-#     `mise use -g rust@1.91` installs cargo at `~/.cargo/bin/cargo` and a mise
+#     `mise use -g rust@1.91` (the MSRV pin at the time; provision.sh installs
+#     1.94 today, and the reachability gap below is version-independent)
+#     installs cargo at `~/.cargo/bin/cargo` and a mise
 #     shim, NEITHER of which is on the base PATH — so it PASSED N1 (exit 0,
 #     observed). DOC-1 §4.3 leans on N1 to catch a golden image that silently
 #     ships a toolchain, and an image baked by our own `provision.sh` would not
@@ -146,7 +148,7 @@ negative_probe_n1() {
     fi
 
     if [ "$fail" -ne 0 ]; then
-        die 30 "N1 FAIL — the guest already has a Rust toolchain where DOC-2 §6.2 requires none. Two likely causes: base-image drift (DOC-2 §3), or a guest that has ALREADY BEEN PROVISIONED — including a golden image baked by this project's own \`mise use -g rust@1.91\`, which installs into \$HOME/.cargo/bin and the mise shims and which the pre-2026-08-02 probe could not see. Either way this is a FINDING, not a nuisance. Base-PATH exits: ${codes}"
+        die 30 "N1 FAIL — the guest already has a Rust toolchain where DOC-2 §6.2 requires none. Two likely causes: base-image drift (DOC-2 §3), or a guest that has ALREADY BEEN PROVISIONED — including a golden image baked by this project's own provisioning (\`mise use -g rust@<msrv>\`, see lib/provision.sh), which installs into \$HOME/.cargo/bin and the mise shims and which the pre-2026-08-02 probe could not see. Either way this is a FINDING, not a nuisance. Base-PATH exits: ${codes}"
     fi
     log "N1 PASS (base PATH: ${codes}; and no toolchain reachable on disk, through mise, or through a login/interactive shell)"
 }
@@ -361,8 +363,9 @@ negative_probe_n2() {
 
 # verify_rustc <vm_name> <crate_abs_dir> <expected>
 # DOC-1 §8.4's per-build-step assertion. Called from `install_from_path`
-# immediately before the build. 0, or dies 50. EMITS the `rustc --version` line
-# on stdout (§12.1's single-value channel); diagnostics go to stderr.
+# immediately before the build. 0, or dies 50 — §12.2's declared signature, with
+# NO stdout emit. Diagnostics go to stderr; the resolved `rustc --version` line
+# is handed back in the global RUSTC_LAST_LINE (#16).
 #
 # An EMPTY <expected> means "assert that rustc resolves here and reports a
 # version, do not assert WHICH" — the caller uses it for a crate that declares
@@ -390,7 +393,16 @@ verify_rustc() {
     fi
 
     log "rustc(${dir}): ${line}   [emitted from INSIDE ${dir}, because rustup resolves by directory; expected='${expected:-<crate-local override: any>}']"
-    printf '%s\n' "$line"
+    # #16: NOT a stdout emitter. DOC-2 §12.2 declares this function "0 or dies
+    # 50" with no emit; the `printf '%s\n' "$line"` that used to close it was an
+    # undeclared value channel, and its one consumer captured it with
+    # `rustc_line=$(verify_rustc …)` — which put all three `die 50` calls above
+    # in a fork, where they classified nothing. The resolved line is handed back
+    # through a global instead, exactly as `_verify_daemon_set` hands back
+    # LIVENESS_DAEMONS and for the reason that function's banner already gives.
+    # NOT named `VMTEST_*`: §12.3 rule 2 reserves that spelling for §8.2's
+    # override channel.
+    RUSTC_LAST_LINE="$line"
 }
 
 # _verify_resolve <vm_name> <binary...>
@@ -552,7 +564,7 @@ _verify_package_expectation() {
 #       doctor.rs:151` resolves `stable_set()` FILTERED TO `m.daemon`. So
 #       `trusty-code`, `trusty-installer` and `tga` are STRUCTURALLY ABSENT and
 #       can never satisfy a predicate quantified over `member(p)`. THEY ARE NOT
-#       EXEMPT FROM VERIFICATION: `verify_binaries` asserts all 13 in-scope
+#       EXEMPT FROM VERIFICATION: `verify_binaries` asserts all 14 in-scope
 #       binaries present (including `tcode`, `trusty-installer`, `tctl`, `tga`)
 #       and `verify_single_install` gates the multi-binary ones. Both are
 #       UNAFFECTED by this scoping and both are stronger evidence of a correct
@@ -676,7 +688,7 @@ _verify_package_expectation() {
 #
 # WHAT THIS DOES NOT NARROW, so nobody over-reads it: `on_path == true` and
 # `version != null` are STILL ASSERTED for every in-scope member doctor reports;
-# all 13 binaries are still asserted present; all 4 Single-Install gates still
+# all 14 binaries are still asserted present; all 4 Single-Install gates still
 # run; §1.3's RC-1 liveness-only rule is untouched. DAEMON HEALTH, and nothing
 # else, is what narrowed.
 #
@@ -686,7 +698,7 @@ _verify_package_expectation() {
 # ===========================================================================
 verify_stack_doctor() {
     local vm="$1" pattern="$2"
-    local json verdict pkg expect health on_path version plist accepted bad extra n unreported
+    local json verdict pkg expect health on_path version plist accepted bad extra n unreported scope
 
     log "--- verify_stack_doctor (pattern ${pattern}; DOC-2 §1.1, §12.2) ---"
 
@@ -710,8 +722,15 @@ verify_stack_doctor() {
     # is LOGGED, NOT ASSERTED — it is a `--check-table` finding, not a run
     # failure. The assertion runs over `tsv_scope_packages`' values and nothing
     # else.
+    # #16: the in-scope set is materialised ONCE, to a file, before either use.
+    # As a `<(tsv_scope_packages)` its `die 60` ran in a fork that `<( )` has no
+    # status channel for, so a failed accessor silently turned `extra` into
+    # doctor's entire member list — and the heredoc below into an empty one.
+    scope="$VMTEST_TMPDIR/doctor-scope-packages.txt"
+    tsv_scope_packages "$scope"
+
     extra=$(printf '%s' "$json" | jq -r '.members[].member' \
-        | grep -v -x -F -f <(tsv_scope_packages) || :)
+        | grep -v -x -F -f "$scope" || :)
     if [ -n "$extra" ]; then
         log "stack doctor reports member(s) the expectation table does not carry: $(printf '%s' "$extra" | tr '\n' ' ')  [LOGGED, NOT ASSERTED — plan §F-10(e)]"
     fi
@@ -796,9 +815,12 @@ verify_stack_doctor() {
                 [ "$on_path" = 'false' ] || bad="${bad}
     ${pkg}: on_path=${on_path}, expected false" ;;
         esac
-    done <<EOF
-$(tsv_scope_packages)
-EOF
+    done < "$scope"
+    # #16: reads the materialised file. This loop used to be driven by a heredoc
+    # containing `$(tsv_scope_packages)` — heredoc expansion is redirection
+    # setup and has no status channel at all, so an accessor that died ran the
+    # loop ZERO times, left `n=0` and `bad` empty, and this function logged
+    # `verify_stack_doctor PASS: all 0 in-scope package(s) …` on a green run.
 
     if [ -n "$unreported" ]; then
         log "in-scope package(s) \`stack doctor\` does not report as members:${unreported}  [NO HEALTH OBLIGATION — DOC-2 §1.1a(a): doctor iterates stable_set() filtered to daemon members. Their presence is asserted by verify_binaries and verify_single_install.]"
@@ -806,6 +828,16 @@ EOF
 
     [ -z "$bad" ] \
         || die 60 "verify_stack_doctor FAILED under pattern ${pattern} — §1.1's per-member predicate (as amended 2026-08-03, §1.1a) does not hold for the following of the ${n} in-scope packages doctor reports:${bad}"
+
+    # FAILS CLOSED (#16), matching `verify_binaries` and `_verify_daemon_set`.
+    # §1.1's predicate is a UNIVERSAL quantifier over
+    # `tsv_scope_packages ∩ report.members`, and a universal over the empty set
+    # is vacuously true — so a PASS over zero members was formally conformant
+    # and still asserted nothing. Recorded in §1.1 as a deliberate strengthening,
+    # on DOC-2 §9.6's own doctrine: "a table that rewrites itself to match
+    # reality asserts nothing".
+    [ "$n" -gt 0 ] \
+        || die 60 "verify_stack_doctor: the assertion set is EMPTY under pattern ${pattern} — no in-scope package from the expectation table appears in \`tctl stack doctor --json\`'s member table, so every clause of §1.1's predicate is vacuously true and a PASS here would assert nothing. Either doctor produced no parseable member table or the expectation table and \`stable_set()\` have diverged."
 
     log "verify_stack_doctor PASS: all ${n} in-scope package(s) reported by doctor satisfy §1.1a's predicate under pattern ${pattern}, AND every launchd member among them is plist_installed=false — asserted directly since 2026-08-04, not inferred (verdict '${verdict}' logged but not asserted)"
 }
@@ -899,7 +931,7 @@ verify_versions() {
 #
 # THERE IS NO UNIFIED DAEMON HEALTH JSON. Every daemon exposes `GET /health` and
 # every one returns JSON, but there is NO SHARED TYPE IN `trusty-common` and no
-# unified schema — four daemons, four independently-evolved shapes, with no field
+# unified schema — six daemons, six independently-evolved shapes, with no field
 # in common beyond `status` and `version`:
 #   - trusty-search  service/server/health.rs  — ~22 fields, several
 #                    `skip_serializing_if` (ABSENT, not null)
@@ -909,6 +941,23 @@ verify_versions() {
 #                    catalog_unknown, catalog_changes, supervised, version
 #   - trusty-review  service/handlers.rs       — status, version, dry_run,
 #                    reviewer_model, inference, deps{...}
+#   - trusty-analyze service/routes.rs:176-180 — status, version,
+#                    search_reachable. EXACTLY THREE fields (`HealthResponse`),
+#                    and `status` is computed: "ok" when search is reachable,
+#                    "degraded" when it is not — see the 503 discussion below.
+#   - trusty-console server/mod.rs:433-438     — status, version. EXACTLY TWO,
+#                    and both are literals: a `json!` with a hardcoded
+#                    `"status":"ok"` and `CARGO_PKG_VERSION`. It reports no
+#                    state of its own at all.
+#
+# THE LAST TWO ROWS WERE ADDED LATE AND THE OMISSION WAS ITSELF THE DEFECT.
+# `trusty-analyze` joined the probed set on 2026-08-04 and `trusty-console` on
+# 2026-08-05 (#4921), but this table kept saying "four" — the same transcription
+# drift that produced the hardcoded four-name list `_verify_daemon_set` was
+# written to eliminate. The spread got WIDER with them, not narrower: 22 fields
+# to 2. Note also that `trusty-console`'s literal `{"status":"ok"}` is precisely
+# the payload the #3364 squatter class describes, which is why RC-1's envelope
+# would need a `service` discriminator and not merely a shared field set.
 #
 # Two further hazards this must not paper over:
 #   - `trusty-mpm` HAS TWO DIFFERENT `/health` ENDPOINTS ON TWO DIFFERENT PORTS.
@@ -924,7 +973,7 @@ verify_versions() {
 #
 # A STRONG ASSERTION HERE WOULD HAVE TO BE INVENTED, and DOC-1 §7.1's whole
 # argument for JSON-only is that the oracle must not depend on surfaces free to
-# change underneath it. An envelope four crates have not agreed on is exactly
+# change underneath it. An envelope six crates have not agreed on is exactly
 # such a surface.
 #
 # WHAT CHANGES IF RC-1 EVER LANDS — exactly three things, and nothing else: this
@@ -1052,13 +1101,21 @@ verify_daemon_liveness() {
 # product surface: it is an in-scope package, `stable_set` marks it a daemon,
 # and `stack doctor` has reported it on every run. It was absent from a
 # HARDCODED FOUR-NAME LIST in this function, transcribed from §1.3's
-# four-shape table. Deriving the set removes the transcription and the drift
-# with it — `trusty-console` is a `stable_set` daemon too and is correctly
-# excluded here, by the intersection, because the TSV marks it out of scope.
+# health-shape table AS IT THEN STOOD — four rows; it carries six today, and
+# that table was itself corrected on 2026-08-05 for the same drift. Deriving
+# the set removes the transcription and the drift
+# with it — `trusty-console` is a `stable_set` daemon too and is now INCLUDED
+# here, by the same intersection and with no edit to this function, because the
+# TSV marks it in scope as of 2026-08-05 (#4921). Its liveness IS verified.
 _verify_daemon_set() {
-    local vm="$1"
+    local vm="$1" scope
+    # #16: this function's own banner names the hazard — "`die` inside a `$(…)`
+    # command substitution kills only the subshell" — and the `<( )` on the next
+    # line was an instance of it. The accessor now writes to a path.
+    scope="$VMTEST_TMPDIR/liveness-scope-packages.txt"
+    tsv_scope_packages "$scope"
     LIVENESS_DAEMONS=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
-        | grep -x -F -f <(tsv_scope_packages) | tr '\n' ' ') || :
+        | grep -x -F -f "$scope" | tr '\n' ' ') || :
     LIVENESS_DAEMONS=${LIVENESS_DAEMONS% }
     # FAILS CLOSED. An empty set would make every assertion below vacuous and
     # still print a PASS line — the false pass this whole oracle exists to avoid.
@@ -1357,7 +1414,7 @@ verify_degraded_probe() {
 
     # ---- 1. FAULT A — trusty-search, gracefully, and BY ITSELF. ----------
     # `tctl stop <member>` resolves exactly the named member through
-    # `select_members` (lifecycle.rs), so the other four daemons are untouched;
+    # `select_members` (lifecycle.rs), so the other five daemons are untouched;
     # that they stay live is asserted, not assumed, by the negative direction's
     # verdict run below, which names every daemon it rejects.
     log 'degraded-check: FAULT A — `tctl stop trusty-search --json --yes` (that daemon only)'

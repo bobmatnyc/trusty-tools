@@ -23,6 +23,8 @@ pub(crate) mod delete;
 // cannot detect that the process answering it is the unsupervised one.
 pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_orphan;
+// #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
+pub(crate) mod doctor_repair;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
 pub(crate) mod generate;
@@ -67,6 +69,9 @@ pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod push_guard;
 pub(crate) mod reconcile_worktrees;
+// #4912: `tm register` positional resolution — URL first, alias optional, with
+// the legacy alias-first order still accepted.
+pub(crate) mod register_args;
 pub(crate) mod rename;
 pub(crate) mod repair;
 pub(crate) mod serve_stdio;

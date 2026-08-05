@@ -2,8 +2,8 @@
 #
 # THE ONE RULE THAT MATTERS HERE: `mise` AND `gh` ARE PREINSTALLED ON
 # `tahoe-base` AND ARE DETECTED AND REUSED, NEVER INSTALLED (DOC-2 §11.1,
-# §11.2). DOC-1 §3.3's phrasing — "installs mise, rust@1.91, uv and gh" — is
-# accurate for `rust@1.91` and `uv` and WRONG for the other two; §11.5 is the
+# §11.2). DOC-1 §3.3's phrasing — "installs mise, rust@1.94, uv and gh" — is
+# accurate for `rust@1.94` and `uv` and WRONG for the other two; §11.5 is the
 # amendment and §11.2 is the operative specification.
 #
 # `curl https://mise.run | sh` and `mise self-update` are FORBIDDEN. The first
@@ -139,21 +139,24 @@ provision_guest() {
         log 'gh NOT detected, though DOC-2 §11.1 records it as preinstalled — recording the divergence'
     fi
 
-    # rust@1.91 and uv@latest are the two tools that ARE installed (§11.2).
+    # rust@1.94 and uv@latest are the two tools that ARE installed (§11.2).
+    # The rust version tracks the workspace MSRV (root Cargo.toml
+    # [workspace.package].rust-version, ADR-0029) — a guest provisioned below it
+    # cannot build the source it is about to be handed.
     # Each is a WATCHDOG, not a poll (§10): a blocking guest exec whose exit
     # code propagates exactly (DOC-1 §5.1). §10.3 clause 3: the message names
     # the condition, the budget, and the vmtest.defaults key that changes it.
     rc=0
     run_watchdog "$budget" "$VMTEST_TMPDIR/provision-rust.log" \
-        vm_exec_raw "$vm" "${VMTEST_GUEST_ENV:-} mise use -g rust@1.91" || rc=$?
+        vm_exec_raw "$vm" "${VMTEST_GUEST_ENV:-} mise use -g rust@1.94" || rc=$?
     if [ "$rc" -ne 0 ]; then
         sed 's/^/    | /' "$VMTEST_TMPDIR/provision-rust.log" >&2 || :
         if [ "$rc" -eq 124 ]; then
-            die 40 "\`mise use -g rust@1.91\` exceeded its ${budget}s budget (change it with vmtest.defaults key provision_timeout). No retry, ever (DOC-2 §10.3)."
+            die 40 "\`mise use -g rust@1.94\` exceeded its ${budget}s budget (change it with vmtest.defaults key provision_timeout). No retry, ever (DOC-2 §10.3)."
         fi
-        die 40 "\`mise use -g rust@1.91\` exited ${rc} (DOC-2 §11.2). FAIL, DO NOT REPAIR."
+        die 40 "\`mise use -g rust@1.94\` exited ${rc} (DOC-2 §11.2). FAIL, DO NOT REPAIR."
     fi
-    log 'installed rust@1.91 (measured baseline 20.778 s)'
+    log 'installed rust@1.94 (baseline 20.778 s, measured on rust@1.91)'
 
     rc=0
     run_watchdog "$budget" "$VMTEST_TMPDIR/provision-uv.log" \

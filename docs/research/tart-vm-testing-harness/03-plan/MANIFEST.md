@@ -1372,6 +1372,43 @@ detected before. See Phase 7 Deviations items 1 and 2.
   vmtest: WARN: another run 'peer' holds a live pid 66623. Concurrency is safe (§4.3) but not advised: each guest is sized at 8 vCPU / 16384 MiB.
   (warns; does NOT fail — §4.3)
 
+  # ^^^ SUPERSEDED 2026-08-04 (issue #15). RETAINED AS THE RECORD OF A CHECK
+  # THAT PASSED WITHOUT TESTING WHAT IT CLAIMED TO TEST — do not read it as
+  # current behaviour and do not re-run it as written.
+  #
+  # THE DEFECT IN THIS TRANSCRIPT: the fixture was a REGISTRY DIRECTORY AND
+  # NOTHING ELSE. There was never a peer VM in state `running`, so preflight's
+  # namespace scan (Deviations item 10) had nothing to refuse and the warn path
+  # was reached — which is exactly the case that CANNOT occur on a real host,
+  # where a peer's VM is `running` for ~85% of a 9-16 minute run. The check
+  # therefore certified a code path that production could never enter, and the
+  # §4.3-vs-item-10 contradiction shipped green behind it. A fixture must
+  # reproduce the whole precondition, not the half of it that is easy to build.
+  #
+  # CURRENT BEHAVIOUR: §4.3 is retracted and replaced by §4.3a (single run only).
+  # The same fixture — plus the peer VM this one omitted — now REFUSES with
+  # exit 10 and case (a)'s wording:
+  #   vmtest: single-run: peer run 'peer' is LIVE (pid 66623); registry entry …/runs/peer
+  #   vmtest: FAIL[10]: another vmtest run is already in progress: peer runid(s) peer(pid 66623) VM(s) vmtest-peer(running) — … WAIT for that run to finish, then retry. …
+  # and an orphan with no live owner refuses with case (b)'s:
+  #   vmtest: FAIL[10]: harness-namespace VM(s) left behind by a run that is no longer alive: vmtest-orphan(running) — … CLEAN IT UP before retrying: run `vmtest clean` …
+  #
+  # Both, the dead-pid and `suspended` variants, empty and non-numeric pid
+  # files, a live peer with NO VM, the mkdir-to-pid-write window, the recycled-
+  # pid stale entry and its recovery, self-exclusion, TSV field splitting, two
+  # clean-namespace regressions and `clean`'s verdict strings are now covered
+  # WITHOUT A VM by `vmtest-harness/tests/test-preflight-single-run.sh` — 117
+  # assertions, ~15 s, stub CLI, no network. The fixture peers are REAL live
+  # processes renamed with `exec -a`, beside one that is not, which is what
+  # distinguishes a peer run from a reused pid.
+  #
+  # It also carries the regression for a defect the FIX introduced and a review
+  # caught: corroboration once compared the peer against the CHECKER's own
+  # filename, so a driver copy named `vmtest-dev` deleted a live `vmtest` run's
+  # stopped VM. That case asserts on RECORDED DELETE CALLS rather than printed
+  # text, because printed text is exactly what let the original #15 defect ship
+  # green. That file, not this transcript, is the standing evidence.
+
   # P2-T4
   $ grep -rln 'tart' vmtest-harness --include='*.sh' --include='vmtest' --exclude-dir=spike
   vmtest-harness/vmtest
@@ -1687,6 +1724,39 @@ detected before. See Phase 7 Deviations items 1 and 2.
       `vmtest-*` namespace may be in any state other than `stopped`. VMs
       outside that namespace are not the harness's and are never inspected —
       which is the same rule that keeps `clean` away from `tahoe-base`.
+
+      > **RECONCILED 2026-08-04 — this item recorded the reading but never
+      > checked it against §4.3, and the two contradicted each other for the
+      > whole of Phases 2-8.** The third clause above ("**no** VM in the
+      > `vmtest-*` namespace may be in any state other than `stopped`") refuses
+      > a healthy peer run's VM, because a peer's VM is `running` for ~85% of a
+      > 9-16 minute run. DOC-2 §4.3 as written at the time specified the exact
+      > opposite for that case — *"preflight therefore **warns** (does not
+      > fail)"* — and this item's silence is what let both survive. It was not
+      > an oversight in the code: the code implemented this item faithfully.
+      > **It was an unrecorded contradiction between two design statements**,
+      > and Deviations is the field whose job was to catch it.
+      >
+      > **Resolved in the direction of this item, not of §4.3.** The owner
+      > retired concurrency (issue #15); §4.3's warn-don't-fail paragraph is
+      > withdrawn and replaced by **§4.3a, the single-run policy**, and
+      > `registry_warn_live_peers` — written for that paragraph and unreachable
+      > behind this check — is deleted. So the *refusal* recorded here stands.
+      >
+      > **What did NOT stand is the reading's granularity.** A namespace-wide
+      > scan collapsed into one message ("… not in state `stopped` … a
+      > suspended one is wedged … Refuse; do not repair") is a single verdict
+      > over VMs that need **opposite** remedies: a live peer's VM must be
+      > **waited for**, an orphan must be **cleaned up**. That message gave the
+      > second remedy to both, so the common case was told the wrong thing. The
+      > scan is now per-VM and classified by `harness_vm_disposition`, the same
+      > helper `clean` (§5.1 condition 3) already used correctly — the fix was
+      > to make preflight call `clean`'s classifier, not to grow a second one.
+      > Preflight's registry check now runs **before** the VM-state scan, so
+      > the refusal is read from the lock rather than inferred from a symptom.
+      >
+      > Regression coverage that did not exist when this item was written:
+      > `vmtest-harness/tests/test-preflight-single-run.sh`.
   11. **Output discipline, recorded because it is a choice.** A command's
       *product* goes to **stdout** — the effective-configuration banner and
       `clean`'s per-VM verdicts; every diagnostic, warning and failure goes to
@@ -4360,6 +4430,50 @@ detected before. See Phase 7 Deviations items 1 and 2.
      > daemons are probed and the README says so. Phase 8 was right that it
      > belonged in front of a reader; it under-read the severity, treating it as a
      > count when it was a coverage gap. See open items 3, 7 and 8.
+
+  9. **POST-PHASE, 2026-08-04 — the `on_exit` wrapper is a DEVIATION from DOC-2
+     §Shell discipline, cleanup property 1, and it is now corrected
+     ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+
+     Property 1 requires cleanup to *"capture `$?` on the very first line, before
+     anything else can clobber it"*, and the spec's own trap skeleton
+     (`trap 'vmtest_cleanup' EXIT`) satisfies it. **The harness interposed a
+     wrapper instead** — `on_exit() { local rc=$?; vmtest_cleanup; exit "$rc"; }`
+     — and `local` **is itself a command**, so by the time `vmtest_cleanup`
+     sampled `$?` it was reading that assignment's status: **structurally always
+     0**. Property 1 was violated by the wrapper, not by cleanup.
+
+     This was recorded twice before without being closed. Phase 5's Deviations
+     item (the MEASURE line reporting `exit 0` for a run that died 50) diagnosed
+     it correctly and fixed it **by reporting `VMTEST_EXIT` instead**, and the
+     driver's own comment at the MEASURE line describes the effect while leaving
+     the dead `$?` fallback in place. That fix worked only because the failure in
+     question was parent-side. It left two paths uncovered: a run that fails with
+     **no `die` and no signal** — a bare command failing under `set -e`, not
+     hypothetical in a 4,200-line harness — where `VMTEST_EXIT` is legitimately
+     unset and the fallback reads 0; and any `die` inside a subshell, where
+     `VMTEST_EXIT` was unset for the separate reason issue #16 documents.
+
+     **The correction restores property 1 rather than working around it:** the
+     captured rc is now PASSED to cleanup (`vmtest_cleanup "$rc"`, read as
+     `_cleanup_rc="${1:-$?}"` so a bare call still satisfies property 1), and the
+     signal handlers pass their codes the same way. Covered by
+     `vmtest-harness/tests/subshell-classification.sh`, which asserts the MEASURE
+     line reports the rc it was handed.
+
+     > **`on_exit` still exits with `$rc`, NOT with `VMTEST_EXIT` — tried,
+     > proven harmful, reverted.** An `exit "${VMTEST_EXIT:-$rc}"` was written
+     > first, to stop a swallowed failure exiting 0. It silently repealed §2's
+     > user-abort rows: `on_int` exits 130, which **fires the EXIT trap**, so a
+     > SIGINT arriving after a classified failure exited **50** instead of 130 —
+     > contradicting §Shell discipline and the driver's own "the literal `exit`
+     > codes stay unconditional" comment, neither of which had been amended. The
+     > case that motivated the override needs a construct that discards a
+     > die-capable function's status; Phase-8-post's Part 2 removed all of them
+     > and `tests/check-no-swallowed-die.sh` fails the build if one returns. A
+     > gate that goes red before the code ships is a stronger guarantee than a
+     > runtime override that costs the abort contract. The two signal codes are
+     > now regression-tested directly.
 - **Tasks:** P8-T1 … P8-T6 complete
 
 ---

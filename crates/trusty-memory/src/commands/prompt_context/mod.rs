@@ -40,7 +40,10 @@
 
 mod fetch;
 mod filter;
-mod format;
+// #4891: `backfill_report` must render a drawer's preview byte-for-byte as the
+// injection does, or its log join silently under-counts. Sharing the one
+// implementation is what makes that guarantee hold.
+pub(crate) mod format;
 
 use anyhow::Result;
 use serde_json::Value;

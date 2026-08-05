@@ -3,10 +3,11 @@ name = "tga"
 version = "2.11.0"
 publish = true
 edition = "2021"
-# Aligned with the workspace MSRV (1.91) per #254. Required for
+# Aligned with the workspace MSRV (1.94) per #254. Required for
 # `std::sync::LazyLock` (CLI help wiring, issue #216). The effective workspace
-# floor is now 1.91 (aws-smithy-* indirect deps); aligning prevents MSRV drift.
-rust-version = "1.91"
+# floor is now 1.94 (aws-config/aws-sdk-bedrockruntime declare 1.94.1);
+# aligning prevents MSRV drift.
+rust-version = "1.94"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license.workspace = true
 repository = "https://github.com/bobmatnyc/trusty-tools"

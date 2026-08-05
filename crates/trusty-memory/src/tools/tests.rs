@@ -2404,6 +2404,183 @@ async fn dispatch_palace_info_reports_room_count() {
     assert_eq!(info["drawer_count"], 2);
 }
 
+// ── ADR-0028 Tier C MCP surface (#4886) ─────────────────────────────────────
+
+/// A well-formed slot is admitted and reported as Tier C, and a second write to
+/// the same slot retires the first — the "one slot, one live fact" contract
+/// (ADR-0028 D5) as an MCP client sees it.
+#[tokio::test]
+async fn dispatch_remember_admits_a_tier_c_slot() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "tierc"}))
+        .await
+        .expect("palace_create");
+
+    let first = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "tierc",
+            "text": "PR 4818 is in flight at head d39638482bfe8de462c02c4f40e02b56b16897ff",
+            "fact_key": "pr:4818/state",
+        }),
+    )
+    .await
+    .expect("first tier C write");
+    assert_eq!(first["tier"], "C", "{first}");
+    assert!(first.get("tier_c_refused").is_none(), "{first}");
+
+    let second = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "tierc",
+            "text": "PR 4818 merged as squash 4c412ae1 at head 59ae50d8 on main",
+            "fact_key": "pr:4818/state",
+            "force": true,
+        }),
+    )
+    .await
+    .expect("second tier C write");
+    assert_eq!(second["tier"], "C", "{second}");
+
+    let handle = open_palace_handle(&state, "tierc").expect("open");
+    let winner: uuid::Uuid = second["drawer_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+        Some(winner),
+        "the newer write must hold the slot"
+    );
+    assert_eq!(
+        handle.kg.load_drawers().unwrap().len(),
+        2,
+        "the superseded fact is demoted, never deleted (D6)"
+    );
+}
+
+/// Fail-closed admission is OBSERVABLE: the write still succeeds, but as an
+/// ordinary Tier E drawer, and the envelope names the reason.
+#[tokio::test]
+async fn dispatch_remember_reports_a_refused_slot_as_tier_e() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "refused"}))
+        .await
+        .expect("palace_create");
+
+    let out = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "refused",
+            "text": "A bare unnamespaced slot name would collide across every workstream",
+            "fact_key": "state",
+        }),
+    )
+    .await
+    .expect("the write degrades, it does not fail");
+    assert_eq!(out["tier"], "E", "{out}");
+    assert!(
+        out["tier_c_refused"]
+            .as_str()
+            .is_some_and(|s| s.contains("state")),
+        "{out}"
+    );
+
+    let handle = open_palace_handle(&state, "refused").expect("open");
+    assert_eq!(handle.kg.drawer_id_for_fact_key("state").unwrap(), None);
+    assert!(
+        handle
+            .kg
+            .load_drawers()
+            .unwrap()
+            .iter()
+            .all(|d| d.fact_key.is_none() && d.expires_at.is_none()),
+        "a refused write must not pick up a slot or the Tier C default TTL"
+    );
+}
+
+/// `memory_note` carries the same slot surface — it is the `importance = 1.0`
+/// path, so a stale note there is the precise failure ADR-0028 exists to stop.
+#[tokio::test]
+async fn dispatch_note_admits_a_tier_c_slot() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "tiercnote"}))
+        .await
+        .expect("palace_create");
+
+    let out = dispatch_tool(
+        &state,
+        "memory_note",
+        json!({
+            "palace": "tiercnote",
+            "content": "origin/main is at 2b83d19e right now",
+            "fact_key": "repo:trusty-tools/main-head",
+        }),
+    )
+    .await
+    .expect("memory_note");
+    assert_eq!(out["tier"], "C", "{out}");
+
+    let handle = open_palace_handle(&state, "tiercnote").expect("open");
+    let id: uuid::Uuid = out["drawer_id"].as_str().unwrap().parse().unwrap();
+    let stored = handle
+        .kg
+        .load_drawers()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == id)
+        .expect("stored");
+    assert_eq!(
+        stored.fact_key.as_deref(),
+        Some("repo:trusty-tools/main-head")
+    );
+    assert!(
+        stored.expires_at.is_some(),
+        "an admitted Tier C fact always carries a retirement condition (D4)"
+    );
+}
+
+/// A malformed `expires_at` STRING is a caller typo, not a degradation —
+/// silently substituting the 24-hour default would hide it.
+#[tokio::test]
+async fn dispatch_remember_rejects_an_unparseable_expires_at() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "badttl"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "badttl",
+            "text": "A memory whose retirement timestamp cannot be parsed at all",
+            "fact_key": "pr:1/state",
+            "expires_at": "tomorrow",
+        }),
+    )
+    .await
+    .expect_err("an unparseable timestamp must be an error");
+    assert!(format!("{err:#}").contains("RFC 3339"), "{err:#}");
+}
+
+/// The schema advertises the two new arguments, on both write tools.
+#[test]
+fn tool_definitions_expose_the_tier_c_arguments() {
+    let defs = super::definitions::tool_definitions();
+    for tool in ["memory_remember", "memory_note"] {
+        let props = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == tool)
+            .unwrap_or_else(|| panic!("{tool} missing"))["inputSchema"]["properties"]
+            .clone();
+        assert!(props.get("fact_key").is_some(), "{tool} lacks fact_key");
+        assert!(props.get("expires_at").is_some(), "{tool} lacks expires_at");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // #4888 — Tier S admission control (ADR-0028 D2 / D8)
 //
@@ -2636,6 +2813,92 @@ async fn dispatch_kg_assert_retracted_fact_frees_a_slot() {
         !facts.iter().any(|f| f["subject"] == "rule-7"),
         "retracted fact must not be active: {listed}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// #4890 — Tier S re-affirmation (ADR-0028 D8 point 4)
+// ---------------------------------------------------------------------------
+
+/// Why (#4890): this is the ticket's central semantic decision and the only
+/// place it can be proven. `affirmed_at` is derived from the active row's
+/// `valid_from` rather than stored, and the decision that re-asserting a rule
+/// **verbatim** counts as re-affirmation depends entirely on `assert`
+/// rewriting `valid_from` even when the object is byte-identical. Nothing in
+/// this crate owns that behaviour — it is `KgStoreRedb::assert`'s — so a change
+/// there (an "identical write is a no-op" optimisation, say) would silently
+/// turn the doctor check into a nag that no amount of re-affirmation could
+/// clear. This test is the tripwire for that.
+/// What: asserts a fact, records its `affirmed_at`, sleeps past the storage
+/// layer's millisecond resolution, re-asserts the SAME subject/predicate/object,
+/// and asserts the surface still holds one fact whose `affirmed_at` moved
+/// strictly forward.
+#[tokio::test]
+async fn reasserting_an_identical_fact_refreshes_affirmed_at() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "affirm"}))
+        .await
+        .expect("palace_create");
+
+    let write = json!({
+        "palace": "affirm",
+        "subject": "conv-1",
+        "predicate": "has_convention",
+        "object": "Write plainly",
+    });
+
+    dispatch_tool(&state, "kg_assert", write.clone())
+        .await
+        .expect("first assert");
+    let first = affirmed_at_of(&state, "conv-1").await;
+
+    // Timestamps persist at millisecond resolution, so two asserts inside the
+    // same millisecond would be indistinguishable and the comparison below
+    // would be measuring the clock rather than the behaviour.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    dispatch_tool(&state, "kg_assert", write)
+        .await
+        .expect("re-asserting the identical fact must be admitted");
+    let second = affirmed_at_of(&state, "conv-1").await;
+
+    assert!(
+        second > first,
+        "re-asserting a verbatim-identical rule must refresh affirmed_at \
+         (first={first}, second={second})",
+    );
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert_eq!(
+        listed["facts"].as_array().expect("facts array").len(),
+        1,
+        "a re-affirmation supersedes rather than adds: {listed}",
+    );
+}
+
+/// Read the `affirmed_at` of the single Tier S fact with the given subject.
+///
+/// Parses rather than string-compares: `to_rfc3339` emits 0, 3, 6, or 9
+/// fractional digits depending on the value, so two RFC 3339 strings do not
+/// order lexicographically (a whole-second timestamp emits no fraction at all,
+/// and `+` sorts before `.`).
+async fn affirmed_at_of(state: &AppState, subject: &str) -> chrono::DateTime<chrono::Utc> {
+    let listed = dispatch_tool(state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array").clone();
+    let row = facts
+        .iter()
+        .find(|f| f["subject"] == subject)
+        .unwrap_or_else(|| panic!("no Tier S fact for {subject}: {listed}"))
+        .clone();
+    let raw = row["affirmed_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("affirmed_at missing or not a string: {row}"));
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|e| panic!("affirmed_at {raw:?} is not RFC 3339: {e}"))
+        .with_timezone(&chrono::Utc)
 }
 
 /// Why (#4888): 80 characters is the boundary and must be inclusive — a rule

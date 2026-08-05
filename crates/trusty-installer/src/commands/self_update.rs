@@ -63,7 +63,7 @@ pub enum WriteProbe {
 /// What: Maps the three "predicts-write-failure" kinds to their named variants;
 /// everything else (e.g. `Interrupted`, `NotFound`) → `WriteProbe::Other` so the
 /// caller falls through to the prebuilt + cargo-fallback path. Uses only stable
-/// `ErrorKind` variants available since Rust 1.83 (well within MSRV 1.91).
+/// `ErrorKind` variants available since Rust 1.83 (well within MSRV 1.94).
 ///
 /// Test: `tests::classify_permission_denied_aborts`,
 ///       `tests::classify_storage_full_aborts`,

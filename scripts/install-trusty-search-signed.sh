@@ -179,32 +179,27 @@ run_sign() {
 # Post-install guidance
 # ---------------------------------------------------------------------------
 
-# Why: the printed restart hint must name the plist launchd actually has
-# installed. The real daemon launchd label is `com.trusty.trusty-search`
-# (crates/trusty-search/src/commands/service.rs, LAUNCHD_LABEL) — this script
-# already printed the correct name, but the sibling README and the Makefile's
-# `deploy` target had drifted to two OTHER names (`com.trusty.search` and
-# `com.bobmatnyc.trusty-search` respectively), the same class of bug as #2827.
-# What: prefers the canonical `com.trusty.trusty-search.plist` when it exists
-# on disk; otherwise globs LaunchAgents for any other `com.trusty.*search*
-# .plist` / `com.bobmatnyc.*search*.plist` so the hint still finds a drifted
-# label, and falls back to the canonical name if nothing is installed yet.
-# Test: `bash -n` syntax check; manually verified against a real
-# ~/Library/LaunchAgents/com.trusty.trusty-search.plist during #2834 triage.
-resolve_search_plist() {
-    local agents_dir="$HOME/Library/LaunchAgents"
-    local canonical="$agents_dir/com.trusty.trusty-search.plist"
-    if [[ -f "$canonical" ]]; then
-        printf '%s' "$canonical"
-        return 0
-    fi
-    local candidate
-    for candidate in "$agents_dir"/com.trusty.*search*.plist "$agents_dir"/com.bobmatnyc.*search*.plist; do
-        [[ -f "$candidate" ]] || continue
-        printf '%s' "$candidate"
-        return 0
-    done
-    printf '%s' "$canonical"
+# Why (#4868): this block used to reach the wrong conclusion from the right
+# observation. It saw three names in play, picked `com.trusty.trusty-search` as
+# canonical because that is what the Rust constant said, and labelled the live
+# `com.trusty.search` a drifted alias. The reverse was true — `com.trusty.search`
+# is the unit launchd has loaded, and the constant was the thing that had
+# drifted. So the hint told the operator to bootout and bootstrap a plist that
+# does not exist, which restarted nothing.
+#
+# It is also the wrong shape of advice. A hand-run bootout/bootstrap pair cannot
+# evict a unit registered under a different label, and leaves the daemon down if
+# the bootstrap fails. `trusty-search service install` does both correctly —
+# it evicts the legacy labels, reloads only when the unit changed, and rolls
+# back rather than leaving the service down. Naming one command also removes
+# the last place this script could restate a label.
+# Test: `bash -n scripts/install-trusty-search-signed.sh`.
+print_restart_hint() {
+    printf '\nRESTART the daemon to pick up the newly signed binary:\n'
+    printf '  trusty-search service install\n'
+    printf '\n  (Re-installs the LaunchAgent under its canonical label, evicts\n'
+    printf '   any unit an older installer left behind, and leaves the daemon\n'
+    printf '   running if the reload fails.)\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -225,13 +220,7 @@ main() {
 
     if [[ "$TRUSTY_CODESIGN_DRY_RUN" != "1" ]]; then
         section "Done — next steps"
-        printf '\nRESTART the daemon to pick up the newly signed binary:\n'
-        local plist_path
-        plist_path="$(resolve_search_plist)"
-        # shellcheck disable=SC2016  # literal "$(id -u)" is narration for the reader to run, not expansion here
-        printf '  launchctl bootout  gui/$(id -u) %s\n' "$plist_path"
-        # shellcheck disable=SC2016
-        printf '  launchctl bootstrap gui/$(id -u) %s\n' "$plist_path"
+        print_restart_hint
         printf '\nVerify the daemon loaded all indexes:\n'
         printf '  trusty-search status\n'
         printf '\nOPTIONAL — notarize for distribution to OTHER machines:\n'

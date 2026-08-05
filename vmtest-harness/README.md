@@ -29,7 +29,7 @@ echo "exit=$?"                              # 0 means everything passed
 ```
 
 `run local` clones the base image, boots it, provisions a Rust toolchain, streams
-your **working tree** into the guest, installs all eight in-scope crates from it,
+your **working tree** into the guest, installs all nine in-scope crates from it,
 runs the assertion oracle, and deletes the VM. Expect **9–16 minutes**.
 
 Try `vmtest-harness/vmtest run local --dry-run` first: it runs preflight and prints
@@ -49,8 +49,10 @@ ready.
 | ≥ 24 GiB RAM | 16 GiB guest + 8 GiB host | yes — **hard fail** |
 | ≥ 8 physical cores | `hw.physicalcpu`, not `hw.ncpu` | warn only |
 
-Roughly 100 GiB of free disk is needed per concurrent run; the clone itself is
-APFS copy-on-write and costs ~0.3 s, but the guest grows as it builds.
+Roughly 100 GiB of free disk is needed for a run; the clone itself is
+APFS copy-on-write and costs ~0.3 s, but the guest grows as it builds. It is
+**one run at a time** — see [Only one run at a time](#only-one-run-at-a-time)
+below — so that figure is not multiplied by anything.
 
 ---
 
@@ -88,10 +90,73 @@ Deletes orphaned `vmtest-*` VMs — ones a crashed or killed run left behind. It
 **refuses to touch a running VM** and refuses to touch a VM that a live run still
 owns; it prints what it would do and tells you the manual commands instead.
 `--dry-run` classifies without destroying. `--include-kept` additionally removes VMs
-you deliberately preserved with `--keep`.
+you deliberately preserved with `--keep` — and for a **stopped** kept VM it
+outranks the "a live run owns this" check, because a kept VM plus a leftover
+registry entry is exactly what `--keep` produces. It never overrides that check
+for a `running` or `suspended` VM.
 
 `clean` never issues a stop. That is deliberate: deciding to stop someone else's VM
 is a human's call, not a cleanup tool's.
+
+### Only one run at a time
+
+**The harness runs exactly one guest at a time, and preflight refuses a second
+one.** Each guest is sized at 8 vCPU / 16 GiB, and two of them on one host only
+contend. Concurrency was a supported mode until 2026-08-04; it is not any more.
+
+Preflight reads this from **the run registry** — the harness's own record of what
+is running — not from whether a VM happens to be booted. The two refusals it can
+give have **opposite remedies**, and it will tell you which one you have:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `another vmtest run is already in progress: … WAIT for that run to finish` | a peer run is live and healthy; it names the runid and PID | **wait.** Do not stop it, do not `vmtest clean` it |
+| `harness-namespace VM(s) left behind by a run that is no longer alive … CLEAN IT UP before retrying` | a previous run crashed without tearing down | run **`vmtest clean`** |
+
+If both are true at once you get both reports, and the failure line is the first
+one — because waiting is the only thing that is safe while a peer is live.
+
+**It is a mistake-catcher, not a mutex.** Two runs started in the *same instant*
+can both get past it, before either has created its registry entry. Nothing else
+gets past it, and nothing about the harness depends on that never happening —
+but do not build automation on the assumption that the gate serialises for you.
+
+**"A run is in progress" but nothing is running?** Then the registry entry is
+stale, and the harness tells you how to clear it. This is a real state, not a
+hypothetical: `--keep` leaves its registry entry behind on purpose, macOS reuses
+PIDs once the number wraps, and a finished run's PID can end up belonging to
+something else entirely.
+
+Each run records **its own command line** when it starts, so a later check can
+ask *is that PID still the process that started this run?* rather than guess.
+When the answer is a clear no, it says so and carries on:
+
+```
+vmtest: WARN: single-run: registry entry 'nightly' was acquired by pid 4711
+running `/Users/you/trusty-tools/vmtest-harness/vmtest run local --keep`; that
+pid is alive but is now running `/usr/sbin/cupsd`. The pid was REUSED after the
+run ended, so the entry is STALE and is being DISREGARDED.
+```
+
+When it cannot tell — no `ps`, an unreadable command line, or an entry written
+before this check existed — it refuses conservatively and prints both escapes:
+
+```sh
+vmtest clean --include-kept          # the supported way
+rm -rf ~/.local/state/vmtest-harness/runs/<runid>    # the entry alone
+```
+
+`clean --include-kept` reaches both shapes this produces: a **stopped** kept VM
+whose entry still answers, and a leftover entry with **no VM at all**. It never
+overrides the refusal for a `running` or `suspended` VM.
+
+Be aware of the one edge, which is deliberate: for a **stopped** VM with a `keep`
+marker, `--include-kept` deletes it *even if the owning run is still alive*.
+That is the point of the flag — `--keep` leaves a stopped VM behind and
+`--include-kept` is how you remove one — but it means the flag is not a
+"safe unless something is running" switch. Plain `vmtest clean` never does this.
+The leftover-**entry** case is the other way round: an entry belonging to a run
+the harness can positively confirm is alive is never removed, under any flag.
 
 ### `vmtest --check-table`
 
@@ -111,7 +176,7 @@ from "the install is broken" without reading the log.
 |---|---|---|
 | **0** | — | Success. Scenario ran, every assertion passed, teardown completed. |
 | **2** | arguments | Usage error — unknown subcommand, bad `--runid`, unknown pattern. **No VM was touched.** |
-| **10** | preflight | Host refused: `tart` or `jq` missing, digest mismatch, a VM not `stopped`, runid collision, insufficient memory. **No VM was created.** |
+| **10** | preflight | Host refused: `tart` or `jq` missing, digest mismatch, a VM not `stopped`, runid collision, another run already in progress or a crashed run's VM left behind, insufficient memory. **No VM was created.** |
 | **20** | VM lifecycle | `tart clone`/`set`/`run` failed, or boot-ready polling timed out. |
 | **30** | negative probe | A precondition probe did not produce its expected result. |
 | **40** | provisioning | Toolchain provisioning failed or timed out. |
@@ -330,15 +395,15 @@ The six steps:
 ## What a green run proves — and what it does not
 
 A `vmtest run <pattern>` exiting 0 proves: the stack **built from that source**,
-**all thirteen in-scope binaries landed**, no multi-binary package installed a
-partial set, the installed tool versions are internally consistent, and the four
+**all fourteen in-scope binaries landed**, no multi-binary package installed a
+partial set, the installed tool versions are internally consistent, and the six
 in-scope daemons **answered `/health`**. On a machine with none of your state on it.
 
 It does **not** prove the following, and each of these is a known, recorded gap
 rather than an oversight:
 
 - **Daemon health is LIVENESS ONLY.** There is no unified health envelope in the
-  product: five daemons, five different `/health` body shapes. The oracle therefore
+  product: six daemons, six different `/health` body shapes. The oracle therefore
   asserts only that each one answered, that the body parses as JSON, and that
   `.status` is a string outside `{down, error, unhealthy}`. Its own PASS line says
   `LIVENESS ONLY`. It does not assert that a daemon is *working*.
@@ -386,8 +451,14 @@ rather than an oversight:
 - **`--dir` mounts were never measured**, in either direction. See rule 2 above.
 - ~~**`trusty-analyze` is a daemon the oracle does NOT probe.**~~ **CLOSED
   2026-08-04 — and it was a real gap, not a cosmetic one.** The liveness probe now
-  covers **all five** in-scope daemons: `trusty-search`, `trusty-memory`,
-  `trusty-analyze`, `trusty-mpm`, `trusty-review`.
+  covers **all six** in-scope daemons: `trusty-search`, `trusty-memory`,
+  `trusty-analyze`, `trusty-mpm`, `trusty-review`, `trusty-console`.
+
+  **`trusty-console` joined that set on 2026-08-05 with no change to this
+  function** *(#4921)*. It was always a `stable_set` daemon; the intersection had
+  been excluding it because the expectation table marked it out of scope. Widening
+  scope in the TSV was the whole edit — which is the derived set behaving as
+  designed rather than a second transcription needing a second fix.
 
   **The earlier framing here understated it, and the correction is worth stating
   plainly.** It was tempting to call this a logging inaccuracy on the grounds that
@@ -441,15 +512,24 @@ vmtest-harness/
 ├── expected-binaries.tsv      # the authoritative binary expectation table
 ├── lib/
 │   ├── vm.sh                  # the OS boundary — the ONLY file that may say `tart`
-│   ├── provision.sh           # mise + rust@1.91 + uv + gh, in the guest
+│   ├── provision.sh           # mise + rust@1.94 + uv + gh, in the guest
 │   ├── source.sh              # source delivery, one function per pattern
 │   └── verify.sh              # the JSON-only assertion oracle
 ├── scenarios/
 │   ├── install-local.sh       # pattern (c)
 │   ├── install-branch.sh      # pattern (b)
 │   └── install-released.sh    # pattern (a)
-└── tests/                     # fixtures (the dirty-worktree sentinel)
+└── tests/
+    ├── test-preflight-single-run.sh   # the single-run gate, proved with a stub CLI
+    └── dirty-check-fixture.txt        # the dirty-worktree sentinel
 ```
+
+`tests/test-preflight-single-run.sh` is the one part of the harness you can check
+without a VM: `bash vmtest-harness/tests/test-preflight-single-run.sh` takes
+**about 15 seconds** (measured 14.7–15.1 s; most of it is deliberate waits for
+the live fixture processes it needs), boots nothing, touches no network, and
+writes only inside its own temporary directories. Run it after any change to
+preflight, the run registry, or `clean`.
 
 A scenario is **a sequence of install steps plus the expectations that follow from
 them**. It composes `lib/` functions and contains no `tart` calls, no `PATH`

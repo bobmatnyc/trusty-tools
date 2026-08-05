@@ -21,7 +21,9 @@
 //! Test: this file.
 
 use super::*;
-use crate::embedder::test_env::{ENV_LOCK, EnvVarGuard};
+// #4940: `env_lock()` rather than the raw static — a panic in any sibling test
+// must not poison this file's tests into `PoisonError` failures.
+use crate::embedder::test_env::{EnvVarGuard, env_lock};
 
 /// Build a current-thread runtime for a synchronous test that must drive one
 /// async call while holding the synchronous [`ENV_LOCK`] (issue #3711).
@@ -36,7 +38,7 @@ fn current_thread_runtime() -> tokio::runtime::Runtime {
 /// sidecar prediction too, mirroring the ORT resolver's behaviour.
 #[test]
 fn resolve_expected_python_provider_forces_cpu() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let _d = EnvVarGuard::apply("TRUSTY_DEVICE", Some("CPU"));
     assert_eq!(resolve_expected_python_provider(), ExecutionProvider::Cpu);
 }
@@ -46,7 +48,7 @@ fn resolve_expected_python_provider_forces_cpu() {
 /// an `embedder-cuda` build predicts `Cuda`; every other host predicts `Cpu`.
 #[test]
 fn resolve_expected_python_provider_default_matches_platform() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
 
     let got = resolve_expected_python_provider();
@@ -98,7 +100,7 @@ fn embedding_model_name_reports_resolved_variant() {
 fn fast_embedder_model_name_reports_fp32_default() {
     // #3711: sync test + explicit runtime so the SHARED std `ENV_LOCK` covers
     // the whole construct window without `clippy::await_holding_lock`.
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
     let name = current_thread_runtime().block_on(async {
         let e = FastEmbedder::new().await.unwrap();
@@ -113,7 +115,7 @@ fn fast_embedder_model_name_reports_fp32_default() {
 #[ignore]
 fn fast_embedder_model_name_reports_int8_opt_in() {
     // #3711: see the sibling test — same shared-lock discipline.
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = env_lock();
     let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some("int8"));
     let name = current_thread_runtime().block_on(async {
         let e = FastEmbedder::new().await.unwrap();
