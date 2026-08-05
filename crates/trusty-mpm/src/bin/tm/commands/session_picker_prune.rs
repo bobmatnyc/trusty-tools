@@ -341,25 +341,26 @@ fn workdir_candidates(s: &ManagedSessionSummary) -> [Option<&str>; 2] {
 ///     none is unverifiable, and is kept);
 ///   * every candidate's probe came back a definitive `Ok(false)`. A probe
 ///     `Err` (permission denied, transient I/O) counts as "possibly present";
-///   * every candidate's PARENT DIRECTORY exists — see below.
+///   * every candidate's absence is CORROBORATED by a surviving directory above
+///     it ([`absence_corroborated`]) — see below.
 ///
-/// 🔴 The parent check is not defensive padding, it is the whole point of the
-/// word "verified". `try_exists("/Volumes/Unplugged/work/proj")` returns
+/// 🔴 The reachability check is not defensive padding, it is the whole point of
+/// the word "verified". `try_exists("/Volumes/Unplugged/work/proj")` returns
 /// `Ok(false)`, NOT `Err`, when the volume is not mounted — ENOENT on an
 /// intermediate component is indistinguishable from ENOENT on the leaf. Without
-/// this check, unplugging an external drive reads as "verified gone" for every
-/// session on it, and one `tm ls` tombstones the lot. Requiring the parent to
-/// exist means the only thing we ever call gone is a leaf missing from a
-/// directory we can still see. This errs toward keeping — a workspace whose
-/// whole parent tree was deleted is kept rather than cleared, which costs one
-/// stale row and risks nothing. Measured 2026-08-03: 4 of 5 spot-checked
-/// stopped workspaces still existed on disk.
+/// it, unplugging an external drive reads as "verified gone" for every session
+/// on it, and one `tm ls` tombstones the lot. The only thing we ever call gone
+/// is a leaf missing from a directory we can still see. This errs toward
+/// keeping — costing one stale row and risking nothing. Measured 2026-08-03:
+/// 4 of 5 spot-checked stopped workspaces still existed on disk.
 ///
 /// What: for each of [`workdir_candidates`], `tokio::fs::try_exists` on the path
-/// itself and on `Path::parent()`.
+/// itself, then [`absence_corroborated`] on the surviving tree above it.
 /// Test: `auto_prune_clears_stopped_record_whose_workspace_is_gone`,
 /// `auto_prune_keeps_stopped_record_whose_workspace_still_exists`,
-/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
+/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`,
+/// `auto_prune_clears_record_whose_worktree_root_survived_the_removal`,
+/// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`.
 async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
     let mut probed_any = false;
     for candidate in workdir_candidates(s).into_iter().flatten() {
@@ -370,18 +371,91 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
             Ok(true) | Err(_) => return false,
             Ok(false) => {}
         }
-        // #4702: the leaf is absent — but is its directory even reachable? An
-        // unmounted volume answers `Ok(false)` for every path under it.
-        let Some(parent) = std::path::Path::new(candidate).parent() else {
-            // No parent (a bare relative name, or the filesystem root itself) —
-            // nothing to corroborate against, so refuse to call it gone.
-            return false;
-        };
-        if !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+        // #4872: the leaf is absent — corroborate against the nearest surviving
+        // worktree root, because `git worktree remove` takes leaf and parent
+        // together and a parent-only probe can never tell that apart.
+        if !absence_corroborated(std::path::Path::new(candidate)).await {
             return false;
         }
     }
     probed_any
+}
+
+/// Directory-name pairs naming a git-worktree CONTAINER — the stable root under
+/// which this project's worktrees are created and removed (#4872).
+///
+/// Why: `git worktree remove` unlinks the whole tree in one operation, so a
+/// removed worktree's leaf, its parent and its grandparent all vanish together.
+/// A parent-only probe therefore cannot distinguish "the worktree was removed"
+/// from "the volume is unmounted", and #4872's four stuck records could never
+/// advance. The container directory is not itself part of any worktree, so it
+/// survives every removal and disappears only when the filesystem holding it is
+/// genuinely unreachable — which is exactly the corroborating anchor the
+/// immediate parent fails to be.
+/// What: `(parent-dir-name, container-dir-name)` pairs matched against a
+/// candidate's ancestors — `.base/.worktrees` (session worktrees) and
+/// `.claude/worktrees` (the worktree root `CLAUDE.md` documents).
+const WORKTREE_ROOT_MARKERS: [(&str, &str); 2] =
+    [(".base", ".worktrees"), (".claude", "worktrees")];
+
+/// Whether `dir` is one of the [`WORKTREE_ROOT_MARKERS`] container directories.
+///
+/// What: matches on the LAST TWO path components only, so it holds for any
+/// checkout location and for nested worktrees alike.
+/// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`.
+fn is_worktree_root(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(parent) = dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+    else {
+        return false;
+    };
+    WORKTREE_ROOT_MARKERS
+        .iter()
+        .any(|(p, c)| *p == parent && *c == name)
+}
+
+/// Decide whether an absent `candidate` is absent because something was DELETED
+/// (corroborated) or because its filesystem is unreachable (#4872).
+///
+/// Why: see [`WORKTREE_ROOT_MARKERS`]. This deliberately does NOT settle for
+/// "some ancestor exists" — `/Volumes` survives every unmount, so that weaker
+/// rule would reinstate exactly the mass-tombstone the guard was written to
+/// prevent.
+/// What: walks the ancestors nearest-first. When any [`is_worktree_root`]
+/// ancestor still exists, the tree below it was removed — corroborated. When the
+/// path has such an ancestor but NONE of them exist, the whole checkout is
+/// unreachable — not corroborated. A path with no worktree-root ancestor at all
+/// falls back to the original immediate-parent rule, unchanged.
+/// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`,
+/// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`,
+/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
+async fn absence_corroborated(candidate: &Path) -> bool {
+    let mut saw_worktree_root = false;
+    for ancestor in candidate
+        .ancestors()
+        .skip(1)
+        .filter(|a| is_worktree_root(a))
+    {
+        saw_worktree_root = true;
+        if tokio::fs::try_exists(ancestor).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    if saw_worktree_root {
+        return false;
+    }
+    // No worktree root in this path: fall back to the immediate parent. A path
+    // with no parent (a bare relative name, or the filesystem root itself) has
+    // nothing to corroborate against, so refuse to call it gone.
+    match candidate.parent() {
+        Some(parent) => tokio::fs::try_exists(parent).await.unwrap_or(false),
+        None => false,
+    }
 }
 
 /// Whether a record's lifecycle state makes it eligible for a record-only
