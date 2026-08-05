@@ -1,6 +1,6 @@
 # 0028. Memory recall splits into three tiers — Standing, Current, Episodic — with enforced retirement for Current
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-04
 - **Scope:** crates `trusty-common` (`memory_core`: retrieval layers, decay,
   drawer model), `trusty-memory` (prompt-facts surface, `prompt-context` hook
@@ -15,8 +15,9 @@
 - **Decision Drivers:** the always-injected prompt-fact surface is empty
   estate-wide and has been since 2026-07-24 (`/api/v1/kg/prompt-context` returns
   the literal `EMPTY_PLACEHOLDER`); a relevance-ranked retriever structurally
-  cannot surface an always-applicable rule; `expires_at` exists on the drawer
-  model but is enforced nowhere; the decay half-life (90 days) exceeds the useful
+  cannot surface an always-applicable rule; `expires_at` is enforced only at
+  palace open, never in the recall path a live session actually exercises
+  (C8); the decay half-life (90 days) exceeds the useful
   life of a point-in-time fact (hours) by three orders of magnitude; the
   most-injected drawer in the estate is a 19-day-old stale session checkpoint
   reaching 44.8% of all turns.
@@ -307,18 +308,53 @@ consuming the five top-k slots that standing rules would otherwise compete for.
 Fixing retirement directly improves standing-rule surfacing even before any
 always-injected tier exists.
 
-### C8. `expires_at` exists and is enforced nowhere
+### C8. `expires_at` is enforced only at palace open, never at read time
 
-The drawer model already carries `expires_at`. It is **set on 12 of 1,100
-drawers (1.1%)**, and — decisively — it is **read by nothing in the retrieval
-path**. Workspace-wide, the only non-test references in the memory crates are:
+The drawer model already carries `expires_at`, and it is **set on 12 of 1,100
+drawers (1.1%)**. Correction to an earlier draft of this ADR: expiry **is**
+enforced today, but only at one point in the palace lifecycle, not in the
+recall path a live session actually exercises.
 
-- `crates/trusty-memory/src/tools/memory_ops.rs:395` — serialises it to JSON output.
-- `crates/trusty-memory/src/service/helpers.rs:486` — hardcodes it to `None`.
+**What already exists.** `PalaceHandle::open_with_intent` prunes expired
+drawers inline, synchronously, on **every** palace open
+(`crates/trusty-common/src/memory_core/retrieval/handle.rs:325-347`, issue
+#61): it walks the drawer set, and for any drawer whose `expires_at` has
+fallen into the past it calls `delete_drawer_sync` and drops it before the
+handle is handed back to the caller. A standalone `PalaceHandle::purge_expired`
+implementing the same sweep also exists
+(`retrieval/handle.rs:874-917`), covered by the test
+`purge_expired_drops_only_past_ttl`
+(`retrieval/tests.rs:977-1010`) — but it has **no non-test call site**; the
+open-time sweep duplicates its logic inline rather than calling it, which is
+duplication worth fixing but not a gap in enforcement. `DrawerType::SessionEvent`
+additionally gets a 7-day default TTL at write time
+(`crates/trusty-common/src/memory_core/palace.rs:243-249`), so open-time pruning
+already has something to act on beyond hand-set `expires_at` values.
 
-There is no filter on expiry anywhere in `memory_core`. Of the 674 point-in-time
-drawers, **99.6% carry no `expires_at` at all**, and **79.1% were created before
-2026-08-01** (≥4 days stale at time of writing).
+**What's actually missing.** `expires_at` is consulted **only** at palace open
+— never in the recall/retrieval path itself. `retrieve_l0_l1`, `retrieve_l2`,
+and `rescore_l1_by_similarity`
+(`crates/trusty-common/src/memory_core/retrieval/layers.rs`) never filter on
+it; a grep for `expires_at` across `layers.rs` and `decay.rs` turns up nothing
+but an inert `expires_at: None` in a struct literal, no comparison against
+`now`. The two surfaces closest to a read path treat the field as inert
+in the same way: `crates/trusty-memory/src/tools/memory_ops.rs:395` only
+serialises it into JSON output, and
+`crates/trusty-memory/src/service/helpers.rs:486` only sets it to `None` when
+constructing a drawer — neither compares it to the current time.
+
+For the production deployment — a long-lived HTTP daemon that opens each
+palace once, as `OpenIntent::Writer`, and holds the handle for the process
+lifetime — that means a drawer whose `expires_at` falls due mid-session keeps
+being served by every recall until the next daemon restart re-triggers the
+open-time sweep. The gap this ADR must close is **read-time enforcement**, not
+enforcement from zero.
+
+Of the 674 point-in-time drawers, **99.6% carry no `expires_at` at all**, and
+**79.1% were created before 2026-08-01** (≥4 days stale at time of writing) —
+so even a correctly-enforced open-time sweep has almost nothing to act on
+today; the estate needs both the field populated (D3/D4) and the field
+enforced where sessions actually read it (D4's read-time requirement, below).
 
 ### C9. The supersession convention is real but unreliable
 
@@ -463,8 +499,9 @@ value of Tier C. A nullable field is an invariant you do not have.
 
 Every Tier C write supplies **at least one** retirement condition:
 
-1. **`expires_at`** — an explicit timestamp. Already on the model (§C8); needs
-   *enforcement*, not invention.
+1. **`expires_at`** — an explicit timestamp. Already on the model, and already
+   enforced once, at palace open (§C8); needs *read-time* enforcement, not
+   invention.
 2. **`live_while`** — an optional verifiable predicate, e.g.
    `gh:pr-open:4818`. Precise rather than merely safe: it retires the fact when
    the PR actually merges, not when a timer happens to fire.
@@ -484,9 +521,12 @@ fired is no longer injected. Privilege and mandatory expiry are the same
 transaction.
 
 **Enforcement point:** expiry is evaluated at **read time**, in the retrieval
-path, not by a background sweeper. A sweeper that fails silently reintroduces
-exactly the bug being fixed; a read-time filter cannot fail open without the
-recall itself failing.
+path — not left to the existing open-time sweep alone (§C8), which runs once
+when a handle is opened and never again for the lifetime of that handle. In
+the production long-lived daemon, that means a session that has been open for
+hours never re-checks it. A sweeper that only fires at open (or fails silently)
+reintroduces exactly the bug being fixed; a read-time filter cannot fail open
+without the recall itself failing.
 
 **Decay:** Tier C uses a **half-life of hours, not 90 days**. The 90-day constant
 (`decay.rs:12-31`) stays correct for Tier E and is left alone.
@@ -697,6 +737,25 @@ of PR #4818.
 | `live_while` checker unavailable/slow | It is optional and advisory; the mandatory TTL is the fail-safe floor |
 | Read-time expiry filter adds latency | Timestamp comparison per candidate drawer, on an already-capped result set |
 | Re-enabling an always-on tier repeats #633 | #633 failed because *episodic* content was always-on. Tier S admits only 80-char standing rules; Tier C admits only facts with enforced retirement. `L1_NO_SIMILARITY_PENALTY` is unchanged. |
+
+### Implementation scope
+
+Two scope decisions, recorded here so the first implementation wave has a
+fixed target rather than an open-ended reading of D4/D6:
+
+- **`live_while` (e.g. `gh:pr-open:4818`) is out of scope for the initial
+  implementation wave.** No GitHub-state checker exists anywhere in the
+  workspace today, and the Risks table above already calls `live_while`
+  optional and advisory. Retirement in the first wave is `expires_at` plus the
+  default TTL only; `live_while` remains a documented future retirement
+  condition, not a first-wave dependency.
+- **D6's supersession pointer is implemented as a KG triple**
+  (`drawer:<old> --superseded-by--> drawer:<new>`) via the existing
+  `kg.assert` path, **not** as a new `Drawer` field. This ADR's own
+  Reversibility Cost accounting budgets exactly one new field (`fact_key`) and
+  one new index; a second schema field would exceed that stated scope. The
+  storage location for the D6 pointer was otherwise left unspecified in the
+  ADR as originally written.
 
 ---
 
