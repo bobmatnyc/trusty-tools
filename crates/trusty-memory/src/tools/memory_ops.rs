@@ -27,9 +27,9 @@ use super::bm25::{
     bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall, serialize_recall,
 };
 use super::helpers::{
-    attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate, mcp_remember_opts,
-    open_palace_handle, parse_tags, resolve_palace, room_label, skipped_envelope, write_drawer,
-    WriteDrawerParams,
+    apply_tier_c, attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate,
+    mcp_remember_opts, open_palace_handle, parse_tags, resolve_palace, resolve_tier_c, room_label,
+    skipped_envelope, write_drawer, WriteDrawerParams,
 };
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -156,6 +156,15 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // wing-scoped recall would be permanently empty outside the default.
     let wing_handle = open_palace_handle(state, palace)?;
     let wing_id = resolve_wing_arg(&wing_handle, &args, "memory_remember")?;
+    // #4886: ADR-0028 D3/D4. `fact_key` is what makes this a Tier C write; a
+    // slot that fails admission degrades to an ordinary drawer, and the
+    // envelope below reports which tier the write actually landed in.
+    let admission = resolve_tier_c(&args, "memory_remember")?;
+    let mut opts = RememberOptions {
+        wing_id,
+        ..mcp_remember_opts(force, defer_embedding, allow_secret_like)
+    };
+    let (tier, refusal) = apply_tier_c(&admission, &mut opts);
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -164,19 +173,21 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             tags,
             room,
             importance: 0.5,
-            opts: RememberOptions {
-                wing_id,
-                ..mcp_remember_opts(force, defer_embedding, allow_secret_like)
-            },
+            opts,
             room_label_for_kg,
         },
     )
     .await?;
-    Ok(json!({
+    let mut out = json!({
         "drawer_id": drawer_id.to_string(),
         "palace": palace,
         "status": "stored",
-    }))
+        "tier": tier,
+    });
+    if let Some(reason) = refusal {
+        out["tier_c_refused"] = json!(reason);
+    }
+    Ok(out)
 }
 
 pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
@@ -272,6 +283,17 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // note() preset skips the token threshold; we keep the default
     // filter for noise patterns. No MCP-stricter min_tokens override
     // is needed because `enforce_min_tokens = false`.
+    // #4886: same Tier C surface as `memory_remember`. `memory_note` is the
+    // more likely home for a current fact — it is the short, curated, pinned
+    // `importance = 1.0` path, which is exactly the privilege ADR-0028 §C5
+    // measured at 8.25x median injection lift and D4 requires be paired with a
+    // retirement condition.
+    let admission = resolve_tier_c(&args, "memory_note")?;
+    let mut opts = RememberOptions {
+        defer_embedding,
+        ..RememberOptions::note()
+    };
+    let (tier, refusal) = apply_tier_c(&admission, &mut opts);
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -280,21 +302,23 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             tags,
             room,
             importance: 1.0,
-            opts: RememberOptions {
-                defer_embedding,
-                ..RememberOptions::note()
-            },
+            opts,
             room_label_for_kg,
         },
     )
     .await
     .context("PalaceHandle::remember_with_options (note)")?;
-    Ok(json!({
+    let mut out = json!({
         "drawer_id": drawer_id.to_string(),
         "palace": palace,
         "status": "stored",
         "drawer_type": "UserFact",
-    }))
+        "tier": tier,
+    });
+    if let Some(reason) = refusal {
+        out["tier_c_refused"] = json!(reason);
+    }
+    Ok(out)
 }
 
 /// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.

@@ -296,6 +296,31 @@ impl Drawer {
         self.expires_at.is_some_and(|t| t < now)
     }
 
+    /// Whether this drawer currently occupies an ADR-0028 Tier C slot (#4886).
+    ///
+    /// Why: expiry means two different things for the two kinds of drawer, and
+    /// the reclamation sweeps need to tell them apart. For an ordinary drawer,
+    /// `expires_at` is a lifetime — when it elapses the row is reclaimable, and
+    /// the sweeps hard-delete it. For a Tier C fact, `expires_at` is the
+    /// *retirement condition* D4 required at admission: when it elapses the
+    /// fact stops being privileged, which read-time expiry (#4885) already
+    /// enforces on every recall. Deleting the row on top of that would
+    /// contradict D6 ("Demoted, never deleted") and destroy the record the
+    /// supersession pointer (#4887) is meant to hang off — and D6 rejects hard
+    /// deletion on evidence, not principle: this estate hand-wrote 109
+    /// amendment edges precisely so corrections survive. So the sweeps skip
+    /// these, and a Tier C fact leaves the tier by being superseded (which
+    /// clears both fields, returning it to an ordinary permanent Tier E
+    /// drawer) rather than by being erased.
+    /// What: `true` while `fact_key` is set. A superseded drawer has had its
+    /// `fact_key` cleared by the retire-on-write path, so it is `false` again
+    /// and the sweeps treat it exactly as they treat any other drawer.
+    /// Test: `expired_tier_c_drawer_survives_the_open_time_sweep`,
+    /// `purge_expired_leaves_tier_c_drawers_alone`.
+    pub fn is_tier_c(&self) -> bool {
+        self.fact_key.is_some()
+    }
+
     /// Accumulated access boost for decay calculation.
     ///
     /// Why: Frequently recalled drawers should resist decay; this exposes the

@@ -158,6 +158,53 @@ impl KnowledgeGraph {
         self.writer.upsert_drawer(drawer.clone()).await
     }
 
+    /// Persist several drawers inside ONE redb write transaction (#4886).
+    ///
+    /// Why: ADR-0028 D5's retire-on-write must be indivisible. The single-op
+    /// `upsert_drawer` path routes through the coalescing writer actor, which
+    /// batches opportunistically — it may or may not put two queued upserts in
+    /// the same commit, and "may" is not a guarantee an invariant can rest on.
+    /// A crash landing between the incumbent's retirement and the replacement's
+    /// arrival would leave a slot whose occupant was retired with nothing
+    /// taking its place, which is strictly worse than the stale fact the tier
+    /// exists to retire. Going straight to `KgStoreRedb::apply_batch` makes the
+    /// pair atomic by construction rather than by scheduling luck.
+    /// What: maps each drawer to a `BatchWriteOp::UpsertDrawer` — preserving
+    /// the caller's order, which the `DRAWERS_BY_FACT_KEY` maintenance in
+    /// `batch_upsert_drawer` depends on — and applies them in one transaction
+    /// on the blocking pool. Rolls the whole batch back on any per-op error.
+    /// Read-only handles are rejected by `apply_batch`'s own writability check.
+    /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
+    /// `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`.
+    pub async fn upsert_drawers_atomic(&self, drawers: Vec<Drawer>) -> Result<()> {
+        use crate::memory_core::store::kg_redb::BatchWriteOp;
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let ops: Vec<BatchWriteOp> = drawers
+                .into_iter()
+                .map(BatchWriteOp::UpsertDrawer)
+                .collect();
+            store.apply_batch(&ops).map(|_| ())
+        })
+        .await
+        .context("upsert_drawers_atomic spawn_blocking join error")?
+    }
+
+    /// Which drawer, if any, currently occupies the `fact_key` slot (#4884).
+    ///
+    /// Why: the ADR-0028 D5 write path asks "who holds this slot?" exactly once
+    /// per Tier C write; answering it from the secondary index is a point
+    /// lookup rather than a decode of every drawer row in the palace.
+    /// What: forwards to `KgStoreRedb::drawer_id_for_fact_key`. Synchronous —
+    /// it is a single redb read transaction, and the Tier C write path already
+    /// holds the per-palace write mutex when it calls this, so there is nothing
+    /// to yield to.
+    /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
+    /// `fact_key_index_tracks_upsert_and_delete`.
+    pub fn drawer_id_for_fact_key(&self, fact_key: &str) -> Result<Option<Uuid>> {
+        self.store.drawer_id_for_fact_key(fact_key)
+    }
+
     /// Remove a drawer's metadata by ID.
     ///
     /// Why: Forgetting must clear both the vector index and the persistent
