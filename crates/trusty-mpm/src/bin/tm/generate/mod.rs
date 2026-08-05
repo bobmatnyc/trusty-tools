@@ -1,20 +1,21 @@
 //! Generator engine for `tm generate capabilities` (issue #2913).
 //!
 //! Why: the `tm-capabilities` bundled skill (CLI tree, MCP tool catalog,
-//! agent roster, skill catalog, doctor checks) must never be hand-maintained
-//! prose — every one of those five surfaces already exists as
-//! machine-extractable, in-process data (clap's `Command` introspection,
+//! agent roster, skill catalog, doctor checks, framework layout) must never
+//! be hand-maintained prose — every one of those six surfaces already exists
+//! as machine-extractable, in-process data (clap's `Command` introspection,
 //! `mcp::tools::tool_catalog()`, `bundle::ALL` + `agent_metadata`, a
-//! maintained-and-cross-checked doctor-check list). This module is the
+//! maintained-and-cross-checked doctor-check list, the `FrameworkPaths` and
+//! tier resolvers the runtime itself resolves against). This module is the
 //! single place that walks each surface and turns it into deterministic
 //! markdown, so `--check` (the CI drift gate) and the write path share
 //! exactly the same generation logic and can never disagree about what
 //! "up to date" means.
-//! What: [`generate`] builds the full [`GeneratedSet`] (6 files); [`write`]
+//! What: [`generate`] builds the full [`GeneratedSet`] (7 files); [`write`]
 //! writes it to `crates/trusty-mpm/src/assets/skills/`; [`diff`] compares it
 //! against the committed copies without writing; [`run_capabilities`] is the
 //! `tm generate capabilities[--check]` CLI entry point.
-//! Test: `generated_set_has_six_entries`, `generated_set_is_deterministic`,
+//! Test: `generated_set_has_seven_entries`, `generated_set_is_deterministic`,
 //! plus each submodule's own render tests.
 
 mod agents;
@@ -32,7 +33,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Why: `&'static str` keys (string literals fixed at compile time, one per
 /// generated file) avoid an owned-`String`-vs-literal mismatch between the
-/// build side and the six fixed call sites in [`generate`]; `BTreeMap` gives
+/// build side and the seven fixed call sites in [`generate`]; `BTreeMap` gives
 /// deterministic iteration order for free (the write/diff loops don't
 /// otherwise care about order, but stable iteration keeps `--check`'s printed
 /// drift summary reproducible too).
@@ -42,7 +43,7 @@ pub(crate) type GeneratedSet = BTreeMap<&'static str, String>;
 /// `src/assets/skills/`.
 ///
 /// Why: a single function is the one place that knows the full generated
-/// file set — the entry point plus five references files — so [`write`] and
+/// file set — the entry point plus six references files — so [`write`] and
 /// [`diff`] share it and can never disagree about which files exist.
 /// What: returns 7 entries: `tm-capabilities.md` (the entry file) plus
 /// `tm-capabilities/references/{cli,mcp-tools,agents,skills,doctor,framework}.md`.
