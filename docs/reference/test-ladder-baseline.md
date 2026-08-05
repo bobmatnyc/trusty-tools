@@ -17,6 +17,16 @@ restated here. What follows is only what that generic version cannot carry.
 |---|---|---|
 | The `trusty-search` filesystem-watcher tests (~6; the set drifts) | `crates/trusty-search/src/service/watch_loop.rs`, `watcher.rs`, `watcher_manager.rs` | FSEvents delivery on this host is nondeterministic. They fail on any branch, and they still fail under `-- --test-threads=1` — so it is the machine, not parallel-test load |
 | `execute_doctor_against_test_daemon` | `crates/trusty-mpm/src/client/executor/tests.rs` | It takes 9–13 s against a 10 s client timeout, so it loses on timing alone under any load |
+| `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet` | `crates/trusty-mpm/src/` (test-only) | Parallel-run race on `$HOME` mutation between tests. Fails 3 of 5 runs on a clean baseline worktree with no branch changes. Passes under `-- --test-threads=1` |
+| `safe_session_cwd_replaces_home_and_missing` | `crates/trusty-mpm/src/` (test-only) | Same `$HOME`-mutation race as `stale_assets_for_many_reads_shared_agent_dir_once_for_the_whole_fleet`, same evidence run (5 runs: 3 failed, 2 passed), same remedy (`-- --test-threads=1`) |
+| `meta_run_demo_writes_and_verifies_artifact` | `crates/trusty-mpm/src/` (`--include-ignored` only) | Times out at ~187s (`launch_outcome: "timed-out"`). It launches a real Claude Code session, so it depends on external process availability. Reproduced identically on a clean baseline worktree with branch changes stashed |
+| `bench_stale_assets_for_many` | `crates/trusty-mpm/src/` (`--include-ignored` only) | Load-sensitive benchmark: fails under a loaded run, passes in isolation and on a clean `--lib --include-ignored` run (4579 passed, 0 failed) |
+
+**Parallel-run failures in `trusty-mpm`:** A failure that appears only in
+parallel test runs is not evidence your branch broke something. Re-run with
+`-- --test-threads=1` to isolate the machinery from parallel interference; if
+it goes green, the failure was isolation-specific, not a correctness defect.
+Isolation races in this crate are pre-existing and documented above.
 
 🔴 **The correct response is to prove your diff touches zero files in those
 crates — never to `#[ignore]`, `cfg`-gate, or `--exclude` them.** The proof is a
