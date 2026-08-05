@@ -202,3 +202,49 @@ pub(crate) fn format_session_row(num: u32, s: &ManagedSessionSummary, use_color:
     let state = colorize(shown_state, color, use_color);
     format!("[{num}] {} ({state})", s.name)
 }
+
+/// Column width the command legend pads each `[key]` to (#4965).
+///
+/// Why: the descriptions must line up in BOTH menus — the empty-session
+/// variant was aligned while the populated one (the common case) was left
+/// ragged, so the two looked like different tools. Sized to the widest key,
+/// `[r<N> <new-name>]`, plus one separating space.
+const MENU_KEY_WIDTH: usize = 18;
+
+/// Build the picker's command legend — the `[key]  description` lines printed
+/// under the session rows.
+///
+/// Why: kept out of `run_tty_picker` for two reasons. This module exists
+/// because `session_picker.rs` sits at the 500-SLOC production cap, and the
+/// legend is exactly the kind of pure formatting it was split off to hold;
+/// and a pure function makes the wording and the column alignment assertable
+/// without driving a real TTY loop.
+/// What: `launch_slot` is `None` for the no-sessions menu (bare Enter is the
+/// launch key, and the delete/rename rows have nothing to target) and
+/// `Some(slot)` for the populated one. The `n` row spells out `tm-<name>-NN`
+/// because the adjacent `r<N> <new-name>` row takes a VERBATIM full session
+/// name — without it the two `<name>` arguments read as interchangeable and
+/// are not.
+/// Test: `command_legend_empty_menu_shape`, `command_legend_populated_menu_shape`,
+/// `command_legend_columns_are_aligned`.
+pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
+    let row = |key: String, description: &str| format!("{key:<MENU_KEY_WIDTH$} {description}");
+    let mut lines = match launch_slot {
+        None => vec![row("[Enter]".to_string(), "launch new session")],
+        Some(slot) => vec![row(format!("[{slot}]"), "launch new session")],
+    };
+    lines.push(row(
+        "[n <name>]".to_string(),
+        "launch new session as tm-<name>-NN (e.g. n auth-refactor)",
+    ));
+    if launch_slot.is_some() {
+        lines.push(row("[d<N>]".to_string(), "delete session N (e.g. d1)"));
+        lines.push(row(
+            "[r<N> <new-name>]".to_string(),
+            "rename session N (e.g. r1 tm-my-new-name)",
+        ));
+    }
+    lines.push(row("[ls]".to_string(), "re-print this list"));
+    lines.push(row("[q]".to_string(), "quit"));
+    lines
+}

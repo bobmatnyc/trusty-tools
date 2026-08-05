@@ -213,9 +213,18 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
 /// dev-dependency of this crate).
 /// What: binds an ephemeral loopback port, serves one `axum` route via a
 /// background task, and returns `(captured, url)` where `captured` is filled
-/// in by the handler once a request lands.
-/// Test: `session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends`.
-async fn spawn_capturing_managed_spawn_server() -> (
+/// in by the handler once a request lands. `answer` selects what the handler
+/// replies with AFTER capturing (#4965): [`StatusCode::OK`] plus the ack for a
+/// caller that must continue past the POST, or any error status for a caller
+/// whose only subject is the request body — `launch_new_session_and_attach`
+/// answered `200` would go on to run a REAL `tmux attach`, so its wire tests
+/// use `500` to make the function return the moment the body is captured.
+/// Test: `session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends`,
+/// `launch_new_session_and_attach_sends_the_name_hint`,
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`.
+async fn spawn_capturing_managed_spawn_server_answering(
+    answer: axum::http::StatusCode,
+) -> (
     std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     String,
 ) {
@@ -229,13 +238,16 @@ async fn spawn_capturing_managed_spawn_server() -> (
         let captured = std::sync::Arc::clone(&captured_for_handler);
         async move {
             *captured.lock().expect("captured mutex poisoned") = Some(body);
-            Json(serde_json::json!({
-                "id": "11111111-1111-1111-1111-111111111111",
-                "name": "tmpm-test-session",
-                "state": "Active",
-                "runtime": "claude-code",
-                "attach_cmd": "tmux attach -t tmpm-test-session",
-            }))
+            (
+                answer,
+                Json(serde_json::json!({
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "name": "tmpm-test-session",
+                    "state": "Active",
+                    "runtime": "claude-code",
+                    "attach_cmd": "tmux attach -t tmpm-test-session",
+                })),
+            )
         }
     };
     let router = Router::new().route("/api/v1/sessions/managed", post(handler));
@@ -249,6 +261,15 @@ async fn spawn_capturing_managed_spawn_server() -> (
     });
 
     (captured, format!("http://{addr}"))
+}
+
+/// [`spawn_capturing_managed_spawn_server_answering`] with the success answer
+/// — the shape every caller wanted before #4965 added the reject variant.
+async fn spawn_capturing_managed_spawn_server() -> (
+    std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    String,
+) {
+    spawn_capturing_managed_spawn_server_answering(axum::http::StatusCode::OK).await
 }
 
 /// #1916 item 3: `session start`'s protected-path branch must POST the SAME
@@ -405,5 +426,91 @@ fn session_start_accepts_a_git_directory() {
     assert!(
         super::refuse_outside_a_git_project(&plain).is_err(),
         "a non-git directory is refused"
+    );
+}
+
+// ── #4965: the picker's `n <name>` name_hint on the wire ───────────────────
+
+/// Drive [`crate::commands::guided_launch::launch_new_session_and_attach`]
+/// against the capturing server and return the request body it POSTed.
+///
+/// Why: the `name_hint` plumbing had no test of its own — `session start`'s
+/// wire-shape test only pins a hand-copied MIRROR of this body, so a wrong key
+/// name, a wrong JSON type, or a key leaking on the `None` path would all have
+/// gone unnoticed. This drives the REAL function.
+/// What: answers `500` after capturing so the function returns immediately
+/// after the POST instead of continuing into `tmux_attach`/`provision-status`
+/// (the returned `Err` is expected and ignored — the request body is the
+/// entire subject). `repo_url` is a non-directory string, so
+/// `needs_first_run_clone` short-circuits without touching the filesystem.
+/// Test: `launch_new_session_and_attach_sends_the_name_hint`,
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed`.
+async fn capture_guided_launch_body(name_hint: Option<&str>) -> serde_json::Value {
+    let (captured, url) = spawn_capturing_managed_spawn_server_answering(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let result = crate::commands::guided_launch::launch_new_session_and_attach(
+        &client,
+        &url,
+        "https://example.invalid/owner/repo.git",
+        name_hint,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the harness answers 500 so the call stops at the POST; got {result:?}"
+    );
+
+    captured
+        .lock()
+        .expect("captured mutex poisoned")
+        .clone()
+        .expect("launch_new_session_and_attach must have POSTed to /api/v1/sessions/managed")
+}
+
+/// #4965: a named launch must put the operator's leaf on the wire under the
+/// key the daemon reads (`name_hint`), as a JSON string.
+///
+/// FAILS BEFORE THIS CHANGE: nothing exercised this function's body at all —
+/// renaming the key to `nameHint`, or sending it as a number, kept every test
+/// green.
+/// What: captures the real POST body for `Some("auth")`.
+#[tokio::test]
+async fn launch_new_session_and_attach_sends_the_name_hint() {
+    let body = capture_guided_launch_body(Some("auth")).await;
+    assert_eq!(
+        body.get("name_hint"),
+        Some(&serde_json::Value::String("auth".to_string())),
+        "the named launch must send name_hint as a JSON string: {body}"
+    );
+}
+
+/// #4965: the unnamed launch must OMIT the key entirely — not send `null`.
+///
+/// Why: the daemon's `Option<String>` deserialization accepts a missing key
+/// and a `null` alike, but `session start`'s wire-shape test asserts the two
+/// surfaces' bodies are EQUAL, so a leaked `null` here would be a silent
+/// divergence between the two spawn entry points (#1916 item 3).
+/// What: captures the real POST body for `None` and asserts the key is absent,
+/// then that the rest of the body is unchanged.
+#[tokio::test]
+async fn launch_new_session_and_attach_omits_name_hint_when_unnamed() {
+    let body = capture_guided_launch_body(None).await;
+    assert!(
+        body.get("name_hint").is_none(),
+        "the unnamed launch must omit name_hint entirely, not send null: {body}"
+    );
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "repo_url": "https://example.invalid/owner/repo.git",
+            "ref": "HEAD",
+            "task": "",
+            "force_new": true,
+            "background": true,
+        }),
+        "the unnamed request's wire shape must be unchanged by #4965"
     );
 }

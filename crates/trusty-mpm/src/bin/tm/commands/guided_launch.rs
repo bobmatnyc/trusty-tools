@@ -126,7 +126,9 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// What: (1) shows a `trusty_progress` spinner (auto-hidden in non-TTY/plain
 /// output); (2) POSTs `{ repo_url, ref: "HEAD", task: "", force_new: true,
 /// background: true }`, plus `name_hint` when the caller supplied one (#4965 —
-/// the picker's `n <name>`; the key is omitted entirely for `None`, so the
+/// the picker's `n <name>`, ALREADY kebab-cased by
+/// `trusty_common::session_naming::leaf_slug_from_hint` so the daemon's own
+/// sanitization is a no-op; the key is omitted entirely for `None`, so the
 /// unnamed path's wire shape is unchanged); (3) if the daemon answered
 /// synchronously (`201` with a
 /// name — an older daemon ignoring `background`) attaches immediately; (4)
@@ -139,7 +141,10 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// `run_tty_picker` loop uses it to decide whether it must stop reading
 /// stdin (a `switch-client` handoff, or a fail-closed skip, means this
 /// pane is no longer the one the operator sees).
-/// Test: covered by the `POST /api/v1/sessions/managed` + `provision-status`
+/// Test: `launch_new_session_and_attach_sends_the_name_hint` and
+/// `launch_new_session_and_attach_omits_name_hint_when_unnamed` (in
+/// `session::start_tests`) pin the `name_hint` key on the wire; the rest is
+/// covered by the `POST /api/v1/sessions/managed` + `provision-status`
 /// integration tests; the message formatting by `spawn_progress_message_*` and
 /// `provisioning_message_*`.
 pub(crate) async fn launch_new_session_and_attach(
