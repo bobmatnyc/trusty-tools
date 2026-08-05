@@ -658,8 +658,10 @@ async fn spawn_managed_cloned(
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
     // #1935: `owned=false` — the workspace is now a `git worktree` slice of a
-    // shared, persistent base checkout (`<project_dir>/.base/`), not an
-    // independently-owned full clone. Bulk `remove_dir_all` would leave the
+    // shared, persistent base checkout, not an independently-owned full clone.
+    // #4270: that base checkout is `<project_dir>` itself and the worktree is
+    // `<project_dir>/.worktrees/<id>`, the same shape `spawn_managed_inproject`
+    // produces. Bulk `remove_dir_all` would leave the
     // base checkout's git worktree metadata and session branch ref dangling;
     // `session_manager::decommission` instead detects the `.worktrees/<id>`
     // shape (`is_session_worktree`) and runs `git worktree remove --force` +
