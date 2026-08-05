@@ -6,6 +6,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.42.3] — 2026-08-05
+
+### Fixed
+
+- **Warm boot paid a full tracked-root relocation walk per dead registry
+  entry, starving live indexes for the better part of an hour** (issues
+  [#4250](https://github.com/bobmatnyc/trusty-tools/issues/4250),
+  [#4846](https://github.com/bobmatnyc/trusty-tools/issues/4846)). Measured on
+  the reporting machine's own registry (248 tracked roots, 55 dead entries):
+  9.5-10.5s per dead entry, recomputed from scratch even though the walk's
+  result is identical for every entry in a boot. Entries are now triaged with
+  one stat into separate live/dead vectors; the dead cohort runs after both
+  live phases under one global salvage budget, and the tracked-root walk runs
+  once for the whole cohort instead of once per entry. A timeout-skipped index
+  is no longer permanently parked in the cold store with nothing able to see
+  it again — a recovery pass now retries the timeout cohort on a backoff (5
+  attempts) while leaving deliberately deferred entries alone. No
+  registration is removed and no index data is deleted by a failed or skipped
+  probe (#4883).
+
+- **The shutdown flush's own window was unreachable — every real termination
+  deadline in the system was shorter than the flush's 30s floor** (issues
+  [#4393](https://github.com/bobmatnyc/trusty-tools/issues/4393),
+  [#4395](https://github.com/bobmatnyc/trusty-tools/issues/4395)). launchd's
+  `ExitTimeOut` default (5s), `trusty-search stop` (5s), and the orphan
+  reaper's SIGKILL window (3s) all fired before a flush with real work could
+  finish. The plist now emits an explicit `ExitTimeOut` of 60s from a shared
+  constant, and a per-index flush deadline can only be minted from the actual
+  SIGTERM-to-now budget, so it is structurally incapable of outliving the
+  process. Separately, the startup orphan reaper identified victims by
+  process name plus `start` in argv — any lock-visibility asymmetry could
+  make it SIGKILL a healthy production daemon; it now identifies a candidate
+  by the data directory the process itself declares, and a candidate whose
+  argv/environment cannot be read is spared rather than assumed guilty
+  (#4868).
+
+- **A write-quarantined index (the #4122 corpus-open-failed guard) still
+  performed a destructive write on shutdown**
+  ([#4226](https://github.com/bobmatnyc/trusty-tools/issues/4226)). The
+  quarantine gated the incremental-ingest family only; the snapshot-writer
+  family (`save_chunks_to_disk`, `flush_corpus_to_disk`, `save_vector_store`,
+  `spawn_incremental_persist`) shared the same `corpus.is_none()` enabling
+  condition quarantine guarantees, so a shutdown flush wrote the
+  deliberately-empty in-memory corpus over the legacy `chunks.json` recovery
+  snapshot — while the refusal diagnostic told the operator the on-disk
+  corpus was untouched. All four snapshot writers are now gated on
+  `corpus_open_failed` directly, closing the same hole for the HNSW graph
+  file (#4866).
+
+- **The test suite could reach and pollute the operator's live index
+  registry** ([#4255](https://github.com/bobmatnyc/trusty-tools/issues/4255)).
+  `cfg(test)` is set per compilation unit and does not cover a crate's
+  `tests/` integration targets or `[[bin]]` unit tests, so
+  `persistence::default_data_dir` kept resolving the operator's real data
+  directory for them; separately, `trusty_common::search_index`'s mutating
+  entry points POST to whatever daemon is discoverable, which under `cargo
+  test` is the operator's own, running in a different process no
+  compile-time guard could reach. This is how the live registry accumulated
+  five stray `.tmpXXXXXX` roots and, over time, reached 396 entries. Both
+  paths now gate on a single runtime check that reads the running
+  executable's own path (cargo test binaries always live under a `deps/`
+  directory); `TRUSTY_ALLOW_PRODUCTION_STATE=1` is the explicit, narrowly
+  scoped opt-in for the one test that deliberately drives a real daemon
+  (#4864).
+
 ## [0.42.2] — 2026-08-04
 
 ### Fixed
