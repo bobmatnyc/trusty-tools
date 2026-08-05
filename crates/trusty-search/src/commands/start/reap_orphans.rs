@@ -129,7 +129,12 @@ pub struct ReapPlan {
 /// What: `Ok(Some(dir))` for an explicit declaration, `Ok(None)` for "positively
 /// declares nothing, so it uses the platform default", `Err(why)` when neither
 /// argv nor environ could be read.
-/// Test: `declared_data_dir_*`.
+/// Test: reached through [`identify`] —
+/// `identify_spares_a_daemon_whose_environment_is_unreadable`,
+/// `identify_spares_a_daemon_whose_argv_is_unreadable`,
+/// `identify_prefers_the_flag_over_the_environment`,
+/// `identify_reads_the_equals_form_of_the_flag`,
+/// `identify_falls_back_to_the_platform_default`.
 fn declared_data_dir(argv: &[String], environ: &[String]) -> Result<Option<PathBuf>, String> {
     if argv.is_empty() {
         return Err("process argv is unreadable".to_string());

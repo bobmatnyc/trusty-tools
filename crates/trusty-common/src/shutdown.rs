@@ -35,8 +35,10 @@
 /// operator-visible failure for a worse one.
 ///
 /// Test: `termination_grace_clears_the_measured_launchd_default`,
-/// `launchd::tests::render_plist_declares_exit_timeout`, and (in trusty-search)
-/// `shutdown_budget_tests::flush_floor_fits_the_termination_window`.
+/// `render_plist_declares_exit_timeout`. trusty-search additionally asserts
+/// this window covers its own per-index flush floor, in
+/// `service::shutdown_budget`, `commands::stop`, and
+/// `commands::start::reap_orphans`.
 pub const TERMINATION_GRACE_SECS: u64 = 60;
 
 /// Operator override for [`TERMINATION_GRACE_SECS`].
