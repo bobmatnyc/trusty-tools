@@ -316,7 +316,7 @@ fn dedent(line: &str, n: usize) -> &str {
 /// pass dropped `.md`-suffixed targets outright rather than normalising them,
 /// losing three genuine cross-references. Stripping the suffix reproduces
 /// 145 of its 148 tag sets exactly and repairs the other three.
-/// Test: `extracts_wikilinks`, `normalises_wikilink_targets`.
+/// Test: `extracts_and_normalises_wikilink_targets`, `wikilink_scan_is_utf8_safe`.
 pub(super) fn wikilink_targets(body: &str) -> Vec<String> {
     let bytes = body.as_bytes();
     let mut out = Vec::new();
@@ -343,7 +343,7 @@ pub(super) fn wikilink_targets(body: &str) -> Vec<String> {
 ///
 /// What: drops an `|alias` and a `#anchor`, trims, strips a trailing `.md`,
 /// and rejects multi-line or empty results.
-/// Test: `normalises_wikilink_targets`.
+/// Test: `extracts_and_normalises_wikilink_targets`.
 fn normalise_link_target(inner: &str) -> Option<String> {
     if inner.contains('\n') {
         return None;

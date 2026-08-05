@@ -173,7 +173,8 @@ impl ImportReport {
 /// [`ImportReport`]; a non-empty `failed` count is the caller's cue to exit
 /// non-zero.
 /// Test: `dry_run_writes_nothing`, `import_is_idempotent`,
-/// `non_memory_files_are_skipped`, `unparseable_file_is_reported_not_fatal`.
+/// `non_memory_files_are_skipped_and_non_markdown_ignored`,
+/// `unparseable_file_is_reported_not_fatal`.
 pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
     let base_url = match &opts.memory_url {
         Some(url) => url.clone(),
@@ -206,7 +207,7 @@ pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
 /// facts plus an index file.
 /// What: reads the directory, keeps regular files with a `.md` extension
 /// (case-insensitive), and sorts by path.
-/// Test: `non_memory_files_are_skipped`.
+/// Test: `non_memory_files_are_skipped_and_non_markdown_ignored`.
 fn markdown_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("read memory directory {}", dir.display()))?;

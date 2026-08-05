@@ -174,8 +174,11 @@ fn frontmatter_without_name_is_error() {
 
 #[test]
 fn extracts_and_normalises_wikilink_targets() {
+    // #4851: the newline-spanning target exercises normalise_link_target's
+    // multi-line rejection, the one branch this test's pointer claimed but
+    // never reached.
     let body = "see [[plain]], [[with-alias|Alias Text]], [[anchored#section]], \
-                [[trailing.md]], [[]], [[unclosed";
+                [[trailing.md]], [[]], [[multi\nline]], [[unclosed";
     assert_eq!(
         wikilink_targets(body),
         vec![

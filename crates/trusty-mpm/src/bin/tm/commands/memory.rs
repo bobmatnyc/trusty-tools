@@ -20,7 +20,7 @@ use crate::cli::MemoryAction;
 /// What: builds [`ImportOptions`] from the parsed flags, runs the import, and
 /// prints the report. Returns `Err` when at least one file failed so the
 /// process exits non-zero.
-/// Test: `cli_parses_memory_import`, `cli_parses_memory_import_dry_run`.
+/// Test: `cli_parses_memory_import`, `cli_parses_memory_import_dry_run_json`.
 pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
     match action {
         MemoryAction::Import {
