@@ -584,7 +584,10 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // `serve` returning for a reason other than shutdown (a bind/accept error),
     // where the window has not started ticking against us at all.
     let budget = crate::service::shutdown_budget::ShutdownBudget::started_at(
-        sigterm_at.get().copied().unwrap_or_else(std::time::Instant::now),
+        sigterm_at
+            .get()
+            .copied()
+            .unwrap_or_else(std::time::Instant::now),
     );
     flush_all_indexes_on_shutdown(&flush_state, budget).await;
 

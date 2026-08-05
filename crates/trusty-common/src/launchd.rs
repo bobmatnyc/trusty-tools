@@ -570,10 +570,15 @@ mod tests {
             )),
             "ExitTimeOut must carry the shared termination grace, got:\n{xml}"
         );
-        assert!(
-            crate::shutdown::TERMINATION_GRACE_SECS > 5,
-            "rendering the measured system default would leave #4393 unfixed"
-        );
+        // `const` block: the operands are compile-time constants, so a later
+        // edit that shortens the window back toward launchd's default fails the
+        // build rather than a test run.
+        const {
+            assert!(
+                crate::shutdown::TERMINATION_GRACE_SECS > 5,
+                "rendering the measured system default would leave #4393 unfixed"
+            );
+        }
     }
 
     #[test]

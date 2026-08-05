@@ -155,14 +155,20 @@ mod tests {
     /// Test: itself.
     #[test]
     fn termination_grace_clears_the_measured_launchd_default() {
-        assert!(
-            super::TERMINATION_GRACE_SECS > 5,
-            "the grace window must exceed launchd's measured 5 s ExitTimeOut default"
-        );
-        assert!(
-            super::TERMINATION_GRACE_SECS >= 30,
-            "the grace window must cover trusty-search's 30 s per-index flush floor"
-        );
+        // `const` blocks: both operands are compile-time constants, so the
+        // check fires at build time rather than waiting for the test binary.
+        const {
+            assert!(
+                super::TERMINATION_GRACE_SECS > 5,
+                "the grace window must exceed launchd's measured 5 s ExitTimeOut default"
+            );
+        }
+        const {
+            assert!(
+                super::TERMINATION_GRACE_SECS >= 30,
+                "the grace window must cover trusty-search's 30 s per-index flush floor"
+            );
+        }
     }
 
     /// Why (#4393): a host that cannot raise its supervisor's real window has

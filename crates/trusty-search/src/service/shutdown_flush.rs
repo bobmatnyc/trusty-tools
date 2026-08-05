@@ -649,7 +649,11 @@ mod tests {
             crate::core::registry::IndexRegistry::new(),
         );
         let start = std::time::Instant::now();
-        flush_all_indexes_on_shutdown(&state, ShutdownBudget::from_window(std::time::Duration::from_secs(65))).await;
+        flush_all_indexes_on_shutdown(
+            &state,
+            ShutdownBudget::from_window(std::time::Duration::from_secs(65)),
+        )
+        .await;
         // SAFETY: same serial guarantee as above.
         unsafe { std::env::remove_var("TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS") };
         assert!(
@@ -995,7 +999,8 @@ mod tests {
             std::time::Instant::now() - std::time::Duration::from_secs(600),
             std::time::Duration::from_secs(60),
         );
-        let window_open = flush_one_index_on_shutdown(&registry, &reindex_progress, id, spent).await;
+        let window_open =
+            flush_one_index_on_shutdown(&registry, &reindex_progress, id, spent).await;
 
         assert!(
             !window_open,

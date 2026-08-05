@@ -277,9 +277,8 @@ fn plan_spares_an_unidentifiable_candidate() {
 #[test]
 fn reap_window_covers_the_flush_floor() {
     let window = trusty_common::shutdown::termination_grace();
-    let floor = std::time::Duration::from_secs(
-        crate::service::shutdown_flush::MIN_FLUSH_TIMEOUT_SECS,
-    );
+    let floor =
+        std::time::Duration::from_secs(crate::service::shutdown_flush::MIN_FLUSH_TIMEOUT_SECS);
     assert!(
         window >= floor,
         "the reaper's SIGKILL window ({window:?}) must cover a reaped daemon's own \
