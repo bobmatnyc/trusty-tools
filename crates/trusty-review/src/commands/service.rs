@@ -45,15 +45,19 @@ pub enum ServiceAction {
 
 /// Reverse-DNS label for the LaunchAgent.
 ///
-/// Why: this MUST equal `trusty_installer`'s
-/// `plist_label::plist_label_for("trusty-review")` (which derives
-/// `com.trusty.trusty-review` by convention) or `tctl start`/`tctl stop` would
-/// target a launchd job that `service install` never created. Pinning the
-/// constant here and asserting it in a test guards that cross-crate contract.
+/// Why: this MUST equal the label `tctl start`/`tctl stop` targets, or those
+/// commands drive a launchd job that `service install` never created. Pinning
+/// the literal here and asserting it against the installer's copy is what
+/// #4868 replaced: two constants that had to agree became one both crates read.
+///
+/// #4868: the value moved from `com.trusty.trusty-review` onto the
+/// `com.trusty.<stem>` convention every loaded trusty-* unit obeys. The old
+/// label is recorded as a legacy alias, so an install evicts a unit left by a
+/// prior version rather than running beside it.
 /// What: the `Label` key value and the `<label>.plist` base name.
 /// Test: `service_label_matches_tctl_convention`.
 #[cfg(target_os = "macos")]
-pub const LAUNCHD_LABEL: &str = "com.trusty.trusty-review";
+pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::REVIEW;
 
 /// Dispatch a `trusty-review service <action>` invocation.
 ///
@@ -239,14 +243,22 @@ fn service_logs() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Why: the label is a cross-crate contract — `tctl` derives
-    /// `com.trusty.trusty-review` in `plist_label_for` and bootstraps THAT
-    /// plist; a drift here silently breaks `tctl start trusty-review`.
-    /// What: asserts the constant equals the convention-derived label.
+    /// Why: the label is a cross-crate contract — `tctl` resolves it through
+    /// `plist_label_for` and bootstraps THAT plist, so drift silently breaks
+    /// `tctl start trusty-review`. #4868: the assertion moved off a re-typed
+    /// literal onto the registry both sides read, so the test can no longer
+    /// certify a label the installer disagrees with.
+    /// What: the constant equals the canonical registry label.
     /// Test: this is the test.
     #[test]
     fn service_label_matches_tctl_convention() {
-        assert_eq!(LAUNCHD_LABEL, "com.trusty.trusty-review");
+        assert_eq!(LAUNCHD_LABEL, trusty_common::launchd_labels::REVIEW);
+        assert!(
+            trusty_common::launchd_labels::legacy_labels_for(LAUNCHD_LABEL)
+                .contains(&"com.trusty.trusty-review"),
+            "the pre-#4868 label must stay recorded as legacy, or an upgrade \
+             leaves that unit loaded beside the new one"
+        );
     }
 
     /// Why: the launchd agent must start the HTTP webhook daemon with an

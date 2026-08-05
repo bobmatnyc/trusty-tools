@@ -95,21 +95,26 @@ patch:
 ##      "exact name match"; it cannot match tmux, claude, or any script that
 ##      merely contains the string "trusty-search" somewhere in its arguments.
 ##
-## Canonical launchd label: com.bobmatnyc.trusty-search (matches GitHub username).
-## The legacy com.trusty.trusty-search label is unloaded and its plist removed
-## during deploy to consolidate to a single plist.
-PLIST_CANONICAL := $(HOME)/Library/LaunchAgents/com.bobmatnyc.trusty-search.plist
-PLIST_LEGACY    := $(HOME)/Library/LaunchAgents/com.trusty.trusty-search.plist
-
+## Canonical launchd label: com.trusty.search — the unit launchd actually has
+## loaded, and the value `trusty_common::launchd_labels::SEARCH` mints.
+##
+## #4868: this target used to declare `com.bobmatnyc.trusty-search` canonical,
+## a THIRD family of label beside the daemon's own constant and the installer's
+## mirror table. Nothing by that name has ever existed on a host, so every
+## deploy ran `launchctl unload` against a missing file, killed the daemon with
+## `stop` + `pkill`, then failed to `load` it back and fell through to
+## `trusty-search start` — a CLI-detached daemon, unsupervised, after a gap that
+## spanned the whole `cargo install`. That gap is the release outage.
+##
+## The eviction of the legacy labels now belongs to `service install`, which
+## does it under launchd with a rollback. This target defers to it instead of
+## reimplementing the sequence in shell.
 deploy:
-	-launchctl unload $(PLIST_CANONICAL) 2>/dev/null
-	-launchctl unload $(PLIST_LEGACY) 2>/dev/null
-	-rm -f $(PLIST_LEGACY)
 	-trusty-search stop 2>/dev/null
 	-pkill -TERM -x trusty-search 2>/dev/null
 	sleep 2
 	CARGO_BUILD_JOBS=2 cargo install --path . --locked
-	launchctl load $(PLIST_CANONICAL) 2>/dev/null || trusty-search start
+	trusty-search service install
 
 ## Stop daemon, install new binary from source, restart (closes #87)
 ## Why: replacing the binary while the daemon is running causes macOS to

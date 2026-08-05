@@ -51,14 +51,18 @@ pub enum ServiceAction {
 
 /// Reverse-DNS label for the LaunchAgent.
 ///
-/// Why: this MUST equal `trusty_installer`'s
-/// `plist_label::plist_label_for("trusty-console")` (`com.trusty.trusty-console`
-/// by convention) or `tctl start`/`tctl stop` would target a launchd job that
-/// `service install` never created.
+/// Why: this MUST equal the label `tctl start`/`tctl stop` targets, or those
+/// commands drive a launchd job that `service install` never created. Making
+/// both read the same registry constant is what turns "must equal" from a
+/// comment into a fact.
+///
+/// #4868: was the literal `"com.trusty.trusty-console"` while the unit launchd
+/// actually has loaded is `com.trusty.console`, so `service status` queried a
+/// label that does not exist — the same divergence that broke trusty-search.
 /// What: the `Label` key value and the `<label>.plist` base name.
 /// Test: `service_label_matches_tctl_convention`.
 #[cfg(target_os = "macos")]
-pub const LAUNCHD_LABEL: &str = "com.trusty.trusty-console";
+pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::CONSOLE;
 
 /// Dispatch a `trusty-console service <action>` invocation.
 ///
@@ -230,14 +234,22 @@ fn service_logs() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Why: the label is a cross-crate contract — `tctl` derives
-    /// `com.trusty.trusty-console` in `plist_label_for` and bootstraps THAT
-    /// plist; drift here silently breaks `tctl start trusty-console`.
-    /// What: asserts the constant equals the convention-derived label.
+    /// Why: the label is a cross-crate contract — `tctl` resolves it through
+    /// `plist_label_for` and bootstraps THAT plist, so drift silently breaks
+    /// `tctl start trusty-console`. #4868: asserting against a re-typed literal
+    /// is what made the old version of this test agree with the wrong answer
+    /// (`com.trusty.trusty-console`, while launchd has `com.trusty.console`);
+    /// it now asserts against the registry both sides read.
+    /// What: the constant equals the canonical registry label, and is NOT the
+    /// pre-#4868 full-name form.
     /// Test: this is the test.
     #[test]
     fn service_label_matches_tctl_convention() {
-        assert_eq!(LAUNCHD_LABEL, "com.trusty.trusty-console");
+        assert_eq!(LAUNCHD_LABEL, trusty_common::launchd_labels::CONSOLE);
+        assert_ne!(
+            LAUNCHD_LABEL, "com.trusty.trusty-console",
+            "the full-name form is a legacy alias, not a unit launchd has"
+        );
     }
 
     /// Why: the launchd agent must start the dashboard HTTP daemon, i.e.

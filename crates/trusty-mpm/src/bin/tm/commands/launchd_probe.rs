@@ -39,7 +39,10 @@
 /// Why: `#4230` review — this is the one label whose plist `ProgramArguments`
 /// actually run `trusty-mpm daemon`. Kept as a shared constant so the probe,
 /// the refusal hint, and the restart recipe cannot drift apart.
-pub(crate) const DAEMON_LAUNCHD_LABEL: &str = "com.trusty.mpm";
+///
+/// #4868: "cannot drift apart" now holds across crates too — the value comes
+/// from the canonical registry, which the installer and every daemon also read.
+pub(crate) const DAEMON_LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MPM;
 
 /// Resolve the launchd label of a registered trusty-mpm DAEMON unit, given a
 /// home directory.

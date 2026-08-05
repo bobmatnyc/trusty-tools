@@ -9,9 +9,14 @@
 
 .PHONY: patch deploy smoke clean check clippy test help
 
-# -- Launchd plist paths ------------------------------------------------------
-PLIST_CANONICAL := $(HOME)/Library/LaunchAgents/com.bobmatnyc.trusty-memory.plist
-PLIST_LEGACY    := $(HOME)/Library/LaunchAgents/com.trusty.trusty-memory.plist
+# -- Launchd plist path -------------------------------------------------------
+# #4868: this declared `com.bobmatnyc.trusty-memory` canonical — a label no host
+# has ever had, alongside a `com.trusty.trusty-memory` legacy that the daemon's
+# own constant also does not use. The real unit is `com.trusty.memory`, minted
+# by `trusty_common::launchd_labels::MEMORY`. Evicting the old labels belongs to
+# `service install`, which does it under launchd with a rollback, so `deploy`
+# no longer reimplements the unload/load sequence in shell.
+PLIST_CANONICAL := $(HOME)/Library/LaunchAgents/com.trusty.memory.plist
 
 # -- Health-check endpoints ---------------------------------------------------
 # Primary: read the bound address from the runtime lock file.
@@ -43,20 +48,21 @@ patch:
 ## so stale daemons from either label cannot survive across deploys.
 ##
 ## Stop strategy (surgical):
-##   1. `launchctl unload` -- stops the launchd-managed instance by label.
-##   2. `trusty-memory service stop` -- SIGTERMs the process that wrote the
+##   1. `trusty-memory service stop` -- SIGTERMs the process that wrote the
 ##      PID lockfile; never matches by command-line string.
-##   3. `pkill -TERM -x trusty-memory` -- matches argv[0] exactly; cannot
+##   2. `pkill -TERM -x trusty-memory` -- matches argv[0] exactly; cannot
 ##      accidentally match tmux, claude, or other processes.
+##
+## #4868: the restart is `service install`, not `launchctl load`. Loading a
+## plist path directly cannot evict a unit registered under a different label,
+## which is how a deploy came to leave the daemon running CLI-detached (the
+## `|| trusty-memory service start` fallback) after the load silently failed.
 deploy:
-	-launchctl unload $(PLIST_CANONICAL) 2>/dev/null
-	-launchctl unload $(PLIST_LEGACY) 2>/dev/null
-	-rm -f $(PLIST_LEGACY)
 	-trusty-memory service stop 2>/dev/null
 	-pkill -TERM -x trusty-memory 2>/dev/null
 	sleep 2
 	CARGO_BUILD_JOBS=2 cargo install --path . --locked
-	launchctl load $(PLIST_CANONICAL) 2>/dev/null || trusty-memory service start
+	trusty-memory service install
 
 ## Health-check: verify the daemon is reachable and version matches.
 ## Why: Confirms the deployed binary is the expected version and the HTTP
@@ -117,8 +123,6 @@ help:
 	  clippy  "cargo clippy --workspace --all-targets" \
 	  test    "cargo test --workspace" \
 	  help    "Show this help"
-	@printf '\nLaunchd plists managed:\n'
-	@printf '  %s\n' \
-	  "$(PLIST_CANONICAL)" \
-	  "$(PLIST_LEGACY)"
+	@printf '\nLaunchd plist managed:\n'
+	@printf '  %s\n' "$(PLIST_CANONICAL)"
 	@printf '\n'

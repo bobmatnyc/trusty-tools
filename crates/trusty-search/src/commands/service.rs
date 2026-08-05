@@ -46,8 +46,16 @@ pub enum ServiceAction {
 
 /// Reverse-DNS label for the LaunchAgent. Used as the plist filename and the
 /// `Label` key — both must match for `launchctl` lookups to work.
+///
+/// #4868: this was the literal `"com.trusty.trusty-search"`, which is not the
+/// label launchd has loaded — the live unit is `com.trusty.search`. So
+/// `service install` wrote and bootstrapped a SECOND unit, evicted nothing, and
+/// left #4868's own `ExitTimeOut` plist fix in a file launchd never reads.
+/// Re-exported from the canonical registry rather than restated, because
+/// correcting the literal is what was already done for #2827 and the defect
+/// came back elsewhere.
 #[cfg(target_os = "macos")]
-pub(crate) const LAUNCHD_LABEL: &str = "com.trusty.trusty-search";
+pub(crate) const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::SEARCH;
 
 /// Dispatch a `trusty-search service <action>` invocation.
 pub fn handle_service(action: &ServiceAction) -> Result<()> {
@@ -284,6 +292,7 @@ pub(crate) fn launchd_agent_loaded() -> bool {
 #[cfg(target_os = "macos")]
 fn service_install(request_off: bool, request_on: bool) -> Result<()> {
     use crate::commands::service_unit::{resolve_auto_discover, AutoDiscover};
+    use trusty_common::launchd_activate::Activation;
 
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("could not resolve current exe: {e}"))?;
@@ -319,21 +328,45 @@ fn service_install(request_off: bool, request_on: bool) -> Result<()> {
         existing.as_ref(),
     );
     let plist_path = cfg.plist_path()?;
-    cfg.install()?;
-    println!(
-        "{} Wrote LaunchAgent plist: {}",
-        "✓".green(),
-        plist_path.display()
-    );
-
-    cfg.bootstrap()?;
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
-    println!(
-        "{} Loaded {} into {} — daemon will start automatically.",
-        "✓".green(),
+
+    // #4868: activate through the label-correct path — evict the labels earlier
+    // installs registered (`com.trusty.trusty-search`, `com.bobmatnyc.trusty-search`)
+    // so this install cannot leave a second daemon fighting for :7878 and the
+    // index locks (#2938), reload only when the unit actually changed, and roll
+    // back rather than leave the service down if the bootstrap fails.
+    let outcome = cfg.install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
         LAUNCHD_LABEL,
-        domain
-    );
+    ))?;
+    for label in outcome.evicted() {
+        println!(
+            "{} Evicted the stale LaunchAgent {} — it named the same daemon \
+             under an old label.",
+            "⚠".yellow(),
+            label.cyan()
+        );
+    }
+    match outcome {
+        Activation::AlreadyCurrent { .. } => println!(
+            "{} {} is already loaded in {} with this exact unit — left running.",
+            "·".dimmed(),
+            LAUNCHD_LABEL,
+            domain
+        ),
+        Activation::Activated { .. } => {
+            println!(
+                "{} Wrote LaunchAgent plist: {}",
+                "✓".green(),
+                plist_path.display()
+            );
+            println!(
+                "{} Loaded {} into {} — daemon will start automatically.",
+                "✓".green(),
+                LAUNCHD_LABEL,
+                domain
+            );
+        }
+    }
 
     // Issue #127: install log rotation for the launchd-managed stderr.log so
     // it never grows unbounded. Non-fatal — a failure here still leaves a
@@ -453,295 +486,5 @@ fn service_logs() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    // `super::*` (in particular `build_launchd_config`) is only referenced by
-    // the macOS-only tests below; on other platforms the whole module body
-    // compiles out to nothing, so gate the import to avoid an
-    // `unused_imports` -D warnings failure on non-macOS CI runners (#2947
-    // follow-up).
-    #[cfg(target_os = "macos")]
-    use super::*;
-
-    /// Why: the LaunchdConfig handed to `trusty_common::launchd` must always
-    /// carry the fd-limit fix — dropping it silently reintroduces the
-    /// large-fleet warm-boot EMFILE crash (issue #2947).
-    /// What: builds the config with dummy paths and asserts `fd_limit` is
-    /// `Some(LAUNCHD_FD_LIMIT)`.
-    /// Test: pure construction, no fs side effects.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn build_launchd_config_sets_fd_limit() {
-        use std::path::PathBuf;
-        use trusty_common::launchd::LAUNCHD_FD_LIMIT;
-
-        let cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            false,
-            None,
-        );
-        assert_eq!(
-            cfg.fd_limit,
-            Some(LAUNCHD_FD_LIMIT),
-            "fd_limit must be Some(LAUNCHD_FD_LIMIT) so the generated plist \
-             raises both soft and hard NumberOfFiles limits to \
-             {LAUNCHD_FD_LIMIT}, preventing EMFILE during large-fleet \
-             warm-boot (issue #2947)"
-        );
-    }
-
-    /// Why: the generated plist XML (what launchd actually reads from disk)
-    /// must contain both resource-limit dicts with the canonical fd value —
-    /// asserting on `render_plist()` output catches regressions where the
-    /// config struct is correct but the renderer drops the dicts.
-    /// What: renders the plist with a dummy exe/log dir and checks that the
-    /// `SoftResourceLimits` / `HardResourceLimits` / `NumberOfFiles` keys
-    /// appear with the right integer value.
-    /// Test: pure string generation, no fs side effects.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn build_launchd_config_plist_includes_fd_limit() {
-        use std::path::PathBuf;
-        use trusty_common::launchd::LAUNCHD_FD_LIMIT;
-
-        let cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            false,
-            None,
-        );
-        let xml = cfg.render_plist().expect("render_plist must succeed");
-
-        assert!(
-            xml.contains("<key>SoftResourceLimits</key>"),
-            "plist must contain SoftResourceLimits to raise the fd ceiling"
-        );
-        assert!(
-            xml.contains("<key>HardResourceLimits</key>"),
-            "plist must contain HardResourceLimits so the soft limit is not \
-             clamped below it"
-        );
-        let fd_str = format!("<integer>{LAUNCHD_FD_LIMIT}</integer>");
-        assert!(
-            xml.contains(&fd_str),
-            "plist NumberOfFiles must equal {LAUNCHD_FD_LIMIT}, got xml: {xml}"
-        );
-    }
-
-    /// Why: issue #4113 — `KeepAlive::OnSuccess` (`SuccessfulExit: false`)
-    /// restarts the daemon only after a NON-zero exit, so a clean SIGTERM /
-    /// orderly drain left search down indefinitely with no recovery and no
-    /// alarm. Reverting this field to `OnSuccess` silently reintroduces a
-    /// permanent-outage class of bug that no other test would catch.
-    /// What: builds the config with dummy paths and asserts `keep_alive` is
-    /// `KeepAlive::Always`.
-    /// Test: pure construction, no fs side effects.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn build_launchd_config_keeps_alive_after_clean_exit() {
-        use std::path::PathBuf;
-        use trusty_common::launchd::KeepAlive;
-
-        let cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            false,
-            None,
-        );
-        assert_eq!(
-            cfg.keep_alive,
-            KeepAlive::Always,
-            "keep_alive must be KeepAlive::Always so launchd restarts the \
-             daemon after a CLEAN (exit 0) shutdown too — KeepAlive::OnSuccess \
-             leaves it down permanently (issue #4113). Deliberate stops go \
-             through `launchctl bootout` / `trusty-search service uninstall`."
-        );
-    }
-
-    /// Why: the config struct can be right while the renderer emits the wrong
-    /// plist fragment — launchd reads the XML, not the struct. This asserts on
-    /// what actually lands in `~/Library/LaunchAgents`.
-    /// What: renders the plist and requires an unconditional
-    /// `<key>KeepAlive</key><true/>` with no `SuccessfulExit` dictionary
-    /// anywhere in the document.
-    /// Test: pure string generation, no fs side effects.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn build_launchd_config_plist_has_unconditional_keepalive() {
-        use std::path::PathBuf;
-
-        let cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            false,
-            None,
-        );
-        let xml = cfg.render_plist().expect("render_plist must succeed");
-
-        assert!(
-            xml.contains("<key>KeepAlive</key>\n  <true/>"),
-            "plist must set KeepAlive unconditionally true (issue #4113), got \
-             xml: {xml}"
-        );
-        assert!(
-            !xml.contains("SuccessfulExit"),
-            "plist must NOT carry a SuccessfulExit dict — that is the \
-             restart-only-on-failure policy #4113 removed, got xml: {xml}"
-        );
-    }
-
-    /// Why (issue #4823): the whole point of the fix is that the operator's
-    /// auto-discovery suppression reaches the file launchd actually reads.
-    /// Asserting on `render_plist()` rather than the config struct is what
-    /// catches the #4709 failure mode where the struct is right and the
-    /// renderer drops the fragment.
-    /// What: builds a suppressing config and requires `--no-auto-discover` to
-    /// appear inside `ProgramArguments`, after `start --foreground`.
-    /// Test: pure string generation, no fs side effects.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn build_launchd_config_plist_carries_no_auto_discover_arg() {
-        use std::path::PathBuf;
-
-        let cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            true,
-            None,
-        );
-        assert_eq!(
-            cfg.args,
-            vec!["start", "--foreground", "--no-auto-discover"],
-            "the suppression must travel as a CLI arg (issue #4823)"
-        );
-
-        let xml = cfg.render_plist().expect("render_plist must succeed");
-        let args_section = xml
-            .split("<key>ProgramArguments</key>")
-            .nth(1)
-            .and_then(|rest| rest.split("</array>").next())
-            .unwrap_or_default();
-        assert!(
-            args_section.contains("<string>--no-auto-discover</string>"),
-            "ProgramArguments must carry --no-auto-discover so the setting \
-             survives regeneration (issue #4823), got xml: {xml}"
-        );
-        // The #4709 restart policy must survive alongside the new arg.
-        assert!(
-            xml.contains("<key>KeepAlive</key>\n  <true/>"),
-            "KeepAlive must stay unconditionally true (issue #4113/#4709) when \
-             auto-discovery is suppressed, got xml: {xml}"
-        );
-    }
-
-    /// Why: the default install must be byte-identical to pre-#4823 behaviour
-    /// — adding the flag unconditionally would disable discovery for everyone.
-    /// What: a non-suppressing config must not mention the flag anywhere.
-    /// Test: pure string generation, no fs side effects.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn build_launchd_config_omits_no_auto_discover_by_default() {
-        use std::path::PathBuf;
-
-        let cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            false,
-            None,
-        );
-        assert_eq!(cfg.args, vec!["start", "--foreground"]);
-        let xml = cfg.render_plist().expect("render_plist must succeed");
-        assert!(
-            !xml.contains("no-auto-discover"),
-            "default install must not suppress auto-discovery, got xml: {xml}"
-        );
-    }
-
-    /// Why (issue #4823 comment — the trap): the reporter's `daemon.env` holds
-    /// `TRUSTY_NO_AUTO_DISCOVER=1`. Copying that into the plist's
-    /// `EnvironmentVariables` is what made the daemon refuse to boot, because
-    /// clap parses the env value through `FromStr<bool>`. The generated plist
-    /// must never carry that key at all, whatever the process env or the
-    /// installed unit says.
-    /// What: drives the assembly with a lookup that returns `1` for the var AND
-    /// an installed unit carrying `TRUSTY_NO_AUTO_DISCOVER=1`, then requires
-    /// both the pairs and the rendered XML to be free of the key.
-    /// Test: pure — the env lookup is injected, so no process env is mutated.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn launchd_env_pairs_never_carries_no_auto_discover() {
-        use crate::commands::service_unit::{parse_installed_unit, NO_AUTO_DISCOVER_ENV};
-        use std::path::PathBuf;
-
-        let existing = parse_installed_unit(
-            "<key>EnvironmentVariables</key><dict>\
-             <key>TRUSTY_NO_AUTO_DISCOVER</key><string>1</string></dict>",
-        );
-        assert!(
-            existing.suppresses_auto_discover(),
-            "fixture must represent the hand-edited unit"
-        );
-
-        let pairs = launchd_env_pairs(
-            Some(PathBuf::from("/Users/x")),
-            |k| (k == NO_AUTO_DISCOVER_ENV).then(|| "1".to_string()),
-            Some(&existing),
-        );
-        assert!(
-            !pairs.iter().any(|(k, _)| k == NO_AUTO_DISCOVER_ENV),
-            "launchd_env_pairs must never emit {NO_AUTO_DISCOVER_ENV}, got {pairs:?}"
-        );
-
-        // The renderer is the thing launchd reads — assert there too. The
-        // suppression must survive as a CLI arg while the env key stays absent.
-        let mut cfg = build_launchd_config(
-            PathBuf::from("/usr/local/bin/trusty-search"),
-            PathBuf::from("/tmp/trusty-search/logs"),
-            true,
-            Some(&existing),
-        );
-        cfg.env_vars = pairs;
-        let xml = cfg.render_plist().expect("render_plist must succeed");
-        assert!(
-            !xml.contains(NO_AUTO_DISCOVER_ENV),
-            "the rendered plist must never carry {NO_AUTO_DISCOVER_ENV} — a \
-             value clap rejects aborts daemon startup (issue #4823), got xml: {xml}"
-        );
-        assert!(
-            xml.contains("<string>--no-auto-discover</string>"),
-            "the suppression must still be preserved, as a CLI arg, got xml: {xml}"
-        );
-    }
-
-    /// Why (issue #4823, generalised): `service install` runs from a shell that
-    /// exports nothing, so reading only the process env blanked tunables the
-    /// installed unit carried — silently unpinning e.g. `TRUSTY_DEVICE=cpu`.
-    /// What: with an empty env lookup, the installed unit's value survives; the
-    /// unconditional `HF_HOME` pin (#86) is still emitted alongside it.
-    /// Test: pure — the env lookup is injected, so no process env is mutated.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn launchd_env_pairs_carries_forward_installed_tunables() {
-        use crate::commands::service_unit::parse_installed_unit;
-        use std::path::PathBuf;
-
-        let existing = parse_installed_unit(
-            "<key>EnvironmentVariables</key><dict>\
-             <key>TRUSTY_BM25_CORPUS_CAP</key><string>4242</string></dict>",
-        );
-        let pairs = launchd_env_pairs(Some(PathBuf::from("/Users/x")), |_| None, Some(&existing));
-        assert!(
-            pairs
-                .iter()
-                .any(|(k, v)| k == "TRUSTY_BM25_CORPUS_CAP" && v == "4242"),
-            "an installed unit's tunable must survive regeneration (issue \
-             #4823), got {pairs:?}"
-        );
-        assert!(
-            pairs
-                .iter()
-                .any(|(k, v)| k == "HF_HOME" && v == "/Users/x/.cache/huggingface"),
-            "the #86 HF_HOME pin must still be emitted, got {pairs:?}"
-        );
-    }
-}
+#[path = "service_tests.rs"]
+mod tests;

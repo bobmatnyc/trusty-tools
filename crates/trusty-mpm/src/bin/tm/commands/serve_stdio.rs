@@ -126,11 +126,16 @@ fn build_bridge_config() -> DaemonBridgeConfig {
 /// `DaemonBridgeConfig::no_spawn_hint`.
 /// Test: `build_bridge_config_no_spawn_hint_names_real_plists`.
 fn mpm_no_spawn_hint() -> String {
-    "trusty-mpm daemon is launchd-managed on this machine — start it with \
-     `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.trusty.mpm.plist` \
-     (or kickstart: `launchctl kickstart -k gui/$UID/com.trusty.mpm`); this \
-     bridge will not auto-spawn to avoid the #2486 restart race."
-        .to_string()
+    // #4868: the plist name and the kickstart target are the same label, so
+    // they come from the same constant. This hint's whole purpose is naming a
+    // real unit — #2827 was this string shape with the wrong plist in it.
+    let label = trusty_common::launchd_labels::MPM;
+    format!(
+        "trusty-mpm daemon is launchd-managed on this machine — start it with \
+         `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/{label}.plist` \
+         (or kickstart: `launchctl kickstart -k gui/$UID/{label}`); this \
+         bridge will not auto-spawn to avoid the #2486 restart race."
+    )
 }
 
 /// Returns true if the request is a JSON-RPC notification.

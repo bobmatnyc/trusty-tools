@@ -10,8 +10,11 @@ use colored::Colorize;
 
 /// Reverse-DNS label for the LaunchAgent. Used as the plist filename and the
 /// `Label` key — both must match for `launchctl` lookups to work.
+///
+/// #4868: value unchanged; read from the canonical registry rather than
+/// restated, so the installer's copy of it cannot drift away independently.
 #[cfg(target_os = "macos")]
-const LAUNCHD_LABEL: &str = "com.trusty.analyze";
+const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::ANALYZE;
 
 /// Subcommand actions for `trusty-analyzer service`.
 ///

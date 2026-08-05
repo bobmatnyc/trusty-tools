@@ -2,51 +2,44 @@
 //!
 //! Why: `tctl start|stop|restart` and `tctl stack doctor` need each launchd
 //! daemon's *actual* `~/Library/LaunchAgents/<label>.plist` label to drive
-//! `launchctl bootstrap`/`bootout` and to check the plist file's presence. The
-//! convention is `com.trusty.<binary>`, but reality deviates: trusty-memory and
-//! trusty-analyze register their agents as `com.trusty.memory` /
-//! `com.trusty.analyze` (binary stem stripped of the `trusty-` prefix), whereas
-//! trusty-search uses the full `com.trusty.trusty-search`. Encoding the
-//! deviations in ONE mapping function means every lifecycle/health path agrees
-//! on exactly which launchd job to target rather than re-deriving (and getting
-//! it wrong) at each call site.
+//! `launchctl bootstrap`/`bootout` and to check the plist file's presence.
 //!
-//! What: [`plist_label_for`] returns the launchd label for a binary name —
-//! `com.trusty.<binary>` by default, with explicit overrides for the daemons
-//! whose real label differs (verified by grepping each daemon crate's
-//! `LAUNCHD_LABEL` constant). [`plist_path_for`] joins that label into the
+//! #4868: this module used to answer that question from its OWN table —
+//! `com.trusty.<binary>` with hand-added overrides, kept in step with the
+//! daemon crates by grepping their `LAUNCHD_LABEL` constants. A mirror
+//! maintained by grep is a mirror that drifts, and it did: the table said
+//! trusty-search's label was `com.trusty.trusty-search` and stated the
+//! convention "is correct" for it, while the unit launchd actually had loaded
+//! was `com.trusty.search`. Every `tctl` bootout and every doctor plist-presence
+//! check therefore targeted a job that does not exist. The table is gone; both
+//! sides now read [`trusty_common::launchd_labels`].
+//!
+//! What: [`plist_label_for`] delegates to the canonical registry, and
+//! [`plist_path_for`] joins that label into the
 //! `~/Library/LaunchAgents/<label>.plist` path.
 //!
-//! Test: `tests` pins the override table (memory/analyze) and the default
-//! derivation (search/review/console), and asserts the plist path layout.
+//! Test: `tests` pins the delegation against the daemon crates' constants and
+//! asserts the plist path layout.
 
 use std::path::PathBuf;
 
+use trusty_common::launchd_labels;
+
 /// Resolve the launchd agent label for a member binary.
 ///
-/// Why: The `com.trusty.<binary>` convention does not hold for every daemon —
-/// trusty-memory and trusty-analyze strip the `trusty-` prefix in their real
-/// `LAUNCHD_LABEL` (`com.trusty.memory`, `com.trusty.analyze`), while
-/// trusty-search keeps the full name (`com.trusty.trusty-search`). Centralising
-/// the override table keeps `bootout`/`bootstrap` targeting the job that
-/// actually exists on disk.
+/// Why: `bootout`/`bootstrap` must target the job that actually exists on disk.
+/// Deriving that here independently is what let it diverge (#4868) — the
+/// registry is the one definition, and the daemon crates' own `LAUNCHD_LABEL`
+/// constants read from it too, so the two cannot disagree.
 ///
-/// What: Returns the verified launchd label for known-deviating binaries,
-/// otherwise derives `com.trusty.<binary>` by convention. The override table
-/// mirrors the `LAUNCHD_LABEL` constants in the respective daemon crates —
-/// `trusty-memory` → `com.trusty.memory` and `trusty-analyze` →
-/// `com.trusty.analyze` (both in `commands/service.rs`). `trusty-search` is
-/// intentionally NOT overridden: its real label is the derived
-/// `com.trusty.trusty-search`.
+/// What: returns the canonical label for `binary` from
+/// [`trusty_common::launchd_labels`].
 ///
-/// Test: `tests::overrides_match_reality`, `tests::default_derivation`.
+/// Test: `tests::labels_match_the_daemon_crates`, `tests::default_derivation`.
 pub fn plist_label_for(binary: &str) -> String {
-    match binary {
-        "trusty-memory" => "com.trusty.memory".to_owned(),
-        "trusty-analyze" => "com.trusty.analyze".to_owned(),
-        // trusty-search registers as the full name; the convention is correct.
-        other => format!("com.trusty.{other}"),
-    }
+    // #4868: delegate rather than restate — the local override table this
+    // replaces is what drifted from the daemons it claimed to mirror.
+    launchd_labels::canonical_label(binary)
 }
 
 /// Resolve the on-disk plist path for a member binary's launchd agent.
@@ -73,29 +66,37 @@ pub fn plist_path_for(binary: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Why: The override table is load-bearing — a wrong label means
-    /// `bootout`/`bootstrap` silently targets a non-existent job. Pin the two
-    /// verified deviations against the daemon crates' `LAUNCHD_LABEL` constants.
-    /// What: Asserts memory/analyze resolve to their prefix-stripped labels.
+    /// Why (#4868): a wrong label means `bootout`/`bootstrap` silently targets
+    /// a non-existent job — which is what happened for trusty-search. Asserting
+    /// against the registry constants (not re-typed literals) is what makes
+    /// this test unable to agree with a lie.
+    /// What: every member resolves to the same constant its daemon crate uses.
     /// Test: This is the test.
     #[test]
-    fn overrides_match_reality() {
-        assert_eq!(plist_label_for("trusty-memory"), "com.trusty.memory");
-        assert_eq!(plist_label_for("trusty-analyze"), "com.trusty.analyze");
+    fn labels_match_the_daemon_crates() {
+        assert_eq!(plist_label_for("trusty-memory"), launchd_labels::MEMORY);
+        assert_eq!(plist_label_for("trusty-analyze"), launchd_labels::ANALYZE);
+        assert_eq!(plist_label_for("trusty-search"), launchd_labels::SEARCH);
+        assert_eq!(plist_label_for("trusty-review"), launchd_labels::REVIEW);
+        assert_eq!(plist_label_for("trusty-console"), launchd_labels::CONSOLE);
+        assert_eq!(plist_label_for("trusty-mpm"), launchd_labels::MPM);
     }
 
-    /// Why: Members without a deviation must use the `com.trusty.<binary>`
-    /// convention; trusty-search's real label IS the derived full-name form.
-    /// What: Asserts search/review/console derive by convention.
+    /// Why: the pre-#4868 table returned `com.trusty.trusty-search` for the
+    /// daemon whose loaded unit is `com.trusty.search`, so `tctl stop` unloaded
+    /// nothing. Naming the wrong answer explicitly stops a "restore the
+    /// convention" refactor from quietly reinstating it.
+    /// What: asserts the resolved label is NOT the drifted full-name form.
     /// Test: This is the test.
     #[test]
     fn default_derivation() {
-        assert_eq!(plist_label_for("trusty-search"), "com.trusty.trusty-search");
-        assert_eq!(plist_label_for("trusty-review"), "com.trusty.trusty-review");
-        assert_eq!(
-            plist_label_for("trusty-console"),
-            "com.trusty.trusty-console"
+        assert_ne!(
+            plist_label_for("trusty-search"),
+            "com.trusty.trusty-search",
+            "the full-name form is a legacy alias, not the label launchd has \
+             loaded (#4868)"
         );
+        assert_eq!(plist_label_for("trusty-search"), "com.trusty.search");
     }
 
     /// Why: The plist path must key off the *resolved* label so an overridden

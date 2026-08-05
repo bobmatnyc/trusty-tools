@@ -112,6 +112,31 @@ pub mod bin_resolve;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
+/// Label-correct LaunchAgent activation with legacy eviction and rollback
+/// (#4868). macOS-only, like [`launchd`] itself.
+///
+/// Why: `install()` + `bootstrap()` could write one plist and activate a
+/// different unit, bounced daemons that had not changed, and left the service
+/// down when a bootstrap failed.
+/// What: [`launchd::LaunchdConfig::install_and_activate`] and its
+/// [`launchd_activate::Activation`] outcome.
+/// Test: `cargo test -p trusty-common launchd_activate`.
+#[cfg(target_os = "macos")]
+pub mod launchd_activate;
+
+/// Canonical launchd labels for every trusty-* LaunchAgent (#4868).
+///
+/// Why: each daemon crate, the installer's mirror table, the Makefiles, and
+/// the install scripts each restated their own label literal, so they drifted
+/// — `trusty-search service install` bootstrapped `com.trusty.trusty-search`
+/// while launchd had `com.trusty.search` loaded, activating nothing.
+/// What: [`launchd_labels::SERVICES`] plus the `com.trusty.<stem>` convention
+/// as executable code, and the legacy aliases an upgrade must evict.
+/// Deliberately NOT macOS-gated, unlike [`launchd`], so the drift tests run on
+/// Linux CI too.
+/// Test: `cargo test -p trusty-common launchd_labels`.
+pub mod launchd_labels;
+
 /// Authoritative, three-state launchd supervision detection (issue #4469).
 ///
 /// Why: the env-var heuristic this replaces let an unsupervised child

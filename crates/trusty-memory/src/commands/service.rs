@@ -60,11 +60,14 @@ pub enum ServiceAction {
 /// Why: launchd identifies agents by their `Label`, which must also be the
 /// plist filename's stem. Centralising the constant keeps install / start /
 /// stop in lockstep.
-/// What: `com.trusty.memory` — matches the naming convention used by
-/// `trusty-search` (`com.trusty.trusty-search`) and follows reverse-DNS.
-/// Test: covered indirectly by `service install` integration runs.
+/// What: the registry's `com.trusty.memory`. #4868: the value is unchanged, but
+/// it was a literal that the installer's mirror table restated separately —
+/// correct today is not the same as safe, since that is precisely the state
+/// trusty-search was in before its own label drifted.
+/// Test: covered indirectly by `service install` integration runs; the registry
+/// itself is pinned by `canonical_consts_match_the_convention`.
 #[cfg(target_os = "macos")]
-pub const LAUNCHD_LABEL: &str = "com.trusty.memory";
+pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MEMORY;
 
 /// Dispatch a `trusty-memory service <action>` invocation.
 ///
