@@ -87,14 +87,13 @@ pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
 
 /// Whether the process-wide shared embedder has been initialised.
 ///
-/// Why (#4836): a daemon's readiness flag used to be a one-shot latch set by a
-/// single startup warm-up attempt. When that attempt failed the flag stayed
-/// `Warming` forever, even though the lazy path later initialised the embedder
-/// successfully — so every MCP recall took a degraded, query-independent
-/// fallback while the HTTP path served real vector results from the same
-/// process. Exposing the cell's true state lets readiness be *derived* from the
-/// embedder rather than latched alongside it, which is what makes it
-/// self-healing.
+/// Why (#4836): a daemon's readiness flag is a latch written by a single
+/// startup warm-up attempt, so it can say `Warming` long after the embedder has
+/// in fact initialised. Callers that degrade on that flag alone served a
+/// query-independent recall fallback for the daemon's whole life. This lets such
+/// a caller check the embedder itself before degrading — and it must not force
+/// a cold init, or the check would reintroduce exactly the startup stall the
+/// degraded path exists to avoid.
 /// What: `OnceCell::initialized()` on `SHARED_EMBEDDER`. Cheap and lock-free;
 /// monotonic (never returns `true` then `false`).
 /// Test: `shared_embedder_initialized_flips_after_seeding`.
