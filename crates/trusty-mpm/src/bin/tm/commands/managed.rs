@@ -904,6 +904,19 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
                     report.skills_pruned.len()
                 );
             }
+            // #391: a guard that declines to delete is invisible unless it says
+            // so — the operator asked for a prune and must be told what survived
+            // it, and where the deleted content went.
+            if let Some(backup) = &report.prune_backup_dir {
+                println!("  backed up to {}", backup.display());
+            }
+            for line in report
+                .agents_prune_kept
+                .iter()
+                .chain(report.skills_prune_kept.iter())
+            {
+                println!("  kept: {line}");
+            }
         }
     }
     Ok(())

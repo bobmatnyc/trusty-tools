@@ -64,6 +64,45 @@ fn seed_catalog_skill(catalog_root: &Path, stem: &str, body: &str) {
     .unwrap();
 }
 
+/// Seed a DIRECTORY-shaped catalog skill (`<stem>/SKILL.md`) that carries one
+/// reference file, so a test can exercise the multi-file ledger keys
+/// (`<stem>/references/<file>`) prune has to reason about (#391).
+fn seed_catalog_skill_dir(catalog_root: &Path, stem: &str, body: &str, reference: &str) {
+    mark_catalog_repo_as_valid(catalog_root);
+    let dir = catalog_root.join("repo/.claude/skills").join(stem);
+    fs::create_dir_all(dir.join("references")).unwrap();
+    fs::write(dir.join("SKILL.md"), format!("# {stem}\n\n{body}\n")).unwrap();
+    fs::write(dir.join("references/notes.md"), reference).unwrap();
+}
+
+/// Overwrite the project manifest with `body` (the `[agents]`/`[skills]` TOML).
+fn rewrite_manifest(project_dir: &Path, body: &str) {
+    fs::write(
+        project_dir
+            .join(".trusty-mpm")
+            .join("framework")
+            .join("manifest.toml"),
+        body,
+    )
+    .unwrap();
+}
+
+/// The single `backup-catalog-prune-*` directory under a framework root, if any.
+///
+/// Why (#391): the backup root is timestamped, so a test cannot name it up
+/// front; it asserts on the one that appeared.
+fn prune_backup_dir(fw_root: &Path) -> Option<std::path::PathBuf> {
+    fs::read_dir(fw_root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("backup-catalog-prune-"))
+        })
+}
+
 /// Write a project manifest selecting the CATALOG source for agents and skills.
 fn write_catalog_manifest(project_dir: &Path) {
     // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
@@ -198,6 +237,15 @@ fn apply_prune_removes_deselected() {
     let manifest = AgentManifest::load(&fw.agent_deploy_dir());
     assert!(!manifest.is_managed("drop-me.md"));
     assert!(manifest.is_managed("keep-me.md"));
+
+    // #391: and what it removed is recoverable.
+    let backup = prune_backup_dir(&fw.root).expect("a prune that deleted must leave a backup");
+    assert!(
+        fs::read_to_string(backup.join("agents/drop-me.md"))
+            .unwrap()
+            .contains("DROP"),
+        "the pruned agent is backed up with its original content"
+    );
 }
 
 #[test]
@@ -293,4 +341,324 @@ fn apply_prune_spares_user_owned() {
     );
     assert!(user_file.is_file(), "user-owned file survives prune");
     assert_eq!(fs::read_to_string(&user_file).unwrap(), "USER OWNED");
+}
+
+// ---------------------------------------------------------------------------
+// #391 — skill prune had none of the guards every other skill-mutating path has.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn apply_prune_removes_deselected_skill() {
+    // The feature still works: a deselected, PRISTINE, bundled-source skill is
+    // removed, directory and ledger entry together. Before #391 this was the
+    // only thing skill prune did — and it did it to everything.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill(&catalog_root, "keep-me", "KEEP");
+    seed_catalog_skill(&catalog_root, "drop-me", "DROP");
+
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+    assert!(fw.claude_skills_dir().join("drop-me/SKILL.md").is_file());
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\nexclude = [\"drop-me\"]\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert!(
+        report.skills_pruned.contains(&"drop-me".to_string()),
+        "deselected pristine skill must be pruned: {report:?}"
+    );
+    assert!(
+        !fw.claude_skills_dir().join("drop-me").exists(),
+        "pruned skill directory removed"
+    );
+    assert!(
+        fw.claude_skills_dir().join("keep-me/SKILL.md").is_file(),
+        "selected skill retained"
+    );
+    let manifest = SkillManifest::load(&fw.claude_skills_dir());
+    assert!(!manifest.is_managed("drop-me"));
+    assert!(manifest.is_managed("keep-me"));
+}
+
+#[test]
+fn apply_prune_skips_hand_edited_skill() {
+    // A deselected skill the user HAND-EDITED is frozen, exactly as
+    // `deploy_one_file` treats it — prune must not be the one path that deletes
+    // what every other path refuses to overwrite.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill(&catalog_root, "edited", "ORIGINAL");
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let deployed = fw.claude_skills_dir().join("edited/SKILL.md");
+    fs::write(&deployed, "# edited\n\nMY OWN NOTES\n").unwrap();
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\nexclude = [\"edited\"]\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&deployed).unwrap(),
+        "# edited\n\nMY OWN NOTES\n",
+        "a hand-edited skill must survive --prune byte-identical"
+    );
+    assert!(
+        !report.skills_pruned.contains(&"edited".to_string()),
+        "hand-edited skill must not be reported pruned: {report:?}"
+    );
+    // The ledger entry stays too — dropping it would reclassify the file as
+    // user-owned and freeze it against every future deploy (#4881's shape).
+    assert!(
+        SkillManifest::load(&fw.claude_skills_dir()).is_managed("edited"),
+        "the kept skill stays managed"
+    );
+}
+
+#[test]
+fn apply_prune_spares_user_tier_skill() {
+    // The case a checksum gate alone does NOT catch: a PRISTINE user-custom
+    // skill. `deploy_all_skill_tiers` deploys `~/.trusty-mpm/skills/` in full,
+    // exempt from the bundled include/exclude — but its ledger entry is then
+    // indistinguishable from a bundled one, so a bundled exclude rule used to
+    // select it for deletion and its matching checksum waved it through.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill(&catalog_root, "bundled-one", "BUNDLED");
+
+    let user_source = fw.user_skill_source_dir();
+    fs::create_dir_all(&user_source).unwrap();
+    fs::write(user_source.join("mine.md"), "# mine\n\nMY SKILL\n").unwrap();
+
+    // A bundled include list that names only the bundled skill — so the user
+    // stem `mine` is "deselected" by the bundled rule it was never subject to.
+    write_catalog_manifest(project.path());
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\ninclude = [\"bundled-one\"]\n",
+    );
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let deployed = fw.claude_skills_dir().join("mine/SKILL.md");
+    assert!(
+        deployed.is_file(),
+        "the user tier deploys regardless of the bundled selection"
+    );
+    assert!(
+        SkillManifest::load(&fw.claude_skills_dir()).is_managed("mine"),
+        "and it lands in the ledger looking exactly like a bundled skill"
+    );
+
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&deployed).unwrap(),
+        "# mine\n\nMY SKILL\n",
+        "a user-custom skill must survive --prune even when pristine"
+    );
+    assert!(
+        !report.skills_pruned.contains(&"mine".to_string()),
+        "user-tier skill must not be pruned: {report:?}"
+    );
+}
+
+#[test]
+fn apply_prune_spares_untracked_file_in_a_managed_skill() {
+    // `remove_dir_all` takes the whole directory, so a file the user dropped
+    // INSIDE a managed skill disqualifies the skill — the same rule
+    // `deploy_one_file` applies to an unmanaged target, extended to the unit
+    // prune actually deletes.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill(&catalog_root, "hosted", "HOSTED");
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let stray = fw.claude_skills_dir().join("hosted/my-notes.md");
+    fs::write(&stray, "USER NOTES").unwrap();
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\nexclude = [\"hosted\"]\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert!(stray.is_file(), "the user's own file must survive --prune");
+    assert_eq!(fs::read_to_string(&stray).unwrap(), "USER NOTES");
+    assert!(
+        !report.skills_pruned.contains(&"hosted".to_string()),
+        "a skill holding an untracked file must not be pruned: {report:?}"
+    );
+}
+
+#[test]
+fn apply_prune_backs_up_before_removing_a_skill() {
+    // A legitimate prune is still recoverable: the directory it removed is
+    // copied under a timestamped backup root first, reference files included.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill_dir(&catalog_root, "doomed", "DOOMED BODY", "REFERENCE BODY");
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+    assert!(
+        fw.claude_skills_dir()
+            .join("doomed/references/notes.md")
+            .is_file()
+    );
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\nexclude = [\"doomed\"]\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+    assert!(report.skills_pruned.contains(&"doomed".to_string()));
+    assert!(!fw.claude_skills_dir().join("doomed").exists());
+
+    let backup = prune_backup_dir(&fw.root).expect("a prune that deleted must leave a backup");
+    let entry = backup.join("skills/doomed/SKILL.md");
+    assert!(entry.is_file(), "backup holds the entry point: {backup:?}");
+    assert!(
+        fs::read_to_string(&entry).unwrap().contains("DOOMED BODY"),
+        "backup holds the ORIGINAL content"
+    );
+    assert!(
+        fs::read_to_string(backup.join("skills/doomed/references/notes.md"))
+            .unwrap()
+            .contains("REFERENCE BODY"),
+        "backup holds the carried reference file too"
+    );
+}
+
+#[test]
+fn apply_prune_keeps_the_ledger_entry_for_a_selected_skills_carried_file() {
+    // A ledger key like `<stem>/references/notes.md` names a file the skill
+    // CARRIES. Judging keys instead of stems meant an `include` rule matching
+    // the stem but not the nested key dropped that file's entry while leaving
+    // the file on disk — after which the deployer reads it as user-owned and
+    // never updates it again.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill_dir(&catalog_root, "carrier", "CARRIER BODY", "REFERENCE BODY");
+    write_catalog_manifest(project.path());
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\ninclude = [\"carrier\"]\n",
+    );
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let key = "carrier/references/notes.md";
+    assert!(SkillManifest::load(&fw.claude_skills_dir()).is_managed(key));
+
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert!(
+        report.skills_pruned.is_empty(),
+        "nothing is deselected here: {report:?}"
+    );
+    assert!(
+        fw.claude_skills_dir()
+            .join("carrier/references/notes.md")
+            .is_file()
+    );
+    assert!(
+        SkillManifest::load(&fw.claude_skills_dir()).is_managed(key),
+        "a selected skill's carried file keeps its ledger entry"
+    );
+}
+
+#[test]
+fn apply_prune_skips_hand_edited_agent() {
+    // Agent parity: prune deletes a deselected agent only while its bytes still
+    // match the ledger. A hand-edited one is the user's work, not stale content.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_agent(&catalog_root, "tweaked", "ORIGINAL");
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let deployed = fw.agent_deploy_dir().join("tweaked.md");
+    fs::write(&deployed, "---\nname: tweaked\n---\n\nMY OWN AGENT\n").unwrap();
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\nexclude = [\"tweaked\"]\n\n[skills]\nsource = \"catalog\"\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&deployed).unwrap(),
+        "---\nname: tweaked\n---\n\nMY OWN AGENT\n",
+        "a hand-edited agent must survive --prune byte-identical"
+    );
+    assert!(
+        !report.agents_pruned.contains(&"tweaked.md".to_string()),
+        "hand-edited agent must not be reported pruned: {report:?}"
+    );
+    assert!(AgentManifest::load(&fw.agent_deploy_dir()).is_managed("tweaked.md"));
+}
+
+#[test]
+fn apply_prune_reports_what_it_kept_and_where_backups_went() {
+    // A guard that declines silently is invisible to the operator who asked for
+    // a prune. The report names what survived, with the reason, and the backup
+    // root for what did not.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_skill(&catalog_root, "pristine", "PRISTINE");
+    seed_catalog_skill(&catalog_root, "edited", "ORIGINAL");
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+    fs::write(
+        fw.claude_skills_dir().join("edited/SKILL.md"),
+        "MY OWN NOTES",
+    )
+    .unwrap();
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\n\n[skills]\nsource = \"catalog\"\nexclude = [\"pristine\", \"edited\"]\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert_eq!(report.skills_pruned, vec!["pristine".to_string()]);
+    assert_eq!(report.skills_prune_kept.len(), 1, "{report:?}");
+    assert!(
+        report.skills_prune_kept[0].starts_with("edited: "),
+        "the kept entry names the skill and the reason: {report:?}"
+    );
+    let backup = report
+        .prune_backup_dir
+        .as_ref()
+        .expect("something was deleted, so a backup root is reported");
+    assert!(backup.join("skills/pristine/SKILL.md").is_file());
 }
