@@ -502,6 +502,7 @@ impl ServiceEnv for RealServiceEnv {
                 throttle_interval: 0,
                 env_vars: Vec::new(),
                 fd_limit: None,
+                working_directory: None,
             };
             cfg.bootstrap()
         }

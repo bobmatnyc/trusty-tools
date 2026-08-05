@@ -60,8 +60,13 @@ use std::path::{Path, PathBuf};
 ///
 /// What: The label as it appears in the plist `<key>Label</key>` entry.
 ///
+/// #4868: read from the canonical registry rather than restated. The value is
+/// unchanged — but "correct today" is the state trusty-search's label was in
+/// before it drifted, and a supervisor label that stops matching its plist is
+/// how #2827's class of defect lands on the unit that restarts everything else.
+///
 /// Test: `tests::label_constant_matches_plist`.
-pub const PLIST_LABEL: &str = "com.trusty.mpm.supervisor";
+pub const PLIST_LABEL: &str = trusty_common::launchd_labels::MPM_SUPERVISOR;
 
 /// Abstraction over the two `launchctl` subcommands this module drives, so
 /// the supervisor bootstrap can be exercised in tests against a stub that
@@ -301,7 +306,7 @@ pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.trusty.mpm.supervisor</string>
+    <string>__PLIST_LABEL__</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -347,11 +352,18 @@ pub const PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 ///
 /// Test: `tests::fill_template_replaces_all_tokens`.
 pub fn fill_template(home: &str, tm_path: &str) -> String {
+    // #4868: the template used to carry the label as its own literal beside
+    // PLIST_LABEL. Two copies of a label are two things that can disagree, and
+    // a plist whose `Label` key differs from the label the installer boots out
+    // is exactly the bug — filling it from the constant makes them one.
     let filled = PLIST_TEMPLATE
         .replace("__HOME__", home)
-        .replace("__TM_BINARY_PATH__", tm_path);
+        .replace("__TM_BINARY_PATH__", tm_path)
+        .replace("__PLIST_LABEL__", PLIST_LABEL);
     debug_assert!(
-        !filled.contains("__HOME__") && !filled.contains("__TM_BINARY_PATH__"),
+        !filled.contains("__HOME__")
+            && !filled.contains("__TM_BINARY_PATH__")
+            && !filled.contains("__PLIST_LABEL__"),
         "unfilled placeholder tokens remain after fill_template"
     );
     filled

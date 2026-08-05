@@ -98,6 +98,12 @@ pub struct InstalledUnit {
     pub args: Vec<String>,
     /// `EnvironmentVariables` as ordered key/value pairs.
     pub env: Vec<(String, String)>,
+    /// `WorkingDirectory`, when the installed unit set one.
+    ///
+    /// #4868: the live unit on the owner's host carries this and the generated
+    /// template never emitted it, so regeneration silently dropped the
+    /// daemon's working directory along with the env keys.
+    pub working_directory: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -166,7 +172,25 @@ pub fn parse_installed_unit(xml: &str) -> InstalledUnit {
         env: section(xml, "EnvironmentVariables", "<dict>", "</dict>")
             .map(pair_key_strings)
             .unwrap_or_default(),
+        // #4868: a scalar, not a container, so it is read by scanning the one
+        // `<string>` that follows the key rather than via `section`.
+        working_directory: scalar_string(xml, "WorkingDirectory"),
     }
+}
+
+/// Read the `<string>` value immediately following `<key>{name}</key>`.
+///
+/// Why: `WorkingDirectory` is a top-level scalar; [`section`] only finds
+/// balanced containers.
+/// What: returns the first `<string>` after the key, or `None` when the key is
+/// absent or is not followed by a string.
+/// Test: `parse_installed_unit_reads_working_directory`.
+#[cfg(target_os = "macos")]
+fn scalar_string(xml: &str, name: &str) -> Option<String> {
+    let needle = format!("<key>{name}</key>");
+    let after = &xml[xml.find(&needle)? + needle.len()..];
+    let (tag, text) = scan_tags(after, &["string", "key"]).into_iter().next()?;
+    (tag == "string").then_some(text)
 }
 
 /// Pair `<key>`/`<string>` tokens into (key, value), skipping any key whose
@@ -330,403 +354,91 @@ pub fn resolve_auto_discover(
 /// suppression is expressed as a `ProgramArguments` flag, which is
 /// unambiguous, human-readable in the plist, and — crucially — cannot carry a
 /// value the daemon's clap parser would reject on boot.
+///
+/// #4868: an allowlist was never enough, and became actively dangerous once
+/// install started overwriting the LIVE unit instead of a differently-named
+/// one. The plist on the owner's host carried five keys no allowlist mentioned
+/// — `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`, `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`,
+/// `FASTEMBED_CACHE_DIR`, `FASTEMBED_CACHE_PATH`, `RUST_LOG` — and the first of
+/// those is the hand-patch from an incident where a restart cost a 200k-chunk
+/// index to a 30 s redb open timeout under warm-boot contention. Dropping it
+/// re-arms that incident, invisibly, until the next restart. So every key the
+/// installed unit carried is now carried forward unless the generated template
+/// sets it itself; extending the allowlist would only have postponed the next
+/// loss.
+///
+/// Precedence, highest first: the process env, then the installed unit. Keys
+/// the template computes at install time (`template_owned`) are never carried
+/// forward — a stale `HF_HOME` or `PATH` from an old unit must not outrank the
+/// freshly resolved one.
+///
 /// Test: `resolve_persisted_env_prefers_process_env`,
 /// `resolve_persisted_env_carries_forward_installed_values`,
-/// `resolve_persisted_env_never_emits_no_auto_discover`.
+/// `resolve_persisted_env_never_emits_no_auto_discover`,
+/// `resolve_persisted_env_carries_forward_unknown_keys`.
 #[cfg(target_os = "macos")]
 pub fn resolve_persisted_env(
     lookup: impl Fn(&str) -> Option<String>,
     existing: Option<&InstalledUnit>,
+    template_owned: &[&str],
 ) -> Vec<(String, String)> {
-    PERSISTED_ENV_VARS
-        .iter()
-        .filter(|key| **key != NO_AUTO_DISCOVER_ENV)
-        .filter_map(|key| {
-            let value = lookup(key)
-                .or_else(|| existing.and_then(|u| u.env_value(key)).map(str::to_owned))?;
-            Some(((*key).to_string(), value))
-        })
-        .collect()
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push = |key: &str, value: String| {
+        if key == NO_AUTO_DISCOVER_ENV || template_owned.contains(&key) {
+            return;
+        }
+        if out.iter().any(|(k, _)| k == key) {
+            return;
+        }
+        out.push((key.to_string(), value));
+    };
+
+    // Named tunables first, so their order in the rendered plist stays stable
+    // and an operator export still outranks the installed value.
+    for key in PERSISTED_ENV_VARS {
+        if let Some(value) =
+            lookup(key).or_else(|| existing.and_then(|u| u.env_value(key)).map(str::to_owned))
+        {
+            push(key, value);
+        }
+    }
+
+    // Then everything else the unit carried. This is the part that generalises:
+    // a key nobody anticipated survives regeneration instead of vanishing.
+    if let Some(unit) = existing {
+        for (key, value) in &unit.env {
+            let resolved = lookup(key).unwrap_or_else(|| value.clone());
+            push(key, resolved);
+        }
+    }
+
+    out
 }
 
+// Test bodies live in sibling `service_unit_*_tests.rs` files (each name
+// ending `_tests.rs`, so `scripts/check_line_cap.sh` classifies them as
+// test files under the 3000-SLOC cap rather than counting against this
+// file's 500-SLOC production budget) — same split convention as
+// `service.rs` / `service_tests.rs` in this directory. `#[path]` keeps each
+// one nested exactly where its inline body used to be, so `use super::*;`
+// inside them resolves identically.
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "service_unit_truthy_bool_tests.rs"]
+mod tests;
 
-    /// Why: `TRUSTY_NO_AUTO_DISCOVER=1` is the spelling the README and the
-    /// #314 changelog document, and it is what already sits in the reporter's
-    /// `daemon.env`. Rejecting it aborts daemon startup (#4823 comment).
-    /// What: asserts every accepted truthy and falsey spelling, case- and
-    /// whitespace-insensitively.
-    /// Test: this function.
-    #[test]
-    fn parse_truthy_bool_accepts_numeric_and_word_spellings() {
-        for raw in ["1", "true", "TRUE", " True ", "yes", "on"] {
-            assert_eq!(
-                parse_truthy_bool(raw),
-                Ok(true),
-                "{raw:?} must parse as true"
-            );
-        }
-        for raw in ["", "0", "false", "FALSE", " no ", "off"] {
-            assert_eq!(
-                parse_truthy_bool(raw),
-                Ok(false),
-                "{raw:?} must parse as false"
-            );
-        }
-    }
-
-    /// Why: loosening the parser must not degrade into "anything unknown is
-    /// false" — that would silently re-enable a scan the operator disabled.
-    /// What: asserts a typo is an error, not a default.
-    /// Test: this function.
-    #[test]
-    fn parse_truthy_bool_rejects_garbage() {
-        assert!(parse_truthy_bool("ture").is_err());
-        assert!(parse_truthy_bool("2").is_err());
-        assert!(parse_truthy_bool("enabled").is_err());
-    }
-}
-
-/// Tests for the launchd-unit half of this module.
+/// Tests for the launchd-unit half of this module — see
+/// `service_unit_launchd_tests.rs`.
 ///
 /// Gated to macOS for the same reason the code under test is — see the module
 /// docs. The logic is pure string handling, so these would run anywhere; the
 /// items they exercise simply do not exist on other targets.
 #[cfg(test)]
 #[cfg(target_os = "macos")]
-mod launchd_unit_tests {
-    use super::*;
+#[path = "service_unit_launchd_tests.rs"]
+mod launchd_unit_tests;
 
-    fn sample_plist() -> &'static str {
-        "<plist version=\"1.0\">\n<dict>\n\
-         <key>Label</key>\n<string>com.trusty.trusty-search</string>\n\
-         <key>ProgramArguments</key>\n<array>\n\
-         <string>/usr/local/bin/trusty-search</string>\n\
-         <string>start</string>\n<string>--foreground</string>\n\
-         <string>--no-auto-discover</string>\n</array>\n\
-         <key>SoftResourceLimits</key>\n<dict>\n\
-         <key>NumberOfFiles</key>\n<integer>8192</integer>\n</dict>\n\
-         <key>EnvironmentVariables</key>\n<dict>\n\
-         <key>HF_HOME</key>\n<string>/Users/x/.cache/huggingface</string>\n\
-         <key>TRUSTY_DEVICE</key>\n<string>cpu</string>\n\
-         <key>TRUSTY_NO_AUTO_DISCOVER</key>\n<string>1</string>\n\
-         </dict>\n</dict>\n</plist>\n"
-    }
-
-    /// Why: preservation is only possible if we can actually read the unit on
-    /// disk, including past an intervening nested `<dict>` (the fd-limit dicts
-    /// sit between `ProgramArguments` and `EnvironmentVariables`).
-    /// What: parses a representative generated plist and asserts both sections.
-    /// Test: this function.
-    #[test]
-    fn parse_installed_unit_reads_args_and_env() {
-        let unit = parse_installed_unit(sample_plist());
-        assert_eq!(
-            unit.args,
-            vec![
-                "/usr/local/bin/trusty-search",
-                "start",
-                "--foreground",
-                "--no-auto-discover"
-            ]
-        );
-        assert_eq!(unit.env_value("TRUSTY_DEVICE"), Some("cpu"));
-        assert_eq!(unit.env_value("TRUSTY_NO_AUTO_DISCOVER"), Some("1"));
-        assert_eq!(unit.env_value("NOPE"), None);
-    }
-
-    /// Why: a hand-made or truncated plist must degrade to "no operator
-    /// intent", never panic or index out of bounds mid-install.
-    /// What: parses documents with each section missing and a malformed one.
-    /// Test: this function.
-    #[test]
-    fn parse_installed_unit_tolerates_missing_sections() {
-        assert_eq!(parse_installed_unit(""), InstalledUnit::default());
-        assert_eq!(
-            parse_installed_unit("<dict><key>Label</key><string>x</string></dict>"),
-            InstalledUnit::default()
-        );
-        let truncated = "<key>ProgramArguments</key><array><string>start";
-        assert!(parse_installed_unit(truncated).args.is_empty());
-    }
-
-    /// Why: `render_plist` XML-escapes every value, so a round trip must
-    /// unescape or a path containing `&` comes back corrupted.
-    /// What: asserts all five entity forms are reversed.
-    /// Test: this function.
-    #[test]
-    fn parse_installed_unit_unescapes_xml() {
-        let xml = "<key>EnvironmentVariables</key><dict>\
-                   <key>TRUSTY_DEVICE</key><string>a&amp;b&lt;c&gt;d&quot;e&apos;f</string>\
-                   </dict>";
-        assert_eq!(
-            parse_installed_unit(xml).env_value("TRUSTY_DEVICE"),
-            Some("a&b<c>d\"e'f")
-        );
-    }
-
-    /// Why: this is the representation `service install` now generates; failing
-    /// to recognise it would make the setting non-durable across two installs.
-    /// What: asserts detection of the bare flag and the `=value` form.
-    /// Test: this function.
-    #[test]
-    fn suppresses_auto_discover_via_arg() {
-        let unit = InstalledUnit {
-            args: vec!["start".into(), NO_AUTO_DISCOVER_ARG.into()],
-            env: vec![],
-        };
-        assert!(unit.suppresses_auto_discover());
-
-        let unit = InstalledUnit {
-            args: vec![format!("{NO_AUTO_DISCOVER_ARG}=1")],
-            env: vec![],
-        };
-        assert!(unit.suppresses_auto_discover());
-    }
-
-    /// Why: the legacy hand-made unit and the 2026-08-04 hand-edit expressed
-    /// the suppression as `TRUSTY_NO_AUTO_DISCOVER=1` in `EnvironmentVariables`
-    /// — exactly the value clap used to reject. Regeneration must recognise it.
-    /// What: asserts env-based detection for both `1` and `true`.
-    /// Test: this function.
-    #[test]
-    fn suppresses_auto_discover_via_env() {
-        for raw in ["1", "true"] {
-            let unit = InstalledUnit {
-                args: vec!["start".into()],
-                env: vec![(NO_AUTO_DISCOVER_ENV.into(), raw.into())],
-            };
-            assert!(
-                unit.suppresses_auto_discover(),
-                "env value {raw:?} must read as suppressed"
-            );
-        }
-        assert!(parse_installed_unit(sample_plist()).suppresses_auto_discover());
-    }
-
-    /// Why: an operator who wrote an explicit falsey value meant "scan" —
-    /// reading mere presence as suppression would invert their intent.
-    /// What: asserts falsey arg and env spellings read as not suppressed.
-    /// Test: this function.
-    #[test]
-    fn suppresses_auto_discover_respects_explicit_false() {
-        let unit = InstalledUnit {
-            args: vec![format!("{NO_AUTO_DISCOVER_ARG}=false")],
-            env: vec![],
-        };
-        assert!(!unit.suppresses_auto_discover());
-
-        let unit = InstalledUnit {
-            args: vec![],
-            env: vec![(NO_AUTO_DISCOVER_ENV.into(), "0".into())],
-        };
-        assert!(!unit.suppresses_auto_discover());
-        assert!(!InstalledUnit::default().suppresses_auto_discover());
-    }
-
-    /// Why: this is the #4823 defect itself — regenerating over a unit that
-    /// suppressed auto-discovery must not re-enable it.
-    /// What: no flags + a suppressing unit → `Suppress { preserved: true }`.
-    /// Test: this function.
-    #[test]
-    fn resolve_auto_discover_preserves_existing_suppression() {
-        let existing = parse_installed_unit(sample_plist());
-        assert_eq!(
-            resolve_auto_discover(false, false, Some(&existing)),
-            AutoDiscover::Suppress { preserved: true }
-        );
-    }
-
-    /// Why: an operator must be able to express the setting on a fresh machine
-    /// where no unit exists yet.
-    /// What: `--no-auto-discover` with no installed unit → suppress, not
-    /// flagged as preserved (it came from this invocation).
-    /// Test: this function.
-    #[test]
-    fn resolve_auto_discover_explicit_request() {
-        assert_eq!(
-            resolve_auto_discover(true, false, None),
-            AutoDiscover::Suppress { preserved: false }
-        );
-        let existing = parse_installed_unit(sample_plist());
-        assert_eq!(
-            resolve_auto_discover(true, false, Some(&existing)),
-            AutoDiscover::Suppress { preserved: false }
-        );
-    }
-
-    /// Why: preservation must be escapable, and turning a suppression off is
-    /// a capability change the caller has to be able to announce.
-    /// What: `--auto-discover` over a suppressing unit → `Enable { dropped }`.
-    /// Test: this function.
-    #[test]
-    fn resolve_auto_discover_explicit_reenable_reports_drop() {
-        let existing = parse_installed_unit(sample_plist());
-        assert_eq!(
-            resolve_auto_discover(false, true, Some(&existing)),
-            AutoDiscover::Enable { dropped: true }
-        );
-        assert_eq!(
-            resolve_auto_discover(false, true, None),
-            AutoDiscover::Enable { dropped: false }
-        );
-    }
-
-    /// Why: the fix must not change behaviour for the overwhelmingly common
-    /// case — a plain install with auto-discovery left on.
-    /// What: no flags, no installed unit → `Enable { dropped: false }`.
-    /// Test: this function.
-    #[test]
-    fn resolve_auto_discover_defaults_to_enabled() {
-        let decision = resolve_auto_discover(false, false, None);
-        assert_eq!(decision, AutoDiscover::Enable { dropped: false });
-        assert!(!decision.suppressed());
-        assert!(resolve_auto_discover(true, false, None).suppressed());
-    }
-
-    /// Why: an operator exporting a tunable before `service install` must still
-    /// win over whatever the old unit said.
-    /// What: process env value beats the installed unit's value.
-    /// Test: this function.
-    #[test]
-    fn resolve_persisted_env_prefers_process_env() {
-        let existing = parse_installed_unit(sample_plist());
-        let pairs = resolve_persisted_env(
-            |k| (k == "TRUSTY_DEVICE").then(|| "metal".to_string()),
-            Some(&existing),
-        );
-        assert_eq!(
-            pairs,
-            vec![("TRUSTY_DEVICE".to_string(), "metal".to_string())]
-        );
-    }
-
-    /// Why (#4823 generalised): `service install` normally runs from a shell
-    /// exporting nothing, which previously blanked every tunable the unit
-    /// carried — including the `TRUSTY_DEVICE=cpu` pin that keeps Apple Silicon
-    /// off CoreML.
-    /// What: with an empty process env, the installed unit's value survives.
-    /// Test: this function.
-    #[test]
-    fn resolve_persisted_env_carries_forward_installed_values() {
-        let existing = parse_installed_unit(sample_plist());
-        let pairs = resolve_persisted_env(|_| None, Some(&existing));
-        assert_eq!(
-            pairs,
-            vec![("TRUSTY_DEVICE".to_string(), "cpu".to_string())]
-        );
-        assert!(resolve_persisted_env(|_| None, None).is_empty());
-    }
-
-    /// Why: this is the trap in the #4823 comment. The installed unit carries
-    /// `TRUSTY_NO_AUTO_DISCOVER=1`; copying that into the regenerated plist is
-    /// what crashed the daemon on the next launchd restart. The suppression
-    /// travels as a `ProgramArguments` flag instead, so no value that a clap
-    /// parser could reject is ever written to `EnvironmentVariables`.
-    /// What: asserts the key is absent from the resolved pairs even when both
-    /// the process env and the installed unit supply it.
-    /// Test: this function.
-    #[test]
-    fn resolve_persisted_env_never_emits_no_auto_discover() {
-        let existing = parse_installed_unit(sample_plist());
-        let pairs = resolve_persisted_env(
-            |k| (k == NO_AUTO_DISCOVER_ENV).then(|| "1".to_string()),
-            Some(&existing),
-        );
-        assert!(
-            !pairs.iter().any(|(k, _)| k == NO_AUTO_DISCOVER_ENV),
-            "{NO_AUTO_DISCOVER_ENV} must never be emitted into a generated \
-             plist — a rejected value aborts daemon startup (#4823); got {pairs:?}"
-        );
-    }
-}
-
+/// End-to-end clap tests for [`parse_truthy_bool`] — see
+/// `service_unit_cli_tests.rs`.
 #[cfg(test)]
-mod cli_tests {
-    //! End-to-end clap tests for [`super::parse_truthy_bool`] as wired into
-    //! `--no-auto-discover` (issue #4823).
-    //!
-    //! Why: `parse_truthy_bool` being correct is not the same as clap *using*
-    //! it — the arg needs `num_args`/`require_equals`/`default_missing_value`
-    //! alongside `value_parser` or the bare flag stops working. These tests
-    //! drive the real `Cli` so a regression in that wiring is caught.
-    //! They live here rather than in `main.rs` because `main.rs` sits at its
-    //! frozen `check_line_cap` budget; `Cli` is still reachable because this
-    //! module is a descendant of the binary's crate root.
-    //! What: parses representative `start` argument vectors and asserts the
-    //! resolved boolean. The env-var path is not driven here — mutating the
-    //! process env would race a parallel test binary — but clap routes an env
-    //! value through the same `value_parser` these tests exercise.
-    //! Test: this module — run with `cargo test -p trusty-search`.
-
-    use crate::{Cli, Commands};
-    use clap::Parser;
-
-    /// Parse `args` and yield the resolved flag, or the clap error rendered as
-    /// a string (`clap::Error` is not `PartialEq`, so it cannot be asserted on
-    /// directly).
-    fn parse_flag(args: &[&str]) -> Result<bool, String> {
-        match Cli::try_parse_from(args)
-            .map_err(|e| e.to_string())?
-            .command
-        {
-            Commands::Start {
-                no_auto_discover, ..
-            } => Ok(no_auto_discover),
-            _ => panic!("expected Commands::Start"),
-        }
-    }
-
-    /// Why: every existing caller — operators, and the `start` detach path in
-    /// `commands::start::daemon` — passes the flag bare. Requiring a value
-    /// would break all of them.
-    /// What: asserts bare presence still resolves to `true`, absence to `false`.
-    /// Test: this function.
-    #[test]
-    fn bare_flag_still_means_true() {
-        assert_eq!(
-            parse_flag(&["trusty-search", "start", "--no-auto-discover"]),
-            Ok(true)
-        );
-        assert_eq!(parse_flag(&["trusty-search", "start"]), Ok(false));
-    }
-
-    /// Why (issue #4823): this is the trap. `TRUSTY_NO_AUTO_DISCOVER=1` flows
-    /// through this arg's `value_parser`; with the pre-fix bare `bool` clap
-    /// used strict `FromStr<bool>` and answered
-    /// `invalid value '1' … [possible values: true, false]`, so the daemon
-    /// refused to boot from any unit carrying that value.
-    /// What: asserts the documented truthy and falsey spellings parse.
-    /// Test: this function.
-    #[test]
-    fn value_form_accepts_documented_spellings() {
-        for spelling in ["1", "true", "yes", "on", "TRUE"] {
-            let arg = format!("--no-auto-discover={spelling}");
-            assert_eq!(
-                parse_flag(&["trusty-search", "start", &arg]),
-                Ok(true),
-                "--no-auto-discover={spelling} must parse as true (issue #4823)"
-            );
-        }
-        for spelling in ["0", "false", "no", "off"] {
-            let arg = format!("--no-auto-discover={spelling}");
-            assert_eq!(
-                parse_flag(&["trusty-search", "start", &arg]),
-                Ok(false),
-                "--no-auto-discover={spelling} must parse as false"
-            );
-        }
-    }
-
-    /// Why: loosening the parser must not turn a typo into a silent `false` —
-    /// that would re-enable a scan the operator disabled, the same
-    /// silent-capability-change defect class as #4823 itself.
-    /// What: asserts an unrecognised spelling is a parse error.
-    /// Test: this function.
-    #[test]
-    fn value_form_rejects_garbage() {
-        assert!(parse_flag(&["trusty-search", "start", "--no-auto-discover=ture"]).is_err());
-    }
-}
+#[path = "service_unit_cli_tests.rs"]
+mod cli_tests;

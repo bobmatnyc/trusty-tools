@@ -311,6 +311,7 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
         throttle_interval: 0,
         env_vars: Vec::new(),
         fd_limit: None,
+        working_directory: None,
     };
     match verb {
         Verb::Stop => {

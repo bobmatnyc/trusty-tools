@@ -30,12 +30,14 @@ use anyhow::Context as _;
 /// here, so the lookup always missed the real daemon and every autostart fell
 /// through to a detached raw spawn — orphaning a stray daemon on a random port
 /// (#1900).
-/// What: `"com.trusty.mpm"` — matches the installed main-daemon plist's
-/// `<key>Label</key>` entry.
+/// What: the registry's `com.trusty.mpm` — matches the installed main-daemon
+/// plist's `<key>Label</key>` entry. #4868: read from the canonical registry
+/// rather than restated, since #1900 was itself a label-lookup miss and a
+/// second literal is a second thing that can miss again.
 /// Test: `main_daemon_plist_path_uses_main_label`,
 /// `main_daemon_managed_ignores_supervisor_only_home`.
 #[cfg(target_os = "macos")]
-pub(crate) const MAIN_DAEMON_PLIST_LABEL: &str = "com.trusty.mpm";
+pub(crate) const MAIN_DAEMON_PLIST_LABEL: &str = trusty_common::launchd_labels::MPM;
 
 /// Resolve the LaunchAgents plist path for `label` under an explicit home dir.
 ///
