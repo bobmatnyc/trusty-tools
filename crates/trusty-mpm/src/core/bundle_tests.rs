@@ -990,20 +990,53 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
         "composed version-control is missing its persona-level update-branch bullet (#4792)"
     );
 
-    // (b) PM_INSTRUCTIONS.md's Parked-Subagent Re-Engagement section must
-    // survive the real PM system-prompt assembly (not just exist in the source
-    // .md file).
+    // (b) The Parked-Subagent Re-Engagement TRIGGER must survive the real PM
+    // system-prompt assembly (not just exist in the source .md file). The
+    // trigger is what cannot be deferred: an agent handing back with CI pending
+    // is the moment the PM must act, and a PM that never learns to act does not
+    // know to load anything.
     let pm_prompt = assemble_system_prompt();
     assert!(
         pm_prompt.contains("## Parked-Subagent Re-Engagement (issues #2833, #4792)"),
         "assembled PM system prompt is missing the Parked-Subagent \
          Re-Engagement section (#2833, #4792)"
     );
+    // The MECHANICS moved to `tm-delegation-patterns` (per-prompt rule: an
+    // instruction not needed on EVERY prompt lives in a skill). The resident
+    // text must therefore name the call explicitly — a bare `[SKILL: name]`
+    // mention is documentation style, not a tool invocation, and is exactly how
+    // the previous pointer decayed into decoration beside a re-inlined copy.
     assert!(
-        pm_prompt
-            .contains("never a 30-second blind poll (that is the spam counter-failure, #2833)"),
-        "assembled PM system prompt is missing the PM-side anti-spam-monitoring \
-         guidance (#2833)"
+        pm_prompt.contains(r#"Skill(skill="tm-delegation-patterns")"#),
+        "the resident re-engagement trigger must name the Skill call that \
+         carries the mechanics, not merely mention the skill (#2833, #4792)"
+    );
+    assert!(
+        !pm_prompt.contains("never a 30-second blind poll"),
+        "the anti-spam MECHANICS belong to the skill now; re-inlining them in \
+         the prompt is the redundancy this rule removes (#2833)"
+    );
+
+    // …and the mechanics must actually BE in the skill, or the pointer above is
+    // a dangling reference. Asserted against the real bundled asset.
+    let skill = TM_DELEGATION_PATTERNS;
+    assert!(
+        skill.contains("30-second blind poll") && skill.contains("counter-failure"),
+        "tm-delegation-patterns must carry the PM-side anti-spam-monitoring \
+         guidance the prompt now points at (#2833)"
+    );
+    assert!(
+        skill.contains("## PM Re-Engagement (issues #2833, #4792)"),
+        "tm-delegation-patterns must carry the PM Re-Engagement section the \
+         prompt names by title (#2833, #4792)"
+    );
+    // The skill has to be REACHABLE by relevance too: its description is what a
+    // relevance match sees, and "delegation matrices" alone never fires at the
+    // moment an agent hands back with pending CI.
+    assert!(
+        skill.contains("CI pending") && skill.contains("re-engagement"),
+        "tm-delegation-patterns' frontmatter description must mention the \
+         CI-wait / re-engagement trigger, or it cannot fire on its own (#4792)"
     );
 }
 

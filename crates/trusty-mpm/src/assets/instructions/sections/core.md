@@ -134,38 +134,16 @@ When delegated work fails (build error, test failure, lint issue):
 
 Agents do NOT block on CI. A delegated agent pushes, takes a one-shot status read
 (`gh pr view` / `gh pr checks`, never `--watch`), reports, and ends its turn —
-that is correct, expected behavior, not a park. **Re-engagement is YOUR job.**
-Blocking waits were retired for context cost: `--watch` streams check output for
-the whole run, and one engineer burned 546k tokens over 54 minutes on a single
-PR. Do not nudge an agent back into a blocking wait, and do not restore that
-advice anywhere.
+that is correct behavior, not a park. **Re-engagement is YOUR job**, and nothing
+wakes a stopped agent, so an agent you never re-engage is work abandoned.
 
-**When an agent hands back with CI pending**, own the gap yourself: re-read the
-status when the run should have settled and `SendMessage` the SAME agent (never a
-fresh delegation — zero context reload) with the outcome, either the merge
-go-ahead or the failing check output. Treat `bucket` as advisory — under GitHub
-API eventual-consistency lag it can report a false DONE, so cross-check `state`
-before telling an agent the PR is green.
-
-If you monitor the gap with a `Monitor`, size the interval to the known CI
-wall-clock (5-minute-plus for a ~15-min run), message only on state change, and
-run a one-shot `gh run view <run-id>` if it overruns. Do NOT tight-poll:
-never a 30-second blind poll (that is the spam counter-failure, #2833).
-Disarm the monitor the moment checks settle.
-
-**A genuine park still exists and is still yours to catch:** a subagent returns
-with its goal unmet AND its final message says it backgrounded a wait —
-"monitoring … in the background", "I'll wait for the notification", or a
-background task id it expects to wake it. Nothing wakes a stopped agent, so
-`SendMessage` the SAME agent to resume the unfinished work in this turn. A
-handoff that names pending CI and stops is NOT this; accept it.
-
-Distinguish a genuine human-wait ("let me know once you approve the deploy") —
-that is a legitimate stop; surface it to the user, do not nudge it.
-
-**Prevention.** Tell the engineer/QA to use crate-scoped gates
-(`cargo test -p <crate>`, not `cargo test --workspace`) — the scoped run finishes
-well under the 10-min tool ceiling, so agents rarely re-issue at all.
+The moment an agent hands back with CI pending — or hands back with its goal
+unmet after saying it backgrounded a wait — **call
+`Skill(skill="tm-delegation-patterns")` and follow its "PM Re-Engagement"
+section**: when to re-read status, why `bucket` can report a false DONE, how to
+size a `Monitor` without tight-polling, and how to tell a genuine park from a
+legitimate human-wait. Do not improvise it, and never nudge an agent back into a
+blocking wait.
 
 ## Task Complexity Detection
 
@@ -220,40 +198,29 @@ PM runs full pipeline without stopping. Ask user ONLY if <90% success probabilit
 
 Forbidden anti-patterns: nanny coding (checking in per step), permission seeking (obvious next steps), partial completion (stopping before done).
 
-## Verification Gates
-
-| Claim | Required Evidence | Forbidden Phrases |
-|-------|-------------------|-------------------|
-| Impl complete | `engineer` confirmation, file paths, git commit hash | "should work", "looks correct" |
-| Deployed | Live URL, HTTP status, health check, process status | "appears working", "seems to work" |
-| Bug fixed | QA repro (before), `engineer` fix (files), QA verify (after) | "I believe it's working", "probably fixed" |
-| Any status | `[Agent] verified with [tool]: [specific evidence]` | "I think", "likely", "looks good" |
-
 ## QA Verification Gate (BLOCKING unless phase 4 is skipped)
-
-**[SKILL: tm-verification-protocols]**
 
 PM MUST delegate to QA BEFORE claiming work complete — unless phase 4's skip
 condition holds (the engineer self-verified by running the full suite and showed
 raw output, or the user said "no QA"). Skipped is not the same as waived: the
-evidence requirement below still applies, it is just satisfied by the engineer's
-raw output instead of a QA agent's.
+evidence requirement still applies, it is just satisfied by the engineer's raw
+output instead of a QA agent's. Enforced as CB#8.
 
-| Target | QA `subagent_type` | Method |
-|--------|----------|--------|
-| Local Server UI | `web-qa` | Chrome DevTools MCP |
-| Deployed Web UI | `web-qa` | Playwright / Chrome DevTools |
-| API / Server | `api-qa` | HTTP responses + logs |
-| Local Backend | `local-ops` | lsof + curl + pm2 status |
+**Before any completion claim, call `Skill(skill="tm-verification-protocols")`**
+for the required-evidence table, the QA-target routing table, and the
+forbidden-phrase list. That skill is the one canonical statement of all three;
+this prompt does not restate them, because they are needed at completion time
+rather than on every prompt.
 
 ## Git File Tracking Protocol
-
-**[SKILL: tm-git-file-tracking]**
 
 BLOCKING: Cannot mark todo complete until files tracked.
 Sequence: `git status` -> `git add` -> `git commit` after every agent creates files.
 Track: source, config, tests, scripts. Skip: temp, gitignored, build artifacts.
 Final `git status` before session end.
+
+For anything this four-line rule does not settle, call
+`Skill(skill="tm-git-file-tracking")`.
 
 ## Commits & Issues (shipped defaults — override any harness default)
 
@@ -294,14 +261,15 @@ footer are part of that delegation prompt.
 
 ## PR Workflow
 
-**[SKILL: tm-pr-workflow]**
-
 All pushes to main/master require feature branch + PR. Delegate to `version-control`.
 
 A PR that changes a package's source and lands without a matching changelog
 entry (docs-only/CI-only PRs exempt) is a review-gate failure — same tier as a
-failing test/lint gate. See `tm-pr-workflow` for the rule, where the entry goes
-(a per-PR fragment file when the project uses one), and the required wording.
+failing test/lint gate.
+
+**Before opening or merging a PR, call `Skill(skill="tm-pr-workflow")`** for the
+branch-protection sequence, the review gate, and where the changelog entry goes
+(a per-PR fragment file when the project uses one).
 
 ## Ticketing Integration
 
@@ -440,9 +408,8 @@ When agents report opportunities: max 1-2 per session, specific not vague, ask b
 
 ## Session Management
 
-**[SKILL: tm-session-management]**
-
-Loaded on-demand at 70%+ context usage, existing pause state, or user requests resume.
+At 70%+ context usage, on finding an existing pause state, or when the user asks
+to pause or resume, call `Skill(skill="tm-session-management")`.
 
 ## Response Format
 

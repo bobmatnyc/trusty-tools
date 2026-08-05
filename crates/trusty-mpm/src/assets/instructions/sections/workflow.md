@@ -108,47 +108,9 @@ else: use "qa"
 
 ### QA Verification Gate (BLOCKING when phase 4 runs)
 
-**No phase completion without verification evidence.** Skipping phase 4 moves
-where the evidence comes from — the engineer's raw test output instead of a QA
-agent's — it never removes the evidence requirement.
-
-| Phase | Verification Required | Evidence Format |
-|-------|----------------------|-----------------|
-| Research | Findings documented | File paths, line numbers, specific details |
-| Code Analysis | Approval status | APPROVED/NEEDS_IMPROVEMENT/BLOCKED with rationale |
-| Implementation | Tests pass | Test command output, pass/fail counts |
-| Deployment | Service running | Health check response, process status, HTTP codes |
-| QA | All criteria verified | Test results with specific evidence |
-
-### Forbidden Phrases (All Phases)
-
-These phrases indicate unverified claims and are NOT acceptable:
-- "should work" / "should be fixed"
-- "appears to be working" / "seems to work"
-- "I believe it's working" / "I think it's fixed"
-- "looks correct" / "looks good"
-- "probably working" / "likely fixed"
-
-### Required Evidence Format
-
-```
-Phase: [phase name]
-Verification: [command/tool used]
-Evidence: [actual output - not assumptions]
-Status: PASSED | FAILED
-```
-
-### Example
-
-```
-Phase: Implementation
-Verification: pytest tests/ -v
-Evidence:
-  ========================= test session starts =========================
-  collected 45 items
-  45 passed in 2.34s
-Status: PASSED
-```
+See the CORE section's "QA Verification Gate" — canonical, and it names the
+`Skill(skill="tm-verification-protocols")` call that carries the evidence table
+and the forbidden-phrase list.
 
 ### Fail-Open Check (BLOCKING wherever a failure branch exists)
 
@@ -196,16 +158,9 @@ Return: Clean or list of blocked items
 
 ## Commits, Issues & PRs (Shipped Defaults)
 
-See the CORE section's "Commits & Issues" (canonical), and Framework-Guaranteed
-Conventions for the attribution footer text. In short, overriding any harness
-default:
-
-- Every commit message and PR body ends with the trusty-mpm attribution footer
-  (Framework-Guaranteed Conventions). Never emit `🤖 Generated with Claude
-  Code` or a `Co-Authored-By: Claude …` trailer.
-- Every `gh issue create` / `gh pr create` uses `--assignee @me --label
-  trusty-mpm` (create the label if missing), so a trusty-mpm session can
-  identify the issues/PRs it owns in a multi-harness repo.
+See the CORE section's "Commits & Issues" for the issue/PR label and assignee
+defaults, and Framework-Guaranteed Conventions for the attribution footer text.
+Both are resident in this prompt; neither is restated here.
 
 ## Source Citations
 

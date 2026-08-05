@@ -1563,11 +1563,7 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
         "enforcement.md holds the canonical statement"
     );
 
-    for section in [
-        SectionId::Core,
-        SectionId::Identity,
-        SectionId::NonOverridableRules,
-    ] {
+    for section in [SectionId::Core, SectionId::NonOverridableRules] {
         let body = package.authored_run(&[section]);
         assert!(
             body.contains(TITLE),
@@ -1578,6 +1574,97 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
             "{section:?} must point at the budget, not restate its mechanics"
         );
     }
+
+    // `identity` no longer references the budget AT ALL. It used to restate the
+    // whole PM identity — orchestrator role, delegation default, budget — that
+    // `core` already states, so the two sections said the same thing twice in
+    // one prompt. `identity` now defers to core's `## Identity` and keeps only
+    // the tm-session context that is genuinely its own.
+    //
+    // The anti-rot guarantee this test exists for still holds, via a two-hop
+    // chain that is asserted end to end: identity -> core's `## Identity` ->
+    // the budget title -> enforcement's canonical statement.
+    let identity = package.authored_run(&[SectionId::Identity]);
+    assert!(
+        !identity.contains(TITLE) && !identity.contains("One direct action = one PM-executed step"),
+        "identity must not restate the budget — core states it once"
+    );
+    assert!(
+        identity.contains(r#"CORE section's "Identity""#),
+        "identity must point at the section that does state it, by exact title"
+    );
+    assert!(
+        package
+            .authored_run(&[SectionId::Core])
+            .contains("## Identity"),
+        "core must carry the `## Identity` heading identity points at, or that \
+         pointer is dangling"
+    );
+}
+
+#[test]
+fn every_skill_pointer_names_the_call_rather_than_decorating() {
+    // `[SKILL: name]` is DOCUMENTATION STYLE, not a tool call. Nothing about the
+    // bracket notation makes the model invoke `Skill(skill="name")`, so a
+    // pointer written that way reads as a label and the content it points at
+    // gets re-inlined beside it by the next editor. That is exactly what had
+    // happened to the QA gate: a `[SKILL: tm-verification-protocols]` line sat
+    // directly above a full inlined copy of the skill's evidence table, routing
+    // table and forbidden-phrase list, with a second copy in `workflow`.
+    //
+    // Every pointer must therefore read as an instruction naming the call.
+    let package = bundled_fallback_package().expect("manifest parses");
+    let prompt = package.authored_run(&SectionId::CANONICAL);
+
+    assert!(
+        !prompt.contains("[SKILL:"),
+        "bare `[SKILL: …]` notation is decoration, not an instruction — write \
+         `call Skill(skill=\"name\")` so the pointer states the action"
+    );
+
+    // Every skill the prompt defers to must be named in a real call. Guards the
+    // inverse failure: deleting the inlined content AND the pointer with it.
+    for skill in [
+        "tm-verification-protocols",
+        "tm-git-file-tracking",
+        "tm-pr-workflow",
+        "tm-session-management",
+        "tm-circuit-breaker",
+        "tm-delegation-patterns",
+    ] {
+        assert!(
+            prompt.contains(&format!(r#"Skill(skill="{skill}")"#)),
+            "{skill} is deferred to but never invoked — the prompt must name \
+             the call, or the content is simply gone"
+        );
+    }
+}
+
+#[test]
+fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
+    // It was stated three times: `core` inlined the evidence table, the QA
+    // routing table and the forbidden phrases beside a pointer to the skill
+    // that already held all three, and `workflow` restated nearly all of it
+    // again with no pointer at all.
+    let package = bundled_fallback_package().expect("manifest parses");
+
+    for (section, id) in [("core", SectionId::Core), ("workflow", SectionId::Workflow)] {
+        let body = package.authored_run(&[id]);
+        assert!(
+            !body.contains("Forbidden Phrases") && !body.contains("| Required Evidence |"),
+            "{section} must not restate the evidence table or forbidden phrases \
+             — they are needed at completion time, not on every prompt"
+        );
+    }
+
+    // The trigger stays resident: the PM has to know a completion claim is
+    // gated before it can know to load anything.
+    let core = package.authored_run(&[SectionId::Core]);
+    assert!(
+        core.contains("## QA Verification Gate (BLOCKING unless phase 4 is skipped)")
+            && core.contains(r#"Skill(skill="tm-verification-protocols")"#),
+        "core keeps the gate trigger and names the call that carries the detail"
+    );
 }
 
 #[test]

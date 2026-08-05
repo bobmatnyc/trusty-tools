@@ -1,6 +1,6 @@
 ---
 name: tm-delegation-patterns
-description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM
+description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
 version: "1.0.0"
 category: pm-reference
@@ -107,14 +107,54 @@ delegation prompt instead of hoping the agent improvises:
    expecting a notification, and do not sleep-poll. Block quietly in the
    foreground on your own commands; hand back an observation, not a promise to
    report."
-4. **PM re-engagement.** When the agent hands back with CI pending, re-read the
-   status yourself and `SendMessage` the SAME agent the outcome — never a fresh
-   delegation, and never a nudge back into a blocking wait (see PM_INSTRUCTIONS
-   "Parked-Subagent Re-Engagement").
+4. **PM re-engagement.** When the agent hands back with CI pending, own the gap
+   yourself — see the next section.
 
 The daemon idle-nudge (#2621) does NOT cover in-conversation subagents — they
 have no tmux pane — so PM-side re-engagement is the only mechanism below the
 managed-session layer.
+
+## PM Re-Engagement (issues #2833, #4792)
+
+An agent that pushes, takes a one-shot status read, reports, and stops has done
+the right thing. Nothing wakes it again, so the work is abandoned unless the PM
+re-engages. That is the whole mechanism at this layer.
+
+**Re-engage the SAME agent.** `SendMessage` it the outcome — the merge go-ahead,
+or the failing check output — once the run should have settled. Never open a
+fresh delegation for work an existing agent already owns: the fresh one reloads
+~95K tokens of context and knows none of the history. Never nudge an agent back
+into a blocking wait.
+
+**Cross-check `state` before calling anything green.** Treat `bucket` as
+advisory: under GitHub API eventual-consistency lag it can report a false DONE
+while a check has not settled.
+
+**Sizing a `Monitor`, if you use one.** Size the interval to the known CI
+wall-clock — 5 minutes or more for a ~15-minute run. Message only on state
+change. If it overruns, run a one-shot `gh run view <run-id>` rather than
+tightening the interval. **Never a 30-second blind poll** — that is the spam
+counter-failure (#2833), the exact behavior the retired blocking waits were
+replaced to avoid. Disarm the monitor the moment checks settle.
+
+**Telling a genuine park from a correct hand-back.** A genuine park is a subagent
+returning with its goal UNMET *and* a final message saying it backgrounded a
+wait — "monitoring … in the background", "I'll wait for the notification", or a
+background task id it expects to wake it. `SendMessage` that agent to resume the
+unfinished work now. An agent that names pending CI and stops is NOT a park;
+accept it and re-engage on the schedule above.
+
+**A human-wait is a legitimate stop.** "Let me know once you approve the deploy"
+is not a park. Surface it to the user; do not nudge it.
+
+**Why blocking waits are not the fix.** They were retired for context cost, not
+because they failed to work: `gh pr checks --watch` streams check output for the
+whole run, and one engineer burned 546k tokens over 54 minutes on a single PR.
+Do not restore that advice anywhere.
+
+**Prevention.** Tell the engineer/QA to use crate-scoped gates
+(`cargo test -p <crate>`, not `cargo test --workspace`) — the scoped run finishes
+well under the 10-minute tool ceiling, so agents rarely re-issue at all.
 
 ## Concurrent Dispatch: Declare File Ownership
 
