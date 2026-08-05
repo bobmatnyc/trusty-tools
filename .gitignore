@@ -52,15 +52,21 @@
 # tracked must be named explicitly.
 .claude/agent-memory/
 
-# trusty-mpm session/worktree runtime state is machine-local (issue #3972),
-# except the one intentionally-tracked file. Uses `.trusty-mpm/*` (ignore
-# immediate children only), NOT `.trusty-mpm/` + `!.trusty-mpm/` — the latter
-# un-ignores the directory itself and reproduces the exact `.claude/` bug
-# this issue is about (only the explicitly re-included children survive;
-# every other child falls through as untracked). Mirrors the existing
-# `.claude-mpm/*` + re-include pattern above.
+# trusty-mpm session/worktree runtime state is machine-local (issue #3972).
+# Uses `.trusty-mpm/*` (ignore immediate children only), NOT `.trusty-mpm/` +
+# `!.trusty-mpm/` — the latter un-ignores the directory itself and reproduces
+# the exact `.claude/` bug this issue is about (only the explicitly re-included
+# children survive; every other child falls through as untracked).
+#
+# Nothing here is re-included any more. `INSTRUCTIONS.md` used to be, as the
+# tracked project-instruction host; #4286 retired all five `.trusty-mpm/`
+# override files and #4676 migrated its content into the root `CLAUDE.md`.
+# The `!` re-include outlived the file it existed for, which left the ONE
+# retired name in this directory that git still offered to commit while its
+# four siblings were correctly ignored — so a session that recreated it got a
+# `??` entry inviting it back, and `tm doctor`'s `legacy_overrides` check now
+# fails on exactly that file.
 .trusty-mpm/*
-!.trusty-mpm/INSTRUCTIONS.md
 
 # Harness-generated project tier under a CRATE directory is machine-local and
 # never a deliverable (#4752). Running `tm` inside `crates/<name>/` seeds a full
