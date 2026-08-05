@@ -333,8 +333,6 @@ crates/trusty-memory/src/service/types.rs	palace_list_includes_richer_counts
 crates/trusty-memory/src/tools/chat_ops.rs	chat_session_get_missing_errors
 crates/trusty-memory/src/tools/helpers.rs	dispatch_remember_rejects_short_content
 crates/trusty-memory/src/tools/memory_ops.rs	recall_all_falls_back_to_bm25_and_l0_l1_while_warming
-crates/trusty-memory/src/tools/memory_ops.rs	recall_deep_falls_back_to_bm25_and_l0_l1_while_warming
-crates/trusty-memory/src/tools/memory_ops.rs	recall_falls_back_to_bm25_and_l0_l1_while_warming
 crates/trusty-memory/src/tools/tests.rs	note_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	recall_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	remember_returns_warming_error_while_state_is_warming
