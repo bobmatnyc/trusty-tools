@@ -44,20 +44,26 @@ pub const FRAMEWORK_DIR: &str = "framework";
 /// Test: `session_dir_is_per_session_under_the_harness_root`.
 pub const SESSIONS_DIR: &str = "sessions";
 
-/// The shared bare clone trusty-mpm provisions inside a managed project.
+/// The shared bare clone trusty-mpm provisioned inside a managed project
+/// before #4270.
 ///
-/// Why: `provisioner::workspace` clones the shared base into `<project>/.base`
-/// and adds every managed session's worktree from THERE, so those worktrees'
-/// git common dir is the bare clone — a directory INSIDE the project, not the
-/// project. This is not a path guess: it is the same directory name
-/// `provisioner::workspace::BASE_CHECKOUT_DIRNAME` writes and
-/// `session_manager::worktree_registry` interrogates.
+/// Why: `provisioner::workspace` used to clone the shared base into
+/// `<project>/.base` and add every managed session's worktree from THERE, so
+/// those worktrees' git common dir is the bare clone — a directory INSIDE the
+/// project, not the project. #4270 retired that store: provisioning now clones
+/// the base into `<project>` itself and puts worktrees at
+/// `<project>/.worktrees/<id>`, matching the in-project path. Existing `.base`
+/// stores were deliberately NOT migrated, so this mapping stays load-bearing
+/// for every worktree already under one, and the name is also what
+/// `provisioner::workspace`'s own guard checks before refusing to clone over a
+/// live legacy store.
 /// What: `.base`. The name alone is never sufficient — see
 /// [`map_base_clone_to_project`], which also requires the directory to be a
 /// BARE repository before rewriting it.
 /// Test: `harness_root_maps_a_base_clone_back_to_the_project`,
-/// `harness_root_for_a_non_bare_repo_named_base_is_itself`.
-const BASE_CLONE_DIRNAME: &str = ".base";
+/// `harness_root_for_a_non_bare_repo_named_base_is_itself`,
+/// `provision_in_leaves_an_existing_dot_base_store_untouched`.
+pub(crate) const BASE_CLONE_DIRNAME: &str = ".base";
 
 /// Environment variable carrying the managed session id inside a tm pane.
 const MANAGED_SESSION_ID_ENV: &str = "TM_MANAGED_SESSION_ID";

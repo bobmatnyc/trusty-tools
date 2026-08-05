@@ -201,6 +201,56 @@ fn migrate_old_layout_aside_ignores_empty_and_git_dirs() {
     );
 }
 
+/// #4270: a project directory holding a legacy `.base` store must be refused,
+/// never renamed aside.
+///
+/// Why: `.base` matches the old-layout signature exactly — non-empty, no
+/// top-level `.git` — but it is a real bare repository owning every
+/// `.base/.worktrees/<id>` worktree beneath it, any of which may belong to a
+/// live session. Renaming the parent orphans all of them at once. This is the
+/// same failure #3605 caused one level down, and the owner ruling makes `.base`
+/// cleanup a manual step, so the correct behaviour is a loud refusal that moves
+/// nothing.
+/// What: pre-seeds `<base>/.base/.worktrees/live/IN-USE.txt`, calls
+/// `migrate_old_layout_aside`, and asserts it returns `Err` naming `.base` while
+/// the marker file survives byte-for-byte and no backup sibling was created.
+/// Test: this function IS the test.
+#[test]
+fn migrate_old_layout_aside_refuses_a_dir_holding_a_dot_base_store() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let base = tmp.path().join("owner").join("repo");
+    let live = base.join(".base").join(".worktrees").join("live");
+    std::fs::create_dir_all(&live).expect("create legacy worktree");
+    let marker = live.join("IN-USE.txt");
+    std::fs::write(&marker, b"live session").expect("write marker");
+
+    let err = migrate_old_layout_aside(&base)
+        .expect_err("a dir holding a .base store must be refused, not migrated");
+    assert!(
+        err.contains(".base"),
+        "the refusal must name the legacy store, got: {err}"
+    );
+
+    assert!(
+        base.is_dir(),
+        "the project dir must stay exactly where it is"
+    );
+    assert_eq!(
+        std::fs::read(&marker).expect("the legacy worktree must survive untouched"),
+        b"live session",
+        "#4270: an existing .base worktree must not be disturbed, relocated, or deleted"
+    );
+    let siblings: Vec<_> = std::fs::read_dir(base.parent().unwrap())
+        .expect("read owner dir")
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .collect();
+    assert_eq!(
+        siblings.len(),
+        1,
+        "no backup sibling may be created, got {siblings:?}"
+    );
+}
+
 #[test]
 fn try_inproject_spawn_returns_none_for_non_git_path() {
     // A directory that is not a git repo must return Ok(None), not an error.

@@ -156,15 +156,26 @@ pub const OLD_LAYOUT_BACKUP_SUFFIX: &str = ".old-layout-backup-";
 /// aside (rather than erroring) upholds the project's "operator does nothing"
 /// north-star: the fresh clone proceeds automatically and the old data is preserved
 /// under a clearly-named backup the operator can inspect or delete at leisure.
-/// What: acts ONLY when `base_path` exists, is a directory, is non-empty, and has
-/// NO top-level `.git` (the precise old-layout signature). In that case it renames
-/// `base_path` to a sibling `<repo><OLD_LAYOUT_BACKUP_SUFFIX><unix_nanos>` and
-/// returns `Ok(Some(backup))`. Empty dirs, already-`.git` dirs, and absent paths
-/// are left untouched (`Ok(None)`) — git clone handles an empty/absent dir fine and
-/// the caller handles the `.git` case before ever calling this. Loudly `warn!`s so
-/// the migration is never silent.
+///
+/// #4270 carves out one directory shape from that automatic rename: a project
+/// directory holding a `.base` store. It matches the old-layout signature
+/// exactly (non-empty, no top-level `.git`) but is nothing like it — `.base` is
+/// a real bare repository owning every `.base/.worktrees/<id>` worktree under
+/// it, and renaming the parent orphans all of them at once, possibly while a
+/// session is live. That is the #3605 failure mode with a bigger blast radius,
+/// so this returns `Err` there instead: retiring `.base` is a manual step the
+/// operator takes once nothing needs it.
+/// What: acts ONLY when `base_path` exists, is a directory, is non-empty, has
+/// NO top-level `.git` (the precise old-layout signature), and holds no `.base`
+/// store. In that case it renames `base_path` to a sibling
+/// `<repo><OLD_LAYOUT_BACKUP_SUFFIX><unix_nanos>` and returns `Ok(Some(backup))`.
+/// Empty dirs, already-`.git` dirs, and absent paths are left untouched
+/// (`Ok(None)`) — git clone handles an empty/absent dir fine and the caller
+/// handles the `.git` case before ever calling this. Loudly `warn!`s so the
+/// migration is never silent.
 /// Test: `ensure_base_clone_migrates_old_layout_dir_aside`,
-/// `migrate_old_layout_aside_ignores_empty_and_git_dirs`.
+/// `migrate_old_layout_aside_ignores_empty_and_git_dirs`,
+/// `migrate_old_layout_aside_refuses_a_dir_holding_a_dot_base_store`.
 fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String> {
     // Absent path or an existing `.git` dir are both non-old-layout: nothing to do.
     if !base_path.exists() || base_path.join(".git").exists() {
@@ -189,6 +200,20 @@ fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String>
         .is_none();
     if is_empty {
         return Ok(None);
+    }
+
+    // #4270: never rename a directory that owns a live `.base` store.
+    let legacy_base = base_path.join(crate::core::harness_root::BASE_CLONE_DIRNAME);
+    if legacy_base.exists() {
+        return Err(format!(
+            "inproject: refusing to migrate {base} aside because it holds the legacy \
+             {legacy} store retired by #4270. That store owns every \
+             {legacy}/.worktrees/<id> worktree under it and a session may be using one \
+             right now, so trusty-mpm will not move, rename, or delete it. Retiring it \
+             is a manual step for once no session needs it.",
+            base = base_path.display(),
+            legacy = crate::core::harness_root::BASE_CLONE_DIRNAME,
+        ));
     }
 
     // Non-empty, no top-level `.git` → this is the pre-#1803 old layout. Move it

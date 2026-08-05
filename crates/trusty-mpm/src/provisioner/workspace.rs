@@ -10,12 +10,16 @@
 //! it). #1935 replaces the per-session clone with ONE persistent, shared base
 //! checkout per project plus a per-session `git worktree add`, mirroring the
 //! same shared-base-plus-worktrees pattern already proven by the in-project
-//! spawn path (`daemon::managed_routes::inproject`).
+//! spawn path (`daemon::managed_routes::inproject`). #4270 finished that
+//! convergence: the base checkout is the project directory itself and
+//! worktrees sit beside it in `.worktrees/`, so a repo spawned from a URL and
+//! the same repo spawned from a local checkout now share ONE base clone
+//! instead of two stores in one project directory.
 //! What: [`WorkspaceProvisioner`] accepts (repo_url, ref, task, session_id),
-//! ensures a persistent bare base checkout exists at
-//! `<project_dir>/.base/` (cloning once via [`GitBackend::ensure_base_checkout`]),
+//! ensures a persistent base checkout exists at `<project_dir>/`
+//! (cloning once via [`GitBackend::ensure_base_checkout`]),
 //! then fetches `git_ref` fresh from `origin` and adds an isolated per-session
-//! `git worktree` at `<project_dir>/.base/.worktrees/<session-id>/` via
+//! `git worktree` at `<project_dir>/.worktrees/<session-id>/` via
 //! [`GitBackend::worktree_add`]. It then calls `prepare_session` to deploy
 //! agents/skills into that worktree, and returns a [`PreparedWorkspace`] with
 //! the worktree path, repo_url, and the REQUESTED branch/ref (not the internal
@@ -50,20 +54,6 @@ pub enum ProvisionError {
     #[error("session preparation failed: {0}")]
     PrepareSession(String),
 }
-
-/// Directory name (relative to a project directory) holding the persistent,
-/// shared base git checkout that every session's worktree branches off of (#1935).
-///
-/// Why: naming this segment `.base` (rather than reusing the project
-/// directory itself as the checkout root) guarantees it is EMPTY the first
-/// time a project is provisioned under the new scheme — even on an existing
-/// installation whose project directory already holds pre-#1935 per-session
-/// full-clone subdirectories — so establishing the base checkout never needs
-/// an old-layout migration step.
-/// What: `".base"`.
-/// Test: `provision_in_uses_explicit_project_dir`,
-/// `provision_reuses_base_checkout_across_sessions`.
-const BASE_CHECKOUT_DIRNAME: &str = ".base";
 
 /// Describes an isolated workspace after provisioning.
 ///
@@ -136,14 +126,15 @@ pub trait GitBackend: Send + Sync {
     /// A single shared base checkout per project lets every session's git
     /// worktree share one object database, cloned only once.
     /// What: no-op (idempotent) when `base_dir` already looks like an
-    /// established git directory; otherwise clones `repo_url` into `base_dir`.
-    /// `RealGitBackend` clones `--bare` (see its impl doc for why); callers
-    /// must not assume a working tree exists at `base_dir` itself — only
-    /// [`worktree_add`](Self::worktree_add) produces checked-out working trees.
-    /// Test: `FakeGitBackend` records the call and writes fake bare-checkout
-    /// markers (`HEAD` + a `bare = true` `config`) so a second call is
-    /// recognised as already-established (no re-clone), while a stale directory
-    /// carrying only a stray `HEAD` is rejected — matching the real backend.
+    /// established git checkout; otherwise clones `repo_url` into `base_dir`.
+    /// Since #4270 `base_dir` is the project directory and the clone is a
+    /// NON-bare one — the same clone `daemon::managed_routes::inproject::
+    /// ensure_base_clone` establishes, so both spawn paths reuse one base per
+    /// project rather than each keeping its own.
+    /// Test: `FakeGitBackend` records the call and writes a fake `.git/config`
+    /// so a second call is recognised as already-established (no re-clone),
+    /// while a stale directory carrying only a stray `HEAD` is rejected —
+    /// matching the real backend.
     fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError>;
 
     /// Fetch `git_ref` fresh from `origin` and add an isolated worktree for it.
@@ -237,8 +228,8 @@ impl RealGitBackend {
 // the 500-SLOC production cap — see that module's doc comment for the full
 // rationale behind each item.
 use base_lock::{
-    acquire_base_checkout_lock, base_checkout_lock_path, fake_is_established_bare_checkout,
-    is_established_bare_checkout, stale_base_dir_error, write_fake_bare_checkout,
+    acquire_base_checkout_lock, base_checkout_lock_path, fake_is_established_checkout,
+    is_established_checkout, stale_base_dir_error, write_fake_checkout,
 };
 
 impl GitBackend for RealGitBackend {
@@ -332,59 +323,38 @@ impl GitBackend for RealGitBackend {
         }
     }
 
-    /// Why: this method used to treat `base_dir.join("HEAD").is_file()` as
-    /// proof of an established bare checkout (trusty-review finding #2 on
-    /// PR #1936 / #1935). A non-bare git repo ALSO has a root-level `HEAD`
-    /// file, so a stale non-bare directory (e.g. left over from a pre-#1935
-    /// full-clone install sharing this path) would be silently accepted as a
-    /// valid base, and a later `git worktree add` against it would then fail
-    /// with `'<branch>' is already checked out`. It also unconditionally
-    /// attempted `git clone --bare` on a cache miss with no protection
-    /// against two sessions provisioning the SAME project for the first time
-    /// concurrently (finding #1): both observe "no base yet" and both start
-    /// cloning into the identical target directory. Note that "recover by
-    /// re-checking after the clone fails" is NOT sufficient here — real `git
-    /// clone --bare` is not safe against a concurrent writer into the exact
-    /// same directory; two interleaved clones can corrupt each other's
-    /// partial checkout (observed empirically: colliding on copying
-    /// `hooks/commit-msg.sample`) rather than cleanly failing with "already
-    /// exists". Only mutual exclusion around the whole check-and-clone window
-    /// avoids that.
-    /// What: replaces the fragile file-existence probe with
-    /// [`is_established_bare_checkout`], which asks git itself via
-    /// `rev-parse --is-bare-repository` (returns `false`, never panics, for a
-    /// non-bare repo or a non-repo directory) — this alone fixes finding #2.
-    /// For finding #1, wraps the clone in [`acquire_base_checkout_lock`]: a
-    /// dependency-free `OpenOptions::create_new` marker-file mutex (no
-    /// file-locking crate such as `fs2`/`fs4` is currently a workspace
-    /// dependency) that serializes concurrent callers for the SAME
-    /// `base_dir`, with stale-lock recovery so a crashed process can never
-    /// permanently deadlock future provisioning. After acquiring the lock,
-    /// re-checks `is_established_bare_checkout` once more (another caller may
-    /// have finished cloning while this one was waiting) before cloning. If the
-    /// path is then found occupied by a non-empty stale/broken (non-bare)
-    /// directory, returns an actionable [`stale_base_dir_error`] naming the
-    /// exact path and a non-destructive `mv`-aside quarantine command — rather
-    /// than a cryptic clone failure, a destructive auto-delete, or a suggested
-    /// recursive delete of this project's SHARED base (issues #1937 item 1,
-    /// #3605).
+    /// Why: this method used to accept a root-level `HEAD` file as proof of an
+    /// established base and to clone on every cache miss with nothing
+    /// serializing two first-time callers. A stray `HEAD` fooled the first
+    /// check; two interleaved clones into one directory corrupt each other
+    /// rather than cleanly failing, so recovering after the fact is not enough
+    /// — only mutual exclusion across the whole check-and-clone window is. See
+    /// trusty-review findings #1 and #2 on PR #1936 / #1935.
+    /// What: asks git itself via [`is_established_checkout`], then wraps the
+    /// clone in [`acquire_base_checkout_lock`] — a dependency-free
+    /// `create_new` marker-file mutex (no file-locking crate is a workspace
+    /// dependency) with stale-lock recovery, so a crashed holder cannot
+    /// deadlock future provisioning — and re-checks once the lock is held,
+    /// since a concurrent caller may have finished while this one waited.
+    /// An occupied path yields an actionable error rather than a cryptic clone
+    /// failure or any auto-delete: [`stale_base_dir_error`], whose recovery
+    /// hint is a non-destructive `mv`-aside quarantine (#1937 item 1, #3605)
+    /// and which answers a live legacy `.base` store with a refusal that moves
+    /// nothing (#4270).
     /// Test: `ensure_base_checkout_recovers_from_concurrent_race` (spawns
     /// real threads racing on the same `base_dir`, asserts every one returns
-    /// `Ok` and exactly one valid bare checkout results),
-    /// `ensure_base_checkout_rejects_stale_non_bare_directory` (pre-seeds a
-    /// non-bare repo at `base_dir` and asserts a loud error, not silent
-    /// reuse), both in `provisioner/workspace/tests.rs`.
+    /// `Ok` and exactly one valid checkout results),
+    /// `ensure_base_checkout_rejects_stale_directory` (pre-seeds a stray
+    /// `HEAD` at `base_dir` and asserts a loud error, not silent reuse),
+    /// `provision_in_leaves_an_existing_dot_base_store_untouched`, all in
+    /// `provisioner/workspace/tests.rs`.
     fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError> {
-        // A bare clone has no working tree of its own, so it can never conflict
-        // with a session worktree checking out the same branch (a non-bare
-        // clone's own checked-out branch would collide with a worktree trying
-        // to check out that same branch elsewhere). Bare-plus-worktrees is the
-        // standard git pattern for exactly this "one shared base, many
-        // isolated worktrees" shape (verified empirically before landing this:
-        // `git clone --bare`, then repeated `git fetch origin +<ref>:refs/heads/<x>`
-        // + `git worktree add` against it, works cleanly for branches, tags,
-        // and SHAs alike).
-        if is_established_bare_checkout(base_dir) {
+        // #4270: the base is the project directory's own non-bare clone, which
+        // is what the in-project spawn path already establishes there. A
+        // session worktree cannot collide with the base's checked-out branch
+        // because `worktree_add` always fetches into a session-unique branch
+        // named after the session id.
+        if is_established_checkout(base_dir) {
             debug!(path = %base_dir.display(), "base checkout already present, reusing");
             return Ok(());
         }
@@ -401,7 +371,7 @@ impl GitBackend for RealGitBackend {
 
         // Re-check now that the lock is held: another caller may have
         // completed the clone while this one was waiting for the lock.
-        if is_established_bare_checkout(base_dir) {
+        if is_established_checkout(base_dir) {
             debug!(
                 path = %base_dir.display(),
                 "base checkout completed by a concurrent caller while waiting for the lock; reusing"
@@ -409,15 +379,14 @@ impl GitBackend for RealGitBackend {
             return Ok(());
         }
 
-        // The path is confirmed NOT a valid bare checkout. If it is a non-empty
-        // stale/broken directory (crashed mid-clone leftover, or a pre-#1935
-        // non-bare clone) a `git clone --bare` here would fail with an opaque
-        // "destination path already exists" message. Surface an actionable
-        // error naming the exact path + a non-destructive `mv`-aside quarantine
-        // command instead (issue #1937 item 1). We neither auto-delete nor
-        // SUGGEST a delete: this base is shared by every worktree of the
-        // project, and the suggested command is executed verbatim by agents
-        // (issue #3605).
+        // The path is confirmed NOT a valid checkout. If it is a non-empty
+        // stale/broken directory (crashed mid-clone leftover) a `git clone`
+        // here would fail with an opaque "destination path already exists"
+        // message. Surface an actionable error naming the exact path + a
+        // non-destructive `mv`-aside quarantine command instead (issue #1937
+        // item 1). We neither auto-delete nor SUGGEST a delete: this base is
+        // shared by every worktree of the project, and the suggested command is
+        // executed verbatim by agents (issue #3605).
         if let Some(err) = stale_base_dir_error(base_dir) {
             return Err(err);
         }
@@ -428,12 +397,15 @@ impl GitBackend for RealGitBackend {
         // `--progress` + `clone_with_progress` streams byte/object percentages
         // as `CloningRepo` stage detail for the (long, on a large repo) base
         // clone — the dominant path for the in-project spawn (#2605).
+        // #4270: `--no-local` mirrors `inproject::ensure_base_clone` so a
+        // `file://`-style origin produces a real, self-contained object store
+        // rather than hardlinks into the source repository.
         let mut cmd = self.command();
-        cmd.args(["clone", "--bare", "--progress", repo_url])
+        cmd.args(["clone", "--no-local", "--progress", repo_url])
             .arg(base_dir)
             .current_dir(cwd);
         let outcome = super::clone_progress::clone_with_progress(cmd)
-            .map_err(|e| ProvisionError::Git(format!("git clone --bare exec failed: {e}")))?;
+            .map_err(|e| ProvisionError::Git(format!("git clone exec failed: {e}")))?;
         if outcome.success {
             info!(url = %repo_url, dest = %base_dir.display(), "base checkout cloned");
             // #2867: install the cross-branch push guard into the FRESHLY
@@ -450,7 +422,7 @@ impl GitBackend for RealGitBackend {
             Ok(())
         } else {
             Err(ProvisionError::Git(format!(
-                "git clone --bare failed: {}",
+                "git clone failed: {}",
                 outcome.stderr
             )))
         }
@@ -636,25 +608,24 @@ impl GitBackend for FakeGitBackend {
             "ensure_base_checkout".to_owned(),
             base_dir.to_owned(),
         ));
-        // Idempotent reuse, mirroring `RealGitBackend`'s
-        // `rev-parse --is-bare-repository` semantics (issue #1937 item 3):
-        // recognise an already-established base ONLY when it looks like a valid
-        // (fake) bare checkout, not merely when a stray `HEAD` file exists.
-        // This is the observable contract
+        // Idempotent reuse, mirroring `RealGitBackend`'s `rev-parse` semantics
+        // (issue #1937 item 3): recognise an already-established base ONLY when
+        // it looks like a valid (fake) checkout, not merely when a stray `HEAD`
+        // file exists. This is the observable contract
         // `provision_reuses_base_checkout_across_sessions` pins down.
-        if fake_is_established_bare_checkout(base_dir) {
+        if fake_is_established_checkout(base_dir) {
             return Ok(());
         }
         // Mirror `RealGitBackend`: a non-empty directory that is NOT a valid
-        // bare checkout is a stale/broken artifact — reject it loudly (with the
+        // checkout is a stale/broken artifact — reject it loudly (with the
         // same actionable message) rather than silently reuse or clobber it, so
         // a fake-backend stale-directory test catches what a real one would.
         if let Some(err) = stale_base_dir_error(base_dir) {
             return Err(err);
         }
-        // Simulate `git clone --bare`: write the structural markers that make
-        // `fake_is_established_bare_checkout` recognise this as a valid base.
-        write_fake_bare_checkout(base_dir)?;
+        // Simulate `git clone`: write the structural markers that make
+        // `fake_is_established_checkout` recognise this as a valid base.
+        write_fake_checkout(base_dir, repo_url)?;
         Ok(())
     }
 
@@ -745,7 +716,7 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
     /// What: derives the project directory
     /// (workspace_root/<project-slug>/), delegates to [`Self::provision_in`]
     /// which ensures a shared base checkout and adds a per-session worktree at
-    /// `<project-slug>/.base/.worktrees/<session-id>/`, runs prepare_session
+    /// `<project-slug>/.worktrees/<session-id>/`, runs prepare_session
     /// inside it, and returns a PreparedWorkspace with path, repo_url, and branch.
     /// Test: provisioner_isolation_path, provisioner_uses_session_id_subdir.
     pub fn provision(
@@ -769,19 +740,18 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
     /// [`Self::provision`] derives a single-segment slug from the URL; this
     /// variant lets the caller supply the pre-resolved two-segment project
     /// directory. #1935: rather than a full clone per session, both variants
-    /// now share ONE persistent base checkout per project
-    /// (`<project_dir>/.base/`, established once via
+    /// share ONE persistent base checkout per project (established once via
     /// [`GitBackend::ensure_base_checkout`]) plus a per-session `git worktree`
-    /// (`<project_dir>/.base/.worktrees/<session-id>/`, added fresh every call
-    /// via [`GitBackend::worktree_add`]) — see the module doc for the full
-    /// rationale. Nesting worktrees under the NEW `.base/` directory (rather
-    /// than reusing `project_dir` as the checkout root directly) means an
-    /// existing installation's pre-#1935 per-session full clones sitting
-    /// directly under `project_dir` can never collide with the fresh base
-    /// checkout: `.base/` is guaranteed empty on first use, so no migration
-    /// step is required.
-    /// What: computes `base_dir = project_dir/.base` and
-    /// `workspace_path = base_dir/.worktrees/<session_id>`; ensures the base
+    /// (added fresh every call via [`GitBackend::worktree_add`]) — see the
+    /// module doc for the full rationale. #4270 moved both: the base checkout
+    /// is `project_dir` itself and the worktree is
+    /// `<project_dir>/.worktrees/<session-id>/`, so this path and the
+    /// in-project path resolve to the SAME base clone for the same repo
+    /// instead of keeping two stores side by side. A project directory that
+    /// still holds the retired `.base` store is refused rather than cloned
+    /// over — see `base_lock::legacy_base_store_error`.
+    /// What: computes `base_dir = project_dir` and
+    /// `workspace_path = project_dir/.worktrees/<session_id>`; ensures the base
     /// checkout exists, fetches `git_ref` fresh from `origin` into an isolated
     /// worktree at `workspace_path`, writes the session-manager worktree
     /// ownership sentinel (so `session_manager::decommission` can safely
@@ -801,8 +771,11 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         git_ref: &str,
         task: &str,
     ) -> Result<PreparedWorkspace, ProvisionError> {
-        let base_dir = project_dir.join(BASE_CHECKOUT_DIRNAME);
-        let workspace_path = base_dir
+        // #4270: the base checkout IS the project directory and worktrees sit
+        // beside it in `.worktrees/` — the git-standard shape the in-project
+        // spawn path already produces. Nothing writes `.base` any more.
+        let base_dir = project_dir.to_path_buf();
+        let workspace_path = project_dir
             .join(crate::session_manager::decommission::WORKTREES_DIRNAME)
             .join(session_id.to_string());
         // The branch backing this worktree is named after the session id
