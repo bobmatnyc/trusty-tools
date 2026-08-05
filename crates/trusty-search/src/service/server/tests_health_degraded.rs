@@ -339,10 +339,18 @@ async fn health_reports_degraded_when_tcc_skip_recorded() {
 /// Issue #3706: same gap as `health_reports_degraded_when_tcc_skip_recorded`
 /// but for the scan-timeout condition (`indexes_skipped_timeout > 0`, issue
 /// #1091) — the second of the three previously-ignored inputs.
-/// What: seeds `warmboot_summary.indexes_skipped_timeout = 1` and
-/// `warm_boot_degraded = true`, registers one healthy index (so
-/// `indexes_corpus_failed` stays `0`), and asserts `/health` reports
-/// `status: "degraded"`.
+/// What: parks a timed-out index and asserts `/health` reports
+/// `status: "degraded"` while it is still down, with one healthy index
+/// registered so `indexes_corpus_failed` stays `0`.
+///
+/// #4250 changed the SETUP, not the assertion. This test used to set
+/// `indexes_skipped_timeout = 1` with an empty cold store — a state the daemon
+/// cannot actually be in, since `record_warm_boot_result` writes that counter
+/// and `park_if_parkable` parks the entry in the same warm boot (#4087 parks
+/// every `TimedOut` outcome). Now that the counter is derived from the live
+/// cohort rather than frozen at boot, the old setup asserted that a daemon with
+/// nothing wrong must report degraded. Parking a real timed-out entry restores
+/// the scenario the test is named for and keeps the original assertion intact.
 /// Test: this IS the test.
 #[tokio::test]
 async fn health_reports_degraded_when_scan_timeout_recorded() {
@@ -359,6 +367,15 @@ async fn health_reports_degraded_when_scan_timeout_recorded() {
     ));
 
     let state = Arc::new(SearchAppState::new(registry));
+    // #4250: a real scan timeout parks the index (#4087) as well as bumping the
+    // counter. Reproduce both halves.
+    state.cold_store.park_if_parkable(
+        crate::service::persistence::PersistedIndex {
+            id: "timed-out".to_string(),
+            ..Default::default()
+        },
+        crate::service::warm_boot::BoundedRestoreOutcome::TimedOut,
+    );
     {
         let mut summary = state.warmboot_summary.lock().expect("lock");
         summary.indexes_skipped_timeout = 1;
@@ -371,6 +388,11 @@ async fn health_reports_degraded_when_scan_timeout_recorded() {
         resp.status, "degraded",
         "#3706: /health must report 'degraded' when warm_boot_degraded is true \
          from a scan timeout alone, even though indexes_corpus_failed is 0"
+    );
+    assert_eq!(
+        resp.warmboot_summary.indexes_skipped_timeout, 1,
+        "#4250: the reported count must be the live cohort, so it falls as \
+         indexes are recovered instead of staying frozen at the boot value"
     );
 }
 
