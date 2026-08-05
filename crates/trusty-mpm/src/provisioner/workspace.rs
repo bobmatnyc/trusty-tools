@@ -232,6 +232,30 @@ use base_lock::{
     is_established_checkout, stale_base_dir_error, write_fake_checkout,
 };
 
+/// Exclude `.worktrees/` from git's view of `base_dir`, as `ProvisionError`.
+///
+/// Why: #4270 made the base checkout the project directory itself, with session
+/// worktrees at `<base>/.worktrees/<id>`. Left untracked, that directory is
+/// destroyed by `git clean -ffd` — measured on git 2.54.0, a single `-f` prints
+/// `Skipping repository` and removes nothing, but the second `-f` descends into
+/// nested git dirs and reports `Removing .worktrees/`, taking every live
+/// session's uncommitted work with it. The in-project spawn path already
+/// excluded it; this path clones the same shape and did not, so the two
+/// entry points into the same project directory disagreed on whether it was
+/// protected.
+/// What: delegates to the single existing implementation,
+/// [`crate::daemon::managed_routes::inproject::ensure_worktrees_gitignored`]
+/// (idempotent append to `.git/info/exclude`), converting its `String` error
+/// into [`ProvisionError::Git`]. Fatal rather than best-effort, matching that
+/// call site: a base whose `.git/info` cannot be written is not a base worth
+/// hosting sessions in.
+/// Test: `base_checkout_exclude_entry_survives_double_force_clean`.
+fn exclude_worktrees_dir(base_dir: &Path) -> Result<(), ProvisionError> {
+    // #4270: without this entry `git clean -ffd` deletes every session worktree.
+    crate::daemon::managed_routes::inproject::ensure_worktrees_gitignored(base_dir)
+        .map_err(ProvisionError::Git)
+}
+
 impl GitBackend for RealGitBackend {
     fn clone_repo(
         &self,
@@ -346,7 +370,8 @@ impl GitBackend for RealGitBackend {
     /// `Ok` and exactly one valid checkout results),
     /// `ensure_base_checkout_rejects_stale_directory` (pre-seeds a stray
     /// `HEAD` at `base_dir` and asserts a loud error, not silent reuse),
-    /// `provision_in_leaves_an_existing_dot_base_store_untouched`, all in
+    /// `provision_in_leaves_an_existing_dot_base_store_untouched`,
+    /// `base_checkout_exclude_entry_survives_double_force_clean`, all in
     /// `provisioner/workspace/tests.rs`.
     fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError> {
         // #4270: the base is the project directory's own non-bare clone, which
@@ -356,6 +381,7 @@ impl GitBackend for RealGitBackend {
         // named after the session id.
         if is_established_checkout(base_dir) {
             debug!(path = %base_dir.display(), "base checkout already present, reusing");
+            exclude_worktrees_dir(base_dir)?;
             return Ok(());
         }
         if let Some(parent) = base_dir.parent() {
@@ -376,6 +402,7 @@ impl GitBackend for RealGitBackend {
                 path = %base_dir.display(),
                 "base checkout completed by a concurrent caller while waiting for the lock; reusing"
             );
+            exclude_worktrees_dir(base_dir)?;
             return Ok(());
         }
 
@@ -408,6 +435,7 @@ impl GitBackend for RealGitBackend {
             .map_err(|e| ProvisionError::Git(format!("git clone exec failed: {e}")))?;
         if outcome.success {
             info!(url = %repo_url, dest = %base_dir.display(), "base checkout cloned");
+            exclude_worktrees_dir(base_dir)?;
             // #2867: install the cross-branch push guard into the FRESHLY
             // cloned base only. `$GIT_COMMON_DIR/hooks` is shared by every
             // worktree of this base — including ad-hoc `git worktree add`

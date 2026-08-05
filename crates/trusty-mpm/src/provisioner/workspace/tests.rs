@@ -1119,3 +1119,72 @@ fn ensure_base_checkout_installs_push_guard() {
         );
     }
 }
+
+/// #4270: a base checkout provisioned by [`RealGitBackend::ensure_base_checkout`]
+/// must carry a `.worktrees/` entry in `.git/info/exclude`, or `git clean -ffd`
+/// run anywhere in that checkout deletes every live session worktree.
+///
+/// Why: without the entry, `.worktrees/` is an untracked directory. Measured on
+/// git 2.54.0: `git clean -fd` prints `Skipping repository .worktrees/<id>` and
+/// removes nothing, but a SECOND `-f` (`git clean -ffd`) is documented to
+/// descend into nested git directories — it reports `Removing .worktrees/` and
+/// deletes the whole tree, uncommitted session work included. The entry makes
+/// `-ffd` a no-op because git never considers an ignored path in the first
+/// place. (`-x` discards ignore rules, so `git clean -xffd` still destroys it;
+/// nothing short of not running that command protects against it.)
+/// What: clones a real base checkout via `ensure_base_checkout`, adds a nested
+/// worktree at `.worktrees/sess`, drops an uncommitted file inside it, runs
+/// `git clean -ffd` from the base, and asserts the worktree and its uncommitted
+/// file both survive.
+/// Test: this function IS the regression guard.
+#[test]
+#[serial_test::serial]
+fn base_checkout_exclude_entry_survives_double_force_clean() {
+    use std::process::Command;
+    let scratch = TempDir::new().unwrap();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        eprintln!("git unavailable — skipping");
+        return;
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("proj");
+    RealGitBackend::default()
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed");
+
+    let wt = base_dir
+        .join(crate::session_manager::decommission::WORKTREES_DIRNAME)
+        .join("sess");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&base_dir)
+            .args(["worktree", "add", "-b", "sess"])
+            .arg(&wt)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "git worktree add must succeed"
+    );
+    let precious = wt.join("uncommitted.txt");
+    std::fs::write(&precious, "uncommitted session work").unwrap();
+
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&base_dir)
+        .args(["clean", "-ffd"])
+        .output()
+        .expect("git clean must run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        wt.is_dir(),
+        "`git clean -ffd` deleted the session worktree at {} — git said: {stdout}",
+        wt.display()
+    );
+    assert!(
+        precious.is_file(),
+        "`git clean -ffd` deleted uncommitted work at {} — git said: {stdout}",
+        precious.display()
+    );
+}
