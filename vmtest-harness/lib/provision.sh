@@ -272,9 +272,13 @@ provision_guest() {
 #    a single value` (git config exit 5), and (b) a credential GitHub REJECTS
 #    makes guest `git ls-remote` HANG — no output, still running at 3 minutes —
 #    because the 401 reaches an interactive helper in a headless VM. Git's own
-#    documented empty-value reset, run FIRST, turns that hang into a sub-second
-#    `terminal prompts disabled` failure. That matters most on exactly the run
-#    where the operator's token has expired. (The base image's gitconfig is a
+#    documented empty-value reset, run FIRST, turns that hang into a
+#    `terminal prompts disabled` failure in a second or two. MEASURED, not
+#    assumed: an invalid-token pattern-(b) run failed 1.977 s after this function
+#    started — and that figure covers all four guest round-trips (reset, write,
+#    wire-in, proof), so the rejected `ls-remote` itself is a fraction of it. The
+#    60 s watchdog below never fired. That matters most on exactly the run where
+#    the operator's token has expired. (The base image's gitconfig is a
 #    property of the pin, not of this harness; see #4924's note on it.)
 # ===========================================================================
 #
@@ -355,8 +359,18 @@ provision_github_token() {
     # list, so the base image's interactive GCM chain cannot be consulted. Doing
     # this AFTER the header write is not a smaller version of this step — it is
     # the hang.
-    vm_exec "$vm" "git config --global --replace-all credential.helper ''" >/dev/null 2>&1 \
-        || die 40 "could not clear the guest's inherited credential.helper chain (git config --global --replace-all credential.helper ''). The base image wires in an INTERACTIVE Git Credential Manager; leaving it in place makes a rejected credential hang \`git ls-remote\` in a headless guest instead of failing."
+    #
+    # git's stderr is KEPT, not sent to /dev/null. This is the step whose
+    # anticipated failure mode is a SPECIFIC git diagnostic — `error: cannot
+    # overwrite multiple values with a single value`, exit 5, per the block
+    # comment above — so discarding it would make the one failure this design
+    # actually predicted die with harness prose and no evidence of what git said.
+    # Nothing here can carry the credential: the value is not an argument.
+    if ! vm_exec "$vm" "git config --global --replace-all credential.helper ''" \
+            > "$VMTEST_TMPDIR/github-auth-config.log" 2>&1; then
+        sed 's/^/    | /' "$VMTEST_TMPDIR/github-auth-config.log" >&2 || :
+        die 40 "could not clear the guest's inherited credential.helper chain (git config --global --replace-all credential.helper ''; git's own output above). The base image wires in an INTERACTIVE Git Credential Manager; leaving it in place makes a rejected credential hang \`git ls-remote\` in a headless guest instead of failing."
+    fi
 
     # `umask 077` FIRST, so the file is CREATED at 0600 — never written and then
     # chmod'ed, which leaves a window in which the credential exists at a looser
@@ -365,6 +379,25 @@ provision_github_token() {
     printf '[http "https://github.com/"]\n\textraheader = Authorization: Basic %s\n' "$header" \
         | vm_exec_stdin "$vm" "umask 077 && mkdir -p ${guest_home}/.vmtest && rm -f ${inc_path} && cat > ${inc_path}" \
         || die 40 "could not write the guest credential include at ${inc_path}"
+
+    # #4924: publish the path THE INSTANT THE FILE EXISTS IN THE GUEST, not after
+    # the proof step below. From here on the credential is on the guest's disk
+    # whatever happens next, and `--keep` preserves that disk — so setting this
+    # only on the success path would leave the run that dies at the proof (an
+    # expired token, exactly the case an operator would reach for `--keep` to
+    # inspect) preserving a credential with no warning that it did.
+    #
+    # MUST NOT BE CALLED IN A SUBSHELL, for the reason `provision_load_toolchain`
+    # must not be: the assignment to this global is a product of the function, and
+    # a subshell would discard it and silence the warning.
+    #
+    # The directive is the WHOLE POINT of naming the consumer: shellcheck lints
+    # each file alone, so a global written here and read in `vmtest` reads as dead.
+    # Three such globals already sit unannotated in the baseline
+    # (VMTEST_GUEST_ENV, INSTALL_DEADLINE_EPOCH, SRC_FIXTURE_RESTORE_FAILED); this
+    # one says where to look instead of adding a fourth silent warning.
+    # shellcheck disable=SC2034  # consumed by vmtest_cleanup's --keep branch in `vmtest`
+    CRED_PROPAGATED_PATH="$inc_path"
 
     # The PATH is the git-config argument, so the secret never enters a command
     # string — that is the whole reason this is an include rather than a direct
@@ -377,8 +410,16 @@ provision_github_token() {
     # `--replace-all`: that is the right change only if guest reuse across runs is
     # ever introduced, and making it now would be a change with no reachable
     # defect behind it.
-    vm_exec "$vm" "git config --global --add include.path ${inc_path}" >/dev/null 2>&1 \
-        || die 40 "could not include ${inc_path} from the guest's global git configuration"
+    #
+    # git's stderr is KEPT here for the same reason as the reset above: the
+    # include path is the only argument, so nothing in this output can be the
+    # credential, and a bare "could not include" with no git diagnostic is not a
+    # diagnosis.
+    if ! vm_exec "$vm" "git config --global --add include.path ${inc_path}" \
+            > "$VMTEST_TMPDIR/github-auth-config.log" 2>&1; then
+        sed 's/^/    | /' "$VMTEST_TMPDIR/github-auth-config.log" >&2 || :
+        die 40 "could not include ${inc_path} from the guest's global git configuration (git's own output above)"
+    fi
 
     # AN ACTUAL NETWORK PROOF, NOT A CONFIGURATION ECHO. Reading the header back
     # would prove only that a write succeeded; `git ls-remote` proves github.com

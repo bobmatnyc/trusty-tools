@@ -90,6 +90,21 @@ VMTEST_DIRTY_CHECK="${VMTEST_DIRTY_CHECK:-0}"
 # `verify_degraded_probe`'s header in lib/verify.sh for what it does.
 VMTEST_DEGRADED_CHECK="${VMTEST_DEGRADED_CHECK:-0}"
 CONF_EFFECTIVE=''
+# #4924: EMPTY until a credential include has actually been written into the
+# guest; then the guest-side PATH of that file. Two jobs in one global: the
+# emptiness is the "did we propagate?" flag, and the value is what teardown needs
+# to NAME in the --keep retention warning, so the path literal lives in exactly
+# one place instead of being recomposed in a second file.
+#
+# NOT NAMED `VMTEST_*`, for the reason RUN_T0_EPOCH and CONF_EFFECTIVE are not:
+# §12.3 rule 2 reserves every `VMTEST_<KEY>` spelling for §8.2's mechanical
+# override channel. Here the hazard is sharper than usual — `propagate_github_token`
+# IS a key, so its override is the real, operator-facing
+# `VMTEST_PROPAGATE_GITHUB_TOKEN`, and an internal global spelled
+# `VMTEST_GITHUB_TOKEN_PROPAGATED` would sit one word-order away from it in the
+# same feature. One of the two is documented and settable by an operator; the
+# other must never be either.
+CRED_PROPAGATED_PATH=''
 # Wall-clock start of the run, and the scenario's full-stack deadline.  Neither
 # is named `VMTEST_*`: §12.3 rule 2 reserves every `VMTEST_<KEY>` spelling for
 # §8.2's mechanical override channel, and `install_timeout` IS a key — so a
@@ -506,6 +521,17 @@ vmtest_cleanup() {
                 wait "$VMTEST_VM_RUN_PID" 2>/dev/null || :   # reap, never kill
             fi
             log "teardown: --keep — '${VMTEST_VM:-}' is stopped and PRESERVED (not deleted)"
+            # #4924: --keep is the moment the operator learns the guest survives,
+            # so it is the only moment at which "and it still holds your
+            # credential" is actionable. The caveat is in README.md, which nobody
+            # reads while watching a run finish. Gated on the path being set, so a
+            # no-token run and patterns (a)/(c) — which never propagate — stay
+            # silent. `warn`, not `log`: this is the feature's residual risk, and
+            # it is the operator's to decide about, not the harness's.
+            if [ -n "${CRED_PROPAGATED_PATH:-}" ]; then
+                warn "--keep: this VM RETAINS your GITHUB_TOKEN, as a base64 Authorization header at ${CRED_PROPAGATED_PATH} (#4924). Base64 is ENCODING, NOT ENCRYPTION — anyone who can read the VM image or this host's home directory can reverse it."
+                warn "--keep: delete it with \`vmtest clean --include-kept\`. If this VM has been SHARED OR COPIED, REVOKE THE TOKEN — deleting the VM afterwards does not undo exposure that already happened."
+            fi
             vm_manual_hint keep "${VMTEST_VM:-}"
             VMTEST_RUNDIR_OWNED=0
         else

@@ -206,7 +206,7 @@ hands it to the guest and the clone is **authenticated**.
 | **No token set** | **Not an error.** The run clones anonymously and exits 0 exactly as it did before this existed. The log says so once, as information. |
 | **Turn it off** | `propagate_github_token` (a `vmtest.defaults` key, default `true`) → `VMTEST_PROPAGATE_GITHUB_TOKEN=false vmtest run branch`. |
 | **Bad value** | Anything but exactly `true` or `false` — `0`, `1`, `yes`, `maybe` — is exit **10** at preflight, **before any VM is cloned**, and `--dry-run` catches it too. Values are refused, never guessed at. |
-| **Proof it worked** | An in-guest `git ls-remote` against `repo_url` runs as an actual network step. If github.com rejects the token the run fails **40** in about a second, naming the cause. |
+| **Proof it worked** | An in-guest `git ls-remote` against `repo_url` runs as an actual network step. If github.com rejects the token the run fails **40** in a second or two, naming the cause. |
 
 How it gets there, because two things about it are counter-intuitive:
 
@@ -221,7 +221,8 @@ How it gets there, because two things about it are counter-intuitive:
   `~/.gitconfig` wired to Git Credential Manager; without the reset, writing the header
   fails with `cannot overwrite multiple values with a single value`, and — worse — a
   credential GitHub rejects makes `git ls-remote` **hang** in the headless guest instead
-  of failing. The reset turns that hang into a sub-second error.
+  of failing. The reset turns that hang into an error in a second or two — measured at
+  **1.977 s** end to end for the whole credential step on an invalid-token run.
 
 **The token never appears** in `vmtest.defaults`, in the effective-configuration banner,
 in `repo_url`, in `$VMTEST_GUEST_ENV`, in host `ps` output, or in `$VMTEST_RUNDIR`. It
@@ -234,6 +235,11 @@ outcome are ever logged.
 `--keep` leaves the VM on the host in state `stopped` **with the credential include file
 intact**. The header value is **base64, which is encoding and not encryption** — it is
 trivially reversible by anyone who can read the VM image or your home directory.
+
+**The harness tells you this at teardown, not only here.** A `--keep` run that actually
+propagated a token prints the warning and the include file's path immediately before the
+inspection hint, so the caveat arrives when it is actionable rather than only in this
+file. A run with no token, and every `local` / `released` run, prints nothing.
 
 - The remedy is **`vmtest clean --include-kept`**, which deletes the kept VM and the file
   with it.

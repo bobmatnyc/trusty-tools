@@ -29,6 +29,27 @@ release tag, and no `changelog.d/` fragment directory (the per-PR fragment gate 
   override is exit `10` in a second rather than after a 30 s+ boot, and `--dry-run`
   catches it too. Deliberately not folded into `conf_load()`, which `vmtest clean`
   shares: a typo'd override must never be able to break cleanup.
+- **`--keep` now warns, at teardown, that the preserved VM retains the token**, naming
+  the include file's guest path, that base64 is encoding rather than encryption, the
+  `vmtest clean --include-kept` remedy, and that a shared or copied VM means the token
+  should be revoked. Previously that caveat existed only in `README.md`, which an
+  operator watching a `--keep` run finish is not reading. It fires only when a
+  credential was actually written into the guest, so a no-token run and every
+  `local` / `released` run stay silent.
+
+### Fixed
+
+- A failing `git clone` under pattern (b) no longer asserts flatly that the failure
+  "is not a credentials failure". That was true while the clone was always anonymous;
+  with a preemptive Authorization header, a token revoked between the `ls-remote` proof
+  and the clone lands exactly there. The message now says an anonymous clone should have
+  succeeded, that propagation makes a credential failure possible, and that
+  `VMTEST_PROPAGATE_GITHUB_TOKEN=false` isolates it.
+- The `credential.helper` reset and the `include.path` wire-in no longer discard git's
+  stderr. The reset is the step whose anticipated failure is a specific git diagnostic
+  (`cannot overwrite multiple values with a single value`, exit 5), so discarding it left
+  the one predicted failure dying with harness prose and no evidence. Both now capture to
+  a log that is echoed before the `die`.
 
 ### Notes
 
