@@ -254,7 +254,7 @@ pub(super) async fn run_deferred_embed(
     let embedder = match shared_embedder().await {
         Ok(e) => e,
         Err(e) => {
-            record_loss(&ctx, id, &EmbedLoss::EmbedderUnavailable(format!("{e:#}")));
+            record_loss(&ctx, id, &EmbedLoss::EmbedderUnavailable(format!("{e:#}"))).await;
             return;
         }
     };
@@ -286,9 +286,9 @@ pub(super) async fn embed_store_or_record(
             );
             // A drawer that has just been embedded is no longer missing; drop
             // any stale row so the ledger cannot outlive the condition.
-            clear_ledger(ctx, id);
+            clear_ledger(ctx, id).await;
         }
-        Err(loss) => record_loss(ctx, id, &loss),
+        Err(loss) => record_loss(ctx, id, &loss).await,
     }
 }
 
@@ -311,10 +311,12 @@ pub(super) fn spawn(ctx: DeferredEmbedCtx, id: Uuid, content: String) {
 /// and a log line nobody keeps are complementary failures, not alternatives.
 /// What: skips the ledger entirely for a host-level embedder outage; otherwise
 /// writes one row keyed by drawer id, but only if the drawer still exists (a
-/// drawer forgotten mid-flight has nothing to annotate).
+/// drawer forgotten mid-flight has nothing to annotate). The write runs on
+/// `spawn_blocking` because `json_rmw::update` blocks the calling thread on an
+/// advisory `flock`.
 /// Test: `permanent_failure_writes_a_ledger_row`,
 /// `missing_embedder_does_not_mark_the_drawer`.
-pub(super) fn record_loss(ctx: &DeferredEmbedCtx, id: Uuid, loss: &EmbedLoss) {
+pub(super) async fn record_loss(ctx: &DeferredEmbedCtx, id: Uuid, loss: &EmbedLoss) {
     let reason = loss.reason();
     if !loss.is_drawer_specific() {
         // Expected on a host with no model downloaded, and on a cold start
@@ -353,21 +355,40 @@ pub(super) fn record_loss(ctx: &DeferredEmbedCtx, id: Uuid, loss: &EmbedLoss) {
         attempts: loss.attempts(),
         reason,
     };
-    if let Err(e) = embed_ledger::record(data_dir, entry) {
-        tracing::error!(
+    let dir = data_dir.clone();
+    let written = tokio::task::spawn_blocking(move || embed_ledger::record(&dir, entry)).await;
+    match written {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(
             palace = %ctx.palace_id, drawer = %id,
             "#4906: could not write the embed-failure ledger: {e:#}"
-        );
+        ),
+        Err(e) => tracing::error!(
+            palace = %ctx.palace_id, drawer = %id,
+            "#4906: embed-failure ledger write task failed: {e}"
+        ),
     }
 }
 
 /// Drop one drawer's ledger row after a successful embed.
-fn clear_ledger(ctx: &DeferredEmbedCtx, id: Uuid) {
+///
+/// Why: a repaired drawer must stop being reported as broken, or the ledger
+/// outlives the condition it describes.
+/// What: a single-id [`embed_ledger::clear`] on `spawn_blocking` (same `flock`
+/// blocking contract as [`record_loss`]). A palace with no ledger short-circuits
+/// inside `clear` without creating one.
+/// Test: `backfill_reembeds_a_marked_drawer`.
+async fn clear_ledger(ctx: &DeferredEmbedCtx, id: Uuid) {
     let Some(data_dir) = ctx.data_dir.as_ref() else {
         return;
     };
-    let ids: std::collections::HashSet<Uuid> = std::iter::once(id).collect();
-    if let Err(e) = embed_ledger::clear(data_dir, &ids) {
+    let dir = data_dir.clone();
+    let cleared = tokio::task::spawn_blocking(move || {
+        let ids: std::collections::HashSet<Uuid> = std::iter::once(id).collect();
+        embed_ledger::clear(&dir, &ids)
+    })
+    .await;
+    if let Ok(Err(e)) = cleared {
         tracing::warn!(palace = %ctx.palace_id, drawer = %id, "#4906: ledger clear failed: {e:#}");
     }
 }

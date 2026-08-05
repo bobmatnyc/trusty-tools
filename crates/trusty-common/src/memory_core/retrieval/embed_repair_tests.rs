@@ -234,7 +234,8 @@ async fn missing_embedder_does_not_mark_the_drawer() {
         &ctx,
         id,
         &EmbedLoss::EmbedderUnavailable("model not downloaded".to_string()),
-    );
+    )
+    .await;
     assert!(
         embed_ledger::load(dir.path()).is_empty(),
         "a host-level embedder outage must not mark individual drawers broken"
@@ -248,7 +249,8 @@ async fn missing_embedder_does_not_mark_the_drawer() {
             reason: "tensor shape mismatch".to_string(),
             attempts: 3,
         },
-    );
+    )
+    .await;
     assert_eq!(
         embed_ledger::load(dir.path()).len(),
         1,
@@ -273,7 +275,8 @@ async fn loss_for_a_forgotten_drawer_is_not_recorded() {
             reason: "gone".to_string(),
             attempts: 1,
         },
-    );
+    )
+    .await;
     assert!(embed_ledger::load(dir.path()).is_empty());
 }
 
@@ -529,4 +532,157 @@ fn embed_ledger_load_is_empty_when_absent() {
     let dir = tempfile::tempdir().unwrap();
     assert!(embed_ledger::load(dir.path()).is_empty());
     assert!(embed_ledger::load(&dir.path().join("nope")).is_empty());
+}
+
+/// Why: reads and writes take deliberately OPPOSITE positions on a corrupt
+/// ledger, and both need pinning or the next refactor will quietly align them.
+/// A read must never be able to stop a palace opening, so `load` degrades to
+/// empty. A write must never silently discard a file it could not parse, so
+/// `record` — going through `json_rmw`, which never fails open — returns `Err`
+/// and leaves the bytes untouched. Losing an annotation costs less than
+/// refusing access to the memories; destroying one costs more than declining
+/// to write.
+/// What: writes bytes that are not a JSON array; asserts `load` is empty, that
+/// `record` errors rather than overwriting, and that the original bytes survive.
+/// Test: itself.
+#[test]
+fn embed_ledger_load_degrades_to_empty_on_malformed_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("embed_failures.json");
+    std::fs::write(&path, b"{not json at all").unwrap();
+    assert!(
+        embed_ledger::load(dir.path()).is_empty(),
+        "a malformed ledger must read as empty, not panic or error"
+    );
+
+    let err = embed_ledger::record(
+        dir.path(),
+        EmbedFailure {
+            drawer_id: Uuid::new_v4(),
+            failed_at: chrono::Utc::now(),
+            attempts: 1,
+            reason: "x".to_string(),
+        },
+    )
+    .expect_err("a write must not silently replace an unparseable ledger");
+    assert!(
+        format!("{err:#}").contains("embed_failures.json"),
+        "the error must name the file an operator has to look at: {err:#}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"{not json at all",
+        "the unparseable bytes must survive the refused write"
+    );
+}
+
+/// Why: this is the review's HIGH-1, and the reason it survived the first
+/// suite is that nothing exercised two writers at once. `record` is
+/// load→retain→push→save; without serialisation two writers that both load
+/// before either saves each write their own single-row result and the later
+/// rename wins. That is the DESIGN LOAD, not a corner case:
+/// `spawn_deferred_embed` spawns one detached task per drawer, every task
+/// sleeps the same 250 ms + 500 ms backoff, so a burst against a broken
+/// embedder lands all of them in `record_loss` within a few milliseconds.
+///
+/// Fail-before / pass-after: without [`embed_ledger::dir_lock`] this keeps a
+/// handful of the 16 rows; with it, all 16.
+/// What: 16 OS threads released together by a `Barrier`, each recording a
+/// distinct drawer id; asserts every id survives.
+/// Test: itself.
+#[test]
+fn concurrent_ledger_records_keep_every_row() {
+    const WRITERS: usize = 16;
+    let dir = tempfile::tempdir().unwrap();
+    let ids: Vec<Uuid> = (0..WRITERS).map(|_| Uuid::new_v4()).collect();
+    let barrier = std::sync::Barrier::new(WRITERS);
+
+    std::thread::scope(|scope| {
+        for id in &ids {
+            let path = dir.path();
+            let barrier = &barrier;
+            scope.spawn(move || {
+                // Release every thread at once so the load→save windows overlap.
+                barrier.wait();
+                embed_ledger::record(
+                    path,
+                    EmbedFailure {
+                        drawer_id: *id,
+                        failed_at: chrono::Utc::now(),
+                        attempts: 3,
+                        reason: "burst failure".to_string(),
+                    },
+                )
+                .expect("record");
+            });
+        }
+    });
+
+    let rows = embed_ledger::load(dir.path());
+    assert_eq!(
+        rows.len(),
+        WRITERS,
+        "every concurrent failure must survive — a burst against a broken \
+         embedder is exactly what the ledger exists to capture; got {} of {WRITERS}",
+        rows.len()
+    );
+    for id in &ids {
+        assert!(
+            rows.iter().any(|r| r.drawer_id == *id),
+            "drawer {id} was lost from the ledger"
+        );
+    }
+}
+
+/// Why: a `clear` racing a `record` has the same lost-update shape, and the
+/// repair backfill runs both against one palace — it clears repaired ids while
+/// the deferred lane may still be recording new failures.
+/// What: 8 threads recording fresh rows while 8 clear pre-seeded ones; asserts
+/// the cleared ids are gone and every newly-recorded id is present.
+/// Test: itself.
+#[test]
+fn concurrent_clear_and_record_do_not_lose_each_other() {
+    const N: usize = 8;
+    let dir = tempfile::tempdir().unwrap();
+    let seeded: Vec<Uuid> = (0..N).map(|_| Uuid::new_v4()).collect();
+    let fresh: Vec<Uuid> = (0..N).map(|_| Uuid::new_v4()).collect();
+    let row = |id: Uuid| EmbedFailure {
+        drawer_id: id,
+        failed_at: chrono::Utc::now(),
+        attempts: 1,
+        reason: "x".to_string(),
+    };
+    for id in &seeded {
+        embed_ledger::record(dir.path(), row(*id)).unwrap();
+    }
+
+    let barrier = std::sync::Barrier::new(N * 2);
+    std::thread::scope(|scope| {
+        for i in 0..N {
+            let (path, barrier) = (dir.path(), &barrier);
+            let (drop_id, add_id) = (seeded[i], fresh[i]);
+            scope.spawn(move || {
+                barrier.wait();
+                embed_ledger::clear(path, &std::iter::once(drop_id).collect()).expect("clear");
+            });
+            scope.spawn(move || {
+                barrier.wait();
+                embed_ledger::record(path, row(add_id)).expect("record");
+            });
+        }
+    });
+
+    let rows = embed_ledger::load(dir.path());
+    for id in &seeded {
+        assert!(
+            !rows.iter().any(|r| r.drawer_id == *id),
+            "cleared drawer {id} must not survive"
+        );
+    }
+    for id in &fresh {
+        assert!(
+            rows.iter().any(|r| r.drawer_id == *id),
+            "newly recorded drawer {id} must not be lost to a concurrent clear"
+        );
+    }
 }

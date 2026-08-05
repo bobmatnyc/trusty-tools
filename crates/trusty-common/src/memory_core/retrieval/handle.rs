@@ -645,9 +645,14 @@ impl PalaceHandle {
         // backfilled by a background task once the embedder resolves. Text
         // and KG indexing never depend on the embedder either way; this
         // branch only changes *when* the drawer becomes vector-searchable.
-        if opts.defer_embedding {
-            self.spawn_deferred_embed(id, content.clone());
-        } else {
+        //
+        // #4906: the deferred branch is SPAWNED BELOW, after the drawer reaches
+        // `self.drawers`. Spawning here raced the push: the background task
+        // refuses to record a failure for a drawer absent from that table, so a
+        // task that failed before the push wrote nothing for a drawer that was
+        // about to become durable and vector-less — the exact combination this
+        // lane exists to eliminate.
+        if !opts.defer_embedding {
             // Issue #906: both `shared_embedder()` (cold init path) and
             // `embed_batch` carry their own bounded timeouts — if the embedder
             // hangs mid-batch the remember call returns an error instead of
@@ -656,17 +661,22 @@ impl PalaceHandle {
                 .await
                 .context("acquire shared embedder for remember")?;
             let embed_timeout = timeouts::embed_batch_timeout();
-            let vecs = tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content]))
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "embed_batch timed out after {:?} on remember path (issue #906); \
+            let vecs = tokio::time::timeout(
+                embed_timeout,
+                // `from_ref` rather than `&[content]`: the deferred branch below
+                // still needs `content`, so this borrows instead of moving.
+                embedder.embed_batch(std::slice::from_ref(&content)),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "embed_batch timed out after {:?} on remember path (issue #906); \
                          increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
                          take longer on this host",
-                        embed_timeout
-                    )
-                })?
-                .context("embed drawer content")?;
+                    embed_timeout
+                )
+            })?
+            .context("embed drawer content")?;
             if let Some(v) = vecs.into_iter().next() {
                 self.vector_store
                     .upsert(id, v)
@@ -692,6 +702,13 @@ impl PalaceHandle {
             // drawer still claims the slot.
             tier_c::retire_in_memory(&mut drawers, retired);
             drawers.push(drawer);
+        }
+
+        // #4906: spawn the background embed only now. The drawer is in redb and
+        // in the in-memory table, so a failure arriving at any point from here
+        // on finds the drawer present and gets recorded. See the branch above.
+        if opts.defer_embedding {
+            self.spawn_deferred_embed(id, content);
         }
 
         // L1 snapshot: re-sort the in-memory table and persist top-15.

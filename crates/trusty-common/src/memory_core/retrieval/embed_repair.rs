@@ -247,7 +247,7 @@ impl PalaceHandle {
                         "#4906: vector backfill could not repair this drawer: {}",
                         loss.reason()
                     );
-                    self.record_backfill_failure(id, &loss);
+                    self.record_backfill_failure(id, &loss).await;
                 }
             }
         }
@@ -256,15 +256,27 @@ impl PalaceHandle {
         report.still_missing_ids.retain(|id| !repaired.contains(id));
         if let Some(data_dir) = self.data_dir.as_ref()
             && !repaired.is_empty()
-            && let Err(e) = embed_ledger::clear(data_dir, &repaired)
         {
-            tracing::warn!(palace = %self.id, "#4906: ledger clear after backfill failed: {e:#}");
+            // `spawn_blocking`: `json_rmw::update` blocks on an advisory flock.
+            let dir = data_dir.clone();
+            let cleared =
+                tokio::task::spawn_blocking(move || embed_ledger::clear(&dir, &repaired)).await;
+            if let Ok(Err(e)) = cleared {
+                tracing::warn!(palace = %self.id, "#4906: ledger clear after backfill failed: {e:#}");
+            }
         }
         Ok(report)
     }
 
     /// Refresh a drawer's ledger row after a failed repair attempt.
-    fn record_backfill_failure(&self, id: Uuid, loss: &super::deferred_embed::EmbedLoss) {
+    ///
+    /// Why: a backfill that tries and fails must leave the drawer marked with
+    /// the fresh attempt count, or the next operator sees a stale reason.
+    /// What: skips a host-level embedder outage (same rule as the write path),
+    /// otherwise records on `spawn_blocking` per `json_rmw`'s contract.
+    /// Test: covered through `backfill_reembeds_a_marked_drawer`'s failure
+    /// counterpart in `permanent_failure_writes_a_ledger_row`.
+    async fn record_backfill_failure(&self, id: Uuid, loss: &super::deferred_embed::EmbedLoss) {
         let Some(data_dir) = self.data_dir.as_ref() else {
             return;
         };
@@ -277,7 +289,9 @@ impl PalaceHandle {
             attempts: loss.attempts(),
             reason: loss.reason(),
         };
-        if let Err(e) = embed_ledger::record(data_dir, entry) {
+        let dir = data_dir.clone();
+        let written = tokio::task::spawn_blocking(move || embed_ledger::record(&dir, entry)).await;
+        if let Ok(Err(e)) = written {
             tracing::error!(palace = %self.id, drawer = %id, "#4906: ledger write failed: {e:#}");
         }
     }

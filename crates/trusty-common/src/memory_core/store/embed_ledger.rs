@@ -8,9 +8,33 @@
 //! to embed and fail?" without re-deriving it from a log.
 //!
 //! What: `<data_dir>/embed_failures.json` — a JSON array of [`EmbedFailure`]
-//! rows keyed by drawer id, written atomically (tmp + rename) with the same
-//! per-invocation tmp naming `L1Cache::save_l1_cache` uses so concurrent
-//! writers cannot trample each other.
+//! rows keyed by drawer id. Every mutation goes through
+//! [`crate::json_rmw::update`], this workspace's single implementation of the
+//! locked load → mutate → publish-atomically critical section.
+//!
+//! Routing through `json_rmw` rather than an atomic rename alone is the fix for
+//! a lost-update bug the first review round found here. The two hazards are
+//! distinct, and conflating them is what produced a comment claiming a safety
+//! property the code did not have:
+//!
+//! - **Torn file.** A unique temp path plus `rename` stops a reader seeing a
+//!   half-written document. `json_rmw` does this, with `fsync`.
+//! - **Lost update.** That does NOTHING for a read-modify-write: two writers
+//!   that both load before either saves each publish their own single-row
+//!   result, and the later rename discards the other's work. Each file is
+//!   individually well-formed; the row is simply gone. This is the DESIGN LOAD,
+//!   not a corner case — `spawn_deferred_embed` spawns one detached task per
+//!   drawer, all sharing the same backoff schedule, so a burst against a broken
+//!   embedder lands every one of them in `record_loss` within a few
+//!   milliseconds. `json_rmw`'s advisory `flock` serialises the whole sequence,
+//!   across threads AND across processes.
+//!
+//! One consequence worth stating: `json_rmw` never fails open, so [`record`] and
+//! [`clear`] return `Err` over a ledger that exists but cannot be parsed, rather
+//! than replacing it with a fresh single-row document. [`load`] takes the
+//! opposite position and degrades to empty, because a read must never be able to
+//! stop a palace opening. Losing an annotation costs less than refusing access
+//! to the memories; silently discarding one costs more than declining to write.
 //!
 //! The ledger is an ANNOTATION, never the source of truth. Whether a drawer has
 //! a vector is answered by set-differencing the drawer table against the vector
@@ -18,27 +42,30 @@
 //! one is missing and how hard we tried. That ordering is deliberate: a marker
 //! that could disagree with the index would be one more thing to keep in sync,
 //! and it repairs nothing for the 39 drawers that were already lost before this
-//! code existed. Rows for drawers that no longer exist, or that have since
-//! acquired a vector, are pruned on the next write rather than trusted.
+//! code existed.
 //!
 //! Test: `embed_ledger_roundtrips_and_upserts_by_drawer`,
 //! `embed_ledger_clear_removes_only_named_rows`,
-//! `embed_ledger_load_is_empty_when_absent`.
+//! `embed_ledger_load_is_empty_when_absent`,
+//! `embed_ledger_load_degrades_to_empty_on_malformed_json`,
+//! `concurrent_ledger_records_keep_every_row`,
+//! `concurrent_clear_and_record_do_not_lose_each_other`.
 
+use crate::json_rmw;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Ledger filename inside a palace's data directory.
 const EMBED_FAILURES_JSON: &str = "embed_failures.json";
 
-/// Per-invocation tmp suffix counter — see `L1Cache::save_l1_cache` for why
-/// two concurrent writers must not share a tmp path.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Path to a palace's ledger file.
+fn ledger_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(EMBED_FAILURES_JSON)
+}
 
 /// One drawer's recorded embedding failure.
 ///
@@ -62,12 +89,15 @@ pub struct EmbedFailure {
 ///
 /// Why: a missing or corrupt ledger must never make a palace unusable — it is
 /// diagnostic annotation, and losing it costs strictly less than refusing to
-/// open the palace that holds the actual memories.
+/// open the palace that holds the actual memories. This is the one place that
+/// deliberately diverges from `json_rmw`'s never-fail-open contract, and it does
+/// so in the direction that cannot hurt: a read, never a write.
 /// What: reads `<data_dir>/embed_failures.json`; a missing file yields `[]`, and
 /// a malformed one yields `[]` plus a `warn!` rather than an error.
-/// Test: `embed_ledger_load_is_empty_when_absent`.
+/// Test: `embed_ledger_load_is_empty_when_absent`,
+/// `embed_ledger_load_degrades_to_empty_on_malformed_json`.
 pub fn load(data_dir: &Path) -> Vec<EmbedFailure> {
-    let target = data_dir.join(EMBED_FAILURES_JSON);
+    let target = ledger_path(data_dir);
     let Ok(bytes) = std::fs::read(&target) else {
         return Vec::new();
     };
@@ -88,13 +118,23 @@ pub fn load(data_dir: &Path) -> Vec<EmbedFailure> {
 /// Why: the deferred lane can fail for the same drawer more than once — a
 /// backfill retry that fails again must update the attempt count and reason,
 /// not append a second row that makes the ledger grow without bound.
-/// What: loads, replaces any row with the same `drawer_id`, writes atomically.
-/// Test: `embed_ledger_roundtrips_and_upserts_by_drawer`.
+/// What: inside [`json_rmw::update`]'s locked critical section — which re-reads
+/// the document from disk under the lock, so a concurrent writer's rows are
+/// never clobbered — replaces any row with the same `drawer_id` and appends this
+/// one. Blocking on an advisory `flock`; async callers must run it on a
+/// blocking-safe thread.
+/// Test: `embed_ledger_roundtrips_and_upserts_by_drawer`,
+/// `concurrent_ledger_records_keep_every_row`.
 pub fn record(data_dir: &Path, entry: EmbedFailure) -> Result<()> {
-    let mut rows = load(data_dir);
-    rows.retain(|r| r.drawer_id != entry.drawer_id);
-    rows.push(entry);
-    save(data_dir, &rows)
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
+    let path = ledger_path(data_dir);
+    json_rmw::update(&path, |rows: &mut Vec<EmbedFailure>| {
+        rows.retain(|r| r.drawer_id != entry.drawer_id);
+        rows.push(entry);
+        Ok::<(), anyhow::Error>(())
+    })
+    .with_context(|| format!("record embed failure in {}", path.display()))
 }
 
 /// Drop the named drawers from the ledger.
@@ -102,51 +142,20 @@ pub fn record(data_dir: &Path, entry: EmbedFailure) -> Result<()> {
 /// Why: a backfill that re-embeds a drawer successfully must stop reporting it
 /// as broken, and a forgotten drawer must not leave a row behind claiming a
 /// failure for an id nothing can look up. Both are the same operation.
-/// What: loads, retains rows whose id is not in `ids`, writes atomically. A
-/// no-op (no write at all) when nothing matched, so a healthy palace never
-/// touches the file.
-/// Test: `embed_ledger_clear_removes_only_named_rows`.
+/// What: same locked critical section as [`record`] — a clear racing a record
+/// has the identical lost-update shape, and the backfill runs both against one
+/// palace. Returns before taking the lock when `ids` is empty or the palace has
+/// no ledger, so a healthy palace never creates the file or its lock sidecar.
+/// Test: `embed_ledger_clear_removes_only_named_rows`,
+/// `concurrent_clear_and_record_do_not_lose_each_other`.
 pub fn clear(data_dir: &Path, ids: &HashSet<Uuid>) -> Result<()> {
-    if ids.is_empty() {
+    let path = ledger_path(data_dir);
+    if ids.is_empty() || !path.exists() {
         return Ok(());
     }
-    let rows = load(data_dir);
-    let kept: Vec<EmbedFailure> = rows
-        .iter()
-        .filter(|r| !ids.contains(&r.drawer_id))
-        .cloned()
-        .collect();
-    if kept.len() == rows.len() {
-        return Ok(());
-    }
-    save(data_dir, &kept)
-}
-
-/// Atomically overwrite the ledger.
-///
-/// Why: a half-written ledger read at the next open would be indistinguishable
-/// from a corrupt one, and this file is exactly the thing an operator reaches
-/// for when they already do not trust what is on disk.
-/// What: writes to `<name>.tmp.<pid>.<seq>` then renames over the target — the
-/// per-invocation tmp name keeps two concurrent writers from removing each
-/// other's temp file (the `L1Cache` #154 fix, same shape).
-/// Test: covered by `embed_ledger_roundtrips_and_upserts_by_drawer`.
-fn save(data_dir: &Path, rows: &[EmbedFailure]) -> Result<()> {
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
-    let target = data_dir.join(EMBED_FAILURES_JSON);
-    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = data_dir.join(format!(
-        "{EMBED_FAILURES_JSON}.tmp.{}.{seq}",
-        std::process::id()
-    ));
-    let bytes = serde_json::to_vec_pretty(rows).context("serialize embed-failure ledger")?;
-    std::fs::write(&tmp, &bytes)
-        .with_context(|| format!("write embed-failure ledger tmp {}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, &target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::from(e)
-            .context(format!("rename embed-failure ledger {}", target.display())));
-    }
-    Ok(())
+    json_rmw::update(&path, |rows: &mut Vec<EmbedFailure>| {
+        rows.retain(|r| !ids.contains(&r.drawer_id));
+        Ok::<(), anyhow::Error>(())
+    })
+    .with_context(|| format!("clear embed failures in {}", path.display()))
 }
