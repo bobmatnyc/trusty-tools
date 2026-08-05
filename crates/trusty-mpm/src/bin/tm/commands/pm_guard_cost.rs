@@ -329,6 +329,9 @@ fn warn_notice_key(payload: &serde_json::Value) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
+// Temp dirs come from `crate::test_support::hermetic_temp_dir`, never a bare
+// `tempfile::tempdir()`: the bare constructor honors `$TMPDIR`, so a sibling
+// test mutating it reddens these (PR #4914 run 31023632348) — see `test_support`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,7 +365,7 @@ mod tests {
         // The load-bearing case: PreToolUse inside a subagent carries the
         // PARENT's transcript_path plus an agent_id, and the subagent's own
         // transcript must be reached from those two.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, sub) = transcript_tree(tmp.path(), "a1d57cf5a7f59b877", 100_000);
         let payload = serde_json::json!({
             "transcript_path": parent.to_str().expect("utf8"),
@@ -373,7 +376,7 @@ mod tests {
 
     #[test]
     fn resolves_explicit_agent_transcript_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, sub) = transcript_tree(tmp.path(), "abc123", 100_000);
         let payload = serde_json::json!({
             "transcript_path": parent.to_str().expect("utf8"),
@@ -387,7 +390,7 @@ mod tests {
     fn resolves_a_transcript_path_already_under_subagents() {
         // If a future Claude Code release points transcript_path straight at
         // the subagent, the guard must still work with no agent_id at all.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (_, sub) = transcript_tree(tmp.path(), "abc123", 100_000);
         let payload = serde_json::json!({
             "transcript_path": sub.to_str().expect("utf8"),
@@ -443,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_exceeded_for_an_over_ceiling_transcript() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, _) = transcript_tree(tmp.path(), "big", 622_200);
         let payload = serde_json::json!({
             "transcript_path": parent.to_str().expect("utf8"),
@@ -460,7 +463,7 @@ mod tests {
     async fn default_config_only_warns_on_the_same_transcript() {
         // BLOCK 1(a) end to end: the identical 622.2k transcript that the
         // opted-in ceiling stops must merely WARN under what actually ships.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, _) = transcript_tree(tmp.path(), "big", 622_200);
         let payload = serde_json::json!({
             "transcript_path": parent.to_str().expect("utf8"),
@@ -475,7 +478,7 @@ mod tests {
     async fn respects_a_disabled_config() {
         // Config override reaches the I/O path too, not just the classifier —
         // a disabled guard must not even touch the filesystem.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, _) = transcript_tree(tmp.path(), "big", 900_000);
         let payload = serde_json::json!({
             "transcript_path": parent.to_str().expect("utf8"),
@@ -493,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn allows_a_healthy_agent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, _) = transcript_tree(tmp.path(), "small", 71_540);
         let payload = serde_json::json!({
             "transcript_path": parent.to_str().expect("utf8"),
@@ -521,7 +524,7 @@ mod tests {
         // Measured: 1 of the 12 largest subagent transcripts on this machine
         // had no complete usage record in its final 64 KiB, so the guard failed
         // open on exactly the transcripts it exists to catch.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, sub) = transcript_tree(tmp.path(), "huge", 500_000);
         // Bury the usage record behind more than 64 KiB of unparseable tail.
         let mut jsonl = std::fs::read_to_string(&sub).expect("read");
@@ -556,7 +559,7 @@ mod tests {
     async fn still_fails_open_when_even_the_larger_tail_has_no_record() {
         // Growing the window must not weaken the fail-open contract: a
         // transcript with no usage record anywhere still ALLOWS.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let (parent, sub) = transcript_tree(tmp.path(), "norec", 500_000);
         std::fs::write(&sub, filler_line(100 * 1024)).expect("write");
         let payload = serde_json::json!({
@@ -638,7 +641,7 @@ mod tests {
         // SUBAGENT's transcript_path and no agent_id, so both siblings fell back
         // to the parent's session_id — one key, and the first to warn silenced
         // the other. The transcript stem is what distinguishes them.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let session = format!("parent-{}", std::process::id());
         let ids = [
             format!("sib-a-{}", std::process::id()),

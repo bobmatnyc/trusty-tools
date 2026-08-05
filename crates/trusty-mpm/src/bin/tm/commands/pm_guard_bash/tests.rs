@@ -774,68 +774,65 @@ fn evaluate_worktree_add_command_follows_git_dash_c_override() {
     );
 }
 
-/// Restore `$TMPDIR` and `$HOME` to their pre-test values on scope exit.
-///
-/// Why: this test must pin both variables to assert the expansion rules, but it
-/// shares a process with every other test in the `tm` bin target — including
-/// `formatters::banner::source`'s, which write real files under `$HOME`.
-/// Leaking `HOME=/Users/x` past this test, or letting it land inside a
-/// concurrent reader's window, is the #4407 failure shape: a test reddens
-/// because of an environment it never set.
-/// What: captures both variables on construction and reinstates them — or
-/// removes them, if originally absent — on `Drop`, so an assertion panic cannot
-/// skip the cleanup the way the old trailing `remove_var` could. That
-/// `remove_var` was also unconditional, clearing a `TMPDIR` the process
-/// normally inherits rather than restoring it.
-/// Test: exercised by `evaluate_worktree_add_command_expands_tmpdir_and_home`.
-struct EnvGuard {
-    tmpdir: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: paired with `#[serial_test::serial]` on the only construction
-        // site — no other thread reads or writes the environment here.
-        unsafe {
-            match self.tmpdir.take() {
-                Some(v) => std::env::set_var("TMPDIR", v),
-                None => std::env::remove_var("TMPDIR"),
-            }
-            match self.home.take() {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
-}
-
-// `#[serial]` is load-bearing, not decoration: it joins the same default serial
-// group as the `formatters::banner::source` tests in this same test binary,
-// which is what keeps this test's `$HOME` write out of their window (#4407).
+// The env values are INJECTED, never written to the process. An earlier
+// revision set `TMPDIR`/`HOME` with `std::env::set_var` behind a restore-on-drop
+// guard plus `#[serial]`; neither closes the window that matters, because
+// `cargo test` runs tests as threads in ONE process and `#[serial]` only
+// serialises against other `#[serial]` tests. Every non-serial sibling still saw
+// the mutated `TMPDIR` — and `tempfile` honors it, so five `pm_guard_budget`
+// tests panicked with `NotFound` on a Linux CI runner over a macOS-only literal
+// path (PR #4914, run 31023632348). `PathEnv` is the seam that removes the
+// global write; `#[serial]` is correspondingly gone because there is nothing
+// left to serialise.
 #[test]
-#[serial_test::serial]
 fn evaluate_worktree_add_command_expands_tmpdir_and_home() {
     let cwd = Path::new("/Users/x/proj");
-    let _env = EnvGuard {
-        tmpdir: std::env::var_os("TMPDIR"),
-        home: std::env::var_os("HOME"),
+    let env = PathEnv {
+        // A harness scratchpad under the `/private/tmp` denylist root — the
+        // property under test. Deliberately not any real machine's path.
+        tmpdir: Some("/private/tmp/agent-scratch".to_string()),
+        tmp: None,
+        home: Some("/Users/x".to_string()),
     };
-    // SAFETY: serialised by `#[serial_test::serial]`; restored by `EnvGuard`.
-    unsafe {
-        std::env::set_var("TMPDIR", "/private/tmp/claude-502/scratch");
-        std::env::set_var("HOME", "/Users/x");
-    }
     assert_eq!(
-        evaluate_worktree_add_command("git worktree add $TMPDIR/wt-foo", cwd),
+        evaluate_worktree_add_command_in("git worktree add $TMPDIR/wt-foo", cwd, &env),
         Some(WORKTREE_TMP_REASON),
         "$TMPDIR indirection must resolve to the harness scratchpad, still denylisted"
     );
     assert_eq!(
-        evaluate_worktree_add_command("git worktree add ~/proj/.claude/worktrees/wt-foo", cwd),
+        evaluate_worktree_add_command_in(
+            "git worktree add ~/proj/.claude/worktrees/wt-foo",
+            cwd,
+            &env
+        ),
         None,
         "~ expansion to an in-project target must be allowed"
     );
+}
+
+/// The public entry point must still expand against the process environment.
+///
+/// Why: without this, the injected-env test above could stay green while a
+/// refactor left [`evaluate_worktree_add_command`] passing an EMPTY `PathEnv`,
+/// silently disabling `$TMPDIR`/`~` expansion for the real guard. Asserts
+/// equivalence rather than a concrete verdict, so it depends on the delegation
+/// and not on what this machine's `$TMPDIR`/`$HOME` happen to be.
+#[test]
+fn evaluate_worktree_add_command_delegates_to_the_process_environment() {
+    let cwd = Path::new("/Users/x/proj");
+    let process_env = PathEnv::from_process();
+    for cmd in [
+        "git worktree add $TMPDIR/wt-foo",
+        "git worktree add ${TMPDIR}/wt-foo",
+        "git worktree add ~/scratch/wt-foo",
+        "git worktree add .claude/worktrees/wt-foo",
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command(cmd, cwd),
+            evaluate_worktree_add_command_in(cmd, cwd, &process_env),
+            "the public entry point must expand against the process env: {cmd}"
+        );
+    }
 }
 
 #[test]
