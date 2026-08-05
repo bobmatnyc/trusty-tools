@@ -31,7 +31,7 @@ mod timeout_tests;
 // Shared embedder
 #[cfg(any(test, feature = "embedder-test-support"))]
 pub use embedder::seed_shared_embedder_with_mock;
-pub use embedder::shared_embedder;
+pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
 pub use types::{

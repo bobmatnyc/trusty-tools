@@ -321,6 +321,28 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     Ok(out)
 }
 
+/// Whether a recall may use the vector lane, or must take the degraded
+/// L0/L1 + BM25 fallback.
+///
+/// Why (#4836): the degraded fallback ignores the query except through an
+/// optional BM25 lane, so taking it when the embedder is in fact live makes
+/// `memory_recall` answer every query with the same drawers — which is what it
+/// did for the whole life of any daemon whose startup warm-up failed once. The
+/// readiness latch alone cannot be trusted for this decision: a recall that
+/// degrades never calls [`AppState::embedder`], so it can never observe the
+/// recovery that would clear the latch. Asking the embedder cell directly
+/// breaks that deadlock, and costs one atomic load.
+/// What: `true` when readiness is `Ready`, or when the shared embedder is
+/// already initialised regardless of the latch. Never triggers a cold init, so
+/// issue #1970's "never block a recall on embedder warm-up" guarantee holds.
+/// Test: `different_queries_return_different_drawers`,
+/// `deep_recall_also_discriminates_by_query` (tests/recall_query_discrimination.rs)
+/// — both drive recall with a live embedder behind a stranded `Warming` latch.
+fn vector_lane_available(state: &AppState) -> bool {
+    state.readiness() != DaemonReadiness::Warming
+        || trusty_common::memory_core::retrieval::shared_embedder_initialized()
+}
+
 /// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.
 ///
 /// Why: mirrors trusty-search's staged-pipeline degradation — rather than
@@ -337,8 +359,8 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
 /// scopes L2/L3 — a caller who narrowed to one room must never be handed
 /// another room's drawer just because the daemon happened to be warming. L0/L1
 /// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
-/// Test: `recall_falls_back_to_bm25_and_l0_l1_while_warming`,
-/// `recall_deep_falls_back_to_bm25_and_l0_l1_while_warming`.
+/// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
+/// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`.
 async fn recall_without_embedder(
     state: &AppState,
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
@@ -438,7 +460,10 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // Issue #1970: while the embedder is still warming up, return BM25 +
     // L0/L1 results immediately instead of blocking/erroring on embedder
     // state.
-    if state.readiness() == DaemonReadiness::Warming {
+    // #4836: gate on the embedder's real state, not the readiness latch alone —
+    // this fallback ignores the query, so entering it while the embedder is live
+    // makes every query return the same drawers.
+    if !vector_lane_available(state) {
         let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
@@ -480,7 +505,8 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let scope = recall_scope(&handle, &args, "memory_recall_deep")?;
 
     // Issue #1970: same warming-fallback posture as memory_recall.
-    if state.readiness() == DaemonReadiness::Warming {
+    // #4836: and the same embedder-state gate, for the same reason.
+    if !vector_lane_available(state) {
         let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
@@ -604,13 +630,14 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         crate::service::helpers::open_palaces_blocking(state, &palaces, "memory_recall_all").await;
 
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
-    let results = if state.readiness() == DaemonReadiness::Warming {
+    // #4836: gated on the embedder's real state, as the per-palace paths are.
+    let results = if !vector_lane_available(state) {
         recall_all_without_embedder(state, &handles, query, top_k).await
     } else {
+        // #4836: `embedder()` now yields the type-erased shared embedder
+        // directly, so the local re-erasure this used to need is gone.
         let embedder = state.embedder().await?;
-        let erased: std::sync::Arc<dyn trusty_common::memory_core::embed::Embedder + Send + Sync> =
-            embedder;
-        recall_across_palaces(&handles, &erased, query, top_k, deep)
+        recall_across_palaces(&handles, &embedder, query, top_k, deep)
             .await
             .context("recall_across_palaces")?
     };

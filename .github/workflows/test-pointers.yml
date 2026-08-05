@@ -34,7 +34,16 @@ jobs:
   test-pointers:
     name: "Test: doc-comment pointer lint"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # #4882: was 5. Measured 2026-08-05: the lint itself legitimately took
+    # 352s locally (close to CI's observed 303s the run that got cancelled),
+    # dominated by tens of thousands of subprocess forks in
+    # scripts/check_test_pointers.sh (dirname/tr/mktemp/grep per file, per
+    # Test: annotation, per citation — see that script's #4882 comments).
+    # Fixing those forks cut local wall time to ~201s (43% faster), but that
+    # still leaves under 2x headroom against a 5-minute cap on a runner that
+    # was already this close to timing out under normal load — not a safe
+    # margin. 10 minutes gives ~3x headroom over the post-fix measurement.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
