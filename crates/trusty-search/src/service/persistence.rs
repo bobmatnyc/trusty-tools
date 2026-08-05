@@ -420,10 +420,28 @@ pub fn data_dir() -> Result<PathBuf> {
 /// What: `dirs::data_local_dir()/trusty-search`, or the `$HOME`-relative
 /// fallback when `NSFileManager` is unavailable (issue #718: launchd
 /// posix_spawn, macOS 26).
-/// Test: exercised by every production caller; not reachable from the crate's
-/// own unit tests by construction (see the `cfg(test)` sibling below).
-#[cfg(not(test))]
+/// Test: exercised by every production caller; not reachable from ANY test
+/// process by construction (see the test-harness branch below).
 pub(super) fn default_data_dir() -> Result<PathBuf> {
+    // #4255: a test process gets an isolated dir instead of the operator's.
+    if trusty_common::running_under_test_harness() {
+        return super::data_dir::test_harness_data_dir();
+    }
+    production_data_dir()
+}
+
+/// The real, operator-facing data location — reached only when this process
+/// is not a test binary.
+///
+/// Why: split from [`default_data_dir`] so the test-harness branch above is a
+/// single guarded call rather than a `cfg` fork of the whole resolver, and so
+/// the production path stays independently readable.
+/// What: `dirs::data_local_dir()/trusty-search`, falling back to the
+/// `$HOME`-relative path when `NSFileManager` is unavailable (issue #718).
+/// Test: `production_data_dir_is_the_real_user_location` pins the location;
+/// `test_harness_data_dir_is_isolated_from_real_user_data_dir` proves tests
+/// never reach it.
+fn production_data_dir() -> Result<PathBuf> {
     if let Some(base) = dirs::data_local_dir() {
         let dir = base.join("trusty-search");
         std::fs::create_dir_all(&dir).context("create trusty-search data dir")?;
@@ -432,32 +450,6 @@ pub(super) fn default_data_dir() -> Result<PathBuf> {
     }
     // Issue #718: NSFileManager unavailable (launchd posix_spawn, macOS 26).
     super::data_dir::data_dir_home_fallback()
-}
-
-/// Test-build replacement for the un-overridden data-dir fallback.
-///
-/// Why (issue #4094): server handler tests drive `create_index` /
-/// `relocate_index` end to end, and those handlers persist through
-/// [`indexes_toml_path`] → [`data_dir`]. A test that does not set
-/// `TRUSTY_DATA_DIR` therefore wrote real entries into the developer's live
-/// `~/Library/Application Support/trusty-search/indexes.toml`, pointing at
-/// `~/.trusty-search-test-roots/…` fixtures that vanish when the test's
-/// `TempDir` drops. A live machine was found carrying 11 such stale entries,
-/// which kept `search_health` reporting `degraded` indefinitely. Remembering
-/// to set the env var in each test is exactly the discipline that failed;
-/// making the fallback unreachable at compile time in test builds cannot be
-/// forgotten, and — unlike a process-global env var — cannot be raced by a
-/// concurrently-running sibling test (the failure mode of issue #4213).
-/// What: a per-process directory under the system temp dir. Tests that DO set
-/// `TRUSTY_DATA_DIR` are unaffected — that branch still wins in [`data_dir`].
-/// Test: `unit_test_data_dir_is_isolated_from_real_user_data_dir`.
-///
-/// Scope note: `cfg(test)` covers this crate's unit tests (the whole of the
-/// documented pollution). Integration tests under `tests/` link the library
-/// built WITHOUT `cfg(test)` and must still set `TRUSTY_DATA_DIR` themselves.
-#[cfg(test)]
-pub(super) fn default_data_dir() -> Result<PathBuf> {
-    super::data_dir::unit_test_data_dir()
 }
 
 /// Path to the registry TOML file.
