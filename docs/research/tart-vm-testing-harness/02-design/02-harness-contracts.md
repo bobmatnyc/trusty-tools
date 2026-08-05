@@ -722,7 +722,7 @@ every failure makes both impossible.
 |---|---|---|
 | **0** | — | Success. Scenario ran, every assertion passed, teardown completed. |
 | **2** | argument parsing | Usage error — unknown subcommand, bad `--runid` format (§4.2), unknown scenario name. No VM was touched. |
-| **10** | preflight | Preflight refused (DOC-1 §4.1): `tart` missing, base-image digest mismatch (§3), a VM not in `stopped` state, runid collision (§4.3), host capacity assertion failed (§8.4), `jq` missing (§JSON parsing). **No VM was created.** |
+| **10** | preflight | Preflight refused (DOC-1 §4.1): `tart` missing, base-image digest mismatch (§3), a VM not in `stopped` state, runid collision (§4.3), **another run already in progress or a crashed run's VM left behind (§4.3a)**, host capacity assertion failed (§8.4), `jq` missing (§JSON parsing). **No VM was created.** |
 | **20** | VM lifecycle | `tart clone` / `set` / `run` failed, or boot-ready polling timed out (§10.1). |
 | **30** | negative probe | The cargo-absent probe did not produce its expected result (§6). |
 | **40** | provisioning | `provision.sh` failed or timed out — including the mise-detection failures of §11. |
@@ -944,25 +944,226 @@ Immediately after acquiring, the driver writes into the run directory:
 | File | Contents |
 |---|---|
 | `pid` | the driver's PID |
+| `cmdline` | the driver's **own** command line, as `ps` reports it (added 2026-08-04, §4.3a.1) |
 | `vm` | the VM name |
 | `pattern` | `local` \| `branch` \| `released` |
 | `started` | UTC timestamp |
 | `toolchain.tsv` | written later by provisioning (§7.3) |
 | `keep` | written only if `--keep` was requested (§5.3) |
 
+`cmdline` is what makes `pid` **checkable**. A PID on its own cannot say whether
+it is still the process that wrote it, and PIDs are reused; recording the
+acquiring process's own identity lets a later reader ask *is this still you?*
+instead of guessing. It is written by the run it describes and never by a
+reader — see §4.3a.1, where the asymmetry that requirement prevents is the
+subject of a recorded defect.
+
 The run directory is removed by the cleanup trap on normal and abnormal exit,
 **except** when `keep` is present. Lock and registry are the same object: there is
 no separate lock file to get out of sync with the registry entry.
 
-**Concurrency is safe but not advised.** The mechanisms above make two simultaneous
-runs collision-free. They do not make them a good idea: DOC-1 §8.5 sizes each guest
-at 8 vCPU / 16 GB, and the research host was 18 logical cores / 64 GB
+#### 4.3a Single-run policy — **the concurrency contract is RETRACTED** (2026-08-04, issue #15)
+
+> **RETRACTION, stated before the replacement so nothing is read out of an old
+> copy.** §4.3 previously ended with a paragraph headed *"Concurrency is safe but
+> not advised"*, which specified that **preflight warns and does not fail** when
+> another run directory holds a live PID. **That paragraph is withdrawn in
+> full.** The `registry_warn_live_peers` function written to implement it has
+> been **deleted** from the driver, and `vmtest-harness/README.md` no longer
+> sizes disk "per concurrent run".
+
+**The harness supports exactly ONE run at a time.** A second run is **refused**,
+not warned about. Exit **10**, which is §2's existing "preflight refused; no VM
+was created" — no new exit code is introduced, because no new *kind* of event
+happened.
+
+*Why the retraction.* The warn-don't-fail contract was never reachable. Preflight
+refused a running `vmtest-*` VM before it ever consulted the registry, and a
+peer's VM is `running` for roughly 85% of a 9–16 minute run — so the specified
+warning could not fire in the case it was written for, and the operator instead
+received a refusal whose text said the namespace might be **wedged**. That is the
+wrong diagnosis for a healthy peer and points at the wrong remedy. Two artifacts
+disagreed with the implementation for an entire phase; retiring concurrency
+resolves the disagreement in the direction the owner chose.
+
+*Where the refusal comes from.* **The registry, not the VM listing.** The
+registry is the harness's own record of what is running; a VM's state is a
+symptom. `preflight_single_run` runs **before** the §4.1 VM-state checks, reads
+every registry entry through `registry_owner_alive` (the one place the harness
+decides whether an entry belongs to a live run), and classifies each
+non-`stopped` `vmtest-*` VM with `harness_vm_disposition` — the **same** helper
+`vmtest clean` (§5) uses.
+
+##### 4.3a.1 What "the owner is alive" means, and why it is not `kill -0`
+
+Making a registry entry a **gate** rather than a hint changed the cost of every
+error in reading one, so the reading is specified here rather than left to the
+primitive:
+
+| Observation | Verdict | Why |
+|---|---|---|
+| no run directory | not alive | nothing was ever acquired |
+| directory, no readable/numeric `pid` yet | **alive** | §4.3 acquires by `mkdir` and writes `pid` immediately after; this is exactly what a peer looks like *between* those two steps |
+| `kill -0` succeeds | alive | ours, and running |
+| `kill -0` fails, `ps` finds the process | **alive** | EPERM — it exists and belongs to **another user**. `kill -0` alone reports this identically to death |
+| `kill -0` fails, `ps` does not find it | not alive | ESRCH — provably gone |
+| alive, and `ps` shows a **different** command line from the entry's own `cmdline` | **not alive — stale entry** | the PID was reused; see below |
+| alive, and there is no `cmdline` record, or it cannot be read | **alive** | nothing was proved either way |
+| alive, and one of the two command lines is a **prefix** of the other | **alive** | that is what a record cut short looks like, and "cut short" proves nothing |
+
+Every uncertain case resolves to **alive**, because both callers' dangerous
+direction is the same one: the gate's cheap mistake is refusing a free host and
+its expensive one is admitting a second run; `clean`'s cheap mistake is skipping
+an orphan and its expensive one is deleting a live run's VM.
+
+**The reading is three-valued, and the two proofs are not each other's
+negation.** *Proved live* (the PID answers **and** shows its recorded command
+line) and *proved different* (both command lines readable **and** unequal) are
+separate questions, with *cannot say* between them. `registry_owner_alive`
+treats *cannot say* as alive. Only an operator's explicit `--include-kept` acts
+on it, and only where there is no VM to destroy (§5.4 row 3).
+
+**The peer asserts its own identity; a reader never infers it.** This is a
+requirement, not an implementation note, and it is written down because the
+first version of this mechanism violated it and was destructive. That version
+compared the peer's `ps` line against **the reading process's own filename**.
+A driver copy named `vmtest-dev` therefore looked for `vmtest-dev` inside a peer
+running `vmtest`, found nothing, concluded the live run was stale, and `clean`
+**deleted that run's stopped VM** — recorded against a real live process as
+`vmtest-realpeer stopped ORPHANED (deleted)` where every earlier revision said
+`IN-USE (live run, skipped)`. Two differently-named copies of the driver were
+the entire precondition, and DOC-1's trade statement makes deleting a live run's
+VM the one outcome that must be impossible. Comparing a **recorded** command
+line against the **observed** one for the same PID has no such asymmetry:
+nothing about the reader enters into it.
+
+##### The record's own integrity
+
+A comparison is only as good as the thing it compares against, so the record gets
+two protections and one stated exclusion.
+
+**It is written atomically.** `registry_acquire` writes each file to a temporary
+name beside it and renames, so a reader sees the old content or the whole new
+content and never half of it. This matters for `cmdline` in a way it does not
+for the others: a **partial** record does not read as *cannot say*, it reads as a
+**different** command line — positive evidence of a reused PID — and that makes a
+genuinely live run's stopped VM collectable. Every other damaged shape (empty,
+missing, unreadable, an extra line, trailing whitespace) already resolves to
+**alive**; a part-written one was the single exception, and a rename removes the
+shape rather than compensating for it downstream.
+
+**A prefix is not a difference.** Where one command line is a prefix of the
+other, the comparison says nothing — that is precisely the shape a truncated
+record takes, and records written by an older driver, or by a filesystem that
+tore the write, are not covered by the atomicity above. The guard cannot admit a
+false *live*: for a reused PID to be excused, the new process's command line
+would have to **begin with the entire command line** of the run that ended. It is
+also deliberately prefix-only — a line that shares a prefix and then diverges is
+still a different process and is still collected.
+
+**Deliberate tampering is out of the threat model, and is stated rather than
+coded against.** A `cmdline` record edited to an unrelated string, or copied from
+another entry, will make a live run's stopped VM collectable. Both require write
+access to `$VMTEST_STATE_DIR`, which is the operator's own state directory; an
+attacker with that access can simply delete the entry, or the VM. The registry is
+bookkeeping between an operator and their own runs, not a security boundary.
+
+*A note on what this narrowed as a side effect.* The old test was a bare
+substring match, so `grep -r vmtest .`, `vim vmtest-harness/vmtest` and
+`tail -f /var/log/vmtest.log` all read as live peers. Exact comparison against a
+recorded line removes that class: a bystander that merely mentions the harness
+now differs from the record and is correctly seen as a reused PID. What remains
+is narrow and stated rather than hidden — an entry with **no** record still
+resolves to alive on any live PID (entries written before this section existed,
+or written where `ps` was unavailable), and a process whose command line is
+byte-identical to the record is indistinguishable from the run itself, which is
+the right answer anyway.
+
+**PID reuse is the failure mode this section exists to prevent.** `--keep`
+leaves its registry entry behind permanently and on purpose (§5.3), macOS PIDs
+wrap at ~99,999, and a reused PID makes a finished run's entry answer "alive"
+for ever. Under an uncorroborated reading that entry refuses **every future
+run**, with a message telling the operator to wait for a run that ended weeks
+ago — and `clean --include-kept`, the one flag that exists to remove a kept VM,
+could not reach it either, because it tested ownership first. Three things
+prevent it, and all three are required:
+
+1. **Corroboration.** An entry whose PID is alive but no longer shows the
+   command line **the entry recorded for itself** is **disregarded**, and the
+   harness says so on stderr — naming both the recorded and the observed command
+   line — rather than proceeding silently. This is positive evidence, never a
+   guess.
+2. **`clean --include-kept` reaches both shapes.** It outranks a live owner for
+   a `stopped` **kept VM** (§5.3), which is precisely what `--keep` leaves
+   behind; and it prunes a **VM-less bookkeeping entry** whose owner cannot be
+   corroborated (§5.4 row 3), which is the shape a crashed run leaves before it
+   clones. `running` and `suspended` VMs are **not** weakened by the flag.
+
+   > **What that flag WILL do, stated plainly because it is a real edge and it is
+   > deliberate.** For a `stopped` VM carrying a `keep` marker, `--include-kept`
+   > deletes it **even when the owning run is corroborated live**. That is not an
+   > oversight in the ordering: `--keep` exists to leave a stopped VM for
+   > inspection, `--include-kept` exists to remove one, and requiring the owner to
+   > be dead first is what made the pairing unclearable in the first place.
+   > Deleting still needs **both** the marker and the explicit flag, and it can
+   > only ever touch a VM that is already `stopped`. The **bookkeeping** prune is
+   > the opposite way round — a corroborated live peer's entry is never pruned,
+   > under any flag — because there the flag would be removing the only record
+   > that a live run exists.
+3. **The refusal message names the escape.** Case (a) states that the entry may
+   be stale and prints both `vmtest clean --include-kept` and the exact
+   `rm -rf <registry root>/<runid>`.
+
+Requirement 2 is stated as two shapes because it shipped as one and the gap was
+real: `--include-kept` was advertised in the refusal message as the supported
+recovery, while a VM-less entry whose PID merely answered was reported
+`IN-USE (live run, no VM yet)` and left in place — so the command the harness
+told the operator to run did nothing for the case the message was about, and
+only a raw `rm -rf` worked.
+
+*The two refusals are distinct and must stay distinct*, because their remedies
+are opposites:
+
+| Case | Condition | Remedy in the message |
+|---|---|---|
+| **(a)** | a registry entry holds a live PID (and/or a `vmtest-*` VM has a live registry owner) | **WAIT** for that run to finish; do not stop it and do not `vmtest clean` it |
+| **(b)** | a `vmtest-*` VM is not `stopped` and its runid has **no** live registry owner — including `suspended`, which DOC-1 §8.2 records as wedged | **CLEAN IT UP**: run `vmtest clean`, which names the manual command for anything it refuses |
+
+Both can hold in one scan. Preflight therefore **reports every finding** before
+it dies; the `FAIL` line carries **(a)** whenever (a) applies, because waiting is
+the only action that is correct in both worlds — `clean` run beside a live peer
+acts on a false picture of the host.
+
+*The mechanisms of (a) and (b) above are unchanged and still do their jobs:*
+PID-embedded runids and the `mkdir` lock still make two runs collision-**free**;
+what has changed is that being collision-free is no longer treated as permission
+to proceed. The original sizing argument survives as the reason the policy is
+single-run at all: DOC-1 §8.5 sizes each guest at 8 vCPU / 16 GB against a
+research host of 18 logical cores / 64 GB
 (`vm-install-probe-findings.md:842-843`), which accommodates one such guest with
-"ample headroom" and two only by contending. Preflight therefore **warns** (does
-not fail) when another run directory holds a live PID. Warning rather than failing
-is a judgment call: the harness cannot know the operator's host, and refusing a
-legitimate second run on a large machine would be worse than a warning ignored on
-a small one.
+"ample headroom" and two only by contending.
+
+*One residual, recorded rather than papered over.* Two invocations started in the
+same instant can both pass the gate **before either has created its registry
+directory**, and their auto-generated runids never collide in `registry_acquire`
+either. The window is scan-to-`mkdir`, **not** scan-to-`pid`-file: a directory
+with no PID file yet reads as a live owner (§4.3a.1, row 2), which closes the
+`mkdir`-to-`pid`-write half of it. Closing the rest needs a registry-root-wide
+lock this section does not define, and a post-acquire re-check would let two
+racers refuse *each other*. For an ad-hoc, manually-run, single-operator harness
+the gate is the operator's mistake-catcher, not a mutex — and `README.md` says so
+too, because an operator reading only the README must not be told the gate is
+absolute.
+
+*Coverage.* `vmtest-harness/tests/test-preflight-single-run.sh` exercises (a)
+with and without a peer VM, the `mkdir`-to-`pid` window, (b), (b) via a **dead**
+registry PID, `suspended`, empty and non-numeric PID files, the **mixed** scan,
+the recycled-PID stale entry and its recovery through `clean --include-kept`,
+self-exclusion, TSV field splitting, and two clean-namespace regressions —
+against a stub CLI, with no VM and no network. Its liveness assertions
+(`proc_alive`, `registry_owner_impostor`, `registry_owner_corroborated`) are
+made directly, because EPERM cannot be
+reached end-to-end without a root-owned driver.
 
 ---
 
@@ -1030,6 +1231,24 @@ skip **only** `vm_delete`, which is what makes this paragraph, condition 2, and
 `vmtest clean --include-kept` removes them too, and is the intended way to tidy up
 after an inspection session.
 
+> **AMENDED 2026-08-04 (issue #15 review) — `--include-kept` now outranks
+> condition 3 for a `stopped` kept VM.** The paragraph above says the run "exits,
+> so its PID dies, so condition 3 is satisfied". **The registry entry outlives
+> the run**, and its recorded PID does not stay dead: macOS PIDs wrap, so a reused
+> PID eventually makes condition 3 fail again, permanently. `clean` then reported
+> the kept VM `IN-USE (live run, skipped)` and `--include-kept` — *the intended
+> way to tidy up after an inspection session* — could not remove it, because
+> ownership was tested first. §4.3a made the same reading a **gate**, so the same
+> entry also refused every future run: an unclearable brick with no documented
+> escape.
+>
+> The order is therefore `keep`-marker **and** `--include-kept` **first**, then
+> ownership, then the marker alone. Deleting still requires **both** the marker
+> and the explicit flag, and this changes nothing for a VM that is not `stopped`:
+> `running` and `suspended` are refused exactly as before, under every flag.
+> `clean`'s own conservative PID-reuse trade (§5.1) is untouched — a false "alive"
+> still only ever costs a skipped deletion there.
+
 #### 5.4 When `clean` cannot tell
 
 Two ambiguous cases, and the rule for each:
@@ -1038,7 +1257,7 @@ Two ambiguous cases, and the rule for each:
 |---|---|
 | `vmtest-*` VM in state `running`, no registry entry at all | **Refuses.** Reports the VM, its state, and the manual commands a human may choose to run. Exits **10**. It cannot distinguish "another user's run" from "crashed run, registry wiped", and both are cases where deleting is destructive. |
 | `vmtest-*` VM in state `suspended` | **Refuses and flags it as wedged.** Per DOC-1 §8.2, resume is broken and reproducible (`VZErrorDomain Code=12`); the manual unwedge (`mv ~/.tart/vms/<name>/state.vzvmsave{,.bak}`) is documented there as a human procedure explicitly *not* for the harness. `clean` prints that procedure and exits 10. |
-| Registry directory with no matching VM | **Prunes the directory** and says so. There is nothing to destroy; a stale registry entry is bookkeeping, not state. |
+| Registry directory with no matching VM | **Prunes the directory** and says so. There is nothing to destroy; a stale registry entry is bookkeeping, not state. **A live owner still protects it** — but *live* here means §4.3a.1's reading, and an owner that merely answers without being **corroborated** is pruned under `--include-kept` (added 2026-08-04; see §4.3a.1 requirement 2, and note that a corroborated peer's entry is never pruned under any flag). |
 | VM in state `stopped`, no registry entry | **Orphaned. Deletes.** This is the normal aftermath of an interrupted run and is the case `clean` exists for. |
 
 `vmtest clean --dry-run` performs the full classification and prints the verdict for
