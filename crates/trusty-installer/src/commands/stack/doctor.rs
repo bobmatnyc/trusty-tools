@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::commands::plist_label::plist_path_for;
 use crate::commands::probe::{health_str, probe_member_health};
-use crate::commands::stable_set::{stable_set, ManageStrategy, StableMember};
+use crate::commands::stable_set::{daemon_members, ManageStrategy, StableMember};
 use crate::commands::update_engine::installed_version;
 use crate::output::render_json;
 
@@ -146,13 +146,14 @@ fn diagnose(m: &StableMember) -> MemberDoctor {
 /// exit 3), diagnoses each, builds + renders the report, returns the exit code.
 /// Test: side-effecting; the aggregation is tested via `DoctorReport`/`MemberDoctor`.
 pub fn run_doctor(member: Option<&str>, json: bool) -> i32 {
-    let all = stable_set();
+    // #17: vmtest-harness derives its daemon-liveness set from this member table.
+    let all = daemon_members();
     let scoped: Vec<StableMember> = match member {
-        None => all.into_iter().filter(|m| m.daemon).collect(),
+        None => all,
         Some(name) => {
             let found: Vec<StableMember> = all
                 .into_iter()
-                .filter(|m| m.daemon && (m.crate_name == name || m.binary == name))
+                .filter(|m| m.crate_name == name || m.binary == name)
                 .collect();
             if found.is_empty() {
                 if json {
@@ -261,6 +262,21 @@ mod tests {
         ]);
         assert_eq!(r.verdict, "degraded");
         assert_eq!(r.exit_code(), 2);
+    }
+
+    /// Why: the module header has claimed this path was covered since the file
+    /// was written, and no test called `run_doctor` at all (#17). An unmatched
+    /// name must exit 3, and — since the scope is `daemon_members` — a real but
+    /// NON-daemon stable-set member (`tga`) must be rejected the same way
+    /// rather than silently sweeping the whole stack.
+    /// What: asserts exit 3 for a bogus name and for `tga`. Both return before
+    /// `diagnose`, so no PATH/filesystem probe runs.
+    /// Test: This is the test.
+    #[test]
+    fn unknown_member_exits_3() {
+        assert_eq!(run_doctor(Some("not-a-daemon"), true), 3);
+        assert_eq!(run_doctor(Some("not-a-daemon"), false), 3);
+        assert_eq!(run_doctor(Some("tga"), true), 3);
     }
 
     /// Why: an all-ok sweep is `ok`, exit 0.

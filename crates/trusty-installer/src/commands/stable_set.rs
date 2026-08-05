@@ -182,6 +182,25 @@ pub fn stable_set() -> Vec<StableMember> {
     ]
 }
 
+/// The daemon subset of the stable set, in install order (#17).
+///
+/// Why: "which members are daemons?" is read by three surfaces — `tctl stack
+/// doctor`, `tctl stack health`, and `vmtest-harness`, which DERIVES its
+/// daemon-liveness set from doctor's `--json` member table rather than
+/// transcribing one. It had two independent copies of the same
+/// `filter(|m| m.daemon)` expression, so narrowing the rule in one place was a
+/// silent divergence rather than a reviewed decision. Same motivation as
+/// [`manage_strategy_for`] (#4246): the rule lives once, and the pinning test
+/// sits next to it.
+///
+/// What: [`stable_set`] filtered to `daemon == true`, preserving the
+/// topological install order.
+///
+/// Test: `tests::daemon_members_is_pinned` pins the resulting names.
+pub fn daemon_members() -> Vec<StableMember> {
+    stable_set().into_iter().filter(|m| m.daemon).collect()
+}
+
 /// Filter the stable set to a caller-named subset, preserving install order.
 ///
 /// Why: `tctl install <members…>` / `tctl upgrade <members…>` let the operator
@@ -329,6 +348,36 @@ mod tests {
                 "trusty-analyze",
                 "trusty-review",
                 "tga",
+                "trusty-console",
+                "trusty-mpm",
+            ]
+        );
+    }
+
+    /// Why: [`daemon_members`] is the rule three surfaces enumerate — `tctl
+    /// stack doctor`, `tctl stack health`, and `vmtest-harness`, whose
+    /// `_verify_daemon_set` (`vmtest-harness/lib/verify.sh:1060`) DERIVES its
+    /// liveness set from doctor's `--json` member table instead of transcribing
+    /// one. Narrowing the rule therefore shrinks that oracle silently: the
+    /// dropped daemon stops being probed, its name lands on the already-noisy
+    /// `unreported` log line, and the run still reports PASS. Pin the NAMES so
+    /// a narrowing is a deliberate, reviewed decision, not accidental drift
+    /// (#17) — same reasoning as `required_vs_optional_classification`.
+    /// Asserting the filter expression back at itself would be a tautology and
+    /// would catch nothing.
+    /// What: asserts the daemon set is exactly these six crate names, in
+    /// stable-set order — the seven members minus `tga`, the one non-daemon.
+    /// Test: This is the test.
+    #[test]
+    fn daemon_members_is_pinned() {
+        let names: Vec<String> = daemon_members().into_iter().map(|m| m.crate_name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "trusty-search",
+                "trusty-memory",
+                "trusty-analyze",
+                "trusty-review",
                 "trusty-console",
                 "trusty-mpm",
             ]
