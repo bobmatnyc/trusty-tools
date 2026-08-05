@@ -1756,10 +1756,20 @@ fn real_secrets_still_blocked_after_4898_narrowing() {
         // LOAD-BEARING for the prefix length floor and the AWS shape gate.
         ("AWS key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
         ("AWS STS id", "ASIAY34FZKBOKMUTVV7A"), // pragma: allowlist secret
+        // LOAD-BEARING for `is_aws_access_key_id` being a PREFIX predicate: the
+        // whole-token form of it lost every one of these (#4898 review round 1).
+        ("AWS key id + suffix", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+        (
+            "AWS key id + secret access key",
+            "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for the character-class-uniformity gate: real
+        // `base64(urandom(15))` output whose every `+`-segment is case-uniform.
+        ("base64 of 15 random bytes", "j1u7nJd+tvZers+wdZyr"), // pragma: allowlist secret
         ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
         ("OpenAI key", "sk-abcdefghijklmnopqrstuvwxyz01234567890123"), // pragma: allowlist secret
         ("OpenAI key, short form", "sk-abcdef0123456789abcdef01"), // pragma: allowlist secret
-        ("Slack token", "xoxb-1234-5678-abcdEFGH"), // pragma: allowlist secret
+        ("Slack token", "xoxb-1234-5678-abcdEFGH"),            // pragma: allowlist secret
         // Unchanged families, re-asserted because the changed predicates all sit
         // on the path these take.
         ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"), // pragma: allowlist secret
@@ -1845,11 +1855,224 @@ fn known_accepted_bounds_after_4898() {
          shape-gated, for `sk-`/`ghp_`/`xoxb-`. A long prose token that starts \
          with one is still flagged."
     );
-    // The AWS prefixes ARE shape-gated (all-uppercase alphanumeric), which is
-    // what removes the `Asia…` prose class entirely rather than by length alone.
+    // The AWS prefixes are shape-gated over the first SECRET_MIN_LEN bytes.
+    //
+    // These two assertions are a PAIR and must be read together (#4898 review
+    // round 1). The first cut of `is_aws_access_key_id` checked the whole token,
+    // which satisfied the `ASIA-PACIFIC…` half while silently losing every AWS
+    // key with a neighbouring character — so an assertion on the prose token
+    // alone passes in both the correct and the broken world and discriminates
+    // nothing. What separates them is where the non-key character sits: inside
+    // the first 20 bytes (prose) or after them (a real key with a suffix).
     assert!(
         find_secret_token("ASIA-PACIFIC-ROLLOUT-NOTES").is_none(),
-        "#4898: an all-uppercase but punctuation-bearing `ASIA…` token is not \
-         an AWS key id shape and must not be flagged"
+        "#4898: `ASIA-PACIFIC-ROLLOUT-NOTES` breaks the key-id shape at byte 4, \
+         inside the first 20, so it is prose and must not be flagged"
     );
+    assert!(
+        find_secret_token("ASIAY34FZKBOKMUTVA7Q-staging").is_some(), // pragma: allowlist secret
+        "#4898: `ASIAY34FZKBOKMUTVA7Q-staging` holds the key-id shape for a full \
+         20 bytes and breaks it only afterwards, so it is a real AWS key id with \
+         a suffix and must STILL be flagged. If this fails while the assertion \
+         above passes, the whole-token regression is back."
+    );
+}
+
+// ---- Issue #4898: generated-encoder corpus ----
+
+/// Why (issue #4898 review round 1, MEDIUM finding): every hand-written battery
+/// in this file is a list of shapes someone thought of. Two of the three defects
+/// found in review lived in encoder output nobody had written down —
+/// `j1u7nJd+tvZers+wdZyr` and `9h6Nn6_ivJd6vmb-xEk4` are both what
+/// `base64(urandom(15))` actually produces, and both flipped FLAG -> MISS. A
+/// generated corpus is the only thing that finds those.
+///
+/// What: xorshift64*, seeded by constant, so the corpus is byte-identical on
+/// every machine and every run. No `rand` dev-dependency, no flake.
+/// Test: used by `generated_encoder_corpus_stays_flagged`.
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn fill(&mut self, buf: &mut [u8]) {
+        for b in buf.iter_mut() {
+            *b = (self.next_u64() >> 24) as u8;
+        }
+    }
+}
+
+/// Standard base64 (`A–Za–z0–9+/`) and base64url (`A–Za–z0–9-_`) alphabets.
+fn b64_alphabet(url_safe: bool) -> Vec<u8> {
+    let mut a: Vec<u8> = Vec::with_capacity(64);
+    a.extend(b'A'..=b'Z');
+    a.extend(b'a'..=b'z');
+    a.extend(b'0'..=b'9');
+    if url_safe {
+        a.extend_from_slice(b"-_");
+    } else {
+        a.extend_from_slice(b"+/");
+    }
+    a
+}
+
+/// Minimal base64 encoder — this file cannot take a dev-dependency on `base64`
+/// (it is an optional production dep behind a feature the memory-core test
+/// profile does not enable).
+fn b64_encode(bytes: &[u8], alphabet: &[u8], pad: bool) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(alphabet[((n >> 18) & 63) as usize] as char);
+        out.push(alphabet[((n >> 12) & 63) as usize] as char);
+        match chunk.len() {
+            1 => {
+                if pad {
+                    out.push_str("==");
+                }
+            }
+            2 => {
+                out.push(alphabet[((n >> 6) & 63) as usize] as char);
+                if pad {
+                    out.push('=');
+                }
+            }
+            _ => {
+                out.push(alphabet[((n >> 6) & 63) as usize] as char);
+                out.push(alphabet[(n & 63) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// Count how many of `n` generated encoder tokens the detector MISSES.
+fn encoder_miss_count(seed: u64, n: usize, input_len: usize, url_safe: bool, pad: bool) -> usize {
+    let mut rng = Xorshift(seed);
+    let alphabet = b64_alphabet(url_safe);
+    let mut buf = vec![0u8; input_len];
+    let mut misses = 0usize;
+    for _ in 0..n {
+        rng.fill(&mut buf);
+        let tok = b64_encode(&buf, &alphabet, pad);
+        if find_secret_token(&tok).is_none() {
+            misses += 1;
+        }
+    }
+    misses
+}
+
+/// Why (issue #4898 review round 1, MEDIUM finding): a ratchet on generated
+/// encoder output. Two of the three defects found in review lived in shapes
+/// nobody had written into a battery.
+///
+/// Read the ceilings as a ratchet, not as a pass mark. Most of each count is a
+/// PRE-EXISTING baseline this PR neither caused nor fixes: unpadded base64 that
+/// happens to carry no `+` or `/` never reaches the base64 branch, and
+/// `find_secret_token` trims trailing `=` off a token before classifying it, so
+/// padded base64 loses its padding too. Both fall to the mixed-case branch,
+/// which needs all three character classes present.
+///
+/// Measured at this seed and N against `origin/main` (`c679c3c3`) and this
+/// branch:
+///
+/// ```text
+///                          origin/main   this branch   delta
+///   base64        15 bytes     7472          7472          0
+///   base64        16 bytes     6289          6289          0
+///   base64        20 bytes     6620          6620          0
+///   base64 padded 17 bytes     6342          6343         +1
+///   base64 padded 25 bytes     7203          7203          0
+///   base64url     15 bytes      970          1012        +42
+///   base64url     16 bytes      799           833        +34
+///   base64url     20 bytes      286           291         +5
+/// ```
+///
+/// The base64 column is zero because `is_plus_joined_word_phrase`'s
+/// character-class-uniformity gate closed it; at 300k samples the residue is 1.
+/// The base64url column is the KNOWN RESIDUAL MISS documented on
+/// [`is_human_word_segment`], carried deliberately — see that doc for why the
+/// narrowing that would close it costs the `gapA` class this PR exists to fix.
+/// What: 30k generated tokens per configuration, asserting the miss count is at
+/// or below the pinned ceiling.
+/// Test: itself.
+#[test]
+fn generated_encoder_corpus_stays_flagged() {
+    const N: usize = 30_000;
+    const SEED: u64 = 0x4898_1234_5678_9abc;
+    for (label, url_safe, input_len, pad, ceiling) in [
+        ("base64", false, 15usize, false, 7472usize),
+        ("base64", false, 16, false, 6289),
+        ("base64", false, 20, false, 6620),
+        ("base64 padded", false, 17, true, 6343),
+        ("base64 padded", false, 25, true, 7203),
+        ("base64url", true, 15, false, 1012),
+        ("base64url", true, 16, false, 833),
+        ("base64url", true, 20, false, 291),
+    ] {
+        let misses = encoder_miss_count(SEED, N, input_len, url_safe, pad);
+        assert!(
+            misses <= ceiling,
+            "#4898 ratchet: {label} at {input_len} input bytes missed {misses} of \
+             {N}, above the pinned ceiling {ceiling}. Something widened the \
+             structural bypass — re-measure against origin/main before touching \
+             this number."
+        );
+    }
+}
+
+/// Why (issue #4898 review round 1, CRITICAL finding): the first cut of
+/// `is_aws_access_key_id` required the WHOLE token to be uppercase-alphanumeric,
+/// converting what had been a prefix predicate into a shape predicate. One
+/// adjacent character then dropped the token through to `is_structural_token`,
+/// whose segmented-identifier branch rescued it, and the mixed-case branch could
+/// not fire because an AWS key id has no lowercase. AWS detection was lost
+/// entirely for any key not standing completely alone — including AWS's own
+/// canonical key-id/secret-key pair, which stored clean.
+///
+/// Every row below was verified FLAG on `origin/main` (`c679c3c3`) and MISS on
+/// the first cut of this branch. They are the discriminating cases: a test that
+/// only asserts the bare 20-character key id passes in both worlds.
+/// What: asserts AWS key ids stay flagged with text on either side, at both the
+/// token predicate and the `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn aws_key_ids_with_adjacent_text_are_blocked() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        ("trailing hyphen suffix", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+        ("file extension", "AKIAIOSFODNN7EXAMPLE.csv"),         // pragma: allowlist secret
+        ("STS id with env suffix", "ASIAY34FZKBOKMUTVA7Q-staging"), // pragma: allowlist secret
+        ("underscore suffix", "AKIAIOSFODNN7EXAMPLE_backup"),   // pragma: allowlist secret
+        (
+            // AWS's canonical key-id + secret-access-key pair.
+            "key id followed by secret access key",
+            "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#4898 ({label}): an AWS key id with an adjacent character must STILL \
+             be flagged: {tok}"
+        );
+        let prose = format!("Rotate {tok} before Friday");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#4898 ({label}): the gate must REJECT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
 }
