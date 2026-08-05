@@ -10,8 +10,9 @@ budget, and no cost-saving, "trivial change", or "documented command" exception.
 
 ## Customizing PM Behavior
 
-The rule itself — one surface (`CLAUDE.md`, nothing else) and one admission
-test (needed on every prompt) — is stated in CORE, the one section a project
+The rule itself — instruction sections are customized in `CLAUDE.md` and
+nowhere else, skills through their own tiers, and only what every prompt needs
+earns a place in `CLAUDE.md` — is stated in CORE, the one section a project
 cannot override. This section carries the mechanics.
 
 Project customization is named sections in the project's root `CLAUDE.md`. A
@@ -63,9 +64,9 @@ delete the file. `tm doctor` fails with `legacy_overrides` until it is gone.
 **Only `CORE` is protected.** Every other section, this one included, can be
 replaced by a named section in the project's `CLAUDE.md`. There is no framework
 floor: a project owns its own `CLAUDE.md`, so a floor would have been the
-appearance of a control rather than a control. That is why the one-surface rule
-is stated in CORE and only restated here — a project could otherwise override
-away the rule telling it not to override elsewhere.
+appearance of a control rather than a control. That is why the customization
+rule is stated in CORE and only pointed at here — a project could otherwise
+override away the rule telling it not to override elsewhere.
 A missing, empty, unclosed, or unreadable marker block falls back to the bundled
 default — an override never blanks a section. Spec of record:
 `docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md`.

@@ -532,16 +532,21 @@ fn framework_guaranteed_conventions_survive_every_override_combination() {
 
 #[test]
 fn one_surface_rule_lives_in_core_and_survives_an_override_attempt() {
-    // The one-surface doctrine has to sit in CORE, not in the floor section
+    // The customization doctrine has to sit in CORE, not in the floor section
     // that documents the mechanics: CORE is the only `fixed`-tier section, so
     // it is the only place a project cannot delete. Stated anywhere else, a
     // project could override away the rule telling it not to override
     // elsewhere.
     const RULE: &[&str] = &[
-        "## Customization Surface (ONE surface, always-on)",
-        // Half 1 — one surface, every other channel banned.
-        "`CLAUDE.md` and NOWHERE else",
-        ".trusty-mpm/` override files",
+        "## Customization Surface (ONE surface per artifact type)",
+        // Half 1 — one surface PER ARTIFACT TYPE. Skills are a deliberate
+        // second surface with their own tiers, so the rule must not read as
+        // "CLAUDE.md and nothing else, ever"; what it bans is a THIRD,
+        // ad-hoc channel duplicating one of the two.
+        "**Prompt/instruction sections**",
+        "**Skills**",
+        "skill tier system",
+        "Ad-hoc override channels are BANNED",
         // Half 2 — the every-prompt admission test, and its corollary.
         "Needed on every prompt",
         "Needed only sometimes",
@@ -552,7 +557,7 @@ fn one_surface_rule_lives_in_core_and_survives_an_override_attempt() {
     for marker in RULE {
         assert!(
             prompt.contains(marker),
-            "bundled prompt must carry the one-surface rule {marker:?}"
+            "bundled prompt must carry the customization rule {marker:?}"
         );
     }
 
