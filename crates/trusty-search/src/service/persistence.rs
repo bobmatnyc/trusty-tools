@@ -386,14 +386,15 @@ pub struct IndexRegistryFile {
 /// `dirs::data_local_dir()` (NSFileManager-backed) can return None on macOS 26:
 /// (1) `TRUSTY_DATA_DIR` env var, (2) `dirs::data_local_dir()`,
 /// (3) `$HOME`-relative path via `service::data_dir::data_dir_home_fallback`.
-/// Issue #4094: in test builds the un-overridden fallback resolves to an
-/// isolated per-process directory instead of the developer's live data dir,
-/// so a test that never sets `TRUSTY_DATA_DIR` cannot register indexes in the
-/// real `indexes.toml` (see [`default_data_dir`]).
+/// Issues #4094 / #4255: in a TEST PROCESS the un-overridden fallback
+/// resolves to an isolated per-process directory instead of the operator's
+/// live data dir, so a test that never sets `TRUSTY_DATA_DIR` cannot register
+/// indexes in the real `indexes.toml` (see [`default_data_dir`]).
 /// What: returns an absolute path, creating the directory if missing.
 /// Test: `data_dir_respects_trusty_data_dir_env_var`, `data_dir_override_yields_absolute_path`,
 /// `data_dir_home_fallback_path_is_absolute`,
-/// `unit_test_data_dir_is_isolated_from_real_user_data_dir`.
+/// `test_harness_data_dir_is_isolated_from_real_user_data_dir`,
+/// `production_data_dir_is_the_real_user_location`.
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
         let dir = PathBuf::from(&override_dir);
