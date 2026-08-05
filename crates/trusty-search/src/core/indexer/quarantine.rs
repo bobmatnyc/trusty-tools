@@ -15,7 +15,9 @@
 //!
 //! What: this module gives `CodeIndexer` a small quarantine surface —
 //! [`CodeIndexer::is_write_quarantined`] (the predicate),
-//! [`CodeIndexer::refuse_incremental_write`] (the enforcement + diagnostic),
+//! [`CodeIndexer::refuse_incremental_write`] (enforcement + diagnostic for the
+//! ingest family), [`CodeIndexer::refuse_durable_write`] (the same for the
+//! snapshot family — see below, #4226),
 //! [`CodeIndexer::refused_incremental_writes`] (the observable counter), and
 //! [`CodeIndexer::clear_corpus_open_failure`] (the way back out, driven by
 //! `set_corpus_store`). The quarantine is deliberately *asymmetric*: refusing
@@ -77,7 +79,9 @@
 //! `debug_assert!`s (in [`CodeIndexer::refuse_incremental_write`] and in
 //! `commit_corpus_to_redb`) exist to make that failure loud instead of silent.
 //!
-//! Test: `crates/trusty-search/tests/corpus_open_quarantine_4122.rs`.
+//! Test: `crates/trusty-search/tests/corpus_open_quarantine_4122.rs` (ingest
+//! family) and `crates/trusty-search/tests/quarantine_durable_writes_4226.rs`
+//! (snapshot family).
 
 use std::sync::atomic::Ordering;
 

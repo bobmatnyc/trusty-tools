@@ -124,8 +124,11 @@ fn seed_legacy_snapshot(path: &Path) -> Vec<RawChunk> {
     });
     std::fs::create_dir_all(path.parent().expect("snapshot has a parent"))
         .expect("create snapshot parent");
-    std::fs::write(path, serde_json::to_vec(&snapshot).expect("serialize snapshot"))
-        .expect("write snapshot");
+    std::fs::write(
+        path,
+        serde_json::to_vec(&snapshot).expect("serialize snapshot"),
+    )
+    .expect("write snapshot");
     chunks
 }
 
