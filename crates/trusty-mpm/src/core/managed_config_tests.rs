@@ -660,13 +660,17 @@ fn ensure_managed_config_dir_deploys_the_project_skill_tier() {
          by the shared choke point, not only by `prepare_session`"
     );
 
-    // The newer text plus an updated project manifest: the trigger fires.
+    // Newer text plus an edited `[skills]` selection: the trigger fires without
+    // a version bump. (The version half is asserted hermetically in
+    // `project_skill_tier_tests::version_bump_redeploys`; this crate's compiled
+    // `CARGO_PKG_VERSION` cannot move mid-test.) The exclude names a DIFFERENT
+    // stem so `probe-skill` stays selected.
     seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
     let framework = crate::core::harness_root::framework_dir(&workspace);
     std::fs::create_dir_all(&framework).unwrap();
     std::fs::write(
         framework.join("manifest.toml"),
-        "[style]\nactive = \"probe-style\"\n",
+        "[skills]\nexclude = [\"something-else\"]\n",
     )
     .unwrap();
 
@@ -675,7 +679,7 @@ fn ensure_managed_config_dir_deploys_the_project_skill_tier() {
     assert_eq!(
         std::fs::read_to_string(&project_copy).unwrap(),
         "---\nname: probe-skill\n---\n\nV2\n",
-        "an updated project manifest must refresh the project tier on resume"
+        "an updated skill selection must refresh the project tier on resume"
     );
 }
 
@@ -713,6 +717,6 @@ fn ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged() {
 
     assert_eq!(
         before, after,
-        "an unchanged project manifest must take the stamp no-op path"
+        "an unchanged version and selection must take the stamp no-op path"
     );
 }

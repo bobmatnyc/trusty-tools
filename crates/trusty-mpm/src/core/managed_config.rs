@@ -245,8 +245,14 @@ pub fn ensure_managed_config_dir_with_root(
     // whenever the project manifest stamp still matches.
     match crate::core::project_skill_tier::ensure_project_skill_tier(fw, project_dir) {
         Ok(project) => {
-            if let Some(line) = skill_skip_summary(&project.stats.skipped) {
-                tracing::warn!("project skill tier: {line}");
+            // Deliberately NOT routed through `skill_skip_summary`: a skipped
+            // project-tier skill is a local customization the model says must
+            // survive, so pointing at a remedy would contradict it.
+            if project.deployed && !project.stats.skipped.is_empty() {
+                tracing::info!(
+                    preserved = project.stats.skipped.len(),
+                    "project skill tier: local copies preserved across the redeploy"
+                );
             }
         }
         Err(err) => {
