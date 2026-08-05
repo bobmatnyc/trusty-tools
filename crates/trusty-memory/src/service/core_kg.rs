@@ -39,8 +39,25 @@ impl MemoryService {
     }
 
     /// Assert a triple in the KG.
+    ///
+    /// #4888: this is the HTTP counterpart of the `kg_assert` MCP tool
+    /// (`POST /api/v1/palaces/{id}/kg`) and accepts an arbitrary predicate, so
+    /// it can write a hot predicate and must carry the same Tier S gate. It is
+    /// not a hypothetical path — `trusty-mpm`'s provisioner seeds its identity
+    /// fact through exactly this endpoint. A gate on the MCP tools alone would
+    /// read as protection while leaving the surface writable.
     pub async fn kg_assert(&self, id: &str, body: KgAssertBody) -> ServiceResult<()> {
         let handle = self.open_handle(id)?;
+        // `_admission` holds the admission lock until after `kg.assert` below.
+        let _admission = crate::prompt_facts::check_tier_s_admission(
+            &self.state,
+            &handle,
+            &body.subject,
+            &body.predicate,
+            &body.object,
+        )
+        .await
+        .map_err(|e| ServiceError::bad_request(format!("{e:#}")))?;
         let triple = Triple {
             subject: body.subject,
             predicate: body.predicate,
