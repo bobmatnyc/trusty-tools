@@ -1,0 +1,312 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-base hook",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-after hook",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/private/tmp/tm-before hook",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/Users/masa/.cargo/bin/trusty-mpm hook",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-base hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-after hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/tm-before hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/masa/.cargo/bin/tm hook --pm-guard",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/masa/.cargo/bin/trusty-mpm hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-base hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-after hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/tm-before hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/masa/.cargo/bin/trusty-mpm hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-base hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-after hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/tm-before hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "trusty-memory inbox-check",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/masa/.cargo/bin/trusty-mpm hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-base hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-after hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/tm-before hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/masa/.cargo/bin/trusty-mpm hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-base hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/240d410c-e044-4a0a-83cb-f60a09b55e6a/scratchpad/base-bins/mpm-lib-after hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/private/tmp/tm-before hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/Users/masa/.cargo/bin/trusty-mpm hook",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "trusty-memory prompt-context",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  },
+  "outputStyle": "trusty-mpm",
+  "spinnerTipsEnabled": true,
+  "spinnerTipsOverride": {
+    "tips": [
+      "tm launch — start a configured claude session for this project",
+      "make check = cargo test + clippy + fmt — must pass before any PR",
+      "API → CLI → TUI: implement at the lowest layer first",
+      "Delegate Rust code to rust-engineer — PM never edits .rs files",
+      "gh issue create to track work; commits include Closes #N",
+      "tmux ls shows all active tm-<project>-NN sessions",
+      "tm session list shows daemon-managed sessions",
+      "/compact at ~50% context to stay focused",
+      "Layer new features behind the HTTP API before wiring CLI or TUI"
+    ]
+  },
+  "statusLine": {
+    "command": "/Users/masa/.cargo/bin/trusty-mpm statusline",
+    "padding": 0,
+    "type": "command"
+  }
+}
