@@ -90,34 +90,91 @@ pub enum Rollback {
 pub enum RollbackPlan {
     /// Rewrite the previous plist and bootstrap it again.
     RestorePrevious,
-    /// Delete the half-written plist and leave the running job alone.
-    RemoveOnly,
+    /// Keep the plist just written and bootstrap it, because the job that was
+    /// running is already gone and this is the only unit left to revive.
+    ReviveWritten,
     /// Delete the half-written plist and boot the label out.
     RemoveAndBootout,
 }
 
 /// Decide what a failed activation should undo.
 ///
-/// Why (#4868 review): the pre-review code treated "no previous plist" as "no
-/// service was running" and booted the label out. launchd keeps a job
-/// REGISTERED after its plist file is deleted, so that combination is reachable
-/// on a real host — and the bootout then took down a daemon that had been
-/// running fine, in the name of rolling back.
+/// Why (#4868 review, round 2): the round-1 fix stopped the bootout but still
+/// left the service down while reporting otherwise. `LaunchdConfig::bootstrap`
+/// calls `bootout` FIRST, so by the time rollback runs on the
+/// `has_previous == false, was_loaded == true` path, the job that WAS running
+/// is already gone. Deleting the plist and returning "nothing was taken down"
+/// then produced the worst possible combination: service down, plist gone, and
+/// a message saying neither happened.
 ///
-/// What: a previous plist means restore it. With none, the label is left alone
-/// if it was already loaded before this attempt, and booted out only if it was
-/// not — which is the state the attempt found.
+/// The job that was running had no plist on disk, so it cannot be reconstructed
+/// — launchd held it in memory. The only unit left that names the same label is
+/// the one just written, so reviving THAT is the best available recovery, and
+/// failing to revive it must be reported as an outage rather than swallowed.
+///
+/// What: a previous plist means restore it. With none but a label that was
+/// loaded, keep and bootstrap the plist just written. With none and nothing
+/// loaded, remove the plist and boot out — that is genuinely the state the
+/// attempt found.
 /// Test: `rollback_plan_restores_a_previous_unit`,
-/// `rollback_plan_leaves_a_live_label_alone_when_there_was_no_plist`,
-/// `rollback_plan_boots_out_a_label_it_started_itself`.
+/// `rollback_plan_revives_the_written_unit_when_a_live_job_was_displaced`,
+/// `rollback_plan_boots_out_a_label_it_started_itself`, and the effect tests
+/// `rollback_execution_*`.
 #[must_use]
 pub fn rollback_plan(has_previous: bool, was_loaded: bool) -> RollbackPlan {
     if has_previous {
         RollbackPlan::RestorePrevious
     } else if was_loaded {
-        RollbackPlan::RemoveOnly
+        RollbackPlan::ReviveWritten
     } else {
         RollbackPlan::RemoveAndBootout
+    }
+}
+
+/// Carry out a [`RollbackPlan`] against injected effects.
+///
+/// Why: the defect this fixes was never in the plan VALUE — round-1 tests
+/// asserted the plan and passed while the service was down. It was in what the
+/// plan DID. Taking the effects as closures lets the outcome be asserted
+/// without launchd.
+///
+/// What: `write_previous` returns whether the previous plist was restored to
+/// disk; `remove_plist` deletes the plist just written; `bootstrap` returns
+/// whether the label is loaded afterwards. Returns [`Rollback::Failed`]
+/// whenever the service is left down.
+/// Test: `rollback_execution_reports_failure_when_revival_fails`,
+/// `rollback_execution_keeps_the_written_plist_when_reviving`,
+/// `rollback_execution_reports_restored_only_when_bootstrap_succeeds`.
+pub fn execute_rollback(
+    plan: RollbackPlan,
+    write_previous: impl FnOnce() -> bool,
+    remove_plist: impl FnOnce(),
+    bootstrap: impl FnOnce() -> bool,
+) -> Rollback {
+    match plan {
+        RollbackPlan::RestorePrevious => {
+            if !write_previous() {
+                return Rollback::Failed;
+            }
+            if bootstrap() {
+                Rollback::Restored
+            } else {
+                Rollback::Failed
+            }
+        }
+        RollbackPlan::ReviveWritten => {
+            // Deliberately does NOT remove the plist: it is the only unit left
+            // naming this label, and the job that was running is already gone.
+            if bootstrap() {
+                Rollback::Restored
+            } else {
+                Rollback::Failed
+            }
+        }
+        RollbackPlan::RemoveAndBootout => {
+            remove_plist();
+            Rollback::NothingToRestore
+        }
     }
 }
 
@@ -244,10 +301,14 @@ impl LaunchdConfig {
     /// Why: an upgrade that only bootstraps its new label leaves the old unit
     /// running — two daemons on one port (#2938). Deleting the plist as well is
     /// what stops the next `launchctl bootstrap` from resurrecting it.
+    /// #4868 review: also called from `service uninstall`. Removing only the
+    /// canonical plist on a not-yet-migrated host printed "nothing to do" and
+    /// left the legacy unit loaded — an uninstall that uninstalls nothing.
+    ///
     /// What: best-effort per label; a legacy unit that is absent, not loaded, or
     /// refuses to unload never fails the install, because the canonical unit is
     /// still the thing being installed.
-    fn evict_legacy(&self, legacy_labels: &[&str]) -> Vec<String> {
+    pub fn evict_legacy(&self, legacy_labels: &[&str]) -> Vec<String> {
         let mut evicted = Vec::new();
         for legacy in legacy_labels {
             let mut alias = self.clone();
@@ -295,37 +356,30 @@ impl LaunchdConfig {
     /// failed and it was. The outcome is returned so the message can tell the
     /// truth.
     ///
-    /// What: executes [`rollback_plan`], reporting whether the previous unit is
-    /// actually running again.
-    /// Test: the decision is covered by `rollback_plan_*`; the `launchctl` calls
-    /// are side-effecting and are exercised by the daemons' `service install`.
+    /// What: binds this config's real filesystem and `launchctl` effects into
+    /// [`execute_rollback`], and boots the label out on the remove path.
+    /// Test: the decision is covered by `rollback_plan_*` and the outcome by
+    /// `rollback_execution_*`; the `launchctl` calls themselves are
+    /// side-effecting and are exercised by the daemons' `service install`.
     fn roll_back(
         &self,
         plist_path: &std::path::Path,
         previous: Option<&str>,
         was_loaded: bool,
     ) -> Rollback {
-        match rollback_plan(previous.is_some(), was_loaded) {
-            RollbackPlan::RestorePrevious => {
-                let bytes = previous.unwrap_or_default();
-                if std::fs::write(plist_path, bytes).is_err() {
-                    return Rollback::Failed;
-                }
-                if self.bootstrap().is_err() || !self.is_loaded() {
-                    return Rollback::Failed;
-                }
-                Rollback::Restored
-            }
-            RollbackPlan::RemoveOnly => {
+        let plan = rollback_plan(previous.is_some(), was_loaded);
+        let outcome = execute_rollback(
+            plan,
+            || previous.is_some_and(|bytes| std::fs::write(plist_path, bytes).is_ok()),
+            || {
                 let _ = std::fs::remove_file(plist_path);
-                Rollback::NothingToRestore
-            }
-            RollbackPlan::RemoveAndBootout => {
-                let _ = std::fs::remove_file(plist_path);
-                let _ = self.bootout();
-                Rollback::NothingToRestore
-            }
+            },
+            || self.bootstrap().is_ok() && self.is_loaded(),
+        );
+        if plan == RollbackPlan::RemoveAndBootout {
+            let _ = self.bootout();
         }
+        outcome
     }
 }
 
@@ -356,18 +410,89 @@ mod tests {
         assert_eq!(rollback_plan(true, false), RollbackPlan::RestorePrevious);
     }
 
-    /// Why (#4868 review): launchd keeps a job REGISTERED after its plist file
-    /// is deleted, so "no previous plist" does not mean "nothing was running".
-    /// The pre-review code booted out on that combination and took down a
-    /// healthy daemon in the name of rolling back.
-    /// What: with no previous plist but a live label, the job is left alone.
+    /// Why (#4868 review, round 2): `bootstrap` boots out FIRST, so on this path
+    /// the job that was running is already gone before rollback runs. Round 1
+    /// deleted the plist and reported "nothing was taken down" — service down,
+    /// plist gone, message wrong.
+    /// What: with no previous plist but a label that WAS loaded, the unit just
+    /// written is kept and revived.
     /// Test: this is the test.
     #[test]
-    fn rollback_plan_leaves_a_live_label_alone_when_there_was_no_plist() {
+    fn rollback_plan_revives_the_written_unit_when_a_live_job_was_displaced() {
         assert_eq!(
             rollback_plan(false, true),
-            RollbackPlan::RemoveOnly,
-            "a rollback must never boot out a daemon that was already running"
+            RollbackPlan::ReviveWritten,
+            "the displaced job cannot be reconstructed, so the written unit is \
+             the only thing left that can restore service"
+        );
+    }
+
+    /// Why: the round-1 tests asserted the plan VALUE and passed while the
+    /// stated goal — service not left down — was unmet. These assert the EFFECT.
+    /// What: reviving without a working bootstrap reports `Failed`, which is
+    /// what makes the caller print "THE SERVICE IS DOWN".
+    /// Test: this is the test.
+    #[test]
+    fn rollback_execution_reports_failure_when_revival_fails() {
+        let mut removed = false;
+        let outcome = execute_rollback(
+            RollbackPlan::ReviveWritten,
+            || unreachable!("no previous plist on this path"),
+            || removed = true,
+            || false,
+        );
+        assert_eq!(
+            outcome,
+            Rollback::Failed,
+            "a failed revival leaves the service down and must say so"
+        );
+        assert!(
+            !removed,
+            "the written plist is the only unit naming this label — deleting it \
+             removes the last chance of recovery"
+        );
+    }
+
+    /// Why: the plist just written must survive the revive path, or a later
+    /// manual bootstrap has no file to work from.
+    /// What: a successful revival reports `Restored` and removes nothing.
+    /// Test: this is the test.
+    #[test]
+    fn rollback_execution_keeps_the_written_plist_when_reviving() {
+        let mut removed = false;
+        let outcome = execute_rollback(
+            RollbackPlan::ReviveWritten,
+            || unreachable!("no previous plist on this path"),
+            || removed = true,
+            || true,
+        );
+        assert_eq!(outcome, Rollback::Restored);
+        assert!(!removed);
+    }
+
+    /// Why: writing the previous plist back is not the same as running it. A
+    /// restore whose bootstrap fails is an outage, not a recovery.
+    /// What: `Restored` only when the write AND the bootstrap both succeed.
+    /// Test: this is the test.
+    #[test]
+    fn rollback_execution_reports_restored_only_when_bootstrap_succeeds() {
+        assert_eq!(
+            execute_rollback(RollbackPlan::RestorePrevious, || true, || {}, || true),
+            Rollback::Restored
+        );
+        assert_eq!(
+            execute_rollback(RollbackPlan::RestorePrevious, || true, || {}, || false),
+            Rollback::Failed,
+            "a restored file that will not load is still a down service"
+        );
+        assert_eq!(
+            execute_rollback(
+                RollbackPlan::RestorePrevious,
+                || false,
+                || {},
+                || { unreachable!("must not bootstrap when the write failed") }
+            ),
+            Rollback::Failed
         );
     }
 
@@ -378,6 +503,15 @@ mod tests {
     #[test]
     fn rollback_plan_boots_out_a_label_it_started_itself() {
         assert_eq!(rollback_plan(false, false), RollbackPlan::RemoveAndBootout);
+        let mut removed = false;
+        let outcome = execute_rollback(
+            RollbackPlan::RemoveAndBootout,
+            || unreachable!("no previous plist on this path"),
+            || removed = true,
+            || unreachable!("nothing to revive when nothing was running"),
+        );
+        assert_eq!(outcome, Rollback::NothingToRestore);
+        assert!(removed, "a unit that never came up must not be left behind");
     }
 
     /// Why (#4868 review): the plist is not the whole unit. `make deploy`

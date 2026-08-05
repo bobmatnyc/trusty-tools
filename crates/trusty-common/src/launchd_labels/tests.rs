@@ -170,15 +170,16 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
             continue;
         };
         for line in production_lines(&body, kind) {
-            // Codesign / bundle identifiers are a different namespace that uses
-            // the full binary name deliberately; renaming one invalidates a
-            // binary's designated requirement and re-triggers macOS TCC prompts
-            // (#2558). They are always an explicit `--identifier` or a
-            // `*_IDENTIFIER` assignment, never a launchd label.
-            if line.contains("--identifier") || line.contains("IDENTIFIER=") {
-                continue;
-            }
-            for label in extract_labels(&line) {
+            // Naming a legacy label in order to EVICT it is the one correct use
+            // of one. A `launchctl bootout`/`unload` line in a build file is
+            // doing exactly the migration this issue is about; the bug is
+            // naming a legacy label to install, load, or point a user at.
+            let evicting =
+                kind != Kind::Rust && (line.contains("bootout") || line.contains("unload"));
+            for label in extract_labels(&codesign_stripped(&line)) {
+                if evicting && legacy_labels_for_any().contains(&label.as_str()) {
+                    continue;
+                }
                 // A Makefile, shell script or plist cannot import a Rust
                 // constant, so naming the CANONICAL label is the best it can
                 // do. What it must never carry is a legacy or unknown label —
@@ -237,12 +238,13 @@ enum Kind {
 fn production_lines(body: &str, kind: Kind) -> Vec<String> {
     let mut out = Vec::new();
     let mut lines = body.lines().peekable();
+    let mut in_block_comment = false;
     while let Some(line) = lines.next() {
-        if kind == Kind::Rust && is_test_cfg_attribute(line) {
-            skip_test_item(&mut lines);
+        if kind == Kind::Rust && !in_block_comment && is_test_cfg_attribute(line) {
+            skip_test_item(line, &mut lines);
             continue;
         }
-        let code = strip_comment(line, kind);
+        let code = strip_comment(line, kind, &mut in_block_comment);
         if !code.trim().is_empty() {
             out.push(code);
         }
@@ -252,12 +254,26 @@ fn production_lines(body: &str, kind: Kind) -> Vec<String> {
 
 /// Whether a line is a `#[cfg(…)]` attribute gating on the `test` cfg.
 ///
-/// Why: a substring check for `test` also fires on
-/// `#[cfg(feature = "embedder-test-support")]`, which gates PRODUCTION code —
-/// skipping the item it guards would reopen the hole this function exists to
-/// close.
-/// What: true only when the attribute contains `test` as a standalone token
-/// (not part of a longer identifier such as `embedder-test-support`).
+/// Whether a `#[cfg(…)]` attribute gates code that exists ONLY under `cfg(test)`.
+///
+/// Why: three separate ways to get this wrong, each of which silences the scan
+/// over production code.
+///
+/// 1. A substring match for `test` fires on
+///    `#[cfg(feature = "embedder-test-support")]`, which gates production code.
+/// 2. #4868 review: POLARITY. `#[cfg(not(test))]` gates code that exists in
+///    every NON-test build — the most production a thing can be — and
+///    `#[cfg(any(…, test))]` gates code that exists in test builds AND others.
+///    Treating either as "a test item" made `skip_test_item` swallow exactly
+///    the code it was supposed to read. Literals planted inside
+///    `#[cfg(not(test))] fn cache_base_dir()` and an `any(…, test)` function
+///    both passed the guard; eight such sites exist in this workspace.
+/// 3. `all(test, …)` IS test-only, because every conjunct must hold.
+///
+/// What: true only when a standalone `test` token appears outside any `not(…)`
+/// and outside any `any(…)`. Everything else is production.
+/// Test: `production_lines_keeps_a_feature_cfg_that_merely_contains_test`,
+/// `is_test_cfg_attribute_respects_polarity`.
 fn is_test_cfg_attribute(line: &str) -> bool {
     let t = line.trim_start();
     if !t.starts_with("#[cfg(") {
@@ -266,9 +282,12 @@ fn is_test_cfg_attribute(line: &str) -> bool {
     let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     let mut rest = t;
     while let Some(idx) = rest.find("test") {
-        let before_ok = rest[..idx].chars().next_back().is_none_or(|c| !is_ident(c));
+        let before = &rest[..idx];
+        let before_ok = before.chars().next_back().is_none_or(|c| !is_ident(c));
         let after_ok = rest[idx + 4..].chars().next().is_none_or(|c| !is_ident(c));
-        if before_ok && after_ok {
+        // A standalone `test` still does not make the item test-only if it sits
+        // under a `not(` or an `any(` that is still open at this point.
+        if before_ok && after_ok && !under_negation_or_disjunction(before) {
             return true;
         }
         rest = &rest[idx + 4..];
@@ -276,11 +295,65 @@ fn is_test_cfg_attribute(line: &str) -> bool {
     false
 }
 
+/// Whether the text preceding a `test` token leaves a `not(` or `any(` open.
+///
+/// What: walks the prefix tracking parenthesis depth, recording the depth at
+/// which each `not(` / `any(` opened, and reports whether any such combinator
+/// is still unclosed at the end of the prefix.
+fn under_negation_or_disjunction(prefix: &str) -> bool {
+    let bytes = prefix.as_bytes();
+    let mut depth: i32 = 0;
+    let mut open_combinators: Vec<i32> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            let head = prefix[..i].trim_end();
+            if head.ends_with("not") || head.ends_with("any") {
+                open_combinators.push(depth);
+            }
+            depth += 1;
+        } else if bytes[i] == b')' {
+            depth -= 1;
+            open_combinators.retain(|d| *d < depth);
+        }
+        i += 1;
+    }
+    !open_combinators.is_empty()
+}
+
 /// Consume the item a `#[cfg(test)]` attribute applies to.
 ///
-/// What: a declaration or `use` ending in `;` costs exactly one line; a braced
-/// item is consumed until its braces balance.
-fn skip_test_item<'a>(lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>) {
+/// Why (#4868 review): `#[cfg(test)] use std::fmt;` puts the attribute and the
+/// item on ONE line. Unconditionally consuming from the NEXT line therefore ate
+/// a line of production code — a literal planted there passed the guard.
+///
+/// What: returns immediately when the attribute line already carries its whole
+/// item (a `;`-terminated statement, or braces that balance on that line).
+/// Otherwise a declaration ending in `;` costs one line and a braced item is
+/// consumed until its braces balance.
+/// Test: `skip_test_item_consumes_nothing_when_the_item_is_on_the_attribute_line`.
+fn skip_test_item<'a>(
+    attr_line: &str,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) {
+    // Everything after the closing `]` of the attribute, if anything.
+    let tail = attr_line
+        .rsplit_once("])")
+        .map_or_else(|| attr_line.rsplit_once(']').map(|(_, t)| t), |_| None)
+        .unwrap_or("")
+        .trim();
+    if !tail.is_empty() {
+        let opens = tail.matches('{').count();
+        let closes = tail.matches('}').count();
+        if tail.ends_with(';') || (opens > 0 && opens == closes) {
+            return;
+        }
+        if opens > closes {
+            consume_until_balanced(lines, i32::try_from(opens - closes).unwrap_or(1));
+            return;
+        }
+    }
+
     let mut depth: i32 = 0;
     let mut opened = false;
     for line in lines.by_ref() {
@@ -299,22 +372,59 @@ fn skip_test_item<'a>(lines: &mut std::iter::Peekable<impl Iterator<Item = &'a s
     }
 }
 
+/// Consume lines until an already-open brace nesting closes.
+fn consume_until_balanced<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    mut depth: i32,
+) {
+    for line in lines.by_ref() {
+        depth += i32::try_from(line.matches('{').count()).unwrap_or(0);
+        depth -= i32::try_from(line.matches('}').count()).unwrap_or(0);
+        if depth <= 0 {
+            return;
+        }
+    }
+}
+
 /// Remove the comment portion of a line for the given file kind.
-fn strip_comment(line: &str, kind: Kind) -> String {
+///
+/// Why (#4868 review): the Rust arm used to blank any line whose trimmed start
+/// was `*`, as a proxy for "inside a block comment". That also blanked a deref
+/// assignment — `*target = "com.trusty.trusty-search".to_string();` passed the
+/// guard while the identical `let` form failed. Block-comment state is now
+/// tracked across lines instead of guessed at from one.
+///
+/// What: `in_block_comment` carries `/* … */` state between calls. A line
+/// inside a block comment, or a `//`-prefixed line, yields empty. Note that a
+/// continuation line of a multi-line Rust STRING literal carries no quote of
+/// its own, so quote-presence is not usable as a filter — that is how the
+/// `com.trusty.mpm.plist` hints in `daemon_bridge` and `serve_stdio` (the #2827
+/// defect class) initially escaped this scan.
+/// Test: `strip_comment_keeps_a_deref_assignment`,
+/// `strip_comment_tracks_block_comment_state`.
+fn strip_comment(line: &str, kind: Kind, in_block_comment: &mut bool) -> String {
     let t = line.trim_start();
     match kind {
-        // A continuation line of a multi-line Rust string literal carries no
-        // quote of its own, so quote-presence is NOT usable as the filter —
-        // that is how the `com.trusty.mpm.plist` hints in `daemon_bridge` and
-        // `serve_stdio` (the #2827 defect class: a hint naming a plist launchd
-        // does not have) initially escaped this scan. Drop whole-line comments
-        // and block-comment bodies instead.
         Kind::Rust => {
-            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
-                String::new()
-            } else {
-                line.to_string()
+            if *in_block_comment {
+                // The comment ends here; anything after `*/` is code again.
+                if let Some((_, after)) = line.split_once("*/") {
+                    *in_block_comment = false;
+                    return after.to_string();
+                }
+                return String::new();
             }
+            if t.starts_with("//") {
+                return String::new();
+            }
+            if let Some((before, rest)) = line.split_once("/*") {
+                if let Some((_, after)) = rest.split_once("*/") {
+                    return format!("{before}{after}");
+                }
+                *in_block_comment = true;
+                return before.to_string();
+            }
+            line.to_string()
         }
         Kind::Hash => line.split('#').next().unwrap_or("").to_string(),
         Kind::Xml => {
@@ -467,6 +577,195 @@ fn production_lines_strips_hash_comments() {
     let kept = production_lines(body, Kind::Hash);
     assert_eq!(kept.len(), 1);
     assert!(kept[0].contains("com.trusty.search"));
+}
+
+/// Why (#4868 review, round 2): POLARITY. `#[cfg(not(test))]` gates code that
+/// exists in every non-test build, and `#[cfg(any(…, test))]` gates code that
+/// exists in test builds AND others — both are PRODUCTION. Treating them as
+/// test items made the scan skip exactly what it should read; literals planted
+/// inside a `not(test)` function and an `any(…, test)` function both passed.
+/// Eight such sites exist in this workspace.
+/// What: `test` under `not(…)` or `any(…)` is production; bare `test` and
+/// `all(test, …)` are test-only.
+/// Test: this is the test.
+#[test]
+fn is_test_cfg_attribute_respects_polarity() {
+    assert!(is_test_cfg_attribute("#[cfg(test)]"));
+    assert!(is_test_cfg_attribute(
+        "#[cfg(all(test, target_os = \"macos\"))]"
+    ));
+
+    assert!(
+        !is_test_cfg_attribute("#[cfg(not(test))]"),
+        "`not(test)` gates code present in every non-test build"
+    );
+    assert!(
+        !is_test_cfg_attribute(
+            "#[cfg(any(all(target_os = \"macos\", target_arch = \"aarch64\"), test))]"
+        ),
+        "`any(…, test)` gates code present outside test builds too"
+    );
+    assert!(!is_test_cfg_attribute("#[cfg(all(not(test), unix))]"));
+}
+
+/// Why: the polarity fix only matters if the scan actually reads the body it
+/// stops skipping.
+/// What: a literal inside a `#[cfg(not(test))]` function is retained.
+/// Test: this is the test.
+#[test]
+fn production_lines_reads_bodies_gated_on_not_test() {
+    let body =
+        "#[cfg(not(test))]\nfn cache_base_dir() {\n    let x = \"com.trusty.trusty-search\";\n}\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(
+        kept.iter().any(|l| l.contains("com.trusty.trusty-search")),
+        "a `not(test)` body is production and must be scanned, kept: {kept:?}"
+    );
+}
+
+/// Why (#4868 review, round 2): `strip_comment` blanked any line whose trimmed
+/// start was `*`, as a proxy for "inside a block comment". A deref assignment
+/// starts with `*` too, so `*target = "com.trusty.trusty-search".to_string();`
+/// passed the guard while the identical `let` form failed.
+/// What: a deref assignment is code; block-comment state is tracked across
+/// lines instead of guessed from one.
+/// Test: this is the test.
+#[test]
+fn strip_comment_keeps_a_deref_assignment() {
+    let body = "*target = \"com.trusty.trusty-search\".to_string();\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(
+        kept.iter().any(|l| l.contains("com.trusty.trusty-search")),
+        "a deref assignment is code, not a comment continuation, kept: {kept:?}"
+    );
+}
+
+/// Why: block comments legitimately narrate legacy labels, so their bodies must
+/// still be dropped — the fix must not simply stop stripping.
+/// What: a `/* … */` body is dropped and code after it is kept.
+/// Test: this is the test.
+#[test]
+fn strip_comment_tracks_block_comment_state() {
+    let body = "/*\n * com.trusty.trusty-search was the old label\n */\nlet a = 1;\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(
+        !kept.iter().any(|l| l.contains("com.trusty.trusty-search")),
+        "a block-comment body must stay unscanned, kept: {kept:?}"
+    );
+    assert!(kept.iter().any(|l| l.contains("let a = 1")));
+}
+
+/// Why (#4868 review, round 2): `#[cfg(test)] use std::fmt;` puts the attribute
+/// AND the item on one line, so consuming from the next line ate a line of
+/// production code — a literal planted there passed.
+/// What: an attribute line carrying its whole item consumes nothing further.
+/// Test: this is the test.
+#[test]
+fn skip_test_item_consumes_nothing_when_the_item_is_on_the_attribute_line() {
+    let body = "#[cfg(test)] use std::fmt;\nlet x = \"com.trusty.trusty-search\";\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(
+        kept.iter().any(|l| l.contains("com.trusty.trusty-search")),
+        "the line after a self-contained test item is production, kept: {kept:?}"
+    );
+}
+
+/// Why (#4868 review, round 2): the codesign skip was whole-line, so a shell
+/// line carrying both an identifier and a plist path had its real launchd label
+/// skipped along with the identifier.
+/// What: only the token adjacent to the marker is removed.
+/// Test: this is the test.
+#[test]
+fn codesign_stripped_spares_only_the_identifier_token() {
+    let line = "local X_IDENTIFIER=\"com.trusty.trusty-mpm\"; local f2=\"/x/com.bobmatnyc.trusty-search.plist\"";
+    let out = codesign_stripped(line);
+    assert!(
+        !out.contains("com.trusty.trusty-mpm"),
+        "the codesign identifier must be exempt, got: {out}"
+    );
+    assert!(
+        out.contains("com.bobmatnyc.trusty-search"),
+        "a launchd label on the same line must still be scanned, got: {out}"
+    );
+
+    let flag = codesign_stripped("codesign --identifier com.trusty.trusty-search /bin/x");
+    assert!(!flag.contains("com.trusty.trusty-search"), "got: {flag}");
+}
+
+/// Every legacy alias in the registry, flattened.
+///
+/// Used to recognise a build-file line that names an old label in order to boot
+/// it out — the migration this issue exists to perform.
+fn legacy_labels_for_any() -> Vec<&'static str> {
+    SERVICES
+        .iter()
+        .flat_map(|s| s.legacy.iter().copied())
+        .collect()
+}
+
+/// Why: a Makefile that boots out a legacy label is performing the migration,
+/// not perpetuating the drift. Rejecting it would have forced the deploy
+/// recipes to drop the eviction they need.
+/// What: a legacy label on a `bootout` line is allowed in a build file; the
+/// same label on an install line is not.
+/// Test: this is the test.
+#[test]
+fn eviction_lines_may_name_a_legacy_label() {
+    let evict = "\t-launchctl bootout gui/$$(id -u)/com.trusty.trusty-search 2>/dev/null\n";
+    let install = "PLIST := $(HOME)/Library/LaunchAgents/com.trusty.trusty-search.plist\n";
+
+    let kept = production_lines(evict, Kind::Hash);
+    assert!(
+        !kept.is_empty(),
+        "the bootout line must survive comment stripping"
+    );
+    assert!(
+        legacy_labels_for_any().contains(&"com.trusty.trusty-search"),
+        "the alias must be registered for the eviction allowance to apply"
+    );
+    // The install-shaped line carries no bootout/unload, so it stays a stray.
+    let install_kept = production_lines(install, Kind::Hash);
+    assert!(!install_kept[0].contains("bootout"));
+}
+
+/// Blank out only the identifier TOKEN adjacent to a codesign marker.
+///
+/// Why: codesign and bundle identifiers are a different namespace that uses the
+/// full binary name deliberately — renaming one invalidates a binary's
+/// designated requirement and re-triggers macOS TCC prompts (#2558).
+///
+/// #4868 review: skipping the whole LINE was too coarse. A shell line carrying
+/// both an identifier and a plist path —
+/// `local X_IDENTIFIER="a"; local f2=".../com.bobmatnyc.trusty-search.plist"` —
+/// had its real launchd label skipped along with the identifier.
+///
+/// What: replaces the quoted or bare token immediately following
+/// `--identifier` or an `*_IDENTIFIER=` assignment, leaving the rest of the
+/// line to be scanned.
+/// Test: `codesign_stripped_spares_only_the_identifier_token`.
+fn codesign_stripped(line: &str) -> String {
+    const MARKERS: &[&str] = &["--identifier", "IDENTIFIER="];
+    let mut out = line.to_string();
+    for marker in MARKERS {
+        while let Some(idx) = out.find(marker) {
+            let after = idx + marker.len();
+            let rest = &out[after..];
+            // Skip separators between the marker and its value.
+            let val_start = rest
+                .find(|c: char| !matches!(c, ' ' | '=' | '"' | '\'' | '\t'))
+                .map_or(rest.len(), |o| o);
+            let tail = &rest[val_start..];
+            let val_end = tail
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'))
+                .unwrap_or(tail.len());
+            let abs_start = after + val_start;
+            let abs_end = abs_start + val_end;
+            // Neutralise the marker so the loop terminates, and drop the token.
+            out.replace_range(abs_start..abs_end, "");
+            out.replace_range(idx..after, &"_".repeat(marker.len()));
+        }
+    }
+    out
 }
 
 /// Pull `com.trusty.*` / `com.bobmatnyc.*` label tokens out of one line.

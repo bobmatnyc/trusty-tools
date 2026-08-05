@@ -66,6 +66,7 @@ patch:
 ## unconditionally, so it always activates the binary just built.
 deploy:
 	-launchctl bootout gui/$$(id -u)/com.trusty.memory 2>/dev/null
+	-launchctl bootout gui/$$(id -u)/com.trusty.trusty-memory 2>/dev/null
 	-trusty-memory service stop 2>/dev/null
 	-pkill -TERM -x trusty-memory 2>/dev/null
 	sleep 2

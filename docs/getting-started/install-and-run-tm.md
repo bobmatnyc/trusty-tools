@@ -224,6 +224,10 @@ Use the graceful restart convention (SIGTERM, not SIGKILL):
 # if the new one fails to load ([#4868]).
 trusty-search service install
 trusty-memory service install
+
+# trusty-mpm's daemon is supervised rather than self-installing, so it restarts
+# via kickstart:
+launchctl kickstart -k gui/$(id -u)/com.trusty.mpm
 ```
 
 Do not hand-run a `launchctl bootout` / `bootstrap` pair against a plist path.

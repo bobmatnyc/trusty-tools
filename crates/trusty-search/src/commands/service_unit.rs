@@ -98,6 +98,12 @@ pub struct InstalledUnit {
     pub args: Vec<String>,
     /// `EnvironmentVariables` as ordered key/value pairs.
     pub env: Vec<(String, String)>,
+    /// `WorkingDirectory`, when the installed unit set one.
+    ///
+    /// #4868: the live unit on the owner's host carries this and the generated
+    /// template never emitted it, so regeneration silently dropped the
+    /// daemon's working directory along with the env keys.
+    pub working_directory: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -166,7 +172,25 @@ pub fn parse_installed_unit(xml: &str) -> InstalledUnit {
         env: section(xml, "EnvironmentVariables", "<dict>", "</dict>")
             .map(pair_key_strings)
             .unwrap_or_default(),
+        // #4868: a scalar, not a container, so it is read by scanning the one
+        // `<string>` that follows the key rather than via `section`.
+        working_directory: scalar_string(xml, "WorkingDirectory"),
     }
+}
+
+/// Read the `<string>` value immediately following `<key>{name}</key>`.
+///
+/// Why: `WorkingDirectory` is a top-level scalar; [`section`] only finds
+/// balanced containers.
+/// What: returns the first `<string>` after the key, or `None` when the key is
+/// absent or is not followed by a string.
+/// Test: `parse_installed_unit_reads_working_directory`.
+#[cfg(target_os = "macos")]
+fn scalar_string(xml: &str, name: &str) -> Option<String> {
+    let needle = format!("<key>{name}</key>");
+    let after = &xml[xml.find(&needle)? + needle.len()..];
+    let (tag, text) = scan_tags(after, &["string", "key"]).into_iter().next()?;
+    (tag == "string").then_some(text)
 }
 
 /// Pair `<key>`/`<string>` tokens into (key, value), skipping any key whose
@@ -330,23 +354,65 @@ pub fn resolve_auto_discover(
 /// suppression is expressed as a `ProgramArguments` flag, which is
 /// unambiguous, human-readable in the plist, and — crucially — cannot carry a
 /// value the daemon's clap parser would reject on boot.
+///
+/// #4868: an allowlist was never enough, and became actively dangerous once
+/// install started overwriting the LIVE unit instead of a differently-named
+/// one. The plist on the owner's host carried five keys no allowlist mentioned
+/// — `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`, `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`,
+/// `FASTEMBED_CACHE_DIR`, `FASTEMBED_CACHE_PATH`, `RUST_LOG` — and the first of
+/// those is the hand-patch from an incident where a restart cost a 200k-chunk
+/// index to a 30 s redb open timeout under warm-boot contention. Dropping it
+/// re-arms that incident, invisibly, until the next restart. So every key the
+/// installed unit carried is now carried forward unless the generated template
+/// sets it itself; extending the allowlist would only have postponed the next
+/// loss.
+///
+/// Precedence, highest first: the process env, then the installed unit. Keys
+/// the template computes at install time (`template_owned`) are never carried
+/// forward — a stale `HF_HOME` or `PATH` from an old unit must not outrank the
+/// freshly resolved one.
+///
 /// Test: `resolve_persisted_env_prefers_process_env`,
 /// `resolve_persisted_env_carries_forward_installed_values`,
-/// `resolve_persisted_env_never_emits_no_auto_discover`.
+/// `resolve_persisted_env_never_emits_no_auto_discover`,
+/// `resolve_persisted_env_carries_forward_unknown_keys`.
 #[cfg(target_os = "macos")]
 pub fn resolve_persisted_env(
     lookup: impl Fn(&str) -> Option<String>,
     existing: Option<&InstalledUnit>,
+    template_owned: &[&str],
 ) -> Vec<(String, String)> {
-    PERSISTED_ENV_VARS
-        .iter()
-        .filter(|key| **key != NO_AUTO_DISCOVER_ENV)
-        .filter_map(|key| {
-            let value = lookup(key)
-                .or_else(|| existing.and_then(|u| u.env_value(key)).map(str::to_owned))?;
-            Some(((*key).to_string(), value))
-        })
-        .collect()
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push = |key: &str, value: String| {
+        if key == NO_AUTO_DISCOVER_ENV || template_owned.contains(&key) {
+            return;
+        }
+        if out.iter().any(|(k, _)| k == key) {
+            return;
+        }
+        out.push((key.to_string(), value));
+    };
+
+    // Named tunables first, so their order in the rendered plist stays stable
+    // and an operator export still outranks the installed value.
+    for key in PERSISTED_ENV_VARS {
+        if let Some(value) =
+            lookup(key).or_else(|| existing.and_then(|u| u.env_value(key)).map(str::to_owned))
+        {
+            push(key, value);
+        }
+    }
+
+    // Then everything else the unit carried. This is the part that generalises:
+    // a key nobody anticipated survives regeneration instead of vanishing.
+    if let Some(unit) = existing {
+        for (key, value) in &unit.env {
+            let resolved = lookup(key).unwrap_or_else(|| value.clone());
+            push(key, resolved);
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -476,12 +542,14 @@ mod launchd_unit_tests {
         let unit = InstalledUnit {
             args: vec!["start".into(), NO_AUTO_DISCOVER_ARG.into()],
             env: vec![],
+            working_directory: None,
         };
         assert!(unit.suppresses_auto_discover());
 
         let unit = InstalledUnit {
             args: vec![format!("{NO_AUTO_DISCOVER_ARG}=1")],
             env: vec![],
+            working_directory: None,
         };
         assert!(unit.suppresses_auto_discover());
     }
@@ -497,6 +565,7 @@ mod launchd_unit_tests {
             let unit = InstalledUnit {
                 args: vec!["start".into()],
                 env: vec![(NO_AUTO_DISCOVER_ENV.into(), raw.into())],
+                working_directory: None,
             };
             assert!(
                 unit.suppresses_auto_discover(),
@@ -515,12 +584,14 @@ mod launchd_unit_tests {
         let unit = InstalledUnit {
             args: vec![format!("{NO_AUTO_DISCOVER_ARG}=false")],
             env: vec![],
+            working_directory: None,
         };
         assert!(!unit.suppresses_auto_discover());
 
         let unit = InstalledUnit {
             args: vec![],
             env: vec![(NO_AUTO_DISCOVER_ENV.into(), "0".into())],
+            working_directory: None,
         };
         assert!(!unit.suppresses_auto_discover());
         assert!(!InstalledUnit::default().suppresses_auto_discover());
@@ -593,9 +664,13 @@ mod launchd_unit_tests {
     #[test]
     fn resolve_persisted_env_prefers_process_env() {
         let existing = parse_installed_unit(sample_plist());
+        // `HF_HOME` is template-owned, so the caller passes it here exactly as
+        // `launchd_env_pairs` does — a stale value must not outrank the freshly
+        // resolved one (#4868).
         let pairs = resolve_persisted_env(
             |k| (k == "TRUSTY_DEVICE").then(|| "metal".to_string()),
             Some(&existing),
+            &["HF_HOME"],
         );
         assert_eq!(
             pairs,
@@ -612,12 +687,69 @@ mod launchd_unit_tests {
     #[test]
     fn resolve_persisted_env_carries_forward_installed_values() {
         let existing = parse_installed_unit(sample_plist());
-        let pairs = resolve_persisted_env(|_| None, Some(&existing));
+        let pairs = resolve_persisted_env(|_| None, Some(&existing), &["HF_HOME"]);
         assert_eq!(
             pairs,
             vec![("TRUSTY_DEVICE".to_string(), "cpu".to_string())]
         );
-        assert!(resolve_persisted_env(|_| None, None).is_empty());
+        assert!(resolve_persisted_env(|_| None, None, &["HF_HOME"]).is_empty());
+    }
+
+    /// Why (#4868 review): an allowlist keeps losing the NEXT hand-set var. The
+    /// live unit carried five keys no allowlist named, including
+    /// `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS` — the hand-patch from an incident
+    /// where a restart cost a 200k-chunk index. Once install started overwriting
+    /// the LIVE plist, dropping a key stopped being harmless and became data
+    /// loss.
+    /// What: a key the code has never heard of survives, and a template-owned
+    /// key is NOT carried forward so a stale value cannot outrank a fresh one.
+    /// Test: this function.
+    #[test]
+    fn resolve_persisted_env_carries_forward_unknown_keys() {
+        let existing = parse_installed_unit(
+            "<key>EnvironmentVariables</key><dict>\
+             <key>HF_HOME</key><string>/stale/hf</string>\
+             <key>TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS</key><string>60</string>\
+             <key>SOME_KEY_NOBODY_ANTICIPATED</key><string>keepme</string>\
+             </dict>",
+        );
+        let pairs = resolve_persisted_env(|_| None, Some(&existing), &["HF_HOME"]);
+        let has = |k: &str, v: &str| pairs.iter().any(|(a, b)| a == k && b == v);
+
+        assert!(
+            has("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS", "60"),
+            "the incident hand-patch must survive regeneration, got {pairs:?}"
+        );
+        assert!(
+            has("SOME_KEY_NOBODY_ANTICIPATED", "keepme"),
+            "an unanticipated key must survive too, got {pairs:?}"
+        );
+        assert!(
+            !pairs.iter().any(|(k, _)| k == "HF_HOME"),
+            "a template-owned key must not be carried forward — the caller \
+             recomputes it, got {pairs:?}"
+        );
+    }
+
+    /// Why (#4868 review): the live unit sets a `WorkingDirectory` and the
+    /// generated template never emitted the key, so regeneration silently
+    /// changed the daemon's working directory once install began overwriting
+    /// the live plist.
+    /// What: the key is read from a top-level scalar, and its absence is `None`.
+    /// Test: this function.
+    #[test]
+    fn parse_installed_unit_reads_working_directory() {
+        let unit = parse_installed_unit(
+            "<key>WorkingDirectory</key>\n<string>/Users/x/work</string>\n\
+             <key>EnvironmentVariables</key>\n<dict>\n</dict>\n",
+        );
+        assert_eq!(unit.working_directory.as_deref(), Some("/Users/x/work"));
+
+        assert_eq!(
+            parse_installed_unit(sample_plist()).working_directory,
+            None,
+            "a unit without the key must not invent one"
+        );
     }
 
     /// Why: this is the trap in the #4823 comment. The installed unit carries
@@ -634,6 +766,7 @@ mod launchd_unit_tests {
         let pairs = resolve_persisted_env(
             |k| (k == NO_AUTO_DISCOVER_ENV).then(|| "1".to_string()),
             Some(&existing),
+            &[],
         );
         assert!(
             !pairs.iter().any(|(k, _)| k == NO_AUTO_DISCOVER_ENV),

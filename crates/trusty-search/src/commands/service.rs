@@ -116,12 +116,22 @@ fn launchd_log_dir() -> Result<std::path::PathBuf> {
 /// is deliberately never emitted here — see
 /// [`crate::commands::service_unit::resolve_persisted_env`].
 ///
-/// What: always emits an `HF_HOME` entry resolved at install time, plus the
-/// `PERSISTED_ENV_VARS` resolved from the process env with the installed unit
-/// as fallback. The env lookup is injected so the assembly is testable without
-/// mutating a shared process env from a parallel test binary.
+/// #4868: install now overwrites the LIVE plist rather than a differently-named
+/// one, so anything this function fails to reproduce is DESTROYED rather than
+/// merely absent from a file nobody read. The named-tunable allowlist was not
+/// enough — see
+/// [`crate::commands::service_unit::resolve_persisted_env`], which now carries
+/// forward every key the installed unit had.
+///
+/// What: always emits an `HF_HOME` entry resolved at install time, plus every
+/// env var the installed unit carried, with the process env taking precedence.
+/// Keys this function computes itself (`HF_HOME`) are never carried forward, so
+/// a stale value cannot outrank the freshly resolved one. The env lookup is
+/// injected so the assembly is testable without mutating a shared process env
+/// from a parallel test binary.
 /// Test: `launchd_env_pairs_never_carries_no_auto_discover`,
-/// `launchd_env_pairs_carries_forward_installed_tunables`; the resolution
+/// `launchd_env_pairs_carries_forward_installed_tunables`,
+/// `launchd_env_pairs_carries_forward_unanticipated_keys`; the resolution
 /// rules themselves are covered by `service_unit::resolve_persisted_env_*`.
 #[cfg(target_os = "macos")]
 fn launchd_env_vars(
@@ -129,6 +139,14 @@ fn launchd_env_vars(
 ) -> Vec<(String, String)> {
     launchd_env_pairs(dirs::home_dir(), |key| std::env::var(key).ok(), existing)
 }
+
+/// Env keys the generated template resolves itself, so they are never carried
+/// forward from an installed unit.
+///
+/// `HF_HOME` is recomputed at install time (#86) and `PATH` is seeded by
+/// `with_daemon_path` (#1298); a stale value for either must not win.
+#[cfg(target_os = "macos")]
+const TEMPLATE_OWNED_ENV: &[&str] = &["HF_HOME", "PATH"];
 
 /// Pure assembly behind [`launchd_env_vars`] — see its docs.
 #[cfg(target_os = "macos")]
@@ -147,8 +165,9 @@ fn launchd_env_pairs(
         pairs.push(("HF_HOME".to_string(), hf_home.display().to_string()));
     }
 
-    // Operator tunables: process env wins, installed unit is the fallback.
-    pairs.extend(resolve_persisted_env(lookup, existing));
+    // Operator tunables and everything else the unit carried: process env wins,
+    // installed unit is the fallback (#4868).
+    pairs.extend(resolve_persisted_env(lookup, existing, TEMPLATE_OWNED_ENV));
 
     pairs
 }
@@ -292,6 +311,9 @@ fn build_launchd_config(
         // raise both soft and hard limits to 8192 so the daemon can hold
         // thousands of open index files before hitting EMFILE.
         fd_limit: Some(LAUNCHD_FD_LIMIT),
+        // #4868: the live unit carries one; regenerating without it would
+        // silently change the daemon's working directory on upgrade.
+        working_directory: existing.and_then(|u| u.working_directory.clone()),
     }
 }
 
@@ -320,6 +342,7 @@ pub(crate) fn launchd_agent_loaded() -> bool {
         throttle_interval: 0,
         env_vars: Vec::new(),
         fd_limit: None,
+        working_directory: None,
     }
     .is_loaded()
 }

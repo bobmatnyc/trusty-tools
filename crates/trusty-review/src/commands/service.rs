@@ -147,6 +147,7 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
         throttle_interval: 10,
         env_vars: Vec::new(),
         fd_limit: None,
+        working_directory: None,
     }
     .with_daemon_path())
 }
@@ -203,6 +204,14 @@ fn service_install() -> Result<()> {
 fn service_uninstall() -> Result<()> {
     let cfg = launchd_config()?;
     let plist_path = cfg.plist_path()?;
+    // #4868: a host that never ran the migrating install still has the unit
+    // under its old label. Removing only the canonical plist printed "nothing
+    // to do" while leaving that one loaded.
+    for label in cfg.evict_legacy(trusty_common::launchd_labels::legacy_labels_for(
+        LAUNCHD_LABEL,
+    )) {
+        println!("[ok] Unloaded and removed the stale LaunchAgent {label}");
+    }
     if plist_path.exists() {
         // bootout is best-effort: a not-loaded agent is fine here.
         let _ = cfg.bootout();

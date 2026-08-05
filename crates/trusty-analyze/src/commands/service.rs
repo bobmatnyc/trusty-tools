@@ -110,6 +110,7 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
         // caches but does not need elevated fd limits; None delegates to the
         // OS default, matching the trusty-search pattern.
         fd_limit: None,
+        working_directory: None,
     })
 }
 
@@ -136,25 +137,47 @@ pub fn launchd_plist_path() -> Result<std::path::PathBuf> {
 #[cfg(target_os = "macos")]
 pub fn service_install() -> Result<()> {
     let cfg = launchd_config()?;
-    cfg.install()
-        .map_err(|e| anyhow::anyhow!("install LaunchAgent plist: {e}"))?;
     let plist_path = cfg.plist_path()?;
-    println!(
-        "{} Wrote LaunchAgent plist: {}",
-        "✓".green(),
-        plist_path.display()
-    );
-
-    cfg.bootstrap()
-        .map_err(|e| anyhow::anyhow!("launchctl bootstrap: {e}"))?;
+    // #4868: the registry records `com.trusty.trusty-analyze` as a legacy alias
+    // and nothing acted on it. Evicting here is what makes that record mean
+    // something on a host that ran an older installer.
+    let outcome = cfg
+        .install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
+            LAUNCHD_LABEL,
+        ))
+        .map_err(|e| anyhow::anyhow!("install LaunchAgent: {e}"))?;
+    for label in outcome.evicted() {
+        println!(
+            "{} Evicted the stale LaunchAgent {label} — it named this daemon \
+             under an old label.",
+            "⚠".yellow()
+        );
+    }
 
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
-    println!(
-        "{} trusty-analyze service installed and started ({} loaded into {}).",
-        "✓".green(),
-        LAUNCHD_LABEL,
-        domain
-    );
+    if matches!(
+        outcome,
+        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. }
+    ) {
+        println!(
+            "{} {} is already loaded in {} with this exact unit — left running.",
+            "·".dimmed(),
+            LAUNCHD_LABEL,
+            domain
+        );
+    } else {
+        println!(
+            "{} Wrote LaunchAgent plist: {}",
+            "✓".green(),
+            plist_path.display()
+        );
+        println!(
+            "{} trusty-analyze service installed and started ({} loaded into {}).",
+            "✓".green(),
+            LAUNCHD_LABEL,
+            domain
+        );
+    }
     println!(
         "  Logs:    {}\n  Status:  {}",
         cfg.log_dir.display().to_string().dimmed(),

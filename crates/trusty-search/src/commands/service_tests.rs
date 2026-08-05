@@ -443,3 +443,120 @@ fn launchd_env_pairs_carries_forward_installed_tunables() {
         "the #86 HF_HOME pin must still be emitted, got {pairs:?}"
     );
 }
+
+/// Why (#4868 review — I introduced this): before this issue, install wrote
+/// `com.trusty.trusty-search.plist` and never touched the live unit, so failing
+/// to reproduce a key was harmless. Now it overwrites `com.trusty.search.plist`,
+/// which IS the live unit, and anything not reproduced is DESTROYED. The live
+/// plist carried five keys no allowlist named —
+/// `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS` among them, the hand-patch from an
+/// incident where a restart cost a 200k-chunk index to a 30 s redb open timeout.
+/// What: an env key the code has never heard of survives regeneration, and so
+/// does the incident hand-patch specifically.
+/// Test: pure — the env lookup is injected, so no process env is mutated.
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_env_pairs_carries_forward_unanticipated_keys() {
+    use crate::commands::service_unit::parse_installed_unit;
+    use std::path::PathBuf;
+
+    let existing = parse_installed_unit(
+        "<key>EnvironmentVariables</key><dict>\
+         <key>TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS</key><string>60</string>\
+         <key>FASTEMBED_CACHE_DIR</key><string>/Users/x/.cache/fastembed</string>\
+         <key>RUST_LOG</key><string>info</string>\
+         <key>SOME_KEY_NOBODY_ANTICIPATED</key><string>keepme</string>\
+         </dict>",
+    );
+
+    let pairs = launchd_env_pairs(Some(PathBuf::from("/Users/x")), |_| None, Some(&existing));
+    let has = |k: &str, v: &str| pairs.iter().any(|(a, b)| a == k && b == v);
+
+    assert!(
+        has("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS", "60"),
+        "dropping this re-arms the warm-boot index-loss incident, invisibly \
+         until the next restart; got {pairs:?}"
+    );
+    assert!(has("FASTEMBED_CACHE_DIR", "/Users/x/.cache/fastembed"));
+    assert!(has("RUST_LOG", "info"));
+    assert!(
+        has("SOME_KEY_NOBODY_ANTICIPATED", "keepme"),
+        "an allowlist keeps losing the NEXT hand-set var — every key the unit \
+         carried must survive; got {pairs:?}"
+    );
+}
+
+/// Why: `HF_HOME` is recomputed at install time (#86) and `PATH` is seeded by
+/// `with_daemon_path` (#1298). Carrying a stale value forward would let an old
+/// unit outrank the freshly resolved one — the opposite failure from dropping.
+/// What: the installed unit's stale `HF_HOME` loses to the computed one, and
+/// appears exactly once.
+/// Test: pure — the env lookup is injected.
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_env_pairs_does_not_let_a_stale_template_key_win() {
+    use crate::commands::service_unit::parse_installed_unit;
+    use std::path::PathBuf;
+
+    let existing = parse_installed_unit(
+        "<key>EnvironmentVariables</key><dict>\
+         <key>HF_HOME</key><string>/stale/hf</string></dict>",
+    );
+    let pairs = launchd_env_pairs(Some(PathBuf::from("/Users/x")), |_| None, Some(&existing));
+
+    let hf: Vec<&(String, String)> = pairs.iter().filter(|(k, _)| k == "HF_HOME").collect();
+    assert_eq!(hf.len(), 1, "HF_HOME must appear once, got {pairs:?}");
+    assert_eq!(hf[0].1, "/Users/x/.cache/huggingface");
+}
+
+/// Why (#4868 review): the live unit carries a `WorkingDirectory` and the
+/// generated template never emitted the key, so regeneration silently changed
+/// the daemon's working directory.
+/// What: a `WorkingDirectory` on the installed unit is parsed and rendered back.
+/// Test: pure string generation, no fs side effects.
+#[cfg(target_os = "macos")]
+#[test]
+fn build_launchd_config_carries_forward_working_directory() {
+    use crate::commands::service_unit::parse_installed_unit;
+    use std::path::PathBuf;
+
+    let existing = parse_installed_unit(
+        "<key>WorkingDirectory</key><string>/Users/x/work</string>\
+         <key>EnvironmentVariables</key><dict></dict>",
+    );
+    assert_eq!(
+        existing.working_directory.as_deref(),
+        Some("/Users/x/work"),
+        "the key must be parsed before it can be preserved"
+    );
+
+    let cfg = build_launchd_config(
+        PathBuf::from("/usr/local/bin/trusty-search"),
+        PathBuf::from("/tmp/trusty-search/logs"),
+        false,
+        Some(&existing),
+    );
+    let xml = cfg.render_plist().expect("render_plist must succeed");
+    assert!(
+        xml.contains("<key>WorkingDirectory</key>\n  <string>/Users/x/work</string>"),
+        "the regenerated unit must keep the working directory, got xml: {xml}"
+    );
+}
+
+/// Why: a unit that never had a `WorkingDirectory` must not gain one.
+/// What: no installed unit ⇒ the key is absent.
+/// Test: pure string generation.
+#[cfg(target_os = "macos")]
+#[test]
+fn build_launchd_config_omits_working_directory_by_default() {
+    use std::path::PathBuf;
+
+    let cfg = build_launchd_config(
+        PathBuf::from("/usr/local/bin/trusty-search"),
+        PathBuf::from("/tmp/trusty-search/logs"),
+        false,
+        None,
+    );
+    let xml = cfg.render_plist().expect("render_plist must succeed");
+    assert!(!xml.contains("WorkingDirectory"), "got xml: {xml}");
+}

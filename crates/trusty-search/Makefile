@@ -123,8 +123,15 @@ patch:
 ##     `install_and_activate` reports `AlreadyCurrent` and launchd keeps running
 ##     the old image. A deploy that does not activate what it built is not a
 ##     deploy.
+##     The LEGACY label is booted out too. On a mid-migration host the loaded
+##     unit is still `com.trusty.trusty-search` with `KeepAlive::Always`, so
+##     booting out only the canonical label leaves that daemon running straight
+##     into the binary swap — the very hazard (1) exists to prevent. The old
+##     recipe covered this with `unload $(PLIST_LEGACY)`; dropping it without
+##     replacement would have been a regression.
 deploy:
 	-launchctl bootout gui/$$(id -u)/com.trusty.search 2>/dev/null
+	-launchctl bootout gui/$$(id -u)/com.trusty.trusty-search 2>/dev/null
 	-trusty-search stop 2>/dev/null
 	-pkill -TERM -x trusty-search 2>/dev/null
 	sleep 2
