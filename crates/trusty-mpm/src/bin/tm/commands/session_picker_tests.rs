@@ -15,7 +15,7 @@ use trusty_mpm::client::ManagedSessionSummary;
 
 use super::{PickerDecision, next_launch_slot, parse_picker_choice};
 use crate::commands::session_picker_render::{
-    StateColor, colorize, format_session_row, picker_use_color, state_color,
+    StateColor, colorize, command_legend, format_session_row, picker_use_color, state_color,
 };
 
 /// Minimal `ManagedSessionSummary` fixture with a given `slot`.
@@ -346,4 +346,80 @@ fn format_session_row_color_disabled_is_plain_text() {
         !row.contains('\x1b'),
         "no ANSI escapes when use_color is false"
     );
+}
+
+// ── command_legend (#4965) ────────────────────────────────────────────────────
+
+/// The no-sessions menu offers bare Enter and `n <name>`, and nothing to
+/// delete or rename — there is no session to target.
+#[test]
+fn command_legend_empty_menu_shape() {
+    let lines = command_legend(None);
+    let keys: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split("  ").next().unwrap())
+        .collect();
+    assert_eq!(keys, ["[Enter]", "[n <name>]", "[ls]", "[q]"]);
+}
+
+/// The populated menu leads with the launch slot and adds the delete/rename
+/// rows.
+#[test]
+fn command_legend_populated_menu_shape() {
+    let lines = command_legend(Some(4));
+    let keys: Vec<&str> = lines
+        .iter()
+        .map(|l| l.split("  ").next().unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "[4]",
+            "[n <name>]",
+            "[d<N>]",
+            "[r<N> <new-name>]",
+            "[ls]",
+            "[q]"
+        ]
+    );
+}
+
+/// #4965: `n <name>` must be self-documenting. `r1 <name>` right below it
+/// takes a VERBATIM full session name while `n <name>` takes a leaf the daemon
+/// wraps as `tm-<name>-NN` — adjacent rows with an unexplained `<name>` each
+/// read as interchangeable.
+#[test]
+fn command_legend_n_row_names_the_resulting_session_shape() {
+    let lines = command_legend(Some(4));
+    let n_row = lines
+        .iter()
+        .find(|l| l.starts_with("[n <name>]"))
+        .expect("the n row must be present");
+    assert!(
+        n_row.contains("tm-<name>-NN"),
+        "the n row must spell out the name it produces: {n_row}"
+    );
+}
+
+/// #4965 (LOW): BOTH menus are padded to the same column. The empty variant
+/// was aligned and the populated one — the common case — was left ragged.
+#[test]
+fn command_legend_columns_are_aligned() {
+    for lines in [command_legend(None), command_legend(Some(12))] {
+        let offsets: Vec<usize> = lines
+            .iter()
+            .map(|l| {
+                l.find("launch")
+                    .or_else(|| l.find("delete"))
+                    .or_else(|| l.find("rename"))
+                    .or_else(|| l.find("re-print"))
+                    .or_else(|| l.find("quit"))
+                    .expect("every row has a description")
+            })
+            .collect();
+        assert!(
+            offsets.windows(2).all(|w| w[0] == w[1]),
+            "descriptions must all start in the same column: {lines:#?}"
+        );
+    }
 }

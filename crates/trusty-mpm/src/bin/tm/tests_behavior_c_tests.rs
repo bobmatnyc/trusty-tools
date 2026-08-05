@@ -472,32 +472,103 @@ fn guided_picker_n_launches_new_unnamed() {
 
 #[test]
 fn guided_picker_n_with_argument_carries_name_hint() {
-    // #4965: the remainder rides through as `name_hint` verbatim — no
-    // validation, no sanitization here; `session_naming::resolve_session_name`
-    // owns that daemon-side, so `my auth fix` becomes `my-auth-fix` there.
+    // #4965: `n <name>` — the whitespace separator is REQUIRED — carries the
+    // name through as `name_hint`, already sanitized (see
+    // `guided_picker_n_sanitizes_the_name_cli_side`).
     assert_eq!(
         parse_picker_choice("n auth-refactor", &picker_fixture(3, &[]), false),
         PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
-    );
-    // No space needed after the prefix, matching `d2` ≡ `d 2`.
-    assert_eq!(
-        parse_picker_choice("nauth", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(Some("auth".to_string()))
     );
     assert_eq!(
         parse_picker_choice("N auth-refactor\n", &[], false),
         PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
     );
     assert_eq!(
-        parse_picker_choice("n my auth fix", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew(Some("my auth fix".to_string())),
-        "multi-word names must survive to name_hint; the daemon sanitizes"
+        parse_picker_choice("n   auth-refactor   ", &picker_fixture(3, &[]), false),
+        PickerDecision::LaunchNew(Some("auth-refactor".to_string())),
+        "extra separator whitespace must not become part of the name"
+    );
+}
+
+/// #4965 round 2: the `n` grammar is BOUNDED — `strip_prefix(['n','N'])` made
+/// every n-initial word a real, unconfirmed spawn. The menu line itself says
+/// "launch new session", so an operator typing `new` got a cloned, spawned,
+/// attached session named `tm-ew-NN`; `n` is also this tool's own "no" answer
+/// in the `[y/N]` delete confirm. The token must be exactly `n`, and a name
+/// requires a separator.
+///
+/// FAILS BEFORE THIS CHANGE: every assertion in the first block returned
+/// `LaunchNew(Some(...))`.
+#[test]
+fn guided_picker_n_grammar_is_bounded() {
+    let sessions = picker_fixture(3, &[]);
+    for input in ["new", "no", "nn", "n1", "nauth", "N0", "note", "next"] {
+        assert_eq!(
+            parse_picker_choice(input, &sessions, false),
+            PickerDecision::Unrecognised,
+            "{input:?} must not spawn a session"
+        );
+    }
+    // The exact token, with or without a whitespace-only remainder, still
+    // launches unnamed.
+    for input in ["n", "N", "n ", "  n  ", "n\t\n"] {
+        assert_eq!(
+            parse_picker_choice(input, &sessions, false),
+            PickerDecision::LaunchNew(None),
+            "{input:?} is the bare launch-new alias"
+        );
+    }
+    // And a separated name is still accepted.
+    assert_eq!(
+        parse_picker_choice("n auth-refactor", &sessions, false),
+        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+    );
+}
+
+/// #4965 round 2: the name is kebab-cased in the PICKER, before it is sent.
+///
+/// Why: the daemon's `resolve_session_name` runs a `name_hint` through
+/// `leaf_slug_from_dir`, whose `Path::file_name()` step drops everything
+/// before the last `/` — so `n feature/auth` and `n hotfix/auth` both used to
+/// produce `tm-auth-NN`, defeating the point of naming them. And a name that
+/// sanitizes to nothing fell back to the daemon's shared `local` leaf,
+/// silently producing `tm-local-NN`.
+///
+/// FAILS BEFORE THIS CHANGE: `n feature/auth` yielded the raw
+/// `Some("feature/auth")`, which the daemon then collapsed to `auth`; `n !!!`
+/// yielded `Some("!!!")` and spawned.
+#[test]
+fn guided_picker_n_sanitizes_the_name_cli_side() {
+    let sessions = picker_fixture(3, &[]);
+    assert_eq!(
+        parse_picker_choice("n My Auth Fix!", &sessions, false),
+        PickerDecision::LaunchNew(Some("my-auth-fix".to_string())),
+        "a multi-word name must arrive kebab-cased"
+    );
+    assert_eq!(
+        parse_picker_choice("n feature/auth", &sessions, false),
+        PickerDecision::LaunchNew(Some("feature-auth".to_string())),
+        "the path-like segment must SURVIVE — the daemon's file_name() would drop it"
+    );
+    assert_eq!(
+        parse_picker_choice("n hotfix/auth", &sessions, false),
+        PickerDecision::LaunchNew(Some("hotfix-auth".to_string())),
+        "and must stay distinct from feature/auth"
+    );
+    // Unusable names refuse rather than spawning under a fallback leaf.
+    assert_eq!(
+        parse_picker_choice("n !!!", &sessions, false),
+        PickerDecision::UnusableName("!!!".to_string())
+    );
+    assert_eq!(
+        parse_picker_choice("n ---", &sessions, false),
+        PickerDecision::UnusableName("---".to_string())
     );
 }
 
 #[test]
 fn guided_picker_n_does_not_shadow_other_commands() {
-    // #4965 is purely additive: adding the `n` prefix must not swallow any
+    // #4965 is purely additive: adding the `n` command must not swallow any
     // existing token, and none of them may swallow `n`. Every case here is a
     // command that already worked before `n` existed.
     let sessions = picker_fixture(3, &[]);
