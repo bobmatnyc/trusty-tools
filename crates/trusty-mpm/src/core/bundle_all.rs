@@ -553,6 +553,10 @@ pub const ALL: &[BundledArtifact] = &[
         TM_CAPABILITIES_DOCTOR,
     ),
     overwrite(
+        "skills/tm-capabilities/references/framework.md",
+        TM_CAPABILITIES_FRAMEWORK,
+    ),
+    overwrite(
         "skills/tm-capabilities/references/workflows.md",
         TM_CAPABILITIES_WORKFLOWS,
     ),

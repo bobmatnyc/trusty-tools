@@ -410,9 +410,25 @@ skill directly into the config dir).
 
 ## Agent Deployment
 
-Cache: `~/.trusty-mpm/framework/agents/`.
-Priority: project `.claude/agents/` > user `~/.trusty-mpm/agents/` > cached remote.
+Source (pre-composition): `~/.trusty-mpm/framework/agents/`.
+
+Precedence at load time, highest first — on a name collision the earlier tier
+wins, case-insensitively:
+
+1. `<project>/.claude/agents/` — hand-placed and project-custom agents only.
+2. `$CLAUDE_CONFIG_DIR/agents/` — where every BUNDLED agent deploys. Managed
+   sessions run with `CLAUDE_CONFIG_DIR` set to
+   `~/.trusty-tools/trusty-mpm/claude-config/`, deliberately not the operator's
+   `~/.claude`, so framework-owned agents never contaminate their own install.
+3. `~/.claude/agents/` — the operator's own Claude Code agents. Read, never
+   written by tm.
+
+There is no `~/.trusty-mpm/agents/` tier — no code reads that path (#4946).
 All agents inherit BASE_AGENT.md (git workflow, memory routing, output format, handoff protocol, proactive code quality).
+
+For the generated, drift-checked version of this layout — plus the skill deploy
+tiers and per-session state — load `tm-capabilities`
+(`references/framework.md`).
 
 ## Auto-Configuration
 

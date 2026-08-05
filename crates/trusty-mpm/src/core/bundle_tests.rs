@@ -153,6 +153,7 @@ fn tm_capabilities_is_in_bundle() {
         "skills/tm-capabilities/references/agents.md",
         "skills/tm-capabilities/references/skills.md",
         "skills/tm-capabilities/references/doctor.md",
+        "skills/tm-capabilities/references/framework.md",
         "skills/tm-capabilities/references/workflows.md",
     ] {
         assert!(paths.contains(expected), "missing bundled file: {expected}");
@@ -176,6 +177,7 @@ fn tm_capabilities_constants_are_non_empty() {
     assert!(!TM_CAPABILITIES_AGENTS.trim().is_empty());
     assert!(!TM_CAPABILITIES_SKILLS.trim().is_empty());
     assert!(!TM_CAPABILITIES_DOCTOR.trim().is_empty());
+    assert!(!TM_CAPABILITIES_FRAMEWORK.trim().is_empty());
     assert!(!TM_CAPABILITIES_WORKFLOWS.trim().is_empty());
 }
 
@@ -412,11 +414,15 @@ fn bundle_table_is_complete() {
     //   `local-ops`), and `agents/elixir-engineer.md` is ADDED (Phoenix's
     //   `mix.exs` gate narrowed to Phoenix-only, which would otherwise leave
     //   plain Elixir with no engineer). -1 +1, count unchanged at 178.
-    assert_eq!(ALL.len(), 178);
+    // Issue #4946 (+1): tm-capabilities gains a sixth generated reference,
+    //   `references/framework.md` — the harness's own install layout and tier
+    //   precedence, rendered from the path constants and tier resolvers the
+    //   runtime uses. 178 + 1 = 179.
+    assert_eq!(ALL.len(), 179);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 178, "artifact paths must be unique");
+    assert_eq!(paths.len(), 179, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

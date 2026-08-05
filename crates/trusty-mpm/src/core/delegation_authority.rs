@@ -427,16 +427,42 @@ pub fn generate_authority(agents: &[AgentSummary]) -> String {
 /// or not they exist; [`scan_agents`] treats an unreadable directory as empty.
 /// Test: `deployed_agent_dirs_puts_project_tier_first`.
 pub fn deployed_agent_dirs(project_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![project_dir.join(".claude").join("agents")];
-
     let managed = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(crate::core::trusty_tools_config::managed_claude_config_dir);
-    if let Some(managed) = managed {
+    deployed_agent_dirs_from(
+        project_dir,
+        managed.as_deref(),
+        &crate::core::paths::FrameworkPaths::default().claude_agents_dir(),
+    )
+}
+
+/// The tier ORDER behind [`deployed_agent_dirs`], with every environment
+/// lookup hoisted out.
+///
+/// Why (#4946): the compiled prompt used to state a precedence no code read
+/// (`~/.trusty-mpm/agents/`), because the real order lived only here and was
+/// restated by hand elsewhere. The `tm-capabilities` skill now renders that
+/// order instead of restating it, and the renderer must be reproducible — it
+/// cannot call [`deployed_agent_dirs`], which reads `CLAUDE_CONFIG_DIR` and
+/// the caller's home directory and so differs per machine. Splitting the pure
+/// ordering out means the generated documentation and the runtime resolution
+/// are the same three lines of code: reorder the tiers and the committed skill
+/// drifts, failing `scripts/check_capabilities.sh`.
+/// What: `<project>/.claude/agents`, then `<managed_config_dir>/agents` when
+/// one is supplied, then `framework_claude_agents` verbatim. No I/O, no env.
+/// Test: `deployed_agent_dirs_from_is_pure_and_ordered`,
+/// `deployed_agent_dirs_from_skips_absent_managed_tier`.
+pub fn deployed_agent_dirs_from(
+    project_dir: &Path,
+    managed_config_dir: Option<&Path>,
+    framework_claude_agents: &Path,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![project_dir.join(".claude").join("agents")];
+    if let Some(managed) = managed_config_dir {
         dirs.push(managed.join("agents"));
     }
-
-    dirs.push(crate::core::paths::FrameworkPaths::default().claude_agents_dir());
+    dirs.push(framework_claude_agents.to_path_buf());
     dirs
 }
 

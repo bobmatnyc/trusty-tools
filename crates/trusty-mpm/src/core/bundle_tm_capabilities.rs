@@ -94,6 +94,23 @@ pub const TM_CAPABILITIES_SKILLS: &str =
 pub const TM_CAPABILITIES_DOCTOR: &str =
     include_str!("../assets/skills/tm-capabilities/references/doctor.md");
 
+/// Generated framework-model reference (source #6, issue #4946).
+///
+/// Why: the catalog described what the harness can DO but not how it is laid
+/// out, so "why didn't my skill deploy?" and "which agent tier wins?" had no
+/// answer short of reading Rust source — and the one place the compiled prompt
+/// did state a precedence named a tier no code reads. Rendering the layout from
+/// [`crate::core::paths::FrameworkPaths`] and the tier order from
+/// [`crate::core::delegation_authority::deployed_agent_dirs_from`] /
+/// [`crate::core::skill_deploy_tiers::skill_deploy_tiers`] means the answer
+/// cannot rot silently: moving a directory drifts this file.
+/// What: embedded markdown deployed to
+/// `skills/tm-capabilities/references/framework.md`. Produced by
+/// `generate::framework::render`.
+/// Test: `tm_capabilities_is_in_bundle`.
+pub const TM_CAPABILITIES_FRAMEWORK: &str =
+    include_str!("../assets/skills/tm-capabilities/references/framework.md");
+
 /// Hand-authored canonical end-to-end workflows (issue #2913 brief §E).
 ///
 /// Why: the design-research brief explicitly calls for one hand-authored
