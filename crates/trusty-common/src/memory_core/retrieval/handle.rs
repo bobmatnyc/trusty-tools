@@ -333,10 +333,18 @@ impl PalaceHandle {
         // logged, never fatal) and drop the entry from the in-memory list
         // so it never participates in recall. Vector tombstones are left
         // for `palace_compact` since dropping them needs an async call.
+        //
+        // #4885: this sweep is reclamation, not enforcement. It cannot be the
+        // enforcement point because the daemon opens the palace once as
+        // `OpenIntent::Writer` and holds it for the process lifetime, so
+        // anything expiring afterwards is never reconsidered here. The
+        // retrieval layers filter on every read (ADR-0028 D4); this only keeps
+        // the store from accumulating. It shares `is_expired_at` with the read
+        // path so the two cannot disagree about what "expired" means.
         let now = chrono::Utc::now();
         let mut pruned = 0usize;
         all_drawers.retain(|d| {
-            let expired = d.expires_at.is_some_and(|t| t < now);
+            let expired = d.is_expired_at(now);
             if expired {
                 if let Err(e) = kg.delete_drawer_sync(d.id) {
                     tracing::warn!(
@@ -898,6 +906,12 @@ impl PalaceHandle {
     /// is in the past, and routes each through `forget` so the vector
     /// index and persistent metadata stay in sync. Returns the number of
     /// drawers pruned. No-op on read-only handles.
+    ///
+    /// #4885: this is reclamation, not the enforcement point — recall filters
+    /// expired drawers on every read (`Drawer::is_expired_at`, ADR-0028 D4), so
+    /// a palace whose sweep never runs still never serves an expired drawer. It
+    /// remains worth calling because the read filter hides rows without freeing
+    /// the storage or the vector slot they occupy.
     /// Test: `purge_expired_drops_only_past_ttl`.
     pub async fn purge_expired(&self) -> Result<usize> {
         if self.is_read_only() {
@@ -908,7 +922,7 @@ impl PalaceHandle {
             .drawers
             .read()
             .iter()
-            .filter(|d| d.expires_at.is_some_and(|t| t < now))
+            .filter(|d| d.is_expired_at(now))
             .map(|d| d.id)
             .collect();
         let count = expired_ids.len();

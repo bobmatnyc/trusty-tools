@@ -305,9 +305,20 @@ pub(super) async fn health(
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
     // Issues #910/#911: surface readiness so monitors and Claude Code can
     // distinguish "alive but warming" from "fully ready".
+    // #4836: report the embedder's real state, not the raw latch. The latch is
+    // written only by the startup warm-up task, and the HTTP path never calls
+    // `AppState::embedder`, so a daemon serving correct vector results could
+    // report `warming` indefinitely — the exact misleading signal that made
+    // #4836 hard to find (observed: uptime 24680 s, `daemon_state: warming`,
+    // while `/recall` returned correctly ranked L2 hits).
     let daemon_state = match state.readiness() {
-        crate::DaemonReadiness::Warming => "warming",
         crate::DaemonReadiness::Ready => "ready",
+        crate::DaemonReadiness::Warming
+            if trusty_common::memory_core::retrieval::shared_embedder_initialized() =>
+        {
+            "ready"
+        }
+        crate::DaemonReadiness::Warming => "warming",
     }
     .to_string();
 

@@ -23,6 +23,7 @@ pub(super) mod probe;
 pub mod restore;
 pub(crate) mod scan;
 pub mod stages;
+pub mod triage;
 
 #[allow(deprecated)]
 pub use probe::leaked_probe_thread_count; // deprecated alias for probe_thread_failures (#822)
@@ -35,6 +36,11 @@ use std::time::Duration;
 use crate::service::persistence::PersistedIndex;
 pub use restore::{restore_one_index_bounded, BoundedRestoreOutcome};
 pub use stages::{derive_warm_boot_stages, index_is_stuck_unwalked, WarmBootInputs};
+// #4846: root-existence triage + the global salvage budget.
+pub use triage::{
+    salvage_budget_secs, triage_entries, triage_entries_with, SalvageBudget, SalvageGrant,
+    TriagedEntries, SALVAGE_BUDGET_ENV,
+};
 
 /// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
 /// form on success or the original path on failure.

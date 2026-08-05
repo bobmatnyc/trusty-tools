@@ -10,8 +10,8 @@
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DrawerRecord, TRIPLES, TripleValue, decode_triple_key,
-    decode_u64, decode_value, subject_prefix,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, DrawerRecord, TRIPLES, TripleValue,
+    decode_triple_key, decode_u64, decode_value, subject_prefix,
 };
 use anyhow::{Context, Result};
 use chrono::DateTime;
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::super::kg::Triple;
 use super::store::KgStoreRedb;
-use super::types::{LegacyDrawerRecord, PreTaskDrawerRecord, parse_drawer_type, triple_from_parts};
+use super::types::{decode_drawer_record, parse_drawer_type, triple_from_parts};
 
 impl KgStoreRedb {
     /// Return all currently active triples for `subject`.
@@ -247,25 +247,14 @@ impl KgStoreRedb {
             let mut id_arr = [0u8; 16];
             id_arr.copy_from_slice(id_bytes);
             let id = Uuid::from_bytes(id_arr);
-            let record: DrawerRecord = match decode_value::<DrawerRecord>(v.value()) {
+            // #4884: the migration chain moved into `decode_drawer_record` so
+            // the index-maintenance path in `write_ops` reads a row's prior
+            // `fact_key` through the same walk instead of a second copy.
+            let record: DrawerRecord = match decode_drawer_record(v.value()) {
                 Ok(r) => r,
-                Err(_) => {
-                    // Postcard is positional, so older rows lack the current
-                    // shape's trailing fields and refuse to decode. Walk the
-                    // migration chain newest→oldest, lifting each forward:
-                    //   1. PreTaskDrawerRecord — #61-era (drawer_type +
-                    //      expires_at_ms, no spec-001 completed_at_ms).
-                    //   2. LegacyDrawerRecord — pre-#61 (none of those fields).
-                    match decode_value::<PreTaskDrawerRecord>(v.value()) {
-                        Ok(pre) => pre.into(),
-                        Err(_) => match decode_value::<LegacyDrawerRecord>(v.value()) {
-                            Ok(legacy) => legacy.into(),
-                            Err(e) => {
-                                tracing::warn!(id = %id, "skip drawer with malformed value: {e}");
-                                continue;
-                            }
-                        },
-                    }
+                Err(e) => {
+                    tracing::warn!(id = %id, "skip drawer with malformed value: {e}");
+                    continue;
                 }
             };
             let room_id = match Uuid::parse_str(&record.room_id) {
@@ -302,6 +291,7 @@ impl KgStoreRedb {
                 drawer_type,
                 expires_at,
                 completed_at,
+                fact_key: record.fact_key,
             });
         }
         Ok(out)
@@ -332,6 +322,48 @@ impl KgStoreRedb {
             out.insert(Uuid::from_bytes(id_arr));
         }
         Ok(out)
+    }
+
+    /// Which drawer, if any, currently occupies the `fact_key` slot (#4884).
+    ///
+    /// Why: ADR-0028 D5 makes a Tier C write claim a named slot and retire the
+    /// slot's prior occupant, so the write path asks this question once per
+    /// write. Answering it from [`DRAWERS_BY_FACT_KEY`] is a single point
+    /// lookup; answering it from `DRAWERS` would mean decoding every drawer row
+    /// in the palace. This is the reason the index exists — no Tier C write
+    /// path consumes it yet.
+    /// What: Point-reads the index at the slot name and decodes the stored
+    /// 16-byte uuid. `Ok(None)` means the slot is free. A malformed value (not
+    /// 16 bytes) is treated as free rather than erroring, matching how
+    /// `load_drawers` skips undecodable rows instead of failing the whole read.
+    /// Test: `fact_key_index_tracks_upsert_and_delete`,
+    /// `fact_key_index_follows_the_slot_on_reassignment`.
+    pub fn drawer_id_for_fact_key(&self, fact_key: &str) -> Result<Option<Uuid>> {
+        let rtx = self
+            .db()
+            .begin_read()
+            .context("begin drawer_id_for_fact_key txn")?;
+        let index = rtx
+            .open_table(DRAWERS_BY_FACT_KEY)
+            .context("open drawers_by_fact_key table")?;
+        let Some(guard) = index
+            .get(fact_key.as_bytes())
+            .context("read fact_key index")?
+        else {
+            return Ok(None);
+        };
+        let bytes = guard.value();
+        if bytes.len() != 16 {
+            tracing::warn!(
+                fact_key,
+                len = bytes.len(),
+                "fact_key index holds a non-16-byte drawer id; treating slot as free"
+            );
+            return Ok(None);
+        }
+        let mut id_arr = [0u8; 16];
+        id_arr.copy_from_slice(bytes);
+        Ok(Some(Uuid::from_bytes(id_arr)))
     }
 
     /// Dump every triple, including closed history rows.

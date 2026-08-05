@@ -138,6 +138,49 @@ pub fn manifest_lock_path(target_dir: &Path) -> std::path::PathBuf {
     target_dir.join(format!("{MANIFEST_FILE}.lock"))
 }
 
+/// Run `f` holding the exclusive cross-process lock on the sidecar `lock_file`.
+///
+/// Why (#4881): the agent ledger (#4409) and the skill ledger need the IDENTICAL
+/// serialisation, and a `flock` critical section is the last code two copies
+/// should drift on — blocking acquisition, RAII release, and
+/// lock-failure-is-an-error ARE the safety property. One implementation, two
+/// named wrappers ([`with_agent_manifest_lock`] and
+/// [`crate::skills::manifest::with_skill_manifest_lock`]), so a change to the
+/// rule lands once.
+/// What: creates `lock_file`'s parent directory and the file itself if absent,
+/// takes a `flock(2)`-style advisory EXCLUSIVE lock on it (blocking until
+/// available), runs `f`, and releases the lock on every exit path including
+/// panics (RAII).
+///
+/// Advisory, not mandatory: a writer that bypasses this helper is not blocked,
+/// so every load-modify-save of a ledger must go through it. Blocking: callers
+/// on an async runtime must use a blocking-safe thread. Not reentrant — a nested
+/// call on the same lock file self-deadlocks.
+///
+/// Lock acquisition failure is an `Err`, never a silent unlocked fallthrough:
+/// proceeding without the lock reinstates exactly the race this closes.
+/// Test: `manifest_lock_serialises_concurrent_writers`,
+/// `crate::skills::manifest::tests::skill_manifest_lock_serialises_concurrent_writers`.
+pub fn with_ledger_lock<T, E, F>(lock_file: &Path, f: F) -> std::result::Result<T, E>
+where
+    E: From<ManifestError>,
+    F: FnOnce() -> std::result::Result<T, E>,
+{
+    if let Some(parent) = lock_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| E::from(ManifestError::Io(e)))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_file)
+        .map_err(|e| E::from(ManifestError::Io(e)))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = lock.write().map_err(|e| E::from(ManifestError::Io(e)))?;
+    f()
+}
+
 /// Run `f` holding the exclusive cross-process lock on `target_dir`'s ledger.
 ///
 /// Why (#4409): the deployer's cycle is load manifest → write files → save
@@ -173,17 +216,7 @@ where
     E: From<ManifestError>,
     F: FnOnce() -> std::result::Result<T, E>,
 {
-    std::fs::create_dir_all(target_dir).map_err(|e| E::from(ManifestError::Io(e)))?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(manifest_lock_path(target_dir))
-        .map_err(|e| E::from(ManifestError::Io(e)))?;
-    let mut lock = fd_lock::RwLock::new(file);
-    let _guard = lock.write().map_err(|e| E::from(ManifestError::Io(e)))?;
-    f()
+    with_ledger_lock(&manifest_lock_path(target_dir), f)
 }
 
 // `repair_stale_tmp(path)` was removed with #4409. It derived a single scratch

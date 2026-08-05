@@ -381,11 +381,22 @@ fn no_auto_discover_resolution() {
 
 // ── Issue #484: moved-project relocation tests ─────────────────────────────
 
-use crate::commands::start_restore::try_locate_moved_root;
+use crate::commands::start_restore::{collect_relocation_candidates, try_locate_moved_root};
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 use crate::service::persistence::PersistedIndex;
 use serial_test::serial;
 use tempfile::tempdir;
+
+/// Mint a salvage grant for tests that need to run the relocation scan (#4846).
+///
+/// Why: `collect_relocation_candidates` requires a `SalvageGrant`, which only a
+/// `SalvageBudget` can produce — that is the point of the token. Tests get one
+/// from a deliberately generous budget.
+fn salvage_grant() -> crate::service::warm_boot::SalvageGrant {
+    crate::service::warm_boot::SalvageBudget::with_budget(Some(std::time::Duration::from_secs(60)))
+        .try_grant()
+        .expect("a fresh 60 s budget always grants")
+}
 
 /// Create a populated `.trusty-search/index.redb` under `root`.
 fn make_populated_ts(root: &std::path::Path) {
@@ -423,7 +434,12 @@ fn restore_moved_colocated_index_relinks_unique_candidate() {
         ..Default::default()
     };
 
-    let result = try_locate_moved_root(&entry, &[]);
+    // #4846: the tracked-root walk moved out of `try_locate_moved_root` into
+    // the once-per-boot `collect_relocation_candidates`, so the test performs
+    // it explicitly. The relocation DECISION under test is unchanged.
+    let grant = salvage_grant();
+    let candidates = collect_relocation_candidates(&[], &grant);
+    let result = try_locate_moved_root(&entry, &candidates);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
     let new_path = result.expect("must find the unique candidate");
@@ -458,7 +474,12 @@ fn restore_missing_root_with_no_candidate_returns_none() {
         ..Default::default()
     };
 
-    let result = try_locate_moved_root(&entry, &[]);
+    // #4846: the tracked-root walk moved out of `try_locate_moved_root` into
+    // the once-per-boot `collect_relocation_candidates`, so the test performs
+    // it explicitly. The relocation DECISION under test is unchanged.
+    let grant = salvage_grant();
+    let candidates = collect_relocation_candidates(&[], &grant);
+    let result = try_locate_moved_root(&entry, &candidates);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
     assert!(
@@ -500,7 +521,12 @@ fn restore_missing_root_with_ambiguous_candidates_returns_none() {
         ..Default::default()
     };
 
-    let result = try_locate_moved_root(&entry, &[]);
+    // #4846: the tracked-root walk moved out of `try_locate_moved_root` into
+    // the once-per-boot `collect_relocation_candidates`, so the test performs
+    // it explicitly. The relocation DECISION under test is unchanged.
+    let grant = salvage_grant();
+    let candidates = collect_relocation_candidates(&[], &grant);
+    let result = try_locate_moved_root(&entry, &candidates);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
     assert!(

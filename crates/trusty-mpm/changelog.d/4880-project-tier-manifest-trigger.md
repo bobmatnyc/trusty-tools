@@ -1,0 +1,6 @@
+Fixed
+
+- The project skill tier (`<workspace>/.claude/skills`) now redeploys on every run path when the binary version or the manifest's skill selection changes (closes [#4880](https://github.com/bobmatnyc/trusty-tools/issues/4880)). It was written only by `prepare_session` and `tm sessions sync-assets`, neither of which runs on resume or in-place relaunch — and because project outranks user, a skill an older binary left there silently shadowed the copy `managed_config` refreshes every run, the [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408) shape one tier down.
+  - A version bump re-runs deployment; the manifest never needs to see skill content. The manifest's `[skills]` selection is the second trigger because the operator's `<harness-root>/.trusty-mpm/framework/manifest.toml` can move between releases. Both are recorded in `<workspace>/.claude/skills/.trusty-mpm-project-tier-stamp`; a matching stamp writes nothing at all.
+  - Custom skills survive the redeploy: a project-custom skill is dropped by the tier planner before any file I/O, and a checksum-frozen hand edit is skipped by the deployer.
+  - A skill source that exists but holds no skill files — an unfetched `agents/skills` submodule looks exactly like this — is a refusal that leaves the stamp unwritten and warns, rather than recording an empty deploy as current.

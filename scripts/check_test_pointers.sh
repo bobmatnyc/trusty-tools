@@ -326,7 +326,12 @@ function emit(nm,    parts, k, final) {
 '
 
 candidate_names() {
-  printf '%s\n' "$1" | awk "$CANDIDATES_AWK"
+  # #4882: a here-string feeds awk's stdin without forking a separate
+  # `printf` process the way `printf ... | awk ...` did — same trailing
+  # newline, same $0 content, one less fork per call. This function is
+  # invoked once per Test: annotation (tens of thousands workspace-wide), so
+  # the extra fork was a measurable share of total runtime.
+  awk "$CANDIDATES_AWK" <<< "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -335,14 +340,27 @@ candidate_names() {
 # Falls back to "." (workspace root) if none is found above it.
 # ---------------------------------------------------------------------------
 crate_root_for() {
+  # #4882: bash-builtin parameter expansion instead of external `dirname` —
+  # called once per file plus once per ancestor directory walked (thousands
+  # of forks workspace-wide; ~24s of a ~350s run measured locally). Mimics
+  # dirname's behavior for the repo-relative, slash-separated paths
+  # `git ls-files` emits (no trailing slashes, no leading "/").
   local f="$1" dir
-  dir="$(dirname "$f")"
+  case "$f" in
+    */*) dir="${f%/*}" ;;
+    *) dir="." ;;
+  esac
+  [ -z "$dir" ] && dir="/"
   while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
     if [ -f "$dir/Cargo.toml" ]; then
       printf '%s\n' "$dir"
       return 0
     fi
-    dir="$(dirname "$dir")"
+    case "$dir" in
+      */*) dir="${dir%/*}" ;;
+      *) dir="." ;;
+    esac
+    [ -z "$dir" ] && dir="/"
   done
   printf '%s\n' "."
 }
@@ -358,8 +376,12 @@ crate_root_for() {
 CRATE_FN_CACHE_DIR=""
 
 crate_cache_file() {
+  # #4882: this runs once per CITATION (~21k times workspace-wide), not once
+  # per crate — only the git-grep build below is crate-scoped. `tr` forked a
+  # process on every call; bash's own `//` pattern substitution does the
+  # same character-class replacement without a fork.
   local crate="$1" key
-  key="$(printf '%s' "$crate" | tr -c 'A-Za-z0-9' '_')"
+  key="${crate//[^A-Za-z0-9]/_}"
   printf '%s/%s.fns\n' "$CRATE_FN_CACHE_DIR" "$key"
 }
 
@@ -484,17 +506,29 @@ scan() {
     exit 1
   fi
 
+  # #4882: both nested loops below used to read from a `cmd | while ...`
+  # pipe, which forces bash to fork a subshell to run the loop body on the
+  # PRODUCER side of every pipe (once per file for the block loop, once per
+  # Test: annotation — ~25k times workspace-wide — for the candidate loop).
+  # Everything the loop bodies do is written straight to the *_out files
+  # rather than to shell variables, so nothing here actually depends on
+  # subshell isolation; switching to `< <(cmd)` process substitution runs
+  # both loops in the *current* shell and removes that fork entirely, on
+  # top of removing the awk-script/`dirname`/`tr` forks fixed above. This
+  # was the single largest contributor to the ~350s measured runtime.
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -f "$f" ] || continue
     is_excluded_path "$f" && continue
     local crate
     crate="$(crate_root_for "$f")"
-    extract_test_blocks "$f" | while IFS=$'\t' read -r line blob; do
+    while IFS=$'\t' read -r line blob; do
       [ -n "${line:-}" ] || continue
-      local seen_file
-      seen_file="$(mktemp "${TMPDIR:-/tmp}/tpseen.XXXXXX")"
-      candidate_names "$blob" | while IFS=$'\t' read -r kind name; do
+      # #4882: in-shell dedup (newline-delimited string + `case`) instead of
+      # a per-block `mktemp` file plus a `grep -qxF` fork per candidate —
+      # same whole-entry exact-match semantics, zero forks.
+      local seen=$'\n'
+      while IFS=$'\t' read -r kind name; do
         [ -n "$kind" ] || continue
         case "$kind" in
           ERR)
@@ -504,8 +538,10 @@ scan() {
         esac
         [ -n "$name" ] || continue
         # De-dupe within a single annotation (same name cited twice in one blob).
-        if grep -qxF "${kind}:${name}" "$seen_file" 2>/dev/null; then continue; fi
-        printf '%s\n' "${kind}:${name}" >> "$seen_file"
+        case "$seen" in
+          *$'\n'"${kind}:${name}"$'\n'*) continue ;;
+        esac
+        seen="${seen}${kind}:${name}"$'\n'
         # #4618: one row per citation this gate actually resolved. "0 dangling
         # pointers" over 0 resolved citations is a broken scan, not a clean tree.
         printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$kind" "$name" >> "$checked_out"
@@ -518,9 +554,8 @@ scan() {
             printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
           fi
         fi
-      done
-      rm -f "$seen_file"
-    done
+      done < <(candidate_names "$blob")
+    done < <(extract_test_blocks "$f")
   done < "$rslist"
   rm -f "$rslist"
 

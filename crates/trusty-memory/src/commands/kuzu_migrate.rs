@@ -373,6 +373,28 @@ pub fn handle_kuzu_data_migrate(
             triples_skipped += 1;
             continue;
         }
+        // #4888: `relation_type` is imported verbatim from the legacy file, so
+        // it can collide with one of the four hot predicates and land on the
+        // always-injected Tier S surface. A bulk legacy import is never a
+        // deliberate act of authoring a standing rule, which ADR-0028 D8 point
+        // 3 requires ("no agent auto-promotes to Tier S"), so this path does
+        // not import hot predicates at all — no cap arithmetic, no way to be
+        // off by one. An operator who genuinely wants the fact as a standing
+        // rule re-asserts it with `kg_assert`, which carries the real gate.
+        // Skipping joins the existing warn-and-skip path so one such relation
+        // never aborts the import.
+        if crate::prompt_facts::is_hot_predicate(&triple.predicate) {
+            tracing::warn!(
+                from = %relation.from, to = %relation.to,
+                predicate = %triple.predicate,
+                "kuzu-migrate: refusing to import a Tier S (hot) predicate — the \
+                 always-injected surface is authored deliberately, not migrated \
+                 (ADR-0028 D8). Re-assert it with `kg_assert` if it is genuinely \
+                 a standing rule. Skipping."
+            );
+            triples_skipped += 1;
+            continue;
+        }
         match handle.kg.assert_sync(&triple) {
             Ok(()) => triples_written += 1,
             Err(e) => {

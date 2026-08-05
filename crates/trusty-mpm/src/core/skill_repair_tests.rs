@@ -395,3 +395,35 @@ fn embedded_reference_is_usable_as_a_repair_source() {
     );
     assert!(!reference.assets["tm-workflow"].is_empty());
 }
+
+/// #4881: a tier directory that does not exist must stay non-existent.
+///
+/// Why: taking the ledger lock creates the directory and a lock sidecar. A
+/// repair over a project with no `.claude/skills/` would then leave both behind
+/// in a tree `tm doctor` was only inspecting. Such a tier has no ledger and so
+/// no findings — skipping it before the lock is behaviour-preserving.
+#[test]
+fn repair_leaves_a_missing_tier_directory_alone() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let paths = paths_under(&home);
+    let backups = TempDir::new().unwrap();
+
+    let outcomes = repair_skills(
+        &reference_of(&[("tm-workflow", "v1")]),
+        &paths,
+        Some(project.path()),
+        false,
+        backups.path(),
+    );
+
+    assert!(
+        outcomes.is_empty(),
+        "a tier with no directory has no findings: {outcomes:?}"
+    );
+    let skills_dir = project.path().join(".claude").join("skills");
+    assert!(
+        !skills_dir.exists(),
+        "repair must not create a skills directory it was only inspecting"
+    );
+}
