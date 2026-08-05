@@ -315,3 +315,59 @@ fn has_tcode_lexical_signal_false_for_signal_free_input() {
          to the recent token refresh changes from last week"
     ));
 }
+
+// =====================================================================
+// `has_repo_file_token` / `has_error_or_stack_trace_marker` in isolation.
+//
+// `has_tcode_lexical_signal_*` above exercises the SAME behavior but through
+// `has_tcode_lexical_signal`'s own reimplementation (route.rs deliberately
+// inlines the checks there rather than calling these two functions, to
+// avoid a second layer of indirection in `route_task`'s hot precedence
+// chain). `route_tests::repo_file_extension_routes_tcode` /
+// `src_path_token_routes_tcode` exercise `has_repo_file_token` for real (via
+// `route_task`'s rule 1), but `has_error_or_stack_trace_marker` has exactly
+// one call site in the whole crate (`intent::has_unambiguous_technical_signal`
+// in mod.rs) and no test isolates it there either — every classify_intent
+// test that mentions an error/stack-trace phrase also carries a repo-file
+// token in the same input, so `||` short-circuits before this function ever
+// runs. These tests close that gap directly against the function itself.
+// =====================================================================
+
+#[test]
+fn has_repo_file_token_true_for_rs_extension() {
+    assert!(has_repo_file_token("something is wrong in main.rs"));
+}
+
+#[test]
+fn has_repo_file_token_true_for_src_path_token() {
+    assert!(has_repo_file_token("look under src/ for the bug"));
+}
+
+#[test]
+fn has_repo_file_token_false_for_plain_text() {
+    assert!(!has_repo_file_token("something is wrong with my car"));
+}
+
+#[test]
+fn has_error_or_stack_trace_marker_true_for_raw_error_prefix() {
+    assert!(has_error_or_stack_trace_marker("error: null pointer"));
+}
+
+#[test]
+fn has_error_or_stack_trace_marker_true_for_stack_trace_phrase() {
+    assert!(has_error_or_stack_trace_marker(
+        "here is a stack trace from the crash"
+    ));
+}
+
+#[test]
+fn has_error_or_stack_trace_marker_true_for_failing_test_phrase() {
+    assert!(has_error_or_stack_trace_marker(
+        "the unit test for this module keeps failing"
+    ));
+}
+
+#[test]
+fn has_error_or_stack_trace_marker_false_for_plain_text() {
+    assert!(!has_error_or_stack_trace_marker("everything looks fine"));
+}
