@@ -8,9 +8,10 @@
 //! reported six healthy daemons as `down`. That false `down` then drove
 //! `verify_tail::needs_kickstart` into `launchctl kickstart -k`, meaning **every
 //! `tctl install` hard-restarted a fully healthy stack** — the real harm behind
-//! #4246, up to and including a SIGKILL of trusty-search mid-index-flush (the
-//! shared plist renderer emits no `ExitTimeOut`, so launchd's default 20s bound
-//! fires well inside search's ≥30s-per-index flush budget).
+//! #4246, up to and including a SIGKILL of trusty-search mid-index-flush (at
+//! the time the shared plist renderer emitted no `ExitTimeOut` at all, so
+//! launchd applied its measured 5s default, well inside search's 30s-per-index
+//! flush floor — #4393 has since made the renderer declare the window).
 //!
 //! Every one of those daemons *does* answer `GET /health` over loopback today,
 //! so this module replaces the subprocess contract with the transport that
@@ -242,11 +243,12 @@ impl ProbeOutcome {
     /// that may authorise a destructive repair (#4246).
     ///
     /// Why: this is the gate that stops `tctl install` hard-restarting healthy
-    /// daemons. `launchctl kickstart -k` is not a polite restart — the shared
-    /// plist renderer emits no `ExitTimeOut`, so launchd SIGKILLs 20s after
-    /// SIGTERM, while trusty-search's graceful index flush budgets ≥30s per
-    /// index. A restart triggered by a schema mismatch or a squatter on a
-    /// default port therefore costs unflushed HNSW vectors. Only an observation
+    /// daemons. `launchctl kickstart -k` SIGTERMs and SIGKILLs at the
+    /// `ExitTimeOut` boundary; before #4393 the shared plist renderer emitted no
+    /// such key, so launchd applied its measured 5s default while
+    /// trusty-search's graceful index flush floors at 30s per index. A restart
+    /// triggered by a schema mismatch or a squatter on a default port therefore
+    /// cost unflushed HNSW vectors. Only an observation
     /// at the TRANSPORT layer — nothing accepted the connection, or nothing
     /// answered in time — is evidence a process is actually not serving. Every
     /// other failure means *something* answered, so restarting is at best a

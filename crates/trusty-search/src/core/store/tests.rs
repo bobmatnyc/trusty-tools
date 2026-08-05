@@ -10,7 +10,48 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::types::VectorStore;
-use super::usearch_store::{UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
+use super::usearch_store::{staging_path, UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
+
+/// Why (#4395's second defect): both writers used the same deterministic
+/// `hnsw.usearch.tmp`, and `hnsw.usearch` has no cross-process lock. Colocated
+/// indexes keep their snapshot in the project root, outside every data
+/// directory, so two data-dir-isolated daemons indexing the same repo staged
+/// through the identical file — one could truncate the other's half-written tmp
+/// and rename a spliced snapshot into place. Reverting `staging_path` to
+/// `with_extension("usearch.tmp")` fails this test.
+/// What: asserts the staging name carries this process's pid, is not the bare
+/// shared name, and still sits beside its target with the target's extension
+/// readable in it.
+/// Test: this IS the test.
+#[test]
+fn test_staging_path_is_process_scoped() {
+    let target = std::path::Path::new("/tmp/proj/.trusty-search/hnsw.usearch");
+    let staged = staging_path(target, "usearch");
+    let name = staged.file_name().unwrap().to_string_lossy().into_owned();
+
+    assert!(
+        name.contains(&std::process::id().to_string()),
+        "staging name must be scoped to this process; got {name}"
+    );
+    assert_ne!(
+        name, "hnsw.usearch.tmp",
+        "the shared staging name is the #4395 collision"
+    );
+    assert!(name.starts_with("hnsw.usearch."), "got {name}");
+    assert!(name.ends_with(".tmp"), "got {name}");
+    assert_eq!(
+        staged.parent(),
+        target.parent(),
+        "staging must happen beside the target so the rename stays same-filesystem"
+    );
+
+    // The sidecar uses the same helper and must not collide with the HNSW one.
+    let sidecar = staging_path(
+        std::path::Path::new("/tmp/proj/.trusty-search/hnsw.keys.json"),
+        "json",
+    );
+    assert_ne!(staged, sidecar);
+}
 
 #[tokio::test]
 async fn test_upsert_and_search() {

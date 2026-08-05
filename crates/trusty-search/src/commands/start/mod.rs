@@ -24,6 +24,9 @@ mod daemon;
 mod embedder;
 mod embedder_fallback;
 mod graceful_bootstrap;
+// #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
+// starts, which used to match by process name alone.
+mod reap_orphans;
 mod restore;
 mod swap_back_watchdog;
 

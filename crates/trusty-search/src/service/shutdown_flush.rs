@@ -33,7 +33,13 @@ use std::sync::Arc;
 /// [`crate::service::shutdown_budget`] — deadlines are now clamped to the
 /// remaining window, and the window itself is declared to launchd via
 /// `ExitTimeOut`.
-pub(crate) const MIN_FLUSH_TIMEOUT_SECS: u64 = 30;
+///
+/// `pub` rather than `pub(crate)`: the `trusty-search` BIN re-exports the lib's
+/// modules into its own `crate::` namespace (see `main.rs`), so the CLI-side
+/// gates in `commands::stop` and `commands::start::reap_orphans` that assert
+/// their termination windows cover this floor are, to the compiler, a different
+/// crate.
+pub const MIN_FLUSH_TIMEOUT_SECS: u64 = 30;
 
 /// Conservative disk-write throughput floor (MB/s) used to scale the flush
 /// deadline from the on-disk HNSW snapshot's current size — a cheap proxy for

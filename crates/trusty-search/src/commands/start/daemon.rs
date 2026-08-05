@@ -258,57 +258,15 @@ pub async fn handle_start(
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
     // lockfile. Reap them now so we don't end up with two daemons fighting
     // over `bind_with_auto_port`.
-    let orphans = crate::commands::stop::find_daemon_pids();
-    if !orphans.is_empty() {
-        tracing::warn!(
-            "found {} existing trusty-search daemon process(es) not tracked by lockfile: {:?} — terminating before start",
-            orphans.len(),
-            orphans
-        );
-        eprintln!(
-            "{} found {} existing trusty-search daemon process(es) not tracked by lockfile — stopping them first",
-            "⚠".yellow(),
-            orphans.len()
-        );
-        #[cfg(unix)]
-        for pid in &orphans {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(*pid as i32),
-                nix::sys::signal::Signal::SIGTERM,
-            );
-        }
-        // Give them 3 s to exit cleanly, then SIGKILL stragglers.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            #[cfg(unix)]
-            let any_alive = orphans.iter().any(|p| {
-                nix::sys::signal::kill(nix::unistd::Pid::from_raw(*p as i32), None).is_ok()
-            });
-            #[cfg(not(unix))]
-            let any_alive = false;
-            if !any_alive || std::time::Instant::now() >= deadline {
-                break;
-            }
-        }
-        #[cfg(unix)]
-        for pid in &orphans {
-            if nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid as i32), None).is_ok() {
-                tracing::warn!("orphan pid {pid} ignored SIGTERM — sending SIGKILL");
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(*pid as i32),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
-        }
-        // Clear stale lock/port files left behind by the killed orphans.
-        if let Ok(lock) = crate::service::daemon_lock_path() {
-            let _ = std::fs::remove_file(&lock);
-        }
-        if let Some(port) = super::super::daemon_utils::daemon_port_path() {
-            let _ = std::fs::remove_file(&port);
-        }
-    }
+    //
+    // #4395: this used to SIGTERM every process on the machine named
+    // `trusty-search` with `start` in argv and SIGKILL the survivors 3 s later,
+    // so a `start` in an isolated data dir destroyed the healthy production
+    // daemon. It now reaps only processes positively identified as sharing our
+    // own data directory, and allows them the same termination window every
+    // other path grants (#4393). See `reap_orphans`'s module doc for why the
+    // data directory is the identity signal and process name never was.
+    super::reap_orphans::reap_orphans_before_start();
 
     // Construct `SearchAppState` immediately; kick off model loading on
     // a background task, and let `run_daemon` bind the HTTP port right away.
