@@ -1,15 +1,33 @@
-# Rust Test Ladder — Baseline-Failure Protocol
+# Rust Test Ladder — Gate Commands and Baseline-Failure Protocol
 
-> **The ladder table, the rung selection rule, and "never make a red gate
-> green by deleting coverage" live in
-> [`CLAUDE.md`](../../CLAUDE.md)** (Rust Test Ladder). This page is the Rust-specific detail for
-> telling a pre-existing red from one your branch caused — consult it while
-> triaging a failing gate, not to decide which rung to run.
+> **Which rung a change lands on — the change classes, the risk labels, and
+> "never make a red gate green by deleting coverage" — is decided in
+> [`CLAUDE.md`](../../CLAUDE.md)** (Rust Test Ladder). Choose the rung there,
+> then come here for the exact command to run and for triaging a red gate.
 
 The six-step baseline-failure protocol (establish whose red it is, fix if
 branch-caused, append to the canonical issue if tracked, one canonical issue if
 not, and the literal report string) lives in `tm-pr-workflow`. It is **not**
 restated here. What follows is only what that generic version cannot carry.
+
+## Per-Rung Gate Commands
+
+Run the smallest deterministic gate that covers the change's blast radius. Paste
+the command you actually ran into the PR body so a reviewer can see which rung
+was exercised.
+
+| # | Development proof | PR gate — the command to run | Hardening / release gate |
+|---|---|---|---|
+| 1 | Read the rendered file | `bash scripts/check_sld.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
+| 2 | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `cargo fmt --check` && `cargo test -p <crate>`; add `-- --test-threads=1` when the flake is isolation-shaped | `cargo test --workspace` **only** when shared test infrastructure changed |
+| 3 | One targeted regression test that provably fails before the change | `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate>` | Workspace gate only when release policy requires it |
+| 4 | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `cargo check --workspace` && `cargo test -p <consumer>` for **each direct dependent** | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
+| 5 | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
+| 6 | Rust crate tests **plus** direct UI/API evidence (curl the route, call the MCP tool, load the page) | rung 3 or 4 for the Rust side, plus `pnpm -C crates/<crate>/ui test` (where the package defines one; otherwise `… build`) and one smoke run of the binary | full product/e2e gate plus `cargo test -- --include-ignored` when hardening |
+
+Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
+never scope away" line that constrains picking a lower rung, are stated with the
+ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
 
 ## Known-Environmental On This Machine — Expect These, Do Not Re-File Them
 
