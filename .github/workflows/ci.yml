@@ -177,10 +177,37 @@ jobs:
       - name: CI helper selftests (#4179, #4468, #4421)
         run: bash scripts/check-ci-helpers-selftest.sh
 
+      # Refresh the base branch ref (same fix as #4688 in version-parity.yml's
+      # pr-version-bump job). `github.event.pull_request.base.sha` is a
+      # SNAPSHOT taken when the triggering event was delivered, but
+      # `actions/checkout`'s default ref for a pull_request event
+      # (`refs/pull/<PR>/merge`) is a GitHub-generated merge commit whose first
+      # parent tracks the base branch's CURRENT tip, refreshed continuously and
+      # independently of that snapshot. On a repo merging this frequently, the
+      # gap between "when the event fired" and "when this job actually runs"
+      # routinely spans several unrelated merges to main. `git merge-base
+      # <stale-sha> HEAD` then resolves to that stale snapshot itself (it IS an
+      # ancestor of HEAD), so the diff against it sweeps in every file touched
+      # by every commit merged to main in between — a genuinely docs-only PR
+      # gets misclassified as docs_only=false. Live instance: PR #4960 (4 files,
+      # all under docs/) was classified as 23 changed paths including a dozen
+      # unrelated trusty-mpm .rs files, because its stale base.sha lagged the
+      # live merge ref by ~25 minutes / several merges. Re-fetching
+      # `origin/<base-ref>` right before diffing pins DOCS_ONLY_BASE to the
+      # freshest tip available at diff time, closing that window.
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
       - name: Classify changed paths
         id: detect
         env:
-          DOCS_ONLY_BASE: ${{ github.event.pull_request.base.sha }}
+          DOCS_ONLY_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
