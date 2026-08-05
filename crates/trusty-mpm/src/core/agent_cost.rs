@@ -111,6 +111,13 @@ pub const DEFAULT_MAX_TOKENS: u64 = 0;
 /// allowlisting them cannot be used to keep going. `git status`/`git diff` are
 /// read-only and earn their place by letting the agent write an accurate
 /// handback instead of guessing at what it left behind.
+///
+/// That "cannot produce new work" claim holds only because the classifier also
+/// judges the FLAGS. A subcommand name alone does not bound what git executes:
+/// `git -c diff.external='cargo test' diff` and
+/// `git push --receive-pack='cargo test' …` are both a listed subcommand
+/// running an arbitrary program (#4850 review). The flag rules live with the
+/// classifier, not with this list — see `pm_guard_bash::persistence`.
 /// What: the git subcommand allowlist consulted by
 /// [`commands::pm_guard_cost::is_persistence_escape`](../../bin/tm/commands/pm_guard_cost/index.html),
 /// which additionally requires EVERY segment of a composed command to match.

@@ -881,13 +881,145 @@ fn command_is_persistence_only_sees_past_git_global_flags() {
     for cmd in [
         "git -C /repo/wt commit -m x",
         "git --git-dir=/repo/.git --work-tree=/repo add -A",
-        "git -c user.name=bot commit -m x",
+        "git --work-tree /repo -C /repo status",
+        "git --no-pager diff --stat",
     ] {
         assert!(
             command_is_persistence_only(cmd),
             "expected {cmd:?} to resolve past its global flags"
         );
     }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_config_injection() {
+    // #4850 review HIGH, shape 1: `-c` sits in `GIT_GLOBAL_OPTS_WITH_ARG`, so
+    // the first cut consumed it with its value and resolved a clean `diff` —
+    // while `diff.external` runs whatever it names. The earlier suite asserted
+    // `git -c user.name=bot commit -m x` WAS persistence, which pinned the hole
+    // open by construction: any `-c <anything>` was accepted. `-c` is now
+    // rejected outright, so no value has to be judged.
+    for cmd in [
+        "git -c diff.external='cargo test' diff",
+        "git -c core.gitProxy=cargo fetch",
+        "git -c credential.helper='!cargo test' push",
+        "git -c alias.p='!cargo test' push",
+        // The benign spelling goes too — an agent persisting work does not
+        // need `-c`, and allow-listing values is the losing side of the bet.
+        "git -c user.name=bot commit -m x",
+        // Same class, other spellings: config from the environment, and the
+        // path git resolves its subcommand binaries from.
+        "git --config-env=user.name=EVIL commit -m x",
+        "git --exec-path=/tmp/evil status",
+        // Default-deny means an option nobody thought about is rejected too.
+        "git --totally-made-up-global status",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as config injection"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_exec_options() {
+    // #4850 review HIGH, shape 3: these sit AFTER the subcommand, which the
+    // first cut never examined — `git_subcommand` had already answered "push"
+    // and stopped reading.
+    for cmd in [
+        "git push --receive-pack='cargo test' /tmp/repo HEAD",
+        "git push --receive-pack cargo /tmp/repo HEAD",
+        "git push --exec='cargo test' /tmp/repo HEAD",
+        "git push --upload-pack=cargo origin HEAD",
+        "git diff --ext-diff",
+        "git diff --textconv",
+        "git diff --output=/tmp/out.txt",
+        // The `-pack` suffix rule, not the literal list: a name nobody has
+        // listed is still denied.
+        "git push --future-pack=cargo origin HEAD",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as an exec-capable option"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_remote_helper_transport() {
+    // #4850 review HIGH, shape 2: `ext::` runs its argument as a shell command
+    // by design, and the form generalises to any `<transport>::<address>`
+    // remote helper. Rejecting the `::` token closes all of them, and the `-c`
+    // that enabled it is independently rejected.
+    for cmd in [
+        "git -c protocol.ext.allow=always push ext::sh -c 'cargo test' HEAD",
+        "git push ext::sh -c 'cargo test' HEAD",
+        "git push ext::cargo origin HEAD",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as a remote-helper transport"
+        );
+    }
+    // An ordinary remote with a single colon is untouched.
+    assert!(command_is_persistence_only("git push origin HEAD:main"));
+}
+
+#[test]
+fn command_is_persistence_only_rejects_process_substitution() {
+    // #4850 review HIGH, shape 4: `<(` is neither `$(` nor a backtick, and the
+    // redirection scan only ever looked at `>`, so this ran `cargo test` inside
+    // an "allowed" git call. Any unquoted metacharacter now disqualifies, so
+    // there is no spelling left to miss.
+    for cmd in [
+        "git diff <(cargo test)",
+        "git diff >(cargo test)",
+        "git add -A < /tmp/list",
+        "git commit -m x -F <(cargo test)",
+        "git status (cargo test)",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as process substitution"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_allows_metacharacters_inside_quotes() {
+    // The metacharacter rule has to stay quote-aware or it strands exactly the
+    // work the hatch exists to save — commit messages are full of these.
+    for cmd in [
+        "git commit -m 'fix: handle (n>1) and $HOME'",
+        "git commit -m \"refactor: spec -> code\"",
+        "git commit -m 'closes #4850 (review)'",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to survive its quoted metacharacters"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_requires_a_bare_git_program() {
+    // An env-assignment prefix is an exec vector of its own
+    // (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `LD_PRELOAD`), and
+    // `sudo`/`env` re-exec. None is needed to persist, so the program token
+    // must be git itself.
+    for cmd in [
+        "GIT_SSH_COMMAND='cargo test' git push",
+        "GIT_EXTERNAL_DIFF=cargo git diff",
+        "env GIT_PAGER=cargo git diff",
+        "sudo git commit -m x",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected: the program must be git itself"
+        );
+    }
+    // A path-qualified git is still git.
+    assert!(command_is_persistence_only("/usr/bin/git commit -m x"));
 }
 
 #[test]
@@ -908,8 +1040,8 @@ fn command_is_persistence_only_rejects_smuggled_work() {
         "echo hi",
         "",
         "   ",
-        // `git` reached only through sudo-with-flag, which the resolver
-        // refuses to parse — unresolvable must mean "not persistence".
+        // `git` reached through sudo: the program token is not git, and a
+        // program that re-execs is not persistence.
         "sudo -u bob git commit -m x",
     ] {
         assert!(
@@ -928,12 +1060,17 @@ fn command_is_persistence_only_rejects_substitution_and_redirection() {
         "git commit -m `date`",
         "git status > /tmp/out.txt",
         "git diff >> notes.md",
+        // #4850: a discard sink used to be allowed here, on the strength of
+        // `has_file_write_redirection` telling a `/dev/null` write from a real
+        // one. That classifier is no longer in the trust path — keeping it
+        // meant keeping a hand-rolled redirection parser that had already
+        // missed `<`. Every unquoted redirection metacharacter now
+        // disqualifies, and an agent saving its work never needs one.
+        "git status 2>/dev/null",
     ] {
         assert!(
             !command_is_persistence_only(cmd),
             "expected {cmd:?} to be rejected"
         );
     }
-    // A discard sink is not a file write, so it stays allowed.
-    assert!(command_is_persistence_only("git status 2>/dev/null"));
 }

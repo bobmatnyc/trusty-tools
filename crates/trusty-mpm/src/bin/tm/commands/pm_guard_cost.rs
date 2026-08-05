@@ -210,17 +210,20 @@ async fn read_latest_context(path: &Path) -> Option<u64> {
 /// Traced against a real case: the #4841 engineer reached 434k while producing
 /// a correct fix and would have been stranded. A guard that strands work is
 /// worse than the overrun it prevents, so the stop keeps a narrow allowlist
-/// open. An allowlist (rather than a one-shot grace budget) is the right shape
-/// because `PreToolUse` is stateless: a grace *count* would need durable
-/// per-agent state that has to be created, expired, and reasoned about on
-/// every call, and it would let the agent spend its grace on anything at all.
-/// Naming the tools instead makes the escape hatch exactly as wide as
-/// "persist and report" and no wider, with nothing to keep.
+/// open. An allowlist beats a one-shot grace budget on shape, not on cost:
+/// [`claim_warn_notice`] already keeps durable per-agent state, so "the hook is
+/// stateless" is not the argument — it was in the first cut of this doc, and the
+/// marker file makes it false. The reason that stands on its own is what each
+/// hatch lets through: a grace *count* is spendable on anything the agent likes,
+/// while naming the tools makes the hatch exactly as wide as "persist and
+/// report" and no wider.
 /// What: `true` for [`is_persistence_tool`] (`SendMessage`), and for `Bash`
 /// when [`command_is_persistence_only`] proves every segment of its command is
-/// an allowlisted git call. Everything else is `false` → denied.
+/// an allowlisted git call carrying no exec-capable flag — see that function's
+/// module docs for the four bypass classes the #4850 review closed. Everything
+/// else is `false` → denied.
 /// Test: `escape_hatch_permits_send_message_and_git_persistence`,
-/// `escape_hatch_denies_work_tools`.
+/// `escape_hatch_denies_work_tools`, `escape_hatch_denies_exec_capable_git`.
 pub(crate) fn is_persistence_escape(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
@@ -251,27 +254,19 @@ pub(crate) fn is_persistence_escape(
 /// marker per agent turns the notice into what it is meant to be: one nudge at
 /// the moment the threshold is crossed. `create_new` makes the claim atomic, so
 /// concurrent tool calls from the same agent cannot both win it.
-/// What: `true` the first time it is called for a given `agent_id` (falling
-/// back to `session_id`), `false` afterwards. Any I/O failure returns `true` —
-/// failing toward informing the agent, since a missed nudge is worse than a
-/// duplicated one. Markers live in the OS temp dir, which is reaped for us; the
-/// only cost of losing them early is one extra nudge.
-/// Test: `warn_notice_is_claimed_once_per_agent`.
+/// What: `true` the first time it is called for a given agent (see
+/// [`warn_notice_key`]), `false` afterwards. Any I/O failure — and any payload
+/// the key cannot be derived from — returns `true`, failing toward informing the
+/// agent, since a missed nudge is worse than a duplicated one. Markers live in
+/// the OS temp dir, which is reaped for us; the only cost of losing them early
+/// is one extra nudge.
+/// Test: `warn_notice_is_claimed_once_per_agent`,
+/// `warn_notice_is_claimed_per_sibling_not_per_parent_session`,
+/// `warn_notice_fails_open_when_no_key_can_be_derived`.
 pub(crate) fn claim_warn_notice(payload: &serde_json::Value) -> bool {
-    let key = ["agent_id", "session_id"]
-        .iter()
-        .find_map(|k| {
-            payload
-                .get(*k)
-                .and_then(serde_json::Value::as_str)
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or("unknown");
-    let key: String = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .take(64)
-        .collect();
+    let Some(key) = warn_notice_key(payload) else {
+        return true;
+    };
     let dir = std::env::temp_dir().join("trusty-mpm-agent-cost");
     if std::fs::create_dir_all(&dir).is_err() {
         return true;
@@ -286,6 +281,52 @@ pub(crate) fn claim_warn_notice(payload: &serde_json::Value) -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(_) => true,
     }
+}
+
+/// A marker-file name that identifies ONE agent, or `None` to fail open.
+///
+/// Why (#4850 review, MEDIUM): the marker mechanism is per-key, so the key has
+/// to be per-agent — and `agent_id` → `session_id` is not. In
+/// [`resolve_agent_transcript`]'s case 2 the payload's `transcript_path`
+/// already points at the subagent and there is no `agent_id` at all, so every
+/// sibling of one parent fell back to the SAME `session_id`: the first to cross
+/// the warn threshold claimed the marker and silenced all the others. The
+/// subagent's own transcript path is the identity the resolver just established,
+/// so its file stem (`agent-<id>`) is the key that case needs.
+///
+/// Why `None` rather than a constant fallback (#4850 review, LOW): the earlier
+/// `.unwrap_or("unknown")` plus a character filter could produce an EMPTY key,
+/// and `dir.join("")` is `dir` itself — `create_new` on the existing directory
+/// returns `AlreadyExists`, i.e. `false`, i.e. the notice suppressed
+/// permanently, for every agent at once. That is the exact inverse of the
+/// documented "any I/O failure returns `true`". An underivable key now says so
+/// and the caller fails open.
+/// What: `agent_id` if present, else the resolved subagent transcript's file
+/// stem, else `session_id`; filtered to ASCII alphanumerics and `-` and capped
+/// at 64 characters so it is a safe single path component. `None` when no field
+/// yields anything, or when filtering leaves nothing.
+/// Test: `warn_notice_is_claimed_per_sibling_not_per_parent_session`,
+/// `warn_notice_fails_open_when_no_key_can_be_derived`.
+fn warn_notice_key(payload: &serde_json::Value) -> Option<String> {
+    let field = |k: &str| {
+        payload
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let raw = field("agent_id")
+        .or_else(|| {
+            resolve_agent_transcript(payload)
+                .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        })
+        .or_else(|| field("session_id"))?;
+    let key: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(64)
+        .collect();
+    (!key.is_empty()).then_some(key)
 }
 
 #[cfg(test)]
@@ -570,6 +611,90 @@ mod tests {
                 !is_persistence_escape("Bash", Some(&serde_json::json!({"command": command}))),
                 "{command:?} must stay denied past the ceiling"
             );
+        }
+    }
+
+    #[test]
+    fn escape_hatch_denies_exec_capable_git() {
+        // #4850 review HIGH: these four shapes were all "persistence" under the
+        // first cut's flag surface, and every one of them runs `cargo test`
+        // inside a listed git subcommand.
+        for command in [
+            "git -c diff.external='cargo test' diff",
+            "git -c protocol.ext.allow=always push ext::sh -c 'cargo test' HEAD",
+            "git push --receive-pack='cargo test' /tmp/repo HEAD",
+            "git diff <(cargo test)",
+        ] {
+            assert!(
+                !is_persistence_escape("Bash", Some(&serde_json::json!({"command": command}))),
+                "{command:?} executes a program and must not count as persistence"
+            );
+        }
+    }
+
+    #[test]
+    fn warn_notice_is_claimed_per_sibling_not_per_parent_session() {
+        // #4850 review MEDIUM: in resolution case 2 the payload carries the
+        // SUBAGENT's transcript_path and no agent_id, so both siblings fell back
+        // to the parent's session_id — one key, and the first to warn silenced
+        // the other. The transcript stem is what distinguishes them.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = format!("parent-{}", std::process::id());
+        let ids = [
+            format!("sib-a-{}", std::process::id()),
+            format!("sib-b-{}", std::process::id()),
+        ];
+        let subs: Vec<PathBuf> = ids
+            .iter()
+            .map(|id| transcript_tree(tmp.path(), id, 300_000).1)
+            .collect();
+        let markers: Vec<PathBuf> = ids
+            .iter()
+            .map(|id| {
+                std::env::temp_dir()
+                    .join("trusty-mpm-agent-cost")
+                    .join(format!("agent-{id}"))
+            })
+            .collect();
+        for m in &markers {
+            let _ = std::fs::remove_file(m);
+        }
+
+        for sub in &subs {
+            let payload = serde_json::json!({
+                "transcript_path": sub.to_str().expect("utf8"),
+                "session_id": session,
+            });
+            assert!(
+                claim_warn_notice(&payload),
+                "each sibling must get its own notice, not share the parent's"
+            );
+            assert!(!claim_warn_notice(&payload), "…and only one each");
+        }
+
+        for m in &markers {
+            let _ = std::fs::remove_file(m);
+        }
+    }
+
+    #[test]
+    fn warn_notice_fails_open_when_no_key_can_be_derived() {
+        // #4850 review LOW: an agent_id that filters to empty used to make the
+        // marker path the DIRECTORY, whose create_new always reports
+        // AlreadyExists — suppressing the notice permanently, for everyone. The
+        // documented contract is that an unusable key fails OPEN.
+        for payload in [
+            serde_json::json!({"agent_id": "!!!"}),
+            serde_json::json!({"agent_id": "", "session_id": ""}),
+            serde_json::json!({}),
+        ] {
+            assert!(warn_notice_key(&payload).is_none(), "{payload}");
+            for _ in 0..3 {
+                assert!(
+                    claim_warn_notice(&payload),
+                    "an underivable key must keep informing the agent: {payload}"
+                );
+            }
         }
     }
 
