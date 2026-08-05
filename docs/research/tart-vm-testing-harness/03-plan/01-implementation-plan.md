@@ -576,22 +576,47 @@ debugging argument parsing while a VM boots.
 - **Contract:** DOC-2 §4.1 (optional, auto-generated when omitted), §4.2 (format
   `YYYYMMDDThhmmssZ-<pid>`; validation regex `^[A-Za-z0-9][A-Za-z0-9-]{0,31}$`;
   violation is **exit 2** before any VM work), §4.3 (registry, run-directory
-  contents, concurrency warning).
+  contents, ~~concurrency warning~~ — **§4.3a single-run refusal**, see the
+  retraction note below).
 - **Do:** acquire the run by **`mkdir "<registry root>/<runid>"`**. `mkdir` either
   creates or fails and two concurrent callers cannot both succeed — **a
   test-then-create sequence (`[ -d ... ] || mkdir ...`) is a race and must not be
   used.** Registry root is
   `${VMTEST_STATE_DIR:-$HOME/.local/state/vmtest-harness}/runs/`. Write `pid`,
-  `vm`, `pattern`, `started` immediately on acquisition. **Warn — do not fail —
+  `vm`, `pattern`, `started` immediately on acquisition. ~~**Warn — do not fail —
   when another run directory holds a live PID** (§4.3: the harness cannot know the
   operator's host, and refusing a legitimate second run on a large machine would be
-  worse than a warning ignored on a small one).
+  worse than a warning ignored on a small one).~~ **RETRACTED — see below.**
 - **Acceptance:** `vmtest run local --runid 'a b' --dry-run` exits **2**;
   `vmtest run local --runid $(printf 'x%.0s' $(seq 40)) --dry-run` exits **2**;
   running two `--runid dup` invocations where the first holds the lock makes the
   second exit **10** naming the conflicting run; an auto-generated id matches
   `^[0-9]{8}T[0-9]{6}Z-[0-9]+$`.
 - **Depends:** P2-T2
+
+  > **RETRACTED 2026-08-04 (issue #15) — this task's warn-don't-fail instruction
+  > is withdrawn, and the §4.3 clause it cites is withdrawn with it.** The
+  > harness supports **exactly one run at a time**: a second run is **refused**
+  > with exit **10**, not warned about. The replacement contract is
+  > [DOC-2 §4.3a](../02-design/02-harness-contracts.md), and the implementation
+  > is `preflight_single_run`, which reads the refusal from the **run registry**
+  > before the VM-state scan and distinguishes *a peer run is live — wait for
+  > it* from *a crashed run left a VM — clean it up*. `registry_warn_live_peers`,
+  > written for the retracted clause, is deleted.
+  >
+  > **This file was the FIFTH artifact, and the count in issue #15 was wrong.**
+  > The issue named four (DOC-2 §4.3, `registry_warn_live_peers`, the
+  > runid/registry mechanisms, and `README.md`); this task was missed because it
+  > lives in the plan rather than the design set. Leaving it would have
+  > re-created exactly the design-vs-implementation conflict #15 exists to
+  > close — a future reader implementing P2-T3 from the plan would have restored
+  > the warn path. Found by the two adversarial review passes over commit
+  > `7f00f24a`, both independently.
+  >
+  > **What in this task still stands, unchanged:** the `mkdir` acquisition, the
+  > prohibition on test-then-create, the registry root, the four immediate
+  > files, the validation regex, and every acceptance clause above. Only the
+  > warn-don't-fail sentence is withdrawn.
 
 ### P2-T4 — `lib/vm.sh` — the OS boundary
 

@@ -590,18 +590,53 @@ registry_acquire() {
     if ! mkdir "$VMTEST_RUNDIR" 2>/dev/null; then
         local owner='(no pid file)'
         if [ -f "$VMTEST_RUNDIR/pid" ]; then owner="pid $(cat "$VMTEST_RUNDIR/pid")"; fi
-        die 10 "runid '$VMTEST_RUNID' is already held by the run directory $VMTEST_RUNDIR ($owner). Choose another --runid, or run \`vmtest clean\` if that run is over."
+        # NOT "choose another --runid": under §4.3a a second run is refused
+        # whatever it is called, so advising a rename would send the operator
+        # round a loop that ends in the same refusal one step later.
+        die 10 "runid '$VMTEST_RUNID' is already held by the run directory $VMTEST_RUNDIR ($owner). The harness runs one at a time (DOC-2 §4.3a): WAIT for that run if it is live. If it is over, clear the entry with \`vmtest clean --include-kept\` or \`rm -rf $VMTEST_RUNDIR\` — renaming the run with a different --runid would only reach the same refusal at the single-run gate."
     fi
     VMTEST_RUNDIR_OWNED=1
-    # DOC-2 §4.3's four immediate files.  NOTE for a reviewer: the fourth
+    # DOC-2 §4.3's immediate files.  NOTE for a reviewer: the `started`
     # filename contains, as an English substring, the four characters P2-T4's
     # acceptance grep searches for — that grep is a substring match, not a word
     # match.  It is mandated by §4.3 and cannot be renamed.  See MANIFEST
     # Phase 2, Deviations.
-    printf '%s\n' "$$"              > "$VMTEST_RUNDIR/pid"
-    printf '%s\n' "$VMTEST_VM"      > "$VMTEST_RUNDIR/vm"
-    printf '%s\n' "$VMTEST_PATTERN" > "$VMTEST_RUNDIR/pattern"
-    date -u '+%Y-%m-%dT%H:%M:%SZ'   > "$VMTEST_RUNDIR/started"
+    registry_put pid     "$$"
+    registry_put vm      "$VMTEST_VM"
+    registry_put pattern "$VMTEST_PATTERN"
+    registry_put started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    # A FIFTH FILE, added 2026-08-04 (§4.3a.1): this run's OWN command line, as
+    # `ps` reports it.  It is what makes `pid` checkable later — a pid alone
+    # cannot say whether it is still the process that wrote it, and macOS reuses
+    # pids.  Written by the run it describes and never by a checker, which is
+    # the whole point: corroboration compares recorded against observed FOR THE
+    # SAME PID, so no property of the checking process can enter into it.  Empty
+    # when `ps` is unavailable, and an empty record simply means "cannot say".
+    registry_put cmdline "$(proc_cmdline "$$")"
+}
+
+# registry_put <file> <value> — write one registry file ATOMICALLY: into a
+# temporary name beside it, then `mv`, which within one directory is a rename
+# and therefore all-or-nothing.  A concurrent reader sees the old content or the
+# whole new content, never half of it.
+#
+# THIS MATTERS FOR `cmdline` SPECIFICALLY.  Corroboration (§4.3a.1) compares the
+# recorded line against the observed one, so a record caught PART-WRITTEN does
+# not read as "cannot say" — it reads as a DIFFERENT command line, which is
+# positive evidence of a reused pid, which makes a genuinely live run's stopped
+# VM collectable.  Every other damaged shape (empty, missing, unreadable, extra
+# lines, trailing whitespace) already resolves to ALIVE; a partial one was the
+# single exception, and a rename removes the shape rather than compensating for
+# it downstream.  A crash between the write and the rename leaves `<file>.tmp`
+# and no `<file>`, which is the absent-record case and therefore also ALIVE.
+registry_put() {
+    local target="$VMTEST_RUNDIR/$1"
+    if ! printf '%s\n' "$2" > "$target.tmp"; then
+        die 10 "could not write the run registry file ${target}"
+    fi
+    if ! mv "$target.tmp" "$target"; then
+        die 10 "could not commit the run registry file ${target} (its content is at ${target}.tmp)"
+    fi
 }
 
 registry_release() {
@@ -612,31 +647,240 @@ registry_release() {
     fi
 }
 
-# WARN — do not fail — when another run directory holds a live pid (§4.3).  The
-# mechanisms above make two simultaneous runs collision-free; they do not make
-# them a good idea, because each guest is sized at 8 vCPU / 16 GB.  Refusing a
-# legitimate second run on a large machine would be worse than a warning
-# ignored on a small one, and the harness cannot know the operator's host.
-registry_warn_live_peers() {
-    local dir peer
+# ---------------------------------------------------------------------------
+# Process liveness (§5.1 condition 3, and the §4.3a gate)
+#
+# "Is that run still alive?" is asked by `clean` and by preflight, and until the
+# #15 review it was one `kill -0` that got BOTH failure directions wrong.
+#
+#   - `kill -0` FAILS WITH EPERM FOR A LIVE PROCESS OWNED BY ANOTHER USER.
+#     Verified on this platform: `kill -0 1` (launchd) exits 1.  Reading that as
+#     "dead" made `clean` DELETE another user's stopped VM and made the gate
+#     tell an operator to clean up a run that was still going.
+#   - A pid file that is missing, unreadable or not a number is NOT evidence of
+#     death either.  §4.3 acquires by `mkdir` and writes `pid` immediately
+#     after, so "directory, no pid yet" is exactly what a peer looks like
+#     between those two steps.
+#
+# BOTH UNCERTAIN CASES NOW RESOLVE TO ALIVE, because every caller's dangerous
+# direction is the same one: the gate's mistake is refusing a host that is
+# actually free (annoying) versus admitting a second run (the thing §4.3a
+# forbids), and `clean`'s mistake is skipping an orphan (annoying) versus
+# deleting a live run's VM (destructive).  Conservative means "alive".
+#
+# THE ONE RELAXATION IS POSITIVE EVIDENCE, and it exists because an
+# unconditional conservative reading BRICKS THE HARNESS.  `--keep` leaves a
+# registry entry behind on purpose and forever; macOS pids wrap around ~99,999,
+# so that entry's pid is eventually reused by an unrelated process, and from
+# that moment a permanently-alive owner refuses every future run.
+#
+# THE PEER ASSERTS ITS OWN IDENTITY; THE CHECKER NEVER INFERS IT.  On
+# acquisition each run records ITS OWN command line, as `ps` reports it, into
+# `<rundir>/cmdline`.  Corroboration is then one comparison — does that pid
+# still show the command line the entry was acquired with? — and it is
+# SYMMETRIC: nothing about the checking process enters into it.
+#
+# THAT IS THE SECOND VERSION OF THIS MECHANISM, AND THE FIRST ONE WAS
+# DESTRUCTIVE.  It matched the peer's `ps` line against the CHECKER's own
+# `basename "$0"`, which is not a property of the peer at all: a driver copy
+# named `vmtest-dev` looked for `vmtest-dev` inside a peer running `vmtest`,
+# found nothing, and declared a genuinely live run stale — `clean` then DELETED
+# that run's stopped VM.  Two differently-named copies of the driver were enough,
+# and DOC-1's trade statement makes deleting a live run's VM the one outcome that
+# must be impossible.  A recorded command line has no such asymmetry, and it is
+# also far narrower than the substring test it replaces: `grep -r vmtest .` no
+# longer reads as a live peer, because its command line is not the one the entry
+# recorded.
+#
+# EVERY UNCERTAIN CASE STILL RESOLVES TO ALIVE: no `ps` at record time or at
+# check time, an empty or unreadable `cmdline` file, and an entry written by an
+# older driver that has no `cmdline` at all.  Corroboration can only ever
+# DOWNGRADE a pid on positive evidence of DIFFERENCE.
+# ---------------------------------------------------------------------------
+
+# proc_alive <pid> — 0 when the process exists OR its existence cannot be
+# disproved; 1 ONLY when it provably does not exist.
+proc_alive() {
+    # Not a pid this function can check.  It cannot be disproved either.
+    case "$1" in ''|*[!0-9]*) return 0 ;; esac
+    kill -0 "$1" 2>/dev/null && return 0
+    # `kill -0` failed, and bash's builtin does not expose errno — but ESRCH and
+    # EPERM mean opposite things.  `ps` reports a process whatever its owner, so
+    # it is the discriminator: found means EPERM (alive), not found means ESRCH.
+    if command -v ps >/dev/null 2>&1; then
+        ps -p "$1" -o pid= >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    # No `ps`, so nothing here can distinguish the two.  Assert nothing.
+    return 0
+}
+
+# proc_cmdline <pid> — the process's command line, or NOTHING when it cannot be
+# read.  `-ww` so a long command line is never truncated: a truncated read
+# compared against an untruncated record would manufacture a false difference,
+# which is the direction that deletes things.
+proc_cmdline() {
+    case "$1" in ''|*[!0-9]*) return 0 ;; esac
+    command -v ps >/dev/null 2>&1 || return 0
+    ps -ww -o command= -p "$1" 2>/dev/null | head -n 1 || :
+}
+
+# registry_field <runid> <file> — the first line of one registry file, or empty
+# when it is missing or unreadable.  `read` rather than `cat`: no fork, and an
+# empty or truncated file yields an empty value instead of a failed pipeline.
+#
+# THE BRACES ARE LOAD-BEARING.  `read -r v < "$f" 2>/dev/null` does NOT silence a
+# missing file: bash applies the INPUT redirection first, and the failure it
+# reports is the shell's own, printed before `2>` is ever established.  The
+# result reached the operator's terminal as a line-numbered shell error —
+#     vmtest: line 709: …/runs/oldver/cmdline: No such file or directory
+# — sitting immediately above a refusal they were already trying to understand,
+# on exactly the mixed-version and crashed-entry paths where a `cmdline` record
+# is legitimately absent.  Grouping puts the redirection inside the construct
+# whose stderr is being discarded.
+registry_field() {
+    local v=''
+    { read -r v < "$REGISTRY_ROOT/$1/$2"; } 2>/dev/null || :
+    printf '%s\n' "$v"
+}
+
+registry_owner_pid() { registry_field "$1" pid; }
+
+# registry_owner_impostor <runid> <pid> — 0 ONLY on positive evidence that <pid>
+# is no longer the process that acquired <runid>: both command lines readable,
+# and differing in a way a PARTIAL record cannot explain.  Anything else is 1
+# ("cannot say").
+registry_owner_impostor() {
+    local recorded observed
+    recorded=$(registry_field "$1" cmdline)
+    [ -n "$recorded" ] || return 1
+    observed=$(proc_cmdline "$2")
+    [ -n "$observed" ] || return 1
+    # A TRUNCATED RECORD IS NOT A DIFFERENT ONE.  When one line is a prefix of
+    # the other the difference is exactly what a record cut short would look
+    # like, and "cut short" is not evidence of anything.  Without this, a record
+    # caught part-written read as a DIFFERENT command line — positive evidence of
+    # a reused pid — and a genuinely live run's stopped VM became collectable;
+    # `registry_put` now writes atomically so the driver cannot produce that
+    # shape, but a record written by an older driver, by a filesystem that tore
+    # the write, or by anything else is still read here.
+    #
+    # It cannot admit a false live: for a reused pid to be excused, the new
+    # process's command line would have to BEGIN WITH the entire command line of
+    # the run that ended.  The first pattern also covers exact equality, which is
+    # why nothing below re-tests it.  Quoted expansions inside a `case` pattern
+    # match literally, so a record containing glob characters is safe here.
+    case "$observed" in "$recorded"*) return 1 ;; esac
+    case "$recorded" in "$observed"*) return 1 ;; esac
+    return 0
+}
+
+# registry_owner_corroborated <runid> — 0 ONLY on positive evidence that the
+# recorded process IS still running: alive, and showing the command line it
+# recorded.  This is NOT the negation of `registry_owner_impostor` and must not
+# be written as one — the reading is three-valued (proved live / proved
+# different / cannot say), and the two functions ask about opposite proofs.
+# Only an operator's explicit `--include-kept` is allowed to act on "cannot say".
+registry_owner_corroborated() {
+    local pid recorded observed
+    [ -n "$1" ] || return 1
+    pid=$(registry_owner_pid "$1")
+    [ -n "$pid" ] || return 1
+    proc_alive "$pid" || return 1
+    recorded=$(registry_field "$1" cmdline)
+    [ -n "$recorded" ] || return 1
+    observed=$(proc_cmdline "$pid")
+    [ "$observed" = "$recorded" ]
+}
+
+# registry_owner_alive <runid> — §5.1 condition 3.  THIS IS THE ONLY PLACE THE
+# HARNESS DECIDES WHETHER A REGISTRY ENTRY BELONGS TO A LIVE RUN: `clean`,
+# `registry_live_owners`, `registry_stale_entries` and preflight all route
+# through it, so the reading above is made once rather than in four drifting
+# copies.  Only an absent runid or directory, a provably-dead pid, or positive
+# evidence of a DIFFERENT process count as "no live owner".
+registry_owner_alive() {
+    # An empty runid resolves to the registry ROOT, which always exists and has
+    # no `pid` — so without this guard a VM named exactly `vmtest-` would be
+    # permanently "held by a live run".  Unreachable from the CLI (§4.2 rejects
+    # an empty --runid) but this is reached from the namespace scan, whose input
+    # is a VM name and not a validated argument.
+    [ -n "$1" ] || return 1
+    local dir="$REGISTRY_ROOT/$1" pid
+    [ -d "$dir" ] || return 1
+    pid=$(registry_owner_pid "$1")
+    [ -n "$pid" ] || return 0
+    proc_alive "$pid" || return 1
+    registry_owner_impostor "$1" "$pid" && return 1
+    return 0
+}
+
+# registry_stale_entries — emits `runid<TAB>pid<TAB>recorded<TAB>observed` for
+# every entry whose pid is ALIVE but is running a different command line from
+# the one the entry recorded.  Reporting only: the decision is
+# `registry_owner_impostor`'s and is not repeated here.  Without this the
+# recovery is invisible — the harness would simply proceed and never say that it
+# had disregarded an entry.
+registry_stale_entries() {
+    local dir peer pid
     for dir in "$REGISTRY_ROOT"/*/; do
         [ -d "$dir" ] || continue
         peer=$(basename "$dir")
-        [ "$peer" != "$VMTEST_RUNID" ] || continue
-        [ -f "$dir/pid" ] || continue
-        if kill -0 "$(cat "$dir/pid")" 2>/dev/null; then
-            warn "another run '$peer' holds a live pid $(cat "$dir/pid"). Concurrency is safe (§4.3) but not advised: each guest is sized at $(conf_get cpu) vCPU / $(conf_get memory_mib) MiB."
-        fi
+        pid=$(registry_owner_pid "$peer")
+        [ -n "$pid" ] || continue
+        proc_alive "$pid" || continue
+        registry_owner_impostor "$peer" "$pid" || continue
+        printf '%s\t%s\t%s\t%s\n' \
+            "$peer" "$pid" "$(registry_field "$peer" cmdline)" "$(proc_cmdline "$pid")"
     done
 }
 
-# registry_owner_alive <runid> — §5.1 condition 3.  Absent directory or dead
-# pid both mean "no live owner".
-registry_owner_alive() {
-    local dir="$REGISTRY_ROOT/$1"
-    [ -d "$dir" ] || return 1
-    [ -f "$dir/pid" ] || return 1
-    kill -0 "$(cat "$dir/pid")" 2>/dev/null
+# registry_live_owners — emits `runid<TAB>pid`, one line per registry entry
+# whose recorded pid is still alive, EXCLUDING this run's own runid.
+#
+# This is what survives of `registry_warn_live_peers`, which was deleted with
+# §4.3's concurrency contract (issue #15).  The iteration was the useful half;
+# the warning was the half that was wrong.  It does not repeat `kill -0` — that
+# lives in `registry_owner_alive` above and nowhere else.
+registry_live_owners() {
+    local dir peer pid
+    for dir in "$REGISTRY_ROOT"/*/; do
+        [ -d "$dir" ] || continue
+        peer=$(basename "$dir")
+        [ "$peer" != "${VMTEST_RUNID:-}" ] || continue
+        registry_owner_alive "$peer" || continue
+        pid=$(registry_owner_pid "$peer")
+        printf '%s\t%s\n' "$peer" "${pid:-unreadable}"
+    done
+}
+
+# harness_vm_disposition <vm_name> <state> — THE classifier for a `vmtest-*` VM
+# that is not `stopped`.  Emits exactly one word:
+#
+#   wedged  suspended, which DOC-1 §8.2 records as unrecoverable-by-retry;
+#   live    a run with a live registry owner is using it;
+#   orphan  no live registry owner: a prior run died without tearing down.
+#
+# `wedged` IS DECIDED BEFORE OWNERSHIP AND IN SPITE OF IT.  An earlier draft of
+# this comment claimed a suspended VM "is nobody's live run, whatever the
+# registry says", which is simply false: a live run's VM can be suspended (by a
+# human, or by a host sleep), and the registry would say so correctly.  The
+# precedence is not a claim about ownership at all — it is that `suspended` has
+# ONE remedy, DOC-1 §8.2's manual unwedge, and that remedy does not change with
+# who owns it.  `clean` has always ordered it this way; preflight now matches.
+# The gate still reports the live owner separately when there is one, so a
+# suspended VM belonging to a live peer produces BOTH lines and refuses with
+# (a) — which is right: you cannot unwedge someone else's running run.
+#
+# ONE mechanism, two callers.  `cmd_clean` had this distinction right from the
+# start (`IN-USE (live run, skipped)` vs `REFUSED (running, no live registry
+# entry)`) while preflight collapsed both into a single "wedged" message; the
+# fix is for preflight to call clean's classifier, not to grow a second one.
+harness_vm_disposition() {
+    case "$2" in
+        suspended) printf 'wedged\n'; return 0 ;;
+    esac
+    if registry_owner_alive "${1#vmtest-}"; then printf 'live\n'; else printf 'orphan\n'; fi
 }
 
 registry_has_keep() { [ -f "$REGISTRY_ROOT/$1/keep" ]; }
@@ -691,6 +935,153 @@ preflight_pin() {
     log "pin OK: ${PIN_OCI_REF}@${PIN_DIGEST}"
 }
 
+# ---------------------------------------------------------------------------
+# THE SINGLE-RUN GATE (DOC-2 §4.3 as amended 2026-08-04; issue #15)
+#
+# THE HARNESS SUPPORTS EXACTLY ONE RUN AT A TIME.  Concurrency is RETIRED as a
+# supported mode: §4.3's "concurrency is safe but not advised … preflight
+# therefore warns (does not fail)" is RETRACTED, and `registry_warn_live_peers`
+# was deleted with it.  Refusing a second run is correct behaviour.
+#
+# TWO THINGS WERE WRONG BEFORE, AND ONLY ONE OF THEM WAS THE POLICY.
+#
+#   1. The refusal was INFERRED FROM VM STATE, not held as a lock.  The
+#      registry — the harness's actual record of what is running — was
+#      consulted only afterwards, by a warn path ordered *after* the refusal
+#      that made it unreachable.
+#   2. BOTH refusals shared ONE message, and it was case (b)'s.  A peer's VM is
+#      `running` for ~85% of a 9-16 minute run, so the common case told the
+#      operator the namespace might be "wedged" — the wrong diagnosis, pointing
+#      at the wrong remedy.  The remedies are opposites:
+#
+#        (a) a live registry owner  -> a peer run is in progress; WAIT for it.
+#        (b) a `vmtest-*` VM that is not `stopped` with NO live registry owner
+#            -> a prior run crashed; CLEAN IT UP.
+#
+# BOTH CAN BE TRUE IN ONE SCAN, so both are collected and both are reported
+# before anything dies.  The FAIL line carries (a) when (a) applies, because
+# waiting is the only action that is correct in both worlds: `vmtest clean`
+# while a peer is live would be acting on a false picture of the host.
+#
+# Exit code is 10 for both, unchanged: DOC-2 §2 defines 10 as "preflight
+# refused … no VM was created", which both of these are.  A new code would
+# describe the same event with a number no §2 row explains.
+#
+# CLASSIFICATION IS `harness_vm_disposition` — the same helper `clean` uses.
+#
+# PID REUSE IS THE FAILURE MODE THIS GATE MUST NOT HAVE, and it is why
+# `registry_owner_alive` corroborates a live pid instead of trusting it.  A
+# `--keep` run leaves its registry entry behind permanently and by design;
+# macOS pids wrap around ~99,999; so that entry's pid is eventually reused by an
+# unrelated process.  A gate that trusted `kill -0` would then refuse EVERY
+# future run, for ever, with a message telling the operator to wait for a run
+# that finished weeks ago.  Three things prevent that: the entry is disregarded
+# when the pid no longer shows the command line the entry RECORDED FOR ITSELF
+# (§4.3a.1); case (a)'s message names the stale-entry possibility and prints the
+# exact commands that clear it; and `clean --include-kept` reaches both shapes —
+# a STOPPED kept VM whose owner still answers, and a VM-less bookkeeping entry
+# whose owner cannot be corroborated.
+#
+# RESIDUAL RACE, RECORDED RATHER THAN PAPERED OVER: two invocations started in
+# the same instant can both pass this gate before either has created its
+# registry directory, because auto-generated runids embed the pid and therefore
+# never collide in `registry_acquire` either.  THE WINDOW IS THE SCAN-TO-`mkdir`
+# GAP, not scan-to-pid-file: a directory with no pid file yet reads as a live
+# owner (see `registry_owner_alive`), which closes the `mkdir`-to-pid-write
+# half.  Closing the rest needs a registry-root-wide lock that §4.3 does not
+# define, and a post-acquire re-check would let two racers refuse *each other*.
+# For an ad-hoc, manually-run, single-operator harness the gate is the
+# operator's mistake-catcher, not a mutex.
+# ---------------------------------------------------------------------------
+
+preflight_single_run() {
+    local peers stale live_vms orphans wedged recovery
+    local row name state disp pname ppid pcmd tab
+    tab=$(printf '\t')
+
+    peers=$(registry_live_owners)
+    stale=$(registry_stale_entries)
+
+    # THE SPLIT IS EXPLICIT, NOT `IFS=$'\t' read`.  TAB is an IFS *whitespace*
+    # character, so `read` collapses runs of it and an empty field shifts every
+    # later one left — a row whose State is empty would report its Source as the
+    # state.  `vm_list` builds these rows with jq's `@tsv`, which escapes any
+    # tab inside a field, so splitting on the first two tabs is exact.
+    live_vms=''; orphans=''; wedged=''
+    while IFS= read -r row; do
+        case "$row" in *"$tab"*) ;; *) continue ;; esac
+        name=${row%%"$tab"*}
+        state=${row#*"$tab"}
+        state=${state%%"$tab"*}
+        case "$name" in vmtest-*) ;; *) continue ;; esac
+        [ "$state" != 'stopped' ] || continue
+        disp=$(harness_vm_disposition "$name" "$state")
+        case "$disp" in
+            live)   live_vms="${live_vms}${name}(${state}) " ;;
+            wedged) wedged="${wedged}${name}(${state}) " ;;
+            *)      orphans="${orphans}${name}(${state}) " ;;
+        esac
+    done < "$VMTEST_TMPDIR/vm-list.tsv"
+
+    # Report every finding BEFORE dying: an operator holding both a live peer
+    # and an orphan needs both remedies, and `die` prints one line and exits.
+    # A here-doc rather than a pipe, so the loop runs in THIS shell and the
+    # `recovery` string it builds survives it.
+    recovery=''
+    if [ -n "$peers" ]; then
+        while IFS= read -r row; do
+            [ -n "$row" ] || continue
+            pname=${row%%"$tab"*}
+            ppid=${row#*"$tab"}
+            log "single-run: peer run '${pname}' is LIVE (pid ${ppid}); registry entry ${REGISTRY_ROOT}/${pname}"
+            recovery="${recovery}rm -rf ${REGISTRY_ROOT}/${pname}  "
+        done <<EOF
+$peers
+EOF
+    fi
+    # A disregarded entry must SAY it was disregarded.  Proceeding silently
+    # after ignoring the harness's own record of a live run would be the same
+    # class of defect as the message this gate replaced.
+    if [ -n "$stale" ]; then
+        while IFS= read -r row; do
+            [ -n "$row" ] || continue
+            pname=${row%%"$tab"*}
+            row=${row#*"$tab"}
+            ppid=${row%%"$tab"*}
+            row=${row#*"$tab"}
+            pcmd=${row%%"$tab"*}
+            warn "single-run: registry entry '${pname}' was acquired by pid ${ppid} running \`${pcmd}\`; that pid is alive but is now running \`${row#*"$tab"}\`. The pid was REUSED after the run ended, so the entry is STALE and is being DISREGARDED. Clear it with: \`vmtest clean --include-kept\`, or: rm -rf ${REGISTRY_ROOT}/${pname}"
+        done <<EOF
+$stale
+EOF
+    fi
+    [ -z "$live_vms" ] || log "single-run: VM(s) held by a live run: ${live_vms}"
+    [ -z "$orphans" ]  || log "single-run: orphaned VM(s), no live registry owner: ${orphans}"
+    [ -z "$wedged" ]   || log "single-run: suspended VM(s), wedged per DOC-1 §8.2: ${wedged}"
+
+    # (a) — a peer run is in progress.
+    if [ -n "$peers" ] || [ -n "$live_vms" ]; then
+        die 10 "another vmtest run is already in progress: ${peers:+peer runid(s) $(printf '%s' "$peers" | awk -F'\t' '{ printf "%s(pid %s) ", $1, $2 }')}${live_vms:+VM(s) ${live_vms}}— the harness supports exactly ONE run at a time (DOC-2 §4.3a, single-run policy; concurrency was retired 2026-08-04). WAIT for that run to finish, then retry. Do not stop it, do not \`vmtest clean\` it, do not retry now. IF NOTHING IS ACTUALLY RUNNING the entry is stale — a finished run's pid can be reused by an unrelated process, and \`--keep\` leaves its entry behind on purpose. Clear it with: \`vmtest clean --include-kept\`${recovery:+, or directly: ${recovery}}"
+    fi
+
+    # (b) — a prior run crashed and left its VM behind.
+    if [ -n "$orphans" ] || [ -n "$wedged" ]; then
+        die 10 "harness-namespace VM(s) left behind by a run that is no longer alive: ${orphans}${wedged}— no live registry owner, so a prior run crashed without tearing down. CLEAN IT UP before retrying: run \`vmtest clean\`, which classifies every vmtest-* VM and deletes the ones it can; one still in state 'running' or 'suspended' is refused there by design and clean prints the exact manual command for it. Refuse; do not repair (DOC-1 §4.1/§8.3)."
+    fi
+
+    # Self-exclusion, and why the OK line is conditional.  `registry_live_owners`
+    # skips OUR OWN runid, because reusing an id whose entry is live is
+    # `registry_acquire`'s refusal (§4.3(b)) and not this gate's.  Without this
+    # branch `--runid X` against a live X logged "no peer run is live" one line
+    # before acquire said one was — two of the harness's own messages
+    # contradicting each other inside a single preflight.
+    if [ -n "${VMTEST_RUNID:-}" ] && registry_owner_alive "$VMTEST_RUNID"; then
+        log "single-run: no OTHER run is live; the only live registry owner is this run's own runid '${VMTEST_RUNID}', which \`registry_acquire\` refuses below (DOC-2 §4.3(b))"
+        return 0
+    fi
+    log 'single-run: no peer run is live and no vmtest-* VM is left over'
+}
+
 preflight_vm_states() {
     local state
     state=$(awk -F'\t' -v n="$PIN_LOCAL_NAME" '$1 == n { print $2 }' "$VMTEST_TMPDIR/vm-list.tsv")
@@ -706,13 +1097,9 @@ preflight_vm_states() {
         die 10 "a VM named '$VMTEST_VM' already exists — runid collision (DOC-1 §4.1)"
     fi
 
-    # Every existing VM the harness would touch must be `stopped`.  The harness
-    # namespace is `vmtest-*` and nothing else is ever a candidate.
-    local wedged
-    wedged=$(awk -F'\t' '$1 ~ /^vmtest-/ && $2 != "stopped" { printf "%s(%s) ", $1, $2 }' \
-        "$VMTEST_TMPDIR/vm-list.tsv")
-    [ -z "$wedged" ] \
-        || die 10 "harness-namespace VM(s) not in state 'stopped': ${wedged}— refusing (DOC-1 §4.1/§8.3). A running VM would make a clone inconsistent; a suspended one is wedged (§8.2). Refuse; do not repair."
+    # The `vmtest-*` namespace scan that used to live here is now
+    # `preflight_single_run`, which runs BEFORE this function.  It was moved
+    # rather than copied: one scan, one classification, two distinct remedies.
 }
 
 # §8.4's four rows.  Total physical memory HARD-FAILS; available memory and
@@ -751,9 +1138,12 @@ preflight() {
     log '--- preflight (DOC-1 §4.1) ---'
     preflight_host_deps
     preflight_pin
+    # BEFORE the VM-state checks, and that order is the fix (issue #15): the
+    # registry is the harness's record of what is running, so the single-run
+    # refusal is read from it rather than inferred from a VM's state.
+    preflight_single_run
     preflight_vm_states
     registry_acquire
-    registry_warn_live_peers
     preflight_capacity
     log 'preflight OK'
 }
@@ -1010,12 +1400,26 @@ scenario_dispatch() {
 # `clean` NEVER issues a stop, NEVER issues a suspend, and NEVER deletes a VM
 # that is not already `stopped` — it inherits DOC-1 §8.1/§8.3 wholesale.
 #
-# THE PID-REUSE EDGE IS ACCEPTED DELIBERATELY.  A recycled pid makes `kill -0`
-# succeed, so clean skips a genuine orphan and leaves a VM for a human.  The
-# opposite error — deleting a VM out from under a live run — cannot occur by
-# this mechanism.  Accepting a conservative false negative to make the
-# dangerous false positive impossible is the trade; do not try to eliminate it
-# with process creation-time comparisons.
+# THE PID-REUSE EDGE IS STILL ACCEPTED HERE, AND IT IS STILL THE RIGHT TRADE
+# FOR `clean`: a recycled pid makes clean skip a genuine orphan and leave a VM
+# for a human, while the opposite error — deleting a VM out from under a live
+# run — cannot occur by this mechanism.  Do not try to eliminate it with process
+# creation-time comparisons.
+#
+# WHAT CHANGED (issue #15 review).  That trade is safe when the cost of a false
+# "alive" is a skipped deletion.  It is NOT safe when the same reading also
+# gates every future run, which is what §4.3a made it: a `--keep` entry outlives
+# its run by design, macOS pids wrap, and a permanently-alive owner then refused
+# every run with no way back.  Two corrections, both narrow:
+#
+#   - `registry_owner_alive` now DISREGARDS an entry when `ps` shows the pid
+#     belongs to another program.  That is positive evidence, not a guess, and
+#     it makes clean strictly more accurate here too.
+#   - `--include-kept` now WINS OVER A LIVE OWNER for a `stopped` KEPT VM.  That
+#     combination is exactly what `--keep` leaves behind, and it is the one flag
+#     that exists to remove it; refusing it there is what made the state
+#     unclearable by any documented command.  `running` and `suspended` VMs are
+#     NOT weakened — they are refused as before, whatever flags are passed.
 # ---------------------------------------------------------------------------
 
 cmd_clean() {
@@ -1031,46 +1435,70 @@ cmd_clean() {
     preflight_host_deps
     vm_list "$VMTEST_TMPDIR/vm-list.tsv"
 
-    local name state runid refusals=0 candidates=0
-    while IFS='	' read -r name state _source; do
+    local row name state runid tab refusals=0 candidates=0
+    tab=$(printf '\t')
+    # Explicit split, for the reason spelled out in `preflight_single_run`:
+    # `IFS=$'\t' read` collapses empty fields and shifts every later one left,
+    # so a VM whose State is empty would be classified by its Source.
+    while IFS= read -r row; do
+        case "$row" in *"$tab"*) ;; *) continue ;; esac
+        name=${row%%"$tab"*}
+        state=${row#*"$tab"}
+        state=${state%%"$tab"*}
         case "$name" in vmtest-*) ;; *) continue ;; esac
         candidates=$(( candidates + 1 ))
         runid="${name#vmtest-}"
 
-        case "$state" in
-        suspended)
-            # §5.4 row 2 / DOC-1 §8.2 — refuse and flag it as wedged.
-            out "$name  $state  WEDGED (refusing)"
-            vm_manual_hint suspended "$name"
-            refusals=$(( refusals + 1 ))
-            continue
-            ;;
-        stopped) ;;
-        *)
-            if registry_owner_alive "$runid"; then
+        # Every state but `stopped` is classified by the SAME helper preflight
+        # uses (issue #15).  The verdict strings are unchanged; what changed is
+        # that there is now one classifier instead of two copies of one.
+        if [ "$state" != 'stopped' ]; then
+            case "$(harness_vm_disposition "$name" "$state")" in
+            wedged)
+                # §5.4 row 2 / DOC-1 §8.2 — refuse and flag it as wedged.
+                out "$name  $state  WEDGED (refusing)"
+                vm_manual_hint suspended "$name"
+                refusals=$(( refusals + 1 ))
+                ;;
+            live)
                 # Protected by §5.1 condition 3: a live run owns it.
                 out "$name  $state  IN-USE (live run, skipped)"
-            else
+                ;;
+            *)
                 # §5.4 row 1 — clean cannot distinguish "another user's run"
                 # from "crashed run, registry wiped", and both are cases where
                 # deleting is destructive.
                 out "$name  $state  REFUSED (running, no live registry entry)"
                 vm_manual_hint running "$name"
                 refusals=$(( refusals + 1 ))
-            fi
+                ;;
+            esac
             continue
-            ;;
-        esac
+        fi
 
         # From here the state is `stopped`.
-        if registry_owner_alive "$runid"; then
+        #
+        # THE ORDER OF THESE THREE TESTS IS THE FIX, not a tidy-up (issue #15
+        # review).  `--include-kept` is now checked FIRST and wins over a live
+        # registry owner, because "stopped + `keep` marker + an entry whose pid
+        # answers" is precisely the state `--keep` leaves behind — and once that
+        # pid is reused, the owner check answered "alive" for ever and the one
+        # flag that exists to remove the VM could never reach it.  Deleting here
+        # needs BOTH the marker and the explicit flag; nothing else changed.
+        if registry_has_keep "$runid" && [ "$VMTEST_INCLUDE_KEPT" -eq 1 ]; then
+            :
+        elif registry_owner_alive "$runid"; then
             out "$name  $state  IN-USE (live run, skipped)"
-        elif registry_has_keep "$runid" && [ "$VMTEST_INCLUDE_KEPT" -eq 0 ]; then
+            continue
+        elif registry_has_keep "$runid"; then
             # §5.3 — a kept VM looks exactly like an orphan, because its run
             # exited and its pid is dead.  The `keep` marker is what stops
             # clean deleting the very thing --keep was asked to preserve.
             out "$name  $state  KEPT (would not delete)"
-        elif [ "$VMTEST_DRY_RUN" -eq 1 ]; then
+            continue
+        fi
+
+        if [ "$VMTEST_DRY_RUN" -eq 1 ]; then
             out "$name  $state  ORPHANED (would delete)"
         else
             vm_assert_stopped "$name"
@@ -1082,6 +1510,16 @@ cmd_clean() {
 
     # §5.4 row 3 — a registry directory with no matching VM.  There is nothing
     # to destroy; a stale registry entry is bookkeeping, not state.
+    #
+    # `--include-kept` PRUNES AN UNCORROBORATED OWNER HERE, and that is the
+    # difference between advertising a recovery command and having one.  §4.3a's
+    # refusal names `vmtest clean --include-kept` as the supported way to clear a
+    # stale entry — but a VM-less entry whose pid merely *answers* was reported
+    # `IN-USE (live run, no VM yet)` and left in place, so the advertised command
+    # did nothing for the exact case the message was about and only a raw
+    # `rm -rf` worked.  A CORROBORATED live peer (§4.3a.1: the pid still shows
+    # the command line the entry recorded) is never pruned, flag or no flag, and
+    # nothing here touches a VM.
     local dir
     for dir in "$REGISTRY_ROOT"/*/; do
         [ -d "$dir" ] || continue
@@ -1090,7 +1528,13 @@ cmd_clean() {
                 "$VMTEST_TMPDIR/vm-list.tsv"; then
             continue
         fi
-        registry_owner_alive "$runid" && { out "runs/$runid  —  IN-USE (live run, no VM yet)"; continue; }
+        if registry_owner_alive "$runid"; then
+            if [ "$VMTEST_INCLUDE_KEPT" -eq 0 ] || registry_owner_corroborated "$runid"; then
+                out "runs/$runid  —  IN-USE (live run, no VM yet)"
+                continue
+            fi
+            log "runs/$runid: owner pid $(registry_owner_pid "$runid") answers but cannot be corroborated as this run (§4.3a.1); --include-kept prunes the entry — there is no VM to destroy"
+        fi
         if [ "$VMTEST_DRY_RUN" -eq 1 ]; then
             out "runs/$runid  —  PRUNE (bookkeeping)"
         else
