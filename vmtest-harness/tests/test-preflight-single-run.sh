@@ -377,6 +377,55 @@ unit 1 'an entry with NO recorded command line is not corroborated either' \
 unit 0 'an entry with NO recorded command line resolves to ALIVE (conservative)' \
        'registry_owner_alive norecord'
 
+# --- E-A: a PARTIAL record is the one damaged shape that used to be lethal ---
+#
+# Corroboration compares recorded against observed, so a record caught
+# part-written did not read as "cannot say" — it read as a DIFFERENT command
+# line, i.e. positive evidence of a reused pid, and a genuinely live run's
+# stopped VM became collectable.  Every other damaged shape already resolved to
+# ALIVE.  `registry_put` now writes atomically so the driver cannot produce a
+# partial record; the prefix guard covers the ones it did not write.
+
+printf -- '\n--- E-A: truncated records, and the guard that does not over-reach ---\n'
+FULL_CMD=$(ps -ww -o command= -p "$LIVE_DRIVER_PID" 2>/dev/null | head -1)
+[ -n "$FULL_CMD" ] || bail 'could not read the fixture command line'
+
+registry_reset
+registry_entry trunc "$LIVE_DRIVER_PID"
+registry_cmdline_stale trunc "${FULL_CMD:0:12}"
+unit 1 'a record truncated to a prefix is NOT an impostor' \
+       "registry_owner_impostor trunc $LIVE_DRIVER_PID"
+unit 1 'a truncated record is NOT corroborated either — so it stays clearable' \
+       'registry_owner_corroborated trunc'
+unit 0 'a truncated record resolves to ALIVE'  'registry_owner_alive trunc'
+
+# The guard must be PREFIX-only.  A line that shares a prefix and then diverges
+# is a different process, and must still be collected — otherwise the guard
+# would be a general "looks a bit similar" excuse and would reopen the brick.
+registry_reset
+registry_entry diverge "$LIVE_DRIVER_PID"
+registry_cmdline_stale diverge "${FULL_CMD:0:12}ZZZ-diverges-here"
+unit 0 'a record that shares a prefix and then DIVERGES is still an impostor' \
+       "registry_owner_impostor diverge $LIVE_DRIVER_PID"
+
+printf -- '\n--- E-A: a live run with a truncated record must not be collectable ---\n'
+registry_reset
+registry_entry trunc "$LIVE_DRIVER_PID"
+registry_cmdline_stale trunc "${FULL_CMD:0:12}"
+write_list "vmtest-trunc:stopped"
+run_clean --dry-run
+assert_stdout_has 'vmtest-trunc  stopped  IN-USE (live run, skipped)' \
+                                    'a live run with a truncated record is reported IN-USE'
+assert_stdout_lacks 'ORPHANED'      'a live run with a truncated record is not classified as an orphan'
+run_clean
+assert_no_delete                    'and a REAL clean issues no delete for it'
+
+printf -- '\n--- E-A: registry_put writes atomically and leaves no temporary behind ---\n'
+unit 0 'registry_put commits the whole value and removes its .tmp' \
+       "VMTEST_RUNDIR='$TMPROOT/putdir'; mkdir -p \"\$VMTEST_RUNDIR\"; \
+        registry_put probe 'a b  c'; \
+        [ \"\$(cat \"\$VMTEST_RUNDIR/probe\")\" = 'a b  c' ] && [ ! -e \"\$VMTEST_RUNDIR/probe.tmp\" ]"
+
 # --- case (a): a live peer run --------------------------------------------
 
 printf -- '\n--- case (a): peer run live, its VM running -> WAIT for it ---\n'
@@ -399,6 +448,13 @@ assert_stderr_has "rm -rf $TMPROOT/state/runs/peer-live" \
 assert_stderr_has 'IF NOTHING IS ACTUALLY RUNNING the entry is stale' \
                                     'case (a) names the stale-entry possibility'
 assert_stderr_lacks "$CLEAN_ANCHOR" 'case (a) does NOT tell the operator to clean up'
+# E-B — this entry has no `cmdline` (a pre-§4.3a.1 or crashed-mid-acquire entry),
+# which is the exact path on which `read -r v < missing 2>/dev/null` leaked a
+# line-numbered shell error to the operator's terminal, directly above a refusal
+# they were already trying to understand.
+assert_stderr_lacks 'No such file or directory' \
+                                    'no raw shell error leaks when an entry has no cmdline record'
+assert_stderr_lacks 'vmtest: line'  'no line-numbered shell diagnostic reaches the operator'
 
 # --- case (a) with NO VM at all (review item 5; QA probe P19) -------------
 #
@@ -648,6 +704,8 @@ write_list
 run_clean --dry-run
 assert_stdout_has 'runs/stuck  —  IN-USE (live run, no VM yet)' \
                                     'plain clean still leaves an uncorroborated VM-less entry alone'
+assert_stderr_lacks 'No such file or directory' \
+                                    'and reading its absent cmdline leaks no shell error'
 run_clean --include-kept --dry-run
 assert_stdout_has 'runs/stuck  —  PRUNE (bookkeeping)' \
                                     '--include-kept classifies it as prunable bookkeeping'

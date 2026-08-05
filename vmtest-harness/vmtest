@@ -596,15 +596,15 @@ registry_acquire() {
         die 10 "runid '$VMTEST_RUNID' is already held by the run directory $VMTEST_RUNDIR ($owner). The harness runs one at a time (DOC-2 §4.3a): WAIT for that run if it is live. If it is over, clear the entry with \`vmtest clean --include-kept\` or \`rm -rf $VMTEST_RUNDIR\` — renaming the run with a different --runid would only reach the same refusal at the single-run gate."
     fi
     VMTEST_RUNDIR_OWNED=1
-    # DOC-2 §4.3's four immediate files.  NOTE for a reviewer: the fourth
+    # DOC-2 §4.3's immediate files.  NOTE for a reviewer: the `started`
     # filename contains, as an English substring, the four characters P2-T4's
     # acceptance grep searches for — that grep is a substring match, not a word
     # match.  It is mandated by §4.3 and cannot be renamed.  See MANIFEST
     # Phase 2, Deviations.
-    printf '%s\n' "$$"              > "$VMTEST_RUNDIR/pid"
-    printf '%s\n' "$VMTEST_VM"      > "$VMTEST_RUNDIR/vm"
-    printf '%s\n' "$VMTEST_PATTERN" > "$VMTEST_RUNDIR/pattern"
-    date -u '+%Y-%m-%dT%H:%M:%SZ'   > "$VMTEST_RUNDIR/started"
+    registry_put pid     "$$"
+    registry_put vm      "$VMTEST_VM"
+    registry_put pattern "$VMTEST_PATTERN"
+    registry_put started "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     # A FIFTH FILE, added 2026-08-04 (§4.3a.1): this run's OWN command line, as
     # `ps` reports it.  It is what makes `pid` checkable later — a pid alone
     # cannot say whether it is still the process that wrote it, and macOS reuses
@@ -612,7 +612,31 @@ registry_acquire() {
     # the whole point: corroboration compares recorded against observed FOR THE
     # SAME PID, so no property of the checking process can enter into it.  Empty
     # when `ps` is unavailable, and an empty record simply means "cannot say".
-    proc_cmdline "$$"               > "$VMTEST_RUNDIR/cmdline"
+    registry_put cmdline "$(proc_cmdline "$$")"
+}
+
+# registry_put <file> <value> — write one registry file ATOMICALLY: into a
+# temporary name beside it, then `mv`, which within one directory is a rename
+# and therefore all-or-nothing.  A concurrent reader sees the old content or the
+# whole new content, never half of it.
+#
+# THIS MATTERS FOR `cmdline` SPECIFICALLY.  Corroboration (§4.3a.1) compares the
+# recorded line against the observed one, so a record caught PART-WRITTEN does
+# not read as "cannot say" — it reads as a DIFFERENT command line, which is
+# positive evidence of a reused pid, which makes a genuinely live run's stopped
+# VM collectable.  Every other damaged shape (empty, missing, unreadable, extra
+# lines, trailing whitespace) already resolves to ALIVE; a partial one was the
+# single exception, and a rename removes the shape rather than compensating for
+# it downstream.  A crash between the write and the rename leaves `<file>.tmp`
+# and no `<file>`, which is the absent-record case and therefore also ALIVE.
+registry_put() {
+    local target="$VMTEST_RUNDIR/$1"
+    if ! printf '%s\n' "$2" > "$target.tmp"; then
+        die 10 "could not write the run registry file ${target}"
+    fi
+    if ! mv "$target.tmp" "$target"; then
+        die 10 "could not commit the run registry file ${target} (its content is at ${target}.tmp)"
+    fi
 }
 
 registry_release() {
@@ -704,9 +728,19 @@ proc_cmdline() {
 # registry_field <runid> <file> — the first line of one registry file, or empty
 # when it is missing or unreadable.  `read` rather than `cat`: no fork, and an
 # empty or truncated file yields an empty value instead of a failed pipeline.
+#
+# THE BRACES ARE LOAD-BEARING.  `read -r v < "$f" 2>/dev/null` does NOT silence a
+# missing file: bash applies the INPUT redirection first, and the failure it
+# reports is the shell's own, printed before `2>` is ever established.  The
+# result reached the operator's terminal as a line-numbered shell error —
+#     vmtest: line 709: …/runs/oldver/cmdline: No such file or directory
+# — sitting immediately above a refusal they were already trying to understand,
+# on exactly the mixed-version and crashed-entry paths where a `cmdline` record
+# is legitimately absent.  Grouping puts the redirection inside the construct
+# whose stderr is being discarded.
 registry_field() {
     local v=''
-    read -r v < "$REGISTRY_ROOT/$1/$2" 2>/dev/null || :
+    { read -r v < "$REGISTRY_ROOT/$1/$2"; } 2>/dev/null || :
     printf '%s\n' "$v"
 }
 
@@ -714,14 +748,31 @@ registry_owner_pid() { registry_field "$1" pid; }
 
 # registry_owner_impostor <runid> <pid> — 0 ONLY on positive evidence that <pid>
 # is no longer the process that acquired <runid>: both command lines readable,
-# and DIFFERENT.  Anything else is 1 ("cannot say").
+# and differing in a way a PARTIAL record cannot explain.  Anything else is 1
+# ("cannot say").
 registry_owner_impostor() {
     local recorded observed
     recorded=$(registry_field "$1" cmdline)
     [ -n "$recorded" ] || return 1
     observed=$(proc_cmdline "$2")
     [ -n "$observed" ] || return 1
-    [ "$observed" != "$recorded" ]
+    # A TRUNCATED RECORD IS NOT A DIFFERENT ONE.  When one line is a prefix of
+    # the other the difference is exactly what a record cut short would look
+    # like, and "cut short" is not evidence of anything.  Without this, a record
+    # caught part-written read as a DIFFERENT command line — positive evidence of
+    # a reused pid — and a genuinely live run's stopped VM became collectable;
+    # `registry_put` now writes atomically so the driver cannot produce that
+    # shape, but a record written by an older driver, by a filesystem that tore
+    # the write, or by anything else is still read here.
+    #
+    # It cannot admit a false live: for a reused pid to be excused, the new
+    # process's command line would have to BEGIN WITH the entire command line of
+    # the run that ended.  The first pattern also covers exact equality, which is
+    # why nothing below re-tests it.  Quoted expansions inside a `case` pattern
+    # match literally, so a record containing glob characters is safe here.
+    case "$observed" in "$recorded"*) return 1 ;; esac
+    case "$recorded" in "$observed"*) return 1 ;; esac
+    return 0
 }
 
 # registry_owner_corroborated <runid> — 0 ONLY on positive evidence that the

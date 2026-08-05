@@ -146,8 +146,15 @@ rm -rf ~/.local/state/vmtest-harness/runs/<runid>    # the entry alone
 
 `clean --include-kept` reaches both shapes this produces: a **stopped** kept VM
 whose entry still answers, and a leftover entry with **no VM at all**. It never
-overrides the refusal for a `running` or `suspended` VM, and it never removes the
-entry of a run it can positively confirm is alive.
+overrides the refusal for a `running` or `suspended` VM.
+
+Be aware of the one edge, which is deliberate: for a **stopped** VM with a `keep`
+marker, `--include-kept` deletes it *even if the owning run is still alive*.
+That is the point of the flag — `--keep` leaves a stopped VM behind and
+`--include-kept` is how you remove one — but it means the flag is not a
+"safe unless something is running" switch. Plain `vmtest clean` never does this.
+The leftover-**entry** case is the other way round: an entry belonging to a run
+the harness can positively confirm is alive is never removed, under any flag.
 
 ### `vmtest --check-table`
 

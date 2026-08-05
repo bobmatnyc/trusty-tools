@@ -965,6 +965,7 @@ primitive:
 | `kill -0` fails, `ps` does not find it | not alive | ESRCH — provably gone |
 | alive, and `ps` shows a **different** command line from the entry's own `cmdline` | **not alive — stale entry** | the PID was reused; see below |
 | alive, and there is no `cmdline` record, or it cannot be read | **alive** | nothing was proved either way |
+| alive, and one of the two command lines is a **prefix** of the other | **alive** | that is what a record cut short looks like, and "cut short" proves nothing |
 
 Every uncertain case resolves to **alive**, because both callers' dangerous
 direction is the same one: the gate's cheap mistake is refusing a free host and
@@ -991,6 +992,37 @@ the entire precondition, and DOC-1's trade statement makes deleting a live run's
 VM the one outcome that must be impossible. Comparing a **recorded** command
 line against the **observed** one for the same PID has no such asymmetry:
 nothing about the reader enters into it.
+
+##### The record's own integrity
+
+A comparison is only as good as the thing it compares against, so the record gets
+two protections and one stated exclusion.
+
+**It is written atomically.** `registry_acquire` writes each file to a temporary
+name beside it and renames, so a reader sees the old content or the whole new
+content and never half of it. This matters for `cmdline` in a way it does not
+for the others: a **partial** record does not read as *cannot say*, it reads as a
+**different** command line — positive evidence of a reused PID — and that makes a
+genuinely live run's stopped VM collectable. Every other damaged shape (empty,
+missing, unreadable, an extra line, trailing whitespace) already resolves to
+**alive**; a part-written one was the single exception, and a rename removes the
+shape rather than compensating for it downstream.
+
+**A prefix is not a difference.** Where one command line is a prefix of the
+other, the comparison says nothing — that is precisely the shape a truncated
+record takes, and records written by an older driver, or by a filesystem that
+tore the write, are not covered by the atomicity above. The guard cannot admit a
+false *live*: for a reused PID to be excused, the new process's command line
+would have to **begin with the entire command line** of the run that ended. It is
+also deliberately prefix-only — a line that shares a prefix and then diverges is
+still a different process and is still collected.
+
+**Deliberate tampering is out of the threat model, and is stated rather than
+coded against.** A `cmdline` record edited to an unrelated string, or copied from
+another entry, will make a live run's stopped VM collectable. Both require write
+access to `$VMTEST_STATE_DIR`, which is the operator's own state directory; an
+attacker with that access can simply delete the entry, or the VM. The registry is
+bookkeeping between an operator and their own runs, not a security boundary.
 
 *A note on what this narrowed as a side effect.* The old test was a bare
 substring match, so `grep -r vmtest .`, `vim vmtest-harness/vmtest` and
@@ -1021,8 +1053,19 @@ prevent it, and all three are required:
    a `stopped` **kept VM** (§5.3), which is precisely what `--keep` leaves
    behind; and it prunes a **VM-less bookkeeping entry** whose owner cannot be
    corroborated (§5.4 row 3), which is the shape a crashed run leaves before it
-   clones. `running` and `suspended` VMs are **not** weakened by the flag, and a
-   corroborated live peer's entry is never pruned.
+   clones. `running` and `suspended` VMs are **not** weakened by the flag.
+
+   > **What that flag WILL do, stated plainly because it is a real edge and it is
+   > deliberate.** For a `stopped` VM carrying a `keep` marker, `--include-kept`
+   > deletes it **even when the owning run is corroborated live**. That is not an
+   > oversight in the ordering: `--keep` exists to leave a stopped VM for
+   > inspection, `--include-kept` exists to remove one, and requiring the owner to
+   > be dead first is what made the pairing unclearable in the first place.
+   > Deleting still needs **both** the marker and the explicit flag, and it can
+   > only ever touch a VM that is already `stopped`. The **bookkeeping** prune is
+   > the opposite way round — a corroborated live peer's entry is never pruned,
+   > under any flag — because there the flag would be removing the only record
+   > that a live run exists.
 3. **The refusal message names the escape.** Case (a) states that the entry may
    be stale and prints both `vmtest clean --include-kept` and the exact
    `rm -rf <registry root>/<runid>`.
