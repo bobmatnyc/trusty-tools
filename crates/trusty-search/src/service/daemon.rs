@@ -227,25 +227,45 @@ pub fn http_addr_path() -> Option<PathBuf> {
 /// Test: set `TRUSTY_DATA_DIR=/tmp/ts-test` before calling; assert the returned
 /// path equals `/tmp/ts-test` and the directory exists.
 fn daemon_dir() -> Result<PathBuf, DaemonError> {
+    let dir = resolve_daemon_dir(std::env::var_os("TRUSTY_DATA_DIR").as_deref())
+        .ok_or(DaemonError::NoDataDir)?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Resolve which data directory a trusty-search daemon uses, given the value of
+/// its `TRUSTY_DATA_DIR` (equivalently, its `--data-dir` flag).
+///
+/// Why (#4395): the orphan reaper has to answer this question about OTHER
+/// processes, not just itself — "is that daemon looking at my data, or someone
+/// else's?" is the only trustworthy basis for deciding whether it is an orphan
+/// of mine or a healthy stranger. Taking the override as a parameter rather than
+/// reading the environment makes the rule one function that the reaper can apply
+/// to a candidate's observed argv/environ and to its own, so the two answers
+/// cannot be computed by different logic.
+///
+/// What: `Some(override)` when one is supplied, otherwise
+/// `<data_local_dir>/trusty-search`. Pure — creates nothing. `None` only when
+/// the platform data-local dir is unresolvable, which [`daemon_dir`] reports as
+/// [`DaemonError::NoDataDir`].
+///
+/// NB: We use `data_local_dir()` (not the shared `trusty_common::resolve_data_dir`
+/// which uses `data_dir()`) because the lockfile path is replicated in `main.rs`
+/// (`Stop`, `daemon_port_path`) against `data_local_dir()`. They must agree;
+/// diverging would break daemon discovery on Windows where the two paths differ
+/// (Roaming vs Local). If/when `trusty-common` grows a `resolve_data_local_dir`
+/// helper, switch both sides at once.
+///
+/// Test: `commands::start::reap_orphans` tests drive it through
+/// `DaemonIdentity`; `daemon_tests` cover the override precedence.
+pub fn resolve_daemon_dir(override_dir: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     // TRUSTY_DATA_DIR wins over the platform default so callers can run
     // isolated daemons for cert/benchmark work without conflicting with the
     // production lockfile (issue #281).
-    if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
-        let dir = PathBuf::from(override_dir);
-        std::fs::create_dir_all(&dir)?;
-        return Ok(dir);
+    if let Some(dir) = override_dir {
+        return Some(PathBuf::from(dir));
     }
-    // NB: We use `data_local_dir()` (not the shared `trusty_common::resolve_data_dir`
-    // which uses `data_dir()`) because the lockfile path is replicated in `main.rs`
-    // (`Stop`, `daemon_port_path`) against `data_local_dir()`. They must agree;
-    // diverging would break daemon discovery on Windows where the two paths differ
-    // (Roaming vs Local). If/when `trusty-common` grows a `resolve_data_local_dir`
-    // helper, switch both sides at once.
-    let dir = dirs::data_local_dir()
-        .ok_or(DaemonError::NoDataDir)?
-        .join("trusty-search");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    dirs::data_local_dir().map(|d| d.join("trusty-search"))
 }
 
 /// Handle returned by [`run_daemon`] (mostly for tests).
@@ -523,6 +543,16 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         );
     }
 
+    // #4393: the termination window starts the moment SIGTERM lands, not when
+    // the flush starts — the axum drain and watcher teardown happen in between
+    // and spend real time out of the same window. Recording the instant here
+    // and building the `ShutdownBudget` from it is what makes the flush charge
+    // that time to itself instead of over-planning by however long the drain
+    // took.
+    let sigterm_at: std::sync::Arc<std::sync::OnceLock<std::time::Instant>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let sigterm_at_signal = std::sync::Arc::clone(&sigterm_at);
+
     // Issue #829: OS signal OR in-process admin_stop channel.
     let serve_result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
@@ -532,6 +562,7 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
                     tracing::warn!("daemon: in-process stop via admin_stop");
                 }
             }
+            let _ = sigterm_at_signal.set(std::time::Instant::now());
         })
         .await;
 
@@ -546,7 +577,19 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // Issue #85 — flush HNSW + chunk corpus for every registered index so
     // the next daemon boot warm-starts instead of paying a full re-index.
     // Best-effort: log on failure, don't abort cleanup.
-    flush_all_indexes_on_shutdown(&flush_state).await;
+    //
+    // #4393: bounded by the real SIGTERM→SIGKILL window rather than by the sum
+    // of the per-index budgets, which no terminator ever granted. Anchored at
+    // the instant the shutdown future resolved; `unwrap_or_else` covers the
+    // `serve` returning for a reason other than shutdown (a bind/accept error),
+    // where the window has not started ticking against us at all.
+    let budget = crate::service::shutdown_budget::ShutdownBudget::started_at(
+        sigterm_at
+            .get()
+            .copied()
+            .unwrap_or_else(std::time::Instant::now),
+    );
+    flush_all_indexes_on_shutdown(&flush_state, budget).await;
 
     // Best-effort cleanup; ignore errors so the lockfile drop is what frees
     // the next daemon, not our cleanup.
