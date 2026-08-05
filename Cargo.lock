@@ -11737,7 +11737,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-progress"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "indicatif 0.17.11",
  "thiserror 1.0.69",
