@@ -33,6 +33,7 @@ mod fleet;
 pub mod front_gate;
 pub mod inproject;
 pub mod inproject_hygiene;
+mod inproject_start_point;
 mod launch_on_main;
 mod lifecycle;
 mod mcp_spawn_gate;

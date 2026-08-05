@@ -430,7 +430,13 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// record's `workspace_path`, which `spawn_managed_inproject` sets to this
 /// same path) rather than re-deriving a path from the session id.
 /// What: runs `git -C <base_path> worktree add -b session/<worktree_name>
-/// <base_path>/.worktrees/<worktree_name>`. Returns the worktree path on
+/// <base_path>/.worktrees/<worktree_name> <start-point>`, where `<start-point>`
+/// is `origin/<default-branch>` freshly fetched by
+/// [`super::inproject_start_point::resolve`] (#4957 — omitting it inherits the
+/// base checkout's local `HEAD`, which starts every session as stale as the
+/// operator's last `git pull`). A fetch that fails degrades to the last-known
+/// remote-tracking ref (or `HEAD`) and is `warn!`-logged, never silent.
+/// Returns the worktree path on
 /// success. Fails loudly (rather than silently clobbering) if the target
 /// worktree directory already exists — callers are expected to have already
 /// steered `SessionManager::resolve_session_name` away from a colliding name
@@ -443,7 +449,8 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// to reclaim this worktree.
 /// Test: covered by integration tests against a real temp repo;
 /// `create_session_worktree_rejects_existing_worktree_dir`,
-/// `create_session_worktree_writes_owner_sentinel` (#3649).
+/// `create_session_worktree_writes_owner_sentinel` (#3649),
+/// `session_worktree_branches_from_fetched_origin_not_stale_local_main` (#4957).
 pub fn create_session_worktree(
     base_path: &Path,
     worktree_name: &str,
@@ -460,19 +467,37 @@ pub fn create_session_worktree(
         ));
     }
 
+    // #4957: cut the session branch from the freshly-fetched remote default
+    // branch. Omitting the start-point inherits the base checkout's local
+    // HEAD, which is stale on any machine that has not pulled recently.
+    let start_point = super::inproject_start_point::resolve(base_path);
+    if let Some(reason) = start_point.warning() {
+        warn!(
+            base = %base_path.display(),
+            branch = %branch,
+            "inproject: session worktree is NOT branched from a freshly-fetched origin — {reason}"
+        );
+    }
+
     info!(
         base = %base_path.display(),
         worktree = %worktree_path.display(),
         branch = %branch,
+        start_point = start_point.git_ref().unwrap_or("HEAD"),
         "inproject: creating per-session worktree"
     );
 
-    let out = std::process::Command::new("git")
+    let mut add_cmd = std::process::Command::new("git");
+    add_cmd
         .arg("-C")
         .arg(base_path)
         .args(["worktree", "add", "-b"])
         .arg(&branch)
-        .arg(&worktree_path)
+        .arg(&worktree_path);
+    if let Some(git_ref) = start_point.git_ref() {
+        add_cmd.arg(git_ref);
+    }
+    let out = add_cmd
         .output()
         .map_err(|e| format!("inproject: git worktree add failed to spawn: {e}"))?;
 
