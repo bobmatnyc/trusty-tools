@@ -1,0 +1,5 @@
+Fixed
+
+- The project skill tier (`<workspace>/.claude/skills`) now redeploys when the project manifest changes, on every run path (closes [#4880](https://github.com/bobmatnyc/trusty-tools/issues/4880)). It was written only by `prepare_session` and `tm sessions sync-assets`, neither of which runs on resume or in-place relaunch — and because project outranks user, a skill an older binary left there silently shadowed the copy `managed_config` refreshes every run, the [#4408](https://github.com/bobmatnyc/trusty-tools/issues/4408) shape one tier down.
+  - "The project manifest" is the RESOLVED harness manifest (compiled default ⊕ framework tier ⊕ catalog ⊕ the operator's `<harness-root>/.trusty-mpm/framework/manifest.toml`), fingerprinted together with the compiled-in skill-bundle stamp and recorded in `<workspace>/.claude/skills/.trusty-mpm-project-tier-stamp`. A matching stamp writes nothing at all.
+  - Custom skills keep every protection they had: a project-custom skill is dropped by the tier planner before any file I/O, and a checksum-frozen hand edit is still skipped by the deployer.

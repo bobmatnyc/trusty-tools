@@ -113,6 +113,8 @@ pub mod process;
 pub mod project;
 pub mod project_aliases;
 pub mod project_discovery;
+// #4880: the project skill tier redeploys on project-manifest change.
+pub mod project_skill_tier;
 pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;

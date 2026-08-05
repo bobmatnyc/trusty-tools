@@ -15,6 +15,20 @@
 use super::*;
 use tempfile::TempDir;
 
+/// The session workspace these tests provision against.
+///
+/// Why (#4880): `ensure_managed_config_dir_with_root` now also refreshes the
+/// PROJECT skill tier, which deploys into `<project_dir>/.claude/skills`.
+/// Keeping it inside the same temp base is what stops these tests writing into
+/// the operator's real checkout.
+/// What: `<base>/workspace`, created on first use.
+/// Test: used by every case in this file.
+fn project_dir(base: &Path) -> std::path::PathBuf {
+    let dir = base.join("workspace");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 /// Build a `FrameworkPaths` whose framework SOURCE dirs are populated from a
 /// small but representative slice of the real bundled roster, so the deploy
 /// assertions do not depend on a prior `tm install` or the git submodule.
@@ -71,7 +85,7 @@ fn ensure_managed_config_dir_deploys_full_roster() {
     let fw = seed_framework(tmp.path());
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     // Scaffolding landed.
     assert!(config_dir.join("settings.json").exists());
@@ -110,11 +124,11 @@ fn ensure_managed_config_dir_is_idempotent() {
     let fw = seed_framework(tmp.path());
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
     let first = std::fs::read_to_string(config_dir.join("agents/engineer.md")).unwrap();
 
     // A second call must not fail and must leave the deployed roster intact.
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
     let second = std::fs::read_to_string(config_dir.join("agents/engineer.md")).unwrap();
 
     assert_eq!(first, second, "re-provisioning must be idempotent");
@@ -135,7 +149,7 @@ fn ensure_managed_config_dir_refreshes_stale_bundled_agents() {
     .unwrap();
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(fw.agents.join("BASE-AGENT.md")).unwrap(),
@@ -160,7 +174,7 @@ fn ensure_managed_config_dir_survives_an_unwritable_agent_target() {
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join("agents"), "blocking file\n").unwrap();
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir)
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path()))
         .expect("an undeployable agent roster must not fail provisioning");
 
     assert!(
@@ -184,7 +198,7 @@ fn ensure_managed_config_dir_deploys_user_tier_skill() {
     .unwrap();
 
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     assert!(
         config_dir.join("skills/my-custom-skill/SKILL.md").exists(),
@@ -221,7 +235,7 @@ fn manual_static_verify_full_roster() {
     }
 
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     // List every deployed agent and confirm each is spawnable.
     let agents_dir = config_dir.join("agents");
@@ -344,7 +358,7 @@ fn ensure_managed_config_dir_refreshes_a_stale_managed_skill() {
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let deployed = config_dir.join("skills/probe-skill/SKILL.md");
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
     assert_eq!(
         std::fs::read_to_string(&deployed).unwrap(),
         "---\nname: probe-skill\n---\n\nV1\n"
@@ -356,7 +370,7 @@ fn ensure_managed_config_dir_refreshes_a_stale_managed_skill() {
         "probe-skill",
         "---\nname: probe-skill\n---\n\nV2-REFRESHED\n",
     );
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&deployed).unwrap(),
@@ -381,10 +395,10 @@ fn ensure_managed_config_dir_skill_deploy_is_a_noop_when_unchanged() {
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let deployed = config_dir.join("skills/probe-skill/SKILL.md");
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
     let before = std::fs::metadata(&deployed).unwrap().modified().unwrap();
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
     let after = std::fs::metadata(&deployed).unwrap().modified().unwrap();
 
     assert_eq!(
@@ -419,7 +433,7 @@ fn ensure_managed_config_dir_preserves_a_project_custom_skill() {
     std::fs::create_dir_all(custom.parent().unwrap()).unwrap();
     std::fs::write(&custom, "PROJECT CUSTOM — DO NOT TOUCH\n").unwrap();
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&custom).unwrap(),
@@ -444,7 +458,7 @@ fn ensure_managed_config_dir_skips_a_frozen_skill() {
     // manifest checksum records V1 while disk holds the edit.
     let (config_dir, deployed) = frozen_skill_fixture(&tmp, &fw);
 
-    ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&deployed).unwrap(),
@@ -477,7 +491,7 @@ fn frozen_skill_fixture(
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let deployed = config_dir.join("skills/probe-skill/SKILL.md");
 
-    ensure_managed_config_dir_with_root(fw, &config_dir).unwrap();
+    ensure_managed_config_dir_with_root(fw, &config_dir, &project_dir(tmp.path())).unwrap();
     std::fs::write(&deployed, "HAND EDITED BY THE OPERATOR\n").unwrap();
     seed_skill(fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
 
@@ -519,7 +533,7 @@ fn ensure_managed_config_dir_emits_the_frozen_skill_warning() {
     );
 
     tracing::subscriber::with_default(subscriber, || {
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+        ensure_managed_config_dir_with_root(&fw, &config_dir, &project_dir(tmp.path())).unwrap();
     });
 
     let lines = buffer.tail(64);
@@ -603,5 +617,102 @@ fn skill_skip_summary_elides_beyond_five() {
     assert!(
         !line.contains("skill-5"),
         "beyond the preview limit: {line}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4880 — the PROJECT tier reaches the same choke point, gated on the project
+// manifest.
+// ---------------------------------------------------------------------------
+
+/// #4880 test 5: a fresh spawn, a `resume_managed`, and a bare-`tm` in-place
+/// relaunch all deploy the PROJECT skill tier.
+///
+/// Why one test for all three: none of those paths performs skill work of its
+/// own — each reaches `runtime::claude_code::prepare_managed_config`, whose only
+/// skill steps are the user-tier deploy above and the project-tier call this
+/// asserts. The same argument `ensure_managed_config_dir_refreshes_a_stale_managed_skill`
+/// already makes for the user tier (#4873) is what makes this test the proof for
+/// the project tier, without standing up a daemon or a tmux pane. Delete the
+/// `project_skill_tier` block from `ensure_managed_config_dir_with_root` and
+/// this fails.
+/// Test: itself.
+#[test]
+fn ensure_managed_config_dir_deploys_the_project_skill_tier() {
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    pin_skill_source_stamp(&fw);
+    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
+    let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+    let workspace = project_dir(tmp.path());
+    let project_copy = workspace
+        .join(".claude")
+        .join("skills")
+        .join("probe-skill")
+        .join("SKILL.md");
+
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&project_copy).unwrap(),
+        "---\nname: probe-skill\n---\n\nV1\n",
+        "the project tier — which OUTRANKS the config-dir tier — must be deployed \
+         by the shared choke point, not only by `prepare_session`"
+    );
+
+    // The newer text plus an updated project manifest: the trigger fires.
+    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV2\n");
+    let framework = crate::core::harness_root::framework_dir(&workspace);
+    std::fs::create_dir_all(&framework).unwrap();
+    std::fs::write(
+        framework.join("manifest.toml"),
+        "[style]\nactive = \"probe-style\"\n",
+    )
+    .unwrap();
+
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&project_copy).unwrap(),
+        "---\nname: probe-skill\n---\n\nV2\n",
+        "an updated project manifest must refresh the project tier on resume"
+    );
+}
+
+/// #4880: a relaunch with nothing changed rewrites nothing in the project tier.
+///
+/// Why: the owner's ruling is "when the project manifest is updated", not "every
+/// run". mtime equality is what distinguishes a stamp no-op from a redeploy that
+/// merely happens to write identical bytes.
+/// Test: itself.
+#[test]
+fn ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    pin_skill_source_stamp(&fw);
+    seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
+    let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+    let workspace = project_dir(tmp.path());
+    let project_copy = workspace
+        .join(".claude")
+        .join("skills")
+        .join("probe-skill")
+        .join("SKILL.md");
+
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+    let before = std::fs::metadata(&project_copy)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+    let after = std::fs::metadata(&project_copy)
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    assert_eq!(
+        before, after,
+        "an unchanged project manifest must take the stamp no-op path"
     );
 }
