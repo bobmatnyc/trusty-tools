@@ -10,7 +10,9 @@
 //! (closes #1566). `rm_cmd` deregisters an alias and removes its project dir.
 //! `update_cmd` pulls the latest changes and idempotently re-deploys managed
 //! config — reusing the same `load_alias` function that `load_cmd` calls.
-//! Test: exercised by `cli_parses_register`, `cli_parses_ls`, etc. in tests.rs.
+//! Test: `register_cmd` in `register_args_tests.rs`; registry semantics in
+//! `core::standalone::registry`'s `test_registry_*`. (#4912: the former pointer
+//! here named `cli_parses_register`/`cli_parses_ls`, neither of which exists.)
 
 use anyhow::Context;
 

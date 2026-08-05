@@ -791,12 +791,17 @@ pub(crate) enum Command {
     /// URL as `owner-repo` (hyphen-joined, e.g.
     /// `https://github.com/bobmatnyc/trusty-tools` → `bobmatnyc-trusty-tools`).
     /// The legacy `tm register <alias> <url>` order still works — whichever
-    /// positional is URL-shaped is taken as the URL (#4912). Persists
-    /// `{alias, url}` to `<root>/registry.json` and prints
+    /// positional is URL-shaped is taken as the URL (#4912). A FULL URL is
+    /// required: `gh`-style `owner/repo` shorthand is rejected, not expanded,
+    /// and so are browser paths into a repo (`.../tree/main`, `.../pull/123`).
+    /// Persists `{alias, url}` to `<root>/registry.json` and prints
     /// `registered <alias> → <url>`.
     /// Test: `register_args_tests.rs`.
     Register {
-        /// Clone-able repo URL (HTTPS or SSH).
+        /// Clone-able repo URL (HTTPS or SSH) — e.g.
+        /// `https://github.com/<owner>/<repo>` or
+        /// `git@github.com:<owner>/<repo>.git`. `owner/repo` shorthand is NOT
+        /// accepted.
         ///
         /// #4912: this position also accepts the legacy alias-first form; the
         /// URL is detected by shape, so `tm register <alias> <url>` still works.
