@@ -384,7 +384,6 @@ crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	delete_needs_force_errore
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	delete_needs_force_stopped_false
 crates/trusty-mpm/src/bin/tm/commands/prune.rs	build_plan_dry_run_has_no_side_effects
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_load
-crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_ls
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_path
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_run
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_errors_on_unknown_alias

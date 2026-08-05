@@ -67,7 +67,10 @@ pub(crate) fn register_cmd(
 /// git roots visited by `tm`) and "Managed fleet aliases" (DOC-24 GitHub-URL
 /// entries). Empty sections are omitted. `--json` outputs a combined JSON
 /// object with both arrays for scripted consumers.
-/// Test: `cli_parses_ls` in tests.rs.
+/// Test: flag parsing in `cli_parses_ls_json`, `cli_parses_ls_current`,
+/// `cli_parses_ls_projects` (`tests_behavior_d_tests.rs`); the printing itself
+/// is stdout-only with nothing to assert on (#4912 — this replaced a pointer to
+/// `cli_parses_ls`, which never existed).
 pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
     let root = &paths.root;
 

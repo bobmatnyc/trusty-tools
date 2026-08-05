@@ -22,8 +22,9 @@ use super::{Positional, classify, looks_like_repo, path_segments, resolve_regist
 // ---------------------------------------------------------------------------
 
 /// Every shape lands in exactly one case. The order of the arms is load-bearing:
-/// `./repo` must be caught as a path BEFORE the host-shape test, which it would
-/// otherwise pass on the `.` in `.`.
+/// a dot-prefixed path must be caught BEFORE the host-shape test, which it would
+/// otherwise pass on its own leading dot — `./repo` on the `.` in `.`, and
+/// `.hidden/repo` on the `.` in `.hidden`.
 #[test]
 fn classify_sorts_every_shape() {
     // Full URLs.
@@ -64,8 +65,15 @@ fn classify_sorts_every_shape() {
         }
     );
 
-    // Relative paths — never shorthand.
-    for s in ["./repo", "../repo", ".", ".."] {
+    // Relative paths — never shorthand, and never a host.
+    for s in [
+        "./repo",
+        "../repo",
+        ".",
+        "..",
+        ".hidden/repo",
+        ".config/x/y",
+    ] {
         assert_eq!(classify(s), Positional::RelativePath, "{s} misclassified");
     }
 
@@ -126,9 +134,22 @@ fn shorthand_with_explicit_alias() {
 
 /// Relative paths are paths, not shorthand — they resolve against the process
 /// cwd but would be cloned from elsewhere. Each shape refused explicitly.
+///
+/// The dot-prefixed directory forms matter beyond the obvious `./`: a leading
+/// dot lands inside the first segment, so `.hidden/repo` passed the "first
+/// segment contains a dot" host test and reached the registry as a host named
+/// `.hidden`. No hostname may begin with a dot, so the guard covers any leading
+/// `.` rather than just `./` and `../`.
 #[test]
 fn relative_paths_are_never_shorthand() {
-    for s in ["./repo", "../repo", "./owner/repo", "../a/b"] {
+    for s in [
+        "./repo",
+        "../repo",
+        "./owner/repo",
+        "../a/b",
+        ".hidden/repo",
+        ".github/workflows",
+    ] {
         let err = resolve_register_args(s, None).unwrap_err().to_string();
         assert!(
             err.contains("relative path"),

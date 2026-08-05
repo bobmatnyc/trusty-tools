@@ -67,7 +67,8 @@ enum Positional<'a> {
     Url(&'a str),
     /// GitHub `owner/repo` shorthand — the primary form (#4912).
     Shorthand { owner: &'a str, repo: &'a str },
-    /// `./x` or `../x` — a path, and explicitly NOT shorthand.
+    /// Anything starting with `.` (`./x`, `../x`, `.hidden/x`) — a path, and
+    /// explicitly NOT shorthand.
     RelativePath,
     /// Not a repo reference: an alias, or something malformed.
     Other,
@@ -76,10 +77,10 @@ enum Positional<'a> {
 /// Sort a positional into the case that decides its outcome.
 ///
 /// Why: see [`Positional`]. The order of the arms is load-bearing — the
-/// filesystem-path guards must run BEFORE the host-shape test, or `./repo`
+/// filesystem-path guards must run BEFORE the host-shape test, or a leading dot
 /// matches "first segment contains a dot" and is read as a host.
-/// What: a scheme, a `git@` prefix, or a leading `/`/`~/` is a `Url`; `./` and
-/// `../` are `RelativePath`; a host-shaped first segment (containing a `.`, or
+/// What: a scheme, a `git@` prefix, or a leading `/`/`~/` is a `Url`; a leading
+/// `.` is a `RelativePath`; a host-shaped first segment (containing a `.`, or
 /// `localhost`) with a non-empty remainder is a `Url`; exactly two
 /// `[A-Za-z0-9._-]` segments with no `:` are `Shorthand`; everything else is
 /// `Other`.
@@ -92,8 +93,11 @@ fn classify(s: &str) -> Positional<'_> {
     if s.contains("://") || s.starts_with("git@") {
         return Positional::Url(s);
     }
-    // Paths first: `./repo` would otherwise match the host-shape test below.
-    if s.starts_with("./") || s.starts_with("../") || s == "." || s == ".." {
+    // Paths first: any leading `.` would otherwise match the host-shape test
+    // below on its own dot — `./repo` splits to `first = "."` and `.hidden/repo`
+    // to `first = ".hidden"`. Neither is a host: no hostname may begin with a
+    // dot, and no GitHub owner may contain one.
+    if s.starts_with('.') {
         return Positional::RelativePath;
     }
     // Absolute and home-relative paths are unambiguous local clone sources.
