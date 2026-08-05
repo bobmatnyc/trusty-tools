@@ -102,7 +102,8 @@ PASS  iff  for every in-scope package p:
            and H_P(p), the accepted health set for p under pattern P, is
 
              H_P(p) := {healthy, stale}
-                     ∪ {unknown}  if member(p).plist_installed == null
+                     ∪ {unknown, down}
+                                  if member(p).plist_installed == null
                      ∪ {down}     if P ∈ {b, c} and member(p).plist_installed == false
 
            and, since 2026-08-04, PASS additionally requires
@@ -197,23 +198,51 @@ the *opposite* direction — a doctor member the TSV does not carry is logged, n
 asserted, which is why `trusty-console` correctly does not fail a run. This is
 that rule's missing counterpart.
 
-**(b) `unknown` is accepted for members the product deliberately declines to
-probe.** `probe_member_health` (`commands/probe.rs:141-158`) returns
-`ProbeOutcome::Unprobeable` for `ManageStrategy::OwnVerb`, and
-`probe_http.rs:211` maps `Unprobeable` to `unknown`. The source comment is
-explicit that this is a decision, not a gap:
+**(b) A non-launchd member (`plist_installed == null`) is accepted `unknown` or
+`down`.**
 
-> `#4246`: trusty-mpm (`OwnVerb`) is DELIBERATELY left unprobed and reported
-> `unknown`, even though it does answer `/health` on 7880. […] probing it would
-> flip `tctl status` to exit 2 and `tctl install` to NOT VERIFIED for every user
-> who simply has not started mpm. Enabling it is a separate, user-visible policy
-> change, tracked separately.
+> **PREMISE REVERSED BY THE PRODUCT 2026-08-05 (`#4925`).** This bullet
+> previously read *"`unknown` is accepted for members the product deliberately
+> declines to probe"*, and cited `probe_member_health`
+> (`commands/probe.rs:141-158`) returning `ProbeOutcome::Unprobeable` for
+> `ManageStrategy::OwnVerb`, quoting that function's own comment as the warrant:
+>
+> > `#4246`: trusty-mpm (`OwnVerb`) is DELIBERATELY left unprobed and reported
+> > `unknown`, even though it does answer `/health` on 7880. […] probing it would
+> > flip `tctl status` to exit 2 and `tctl install` to NOT VERIFIED for every user
+> > who simply has not started mpm. Enabling it is a separate, user-visible policy
+> > change, tracked separately.
+>
+> **`#4925` is that separate, user-visible policy change, and it was accepted.**
+> The carve-out is gone: `probe_member_health` now routes `ManageStrategy::OwnVerb`
+> through the same HTTP `/health` transport as `Launchd`, because **probeability is
+> a property of the daemon's HTTP transport, not of its lifecycle-management
+> strategy** — the two axes diverged when `#4246` moved the probe from
+> `<binary> health --json` to HTTP. `ManageStrategy` is unchanged and still governs
+> start/stop dispatch and `needs_kickstart`, which is why mpm remains `OwnVerb` in
+> `stable_set`. Corrected here rather than deleted, per this doc set's
+> record-reversals convention.
 
-Rejecting `unknown` therefore asserts against a documented product decision.
-**The condition is written as `plist_installed == null`, not as a member name.**
-`null` means "not a launchd member" (§1.1's own field table) which is exactly the
-`OwnVerb`/`None` set that `probe_member_health` returns `Unprobeable` for, so the
-acceptance is **derived from the JSON** and follows the product automatically if
+**What that leaves.** trusty-mpm — the only member this clause has ever fired for
+— now reports a real verdict: `healthy` when serving on 7880, `down` when not.
+
+- **`unknown` is retained but vestigial.** No member of the shipped stable set
+  produces it any more (only `ManageStrategy::None`, a non-daemon, is still
+  `Unprobeable`, and `stack doctor` does not report non-daemons). It is kept so a
+  member that genuinely cannot be probed does not turn into a red run before
+  anyone has decided that it should — that is **#4847**'s open policy question,
+  which this oracle does not pre-empt.
+- **`down` is now accepted for `plist_installed == null` too**, for exactly the
+  reason (c) accepts it for `plist_installed == false`: nothing in this harness's
+  install path starts a daemon before the oracle reads `doctor`. A process-managed
+  member has no plist and no `service install` step for the `false` branch to key
+  off, so its pre-start `down` is the same artefact of the ordering, not a
+  packaging defect. **A genuinely dead mpm still fails the run** — at
+  `verify_daemon_liveness`, which probes it directly *after* `tctl start --json`.
+
+**The condition is still written as `plist_installed == null`, not as a member
+name.** `null` means "not a launchd member" (§1.1's own field table), so the
+acceptance stays **derived from the JSON** and follows the product automatically if
 another member ever changes strategy. Naming `trusty-mpm` in the predicate would
 hardcode today's `stable_set` into the oracle.
 
@@ -229,9 +258,10 @@ it correctly. **The cause previously recorded for it was not.**
 > modified by this correction** — only the reasoning a future reader would act on.
 
 **Mechanism — `health` is a pure HTTP fact, and `plist_installed` is not an input
-to it.** For a `Launchd` member, `probe_member_health` delegates to
-`probe_member_http_blocking` (`commands/probe.rs:146`), a blocking `GET /health`
-against the member's recorded address. `probe_http.rs:213-218` maps
+to it.** For a DAEMON member — `Launchd` or, since `#4925`, `OwnVerb` —
+`probe_member_health` delegates to `probe_member_http_blocking`
+(`commands/probe.rs`), a blocking `GET /health` against the member's recorded
+address. `probe_http.rs:213-218` maps
 `NoAddress | Refused | Timeout | HttpError | BadEnvelope | ProbeFailed` to
 `down` — **every one of those is a transport fact about the request**.
 `plist_installed` is computed **only** at `doctor.rs:117-124`, solely to populate
@@ -659,13 +689,18 @@ INTERIM (as amended 2026-08-04 — see below; the status CODE is not the signal)
 > (`stack/health.rs:96`), classified on the body through the same
 > `probe_member_health` this amendment is modelled on — so it is genuinely
 > product-maintained, body-based, 503-tolerant, and sweeps the whole stable set.
-> **It would nonetheless LOSE an assertion this oracle already makes.**
-> `trusty-mpm` is *deliberately* left unprobed by `probe_member_health`
+> **The primary reason for declining it was withdrawn 2026-08-05 (#4925).** It
+> used to be that delegating **would LOSE an assertion this oracle already makes**:
+> `trusty-mpm` was *deliberately* left unprobed by `probe_member_health`
 > (`ManageStrategy::OwnVerb` → `Unprobeable` → `unknown`, #4246) **even though it
 > does answer `/health` on 7880** — which the oracle's own probe reaches and
-> proves. Delegating would downgrade a daemon this harness demonstrates is serving
-> into a verdict nothing can assert on. It also drops `version`, drops each
-> daemon's raw body, and carries no `service` discriminator.
+> proves, so delegating would have downgraded a daemon this harness demonstrates is
+> serving into a verdict nothing can assert on. #4925 removed that carve-out;
+> `stack health` now covers mpm and no assertion is lost on that account.
+>
+> **The decision stands on the reasons that were always independent of mpm:** it
+> drops `version`, drops each daemon's raw body, and carries no `service`
+> discriminator.
 >
 > **So the product's CLASSIFICATION RULE is adopted; the product's COMMAND is not
 > substituted for the probe.** `stack health --json` is recorded verbatim in the
@@ -677,7 +712,8 @@ INTERIM (as amended 2026-08-04 — see below; the status CODE is not the signal)
 > per-member predicate, whose verdict vocabularies differ (`ready|degraded` vs
 > `ok|degraded`). `verify_stack_doctor` still uses `stack doctor`. This section
 > considered `stack health` as an *additional* surface for the liveness probe
-> specifically, and **declined it** for the `trusty-mpm` reason above.
+> specifically, and **declined it** — originally for the `trusty-mpm` reason above,
+> now for the envelope reasons that outlived it.
 
 > **`trusty-review` is now one of the daemons this covers.** *(Amended 2026-07-31,
 > D3 widened to eight crates.)* It was previously in this section's four-shape table
@@ -3154,10 +3190,12 @@ Recorded in the same register as DOC-1 §14, so they are not lost.
   > whole stable set, so the harness need not invent a health rule. **It recovers
   > none of the envelope itself** — no `version`, no per-daemon body, and **no
   > `service` discriminator**, so the **#3364** squatter-collision class stays
-  > open; that class is closable only by a product change RC-1 would carry. It
-  > also reports `trusty-mpm` as `unknown` (`OwnVerb` → `Unprobeable`, #4246),
+  > open; that class is closable only by a product change RC-1 would carry.
+  > ~~It also reports `trusty-mpm` as `unknown` (`OwnVerb` → `Unprobeable`, #4246),
   > which is why substituting it for the probe would **lose** an assertion the
-  > oracle already makes. The harness therefore adopted the product's
+  > oracle already makes.~~ **Withdrawn 2026-08-05 (#4925)** — mpm is probed over
+  > HTTP now, so `stack health` covers it; the envelope reasons above are what the
+  > decision rests on. The harness therefore adopted the product's
   > **classification rule** and declined its **command**. **RC-1's status is
   > unchanged by this evaluation** — it neither becomes more urgent nor less.
 - ~~**RC-2 — `tctl install` cargo-absent exit code and message** (§6.2). Not pinned
