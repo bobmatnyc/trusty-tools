@@ -284,6 +284,232 @@ mod tests {
         );
     }
 
+    /// #4884: a `fact_key` written through the normal upsert path must come
+    /// back off disk intact, and a drawer that claims no slot must come back
+    /// claiming none.
+    #[test]
+    fn drawer_fact_key_round_trips_through_redb() {
+        let (_d, kg) = open_kg();
+        let mut slotted = Drawer::new(Uuid::new_v4(), "PR #4818 is in flight");
+        slotted.fact_key = Some("pr:4818/state".to_string());
+        let slotted_id = slotted.id;
+        let plain = Drawer::new(Uuid::new_v4(), "no slot claimed");
+        let plain_id = plain.id;
+
+        kg.upsert_drawer(&slotted).unwrap();
+        kg.upsert_drawer(&plain).unwrap();
+
+        let loaded = kg.load_drawers().unwrap();
+        let got_slotted = loaded.iter().find(|d| d.id == slotted_id).expect("slotted");
+        let got_plain = loaded.iter().find(|d| d.id == plain_id).expect("plain");
+        assert_eq!(got_slotted.fact_key.as_deref(), Some("pr:4818/state"));
+        assert_eq!(got_plain.fact_key, None);
+    }
+
+    /// #4884 migration regression: a row written BEFORE `fact_key` existed —
+    /// the spec-001-era `PreFactKeyDrawerRecord` layout — must still decode.
+    /// Postcard is positional, so those bytes fail as the current
+    /// `DrawerRecord`; the reader falls back through `PreFactKeyDrawerRecord`.
+    /// The link matters: without it the walk would skip to
+    /// `PreTaskDrawerRecord` and silently drop `completed_at`, marking a
+    /// finished task open again. No existing row is rewritten to add the field.
+    #[test]
+    fn pre_fact_key_drawer_row_migrates_fact_key_to_none() {
+        use crate::memory_core::palace::DrawerType;
+        use crate::memory_core::store::kg_store::{DRAWERS, encode_value};
+        use redb::Database;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let id = Uuid::new_v4();
+        let completed_ms = 1_720_000_000_000i64;
+
+        {
+            let old = super::super::types::PreFactKeyDrawerRecord {
+                room_id: Uuid::new_v4().to_string(),
+                content: "pre-#4884 task row".to_string(),
+                importance: 0.6,
+                tags: vec!["legacy".to_string()],
+                source_file: None,
+                created_at_ms: 1_700_000_000_000,
+                drawer_type: Some("Task".to_string()),
+                expires_at_ms: None,
+                completed_at_ms: Some(completed_ms),
+            };
+            let bytes = encode_value(&old).expect("encode pre-#4884 record");
+            let db = Database::create(&path).expect("create redb");
+            let wtx = db.begin_write().expect("begin write");
+            {
+                let mut table = wtx.open_table(DRAWERS).expect("open drawers");
+                table
+                    .insert(id.as_bytes().as_slice(), bytes.as_slice())
+                    .expect("insert pre-#4884 drawer");
+            }
+            wtx.commit().expect("commit");
+        }
+
+        let kg = KgStoreRedb::open(&path).expect("reopen via KgStoreRedb");
+        let loaded = kg.load_drawers().expect("load drawers");
+        assert_eq!(loaded.len(), 1, "pre-#4884 row must decode, not be skipped");
+        assert_eq!(loaded[0].id, id);
+        assert_eq!(loaded[0].content, "pre-#4884 task row");
+        assert_eq!(loaded[0].drawer_type, DrawerType::Task);
+        assert!(
+            loaded[0].fact_key.is_none(),
+            "missing fact_key field must migrate to None"
+        );
+        assert_eq!(
+            loaded[0].completed_at.map(|d| d.timestamp_millis()),
+            Some(completed_ms),
+            "completed_at must survive — that is why this fallback shape exists"
+        );
+    }
+
+    /// #4884: the index must gain an entry on write and lose it on delete. A
+    /// surviving entry would make the ADR-0028 D5 occupancy check report a slot
+    /// as taken by a drawer that no longer exists.
+    #[test]
+    fn fact_key_index_tracks_upsert_and_delete() {
+        let (_d, kg) = open_kg();
+        assert_eq!(
+            kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+            None,
+            "an untouched slot is free"
+        );
+
+        let mut drawer = Drawer::new(Uuid::new_v4(), "PR #4818 is in flight");
+        drawer.fact_key = Some("pr:4818/state".to_string());
+        let id = drawer.id;
+        kg.upsert_drawer(&drawer).unwrap();
+        assert_eq!(
+            kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+            Some(id)
+        );
+
+        kg.delete_drawer(id).unwrap();
+        assert_eq!(
+            kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+            None,
+            "deleting the occupant must free the slot"
+        );
+    }
+
+    /// #4884: writing a slot another drawer holds moves the index onto the new
+    /// drawer — "one slot, one live fact" (ADR-0028 D5).
+    #[test]
+    fn fact_key_index_follows_the_slot_on_reassignment() {
+        let (_d, kg) = open_kg();
+        let room = Uuid::new_v4();
+
+        let mut first = Drawer::new(room, "PR #4818 at head d3963848");
+        first.fact_key = Some("pr:4818/state".to_string());
+        let first_id = first.id;
+        kg.upsert_drawer(&first).unwrap();
+
+        let mut second = Drawer::new(room, "PR #4818 merged at head 59ae50d8");
+        second.fact_key = Some("pr:4818/state".to_string());
+        let second_id = second.id;
+        kg.upsert_drawer(&second).unwrap();
+
+        assert_eq!(
+            kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+            Some(second_id),
+            "the newest writer owns the slot"
+        );
+        // Storage does not retire the displaced drawer — that is the Tier C
+        // write path's job. It must still be readable (ADR-0028 D6: demoted,
+        // never deleted).
+        let loaded = kg.load_drawers().unwrap();
+        assert!(loaded.iter().any(|d| d.id == first_id));
+        assert_eq!(loaded.len(), 2);
+    }
+
+    /// #4884: re-upserting a drawer with its `fact_key` cleared must release
+    /// the slot. Leaving the entry behind would point the index at a drawer
+    /// that no longer claims the key.
+    #[test]
+    fn clearing_a_fact_key_drops_the_index_entry() {
+        let (_d, kg) = open_kg();
+        let mut drawer = Drawer::new(Uuid::new_v4(), "temporarily slotted");
+        drawer.fact_key = Some("ws:tm-03/resume".to_string());
+        kg.upsert_drawer(&drawer).unwrap();
+        assert!(
+            kg.drawer_id_for_fact_key("ws:tm-03/resume")
+                .unwrap()
+                .is_some()
+        );
+
+        drawer.fact_key = None;
+        kg.upsert_drawer(&drawer).unwrap();
+        assert_eq!(
+            kg.drawer_id_for_fact_key("ws:tm-03/resume").unwrap(),
+            None,
+            "clearing the key must free the slot"
+        );
+        // The drawer itself survives; only its slot claim was dropped.
+        let loaded = kg.load_drawers().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].fact_key, None);
+    }
+
+    /// #4884: the ownership guard. A drawer that lost its slot to a newer
+    /// writer must not evict that newer writer's index entry when it is later
+    /// deleted — an unguarded removal would report a slot as free while a live
+    /// drawer occupies it, and the next Tier C write would then fail to retire
+    /// the real occupant.
+    #[test]
+    fn deleting_a_drawer_that_lost_its_slot_leaves_the_new_owner_indexed() {
+        let (_d, kg) = open_kg();
+        let room = Uuid::new_v4();
+
+        let mut first = Drawer::new(room, "stale state");
+        first.fact_key = Some("pr:4818/state".to_string());
+        let first_id = first.id;
+        kg.upsert_drawer(&first).unwrap();
+
+        let mut second = Drawer::new(room, "current state");
+        second.fact_key = Some("pr:4818/state".to_string());
+        let second_id = second.id;
+        kg.upsert_drawer(&second).unwrap();
+
+        kg.delete_drawer(first_id).unwrap();
+
+        assert_eq!(
+            kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+            Some(second_id),
+            "deleting the displaced drawer must not free the live owner's slot"
+        );
+    }
+
+    /// #4884: `apply_batch` shares the same helpers as the single-op path, so a
+    /// batched upsert-then-delete must leave the index in the same state a pair
+    /// of individual calls would.
+    #[test]
+    fn batched_drawer_ops_maintain_the_fact_key_index() {
+        let (_d, kg) = open_kg();
+        let room = Uuid::new_v4();
+        let mut kept = Drawer::new(room, "kept");
+        kept.fact_key = Some("daemon:trusty-search/install-state".to_string());
+        let kept_id = kept.id;
+        let mut dropped = Drawer::new(room, "dropped");
+        dropped.fact_key = Some("pr:4818/state".to_string());
+        let dropped_id = dropped.id;
+
+        kg.apply_batch(&[
+            BatchWriteOp::UpsertDrawer(kept),
+            BatchWriteOp::UpsertDrawer(dropped),
+            BatchWriteOp::DeleteDrawer(dropped_id),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            kg.drawer_id_for_fact_key("daemon:trusty-search/install-state")
+                .unwrap(),
+            Some(kept_id)
+        );
+        assert_eq!(kg.drawer_id_for_fact_key("pr:4818/state").unwrap(), None);
+    }
+
     #[test]
     fn load_drawer_ids_matches_load_drawers() {
         let (_d, kg) = open_kg();

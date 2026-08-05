@@ -729,7 +729,10 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
     // even on a partial provisioning error we still point CLAUDE_CONFIG_DIR at it,
     // because that is strictly safer than falling back to the project's committed
     // `.claude/` (the #1996 regression this whole change exists to prevent).
-    if let Err(e) = crate::core::managed_config::ensure_managed_config_dir(&config_dir) {
+    // #4880: `cwd` is the workspace, so the same call also refreshes the
+    // PROJECT skill tier (`<cwd>/.claude/skills`) when the project manifest
+    // moved — the tier that outranks everything this config dir carries.
+    if let Err(e) = crate::core::managed_config::ensure_managed_config_dir(&config_dir, cwd) {
         tracing::warn!(
             session = %tmux_name,
             config_dir = %config_dir.display(),
