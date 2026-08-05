@@ -98,6 +98,9 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+# #4891: the backfill report reads a private COPY of each palace's redb store so
+# that opening it can never write to the live file (see commands/backfill_report).
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Why (issue #226): axum + tower-http are HTTP-server only. Gating them behind

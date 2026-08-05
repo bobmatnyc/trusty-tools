@@ -10,6 +10,33 @@
 //! Test: `recall_ranks_by_similarity_over_importance`, `l0_l1_always_present`,
 //! `l2_returns_relevant_drawer`, `l2_room_filter_excludes_other_rooms`,
 //! `recall_across_palaces_merges_results`.
+//!
+//! # Read-time expiry (#4885, ADR-0028 D4)
+//!
+//! Every layer here drops drawers whose `expires_at` has passed, judged by the
+//! one shared predicate `Drawer::is_expired_at`. Before this, expiry was
+//! consulted only when a palace was opened — and the daemon opens once and
+//! holds the handle for the process lifetime, so a drawer that expired
+//! mid-session kept being served until a restart.
+//!
+//! These paths FILTER; they do not delete. Three reasons, in order of weight:
+//!
+//! 1. Deleting needs the write lock on `handle.drawers` plus async I/O to the
+//!    KG and the vector index. Retrieval holds a read guard over the same
+//!    `RwLock` while it scans, so a delete here means either upgrading a lock
+//!    mid-scan or doing I/O under it — the second stalls every writer on the
+//!    palace behind one recall.
+//! 2. A read must not fail because a cleanup failed. Filtering cannot fail
+//!    open: an expired drawer is unreachable by recall whether or not its row
+//!    is ever reclaimed. That is the fail-closed property ADR-0028 D4 is
+//!    after, and a deleting read path would trade it for a write that can
+//!    error.
+//! 3. Reclamation already has an owner — `PalaceHandle::purge_expired` and the
+//!    open-time sweep. Correctness and reclamation stay separable; a
+//!    reclamation bug can waste space but can no longer serve a false fact.
+//!
+//! Cost of the choice: an expired drawer keeps its row and its vector slot
+//! until a sweep runs. That is storage, not correctness.
 
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
@@ -66,9 +93,17 @@ pub(super) fn uuid_prefix_eq(a: Uuid, b: Uuid) -> bool {
 /// vector-similarity data (i.e. `recall` / `recall_deep`) should call
 /// `rescore_l1_by_similarity` afterward so the final merged list ranks by
 /// relevance, not importance (issue #633).
-/// Test: `l0_l1_always_present` asserts both layers appear.
+///
+/// #4885: L1 entries past their `expires_at` are dropped (see the module
+/// header). This layer is where read-time expiry matters most: `l1_drawers` is
+/// filled from the L1 cache snapshot at open and the open-time sweep only
+/// retains over the full drawer table, so an expired drawer in that snapshot
+/// survived even a reopen. The L0 identity row is synthetic and never expires.
+/// Test: `l0_l1_always_present` asserts both layers appear;
+/// `expired_l1_drawer_is_excluded_without_reopen` covers the filter.
 pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
     let mut out: Vec<RecallResult> = Vec::with_capacity(1 + handle.l1_drawers.len());
+    let now = chrono::Utc::now();
 
     if !handle.identity.is_empty() {
         // Synthesize a Drawer for the identity so RecallResult stays uniform.
@@ -85,6 +120,7 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
             drawer_type: DrawerType::UserFact,
             expires_at: None,
             completed_at: None,
+            fact_key: None,
         };
         out.push(RecallResult {
             drawer: identity_drawer,
@@ -94,6 +130,12 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
     }
 
     for d in &handle.l1_drawers {
+        // #4885: an expired drawer is a false fact, not a low-ranked one —
+        // skip it rather than let `rescore_l1_by_similarity` demote it, which
+        // would still leave it eligible for the injection budget.
+        if d.is_expired_at(now) {
+            continue;
+        }
         out.push(RecallResult {
             drawer: d.clone(),
             score: d.importance,
@@ -228,6 +270,7 @@ pub async fn retrieve_l2_scoped(
     let drawers = handle.drawers.read();
     let closets = handle.closets.read();
     let query_tokens: Vec<String> = extract_keywords(query);
+    let now = chrono::Utc::now();
     let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
 
     for hit in hits {
@@ -238,6 +281,13 @@ pub async fn retrieve_l2_scoped(
         };
 
         if !scope_admits(&allowed, drawer.room_id) {
+            continue;
+        }
+
+        // #4885: the vector index still holds an expired drawer's embedding
+        // until a sweep compacts it, so a semantic hit can land on a drawer
+        // whose TTL passed after this handle was opened. Drop it here.
+        if drawer.is_expired_at(now) {
             continue;
         }
 
@@ -349,12 +399,18 @@ pub async fn retrieve_l3_scoped(
     let drawers = handle.drawers.read();
     let closets = handle.closets.read();
     let query_tokens: Vec<String> = extract_keywords(query);
+    let now = chrono::Utc::now();
     let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
     for hit in hits {
         let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {
             continue;
         };
         if !scope_admits(&allowed, drawer.room_id) {
+            continue;
+        }
+        // #4885: same read-time expiry gate as L2 — a deep search must not be
+        // the one path that still serves a drawer past its TTL.
+        if drawer.is_expired_at(now) {
             continue;
         }
         let age_days = DecayConfig::age_days(drawer.created_at);

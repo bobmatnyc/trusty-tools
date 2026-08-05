@@ -80,7 +80,12 @@
 //! merged, compiled-in `BASE-AGENT.md` change silently reached no running
 //! agent. Since #4873 the SKILL half warns (once, bounded) about every file it
 //! declined to refresh — the deploy itself already ran on all three run paths;
-//! only the evidence of it was missing.
+//! only the evidence of it was missing. Since #4880 step (2) also refreshes the
+//! session workspace's PROJECT skill tier (`<project_dir>/.claude/skills`),
+//! which OUTRANKS everything deployed here and previously went stale on resume
+//! and in-place relaunch; that half is stamp-gated on the project manifest, so
+//! it writes nothing when nothing changed. See
+//! [`crate::core::project_skill_tier`].
 //! Test: `ensure_managed_config_dir_deploys_full_roster`,
 //! `ensure_managed_config_dir_is_idempotent`,
 //! `ensure_managed_config_dir_refreshes_stale_bundled_agents`,
@@ -126,8 +131,8 @@ use crate::core::standalone::global_config::ensure_global_config_dir;
 /// Test: `ensure_managed_config_dir_deploys_full_roster`,
 /// `ensure_managed_config_dir_is_idempotent`,
 /// `ensure_managed_config_dir_refreshes_stale_bundled_agents`.
-pub fn ensure_managed_config_dir(config_dir: &Path) -> anyhow::Result<()> {
-    ensure_managed_config_dir_with_root(&FrameworkPaths::default(), config_dir)
+pub fn ensure_managed_config_dir(config_dir: &Path, project_dir: &Path) -> anyhow::Result<()> {
+    ensure_managed_config_dir_with_root(&FrameworkPaths::default(), config_dir, project_dir)
 }
 
 /// Hermetic core of [`ensure_managed_config_dir`], taking an explicit framework
@@ -160,10 +165,22 @@ pub fn ensure_managed_config_dir(config_dir: &Path) -> anyhow::Result<()> {
 /// `ensure_managed_config_dir_skill_deploy_is_a_noop_when_unchanged`,
 /// `ensure_managed_config_dir_preserves_a_project_custom_skill`,
 /// `ensure_managed_config_dir_skips_a_frozen_skill`,
-/// `ensure_managed_config_dir_emits_the_frozen_skill_warning`.
+/// `ensure_managed_config_dir_emits_the_frozen_skill_warning`,
+/// `ensure_managed_config_dir_deploys_the_project_skill_tier`,
+/// `ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged`.
+///
+/// #4880 — WHY THE PROJECT TIER IS DEPLOYED FROM HERE TOO. The user tier this
+/// function refreshes every run is OUTRANKED by `<project_dir>/.claude/skills`,
+/// which until now was written only by `session_launch::prepare_session` and
+/// `tm sessions sync-assets` — neither of which runs on resume or in-place
+/// relaunch. Hanging the project-tier trigger off this same choke point is what
+/// makes it reach all three run paths; see
+/// [`crate::core::project_skill_tier`] for the stamp that keeps it a no-op when
+/// the project manifest has not moved.
 pub fn ensure_managed_config_dir_with_root(
     fw: &FrameworkPaths,
     config_dir: &Path,
+    project_dir: &Path,
 ) -> anyhow::Result<()> {
     // Phase 1: canonical scaffolding shared with the standalone driver.
     ensure_global_config_dir(&fw.root, config_dir)?;
@@ -221,6 +238,29 @@ pub fn ensure_managed_config_dir_with_root(
     // that never ran — see this function's doc for why that is the whole defect.
     if let Some(line) = skill_skip_summary(&skills.stats.skipped) {
         tracing::warn!("managed config dir: {line}");
+    }
+
+    // #4880: the PROJECT tier outranks the user tier deployed just above, so a
+    // stale project copy silently beats a current one. Non-fatal, and a no-op
+    // whenever the project manifest stamp still matches.
+    match crate::core::project_skill_tier::ensure_project_skill_tier(fw, project_dir) {
+        Ok(project) => {
+            // Deliberately NOT routed through `skill_skip_summary`: a skipped
+            // project-tier skill is a local customization the model says must
+            // survive, so pointing at a remedy would contradict it.
+            if project.deployed && !project.stats.skipped.is_empty() {
+                tracing::info!(
+                    preserved = project.stats.skipped.len(),
+                    "project skill tier: local copies preserved across the redeploy"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                project_dir = %project_dir.display(),
+                "project skill tier deploy failed (non-fatal): {err}"
+            );
+        }
     }
 
     Ok(())

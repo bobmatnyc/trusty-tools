@@ -63,6 +63,33 @@ pub fn select_warmboot_entries(
     (sorted, cold)
 }
 
+/// Why an entry is parked in the cold store (#4250).
+///
+/// Why: the store held both populations in one `DashMap` with nothing to tell
+/// them apart, so "deferred on purpose" and "failed and papered over" were the
+/// same state — the same conflation PR #4718 removed from
+/// `BoundedRestoreOutcome`. It is exactly why a timeout-skipped index stayed
+/// dark: `list_indexes` omits every cold entry, boot reconcile walks
+/// `registry.list()` and so never sees one, and only a query naming the id
+/// verbatim would ever load it. A client that discovers indexes by listing
+/// never names it, so it stayed invisible until a human restarted the daemon.
+/// What: [`Self::Deferred`] is policy — `TRUSTY_WARMBOOT_MAX_INDEXES` chose not
+/// to load it, and loading it on first query is the correct, complete
+/// behaviour. [`Self::TimedOut`] is a failure the daemon absorbed, and is what
+/// the recovery pass drains. The reason is assigned by the store itself, never
+/// passed in by a caller, so an entry cannot be mislabelled at a call site.
+/// Test: `cold_store_timed_out_cohort_excludes_deferred_entries`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColdReason {
+    /// Not in the top-N by recency at boot — lazy BY DESIGN (#993). Never
+    /// proactively retried; a first query is what it is waiting for.
+    Deferred,
+    /// Parked after its eager warm-boot restore timed out (#4087). The restore
+    /// was slow, not wrong, and nothing else will come along to name this id —
+    /// so it must be retried rather than left waiting for a query (#4250).
+    TimedOut,
+}
+
 /// A cold entry paired with an opaque identity token (issue #3995 round 5).
 ///
 /// Why: `ColdIndexStore::mark_loaded`'s unconditional `entries.remove(id)` was
@@ -80,6 +107,8 @@ pub fn select_warmboot_entries(
 struct ColdEntry {
     persisted: PersistedIndex,
     token: Arc<()>,
+    /// #4250: why this entry is parked. Set by the store, never by a caller.
+    reason: ColdReason,
 }
 
 /// In-memory registry of cold (not-yet-loaded) indexes.
@@ -147,6 +176,25 @@ impl ColdIndexStore {
     /// uses it to track its own single insertion (see `mark_loaded_if`).
     /// Test: `cold_store_register_and_contains`.
     pub fn register_cold_entries(&self, entries: Vec<PersistedIndex>) -> Vec<Arc<()>> {
+        // #4250: everything through this door is deliberate deferral. The only
+        // route to `ColdReason::TimedOut` is `park_if_parkable`, which already
+        // gates on the typed restore outcome — so no caller can mislabel a
+        // failure as policy or the reverse.
+        self.register_with_reason(entries, ColdReason::Deferred)
+    }
+
+    /// Insert entries under an explicit reason (#4250).
+    ///
+    /// Why: private so `ColdReason` stays store-assigned. `register_cold_entries`
+    /// and `park_if_parkable` are the only two entry points, and each hard-codes
+    /// its own reason.
+    /// What: as `register_cold_entries`, stamping `reason` on each insertion.
+    /// Test: `cold_store_timed_out_cohort_excludes_deferred_entries`.
+    fn register_with_reason(
+        &self,
+        entries: Vec<PersistedIndex>,
+        reason: ColdReason,
+    ) -> Vec<Arc<()>> {
         entries
             .into_iter()
             .map(|entry| {
@@ -157,11 +205,47 @@ impl ColdIndexStore {
                     ColdEntry {
                         persisted: entry,
                         token: token.clone(),
+                        reason,
                     },
                 );
                 token
             })
             .collect()
+    }
+
+    /// Snapshot every entry parked because its eager restore TIMED OUT (#4250).
+    ///
+    /// Why: this is the cohort the recovery pass drains. Deferred entries are
+    /// deliberately excluded — retrying them would defeat
+    /// `TRUSTY_WARMBOOT_MAX_INDEXES`, loading exactly the indexes an operator
+    /// asked the daemon not to load.
+    /// What: clones out the persisted metadata of `TimedOut` entries only.
+    /// Test: `cold_store_timed_out_cohort_excludes_deferred_entries`.
+    pub fn timed_out_entries(&self) -> Vec<PersistedIndex> {
+        self.entries
+            .iter()
+            .filter(|kv| kv.value().reason == ColdReason::TimedOut)
+            .map(|kv| kv.value().persisted.clone())
+            .collect()
+    }
+
+    /// How many entries are still parked from a restore timeout (#4250).
+    ///
+    /// Why: `/health` derives `warm_boot_degraded` from this LIVE count instead
+    /// of the frozen boot-time `indexes_skipped_timeout`. Before this, the flag
+    /// latched at boot and stayed true for the daemon's whole life even after
+    /// every affected index came back — and, symmetrically, an index that never
+    /// came back had no live signal of its own.
+    /// What: counts `TimedOut` entries in `entries` (so it drops to zero as the
+    /// recovery pass drains them). Excludes `failed_entries`, which
+    /// `indexes_failed` already reports.
+    /// Test: `cold_store_timed_out_cohort_excludes_deferred_entries`,
+    /// `warm_boot_degraded_clears_once_the_timeout_cohort_drains`.
+    pub fn timed_out_len(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|kv| kv.value().reason == ColdReason::TimedOut)
+            .count()
     }
 
     /// Park an index whose eager warm-boot restore timed out (#4087).
@@ -206,14 +290,18 @@ impl ColdIndexStore {
             return;
         }
         let id = entry.id.clone();
-        self.register_cold_entries(vec![entry]);
+        // #4250: stamped `TimedOut`, not `Deferred`. Parking made the index
+        // reachable by a query naming this id and by nothing else, which is not
+        // recovery — `list_indexes` omits cold entries, so a client that
+        // discovers indexes by listing never learns the id exists. The reason
+        // is what lets `timeout_recovery` find it and drive it back.
+        self.register_with_reason(vec![entry], ColdReason::TimedOut);
         tracing::warn!(
             index_id = %id,
             "warm-boot: index '{id}' timed out during eager restore — PARKED in the cold \
-             store for lazy load on first query instead of being dropped for the rest of \
-             this boot (issue #4087). It stays absent from `list_indexes` until loaded, but \
-             a query against it now restores it on demand rather than 404-ing until a \
-             daemon restart."
+             store instead of being dropped for the rest of this boot (issue #4087), and \
+             recorded as a TIMEOUT so the recovery pass retries it on a backoff rather \
+             than waiting for a query that may never name it (issue #4250)."
         );
     }
 

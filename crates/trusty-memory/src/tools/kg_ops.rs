@@ -48,6 +48,15 @@ pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Va
         .map(|s| s.to_string());
 
     let handle = open_palace_handle(state, palace)?;
+    // #4888: Tier S is injected on every turn of every session, so a
+    // hot-predicate write is gated on the 20-fact cap and the 80-char form
+    // constraint before it reaches storage. Fail-closed by construction —
+    // the `?` returns before `kg.assert`, so a rejected write never lands.
+    // `_admission` holds the lock that keeps the count valid until the write
+    // is enqueued; it must stay bound until after `kg.assert`.
+    let _admission =
+        crate::prompt_facts::check_tier_s_admission(state, &handle, &subject, &predicate, &object)
+            .await?;
     let triple = Triple {
         subject,
         predicate,
@@ -98,6 +107,17 @@ pub(crate) async fn handle_add_alias(state: &AppState, args: Value) -> Result<Va
         Some(e) if !e.is_empty() => format!("{full} ({e})"),
         _ => full.clone(),
     };
+    // #4888: `is_alias_for` is a hot predicate, so an alias consumes a Tier S
+    // slot exactly like a convention does and is gated identically. Guard held
+    // until after `kg.assert` below.
+    let _admission = crate::prompt_facts::check_tier_s_admission(
+        state,
+        &handle,
+        &short,
+        "is_alias_for",
+        &object,
+    )
+    .await?;
     let triple = Triple {
         subject: short.clone(),
         predicate: "is_alias_for".to_string(),
@@ -316,6 +336,11 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
     let mut already_known = 0usize;
     let mut newly_asserted = 0usize;
     let mut reported: Vec<Value> = Vec::with_capacity(discoveries.len());
+    // #4888: aliases the Tier S budget refused, plus the first refusal's
+    // message. The reason is carried once rather than per row because it is
+    // the same actionable paragraph (naming all 20 occupants) every time.
+    let mut rejected: Vec<Value> = Vec::new();
+    let mut rejected_reason: Option<String> = None;
 
     for d in &discoveries {
         // Check active triples for the subject; if any matches the
@@ -333,6 +358,41 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
             continue;
         }
 
+        // #4888: auto-discovery writes `is_alias_for`, so without this gate it
+        // would be a hole straight through the Tier S cap — the one path that
+        // can add many facts at once and the one nobody types by hand. The
+        // check runs per candidate because each admitted write consumes a
+        // slot, so the budget has to be re-read as it fills.
+        //
+        // Unlike the single-write tools, a refusal here does NOT abort the
+        // call. This is a bulk operation whose contract already skips
+        // candidates it will not write (the `already_known` branch above), and
+        // a workspace with more crates than Tier S has slots is ordinary — the
+        // trusty-tools workspace itself discovers more than 20. Aborting would
+        // make the tool unusable there AND leave the aliases written before the
+        // refusal behind as partial state. Every refused alias is instead
+        // reported back in `rejected`, so nothing is silently dropped and the
+        // cap is never exceeded.
+        // `_admission` holds the admission lock for the rest of this iteration,
+        // covering the `kg.assert` below.
+        let _admission = match crate::prompt_facts::check_tier_s_admission(
+            state,
+            &handle,
+            &d.short,
+            "is_alias_for",
+            &d.full,
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                if rejected_reason.is_none() {
+                    rejected_reason = Some(format!("{e:#}"));
+                }
+                rejected.push(json!({ "short": d.short, "full": d.full }));
+                continue;
+            }
+        };
         let triple = Triple {
             subject: d.short.clone(),
             predicate: "is_alias_for".to_string(),
@@ -366,6 +426,14 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
         "already_known": already_known,
         "new": newly_asserted,
         "palace": palace,
+        // #4888: empty on the common path; non-empty means the Tier S budget
+        // is exhausted and these aliases were NOT written. `complete` is the
+        // one-field answer to "did I get everything?" — a caller reading only
+        // `new`/`already_known` would otherwise mistake a partial batch for a
+        // whole one.
+        "complete": rejected.is_empty(),
+        "rejected": rejected,
+        "rejected_reason": rejected_reason,
     }))
 }
 

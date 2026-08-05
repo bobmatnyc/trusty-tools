@@ -16,7 +16,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::commands::start_restore::restore_one_index;
+use crate::commands::start_restore::{
+    collect_relocation_candidates, restore_one_index, RelocationScan,
+};
 use crate::service::SearchAppState;
 
 use crate::service::lazy_loader::{select_warmboot_entries, warmboot_max_indexes};
@@ -24,7 +26,7 @@ use crate::service::persistence::PersistedIndex;
 use crate::service::warm_boot::{
     collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
     probe_warmboot_volumes, probe_warmboot_volumes_from_paths, restore_one_index_bounded,
-    BoundedRestoreOutcome,
+    triage_entries, BoundedRestoreOutcome, SalvageBudget,
 };
 
 /// Collect colocated index entries for warm-boot, honoring
@@ -208,6 +210,39 @@ pub(super) async fn restore_indexes(
         .cloned()
         .collect();
 
+    // #4846: settle every eager entry's root with ONE stat before any restore
+    // runs. An entry whose root_path is gone used to enter the same loop under
+    // the same per-index deadline as a live one and drag a full tracked-root
+    // relocation walk (measured 9.5–10.5 s over 248 roots) behind it, per
+    // entry — which is how 55 dead registrations on the reporting machine
+    // starved a live 70k-chunk index for the better part of an hour. Triage
+    // returns two SEPARATE vectors, so the loops below iterate only live
+    // entries and have no way to reach a dead one; "live first" is a property
+    // of the types, not of loop ordering.
+    let legacy_triaged = triage_entries(legacy_eager);
+    let colocated_triaged = triage_entries(colocated_eager);
+    // The fail-loud diff at the end of this function keys off every legacy id
+    // that was DISCOVERED, so record the missing ones here — they never reach
+    // the legacy loop that used to do it.
+    for e in &legacy_triaged.missing {
+        seen_legacy_ids.insert(e.id.clone());
+    }
+    let missing_roots: Vec<PersistedIndex> = legacy_triaged
+        .missing
+        .into_iter()
+        .chain(colocated_triaged.missing)
+        .collect();
+    let legacy_eager = legacy_triaged.present;
+    let colocated_eager = colocated_triaged.present;
+    if !missing_roots.is_empty() {
+        tracing::info!(
+            "warm-boot: {} eager entr(ies) have a root_path that no longer exists — \
+             deferred to the budgeted salvage phase so they cannot consume the live \
+             indexes' restore budget (issue #4846)",
+            missing_roots.len(),
+        );
+    }
+
     // ── Eager: legacy entries ────────────────────────────────────────────────
     if !legacy_eager.is_empty() {
         let inaccessible_volumes = probe_warmboot_volumes(&legacy_eager);
@@ -240,7 +275,12 @@ pub(super) async fn restore_indexes(
                 legacy_skipped_tcc += 1;
                 continue;
             }
-            match restore_eager_entry(state, embedder, entry).await {
+            // #4846: `Unavailable` is correct here, not a limitation — this
+            // entry's root existed at triage, so `restore_one_index`'s
+            // relocation branch is unreachable for it. Should the root vanish
+            // between the stat and the restore, skipping is the right answer
+            // and it costs nothing.
+            match restore_eager_entry(state, embedder, entry, RelocationScan::Unavailable).await {
                 BoundedRestoreOutcome::Completed => legacy_ok += 1,
                 BoundedRestoreOutcome::TimedOut => legacy_timed_out += 1,
                 BoundedRestoreOutcome::Panicked => legacy_panicked += 1,
@@ -270,7 +310,9 @@ pub(super) async fn restore_indexes(
                 colocated_skipped_tcc += 1;
                 continue;
             }
-            match restore_eager_entry(state, embedder, entry).await {
+            // #4846: see the legacy loop — a present root never consults the
+            // relocation set.
+            match restore_eager_entry(state, embedder, entry, RelocationScan::Unavailable).await {
                 BoundedRestoreOutcome::Completed => colocated_ok += 1,
                 BoundedRestoreOutcome::TimedOut => colo_timed_out += 1,
                 BoundedRestoreOutcome::Panicked => colo_panicked += 1,
@@ -285,6 +327,17 @@ pub(super) async fn restore_indexes(
              (skipped tcc={colocated_skipped_tcc} timeout={colo_timed_out} \
              panicked={colo_panicked})"
         );
+    }
+
+    // ── Salvage: entries whose root_path was missing at triage (#4846) ───────
+    // Runs strictly AFTER both live phases and under its own global ceiling, so
+    // however long it takes or however early it gives up, no live index has
+    // already lost anything to it.
+    if !missing_roots.is_empty() {
+        let salvage = salvage_missing_root_entries(state, embedder, missing_roots).await;
+        total_ok += salvage.ok;
+        total_skipped_timeout += salvage.timed_out;
+        total_panicked += salvage.panicked;
     }
 
     let total = state.registry.list().len();
@@ -374,17 +427,133 @@ async fn restore_eager_entry(
     state: &SearchAppState,
     embedder: &Arc<dyn crate::core::Embedder>,
     entry: PersistedIndex,
+    relocation: RelocationScan,
 ) -> BoundedRestoreOutcome {
     let s = state.clone();
     let e = Arc::clone(embedder);
     // Keep a copy so a TIMED-OUT restore can be parked cold rather than dropped.
     let parked = entry.clone();
     let outcome = restore_one_index_bounded(entry, move |en| async move {
-        restore_one_index(&s, &e, en).await;
+        restore_one_index(&s, &e, en, relocation).await;
     })
     .await;
     state.cold_store.park_if_parkable(parked, outcome);
     outcome
+}
+
+/// Outcome tally for the salvage phase (#4846).
+///
+/// Why: the salvage phase reports into the same warm-boot counters as the live
+/// phases, but it is a separate pass with a separate budget, so its results are
+/// gathered separately rather than mutating the caller's locals from inside a
+/// helper.
+/// What: `skipped` counts entries the budget refused — they are neither loaded
+/// nor failed, just untouched until the next boot.
+#[derive(Default)]
+struct SalvageTally {
+    ok: usize,
+    timed_out: usize,
+    panicked: usize,
+    skipped: usize,
+}
+
+/// Attempt to relink and restore the missing-root cohort under one global
+/// budget (#4846).
+///
+/// Why: this is the whole point of the issue. The pre-fix path gave each dead
+/// entry its own 10-second per-index deadline and, inside it, a fresh
+/// depth-5 walk of every tracked root — so cost scaled with accumulated
+/// registry cruft rather than with real index count, and the walk's identical
+/// result was recomputed once per dead entry. Here the walk runs ONCE for the
+/// whole cohort, and [`SalvageBudget`] caps the cohort's total wall time
+/// instead of multiplying a per-entry allowance by however many dead rows the
+/// registry has accreted.
+/// What: takes a grant (refusing outright when salvage is disabled or already
+/// spent), runs `collect_relocation_candidates` once on the blocking pool,
+/// then walks the cohort re-checking the budget before each entry so a slow
+/// cohort stops at the ceiling instead of running past it. Entries the budget
+/// refuses are left exactly as they are: registered, on-disk data untouched,
+/// retried next boot. Nothing here reaps a registration or deletes a corpus —
+/// a failed probe is not evidence about the corpus (#4846 operator note).
+/// Test: `dead_entries_do_not_consume_the_live_index_budget`,
+/// `disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat`.
+async fn salvage_missing_root_entries(
+    state: &SearchAppState,
+    embedder: &Arc<dyn crate::core::Embedder>,
+    entries: Vec<PersistedIndex>,
+) -> SalvageTally {
+    let mut tally = SalvageTally::default();
+    let budget = SalvageBudget::from_env();
+    let Some(grant) = budget.try_grant() else {
+        tally.skipped = entries.len();
+        tracing::warn!(
+            "warm-boot salvage: {} entr(ies) with a missing root_path were NOT probed — \
+             the salvage budget is disabled or already spent ({}). Their registrations and \
+             on-disk index data are untouched; they are retried on the next boot. \
+             (issue #4846)",
+            tally.skipped,
+            crate::service::warm_boot::SALVAGE_BUDGET_ENV,
+        );
+        return tally;
+    };
+
+    // One walk for the whole cohort, on the blocking pool — it is recursive
+    // `read_dir` + `canonicalize`, not async work.
+    let all_entries = crate::service::persistence::load_index_registry().unwrap_or_default();
+    let started = std::time::Instant::now();
+    let candidates = match tokio::task::spawn_blocking(move || {
+        collect_relocation_candidates(&all_entries, &grant)
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tally.skipped = entries.len();
+            tracing::error!(
+                "warm-boot salvage: the shared relocation scan panicked ({e}) — {} \
+                     missing-root entr(ies) left untouched for the next boot (issue #4846)",
+                tally.skipped,
+            );
+            return tally;
+        }
+    };
+    tracing::info!(
+        "warm-boot salvage: tracked-root relocation scan completed in {:?} — ONE walk shared \
+         by all {} missing-root entr(ies) instead of one walk each (issue #4846)",
+        started.elapsed(),
+        entries.len(),
+    );
+
+    let scan = RelocationScan::Ready(Arc::new(candidates));
+    let total = entries.len();
+    for (i, entry) in entries.into_iter().enumerate() {
+        if budget.try_grant().is_none() {
+            tally.skipped = total - i;
+            tracing::warn!(
+                "warm-boot salvage: budget exhausted after {i}/{total} missing-root \
+                 entr(ies) — the remaining {} are left registered and untouched for the next \
+                 boot. No live index paid for this: the salvage phase runs only after both \
+                 eager phases have finished. (issue #4846)",
+                tally.skipped,
+            );
+            break;
+        }
+        match restore_eager_entry(state, embedder, entry, scan.clone()).await {
+            BoundedRestoreOutcome::Completed => tally.ok += 1,
+            BoundedRestoreOutcome::TimedOut => tally.timed_out += 1,
+            BoundedRestoreOutcome::Panicked => tally.panicked += 1,
+        }
+    }
+
+    tracing::info!(
+        "warm-boot salvage: complete — {} relinked, {} timed out, {} panicked, {} skipped \
+         (issue #4846)",
+        tally.ok,
+        tally.timed_out,
+        tally.panicked,
+        tally.skipped,
+    );
+    tally
 }
 
 /// Self-heal `indexes.toml` after warm-boot dedup collapses a corpus-path
