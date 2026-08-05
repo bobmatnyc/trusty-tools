@@ -286,6 +286,13 @@ fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
         // SAFETY: guarded by ENV_LOCK; removed below before returning.
         unsafe {
             std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+            // #4255: this is the ONE test that genuinely needs the daemon-write
+            // path — asserting on the wire body requires the POST to actually
+            // happen. Opting in explicitly is safe here because the "daemon"
+            // is this test's own loopback socket, not the operator's: the
+            // override above points discovery at it. Every other caller stays
+            // guarded.
+            std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
         }
 
         // Fake daemon: accept one connection, capture the request body,
@@ -335,6 +342,7 @@ fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
 
         unsafe {
             std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+            std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
         }
         let _ = fs::remove_dir_all(&project);
         let _ = fs::remove_dir_all(&data_dir);
@@ -532,4 +540,125 @@ fn post_index_file_exhausts_retries_and_returns_send_failed() {
     // attempts — no more, no less.
     assert_eq!(outcome, IndexOutcome::SendFailed);
     assert_eq!(accepted, MAX_INDEX_ATTEMPTS as usize);
+}
+
+/// Offer the code under test a REAL, discoverable trusty-search daemon, run
+/// `body`, and report whether anything connected to it (issue #4255).
+///
+/// Why: "no write reached the operator's daemon" cannot be proved by pointing
+/// discovery at a dead port — the fail-open path and the guarded path both
+/// look identical then. Standing up a socket that WOULD accept the write is
+/// the only arrangement where the guard is the thing making the difference.
+/// What: binds `127.0.0.1:0`, publishes that address where
+/// `resolve_daemon_base_url("trusty-search")` reads it (via an isolated
+/// `DATA_DIR_OVERRIDE_ENV` data dir, serialised on `ENV_LOCK` like every other
+/// env-mutating test here), asserts discovery actually finds it, runs `body`,
+/// restores the env, and returns `true` if a connection arrived.
+/// Test: used by the two `never_writes_to_a_daemon_under_test` tests below.
+fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
+    use crate::data_dir::{DATA_DIR_OVERRIDE_ENV, ENV_LOCK};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stand-in daemon");
+    let addr = listener.local_addr().expect("stand-in daemon local_addr");
+    listener
+        .set_nonblocking(true)
+        .expect("stand-in daemon set_nonblocking");
+
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir("4255-daemon");
+    fs::create_dir_all(&data_dir).expect("create isolated data dir");
+    let previous = std::env::var(DATA_DIR_OVERRIDE_ENV).ok();
+    unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data_dir) };
+    crate::write_daemon_addr("trusty-search", &addr.to_string()).expect("publish daemon addr");
+    assert_eq!(
+        crate::resolve_daemon_base_url("trusty-search"),
+        Some(format!("http://{addr}")),
+        "the stand-in daemon must be discoverable, or this test proves nothing"
+    );
+
+    body();
+
+    match previous {
+        Some(p) => unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, p) },
+        None => unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) },
+    }
+    drop(guard);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    // A connection the code opened just before returning may still be in the
+    // accept queue; give it a moment rather than racing it.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    !matches!(
+        listener.accept(),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// Issue #4255: registering a project must not reach a live daemon from a test
+/// process — and must still return the derived id.
+///
+/// Why: this is the defect the ticket reports, in the form it actually
+/// occurred: trusty-code's and trusty-mpm's tests call this helper with a
+/// `tempfile` fixture root, and every such call registered that throwaway path
+/// in whatever real `indexes.toml` the discoverable daemon owned. The dead
+/// roots then stalled warm boot. `allow_sensitive_path: true` is passed
+/// deliberately — that is tcode's real caller, and the temp-dir denylist (the
+/// only prior guard) is switched off on that path, so nothing else stands
+/// between the fixture and the operator's registry.
+/// What: with a discoverable stand-in daemon, calls `ensure_project_indexed`
+/// on a temp fixture root; asserts no connection was made and the id still
+/// came back (the fail-open contract is unchanged).
+/// Test: this test.
+#[test]
+fn ensure_project_indexed_never_writes_to_a_daemon_under_test() {
+    let root = scratch_dir("4255-ensure");
+    fs::create_dir_all(&root).expect("create fixture root");
+    let mut id = None;
+
+    let contacted = daemon_was_contacted_during(|| {
+        id = ensure_project_indexed(&root, true);
+    });
+
+    assert!(
+        !contacted,
+        "ensure_project_indexed contacted a live trusty-search daemon from a test \
+         process — that is the issue #4255 registry leak"
+    );
+    assert!(
+        id.is_some(),
+        "the derived index id must still be returned; the guard suppresses the \
+         daemon write, not the caller's contract"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue #4255: incremental per-file indexing must not reach a live daemon
+/// from a test process either.
+///
+/// Why: `index_files_best_effort` is the other mutating entry point in this
+/// module. It does not create registry entries, but it POSTs fixture file
+/// content into a real index — corrupting the operator's search results rather
+/// than their registry. Guarding only the registration half would leave that
+/// open.
+/// What: with a discoverable stand-in daemon, calls `index_files_inner`
+/// (the synchronous body, so there is no detached thread to race) with one
+/// real file; asserts no connection was made.
+/// Test: this test.
+#[test]
+fn index_files_inner_never_writes_to_a_daemon_under_test() {
+    let root = scratch_dir("4255-incremental");
+    fs::create_dir_all(&root).expect("create fixture root");
+    let file = root.join("fixture.rs");
+    fs::write(&file, "fn fixture() {}\n").expect("write fixture file");
+
+    let contacted = daemon_was_contacted_during(|| {
+        index_files_inner(&root, std::slice::from_ref(&file));
+    });
+
+    assert!(
+        !contacted,
+        "index_files_inner pushed fixture content to a live trusty-search daemon \
+         from a test process (issue #4255)"
+    );
+    let _ = fs::remove_dir_all(&root);
 }

@@ -114,6 +114,11 @@ pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -
         return None;
     }
 
+    // #4255: never register a fixture root against the operator's real daemon.
+    if refuse_daemon_write_under_test("registration", &index_id) {
+        return Some(index_id);
+    }
+
     // Discover the running daemon's address (issue #2033: via the shared
     // `resolve_daemon_base_url` helper — never a hardcoded port). Absent /
     // unreadable file ⇒ daemon not started: skip registration (best-effort) but
@@ -133,6 +138,39 @@ pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -
     }
 
     Some(index_id)
+}
+
+/// Should this process refuse to mutate a real trusty-search daemon?
+///
+/// Why (issue #4255): both mutating entry points in this module talk to
+/// whatever daemon is discoverable on the machine. Under `cargo test` that is
+/// the OPERATOR's daemon, so a test exercising a session launch or a task run
+/// against a `tempfile` fixture registered that throwaway directory in the
+/// live `indexes.toml` — the dead roots then stall warm boot for the timeout,
+/// once per entry. Issue #2914 narrowed this by making the temp-dir denylist
+/// bypass opt-in, and trusty-code's tests added a per-test
+/// `isolate_ambient_daemons()` call, but both leave the safety to whoever
+/// writes the next test. The live registry carried five `.tmpXXXXXX` roots
+/// proving that was forgotten. Deciding it here, in the shared helper, is the
+/// version nobody can forget.
+/// What: returns `true` — and logs why — when
+/// [`crate::running_under_test_harness`] says this is a test process. A test
+/// that genuinely wants the real daemon sets `TRUSTY_ALLOW_PRODUCTION_STATE=1`
+/// (see [`crate::test_harness::ALLOW_PRODUCTION_ENV`]). Reads are untouched:
+/// this gates only the writes.
+/// Test: `ensure_project_indexed_never_writes_to_a_daemon_under_test`,
+/// `index_files_inner_never_writes_to_a_daemon_under_test`.
+fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
+    if !crate::running_under_test_harness() {
+        return false;
+    }
+    tracing::debug!(
+        "test harness detected (issue #4255): skipping trusty-search {operation} for \
+         '{index_id}' so a fixture root can never reach the operator's live registry. \
+         Set {}=1 to opt in to real daemon writes.",
+        crate::test_harness::ALLOW_PRODUCTION_ENV
+    );
+    true
 }
 
 /// Best-effort, non-blocking incremental re-index of specific files into an
@@ -206,6 +244,10 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
             "skipping incremental trusty-search index update: empty index id for {}",
             root.display()
         );
+        return;
+    }
+    // #4255: never push fixture file content into the operator's real indexes.
+    if refuse_daemon_write_under_test("incremental index update", &index_id) {
         return;
     }
     let Some(base) = crate::resolve_daemon_base_url("trusty-search") else {
