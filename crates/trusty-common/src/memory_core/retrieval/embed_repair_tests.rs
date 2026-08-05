@@ -496,6 +496,52 @@ fn embed_ledger_roundtrips_and_upserts_by_drawer() {
     assert_eq!(a_row.attempts, 7);
 }
 
+/// Why: `clear` runs on the SUCCESS path of every deferred embed, and
+/// `json_rmw::update` has no "nothing changed" branch — reaching it costs an
+/// flock plus two fsyncs even when no row matched. Without the pre-lock check,
+/// one recorded failure anywhere in a palace would make every subsequent
+/// healthy write pay that. This pins the check so the next refactor cannot drop
+/// it again (it was lost once already, in the port to `json_rmw`).
+/// What: seeds one row, clears an unrelated id, and asserts the file's mtime and
+/// bytes are untouched — the observable proxy for "no write happened".
+/// Test: itself.
+#[test]
+fn clear_without_a_matching_row_never_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("embed_failures.json");
+    embed_ledger::record(
+        dir.path(),
+        EmbedFailure {
+            drawer_id: Uuid::new_v4(),
+            failed_at: chrono::Utc::now(),
+            attempts: 1,
+            reason: "x".to_string(),
+        },
+    )
+    .unwrap();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let bytes_before = std::fs::read(&path).unwrap();
+
+    // An id that is not in the ledger — the healthy-write case.
+    embed_ledger::clear(dir.path(), &std::iter::once(Uuid::new_v4()).collect()).unwrap();
+
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        before,
+        "a clear that matches nothing must not republish the ledger"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes_before);
+
+    // A palace with no ledger at all must not have one created for it.
+    let empty = tempfile::tempdir().unwrap();
+    embed_ledger::clear(empty.path(), &std::iter::once(Uuid::new_v4()).collect()).unwrap();
+    assert!(
+        !empty.path().join("embed_failures.json").exists(),
+        "clearing on a healthy palace must not create the ledger or its lock sidecar"
+    );
+    assert!(!empty.path().join("embed_failures.json.lock").exists());
+}
+
 /// Why: clearing must be surgical — a backfill that repaired one drawer must
 /// not wipe the record of the ones it could not.
 /// What: records two rows, clears one, asserts the other survives.
@@ -577,16 +623,18 @@ fn embed_ledger_load_degrades_to_empty_on_malformed_json() {
 }
 
 /// Why: this is the review's HIGH-1, and the reason it survived the first
-/// suite is that nothing exercised two writers at once. `record` is
-/// load→retain→push→save; without serialisation two writers that both load
-/// before either saves each write their own single-row result and the later
-/// rename wins. That is the DESIGN LOAD, not a corner case:
-/// `spawn_deferred_embed` spawns one detached task per drawer, every task
-/// sleeps the same 250 ms + 500 ms backoff, so a burst against a broken
-/// embedder lands all of them in `record_loss` within a few milliseconds.
+/// suite is that nothing exercised two writers at once. A read-modify-write
+/// without serialisation lets two writers both load before either publishes;
+/// each then writes its own single-row result and the later rename discards the
+/// other's. That is the DESIGN LOAD, not a corner case: `spawn_deferred_embed`
+/// spawns one detached task per drawer, every task sleeps the same
+/// 250 ms + 500 ms backoff, so a burst against a broken embedder lands all of
+/// them in `record_loss` within a few milliseconds.
 ///
-/// Fail-before / pass-after: without [`embed_ledger::dir_lock`] this keeps a
-/// handful of the 16 rows; with it, all 16.
+/// Fail-before / pass-after: [`embed_ledger::record`] routes through
+/// `json_rmw::update`, whose advisory `flock` is held by the open file
+/// description and so serialises threads as well as processes. Patched to skip
+/// only that lock, this test keeps 1 of 16 rows; unpatched, all 16.
 /// What: 16 OS threads released together by a `Barrier`, each recording a
 /// distinct drawer id; asserts every id survives.
 /// Test: itself.

@@ -144,13 +144,30 @@ pub fn record(data_dir: &Path, entry: EmbedFailure) -> Result<()> {
 /// failure for an id nothing can look up. Both are the same operation.
 /// What: same locked critical section as [`record`] — a clear racing a record
 /// has the identical lost-update shape, and the backfill runs both against one
-/// palace. Returns before taking the lock when `ids` is empty or the palace has
-/// no ledger, so a healthy palace never creates the file or its lock sidecar.
+/// palace.
+///
+/// Three cheap early returns come BEFORE the lock, because `clear` is on the
+/// success path of every deferred embed and `json_rmw::update` always publishes
+/// — it has no "nothing changed" branch, so reaching it costs an flock plus two
+/// fsyncs whether or not a row matched. Skipping it when `ids` is empty, when
+/// the palace has no ledger, or when no listed id is actually present keeps a
+/// healthy palace from paying that on every single write, and from creating the
+/// file or its lock sidecar at all.
+///
+/// The unlocked pre-read is a benign check-then-act: a row that appears between
+/// the check and the (skipped) lock belongs to a drawer that failed after this
+/// caller's drawer succeeded, so clearing it would have been wrong anyway. The
+/// authoritative surface stays `PalaceHandle::embed_health`, which never reads
+/// this file.
 /// Test: `embed_ledger_clear_removes_only_named_rows`,
-/// `concurrent_clear_and_record_do_not_lose_each_other`.
+/// `concurrent_clear_and_record_do_not_lose_each_other`,
+/// `clear_without_a_matching_row_never_writes`.
 pub fn clear(data_dir: &Path, ids: &HashSet<Uuid>) -> Result<()> {
     let path = ledger_path(data_dir);
     if ids.is_empty() || !path.exists() {
+        return Ok(());
+    }
+    if !load(data_dir).iter().any(|r| ids.contains(&r.drawer_id)) {
         return Ok(());
     }
     json_rmw::update(&path, |rows: &mut Vec<EmbedFailure>| {
