@@ -35,6 +35,17 @@ pub enum ServiceAction {
         /// re-enabled as a silent side effect of reinstalling.
         #[arg(long)]
         auto_discover: bool,
+
+        /// Reload the agent even when the rendered unit is unchanged.
+        ///
+        /// #4868: install skips the reload when the plist is byte-identical and
+        /// the label is loaded, which is what stops a re-run costing a restart.
+        /// That is wrong after the BINARY changed — `make deploy` installs a new
+        /// executable behind an identical plist, and without this flag launchd
+        /// keeps running the old image. Deploy paths pass `--force`; operators
+        /// re-running install do not need it.
+        #[arg(long)]
+        force: bool,
     },
     /// Unload the LaunchAgent and remove the plist
     Uninstall,
@@ -65,7 +76,8 @@ pub fn handle_service(action: &ServiceAction) -> Result<()> {
             ServiceAction::Install {
                 no_auto_discover,
                 auto_discover,
-            } => service_install(*no_auto_discover, *auto_discover),
+                force,
+            } => service_install(*no_auto_discover, *auto_discover, *force),
             ServiceAction::Uninstall => service_uninstall(),
             ServiceAction::Status => service_status(),
             ServiceAction::Logs => service_logs(),
@@ -149,16 +161,52 @@ fn launchd_env_pairs(
 /// `ProgramArguments` / `EnvironmentVariables`. Any failure (no home dir, no
 /// file, unreadable) yields `None` — "nothing to preserve", which is exactly
 /// the pre-#4823 behaviour, so a broken read can never make install fail.
-/// Test: filesystem-dependent; the parsing it delegates to is covered by
-/// `service_unit::parse_installed_unit_*`.
+///
+/// #4868: reading only `<LAUNCHD_LABEL>.plist` defeats #4823 precisely on the
+/// migration path this issue introduces. On the host the whole premise
+/// describes — one whose live unit carries the LEGACY name — the canonical file
+/// does not exist yet, so the read returned `None`, every preserved tunable
+/// (`TRUSTY_NO_AUTO_DISCOVER`, `TRUSTY_DEVICE`, `TRUSTY_BM25_CORPUS_CAP`) was
+/// silently dropped, and eviction then deleted the legacy plist that held the
+/// only record. The legacy plists are therefore consulted as a fallback, and
+/// this must run BEFORE eviction.
+///
+/// What: reads `~/Library/LaunchAgents/<LAUNCHD_LABEL>.plist`; when absent,
+/// falls back to the first present legacy plist for this label, in registry
+/// order (newest alias first). Parses `ProgramArguments` /
+/// `EnvironmentVariables`. Any failure yields `None` — "nothing to preserve" —
+/// so a broken read can never make install fail.
+/// Test: `installed_unit_paths_prefers_canonical_then_legacy`; the parsing it
+/// delegates to is covered by `service_unit::parse_installed_unit_*`.
 #[cfg(target_os = "macos")]
 fn installed_unit() -> Option<crate::commands::service_unit::InstalledUnit> {
-    let path = dirs::home_dir()?
-        .join("Library")
-        .join("LaunchAgents")
-        .join(format!("{LAUNCHD_LABEL}.plist"));
-    let xml = std::fs::read_to_string(path).ok()?;
-    Some(crate::commands::service_unit::parse_installed_unit(&xml))
+    let home = dirs::home_dir()?;
+    for path in installed_unit_paths(&home) {
+        if let Ok(xml) = std::fs::read_to_string(&path) {
+            return Some(crate::commands::service_unit::parse_installed_unit(&xml));
+        }
+    }
+    None
+}
+
+/// Candidate plist paths to read operator configuration from, best first.
+///
+/// Why: kept pure and separate from the filesystem read so the ordering — the
+/// thing #4868 got wrong — is testable without a real `~/Library/LaunchAgents`.
+/// What: the canonical `<label>.plist`, then each legacy alias's plist in
+/// registry order.
+/// Test: `installed_unit_paths_prefers_canonical_then_legacy`.
+#[cfg(target_os = "macos")]
+fn installed_unit_paths(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let agents = home.join("Library").join("LaunchAgents");
+    std::iter::once(LAUNCHD_LABEL)
+        .chain(
+            trusty_common::launchd_labels::legacy_labels_for(LAUNCHD_LABEL)
+                .iter()
+                .copied(),
+        )
+        .map(|label| agents.join(format!("{label}.plist")))
+        .collect()
 }
 
 /// Build the shared `LaunchdConfig` describing the trusty-search agent.
@@ -290,7 +338,7 @@ pub(crate) fn launchd_agent_loaded() -> bool {
 /// covered by `service_unit::resolve_auto_discover_*` and
 /// `build_launchd_config_plist_carries_no_auto_discover_arg`.
 #[cfg(target_os = "macos")]
-fn service_install(request_off: bool, request_on: bool) -> Result<()> {
+fn service_install(request_off: bool, request_on: bool, force: bool) -> Result<()> {
     use crate::commands::service_unit::{resolve_auto_discover, AutoDiscover};
     use trusty_common::launchd_activate::Activation;
 
@@ -335,9 +383,10 @@ fn service_install(request_off: bool, request_on: bool) -> Result<()> {
     // so this install cannot leave a second daemon fighting for :7878 and the
     // index locks (#2938), reload only when the unit actually changed, and roll
     // back rather than leave the service down if the bootstrap fails.
-    let outcome = cfg.install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
-        LAUNCHD_LABEL,
-    ))?;
+    let outcome = cfg.install_and_activate_forced(
+        trusty_common::launchd_labels::legacy_labels_for(LAUNCHD_LABEL),
+        force,
+    )?;
     for label in outcome.evicted() {
         println!(
             "{} Evicted the stale LaunchAgent {} — it named the same daemon \

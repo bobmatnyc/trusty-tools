@@ -57,7 +57,15 @@ patch:
 ## plist path directly cannot evict a unit registered under a different label,
 ## which is how a deploy came to leave the daemon running CLI-detached (the
 ## `|| trusty-memory service start` fallback) after the load silently failed.
+##
+## `bootout` runs first so launchd cannot relaunch the daemon into the middle of
+## `cargo install` and get its binary swapped underneath it (#87). This unit is
+## `KeepAlive::OnSuccess`, so a clean stop would not have been relaunched — but a
+## non-zero exit would, and booting the job out removes the question. No
+## `--force` is needed here: trusty-memory's `service install` reloads
+## unconditionally, so it always activates the binary just built.
 deploy:
+	-launchctl bootout gui/$$(id -u)/com.trusty.memory 2>/dev/null
 	-trusty-memory service stop 2>/dev/null
 	-pkill -TERM -x trusty-memory 2>/dev/null
 	sleep 2

@@ -74,17 +74,23 @@ fn build_launchd_config_targets_the_label_launchd_has_loaded() {
     );
 }
 
-/// Why (#4868): the whole point of making install label-correct is that the
-/// plist fixes reach the live unit. #4868's own `ExitTimeOut` was written
-/// into a plist under a label nothing loaded, so the daemon kept launchd's
-/// 5 s default. This asserts the unit a normal install now activates
-/// carries that key.
-/// What: renders the config `service install` builds and requires
-/// `ExitTimeOut` to be present and above the 5 s default it replaces.
-/// Test: pure string generation, no fs side effects.
+/// Why (#4868): the plist fix only reaches the live unit if the file
+/// `install_and_activate` writes — under the canonical label — is the one
+/// carrying it. #4868's `ExitTimeOut` was rendered correctly all along; it was
+/// written under a label nothing loaded, so the daemon kept launchd's 5 s
+/// default. That makes the load-bearing assertion `ExitTimeOut` AND
+/// `com.trusty.search` in the SAME document, not `ExitTimeOut` on its own —
+/// which trusty-common's `render_plist_declares_exit_timeout` already covers.
+///
+/// #4868 review: an earlier version of this test asserted only on
+/// `render_plist()` and was named for an install path it never touched.
+/// What: renders the exact config `service install` hands to
+/// `install_and_activate`, and requires the canonical `Label`, the plist
+/// filename, and `ExitTimeOut` to agree in one rendered unit.
+/// Test: pure string generation, no fs side effects and no `launchctl`.
 #[cfg(target_os = "macos")]
 #[test]
-fn installed_unit_carries_the_exit_timeout_fix() {
+fn the_unit_install_activates_carries_the_exit_timeout_fix() {
     use std::path::PathBuf;
 
     let cfg = build_launchd_config(
@@ -93,7 +99,22 @@ fn installed_unit_carries_the_exit_timeout_fix() {
         false,
         None,
     );
+    // The file `install_and_activate` writes is `plist_path()`, keyed off the
+    // same label it bootstraps. Both must be canonical or the fix lands in an
+    // inert file again.
+    assert_eq!(
+        cfg.plist_path().expect("home dir resolvable").file_name(),
+        Some(std::ffi::OsStr::new("com.trusty.search.plist"))
+    );
+
     let xml = cfg.render_plist().expect("render_plist must succeed");
+    assert!(
+        xml.contains(&format!(
+            "<string>{}</string>",
+            trusty_common::launchd_labels::SEARCH
+        )),
+        "the activated unit must declare the canonical label, got xml: {xml}"
+    );
     assert!(
         xml.contains(&format!(
             "<key>ExitTimeOut</key>\n  <integer>{}</integer>",
@@ -102,6 +123,42 @@ fn installed_unit_carries_the_exit_timeout_fix() {
         "the unit `service install` activates must carry #4868's \
          ExitTimeOut, got xml: {xml}"
     );
+}
+
+/// Why (#4868 review): `installed_unit` read only `<canonical>.plist`, so on the
+/// host this whole issue describes — one whose live unit still carries the
+/// LEGACY name — it returned `None` and every #4823 tunable was silently
+/// dropped, moments before eviction deleted the plist holding the only record.
+/// What: the canonical plist is consulted first, then each legacy alias in
+/// registry order, so a migrating host still has somewhere to read from.
+/// Test: pure path construction — no filesystem access.
+#[cfg(target_os = "macos")]
+#[test]
+fn installed_unit_paths_prefers_canonical_then_legacy() {
+    let home = std::path::Path::new("/Users/x");
+    let paths = installed_unit_paths(home);
+    let names: Vec<String> = paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("com.trusty.search.plist"),
+        "the canonical unit must win when it exists, got {names:?}"
+    );
+    assert!(
+        names.contains(&"com.trusty.trusty-search.plist".to_string()),
+        "the pre-#4868 plist must be readable as a fallback or the migration \
+         destroys operator tunables, got {names:?}"
+    );
+    assert!(
+        names.contains(&"com.bobmatnyc.trusty-search.plist".to_string()),
+        "the Makefile's label family must be readable too, got {names:?}"
+    );
+    assert!(paths
+        .iter()
+        .all(|p| p.starts_with("/Users/x/Library/LaunchAgents")));
 }
 
 /// Why: the LaunchdConfig handed to `trusty_common::launchd` must always

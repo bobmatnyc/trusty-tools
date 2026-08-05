@@ -125,24 +125,30 @@ const SCAN_EXEMPT_PATHS: &[&str] = &["trusty-installer/src/commands/macos_signin
 /// fails on any the registry does not own, so the third recurrence cannot
 /// merge.
 ///
-/// What: walks every workspace member's `src/**.rs`, takes the portion of each
-/// file BEFORE its `#[cfg(test)]` marker (test fixtures deliberately name
-/// drifted labels that exist on other hosts), keeps only string-literal-bearing
-/// non-comment lines, extracts `com.trusty.*` / `com.bobmatnyc.*` tokens, and
-/// requires [`is_canonical_label`] to recognise each one. Legacy aliases are
-/// rejected on purpose — a legacy literal in production source IS the defect.
+/// What: walks every workspace member's `src/**.rs` plus the build and deploy
+/// files a label can hide in (`Makefile`, `*.sh`, `*.plist`, `*.yml`), strips
+/// each Rust file's inline test module (test fixtures deliberately name drifted
+/// labels that exist on other hosts) and every comment, extracts
+/// `com.trusty.*` / `com.bobmatnyc.*` tokens, and reports each one. Legacy
+/// aliases are rejected everywhere. In Rust a CANONICAL label typed as a
+/// literal is rejected too — a correct-but-duplicated literal is the state
+/// trusty-search's label was in before it drifted, and Rust has the registry.
+/// A Makefile, shell script or plist cannot import a Rust constant, so it may
+/// name the canonical label; a legacy or unknown one still fails.
 /// Test: this is the test.
 #[test]
 fn no_stray_launchd_label_literals_in_workspace_sources() {
     let root = workspace_root();
     let mut files = Vec::new();
-    collect_rs_files(&root.join("crates"), &mut files);
+    collect_scannable_files(&root, &mut files);
+
+    let rs = files.iter().filter(|p| kind_of(p) == Kind::Rust).count();
+    let other = files.len() - rs;
     assert!(
-        files.len() > 100,
-        "the scan found only {} files under {} — a broken walk would pass this \
-         test vacuously",
-        files.len(),
-        root.join("crates").display()
+        rs > 2000 && other > 20,
+        "the scan found {rs} Rust and {other} build/deploy file(s) under {} — a \
+         broken walk would pass this test vacuously",
+        root.display()
     );
 
     let mut strays: Vec<String> = Vec::new();
@@ -159,21 +165,28 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
         if rel.contains("trusty-common/src/launchd_labels") {
             continue;
         }
+        let kind = kind_of(path);
         let Ok(body) = std::fs::read_to_string(path) else {
             continue;
         };
-        for line in production_lines(&body) {
-            let trimmed = line.trim_start();
-            // Comments may legitimately discuss a legacy label; code may not.
-            // A continuation line of a multi-line string literal carries no
-            // quote of its own, so quote-presence is NOT usable as the filter —
-            // that is how the `com.trusty.mpm.plist` hints in `daemon_bridge`
-            // and `serve_stdio` (the #2827 defect class: a hint naming a plist
-            // launchd does not have) initially escaped this scan.
-            if trimmed.starts_with("//") || trimmed.starts_with('*') {
+        for line in production_lines(&body, kind) {
+            // Codesign / bundle identifiers are a different namespace that uses
+            // the full binary name deliberately; renaming one invalidates a
+            // binary's designated requirement and re-triggers macOS TCC prompts
+            // (#2558). They are always an explicit `--identifier` or a
+            // `*_IDENTIFIER` assignment, never a launchd label.
+            if line.contains("--identifier") || line.contains("IDENTIFIER=") {
                 continue;
             }
-            for label in extract_labels(line) {
+            for label in extract_labels(&line) {
+                // A Makefile, shell script or plist cannot import a Rust
+                // constant, so naming the CANONICAL label is the best it can
+                // do. What it must never carry is a legacy or unknown label —
+                // that is what `com.bobmatnyc.trusty-search` was. Rust has no
+                // such excuse: it gets the registry, so any literal is a stray.
+                if kind != Kind::Rust && is_canonical_label(&label) {
+                    continue;
+                }
                 strays.push(format!("{rel}: {label}"));
             }
         }
@@ -187,23 +200,143 @@ fn no_stray_launchd_label_literals_in_workspace_sources() {
     );
 }
 
-/// Lines of a source file that are production code — everything above its
-/// inline test module.
+/// What sort of file is being scanned, which decides its comment syntax and
+/// whether it has an inline test module to strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Rust source: `//` comments, and an inline `#[cfg(test)] mod tests { … }`
+    /// to strip.
+    Rust,
+    /// Makefile / shell / YAML: `#` comments, no test module.
+    Hash,
+    /// XML property list: `<!-- -->` comments, no test module.
+    Xml,
+}
+
+/// Lines of a file that carry executable meaning — comments stripped, and for
+/// Rust, the inline test module removed.
 ///
-/// Why: test fixtures deliberately name drifted labels that exist on other
-/// hosts (`launchd_probe`'s `com.trusty.mpm.dogfood`), so scanning them would
-/// force those fixtures to lie. Splitting on the literal `#[cfg(test)]` was not
-/// enough: `trusty-console`'s module is `#[cfg(all(test, target_os = "macos"))]`
-/// and slipped straight through.
-/// What: yields lines until the first `mod tests` or any `#[cfg(…test…)]`
-/// attribute, whichever comes first.
-fn production_lines(body: &str) -> impl Iterator<Item = &str> {
-    body.lines().take_while(|line| {
-        let t = line.trim_start();
-        !(t.starts_with("mod tests")
-            || t.starts_with("pub mod tests")
-            || (t.starts_with("#[cfg(") && t.contains("test")))
-    })
+/// Why: comments legitimately discuss a legacy label (this module's own header
+/// does), and test fixtures deliberately name drifted labels that exist on other
+/// hosts, such as `launchd_probe`'s `com.trusty.mpm.dogfood`. Scanning either
+/// would force them to lie.
+///
+/// #4868 review: the first version used `take_while`, so the scan STOPPED at the
+/// first `#[cfg(test)]`-ish line. In a `mod.rs` that declaration sits near the
+/// top among the module list, so the entire production body below it went
+/// unscanned — a literal planted at line 301 of
+/// `trusty-mpm/src/services/discoverer/mod.rs` passed. It now SKIPS the test
+/// item and keeps going: a bare `mod tests;` declaration costs one line, and a
+/// `mod tests { … }` block is skipped by brace balance.
+///
+/// What: yields owned lines with comment text removed. A line whose code part
+/// is empty is dropped.
+/// Test: `production_lines_skips_past_a_test_module_declaration`,
+/// `production_lines_strips_an_inline_test_block`,
+/// `production_lines_keeps_a_feature_cfg_that_merely_contains_test`.
+fn production_lines(body: &str, kind: Kind) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut lines = body.lines().peekable();
+    while let Some(line) = lines.next() {
+        if kind == Kind::Rust && is_test_cfg_attribute(line) {
+            skip_test_item(&mut lines);
+            continue;
+        }
+        let code = strip_comment(line, kind);
+        if !code.trim().is_empty() {
+            out.push(code);
+        }
+    }
+    out
+}
+
+/// Whether a line is a `#[cfg(…)]` attribute gating on the `test` cfg.
+///
+/// Why: a substring check for `test` also fires on
+/// `#[cfg(feature = "embedder-test-support")]`, which gates PRODUCTION code —
+/// skipping the item it guards would reopen the hole this function exists to
+/// close.
+/// What: true only when the attribute contains `test` as a standalone token
+/// (not part of a longer identifier such as `embedder-test-support`).
+fn is_test_cfg_attribute(line: &str) -> bool {
+    let t = line.trim_start();
+    if !t.starts_with("#[cfg(") {
+        return false;
+    }
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut rest = t;
+    while let Some(idx) = rest.find("test") {
+        let before_ok = rest[..idx].chars().next_back().is_none_or(|c| !is_ident(c));
+        let after_ok = rest[idx + 4..].chars().next().is_none_or(|c| !is_ident(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        rest = &rest[idx + 4..];
+    }
+    false
+}
+
+/// Consume the item a `#[cfg(test)]` attribute applies to.
+///
+/// What: a declaration or `use` ending in `;` costs exactly one line; a braced
+/// item is consumed until its braces balance.
+fn skip_test_item<'a>(lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>) {
+    let mut depth: i32 = 0;
+    let mut opened = false;
+    for line in lines.by_ref() {
+        depth += i32::try_from(line.matches('{').count()).unwrap_or(0);
+        depth -= i32::try_from(line.matches('}').count()).unwrap_or(0);
+        if line.contains('{') {
+            opened = true;
+        }
+        if opened {
+            if depth <= 0 {
+                return;
+            }
+        } else if line.trim_end().ends_with(';') {
+            return;
+        }
+    }
+}
+
+/// Remove the comment portion of a line for the given file kind.
+fn strip_comment(line: &str, kind: Kind) -> String {
+    let t = line.trim_start();
+    match kind {
+        // A continuation line of a multi-line Rust string literal carries no
+        // quote of its own, so quote-presence is NOT usable as the filter —
+        // that is how the `com.trusty.mpm.plist` hints in `daemon_bridge` and
+        // `serve_stdio` (the #2827 defect class: a hint naming a plist launchd
+        // does not have) initially escaped this scan. Drop whole-line comments
+        // and block-comment bodies instead.
+        Kind::Rust => {
+            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+                String::new()
+            } else {
+                line.to_string()
+            }
+        }
+        Kind::Hash => line.split('#').next().unwrap_or("").to_string(),
+        Kind::Xml => {
+            if t.starts_with("<!--") {
+                String::new()
+            } else {
+                line.to_string()
+            }
+        }
+    }
+}
+
+/// Classify a path by the comment syntax it uses.
+fn kind_of(path: &std::path::Path) -> Kind {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    if name.ends_with(".rs") {
+        Kind::Rust
+    } else if name.ends_with(".plist") {
+        Kind::Xml
+    } else {
+        Kind::Hash
+    }
 }
 
 /// Resolve the workspace root from this crate's manifest directory.
@@ -215,9 +348,19 @@ fn workspace_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// Recursively collect `src/**.rs` files under a crates directory, skipping
-/// dedicated test/bench trees (their fixtures name drifted labels on purpose).
-fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+/// Recursively collect the files the label scan covers.
+///
+/// Why (#4868 review): scanning `crates/**/src/**.rs` alone left the two file
+/// types the last recurrence actually lived in unguarded — the per-crate
+/// `Makefile`s carried the `com.bobmatnyc.*` family and
+/// `scripts/install-trusty-search-signed.sh` carried the inverted hint. A guard
+/// that cannot see where the bug was is not a guard.
+///
+/// What: every `.rs` under a crate `src/` tree, plus every `Makefile`, `*.sh`,
+/// `*.plist` and `*.yml` in the repository. Dedicated test/bench trees and
+/// `docs/` are skipped — their fixtures and research notes name drifted labels
+/// deliberately.
+fn collect_scannable_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -228,19 +371,102 @@ fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         if path.is_dir() {
             if matches!(
                 name.as_ref(),
-                "target" | "tests" | "benches" | "node_modules"
+                "target"
+                    | "tests"
+                    | "benches"
+                    | "node_modules"
+                    | "docs"
+                    | ".git"
+                    | ".claude"
+                    | "test-data"
+                    | "testdata"
+                    | "vmtest-harness"
             ) {
                 continue;
             }
-            collect_rs_files(&path, out);
-        } else if name.ends_with(".rs")
+            collect_scannable_files(&path, out);
+            continue;
+        }
+        let is_rust = name.ends_with(".rs")
             && !name.ends_with("_tests.rs")
             && !name.ends_with("_test.rs")
-            && name != "tests.rs"
-        {
+            && name != "tests.rs";
+        let is_build_or_deploy = name == "Makefile"
+            || name.ends_with(".sh")
+            || name.ends_with(".plist")
+            || name.ends_with(".yml");
+        if is_rust || is_build_or_deploy {
             out.push(path);
         }
     }
+}
+
+/// Why (#4868 review): the first `production_lines` used `take_while`, so a
+/// `mod tests;` declaration near the top of a `mod.rs` terminated the scan and
+/// everything below it went unread — 342 of 2847 files lost more than half
+/// their body, many after ~15 lines. A planted literal at line 301 of
+/// `trusty-mpm/src/services/discoverer/mod.rs` passed.
+/// What: a declaration costs one line and scanning continues past it.
+/// Test: this is the test.
+#[test]
+fn production_lines_skips_past_a_test_module_declaration() {
+    let body = "pub mod a;\n#[cfg(test)]\nmod tests;\npub mod b;\nlet x = \"deep\";\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(
+        kept.iter().any(|l| l.contains("deep")),
+        "code below a `mod tests;` declaration must still be scanned, kept: {kept:?}"
+    );
+    assert!(!kept.iter().any(|l| l.contains("mod tests;")));
+}
+
+/// Why: an inline test module names drifted labels on purpose, so it must be
+/// skipped — but only as far as its closing brace.
+/// What: the block body is dropped and code after it is kept.
+/// Test: this is the test.
+#[test]
+fn production_lines_strips_an_inline_test_block() {
+    let body = "fn real() {}\n#[cfg(all(test, target_os = \"macos\"))]\nmod tests {\n    let f = \"com.trusty.trusty-fixture\";\n}\nfn after() {}\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(!kept.iter().any(|l| l.contains("trusty-fixture")));
+    assert!(
+        kept.iter().any(|l| l.contains("fn after")),
+        "code after the test block must survive, kept: {kept:?}"
+    );
+}
+
+/// Why: a substring check for `test` also fires on
+/// `#[cfg(feature = "embedder-test-support")]`, which gates PRODUCTION code.
+/// Skipping the item it guards would reopen the hole the fix closes.
+/// What: only a standalone `test` cfg token counts.
+/// Test: this is the test.
+#[test]
+fn production_lines_keeps_a_feature_cfg_that_merely_contains_test() {
+    assert!(!is_test_cfg_attribute(
+        "#[cfg(feature = \"embedder-test-support\")]"
+    ));
+    assert!(is_test_cfg_attribute("#[cfg(test)]"));
+    assert!(is_test_cfg_attribute(
+        "#[cfg(all(test, target_os = \"macos\"))]"
+    ));
+
+    let body = "#[cfg(feature = \"embedder-test-support\")]\npub fn kept() {}\n";
+    let kept = production_lines(body, Kind::Rust);
+    assert!(
+        kept.iter().any(|l| l.contains("pub fn kept")),
+        "a feature cfg must not swallow the item it guards, kept: {kept:?}"
+    );
+}
+
+/// Why: Makefiles and shell scripts are where two of the divergent sites lived,
+/// and their comments legitimately narrate the old labels.
+/// What: `#` comments are stripped, code is kept.
+/// Test: this is the test.
+#[test]
+fn production_lines_strips_hash_comments() {
+    let body = "# was com.trusty.trusty-search\nPLIST := com.trusty.search.plist\n";
+    let kept = production_lines(body, Kind::Hash);
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].contains("com.trusty.search"));
 }
 
 /// Pull `com.trusty.*` / `com.bobmatnyc.*` label tokens out of one line.

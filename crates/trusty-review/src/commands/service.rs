@@ -151,17 +151,44 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
     .with_daemon_path())
 }
 
+/// Install the LaunchAgent and load it.
+///
+/// #4868: review's label genuinely CHANGES with this fix
+/// (`com.trusty.trusty-review` → `com.trusty.review`), and a
+/// `com.trusty.trusty-review.plist` exists on the owner's host right now. A bare
+/// `install()` + `bootstrap()` would strand it while `plist_label_for` — and so
+/// `tctl start trusty-review` and `tctl stack doctor` — moved to the new name,
+/// leaving the old plist behind for a future bootstrap to resurrect (#2938).
+/// `install_and_activate` boots it out and deletes it.
 #[cfg(target_os = "macos")]
 fn service_install() -> Result<()> {
     let cfg = launchd_config()?;
-    cfg.install()
-        .map_err(|e| anyhow::anyhow!("install LaunchAgent plist: {e}"))?;
     let plist_path = cfg.plist_path()?;
-    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
-
-    cfg.bootstrap()
-        .map_err(|e| anyhow::anyhow!("launchctl bootstrap: {e}"))?;
+    let outcome = cfg
+        .install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
+            LAUNCHD_LABEL,
+        ))
+        .map_err(|e| anyhow::anyhow!("install LaunchAgent: {e}"))?;
+    for label in outcome.evicted() {
+        println!(
+            "[warn] Evicted the stale LaunchAgent {label} — it named this daemon under an old label."
+        );
+    }
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
+    if matches!(
+        outcome,
+        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. }
+    ) {
+        println!(
+            "[ok] {LAUNCHD_LABEL} is already loaded in {domain} with this exact unit — left running."
+        );
+        println!(
+            "  Logs:    {}\n  Status:  trusty-review service status",
+            cfg.log_dir.display()
+        );
+        return Ok(());
+    }
+    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
     println!(
         "[ok] trusty-review service installed and started ({LAUNCHD_LABEL} loaded into {domain})."
     );

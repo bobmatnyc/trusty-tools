@@ -144,17 +144,44 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
     .with_daemon_path())
 }
 
+/// Install the LaunchAgent and load it.
+///
+/// #4868: console's label genuinely CHANGES with this fix
+/// (`com.trusty.trusty-console` → `com.trusty.console`), which makes eviction
+/// mandatory rather than tidy. A bare `install()` + `bootstrap()` on a host that
+/// ran the older installer would leave the old unit loaded AND add the new one —
+/// two console daemons on one port, the exact #2938 condition. Routing through
+/// `install_and_activate` boots the old label out first, skips the reload when
+/// nothing changed, and rolls back rather than leaving the dashboard down.
 #[cfg(target_os = "macos")]
 fn service_install() -> Result<()> {
     let cfg = launchd_config()?;
-    cfg.install()
-        .map_err(|e| anyhow::anyhow!("install LaunchAgent plist: {e}"))?;
     let plist_path = cfg.plist_path()?;
-    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
-
-    cfg.bootstrap()
-        .map_err(|e| anyhow::anyhow!("launchctl bootstrap: {e}"))?;
+    let outcome = cfg
+        .install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
+            LAUNCHD_LABEL,
+        ))
+        .map_err(|e| anyhow::anyhow!("install LaunchAgent: {e}"))?;
+    for label in outcome.evicted() {
+        println!(
+            "[warn] Evicted the stale LaunchAgent {label} — it named this daemon under an old label."
+        );
+    }
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
+    if matches!(
+        outcome,
+        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. }
+    ) {
+        println!(
+            "[ok] {LAUNCHD_LABEL} is already loaded in {domain} with this exact unit — left running."
+        );
+        println!(
+            "  Logs:    {}\n  Status:  trusty-console service status",
+            cfg.log_dir.display()
+        );
+        return Ok(());
+    }
+    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
     println!(
         "[ok] trusty-console service installed and started ({LAUNCHD_LABEL} loaded into {domain})."
     );

@@ -20,12 +20,24 @@
 //! Re-fixing the literals one at a time is what let the defect come back after
 //! #2827; this module removes the second copy instead.
 //!
-//! The convention, which every LaunchAgent loaded on a real host obeys:
-//! `com.trusty.<member with its `trusty-` prefix stripped>`, with sub-units
-//! suffixed (`com.trusty.mpm.supervisor`, `com.trusty.search.logrotate`).
-//! [`canonical_label`] is that rule as code, and [`SERVICES`] is checked
-//! against it by `canonical_consts_match_the_convention` — a table entry that
-//! restates a label wrongly fails the build's test run rather than shipping.
+//! The convention: `com.trusty.<member with its `trusty-` prefix stripped>`,
+//! with sub-units suffixed (`com.trusty.mpm.supervisor`,
+//! `com.trusty.search.logrotate`). [`canonical_label`] is that rule as code, and
+//! [`SERVICES`] is checked against it by `canonical_consts_match_the_convention`
+//! — a table entry that restates a label wrongly fails the test run rather than
+//! shipping.
+//!
+//! How far the survey actually reaches, stated exactly, because overstating a
+//! partial survey is how the direction got reversed the first time: **every unit
+//! with a live daemon obeys it** — `com.trusty.mpm`, `com.trusty.memory`,
+//! `com.trusty.analyze`, `com.trusty.search`, `com.trusty.console`,
+//! `com.trusty.agents.slack`, all confirmed from `launchctl list` with a pid.
+//! Two do not, and both are being normalised onto it here rather than being
+//! counted as support for it: `com.trusty.trusty-search.logrotate` is loaded
+//! with no pid and no main unit beside it, and `com.trusty.trusty-review.plist`
+//! sits on disk unloaded — and that file is this codebase's own output, so it
+//! was never independent evidence of anything. Both are recorded as legacy
+//! aliases below.
 //!
 //! Deliberately NOT `#[cfg(target_os = "macos")]`, unlike [`crate::launchd`]:
 //! the registry is data, and gating it would stop the drift tests from running
@@ -249,7 +261,10 @@ pub fn legacy_labels_for(label: &str) -> &'static [&'static str] {
 /// literal, and a membership test that accepted it would have passed while the
 /// installer bootstrapped a unit launchd does not have.
 /// What: true iff some [`SERVICES`] entry's `label` equals `candidate`.
-/// Test: `no_stray_launchd_label_literals_in_workspace_sources`.
+/// Test: `no_stray_launchd_label_literals_in_workspace_sources` calls it to
+/// decide whether a Makefile / shell / plist literal is acceptable — those
+/// files cannot import a Rust constant, so naming the canonical label is the
+/// best they can do, while a legacy or unknown one still fails.
 #[must_use]
 pub fn is_canonical_label(candidate: &str) -> bool {
     service_for_label(candidate).is_some()

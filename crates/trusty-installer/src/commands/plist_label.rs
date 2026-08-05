@@ -32,14 +32,36 @@ use trusty_common::launchd_labels;
 /// registry is the one definition, and the daemon crates' own `LAUNCHD_LABEL`
 /// constants read from it too, so the two cannot disagree.
 ///
-/// What: returns the canonical label for `binary` from
-/// [`trusty_common::launchd_labels`].
+/// What: looks `binary` up in [`trusty_common::launchd_labels::SERVICES`] and
+/// returns that service's label, falling back to the `com.trusty.<stem>`
+/// convention for a member the registry does not list.
 ///
-/// Test: `tests::labels_match_the_daemon_crates`, `tests::default_derivation`.
+/// #4868 review: delegating straight to `canonical_label` skipped `SERVICES`
+/// entirely, so a member whose only unit is a SUB-unit resolved wrongly —
+/// `trusty-agents` returned `com.trusty.agents`, not the
+/// `com.trusty.agents.slack` that is actually loaded. The registry is consulted
+/// first; the convention is the fallback, not the answer.
+///
+/// Test: `tests::labels_match_the_daemon_crates`, `tests::default_derivation`,
+/// `tests::sub_unit_members_resolve_to_their_registered_label`.
 pub fn plist_label_for(binary: &str) -> String {
     // #4868: delegate rather than restate — the local override table this
     // replaces is what drifted from the daemons it claimed to mirror.
-    launchd_labels::canonical_label(binary)
+    let for_member = || {
+        launchd_labels::SERVICES
+            .iter()
+            .filter(|s| s.member == binary)
+    };
+    // A member's MAIN daemon wins when it has one; otherwise its sole sub-unit
+    // is what `tctl` must target. Selecting explicitly rather than by table
+    // order keeps the answer stable if `SERVICES` is ever reordered.
+    for_member()
+        .find(|s| s.sub_unit.is_none())
+        .or_else(|| for_member().next())
+        .map_or_else(
+            || launchd_labels::canonical_label(binary),
+            |s| s.label.to_owned(),
+        )
 }
 
 /// Resolve the on-disk plist path for a member binary's launchd agent.
@@ -97,6 +119,31 @@ mod tests {
              loaded (#4868)"
         );
         assert_eq!(plist_label_for("trusty-search"), "com.trusty.search");
+    }
+
+    /// Why (#4868 review): delegating straight to the convention could not
+    /// express a member whose only unit is a sub-unit — `trusty-agents`
+    /// resolved to `com.trusty.agents` while the loaded unit is
+    /// `com.trusty.agents.slack`, so `tctl` would have targeted a job that does
+    /// not exist. That is the same failure this issue is about, one member over.
+    /// What: a sub-unit-only member resolves to its registered label; a member
+    /// with both a main daemon and a sub-unit resolves to the main daemon.
+    /// Test: This is the test.
+    #[test]
+    fn sub_unit_members_resolve_to_their_registered_label() {
+        assert_eq!(
+            plist_label_for("trusty-agents"),
+            launchd_labels::AGENTS_SLACK,
+            "a member whose only registered unit is a sub-unit must resolve to \
+             that sub-unit's label"
+        );
+        assert_eq!(
+            plist_label_for("trusty-search"),
+            launchd_labels::SEARCH,
+            "a member with both a daemon and a sub-unit must resolve to the \
+             daemon, not the logrotate agent"
+        );
+        assert_eq!(plist_label_for("trusty-mpm"), launchd_labels::MPM);
     }
 
     /// Why: The plist path must key off the *resolved* label so an overridden

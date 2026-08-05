@@ -109,12 +109,27 @@ patch:
 ## The eviction of the legacy labels now belongs to `service install`, which
 ## does it under launchd with a rollback. This target defers to it instead of
 ## reimplementing the sequence in shell.
+##
+## Two things this sequence must get right, both flagged in #4868 review:
+##
+##  1. `bootout` FIRST, not `stop` + `pkill`. The installed unit is
+##     `KeepAlive::Always` (#4113), so a SIGTERM'd daemon is relaunched by
+##     launchd within `ThrottleInterval` — `cargo install` would then overwrite
+##     the binary of a running process, which is #87 (macOS SIGKILLs it with
+##     "Code Signature Invalid"). Booting the job out deregisters it, so nothing
+##     brings it back until we ask.
+##  2. `--force` on the way back in. The rendered plist is byte-identical
+##     across a deploy — only the BINARY changed — so without it
+##     `install_and_activate` reports `AlreadyCurrent` and launchd keeps running
+##     the old image. A deploy that does not activate what it built is not a
+##     deploy.
 deploy:
+	-launchctl bootout gui/$$(id -u)/com.trusty.search 2>/dev/null
 	-trusty-search stop 2>/dev/null
 	-pkill -TERM -x trusty-search 2>/dev/null
 	sleep 2
 	CARGO_BUILD_JOBS=2 cargo install --path . --locked
-	trusty-search service install
+	trusty-search service install --force
 
 ## Stop daemon, install new binary from source, restart (closes #87)
 ## Why: replacing the binary while the daemon is running causes macOS to
