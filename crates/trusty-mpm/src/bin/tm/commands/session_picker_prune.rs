@@ -395,15 +395,24 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
 /// What: `(parent-dir-name, container-dir-name)` pairs matched against a
 /// candidate's ancestors — `.base/.worktrees` (session worktrees) and
 /// `.claude/worktrees` (the worktree root `CLAUDE.md` documents).
-const WORKTREE_ROOT_MARKERS: [(&str, &str); 2] =
+const WORKTREE_CONTAINER_MARKERS: [(&str, &str); 2] =
     [(".base", ".worktrees"), (".claude", "worktrees")];
 
-/// Whether `dir` is one of the [`WORKTREE_ROOT_MARKERS`] container directories.
+/// Whether `dir` is a worktree CONTAINER — the directory that HOLDS worktrees,
+/// never an individual worktree itself.
 ///
-/// What: matches on the LAST TWO path components only, so it holds for any
-/// checkout location and for nested worktrees alike.
+/// 🔴 Read the name literally: this is `true` for `.base/.worktrees` and
+/// `.claude/worktrees`, and `false` for every worktree inside them. It is the
+/// exact OPPOSITE of `session_manager::worktree_safety::is_worktree_root`, which
+/// asks whether a path is the root of ONE worktree (`git rev-parse
+/// --show-toplevel`). The two answer contradictory questions about the same
+/// paths, so they must never share a name (PR #4874 review).
+///
+/// What: matches the LAST TWO path components against
+/// [`WORKTREE_CONTAINER_MARKERS`], so it holds for any checkout location and for
+/// nested worktrees alike.
 /// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`.
-fn is_worktree_root(dir: &Path) -> bool {
+fn is_worktree_container(dir: &Path) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -414,7 +423,7 @@ fn is_worktree_root(dir: &Path) -> bool {
     else {
         return false;
     };
-    WORKTREE_ROOT_MARKERS
+    WORKTREE_CONTAINER_MARKERS
         .iter()
         .any(|(p, c)| *p == parent && *c == name)
 }
@@ -422,34 +431,34 @@ fn is_worktree_root(dir: &Path) -> bool {
 /// Decide whether an absent `candidate` is absent because something was DELETED
 /// (corroborated) or because its filesystem is unreachable (#4872).
 ///
-/// Why: see [`WORKTREE_ROOT_MARKERS`]. This deliberately does NOT settle for
+/// Why: see [`WORKTREE_CONTAINER_MARKERS`]. This deliberately does NOT settle for
 /// "some ancestor exists" — `/Volumes` survives every unmount, so that weaker
 /// rule would reinstate exactly the mass-tombstone the guard was written to
 /// prevent.
-/// What: walks the ancestors nearest-first. When any [`is_worktree_root`]
+/// What: walks the ancestors nearest-first. When any [`is_worktree_container`]
 /// ancestor still exists, the tree below it was removed — corroborated. When the
 /// path has such an ancestor but NONE of them exist, the whole checkout is
-/// unreachable — not corroborated. A path with no worktree-root ancestor at all
+/// unreachable — not corroborated. A path with no container ancestor at all
 /// falls back to the original immediate-parent rule, unchanged.
 /// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`,
 /// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`,
 /// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
 async fn absence_corroborated(candidate: &Path) -> bool {
-    let mut saw_worktree_root = false;
+    let mut saw_container = false;
     for ancestor in candidate
         .ancestors()
         .skip(1)
-        .filter(|a| is_worktree_root(a))
+        .filter(|a| is_worktree_container(a))
     {
-        saw_worktree_root = true;
+        saw_container = true;
         if tokio::fs::try_exists(ancestor).await.unwrap_or(false) {
             return true;
         }
     }
-    if saw_worktree_root {
+    if saw_container {
         return false;
     }
-    // No worktree root in this path: fall back to the immediate parent. A path
+    // No worktree container in this path: fall back to the immediate parent. A path
     // with no parent (a bare relative name, or the filesystem root itself) has
     // nothing to corroborate against, so refuse to call it gone.
     match candidate.parent() {
