@@ -33,6 +33,12 @@ mod swap_back_watchdog;
 #[cfg(test)]
 mod tests;
 
+// #4846: the dead-entry budget regression tests. A sibling of `tests` because
+// they need their own fixtures (a walkable tracked-root tree) and assert on
+// cost rather than on a return value.
+#[cfg(test)]
+mod tests_4846;
+
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A
 // sibling of `tests` rather than folded into it because `tests.rs` is
