@@ -1,8 +1,11 @@
 Fixed
 
-- A crafted spreadsheet can no longer force unbounded decompression: xlsx/xlsm/ods packages are now capped at 256 MiB of total uncompressed content before calamine opens them (closes [#4894](https://github.com/bobmatnyc/trusty-tools/issues/4894))
-  - a 511 KB adversarial workbook used to extract *successfully* in 143 ms while peaking at 521 MiB RSS. `MAX_OFFICE_FILE_BYTES` (10 MiB) bounds the container rather than the decompressed payload, and `EXTRACT_TIMEOUT` (30 s) is a time bound the attack never approaches — so neither existing mitigation applied
+- A crafted spreadsheet can no longer force unbounded decompression: xlsx/xlsm packages are now capped at 256 MiB of total uncompressed content and 4096 entries before calamine opens them (closes [#4894](https://github.com/bobmatnyc/trusty-tools/issues/4894))
+  - a 511 KB adversarial workbook used to extract *successfully* in 143 ms while peaking at 529.8 MiB RSS. `MAX_OFFICE_FILE_BYTES` (10 MiB) bounds the container rather than the decompressed payload, and `EXTRACT_TIMEOUT` (30 s) is a time bound the attack never approaches — so neither existing mitigation applied
   - calamine exposes no size limit and the zip layer bounds an entry read by its *compressed* length, so the check runs outside calamine: declared sizes are summed from the central directory first (rejecting a declared bomb with zero decompression), then every entry is drained through `Read::take` into a sink so a lying size field is caught too. The guard itself allocates O(1) regardless of the cap
-  - measured on the same fixture: peak RSS 529.7 MiB before, 11.7 MiB after
+  - the document is read into memory once and both the guard and calamine parse those same bytes. Validating a path and then reopening it let an attacker with write access to a watched directory swap a benign workbook for a bomb between the two opens, with the watcher supplying unlimited retries
+  - an entry-count cap covers what the byte caps cannot: a package of empty entries declares and decompresses to nothing, yet 200 000 of them in a 16.6 MiB container cost 142.8 MiB of zip metadata before either byte pass ran
+  - measured on the same fixture: peak RSS 529.8 MiB before, 11.7 MiB after
   - the cap is package-wide rather than per-part like the docx path because calamine reads the whole package, and because a dense workbook at the container cap decompresses to ~190 MiB almost entirely within one sheet entry — a 50 MiB per-part cap would reject legitimate files
   - `.xls` is unaffected: CFB has no stream compression, so the container cap already bounds it
+  - one visible consequence: a file that is not a workbook in any format is now logged as `spreadsheet extraction failed: Cannot detect file format` rather than as the xlsx reader's zip failure, because format detection now sniffs content instead of trusting the extension

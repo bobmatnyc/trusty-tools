@@ -7,17 +7,27 @@
 //! per row — so downstream chunking (the existing sliding-window chunker;
 //! see `core::extract` module docs) keeps rows grouped under their sheet.
 //!
-//! What: [`extract`] opens the workbook with `calamine::open_workbook_auto`,
-//! which handles xls/xlsx/xlsm (and ods) uniformly, and walks
-//! `Reader::worksheets()`.
+//! What: [`extract`] reads the file into memory once, then opens the workbook
+//! with `calamine::open_workbook_auto_from_rs` over those same bytes and walks
+//! `Reader::worksheets()`. The dispatcher routes only `xls`/`xlsx`/`xlsm` here
+//! (`core::extract::EXTRACT_EXTS`), so `.ods` never reaches this module even
+//! though calamine itself can read it.
 //!
 //! Zip-bomb defence: calamine still exposes no size bound of its own, so
 //! [`preflight_package_bounds`] validates the package with the `zip` crate
-//! BEFORE calamine opens it, capping total decompressed bytes at
-//! [`MAX_WORKBOOK_UNCOMPRESSED_BYTES`]. See that function for why the check
-//! had to move outside calamine, and the constant for how the cap was sized.
+//! BEFORE calamine parses it, capping total decompressed bytes at
+//! [`MAX_WORKBOOK_UNCOMPRESSED_BYTES`] and entry count at
+//! [`MAX_WORKBOOK_ENTRIES`]. See that function for why the check had to move
+//! outside calamine, and the constants for how the caps were sized.
 //!
-//! RESIDUAL RISK: the bound covers zip-based packages (xlsx/xlsm/ods) only.
+//! #4894 review: the guard and the parser must see the SAME bytes. Validating
+//! by path and then reopening by path lets an attacker with write access to a
+//! watched directory swap a benign workbook for a bomb between the two opens —
+//! and the watcher re-triggers extraction on every write, so one winning
+//! interleaving out of unlimited attempts is enough. Reading once and handing
+//! calamine the in-memory buffer removes the second open entirely.
+//!
+//! RESIDUAL RISK: the bound covers zip-based packages (xlsx/xlsm) only.
 //! `.xls` is a CFB/BIFF container with no stream compression, so its
 //! in-memory size is bounded directly by the 10 MiB
 //! [`MAX_OFFICE_FILE_BYTES`](super::MAX_OFFICE_FILE_BYTES) container cap and
@@ -31,12 +41,13 @@
 //! `test_not_a_workbook_errors`, `test_zip_bomb_extraction_stays_within_memory_bound`.
 
 use std::fmt::Write as _;
-use std::io::Read;
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
+use std::sync::Arc;
 
-use calamine::{open_workbook_auto, Reader};
+use calamine::{open_workbook_auto_from_rs, Reader};
 
-use super::{ExtractError, Extracted};
+use super::{ExtractError, Extracted, MAX_OFFICE_FILE_BYTES};
 
 /// Cap on the TOTAL uncompressed size of every entry in a spreadsheet
 /// package (bytes).
@@ -45,7 +56,8 @@ use super::{ExtractError, Extracted};
 /// and `EXTRACT_TIMEOUT` caps only wall-clock time — a zip bomb defeats both,
 /// because it is small and it is fast. A 511 KiB fixture whose sheet XML
 /// expands to 512 MiB extracted *successfully* in 143 ms while peaking at
-/// 521 MiB RSS; one such file in a watched directory would OOM the daemon.
+/// 529.8 MiB RSS (555_499_520 bytes); one such file in a watched directory
+/// would OOM the daemon.
 ///
 /// Why 256 MiB, and why one package-wide cap rather than docx's per-part
 /// cap: a dense inline-string workbook was measured compressing at 18.5:1,
@@ -65,18 +77,49 @@ use super::{ExtractError, Extracted};
 /// `test_large_legitimate_workbook_still_extracts`.
 const MAX_WORKBOOK_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Cap on how many entries a spreadsheet package may contain.
+///
+/// Why: the byte caps say nothing about entry COUNT, and `ZipArchive::new`
+/// materialises every entry's metadata before either byte pass runs. A package
+/// of empty entries declares zero uncompressed bytes, so both passes wave it
+/// through: 200_000 stored empty entries in a 16.6 MiB container returned
+/// `Ok(())` while adding 142.8 MiB RSS. At the 10 MiB
+/// [`MAX_OFFICE_FILE_BYTES`] container ceiling that is ~115k entries ≈ 82 MiB,
+/// and calamine then builds its own `ZipArchive` over the same bytes and pays
+/// it a second time.
+///
+/// Why 4096: a real xlsx package has tens to low hundreds of parts (one per
+/// worksheet, plus shared strings, styles, relationships, and any embedded
+/// media), so 4096 leaves an order of magnitude of headroom over the largest
+/// legitimate workbook while capping the metadata table at a few MiB.
+///
+/// What: checked by [`preflight_package_bounds`] immediately after the central
+/// directory is parsed, before either byte pass.
+/// Test: `test_entry_count_cap_rejects_many_empty_entries`.
+const MAX_WORKBOOK_ENTRIES: usize = 4096;
+
 /// Extract text from an xls/xlsx/xlsm workbook.
 ///
-/// Why/What: see module docs. Decompression is bounded by
-/// [`MAX_WORKBOOK_UNCOMPRESSED_BYTES`] (zip-bomb defence; see
+/// Why/What: see module docs. The file is read once and both the guard and
+/// calamine work from that single buffer, so there is no window in which the
+/// bytes can change between validation and parsing. Decompression is bounded
+/// by [`MAX_WORKBOOK_UNCOMPRESSED_BYTES`] and entry count by
+/// [`MAX_WORKBOOK_ENTRIES`] (zip-bomb defence; see
 /// [`preflight_package_bounds`]).
 /// Test: `test_extracts_single_sheet`,
-/// `test_zip_bomb_extraction_stays_within_memory_bound`.
+/// `test_zip_bomb_extraction_stays_within_memory_bound`,
+/// `test_forged_central_directory_size_still_rejected`.
 pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
-    // #4894: bound decompression before calamine, which has no bound of its own.
-    preflight_package_bounds(path, MAX_WORKBOOK_UNCOMPRESSED_BYTES)?;
+    // #4894: read ONCE, then validate and parse the same bytes. Validating a
+    // path and reopening it hands calamine a file the guard never saw.
+    let bytes = read_package_bytes(path)?;
 
-    let mut workbook = open_workbook_auto(path).map_err(|e| ExtractError::Xlsx(e.to_string()))?;
+    preflight_package_bounds(Cursor::new(&bytes[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)?;
+
+    // `Arc<[u8]>` because `open_workbook_auto_from_rs` clones the reader once
+    // per format it sniffs; cloning a `Vec` would copy the package each time.
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(Arc::<[u8]>::from(bytes)))
+        .map_err(|e| ExtractError::Xlsx(e.to_string()))?;
 
     let mut text = String::new();
     for (name, range) in workbook.worksheets() {
@@ -94,6 +137,46 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
     })
 }
 
+/// Read the whole document into memory, refusing anything over
+/// [`MAX_OFFICE_FILE_BYTES`].
+///
+/// Why: every later step — the preflight guard and calamine — works from this
+/// one buffer, so the file is opened exactly once and cannot change underneath
+/// the guard (#4894 review). The size check is re-run on the bytes actually
+/// read rather than trusted from `metadata`, so a file that grows between the
+/// two is reported rather than silently truncated into a parse error.
+/// What: returns the file's contents, or `TooLarge` when it exceeds the cap.
+/// Test: `test_oversized_package_reports_too_large`,
+/// `test_extracts_single_sheet`.
+fn read_package_bytes(path: &Path) -> Result<Vec<u8>, ExtractError> {
+    let to_io_err = |source| ExtractError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+    let too_large = |size| ExtractError::TooLarge {
+        path: path.display().to_string(),
+        size,
+        cap: MAX_OFFICE_FILE_BYTES,
+    };
+
+    let file = std::fs::File::open(path).map_err(to_io_err)?;
+    let declared = file.metadata().map_err(to_io_err)?.len();
+    if declared > MAX_OFFICE_FILE_BYTES {
+        return Err(too_large(declared));
+    }
+
+    // One byte past the cap: enough to detect an over-cap file, never enough
+    // to let one in.
+    let mut bytes = Vec::with_capacity(declared as usize);
+    file.take(MAX_OFFICE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(to_io_err)?;
+    if bytes.len() as u64 > MAX_OFFICE_FILE_BYTES {
+        return Err(too_large(bytes.len() as u64));
+    }
+    Ok(bytes)
+}
+
 /// Refuse a spreadsheet package whose entries decompress past `cap` bytes in
 /// total, before calamine reads any of it.
 ///
@@ -107,8 +190,12 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
 /// be enforced is outside calamine, on the same file, using the `zip` crate
 /// this crate already depends on.
 ///
-/// What: two passes, mirroring `docx::read_entry_bounded`'s declared-size +
-/// `Read::take` pair, widened from one part to the whole package.
+/// What: an entry-count check plus two byte passes, the latter mirroring
+/// `docx::read_entry_bounded`'s declared-size + `Read::take` pair, widened
+/// from one part to the whole package.
+/// 0. Entry count against [`MAX_WORKBOOK_ENTRIES`]. Neither byte pass sees a
+///    package of empty entries — it declares and decompresses to nothing —
+///    yet `ZipArchive::new` has already built a metadata record for each one.
 /// 1. Central-directory metadata only. Summing the declared uncompressed
 ///    sizes refuses an honestly-declared bomb having decompressed nothing at
 ///    all — the cheapest possible rejection, and the one the measured
@@ -120,20 +207,28 @@ pub fn extract(path: &Path) -> Result<Extracted, ExtractError> {
 ///    governs only whether calamine runs — never how much the guard itself
 ///    allocates.
 ///
+/// Takes a reader rather than a path so the caller can validate the exact
+/// bytes it goes on to parse (#4894 review) — see [`extract`].
+///
 /// A non-zip container (`.xls` is CFB) is passed through untouched: there is
 /// no compression to bound, and reporting on malformed input stays calamine's
 /// job so error messages do not change.
 /// Test: `test_zip_bomb_rejected_with_cap_in_message`,
+/// `test_forged_central_directory_size_still_rejected`,
+/// `test_entry_count_cap_rejects_many_empty_entries`,
 /// `test_non_zip_container_passes_preflight`,
 /// `test_large_legitimate_workbook_still_extracts`.
-fn preflight_package_bounds(path: &Path, cap: u64) -> Result<(), ExtractError> {
-    let file = std::fs::File::open(path).map_err(|source| ExtractError::Io {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+fn preflight_package_bounds<R: Read + Seek>(reader: R, cap: u64) -> Result<(), ExtractError> {
+    let Ok(mut archive) = zip::ZipArchive::new(reader) else {
         return Ok(());
     };
+
+    if archive.len() > MAX_WORKBOOK_ENTRIES {
+        return Err(ExtractError::Xlsx(format!(
+            "workbook package holds {} entries, over the {MAX_WORKBOOK_ENTRIES} entry cap",
+            archive.len()
+        )));
+    }
 
     let mut declared_total: u64 = 0;
     for i in 0..archive.len() {
@@ -171,7 +266,9 @@ fn preflight_package_bounds(path: &Path, cap: u64) -> Result<(), ExtractError> {
 /// What: reads at most `budget + 1` bytes into `io::sink()`; exceeding
 /// `budget` means the declared size was false, which is an error.
 /// Test: `test_drain_entry_bounded_rejects_underdeclared_stream`,
-/// `test_drain_entry_bounded_accepts_within_budget`.
+/// `test_drain_entry_bounded_accepts_within_budget`, and — over a real zip
+/// whose size fields were forged rather than a `Cursor` —
+/// `test_forged_central_directory_size_still_rejected`.
 fn drain_entry_bounded<R: Read>(entry: R, name: &str, budget: u64) -> Result<u64, ExtractError> {
     let drained = std::io::copy(
         &mut entry.take(budget.saturating_add(1)),
@@ -439,7 +536,7 @@ mod tests {
     /// Uncompressed payload the zip-bomb fixture expands to: 512 MiB.
     ///
     /// Matches the `spike/anydoc-extraction-evaluation` harness fixture that
-    /// produced the 521 MiB peak-RSS measurement, so the before/after numbers
+    /// produced the 529.8 MiB peak-RSS measurement, so the before/after numbers
     /// on this file are directly comparable. A run of a repeating byte
     /// deflates ~1000:1, keeping the container around 500 KiB — well under
     /// `MAX_OFFICE_FILE_BYTES`, which is the whole point: the container cap
@@ -448,7 +545,7 @@ mod tests {
 
     /// Peak-RSS ceiling asserted for a zip-bomb extraction, in bytes.
     ///
-    /// The pre-fix behavior peaked at 521 MiB; the bounded path peaks in the
+    /// The pre-fix behavior peaked at 529.8 MiB; the bounded path peaks in the
     /// tens of MiB. 256 MiB sits an order of magnitude below the former and
     /// an order of magnitude above the latter, so the assertion separates the
     /// two regimes without being sensitive to allocator or platform noise.
@@ -556,7 +653,7 @@ mod tests {
     /// `MAX_OFFICE_FILE_BYTES` (10 MiB) bounds the CONTAINER, and this
     /// fixture's container is ~0.5 MiB; `EXTRACT_TIMEOUT` (30 s) bounds TIME,
     /// and the pre-fix path completed in 143 ms. It completed *successfully*,
-    /// having allocated 521 MiB on the way — so an assertion on the return
+    /// having allocated 529.8 MiB on the way — so an assertion on the return
     /// value alone would have passed against the vulnerable code.
     #[test]
     fn test_zip_bomb_extraction_stays_within_memory_bound() {
@@ -621,17 +718,175 @@ mod tests {
     /// the logs can tell a size refusal from a parse failure.
     #[test]
     fn test_zip_bomb_rejected_with_cap_in_message() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("zipbomb.xlsx");
         // 1 MiB payload against a 64 KiB cap: same shape as the 512 MiB
         // fixture, small enough to keep this test fast.
-        std::fs::write(&path, build_xlsx_zip_bomb(1024 * 1024)).unwrap();
+        let bomb = build_xlsx_zip_bomb(1024 * 1024);
 
-        let err = preflight_package_bounds(&path, 64 * 1024)
+        let err = preflight_package_bounds(Cursor::new(&bomb[..]), 64 * 1024)
             .expect_err("a package over the cap must be refused");
         assert!(
             err.to_string().contains("over the 65536 byte cap"),
             "expected the cap in the message, got: {err}"
+        );
+    }
+
+    /// Patch every central-directory and local-header uncompressed-size field
+    /// belonging to `target_name` so it reads `to`, and report how many fields
+    /// were rewritten.
+    ///
+    /// Both header copies are patched: rewriting only the central directory
+    /// would leave the local header available as a second honest source, and
+    /// the guard must hold when neither one can be trusted.
+    fn forge_uncompressed_size(bytes: &mut [u8], target_name: &str, to: u32) -> usize {
+        const CD_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
+        const LOCAL_SIG: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
+        let mut patched = 0;
+        let mut i = 0;
+        while i + 46 <= bytes.len() {
+            if bytes[i..i + 4] == CD_SIG {
+                // Central directory header: name length at +28, uncompressed
+                // size at +24, name itself at +46.
+                let name_len =
+                    u16::from_le_bytes(bytes[i + 28..i + 30].try_into().unwrap()) as usize;
+                if i + 46 + name_len <= bytes.len()
+                    && &bytes[i + 46..i + 46 + name_len] == target_name.as_bytes()
+                {
+                    bytes[i + 24..i + 28].copy_from_slice(&to.to_le_bytes());
+                    patched += 1;
+                }
+            } else if bytes[i..i + 4] == LOCAL_SIG {
+                // Local file header: name length at +26, uncompressed size at
+                // +22, name itself at +30.
+                let name_len =
+                    u16::from_le_bytes(bytes[i + 26..i + 28].try_into().unwrap()) as usize;
+                if i + 30 + name_len <= bytes.len()
+                    && &bytes[i + 30..i + 30 + name_len] == target_name.as_bytes()
+                {
+                    bytes[i + 22..i + 26].copy_from_slice(&to.to_le_bytes());
+                    patched += 1;
+                }
+            }
+            i += 1;
+        }
+        patched
+    }
+
+    /// Pass 2 must reject a REAL zip whose size fields lie, not just a
+    /// `Cursor` whose length exceeds a budget.
+    ///
+    /// Why this test and not just `test_drain_entry_bounded_*`: those exercise
+    /// `Read::take` arithmetic. What actually makes pass 2 work is that `zip`
+    /// bounds an entry reader by COMPRESSED length (`zip-2.4.2/src/read.rs`,
+    /// `find_content` → `.take(data.compressed_size)`), so a forged
+    /// uncompressed size cannot shorten the stream. Were a future `zip` to
+    /// bound by the DECLARED uncompressed size instead, the drain would return
+    /// exactly `declared`, the guard would pass, the whole defence would become
+    /// a no-op — and every other test here would stay green. This one goes red.
+    ///
+    /// It also fails if pass 2 is removed outright: pass 1 is deliberately
+    /// blinded first, and asserted blind.
+    #[test]
+    fn test_forged_central_directory_size_still_rejected() {
+        const CAP: u64 = 64 * 1024;
+        let mut bomb = build_xlsx_zip_bomb(1024 * 1024);
+        let patched = forge_uncompressed_size(&mut bomb, "xl/worksheets/sheet1.xml", 1024);
+        assert!(
+            patched >= 2,
+            "expected both the central-directory and local-header size fields to be forged, \
+             patched {patched}"
+        );
+
+        // Pass 1 must now be blind — otherwise this would not isolate pass 2.
+        let declared_total: u64 = {
+            let mut archive = zip::ZipArchive::new(Cursor::new(&bomb[..])).unwrap();
+            (0..archive.len())
+                .map(|i| archive.by_index_raw(i).unwrap().size())
+                .sum()
+        };
+        assert!(
+            declared_total <= CAP,
+            "the forged package must slip past the declared-size pass to exercise the drain, \
+             declares {declared_total} against a {CAP} byte cap"
+        );
+
+        let err = preflight_package_bounds(Cursor::new(&bomb[..]), CAP)
+            .expect_err("a package whose size fields lie must still be refused");
+        assert!(
+            err.to_string().contains("decompressed past"),
+            "expected the drain to catch it, got: {err}"
+        );
+    }
+
+    /// A package of many empty entries declares zero uncompressed bytes and
+    /// decompresses to zero, so both byte passes wave it through — but
+    /// `ZipArchive::new` has already built a metadata record per entry, and
+    /// calamine then builds a second archive over the same bytes. Only an
+    /// entry-count cap bounds that.
+    #[test]
+    fn test_entry_count_cap_rejects_many_empty_entries() {
+        let mut buf = Vec::new();
+        {
+            let mut zipw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for i in 0..(MAX_WORKBOOK_ENTRIES + 1) {
+                zipw.start_file(format!("xl/media/e{i}"), opts).unwrap();
+            }
+            zipw.finish().unwrap();
+        }
+
+        // The byte caps genuinely do not see this: nothing is declared and
+        // nothing decompresses.
+        let declared_total: u64 = {
+            let mut archive = zip::ZipArchive::new(Cursor::new(&buf[..])).unwrap();
+            (0..archive.len())
+                .map(|i| archive.by_index_raw(i).unwrap().size())
+                .sum()
+        };
+        assert_eq!(declared_total, 0, "fixture must declare no content at all");
+
+        let err = preflight_package_bounds(Cursor::new(&buf[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)
+            .expect_err("a package over the entry cap must be refused");
+        assert!(
+            err.to_string()
+                .contains(&format!("over the {MAX_WORKBOOK_ENTRIES} entry cap")),
+            "expected the entry cap in the message, got: {err}"
+        );
+    }
+
+    /// A package at the entry cap is still accepted — the cap must refuse the
+    /// pathological case without clipping a legitimately part-heavy workbook.
+    #[test]
+    fn test_entry_count_cap_accepts_package_at_the_limit() {
+        let mut buf = Vec::new();
+        {
+            let mut zipw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for i in 0..MAX_WORKBOOK_ENTRIES {
+                zipw.start_file(format!("xl/media/e{i}"), opts).unwrap();
+            }
+            zipw.finish().unwrap();
+        }
+
+        preflight_package_bounds(Cursor::new(&buf[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)
+            .expect("a package exactly at the entry cap must pass");
+    }
+
+    /// A document over `MAX_OFFICE_FILE_BYTES` is refused by name and size
+    /// rather than truncated into a confusing parse error. `extract` is a
+    /// module entry point reachable without going through `extract_text`'s
+    /// gate, so it re-checks on the bytes it actually read.
+    #[test]
+    fn test_oversized_package_reports_too_large() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("huge.xlsx");
+        std::fs::write(&path, vec![0u8; (MAX_OFFICE_FILE_BYTES + 1) as usize]).unwrap();
+
+        let err = extract(&path).expect_err("an over-cap document must be refused");
+        assert!(
+            matches!(err, ExtractError::TooLarge { cap, .. } if cap == MAX_OFFICE_FILE_BYTES),
+            "expected TooLarge naming the office-document cap, got: {err}"
         );
     }
 
@@ -658,15 +913,9 @@ mod tests {
     /// diagnostics — the case `test_not_a_workbook_errors` depends on.
     #[test]
     fn test_non_zip_container_passes_preflight() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("legacy.xls");
-        std::fs::write(
-            &path,
-            b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1 not really a workbook",
-        )
-        .unwrap();
+        let cfb = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1 not really a workbook";
 
-        preflight_package_bounds(&path, MAX_WORKBOOK_UNCOMPRESSED_BYTES)
+        preflight_package_bounds(Cursor::new(&cfb[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)
             .expect("a non-zip container has no decompression to bound");
     }
 
@@ -705,23 +954,39 @@ mod tests {
         assert!(extracted.text.contains("cell-1999-199-value"));
     }
 
+    /// Non-workbook input must still fail, and fail as a FORMAT problem rather
+    /// than a size refusal — the preflight waves a non-zip container through
+    /// precisely so calamine keeps owning that diagnosis.
+    ///
+    /// The message changed with the move to `open_workbook_auto_from_rs`
+    /// (#4894 review): the path-based call picked a reader from the `.xlsx`
+    /// extension and surfaced that reader's failure —
+    /// `Xlsx error: Zip error: invalid Zip archive: Could not find EOCD` —
+    /// while the byte-based call sniffs content across all four formats and
+    /// reports that none matched. The new text is the more accurate of the
+    /// two for input that is not a workbook in any format, so it is asserted
+    /// as-is rather than the assertion being relaxed to accommodate it.
     #[test]
     fn test_not_a_workbook_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("not-a-workbook.xlsx");
         std::fs::write(&path, b"this is not a spreadsheet").unwrap();
 
-        let result = extract(&path);
-        assert!(result.is_err(), "non-workbook input must error");
+        let err = extract(&path).expect_err("non-workbook input must error");
+        assert_eq!(
+            err.to_string(),
+            "spreadsheet extraction failed: Cannot detect file format"
+        );
     }
 
-    /// Sanity check on the `Sheets` re-export path used by `open_workbook_auto`
-    /// stays importable — guards against an upstream API rename silently
-    /// breaking this module without a compile error surfaced elsewhere.
+    /// Sanity check on the `Sheets` re-export path used by
+    /// `open_workbook_auto_from_rs` stays importable — guards against an
+    /// upstream API rename silently breaking this module without a compile
+    /// error surfaced elsewhere.
     #[test]
     fn test_sheets_type_is_importable() {
         fn _assert_type<T>() {}
-        _assert_type::<Sheets<std::io::BufReader<std::fs::File>>>();
+        _assert_type::<Sheets<Cursor<Arc<[u8]>>>>();
         let _ = Data::Empty;
     }
 }
