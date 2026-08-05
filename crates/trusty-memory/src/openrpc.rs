@@ -76,6 +76,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_delete"
         | "palace_update"
         | "palace_compact"
+        // #4906: dry-run is read-only but the repair writes vectors.
+        | "palace_reembed"
         | "kg_assert"
         | "add_alias"
         | "remove_prompt_fact"

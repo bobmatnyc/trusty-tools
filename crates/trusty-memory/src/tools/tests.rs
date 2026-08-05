@@ -101,6 +101,7 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("memory_forget", true),
         ("palace_info", true),
         ("palace_compact", true),
+        ("palace_reembed", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -137,7 +138,8 @@ fn tool_definitions_lists_all_tools() {
     // 34 original + 3 task tools (task_add, task_list, task_complete, issue
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
     // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
-    assert_eq!(tools.len(), 43);
+    // + 1 repair tool (palace_reembed, #4906)
+    assert_eq!(tools.len(), 44);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -155,6 +157,7 @@ fn tool_definitions_lists_all_tools() {
         "palace_list",
         "palace_info",
         "palace_compact",
+        "palace_reembed",
         "kg_assert",
         "kg_query",
         "memory_recall_all",
@@ -209,6 +212,30 @@ async fn dispatch_palace_create_persists() {
         .expect("palace_list");
     let ids = listed["palaces"].as_array().expect("palaces array");
     assert!(ids.iter().any(|v| v.as_str() == Some("alpha")));
+}
+
+/// Why (#4906): the repair path has to be reachable from the daemon, because
+/// the daemon holds the palace's writer lock — a CLI would only ever get a
+/// read-only snapshot. This confirms the tool is wired end-to-end through
+/// `dispatch_tool` and that a dry run reports rather than mutates.
+/// What: creates a palace, calls `palace_reembed` with no arguments, and
+/// asserts the response carries the coverage counts and defaults to a dry run.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_palace_reembed_dry_run_reports_counts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "reembed-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_reembed", json!({"palace": "reembed-test"}))
+        .await
+        .expect("palace_reembed");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(out["missing"], 0);
+    assert_eq!(out["attempted"], 0);
+    assert_eq!(out["repaired"], 0);
+    assert!(out["drawer_count"].is_number());
+    assert!(out["vector_count"].is_number());
 }
 
 /// Why (issue #1714): `force=true` bypasses slug validation with no

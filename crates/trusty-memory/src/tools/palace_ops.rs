@@ -249,6 +249,59 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
     }))
 }
 
+/// `palace_reembed` — report, and optionally repair, drawers with no vector.
+///
+/// Why (#4906): the deferred-embed lane used to drop failures silently, leaving
+/// drawers durable in redb and permanently invisible to vector recall — 39 of
+/// 1,241 on the live `trusty-tools` palace. Fixing the write path forward
+/// repairs none of those, and the repair has to run INSIDE the daemon: the
+/// daemon holds the palace's writer lock, so a CLI would only ever get a
+/// read-only snapshot it cannot write vectors into.
+/// What: `dry_run` (the default) returns the exact set of vectorless drawer ids
+/// without touching the embedder; `dry_run: false` re-embeds them through the
+/// same primitive the write path uses. Idempotent — a second run over a
+/// repaired palace reports zero missing and does no work.
+/// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
+pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Result<Value> {
+    use trusty_common::memory_core::retrieval::VectorBackfillOptions;
+    let palace = resolve_palace(state, &args, "palace_reembed")?;
+    let handle = open_palace_handle(state, &palace)?;
+    // Defaults to a dry run on purpose: the first thing an operator wants is
+    // the number, and #4834 deletes source files on the strength of it.
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let report = handle
+        .backfill_missing_vectors(VectorBackfillOptions {
+            dry_run,
+            limit,
+            ..Default::default()
+        })
+        .await?;
+    let health = handle.embed_health();
+    Ok(json!({
+        "palace": report.palace_id,
+        "dry_run": report.dry_run,
+        "drawer_count": report.drawer_count,
+        "vector_count": report.vector_count,
+        "missing": report.missing,
+        "attempted": report.attempted,
+        "repaired": report.repaired,
+        "still_failing": report.still_failing,
+        "still_missing_ids": report.still_missing_ids
+            .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        // Without this a shortfall is unexplained: "no embedder on this host"
+        // reads identically to "the embedder is dropping writes".
+        "embedder_ready": health.embedder_ready,
+        "recorded_failures": health.recorded_failures.len(),
+    }))
+}
+
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_compact")?;
     let handle = open_palace_handle(state, &palace)?;
