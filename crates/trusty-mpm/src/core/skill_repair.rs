@@ -39,13 +39,16 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::agent_manifest::ManifestError;
 use crate::core::agent_manifest::{atomic_write, checksum};
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_deploy_tiers::skill_deploy_tiers;
+use crate::core::skill_deploy_tiers::{SkillDeployTier, skill_deploy_tiers};
 use crate::core::skill_drift::{
     ManifestState, SkillDrift, SkillReference, audit_deployed_skills, deployed_path,
 };
-use crate::core::skill_manifest::{SkillManifest, SkillManifestEntry};
+use crate::core::skill_manifest::{
+    SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
+};
 
 /// What the repair did — or deliberately did not do — to one skill.
 ///
@@ -115,79 +118,143 @@ pub fn repair_skills(
 ) -> Vec<RepairOutcome> {
     let mut outcomes = Vec::new();
     for tier in skill_deploy_tiers(paths, project_dir) {
-        let audit = audit_deployed_skills(reference, &tier.dir);
-        // #4622 review: never write into a tier whose ownership ledger could not
-        // be read. Saving a rebuilt manifest over an unparseable one would
-        // silently reclassify every file there as tm-owned and make the next
-        // deploy overwrite the operator's work — the frozen-skill protection
-        // depends on that ledger being intact.
-        if let ManifestState::Unreadable(why) = &audit.manifest {
-            outcomes.push(RepairOutcome {
-                tier: tier.label,
-                stem: "<manifest>".to_string(),
-                action: RepairAction::SkippedUnverifiable(format!(
-                    "{why} — refusing to touch this tier; repairing it would rewrite an                      ownership ledger that cannot be read"
-                )),
-            });
+        // #4881: a tier directory that does not exist has no ledger and so no
+        // findings — repairing it was already a no-op. Skipped BEFORE the lock
+        // so taking one never creates an empty `skills/` directory and a lock
+        // sidecar in a project `tm doctor` was only inspecting.
+        if !tier.dir.is_dir() {
             continue;
         }
-
-        let mut manifest = SkillManifest::load(&tier.dir);
-        let mut manifest_dirty = false;
-
-        for finding in audit.findings {
-            let action = match finding.state {
-                SkillDrift::Fresh => continue,
-                SkillDrift::Unverifiable(why) => RepairAction::SkippedUnverifiable(why),
-                SkillDrift::DriftedFrozen if !include_frozen => RepairAction::SkippedFrozen,
-                SkillDrift::Drifted | SkillDrift::DriftedFrozen | SkillDrift::Missing => {
-                    let Some(content) = reference.assets.get(&finding.stem) else {
-                        // Unreachable: a non-`Unverifiable` state implies an
-                        // asset exists. Reported rather than unwrapped.
-                        outcomes.push(RepairOutcome {
-                            tier: tier.label,
-                            stem: finding.stem,
-                            action: RepairAction::Failed(
-                                "no bundled asset available to write".to_string(),
-                            ),
-                        });
-                        continue;
-                    };
-                    match rewrite_and_verify(
-                        &tier.dir,
-                        tier.label,
-                        &finding.stem,
-                        content,
-                        backup_root,
-                    ) {
-                        Ok(backup) => {
-                            manifest.managed.insert(
-                                finding.stem.clone(),
-                                SkillManifestEntry {
-                                    checksum: checksum(content),
-                                    deployed_at: chrono::Utc::now().to_rfc3339(),
-                                },
-                            );
-                            manifest_dirty = true;
-                            RepairAction::Repaired { backup }
-                        }
-                        Err(e) => RepairAction::Failed(e),
-                    }
-                }
-            };
-            outcomes.push(RepairOutcome {
-                tier: tier.label,
-                stem: finding.stem,
-                action,
-            });
+        // #4881: audit → rewrite → manifest save is a load-modify-save of the
+        // same ledger the deployer writes, so it runs under the tier's ledger
+        // lock. Unlocked, a repair racing a session launch's deploy publishes a
+        // manifest missing the launch's entries, and the skills those entries
+        // described then read as hand-edited and freeze — the very state this
+        // module exists to remedy.
+        let label = tier.label;
+        let locked = with_skill_manifest_lock::<_, ManifestError, _>(&tier.dir, || {
+            Ok(repair_tier_locked(
+                reference,
+                &tier,
+                include_frozen,
+                backup_root,
+            ))
+        });
+        match locked {
+            Ok(tier_outcomes) => outcomes.extend(tier_outcomes),
+            Err(e) => outcomes.push(RepairOutcome {
+                tier: label,
+                stem: "<manifest>".to_string(),
+                action: RepairAction::Failed(format!(
+                    "could not lock the deploy manifest: {e} — refusing to repair this tier \
+                     unserialised"
+                )),
+            }),
         }
+    }
+    outcomes
+}
 
-        if manifest_dirty && let Err(e) = manifest.save(&tier.dir) {
-            outcomes.push(RepairOutcome {
+/// Repair one tier, holding that tier's skill ledger lock.
+///
+/// Why (#4881): split out so the locked critical section is one expression and
+/// its scope cannot be misread — every manifest load, file write, and manifest
+/// save for this tier happens with the lock held. Never call it directly, and
+/// never from inside another `with_skill_manifest_lock` on the same directory.
+/// What: the audit/classify/rewrite/save pipeline documented on
+/// [`repair_skills`], for a single tier.
+/// Test: `skill_repair_tests.rs` exercises it through [`repair_skills`].
+fn repair_tier_locked(
+    reference: &SkillReference,
+    tier: &SkillDeployTier,
+    include_frozen: bool,
+    backup_root: &Path,
+) -> Vec<RepairOutcome> {
+    let mut outcomes = Vec::new();
+    let audit = audit_deployed_skills(reference, &tier.dir);
+    // #4622 review: never write into a tier whose ownership ledger could not
+    // be read. Saving a rebuilt manifest over an unparseable one would
+    // silently reclassify every file there as tm-owned and make the next
+    // deploy overwrite the operator's work — the frozen-skill protection
+    // depends on that ledger being intact.
+    if let ManifestState::Unreadable(why) = &audit.manifest {
+        outcomes.push(RepairOutcome {
+            tier: tier.label,
+            stem: "<manifest>".to_string(),
+            action: RepairAction::SkippedUnverifiable(format!(
+                "{why} — refusing to touch this tier; repairing it would rewrite an                      ownership ledger that cannot be read"
+            )),
+        });
+        return outcomes;
+    }
+
+    let mut manifest = SkillManifest::load(&tier.dir);
+    // #4881: the snapshot the merging save replays this run's delta against.
+    let base = manifest.clone();
+    let mut manifest_dirty = false;
+
+    for finding in audit.findings {
+        let action = match finding.state {
+            SkillDrift::Fresh => continue,
+            SkillDrift::Unverifiable(why) => RepairAction::SkippedUnverifiable(why),
+            SkillDrift::DriftedFrozen if !include_frozen => RepairAction::SkippedFrozen,
+            SkillDrift::Drifted | SkillDrift::DriftedFrozen | SkillDrift::Missing => {
+                let Some(content) = reference.assets.get(&finding.stem) else {
+                    // Unreachable: a non-`Unverifiable` state implies an
+                    // asset exists. Reported rather than unwrapped.
+                    outcomes.push(RepairOutcome {
+                        tier: tier.label,
+                        stem: finding.stem,
+                        action: RepairAction::Failed(
+                            "no bundled asset available to write".to_string(),
+                        ),
+                    });
+                    continue;
+                };
+                match rewrite_and_verify(&tier.dir, tier.label, &finding.stem, content, backup_root)
+                {
+                    Ok(backup) => {
+                        manifest.managed.insert(
+                            finding.stem.clone(),
+                            SkillManifestEntry {
+                                checksum: checksum(content),
+                                deployed_at: chrono::Utc::now().to_rfc3339(),
+                            },
+                        );
+                        manifest_dirty = true;
+                        RepairAction::Repaired { backup }
+                    }
+                    Err(e) => RepairAction::Failed(e),
+                }
+            }
+        };
+        outcomes.push(RepairOutcome {
+            tier: tier.label,
+            stem: finding.stem,
+            action,
+        });
+    }
+
+    // #4881: `rewrite_and_verify` already wrote and re-read every repaired file,
+    // so this save must publish or the repair leaves each one reading as
+    // hand-edited — the exact state it was invoked to clear. `save_merging`
+    // folds in a writer that bypassed the lock rather than dropping it.
+    if manifest_dirty {
+        match manifest.save_merging(&tier.dir, &base) {
+            // `OverwroteUnreadable` is already reported by `save_merging` at
+            // error level — louder than this warn would be — so it needs no
+            // second line here. The ledger was published either way.
+            Ok(SkillManifestSave::Written | SkillManifestSave::OverwroteUnreadable) => {}
+            Ok(SkillManifestSave::Merged) => tracing::warn!(
+                tier = tier.label,
+                "the skill manifest changed during repair — a writer bypassed the \
+                 ledger lock; its entries were merged rather than dropped"
+            ),
+            Err(e) => outcomes.push(RepairOutcome {
                 tier: tier.label,
                 stem: "<manifest>".to_string(),
                 action: RepairAction::Failed(format!("could not save the deploy manifest: {e}")),
-            });
+            }),
         }
     }
     outcomes

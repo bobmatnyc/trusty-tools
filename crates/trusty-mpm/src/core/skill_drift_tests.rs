@@ -454,3 +454,27 @@ fn drift_states_report_not_fresh() {
     assert!(SkillDrift::Missing.is_problem());
     assert!(SkillDrift::Unverifiable("x".into()).is_problem());
 }
+
+/// #4881: the ledger lock's sidecar is bookkeeping, not deployed content.
+///
+/// Why: `with_skill_manifest_lock` creates
+/// `.trusty-mpm-skills-manifest.json.lock` when the lock is TAKEN, which is
+/// before anything is written. Counting it as content would report a tier that
+/// was never deployed to as unattributable, and `tm doctor` renders
+/// `AbsentButPopulated` as unverifiable — a false alarm on an empty tier.
+#[test]
+fn a_lock_sidecar_alone_is_not_a_populated_tier() {
+    let dest = TempDir::new().unwrap();
+    fs::write(
+        crate::core::skill_manifest::skill_manifest_lock_path(dest.path()),
+        "",
+    )
+    .unwrap();
+
+    let audit = audit_deployed_skills(&reference_of(&[("tm-workflow", "v1")]), dest.path());
+    assert_eq!(
+        audit.manifest,
+        ManifestState::AbsentAndEmpty,
+        "a tier holding only the lock sidecar was never deployed to"
+    );
+}
