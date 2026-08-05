@@ -28,7 +28,12 @@ Skills are Markdown documents that provide reusable, invokable knowledge to agen
   templates, ticketing, PR workflow, delegation patterns, session
   management, bug reporting, and `tm-doctor`)
 
-### Skill Tiers & Precedence (issue #2816)
+### Deploy-Time Source Precedence (issue #2816)
+
+This decides which SOURCE file tm writes into one destination directory. It is
+NOT Claude Code's runtime resolution order — that is the next section, and it
+is the one that decides which copy actually loads.
+
 Skills deploy per-project into `<project>/.claude/skills/<name>/SKILL.md`.
 On a name collision, precedence is **project-custom > user-custom > bundled**:
 
@@ -65,6 +70,38 @@ just per-project deploys, per the stated intent that user-custom skills apply
 everywhere. The project-custom tier is naturally empty at this destination
 (nothing hand-places a skill directly into the config dir's `skills/`), so no
 special-casing was needed there.
+
+### Claude Code Runtime Resolution — where to write so a skill WINS
+
+Deploy-time precedence decides what lands on disk. This decides which copy
+Claude Code loads when the same name exists in more than one place:
+
+**`enterprise > personal ~/.claude/skills/ > project .claude/skills/ > bundled`**
+
+A skill at any of those levels overrides a same-named bundled skill.
+
+🔴 **For SKILLS personal beats project. For AGENTS project beats user. Same two
+scopes, opposite order.** Anyone who assumes one rule covers both will place a
+file that silently loses. `mpm-agent-manager` carries the agent half — never
+transfer this rule to agents.
+
+**To make a skill win a collision, write it to the PERSONAL tier** —
+`~/.claude/skills/<name>/SKILL.md`, or `$CLAUDE_CONFIG_DIR/skills/<name>/SKILL.md`
+when that variable is set. Writing to the project tier does NOT override a
+same-named personal skill.
+
+- `CLAUDE_CONFIG_DIR` relocates the ENTIRE `~/.claude` tree wholesale;
+  `~/.claude/skills/` does not keep loading alongside it. tm's global roster
+  deploys into `$CLAUDE_CONFIG_DIR/skills` — that IS the personal tier, which
+  for skills outranks project.
+- Plugin skills use a `plugin-name:skill-name` namespace and sit OUTSIDE the
+  ranking entirely, so they cannot collide. `plugin:` is the only reserved,
+  guaranteed-non-collidable namespace.
+- No frontmatter field declares a tier. Scope is filesystem location only. tm
+  reads a `category:` key; Claude Code ignores it, so it can never be used to
+  win a collision.
+- Bundled skills are `tm-*` prefixed, so a real collision with a user's own
+  skill is unlikely. Rely on the prefix, not on precedence.
 
 ### Skill Structure
 A valid skill file must have:
