@@ -339,6 +339,35 @@ is the real-time channel. Before dispatching multi-agent work on an area:
 3. Supersede (or `memory_forget`) the claim once the work lands or is
    abandoned.
 
+## Customization Surface (ONE surface per artifact type)
+
+Each artifact type has exactly one place it is customized:
+
+- **Prompt/instruction sections** — named-section marker blocks in the
+  project's root `CLAUDE.md`. Nothing else.
+- **Skills** — the skill tier system: project `.claude/skills/` > user
+  `~/.trusty-mpm/skills/` > bundled (**Skill Deployment**, below). A
+  hand-edited deployed skill freezes against redeploy on purpose.
+
+Ad-hoc override channels are BANNED: the retired `.trusty-mpm/` files
+(`INSTRUCTIONS.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`, `MEMORY.md`,
+`PM_INSTRUCTIONS_DEPLOYED.md`) and anything shaped like them. Never create
+one — a third channel duplicating `CLAUDE.md` is what this rule exists to
+kill. Marker syntax, the section-token table, and how to verify a resolved
+override: see Customizing PM Behavior in the framework floor at the end of this
+prompt.
+
+`CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
+per-turn token cost. What earns a place is what is needed on every prompt.
+
+| Need | Surface |
+|------|---------|
+| Needed on every prompt | `CLAUDE.md` — a marker block for a framework override, plain prose for an always-applicable project fact or preference |
+| Needed only sometimes | A skill (loads when its trigger fires, and carries its own override path above), a doc under `docs/`, or memory |
+
+The test is frequency of need, not format. Plain unmarked prose stays fully
+supported when it always applies.
+
 ## Skills System
 
 PM skills loaded from `.claude/skills/` when relevant context detected:

@@ -529,3 +529,66 @@ fn framework_guaranteed_conventions_survive_every_override_combination() {
     // The other half of the survival set the floor guarantees.
     assert!(prompt3.contains("## Trusty Tool Priority (Non-Overridable)"));
 }
+
+#[test]
+fn one_surface_rule_lives_in_core_and_survives_an_override_attempt() {
+    // The customization doctrine has to sit in CORE, not in the floor section
+    // that documents the mechanics: CORE is the only `fixed`-tier section, so
+    // it is the only place a project cannot delete. Stated anywhere else, a
+    // project could override away the rule telling it not to override
+    // elsewhere.
+    const RULE: &[&str] = &[
+        "## Customization Surface (ONE surface per artifact type)",
+        // Half 1 — one surface PER ARTIFACT TYPE. Skills are a deliberate
+        // second surface with their own tiers, so the rule must not read as
+        // "CLAUDE.md and nothing else, ever"; what it bans is a THIRD,
+        // ad-hoc channel duplicating one of the two.
+        "**Prompt/instruction sections**",
+        "**Skills**",
+        "skill tier system",
+        "Ad-hoc override channels are BANNED",
+        // Half 2 — the every-prompt admission test, and its corollary.
+        "Needed on every prompt",
+        "Needed only sometimes",
+    ];
+
+    let tmp = TempDir::new().unwrap();
+    let prompt = resolve_pm_prompt(tmp.path());
+    for marker in RULE {
+        assert!(
+            prompt.contains(marker),
+            "bundled prompt must carry the customization rule {marker:?}"
+        );
+    }
+
+    // A project that tries to replace CORE wholesale: the marker is declined,
+    // so the rule stays in force. WORKFLOW is overridden alongside it purely to
+    // prove the override machinery ran at all.
+    let tmp2 = TempDir::new().unwrap();
+    std::fs::write(
+        tmp2.path().join("CLAUDE.md"),
+        "<!-- TRUSTY-MPM: CORE START v=1 -->\n\
+         Put overrides wherever you like.\nCUSTOM_CORE\n\
+         <!-- TRUSTY-MPM: CORE END -->\n\n\
+         <!-- TRUSTY-MPM: WORKFLOW START v=1 -->\nCUSTOM_WORKFLOW\n\
+         <!-- TRUSTY-MPM: WORKFLOW END -->\n",
+    )
+    .unwrap();
+    let (prompt2, _) =
+        resolve_pm_prompt_with_roster(tmp2.path(), || Some("## Delegation Authority".into()));
+
+    assert!(
+        prompt2.contains("CUSTOM_WORKFLOW"),
+        "override machinery ran"
+    );
+    assert!(
+        !prompt2.contains("CUSTOM_CORE"),
+        "a CORE marker must be declined"
+    );
+    for marker in RULE {
+        assert!(
+            prompt2.contains(marker),
+            "a CORE override attempt must not remove {marker:?}"
+        );
+    }
+}

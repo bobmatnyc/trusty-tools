@@ -339,6 +339,35 @@ is the real-time channel. Before dispatching multi-agent work on an area:
 3. Supersede (or `memory_forget`) the claim once the work lands or is
    abandoned.
 
+## Customization Surface (ONE surface per artifact type)
+
+Each artifact type has exactly one place it is customized:
+
+- **Prompt/instruction sections** — named-section marker blocks in the
+  project's root `CLAUDE.md`. Nothing else.
+- **Skills** — the skill tier system: project `.claude/skills/` > user
+  `~/.trusty-mpm/skills/` > bundled (**Skill Deployment**, below). A
+  hand-edited deployed skill freezes against redeploy on purpose.
+
+Ad-hoc override channels are BANNED: the retired `.trusty-mpm/` files
+(`INSTRUCTIONS.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`, `MEMORY.md`,
+`PM_INSTRUCTIONS_DEPLOYED.md`) and anything shaped like them. Never create
+one — a third channel duplicating `CLAUDE.md` is what this rule exists to
+kill. Marker syntax, the section-token table, and how to verify a resolved
+override: see Customizing PM Behavior in the framework floor at the end of this
+prompt.
+
+`CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
+per-turn token cost. What earns a place is what is needed on every prompt.
+
+| Need | Surface |
+|------|---------|
+| Needed on every prompt | `CLAUDE.md` — a marker block for a framework override, plain prose for an always-applicable project fact or preference |
+| Needed only sometimes | A skill (loads when its trigger fires, and carries its own override path above), a doc under `docs/`, or memory |
+
+The test is frequency of need, not format. Plain unmarked prose stays fully
+supported when it always applies.
+
 ## Skills System
 
 PM skills loaded from `.claude/skills/` when relevant context detected:
@@ -989,6 +1018,11 @@ budget, and no cost-saving, "trivial change", or "documented command" exception.
 
 ## Customizing PM Behavior
 
+The rule itself — instruction sections are customized in `CLAUDE.md` and
+nowhere else, skills through their own tiers, and only what every prompt needs
+earns a place in `CLAUDE.md` — is stated in CORE, the one section a project
+cannot override. This section carries the mechanics.
+
 Project customization is named sections in the project's root `CLAUDE.md`. A
 marked block replaces exactly the matching section of the bundled PM prompt —
 nothing else:
@@ -1030,15 +1064,17 @@ didn't my override apply?".
 The `.trusty-mpm/` override files (`.trusty-mpm/INSTRUCTIONS.md`,
 `.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
 `.trusty-mpm/MEMORY.md`, `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md`) are
-RETIRED and are no longer read (#4286). Never create one. If a project still
-has one, its contents are NOT reaching this prompt: move project facts into
+RETIRED and are no longer read (#4286); CORE bans creating one. If a project
+still has one, its contents are NOT reaching this prompt: move project facts into
 `CLAUDE.md` as plain prose and section overrides into a marker block, then
 delete the file. `tm doctor` fails with `legacy_overrides` until it is gone.
 
 **Only `CORE` is protected.** Every other section, this one included, can be
 replaced by a named section in the project's `CLAUDE.md`. There is no framework
 floor: a project owns its own `CLAUDE.md`, so a floor would have been the
-appearance of a control rather than a control.
+appearance of a control rather than a control. That is why the customization
+rule is stated in CORE and only pointed at here — a project could otherwise
+override away the rule telling it not to override elsewhere.
 A missing, empty, unclosed, or unreadable marker block falls back to the bundled
 default — an override never blanks a section. Spec of record:
 `docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md`.
