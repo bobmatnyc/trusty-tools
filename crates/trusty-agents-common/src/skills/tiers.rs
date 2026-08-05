@@ -1,4 +1,7 @@
-//! Multi-tier skill precedence — project-custom > user-custom > bundled.
+//! Multi-tier skill DEPLOY-TIME source precedence — project-custom >
+//! user-custom > bundled. NOT Claude Code's runtime resolution (#4958): this
+//! decides which SOURCE is written into one `dest`, never which of several
+//! on-disk copies loads.
 //!
 //! Why: skills are deployed per-project into `<project>/.claude/skills/`, and
 //! historically only ONE source fed that deploy (the bundled framework skills,
@@ -302,12 +305,23 @@ pub fn deploy_all_skill_tiers(
 
     let plan = plan_skill_tiers(&project, &user, &bundled);
 
+    // #4958: say which precedence this is. The old message — "deploying the
+    // higher-precedence copy" — read as a final verdict, and for a project-custom
+    // winner it stated the opposite of what happens: Claude Code resolves skills
+    // `enterprise > personal > project > bundled`, so a same-named copy under
+    // `$CLAUDE_CONFIG_DIR/skills` still beats the project-tier file this line
+    // just called the winner. This function only ever sees ONE `dest`, so it
+    // cannot know the cross-destination outcome; it now says only what it knows
+    // and names `dest` so the reader can tell which tier was decided.
     for shadow in &plan.shadowed {
         tracing::info!(
             skill = %shadow.stem,
             winner = shadow.winner.label(),
             loser = shadow.loser.label(),
-            "skill tier collision — deploying the higher-precedence copy"
+            dest = %dest.display(),
+            "skill tier collision — deploy-time source precedence WITHIN this destination; \
+             Claude Code resolves across destinations separately (for skills, personal \
+             outranks project)"
         );
     }
 

@@ -66,6 +66,14 @@
 //! exceptions were checksum-frozen hand edits the deployer is correct to
 //! decline.
 //!
+//! And this tier WINS for skills (#4958). Claude Code resolves skills
+//! `enterprise > personal > project > bundled`, and `CLAUDE_CONFIG_DIR`
+//! relocates the personal tier — so `$CLAUDE_CONFIG_DIR/skills` outranks the
+//! workspace's `<project_dir>/.claude/skills`. AGENTS invert that (project
+//! beats user), which is why the same directory needs `--reset-agents` to
+//! clear a project-tier shadow but no equivalent for skills. Do not carry
+//! either order across to the other artifact type.
+//!
 //! What: [`ensure_managed_config_dir`] (1) runs the canonical standalone
 //! scaffolding ([`ensure_global_config_dir`] — settings.json + the MPM hook
 //! triad + `.mcp.json` + output-styles, plus a best-effort deploy from the
@@ -82,8 +90,8 @@
 //! declined to refresh — the deploy itself already ran on all three run paths;
 //! only the evidence of it was missing. Since #4880 step (2) also refreshes the
 //! session workspace's PROJECT skill tier (`<project_dir>/.claude/skills`),
-//! which OUTRANKS everything deployed here and previously went stale on resume
-//! and in-place relaunch; that half is stamp-gated on the project manifest, so
+//! which previously went stale on resume and in-place relaunch; that half is
+//! stamp-gated on the project manifest, so
 //! it writes nothing when nothing changed. See
 //! [`crate::core::project_skill_tier`].
 //! Test: `ensure_managed_config_dir_deploys_full_roster`,
@@ -240,9 +248,12 @@ pub fn ensure_managed_config_dir_with_root(
         tracing::warn!("managed config dir: {line}");
     }
 
-    // #4880: the PROJECT tier outranks the user tier deployed just above, so a
-    // stale project copy silently beats a current one. Non-fatal, and a no-op
-    // whenever the project manifest stamp still matches.
+    // #4880: refresh the PROJECT tier, which no other run path touches on a
+    // resume or an in-place relaunch. #4958 corrects why: for SKILLS Claude Code
+    // resolves personal > project, so `$CLAUDE_CONFIG_DIR/skills` (deployed just
+    // above) OUTRANKS this destination — a stale copy here does not beat it. It
+    // is still what loads for every name the managed roster does not carry.
+    // Non-fatal, and a no-op whenever the project manifest stamp still matches.
     match crate::core::project_skill_tier::ensure_project_skill_tier(fw, project_dir) {
         Ok(project) => {
             // Deliberately NOT routed through `skill_skip_summary`: a skipped
