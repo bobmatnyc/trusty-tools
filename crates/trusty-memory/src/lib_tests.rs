@@ -95,8 +95,9 @@ async fn tools_list_returns_all_tools() {
     // `chat_session_*` tools and `dream_consolidate_room`;
     // issue #1720 adds `chat_session_recall`, `chat_session_delete`,
     // `chat_turn_append`; issue #1721 adds `palace_dream`;
-    // issue #1722 adds `task_add`, `task_list`, `task_complete`.
-    assert_eq!(tools.len(), 37);
+    // issue #1722 adds `task_add`, `task_list`, `task_complete`;
+    // ADR-0027 T6 (#4805) adds `room_list`, `room_create`, `room_rename`.
+    assert_eq!(tools.len(), 40);
 }
 
 #[tokio::test]

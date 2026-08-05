@@ -101,6 +101,11 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         "task_list" => &[MEMORY_READ],
         "task_add" | "task_complete" => &[MEMORY_WRITE],
 
+        // ADR-0027 T6 room surface (#4805): listing is read-only; creating and
+        // renaming mutate the palace's ROOMS/ROOM_KEYS tables (never DRAWERS).
+        "room_list" => &[MEMORY_READ],
+        "room_create" | "room_rename" => &[MEMORY_WRITE],
+
         _ => &[],
     };
     s.iter().map(|x| (*x).to_string()).collect()

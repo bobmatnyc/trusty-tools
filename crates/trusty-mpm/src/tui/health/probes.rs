@@ -430,7 +430,13 @@ pub(crate) fn project_palace_rows(list: &serde_json::Value) -> Vec<CollectionRow
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let drawer_count = p.get("drawer_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            let wing_count = p.get("wing_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            // #4811: prefer the truthful `room_count` (ADR-0027 T8); an older
+            // daemon only sends `wing_count`, which held this same number.
+            let room_count = p
+                .get("room_count")
+                .or_else(|| p.get("wing_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let last_write_at = p
                 .get("last_write_at")
                 .and_then(|v| v.as_str())
@@ -455,7 +461,7 @@ pub(crate) fn project_palace_rows(list: &serde_json::Value) -> Vec<CollectionRow
                 count,
                 kg_count,
                 drawer_count,
-                wing_count,
+                room_count,
                 last_write_at,
                 node_count,
                 edge_count,

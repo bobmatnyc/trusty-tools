@@ -955,15 +955,34 @@ fn project_palace_rows_reads_extended_fields() {
             "vector_count": 100u64,
             "kg_triple_count": 50u64,
             "drawer_count": 7u64,
-            "wing_count": 3u64,
+            "room_count": 3u64,
             "last_write_at": ts,
         },
     ]);
     let rows = project_palace_rows(&list);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].drawer_count, 7);
-    assert_eq!(rows[0].wing_count, 3);
+    assert_eq!(rows[0].room_count, 3);
     assert_eq!(rows[0].last_write_at.as_deref(), Some(ts.as_str()));
+}
+
+/// Why (#4811): the TUI talks to whatever daemon is running, which may predate
+/// ADR-0027 T8 and send only `wing_count` — a field that has always held a room
+/// count. Falling back to it keeps the panel truthful across that version skew
+/// instead of rendering "Rooms: 0".
+#[test]
+fn project_palace_rows_falls_back_to_legacy_wing_count() {
+    let list = serde_json::json!([
+        {
+            "name": "main",
+            "vector_count": 100u64,
+            "kg_triple_count": 50u64,
+            "drawer_count": 7u64,
+            "wing_count": 4u64,
+        },
+    ]);
+    let rows = project_palace_rows(&list);
+    assert_eq!(rows[0].room_count, 4);
 }
 
 #[test]
@@ -973,7 +992,7 @@ fn palace_index_tab_lines_shows_graph_section() {
         count: 12_345,
         kg_count: 6_789,
         drawer_count: 42,
-        wing_count: 3,
+        room_count: 3,
         ok: true,
         ..Default::default()
     };
@@ -985,10 +1004,16 @@ fn palace_index_tab_lines_shows_graph_section() {
             .iter()
             .any(|l| l.contains("Drawers:") && l.contains("42"))
     );
+    // #4811: the panel renders "Rooms:", not "Wings:" — the number was always
+    // a room count (ADR-0027 C3.4).
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("Wings:") && l.contains("3"))
+            .any(|l| l.contains("Rooms:") && l.contains("3"))
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("Wings:")),
+        "the mislabelled row must be gone, not just supplemented"
     );
     assert!(lines.iter().any(|l| l.contains("Knowledge Graph")));
     assert!(

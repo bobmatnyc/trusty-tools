@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::palace::RoomType;
 use trusty_common::memory_core::retrieval::{
-    recall, recall_across_palaces, recall_deep, RememberOptions,
+    recall_across_palaces, recall_deep_in_room, recall_in_room, RememberOptions,
 };
 use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
@@ -243,6 +243,18 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             ));
         }
     }
+    // ADR-0027 T5 (#4804): the pin to `General` is lifted. `memory_note` takes
+    // the same optional `room` as `memory_remember`, through the same single
+    // parser (`RoomType::parse`, ADR-0027 D4.1), and still defaults to
+    // `General` — so a caller that passes nothing is unaffected.
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(RoomType::parse)
+        .unwrap_or(RoomType::General);
+    // Mirror the resolved room for the KG extractor so the auto-extracted
+    // triples carry the same room label as the drawer.
+    let room_label_for_kg = room_label(&room);
     // note() preset skips the token threshold; we keep the default
     // filter for noise patterns. No MCP-stricter min_tokens override
     // is needed because `enforce_min_tokens = false`.
@@ -252,16 +264,13 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             palace_id: palace,
             content,
             tags,
-            room: RoomType::General,
+            room,
             importance: 1.0,
             opts: RememberOptions {
                 defer_embedding,
                 ..RememberOptions::note()
             },
-            // memory_note is pinned to the General room; mirror that for
-            // the KG extractor so the auto-extracted triples carry the
-            // same room label as the drawer.
-            room_label_for_kg: Some("General".to_string()),
+            room_label_for_kg,
         },
     )
     .await
@@ -286,6 +295,10 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
 /// dependency), hydrates any BM25-only hits via `bm25_hits_to_recall_results`,
 /// merges without duplicating drawers already present, re-sorts by score
 /// descending, and truncates to `top_k`.
+/// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
+/// scopes L2/L3 — a caller who narrowed to one room must never be handed
+/// another room's drawer just because the daemon happened to be warming. L0/L1
+/// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
 /// Test: `recall_falls_back_to_bm25_and_l0_l1_while_warming`,
 /// `recall_deep_falls_back_to_bm25_and_l0_l1_while_warming`.
 async fn recall_without_embedder(
@@ -293,11 +306,17 @@ async fn recall_without_embedder(
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
     palace: &str,
     query: &str,
+    room: Option<&RoomType>,
     top_k: usize,
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
     let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
+    let target_room_id = room
+        .map(|r| trusty_common::memory_core::store::rooms::resolve_room_filter_id(&handle.kg, r));
     if let Some(bm25_hits) = bm25_search_optional(state, palace, query, top_k).await {
         for hydrated in bm25_hits_to_recall_results(handle, &bm25_hits) {
+            if target_room_id.is_some_and(|rid| hydrated.drawer.room_id != rid) {
+                continue;
+            }
             if !results.iter().any(|r| r.drawer.id == hydrated.drawer.id) {
                 results.push(hydrated);
             }
@@ -312,6 +331,22 @@ async fn recall_without_embedder(
     results
 }
 
+/// The optional `room` scope on a recall call.
+///
+/// Why (ADR-0027 T7 / #4806): `retrieve_l2` has enforced a room filter since
+/// #3274, but the MCP recall schema never carried the argument, so room-scoped
+/// recall was reachable only through `memory_list` or the HTTP `/recall` route.
+/// Parsing it in one helper keeps `memory_recall` and `memory_recall_deep`
+/// from drifting into two spellings of the same option (ADR-0027 D4.1).
+/// What: `RoomType::parse` over `args["room"]`; `None` means every room.
+/// Test: `dispatch_recall_room_filter_scopes_results`.
+fn recall_room_filter(args: &Value) -> Option<RoomType> {
+    args.get("room")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(RoomType::parse)
+}
+
 pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "memory_recall")?;
     let query = args
@@ -319,6 +354,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_recall: missing 'query'"))?;
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let room = recall_room_filter(&args);
 
     let handle = open_palace_handle(state, &palace)?;
 
@@ -326,7 +362,8 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // L0/L1 results immediately instead of blocking/erroring on embedder
     // state.
     if state.readiness() == DaemonReadiness::Warming {
-        let results = recall_without_embedder(state, &handle, &palace, query, top_k).await;
+        let results =
+            recall_without_embedder(state, &handle, &palace, query, room.as_ref(), top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
@@ -336,7 +373,13 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // When the daemon is unavailable or the env var is unset, the
     // helper returns `None` and we return the vector-only results
     // verbatim — zero behavioural change for existing deployments.
-    let vector_fut = recall(&handle, embedder.as_ref(), query, top_k);
+    // ADR-0027 T7: the BM25 lane needs no room filter of its own here —
+    // `fuse_bm25_into_recall` only *boosts* drawers already present in the
+    // vector list (it never appends BM25-only hits), and that list is already
+    // room-scoped, so no out-of-room drawer can enter through the lexical
+    // lane. The warming path above is different: it hydrates BM25-only hits,
+    // which is why it filters explicitly.
+    let vector_fut = recall_in_room(&handle, embedder.as_ref(), query, room, top_k);
     let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
@@ -353,17 +396,21 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_recall_deep: missing 'query'"))?;
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    // ADR-0027 T7: deep recall is no longer the odd one out — it takes the
+    // same `room` scope as `memory_recall`.
+    let room = recall_room_filter(&args);
 
     let handle = open_palace_handle(state, &palace)?;
 
     // Issue #1970: same warming-fallback posture as memory_recall.
     if state.readiness() == DaemonReadiness::Warming {
-        let results = recall_without_embedder(state, &handle, &palace, query, top_k).await;
+        let results =
+            recall_without_embedder(state, &handle, &palace, query, room.as_ref(), top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
     let embedder = state.embedder().await?;
-    let results = recall_deep(&handle, embedder.as_ref(), query, top_k)
+    let results = recall_deep_in_room(&handle, embedder.as_ref(), query, room, top_k)
         .await
         .context("recall_deep")?;
     Ok(serialize_recall(&palace, query, results))
@@ -439,7 +486,7 @@ async fn recall_all_without_embedder(
     let mut merged = Vec::new();
     for handle in handles {
         let palace_id = handle.id.as_str().to_string();
-        let hits = recall_without_embedder(state, handle, &palace_id, query, top_k).await;
+        let hits = recall_without_embedder(state, handle, &palace_id, query, None, top_k).await;
         merged.extend(hits.into_iter().map(|result| {
             trusty_common::memory_core::retrieval::CrossPalaceResult {
                 palace_id: palace_id.clone(),

@@ -10,6 +10,7 @@
 use serde_json::{json, Value};
 
 use super::chat_definitions::chat_tool_definitions;
+use super::room_definitions::room_tool_definitions;
 use super::task_definitions::task_tool_definitions;
 
 /// Marker server type. Reserved for future stateful MCP server impls.
@@ -129,6 +130,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "properties": {
                         "palace":  {"type": "string"},
                         "content": {"type": "string", "description": "Brief fact to remember"},
+                        "room":    {"type": "string", "description": "ADR-0027: room to file this note in (Frontend, Backend, Testing, Planning, Documentation, Research, Configuration, Meetings, General, or any custom name). Defaults to General; list a palace's rooms with room_list."},
                         "tags":    {"type": "array", "items": {"type": "string"}},
                         "context": {"type": "string", "description": "Optional surrounding context. Prepended to `content` (separated by `---`) when supplied; with very short content (< 4 words) and no context the write is skipped (issue #215)."},
                         "cwd":         {"type": "string", "description": "DOC-53: optional caller working directory, used to derive the writer's `creator:workstream=`/`ws:` attribution tags. The MCP stdio bridge sets this automatically per-request."},
@@ -139,12 +141,13 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall",
-                "description": "Recall memories using L0+L1+L2 progressive retrieval.",
+                "description": "Recall memories using L0+L1+L2 progressive retrieval. Pass `room` to scope the search to one room (ADR-0027).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace": {"type": "string"},
                         "query":  {"type": "string"},
+                        "room":   {"type": "string", "description": "ADR-0027: restrict the semantic layer to this room. The always-on identity/essential layers (L0/L1) are still returned — they are the palace's baseline grounding, not search results. Use room_list to discover a palace's rooms."},
                         "top_k":  {"type": "integer", "default": 10}
                     },
                     "required": memory_recall_required,
@@ -152,12 +155,13 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall_deep",
-                "description": "Deep recall using L3 full HNSW search.",
+                "description": "Deep recall using L3 full HNSW search. Pass `room` to scope the search to one room (ADR-0027).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace": {"type": "string"},
                         "query":  {"type": "string"},
+                        "room":   {"type": "string", "description": "ADR-0027: restrict the deep search to this room. Same semantics as memory_recall's `room`."},
                         "top_k":  {"type": "integer", "default": 10}
                     },
                     "required": memory_recall_required,
@@ -411,6 +415,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     let metrics = tools.pop().expect("console_metrics sentinel");
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
+    // ADR-0027 T6 (#4805): the room surface, in its own sibling module for the
+    // same 500-SLOC reason as the task and chat groups.
+    tools.extend(room_tool_definitions(has_default));
     tools.push(metrics);
     result
 }

@@ -17,6 +17,9 @@ pub mod agent_metadata;
 pub mod agent_reset;
 pub mod agent_reset_workspace;
 pub mod agent_skill_codeploy;
+// #4840: bundled agent assets reached `$CLAUDE_CONFIG_DIR/agents/` only via a
+// manual `tm install`; this module makes the refresh+deploy automatic.
+pub mod agent_source;
 pub mod artifact;
 pub mod auto_resume;
 pub mod binary_provenance;

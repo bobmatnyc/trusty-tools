@@ -39,11 +39,24 @@ use trusty_agents_common::compress::compress_tool_output_async_with_path;
 
 /// Run `tm compress --tool <tool>`: read stdin, compress, log stats, print.
 ///
-/// Why: the single entry point the rewritten Bash command pipes into
-/// (`<cmd> | tm compress --tool "<effective tool name>"`); must behave like
-/// a well-mannered Unix filter — read all of stdin, write the (possibly
-/// unchanged) result to stdout, exit 0 — so it never breaks the exit-code
-/// semantics of whatever pipeline it's the tail of.
+/// Why: a well-mannered Unix filter — read all of stdin, write the (possibly
+/// unchanged) result to stdout, exit 0 — so trimming a caller's output never
+/// itself introduces a failure.
+///
+/// 🔴 Exiting 0 DISCARDS the upstream command's exit status; it does not
+/// preserve it. A shell takes a pipeline's status from its LAST command, so
+/// `cargo test … | tm compress` reports success on a failing suite. Callers
+/// that need the verdict must capture it before trimming, never pipe:
+///
+/// ```bash
+/// <gate> > /tmp/gate.txt 2>&1; echo "EXIT=$?"
+/// tm compress --tool "cargo test" < /tmp/gate.txt   # only when non-zero
+/// ```
+///
+/// The exit-0 contract itself is deliberate and unchanged — callers rely on
+/// this filter never failing them. #4837: the comment previously justified it
+/// as never breaking a pipeline's exit-code semantics, which is backwards. See
+/// `assets/agents/BASE-AGENT.md`, "Never end a gate chain in a pipe".
 /// What: Blocks until stdin reaches EOF (this is intentional — the whole
 /// point is to wait for the wrapped command to finish producing output), via
 /// [`tokio::io::AsyncReadExt::read_to_string`] rather than a synchronous

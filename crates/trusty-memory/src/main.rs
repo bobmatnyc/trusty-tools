@@ -341,6 +341,23 @@ enum Command {
         palace: Option<String>,
     },
 
+    /// Inspect or apply the ADR-0027 room registry back-fill.
+    ///
+    /// The back-fill runs automatically the first time a palace is opened, so
+    /// this command exists to audit it against a live palace BEFORE it writes:
+    /// `--dry-run` prints the label each room would be given, by which
+    /// confidence step, and how many drawers sit behind it, then exits without
+    /// writing. `--apply` is required to write. Nothing here ever moves,
+    /// reassigns, or rewrites a drawer.
+    ///
+    ///   trusty-memory rooms backfill --dry-run
+    ///   trusty-memory rooms backfill --palace trusty-tools --apply
+    #[command(subcommand_required = true)]
+    Rooms {
+        #[command(subcommand)]
+        action: RoomsAction,
+    },
+
     /// Pin this project's palace slug in `.trusty-tools/trusty-memory.yaml`.
     ///
     /// Why: the lazy write in normal memory operations locks in the slug the
@@ -435,6 +452,25 @@ enum Command {
     /// `config keys set/list/test/unset` surface shared by every trusty-*
     /// binary (epic #2400 Wave 1, #2405).
     Config(trusty_common::inference::config::ConfigCommand),
+}
+
+/// Actions under `trusty-memory rooms`.
+#[derive(Debug, Subcommand)]
+enum RoomsAction {
+    /// Register a row for every room the palace's drawers already sit in.
+    Backfill {
+        /// Restrict to a single palace id (default: every palace on disk).
+        #[arg(long, value_name = "ID")]
+        palace: Option<String>,
+
+        /// Print the plan and exit without writing. This is the default.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Write the plan. Required — the command never writes without it.
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -608,6 +644,9 @@ async fn main() -> Result<()> {
         Command::KgRebuild { palace } => {
             trusty_memory::commands::kg_rebuild::handle_kg_rebuild(palace).await
         }
+        Command::Rooms {
+            action: RoomsAction::Backfill { palace, apply, .. },
+        } => trusty_memory::commands::rooms::handle_rooms_backfill(palace, apply).await,
         Command::Link {
             path,
             slug,

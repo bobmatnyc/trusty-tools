@@ -212,17 +212,29 @@ an agent told to "rerun the suite until green" spent 415k tokens because
 `cargo test` prints a line per test; a sibling spent 546k on `gh pr checks
 --watch` streaming a 15–17 minute CI job.
 
-1. **Run it.** Don't watch, tail, or poll a live stream.
-2. **Trim the output.** `--quiet` plus `tail`/`grep` for the summary line covers
-   most gates. For a heavier squeeze this repo ships a Unix filter:
-   `<command> 2>&1 | tm compress --tool "<tool-name>"` (`--tool` is free-form,
-   substring-matched — `"cargo test"`, `"git diff"`). Known gap: its
-   structured-format guard can misread a leading `key: value`-shaped line — such
-   as a `warning: <path>: …` build warning ahead of the test output — as YAML and
-   silently skip compression. `--quiet` is the reliable default; `tm compress` is
-   an addition on top, not a replacement, until that gap is fixed.
-3. **Still long → have Haiku summarize it** before you read it.
-4. **Only then read it.**
+1. **Run it into a file, never a pipe.** Don't watch, tail, or poll a live
+   stream. A pipe eats the verdict — see "Never end a gate chain in a pipe".
+
+   ```bash
+   <command> > /tmp/gate.txt 2>&1; echo "EXIT=$?"
+   ```
+
+2. **`EXIT=0` → stop. Do NOT read the file.** Nothing in it is information.
+3. **Non-zero → trim the file, then read it.** Trim reads FROM the file, never
+   from the live command: `--quiet` on the command, `grep`/`tail` over the file,
+   or this repo's Unix filter:
+
+   ```bash
+   tm compress --tool "cargo test" < /tmp/gate.txt
+   ```
+
+   `--tool` is free-form, substring-matched (`"cargo test"`, `"git diff"`). Known
+   gap: its structured-format guard can misread a leading `key: value`-shaped
+   line — such as a `warning: <path>: …` build warning ahead of the test output —
+   as YAML and silently skip compression. `--quiet`/`grep` is the reliable
+   default; `tm compress` is an addition on top, not a replacement, until that
+   gap is fixed.
+4. **Still long → have Haiku summarize it** before you read it.
 
 On failure, re-run only the failing case with full output. That is the only place
 per-test detail carries information.
@@ -281,6 +293,23 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
   for a delegated agent.
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
+
+### Never end a gate chain in a pipe
+
+🔴 A pipeline's exit status is the LAST command's. `cargo test … | tail` AND
+`cargo test … | tm compress` both exit 0 on a failing suite — the trim this file
+recommends is itself the trap, not just an aside. FORBIDDEN: it produced a false
+green twice in one day, once for an engineer and once for a reviewer. Redirect,
+then echo the status:
+
+```bash
+( <gate> && <gate> ) > /tmp/gates.txt 2>&1; echo "EXIT=$?"
+```
+
+`EXIT=0` → don't read the file. Non-zero → Read only the failing portion. Trim
+the FILE when it is long (`tm compress --tool "cargo test" < /tmp/gates.txt`),
+never the live command. Must you genuinely pipe? `set -o pipefail` in the SAME
+invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
 
 ## Agent-Authored Prose
 

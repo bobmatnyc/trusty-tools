@@ -6,14 +6,19 @@
 //! the record shape and the resolve-or-create policy. Splitting them this way
 //! also keeps `read_ops.rs` / `write_ops.rs` clear of the 500-SLOC cap.
 //! What: `impl KgStoreRedb` for `lookup_room_id`, `get_room`,
-//! `insert_room_if_absent`, `list_rooms`, and the schema-version marker.
-//! Every write here is INSERT-ONLY — nothing in this file ever updates or
-//! deletes a row, which is what makes the backfill idempotent and a human
-//! rename survive every subsequent palace open (ADR-0027 D1.4).
+//! `insert_room_if_absent`, `list_rooms`, `rename_room`, and the
+//! schema-version marker.
+//! Every write here is INSERT-ONLY except [`KgStoreRedb::rename_room`], which
+//! is the single deliberate update path (ADR-0027 D6, ticket T6). Insert-only
+//! everywhere else is what makes the backfill idempotent and what makes a
+//! human rename survive every subsequent palace open (ADR-0027 D1.4).
+//! Nothing in this file writes to `DRAWERS`.
 //! Test: `room_key_lookup_returns_registered_id`, `room_insert_is_insert_only`,
 //! `room_key_collision_keeps_both_rows`,
 //! `backfill_stamps_schema_version_and_skips_marker_row` (all in
-//! `store::room_backfill::tests`).
+//! `store::room_backfill::tests`); `rename_changes_no_drawer_rows`,
+//! `rename_rejects_a_key_owned_by_another_room` (in
+//! `store::rooms::surface_tests`).
 
 use crate::memory_core::store::kg_store::{ROOM_KEYS, ROOMS, decode_value, encode_value};
 use crate::memory_core::store::rooms::{ROOM_SCHEMA_VERSION, RoomRecord, RoomSchemaMarker};
@@ -186,29 +191,96 @@ impl KgStoreRedb {
         Ok(())
     }
 
-    /// Overwrite one room row unconditionally — test-only.
+    /// Re-point `id` at `record` and move its canonical key — the ONE update.
     ///
-    /// Why: the "insert-only preserves a human rename" guarantee cannot be
-    /// exercised until `room_rename` ships (ticket T6), yet it is the property
-    /// the whole backfill design rests on. This is the seam that stands in for
-    /// that future update path; production code has no way to overwrite a row.
-    /// What: unconditional `insert` into `ROOMS`, leaving `ROOM_KEYS` alone.
-    /// Test: `backfill_rename_survives_second_run`.
-    #[cfg(test)]
-    pub(crate) fn force_put_room(&self, id: Uuid, record: &RoomRecord) -> Result<()> {
+    /// Why (ADR-0027 D6, ticket T6): the backfill synthesises
+    /// `unresolved-<first8>` labels for rooms whose id it cannot invert, and a
+    /// human needs a way to fix those names. That repair is the only reason a
+    /// `ROOMS` row is ever rewritten; everything else in this file stays
+    /// insert-only so re-opening a palace can never clobber the repair.
+    /// What: one write transaction that overwrites the `ROOMS` row for `id`,
+    /// drops `old_key` **only when it still points at `id`** (a canonical-key
+    /// collision can leave it owned by a different room — see
+    /// [`KgStoreRedb::insert_room_if_absent`]), and claims `new_key`. Refuses,
+    /// leaving the transaction uncommitted, when `new_key` is already owned by
+    /// a different room: merging two rooms is ADR-0027 D5 and is deliberately
+    /// not built here.
+    /// Never touches `DRAWERS` — a rename changes a name, never a membership.
+    /// Test: `rename_changes_no_drawer_rows`,
+    /// `rename_rejects_a_key_owned_by_another_room`,
+    /// `backfill_rename_survives_second_run`.
+    pub fn rename_room(
+        &self,
+        id: Uuid,
+        old_key: &str,
+        new_key: &str,
+        record: &RoomRecord,
+    ) -> Result<()> {
+        self.check_writable()?;
         let value = encode_value(record).context("encode RoomRecord")?;
-        let wtx = self
-            .db()
-            .begin_write()
-            .context("begin force_put_room txn")?;
+        let wtx = self.db().begin_write().context("begin rename_room txn")?;
         {
+            let mut keys = wtx.open_table(ROOM_KEYS).context("open room_keys table")?;
+            if new_key != old_key {
+                if let Some(owner) = keys.get(new_key).context("probe new room key")? {
+                    let owned_by = <[u8; 16]>::try_from(owner.value())
+                        .ok()
+                        .map(Uuid::from_bytes);
+                    drop(owner);
+                    if owned_by != Some(id) {
+                        anyhow::bail!(
+                            "room name {new_key:?} already belongs to another room; \
+                             merging rooms is not supported (ADR-0027 D5)"
+                        );
+                    }
+                }
+                let owns_old = keys
+                    .get(old_key)
+                    .context("probe old room key")?
+                    .and_then(|v| <[u8; 16]>::try_from(v.value()).ok())
+                    .is_some_and(|raw| Uuid::from_bytes(raw) == id);
+                if owns_old {
+                    keys.remove(old_key).context("remove old room key")?;
+                }
+                keys.insert(new_key, id.as_bytes().as_slice())
+                    .context("insert new room key")?;
+            }
             let mut rooms = wtx.open_table(ROOMS).context("open rooms table")?;
             rooms
                 .insert(id.as_bytes().as_slice(), value.as_slice())
-                .context("force insert rooms row")?;
+                .context("rewrite rooms row")?;
         }
-        wtx.commit().context("commit force_put_room txn")?;
+        wtx.commit().context("commit rename_room txn")?;
         Ok(())
+    }
+
+    /// Raw `(key, value)` bytes of every `ROOMS` and `ROOM_KEYS` row —
+    /// test-only.
+    ///
+    /// Why: `--dry-run` (ticket T10) claims to write nothing. Comparing the
+    /// *files* cannot prove that — redb rewrites its own header when a database
+    /// is opened, even for a read — so the proof has to be at the table level,
+    /// and in bytes rather than decoded rows so a same-value rewrite cannot
+    /// hide.
+    /// What: full scan of both room tables, returning owned bytes.
+    /// Test: `dry_run_plan_writes_nothing`.
+    #[cfg(test)]
+    pub(crate) fn raw_room_rows(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let rtx = self.db().begin_read().context("begin raw_room_rows txn")?;
+        let mut out = Vec::new();
+        {
+            let table = rtx.open_table(ROOMS).context("open rooms table")?;
+            for entry in table.iter().context("iter rooms")? {
+                let (k, v) = entry.context("read rooms row")?;
+                out.push((k.value().to_vec(), v.value().to_vec()));
+            }
+        }
+        let keys = rtx.open_table(ROOM_KEYS).context("open room_keys table")?;
+        for entry in keys.iter().context("iter room_keys")? {
+            let (k, v) = entry.context("read room_keys row")?;
+            out.push((k.value().as_bytes().to_vec(), v.value().to_vec()));
+        }
+        Ok(out)
     }
 
     /// Raw `(key, value)` bytes of every `DRAWERS` row — test-only.

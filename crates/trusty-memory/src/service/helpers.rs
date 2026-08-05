@@ -279,11 +279,31 @@ pub(crate) async fn open_palaces_blocking(
 /// `cached` is what tells a client "these zeros mean unknown, not empty".
 /// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`,
 /// `list_palaces_does_not_open_uncached_palaces`.
+/// Rooms registered in this palace's `ROOMS` table, or `None` on a read error.
+///
+/// Why (#4811 / ADR-0027 T8): `PalaceInfo` must report the same room set
+/// `room_list` does. Kept as its own function so `palace_info_from` gains a
+/// call rather than an implementation — `service/helpers.rs` sits close to the
+/// 500-SLOC cap (ADR-0027 C5).
+/// What: a scan of the (tiny — a few dozen rows) `ROOMS` table. `None` lets
+/// the caller degrade to a drawer-derived lower bound instead of reporting 0.
+/// Test: `palace_list_includes_richer_counts`.
+fn room_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
+    match handle.kg.store().list_rooms() {
+        Ok(rooms) => Some(rooms.len()),
+        Err(e) => {
+            tracing::warn!(palace = %handle.id, "room_count unavailable: {e:#}");
+            None
+        }
+    }
+}
+
 pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
     let (
         drawer_count,
         vector_count,
         kg_triple_count,
+        room_count,
         wing_count,
         last_write_at,
         node_count,
@@ -292,13 +312,26 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
         is_compacting,
     ) = if let Some(h) = handle {
         let drawers = h.drawers.read();
-        let distinct_rooms: HashSet<Uuid> = drawers.iter().map(|d| d.room_id).collect();
         let last_write = drawers.iter().map(|d| d.created_at).max();
+        // #4811 / ADR-0027 T8: `room_count` comes from the ROOMS registry so it
+        // agrees with `room_list`; on a read failure it degrades to the rooms
+        // the drawers are actually in, which is a lower bound rather than a
+        // zero that would read as "no rooms". `wing_count` is 1 — there is
+        // exactly one wing (DEFAULT_WING_ID) until T9 — and no longer the
+        // room count it used to report under a wing label.
+        let rooms = room_registry_count(h).unwrap_or_else(|| {
+            drawers
+                .iter()
+                .map(|d| d.room_id)
+                .collect::<HashSet<Uuid>>()
+                .len()
+        });
         (
             drawers.len(),
             h.vector_store.index_size(),
             h.kg.count_active_triples(),
-            distinct_rooms.len(),
+            rooms,
+            1,
             last_write,
             h.kg.node_count() as u64,
             h.kg.edge_count() as u64,
@@ -306,7 +339,7 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
             h.is_compacting(),
         )
     } else {
-        (0, 0, 0, 0, None, 0, 0, 0, false)
+        (0, 0, 0, 0, 0, None, 0, 0, 0, false)
     };
     PalaceInfo {
         id: palace.id.0.clone(),
@@ -315,6 +348,7 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
         drawer_count,
         vector_count,
         kg_triple_count,
+        room_count,
         wing_count,
         created_at: palace.created_at,
         last_write_at,
