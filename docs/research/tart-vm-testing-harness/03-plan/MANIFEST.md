@@ -4430,6 +4430,50 @@ detected before. See Phase 7 Deviations items 1 and 2.
      > daemons are probed and the README says so. Phase 8 was right that it
      > belonged in front of a reader; it under-read the severity, treating it as a
      > count when it was a coverage gap. See open items 3, 7 and 8.
+
+  9. **POST-PHASE, 2026-08-04 — the `on_exit` wrapper is a DEVIATION from DOC-2
+     §Shell discipline, cleanup property 1, and it is now corrected
+     ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+
+     Property 1 requires cleanup to *"capture `$?` on the very first line, before
+     anything else can clobber it"*, and the spec's own trap skeleton
+     (`trap 'vmtest_cleanup' EXIT`) satisfies it. **The harness interposed a
+     wrapper instead** — `on_exit() { local rc=$?; vmtest_cleanup; exit "$rc"; }`
+     — and `local` **is itself a command**, so by the time `vmtest_cleanup`
+     sampled `$?` it was reading that assignment's status: **structurally always
+     0**. Property 1 was violated by the wrapper, not by cleanup.
+
+     This was recorded twice before without being closed. Phase 5's Deviations
+     item (the MEASURE line reporting `exit 0` for a run that died 50) diagnosed
+     it correctly and fixed it **by reporting `VMTEST_EXIT` instead**, and the
+     driver's own comment at the MEASURE line describes the effect while leaving
+     the dead `$?` fallback in place. That fix worked only because the failure in
+     question was parent-side. It left two paths uncovered: a run that fails with
+     **no `die` and no signal** — a bare command failing under `set -e`, not
+     hypothetical in a 4,200-line harness — where `VMTEST_EXIT` is legitimately
+     unset and the fallback reads 0; and any `die` inside a subshell, where
+     `VMTEST_EXIT` was unset for the separate reason issue #16 documents.
+
+     **The correction restores property 1 rather than working around it:** the
+     captured rc is now PASSED to cleanup (`vmtest_cleanup "$rc"`, read as
+     `_cleanup_rc="${1:-$?}"` so a bare call still satisfies property 1), and the
+     signal handlers pass their codes the same way. Covered by
+     `vmtest-harness/tests/subshell-classification.sh`, which asserts the MEASURE
+     line reports the rc it was handed.
+
+     > **`on_exit` still exits with `$rc`, NOT with `VMTEST_EXIT` — tried,
+     > proven harmful, reverted.** An `exit "${VMTEST_EXIT:-$rc}"` was written
+     > first, to stop a swallowed failure exiting 0. It silently repealed §2's
+     > user-abort rows: `on_int` exits 130, which **fires the EXIT trap**, so a
+     > SIGINT arriving after a classified failure exited **50** instead of 130 —
+     > contradicting §Shell discipline and the driver's own "the literal `exit`
+     > codes stay unconditional" comment, neither of which had been amended. The
+     > case that motivated the override needs a construct that discards a
+     > die-capable function's status; Phase-8-post's Part 2 removed all of them
+     > and `tests/check-no-swallowed-die.sh` fails the build if one returns. A
+     > gate that goes red before the code ships is a stronger guarantee than a
+     > runtime override that costs the abort contract. The two signal codes are
+     > now regression-tested directly.
 - **Tasks:** P8-T1 … P8-T6 complete
 
 ---

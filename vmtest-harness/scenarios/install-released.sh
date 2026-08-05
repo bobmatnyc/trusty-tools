@@ -78,9 +78,16 @@ scenario_install_released() {
     #    `install_from_registry` asserts `rustc --version` before building
     #    (DOC-1 §8.4) and passes `--locked` unconditionally — see its banner for
     #    the E0063 incident that makes `--locked` mandatory rather than tidy.
-    for _pkg in $(tsv_scope_packages); do
+    #    #16: `for _pkg in $(tsv_scope_packages)` discarded the accessor's
+    #    status outright — a `die 60` inside the for-list neither classified nor
+    #    aborted, and the loop simply ran zero times. It writes to a path now,
+    #    and `while read < file` runs in THIS shell, not a subshell.
+    _scope="$VMTEST_TMPDIR/scope-packages.txt"
+    tsv_scope_packages "$_scope"
+    while IFS= read -r _pkg; do
+        [ -n "$_pkg" ] || continue
         install_from_registry "$VMTEST_VM" "$_pkg"
-    done
+    done < "$_scope"
 
     # 2b. THE RUN-LEVEL TRIPWIRE (P5-T8), driven by PATTERN (a)'S accessor.
     #     Same function, same ledger, same guarantee: exactly one install per

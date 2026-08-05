@@ -60,11 +60,14 @@ scenario_install_branch() {
     # 1. Acquire the source — THE ONLY STEP THAT DIFFERS FROM PATTERN (c).
     #    The GUEST clones the public repository and checks out the branch; there
     #    is NO host->guest transfer and the host repository is not read at all
-    #    (DOC-1 §6.2). `source_deliver_branch` emits the resolved commit SHA on
-    #    stdout and sends every diagnostic to stderr (DOC-2 §12.1).
-    _sha=$(source_deliver_branch "$VMTEST_VM" "$(conf_get repo_url)" \
-                                 "$(conf_get default_branch)" "$_guest_src")
-    log "guest cloned $(conf_get repo_url) at branch $(conf_get default_branch), commit ${_sha}"
+    #    (DOC-1 §6.2). `source_deliver_branch` logs the checked-out branch and
+    #    the resolved commit SHA itself, on stderr (DOC-2 §12.1).
+    #
+    #    #16: a PLAIN call. Capturing an undeclared stdout emit put the
+    #    function's ten `die 50` calls in a fork, so the run aborted with the
+    #    classification lost — and the line this rebuilt was already logged.
+    source_deliver_branch "$VMTEST_VM" "$(conf_get repo_url)" \
+                          "$(conf_get default_branch)" "$_guest_src"
 
     # 2. Install each in-scope CRATE from the cloned tree — "each in-scope
     #    crate", not each row and not each binary (§12.5's own loop comment).
@@ -84,9 +87,16 @@ scenario_install_branch() {
     #    therefore fails inside `install_from_path`, by name — which is the right
     #    place for it, because a table/branch disagreement is a finding about the
     #    branch and the failure should say which crate it happened on.
-    for _dir in $(tsv_scope_crate_dirs); do
+    #    #16: `for _dir in $(tsv_scope_crate_dirs)` discarded the accessor's
+    #    status outright — a `die 60` inside the for-list neither classified nor
+    #    aborted, and the loop simply ran zero times. It writes to a path now,
+    #    and `while read < file` runs in THIS shell, not a subshell.
+    _scope="$VMTEST_TMPDIR/scope-crate-dirs.txt"
+    tsv_scope_crate_dirs "$_scope"
+    while IFS= read -r _dir; do
+        [ -n "$_dir" ] || continue
         install_from_path "$VMTEST_VM" "$_guest_src" "$_dir"
-    done
+    done < "$_scope"
 
     # 2b. THE RUN-LEVEL TRIPWIRE (P5-T8) — the counterpart to P4-T4's host-level
     #     postcondition on the helper itself. P4-T4 catches a helper that stops
