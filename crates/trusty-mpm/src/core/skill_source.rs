@@ -49,7 +49,11 @@ use crate::core::paths::FrameworkPaths;
 
 /// Marker file recording the last-materialized bundle stamp, written
 /// directly under the skill source directory (`paths.skills/.bundle-stamp`).
-const STAMP_FILE_NAME: &str = ".bundle-stamp";
+///
+/// #4873: `pub(crate)` so a test can pin a hand-seeded skill source as
+/// already-current and stop [`ensure_skill_source_fresh`] materializing the
+/// real compiled-in bundle over it.
+pub(crate) const STAMP_FILE_NAME: &str = ".bundle-stamp";
 
 /// Compute a stable sha256 fingerprint over every `skills/*` entry in the
 /// compiled-in [`bundle::ALL`] table.

@@ -568,6 +568,14 @@ pub(crate) async fn run_inplace_relaunch(
     // in a managed pane was the one way to start a session on a stale or missing
     // compiled prompt where a fresh launch would have refused.
     //
+    // #4873: the PROMPT is the only thing this path had to refresh by hand.
+    // Agents and skills are already covered — `build_inplace_resume_command`
+    // below calls `runtime::claude_code::prepare_managed_config`, which runs
+    // `core::managed_config::ensure_managed_config_dir` and redeploys both
+    // rosters. Read the "only daemon call is `reactivate`" line above as being
+    // about DAEMON calls specifically; it is not a claim that this path skips
+    // asset deployment.
+    //
     // Ordered BEFORE `build_inplace_resume_command` so a refusal costs nothing
     // and, like the other two sites, cannot half-provision the pane.
     //
