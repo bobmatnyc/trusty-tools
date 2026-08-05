@@ -501,21 +501,22 @@ async fn salvage_missing_root_entries(
     // `read_dir` + `canonicalize`, not async work.
     let all_entries = crate::service::persistence::load_index_registry().unwrap_or_default();
     let started = std::time::Instant::now();
-    let candidates =
-        match tokio::task::spawn_blocking(move || collect_relocation_candidates(&all_entries, &grant))
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tally.skipped = entries.len();
-                tracing::error!(
-                    "warm-boot salvage: the shared relocation scan panicked ({e}) — {} \
+    let candidates = match tokio::task::spawn_blocking(move || {
+        collect_relocation_candidates(&all_entries, &grant)
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tally.skipped = entries.len();
+            tracing::error!(
+                "warm-boot salvage: the shared relocation scan panicked ({e}) — {} \
                      missing-root entr(ies) left untouched for the next boot (issue #4846)",
-                    tally.skipped,
-                );
-                return tally;
-            }
-        };
+                tally.skipped,
+            );
+            return tally;
+        }
+    };
     tracing::info!(
         "warm-boot salvage: tracked-root relocation scan completed in {:?} — ONE walk shared \
          by all {} missing-root entr(ies) instead of one walk each (issue #4846)",

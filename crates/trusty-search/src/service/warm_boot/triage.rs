@@ -92,9 +92,7 @@ pub fn triage_entries_with<F>(entries: Vec<PersistedIndex>, root_exists: F) -> T
 where
     F: Fn(&Path) -> bool,
 {
-    let (present, missing) = entries
-        .into_iter()
-        .partition(|e| root_exists(&e.root_path));
+    let (present, missing) = entries.into_iter().partition(|e| root_exists(&e.root_path));
     TriagedEntries { present, missing }
 }
 
@@ -218,11 +216,19 @@ mod tests {
             |p| p == Path::new("/live/root"),
         );
         assert_eq!(
-            triaged.present.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            triaged
+                .present
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
             ["live"]
         );
         assert_eq!(
-            triaged.missing.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            triaged
+                .missing
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
             ["dead-a", "dead-b"]
         );
     }
@@ -237,7 +243,11 @@ mod tests {
         let entries: Vec<_> = (0..5).map(|i| entry(&format!("i{i}"), "/live")).collect();
         let triaged = triage_entries_with(entries, |_| true);
         assert_eq!(
-            triaged.present.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            triaged
+                .present
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
             ["i0", "i1", "i2", "i3", "i4"]
         );
         assert!(triaged.missing.is_empty());
