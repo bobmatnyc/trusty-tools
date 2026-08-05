@@ -10,14 +10,17 @@
 //!   `WORKFLOW.md` override starts receiving different instructions from a
 //!   project without one.
 //! * the tier tests hold the SCHEMA to the CONTENT: a section declared
-//!   `project` must be one the floor actually advertises an override file for,
-//!   and a `fixed` section must refuse every override tier.
+//!   `project` must be one the floor actually advertises a `CLAUDE.md` named
+//!   section for, and a `fixed` section must refuse every override tier.
+//!   [`the_floor_advertises_the_grammar_the_reader_actually_parses`] closes the
+//!   remaining gap by running the shipped prose through the real reader.
 //!
 //! The content itself is gated by the committed snapshots in
 //! `pm_prompt_golden_tests.rs`, which is what replaces #4249's
 //! byte-equality-against-the-old-prompt gate.
 
 use super::*;
+use crate::core::claude_md_sections::section_token;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
     PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt,
@@ -705,16 +708,15 @@ fn content_sections_admit_project_but_not_user_overrides() {
     }
 }
 
-#[test]
-fn every_advertised_override_file_maps_to_an_overridable_section() {
-    // Binds the SCHEMA to the CONTENT. The floor advertises a "Customizing PM
-    // Behavior" table naming the `.trusty-mpm/` files a project may drop in; if
-    // a file listed there mapped to a `fixed` section the framework would be
-    // promising an override it must refuse. Reading the advertisement out of the
-    // shipped floor text — rather than restating it — is what makes the two
-    // unable to drift.
-    let package = bundled_fallback_package();
-    let floor = match &package
+/// The shipped `## Customizing PM Behavior` floor text, as delivered.
+///
+/// Why: every gate below reads the advertisement out of the SHIPPED asset
+/// rather than restating it, which is what makes the prose and the code unable
+/// to drift apart.
+/// Test: used by `every_advertised_section_token_is_overridable`,
+/// `the_floor_advertises_the_grammar_the_reader_actually_parses`.
+fn floor_rules_text(package: &InstructionPackage) -> String {
+    match &package
         .blocks
         .iter()
         .find(|b| b.section == SectionId::NonOverridableRules)
@@ -723,26 +725,123 @@ fn every_advertised_override_file_maps_to_an_overridable_section() {
     {
         BlockBody::Text { text } => text.clone(),
         other => panic!("expected text, got {other:?}"),
-    };
+    }
+}
 
-    for (file, section) in [
-        (FILE_WORKFLOW, SectionId::Workflow),
-        (FILE_AGENT_DELEGATION, SectionId::AgentDelegation),
-        (FILE_MEMORY, SectionId::Memory),
-    ] {
+#[test]
+fn every_advertised_section_token_is_overridable() {
+    // Binds the SCHEMA to the CONTENT. #4286 replaced the floor's
+    // `.trusty-mpm/` file table with a table of `CLAUDE.md` SECTION TOKENS, so
+    // the drift risk moved with it: if a token advertised as overridable mapped
+    // to a `fixed` section, the framework would be promising an override that
+    // `with_overrides` must refuse — issue #381 in its newest form.
+    let package = bundled_fallback_package();
+    let floor = floor_rules_text(&package);
+
+    for id in SectionId::CANONICAL {
+        let token = section_token(id);
+        let advertised = floor.contains(&format!("`{token}`"));
+        let overridable = package
+            .section(id)
+            .expect("declared")
+            .customization_tier
+            .permits(OverrideTier::Project);
+
         assert!(
-            floor.contains(&format!(".trusty-mpm/{file}")),
-            "{file} must stay advertised in the customization table"
+            advertised,
+            "{token} must be named in the customization contract — silently \
+             omitting a token is how a project learns the mechanism by guessing"
         );
+        if id.is_floor() {
+            assert!(!overridable, "{token} is floor and must refuse an override");
+        } else {
+            assert!(
+                overridable,
+                "{token} is advertised as overridable, so {id:?} must admit a \
+                 project-tier override"
+            );
+        }
+    }
+
+    // The floor tokens are advertised as REFUSED, not as available. Asserting
+    // the word is crude, but the alternative is a contract that lists all eight
+    // tokens in one table and lets a reader assume all eight are writable.
+    assert!(
+        floor.contains("refused"),
+        "the floor must say what happens to a block naming a floor token"
+    );
+}
+
+#[test]
+fn the_floor_advertises_the_grammar_the_reader_actually_parses() {
+    // The gate that stops #4286 from shipping #381 in a new form. The floor now
+    // prints a worked marker example; if the reader rejected that exact syntax,
+    // every project following the shipped instructions would author a silent
+    // no-op. Feeding the floor prose to `scan_project` as if it were a
+    // `CLAUDE.md` is the cheapest way to make the documented syntax and the
+    // parser the same fact: the example parses, or this fails.
+    let tmp = TempDir::new().expect("tempdir");
+    fs::write(
+        tmp.path().join("CLAUDE.md"),
+        floor_rules_text(&bundled_fallback_package()),
+    )
+    .expect("write CLAUDE.md");
+
+    let scanned = crate::core::claude_md_sections::scan_project(tmp.path());
+
+    let sections: Vec<SectionId> = scanned.overrides.iter().map(|o| o.section).collect();
+    assert_eq!(
+        sections,
+        vec![SectionId::Workflow],
+        "the floor's worked example must parse as exactly the block it shows; \
+         diagnostics were {:?}",
+        scanned.diagnostics
+    );
+    assert!(
+        !scanned.overrides[0].body.is_empty(),
+        "the example's body must survive the parse"
+    );
+    // The example carries `v=1`, so no version diagnostic may be raised for it.
+    assert!(
+        !scanned
+            .diagnostics
+            .iter()
+            .any(|d| d.reason == crate::core::claude_md_sections::REASON_MISSING_VERSION),
+        "the documented example must spell the version the reader supports"
+    );
+}
+
+#[test]
+fn the_floor_no_longer_tells_the_pm_to_write_override_files() {
+    // #4286: the five `.trusty-mpm/` override files were created by PROSE, not
+    // by code — the floor carried a trigger table mapping "remember/always/
+    // never" onto writing `.trusty-mpm/INSTRUCTIONS.md`, and the PM obeyed it.
+    // The read path stays (PR3 removes it) but the instruction to write must
+    // not come back, or the one-surface model of #4183 is undone by the prompt
+    // itself.
+    let floor = floor_rules_text(&bundled_fallback_package());
+    assert!(
+        !floor.contains("Trigger phrases"),
+        "the floor must not carry a write-trigger table"
+    );
+    for file in [
+        FILE_INSTRUCTIONS,
+        FILE_AGENT_DELEGATION,
+        FILE_WORKFLOW,
+        FILE_MEMORY,
+    ] {
+        // Naming a legacy file as DEPRECATED is fine and deliberate; naming it
+        // as the destination of a user phrase is what may not return.
         assert!(
-            package
-                .section(section)
-                .expect("declared")
-                .customization_tier
-                .permits(OverrideTier::Project),
-            "{file} is advertised, so {section:?} must admit a project override"
+            !floor.contains(&format!("-> `.trusty-mpm/{file}`")),
+            "{file} must not be advertised as a write destination"
         );
     }
+    assert!(
+        floor.contains("DEPRECATED"),
+        "the legacy files are still read, so the floor must say they are \
+         deprecated rather than pretend they do not exist"
+    );
 }
 
 #[test]

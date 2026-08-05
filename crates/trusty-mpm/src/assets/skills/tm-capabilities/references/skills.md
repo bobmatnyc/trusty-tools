@@ -51,7 +51,7 @@ Generated from `bundle::ALL` (filtered to top-level `skills/*.md` entries) + a s
 | `tm-ticketing` | pm-workflow | yes | Ticket-driven development protocol and high-level ticketing orchestration for the trusty-mpm PM |
 | `tm-tool-usage-guide` | pm-reference | no | Detailed tool usage patterns and examples for the trusty-mpm PM agent |
 | `tm-verification-protocols` | pm-workflow | no | QA verification gate and evidence requirements for the trusty-mpm PM |
-| `tm-workflow` | pm-workflow | yes | Manage and customize the trusty-mpm PM workflow via project-level .trusty-mpm/ override files |
+| `tm-workflow` | pm-workflow | yes | Manage and customize the trusty-mpm PM workflow via CLAUDE.md named-section overrides |
 | `verification-before-completion` | agent-reference | no | Run verification commands and confirm output before claiming success |
 | `web-performance-optimization` | agent-reference | no | Optimize web performance using Core Web Vitals, modern patterns (View Transitions, Speculation Rules), and framework-specific techniques |
 | `webapp-testing` | agent-reference | no | Comprehensive web application testing patterns with Playwright selectors, wait strategies, and best practices |

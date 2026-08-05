@@ -45,8 +45,8 @@ idioms", "test coverage from a dedicated QA pass"].
 ### Level 3: Deep Dive (only when needed)
 
 Triggered when: the user is debugging framework behavior themselves, is
-customizing `.trusty-mpm/` overrides, or explicitly asks for the full
-mechanism.
+customizing the PM prompt via `CLAUDE.md` named sections, or explicitly asks
+for the full mechanism.
 
 Point to the concrete skill, not a live re-explanation:
 - Delegation discipline and enforcement → `tm-circuit-breaker`

@@ -528,30 +528,56 @@ No cost-saving, "trivial change", or "documented command" exceptions.
 
 ## Customizing PM Behavior
 
-Override files live in the project's `.trusty-mpm/` directory and are read at
-session start. Relative to the project root:
+A project customizes these instructions in ONE place: a **named section** marked
+out inside the project's own `CLAUDE.md`, read at session start. A marked block
+replaces exactly the matching section of this prompt and nothing else.
 
-| User wants | File | Effect |
-|-----------|------|--------|
-| Project rules | `.trusty-mpm/INSTRUCTIONS.md` | Appended (additive) to the PM prompt |
-| Agent routing | `.trusty-mpm/AGENT_DELEGATION.md` | Replaces the agent-delegation section |
-| Workflow phases | `.trusty-mpm/WORKFLOW.md` | Replaces the workflow section |
-| Memory behavior | `.trusty-mpm/MEMORY.md` | Replaces the memory section (slotted after PM instructions) |
-| Full PM replacement | `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` | Replaces the entire PM body — **except** the BASE_PM floor below, which is always kept |
+The marker grammar, matched whole-line — both markers name the same section:
 
-**The BASE_PM floor is never overridable.** Even `PM_INSTRUCTIONS_DEPLOYED.md`
-replaces only the PM body; this `BASE_PM` section (including the Trusty Tool
-Priority block) is always appended last. Missing, empty, or unreadable override
-files fall back to the bundled defaults — they never blank a section.
+```text
+<!-- TRUSTY-MPM: WORKFLOW START v=1 -->
+...replacement text for the Workflow section...
+<!-- TRUSTY-MPM: WORKFLOW END -->
+```
 
-Trigger phrases -> act immediately:
-- "remember/always/never/for this project" -> `.trusty-mpm/INSTRUCTIONS.md`
-- "use X agent for Y" / "route/change agent" -> `.trusty-mpm/AGENT_DELEGATION.md`
-- "add/change workflow phase" -> `.trusty-mpm/WORKFLOW.md`
-- "memory behavior" -> `.trusty-mpm/MEMORY.md`
+Everything strictly between the two marker lines becomes that section. Text
+outside markers is ordinary `CLAUDE.md` prose and is not instruction content.
+`v=1` is the only format version; omitting `v=` is accepted as v=1 with a
+warning. Tokens are matched case-insensitively, and blocks do not nest.
 
-After writing: confirm file path, note "takes effect at next session startup."
-Inspect: `ls .trusty-mpm/*.md 2>/dev/null`
+| Section token | Replaces |
+|---|---|
+| `CORE` | Core PM instructions |
+| `MEMORY` | Memory protocol |
+| `SEARCH` | Code search protocol |
+| `WORKFLOW` | Workflow phases |
+| `AGENT-DELEGATION` | The routing doctrine only — the live agent roster is generated, not authored, and always survives |
+
+**The framework floor is never overridable.** `IDENTITY`,
+`NON-OVERRIDABLE-RULES` and `FRAMEWORK-GUARANTEED-CONVENTIONS` are floor tokens:
+a block naming one is refused, the bundled text is kept, and the refusal is
+logged. This section (including the Trusty Tool Priority block below) is always
+appended last, at every tier.
+
+Host files, highest precedence first: `CLAUDE.md`, then
+`.trusty-mpm/INSTRUCTIONS.md` — `CLAUDE.md` wins a same-section collision.
+`.trusty-mpm/INSTRUCTIONS.md` also remains the additive project addendum;
+anything it marks out is delivered as the override, never twice.
+
+Nothing here can blank a section. An empty body, an unknown token, an
+unsupported `v=`, a `START` with no `END`, a duplicate section, and an unreadable
+file all keep the bundled section and log the reason.
+
+Legacy whole-file overrides — `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md`,
+`.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
+`.trusty-mpm/MEMORY.md` — are still read for projects that already carry them,
+but they are DEPRECATED: do not create one. While any of them is present the
+prompt is assembled without sections, so named-section overrides are NOT applied
+(each one is logged as unapplied).
+
+Never write or restructure a project's `CLAUDE.md` unasked. When the user wants a
+persistent project rule, show them the marked block and let them place it.
+Changes take effect at the NEXT session start, never mid-session.
 Verify the resolved prompt: `tm session instructions` (or read
 `.trusty-mpm/last-instructions.md`).
 

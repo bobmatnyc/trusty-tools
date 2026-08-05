@@ -64,6 +64,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **The instruction floor now advertises `CLAUDE.md` named sections, and no
+  longer tells the PM to write `.trusty-mpm/` override files** (epic
+  [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183), part of
+  [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286)): the floor's
+  `## Customizing PM Behavior` block carried a five-file override table plus a
+  "Trigger phrases -> act immediately" list mapping "remember/always/never/for
+  this project" onto writing `.trusty-mpm/INSTRUCTIONS.md`. That prose was the
+  sole cause of those files being created — no code writes them, the PM did,
+  because the prompt said to. It is replaced by the named-section contract the
+  reader actually implements: the marker grammar, the five overridable section
+  tokens, the three floor tokens that are refused, the host precedence, and the
+  fail-open rules. The same trigger table is removed from the bundled
+  `tm-workflow` skill, which also documented the pre-#4264 four-monolithic-asset
+  pipeline and cited an `AGENT_DELEGATION` asset that no longer exists.
+  The legacy files are still READ and keep working — their removal is a later
+  step of #4286 — but the floor now marks them DEPRECATED and warns that while
+  one is present the prompt is assembled without sections, so named-section
+  overrides are not applied.
+- `assets/instructions/sections/agent-delegation.md`: dropped the advertised
+  user-level `~/.trusty-mpm/AGENT_DELEGATION.md` override. No code has ever read
+  it — `instruction_overrides::read_override` only ever joins the project dir —
+  and the delegation section is tier `project`, which by construction refuses a
+  user-tier override. The stale system-default path in the same blockquote is
+  corrected to the per-section source (#4183).
+- `core::bundled_pm_package_tests`: the schema-to-content gate now binds the
+  section TOKENS the floor advertises (rather than the removed `.trusty-mpm/`
+  file table) to their declared `customization_tier`, and a new gate feeds the
+  shipped floor prose to the real `claude_md_sections::scan_project` so a
+  documented syntax the parser would reject fails the build — the specific way
+  this change could have shipped
+  [#381](https://github.com/bobmatnyc/trusty-tools/issues/381) again.
 - `daemon::managed_routes::prune`: the orphan sweep's `active_workspace_paths`
   set is now documented as DELIBERATELY unfiltered by session state, and pinned
   by a new regression test `prune_spares_a_stopped_records_workspace`

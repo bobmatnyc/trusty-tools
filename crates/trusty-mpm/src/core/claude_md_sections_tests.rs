@@ -826,10 +826,25 @@ fn a_marked_block_in_instructions_md_is_delivered_once() {
         prompt.contains("STILL_ADDITIVE"),
         "unmarked prose still added"
     );
+    // Asserted on the HOST's own block rather than on the bare `TRUSTY-MPM:`
+    // substring: since #4286 the floor itself prints a worked marker example, so
+    // a substring check would be reading the framework's documentation instead
+    // of the project's stripped addendum.
     assert!(
-        !prompt.contains("TRUSTY-MPM:"),
-        "markers never reach the prompt"
+        !prompt.contains(&block(SectionId::Workflow, "SECTIONED_WORKFLOW")),
+        "the host's own marker lines never reach the prompt"
     );
+    for marker in [
+        "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->",
+        "<!-- TRUSTY-MPM: WORKFLOW END -->",
+    ] {
+        assert_eq!(
+            prompt.matches(marker).count(),
+            1,
+            "exactly one {marker} may appear — the floor's worked example, and \
+             nothing leaked out of the host"
+        );
+    }
     assert_eq!(
         prompt.matches("SECTIONED_WORKFLOW").count(),
         1,

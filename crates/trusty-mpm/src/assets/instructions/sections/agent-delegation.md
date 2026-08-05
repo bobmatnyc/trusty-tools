@@ -1,9 +1,10 @@
 # Agent Delegation Routing
 
 > This file defines the agent routing table and delegation logic for the PM.
-> Override at project level: .trusty-mpm/AGENT_DELEGATION.md
-> Override at user level:    ~/.trusty-mpm/AGENT_DELEGATION.md
-> System default:            crates/trusty-mpm/src/assets/instructions/AGENT_DELEGATION.md (this file)
+> Project override: an `AGENT-DELEGATION` named section in the project's
+> `CLAUDE.md` (see "Customizing PM Behavior"). There is no user-level override
+> of this section — only the project tier may replace it.
+> System default: crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md (this file)
 
 ## When to Delegate to Each Agent
 
