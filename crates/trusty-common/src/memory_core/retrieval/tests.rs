@@ -1011,6 +1011,120 @@ async fn purge_expired_drops_only_past_ttl() {
     assert!(remaining.contains(&permanent_id));
 }
 
+/// Regression test for #4885: a drawer that expires mid-session must stop
+/// being served WITHOUT reopening the palace.
+///
+/// Why this is the whole ticket: production opens the palace once as
+/// `OpenIntent::Writer` and holds the handle for the daemon's lifetime, so the
+/// open-time sweep never runs again. Before the read-time filter, an expired
+/// drawer kept being injected until the daemon restarted. The handle here is
+/// built once and never reopened, which is exactly the production shape.
+///
+/// It also covers a second gap: `l1_drawers` is filled from the L1 cache
+/// snapshot, and the open-time sweep only retains over the full drawer table —
+/// so an expired drawer in that snapshot survived even a reopen.
+#[test]
+fn expired_l1_drawer_is_excluded_without_reopen() {
+    let dir = tempdir().unwrap();
+    let mut handle = make_handle(dir.path());
+    let room_id = uuid::Uuid::new_v4();
+
+    let mut expired = Drawer::new(room_id, "PR #4818 is in flight at head d3963848");
+    expired.importance = 0.95;
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    let expired_id = expired.id;
+
+    let mut live = Drawer::new(room_id, "write plainly");
+    live.importance = 0.9;
+    let live_id = live.id;
+
+    handle.add_drawer(expired);
+    handle.add_drawer(live);
+    handle.refresh_l1();
+
+    // Both are in L1 — the filter has to run at read time, not at load time.
+    assert!(
+        handle.l1_drawers.iter().any(|d| d.id == expired_id),
+        "precondition: the expired drawer is cached in L1"
+    );
+
+    let results = retrieve_l0_l1(&handle);
+    let returned: Vec<uuid::Uuid> = results.iter().map(|r| r.drawer.id).collect();
+    assert!(
+        !returned.contains(&expired_id),
+        "an expired drawer must not be served by L0/L1"
+    );
+    assert!(
+        returned.contains(&live_id),
+        "an unexpired drawer must still be served"
+    );
+}
+
+/// #4885: the same gate on the semantic path. The vector index still holds an
+/// expired drawer's embedding until a sweep compacts it, so L2 can score a hit
+/// against a drawer whose TTL passed after this handle was opened.
+#[tokio::test]
+async fn expired_drawer_is_excluded_from_l2() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let room_id = uuid::Uuid::new_v4();
+
+    let mut expired = Drawer::new(room_id, "Rust is a systems programming language");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    let expired_id = expired.id;
+
+    let vecs = embedder
+        .embed_batch(std::slice::from_ref(&expired.content))
+        .await
+        .unwrap();
+    handle
+        .vector_store
+        .upsert(expired_id, vecs[0].clone())
+        .await
+        .unwrap();
+    handle.add_drawer(expired);
+
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        None,
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !results.iter().any(|r| r.drawer.id == expired_id),
+        "L2 must not return a drawer past its TTL, even on a strong vector hit"
+    );
+}
+
+/// #4885: read-time enforcement FILTERS, it does not delete. The expired
+/// drawer stays in the store — reclamation belongs to `purge_expired` and the
+/// open-time sweep — so a recall can never fail because a cleanup failed.
+#[test]
+fn read_time_expiry_filters_without_deleting() {
+    let dir = tempdir().unwrap();
+    let mut handle = make_handle(dir.path());
+    let room_id = uuid::Uuid::new_v4();
+
+    let mut expired = Drawer::new(room_id, "stale point-in-time fact");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    let expired_id = expired.id;
+    handle.add_drawer(expired);
+    handle.refresh_l1();
+
+    let results = retrieve_l0_l1(&handle);
+    assert!(!results.iter().any(|r| r.drawer.id == expired_id));
+
+    assert!(
+        handle.drawers.read().iter().any(|d| d.id == expired_id),
+        "the read path must leave the drawer in place for the sweep to reclaim"
+    );
+}
+
 /// Regression test for issue #633: recall must rank by semantic similarity
 /// rather than raw importance.
 ///
@@ -1139,6 +1253,7 @@ fn rescore_l1_by_similarity_patches_scores() {
         drawer_type: crate::memory_core::palace::DrawerType::UserFact,
         expires_at: None,
         completed_at: None,
+        fact_key: None,
     };
 
     // L1 drawer that appears in the similarity map.

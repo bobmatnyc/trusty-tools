@@ -532,20 +532,13 @@ mod tests {
         let now = Utc::now();
         // Index 0 is newest; index 4 is oldest.
         for (i, importance) in [0.1f32, 0.9, 0.3, 0.7, 0.5].iter().enumerate() {
-            let drawer = Drawer {
-                id: Uuid::new_v4(),
-                room_id,
-                content: format!("drawer-{i}"),
-                importance: *importance,
-                source_file: None,
-                created_at: now - ChronoDuration::seconds(i as i64),
-                tags: vec![format!("idx:{i}")],
-                last_accessed_at: None,
-                access_count: 0,
-                drawer_type: Default::default(),
-                expires_at: None,
-                completed_at: None,
-            };
+            // Built through `Drawer::new` rather than a struct literal: this
+            // fixture only cares about importance and created_at, and a literal
+            // made it fail to compile every time `Drawer` gained a field.
+            let mut drawer = Drawer::new(room_id, format!("drawer-{i}"));
+            drawer.importance = *importance;
+            drawer.created_at = now - ChronoDuration::seconds(i as i64);
+            drawer.tags = vec![format!("idx:{i}")];
             handle.add_drawer(drawer);
         }
         // The handle is `Arc<PalaceHandle>` and the registry caches it; drop
