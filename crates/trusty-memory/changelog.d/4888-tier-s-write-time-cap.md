@@ -26,13 +26,14 @@ Added
     admission mutex is held from the count through the write. Measured before the
     fix: 16 concurrent writers contending for 1 free slot were all admitted,
     landing the surface at 35
-  - `kuzu-migrate` refusals join the existing warn-and-skip path, so a legacy
-    relation colliding with a hot predicate is skipped and counted rather than
-    aborting the import mid-way. Its gate counts across every palace under the
-    data root, matching what actually reaches the injection surface — a
-    per-palace count would let one operator, in one run with no concurrency,
-    import a 21st standing fact into an empty palace while another palace held
-    the full 20
+  - the offline `kuzu-migrate` import refuses hot predicates outright rather than
+    counting free slots. A bulk legacy import is not a deliberate act of authoring
+    a standing rule, which ADR-0028 D8 point 3 requires, so legacy relation data
+    never reaches Tier S no matter how much room is left. Refusals join the
+    existing warn-and-skip path and name `kg_assert` as the way to author the fact
+    deliberately, where the real gate applies. This removes the cap arithmetic
+    from that path entirely, and with it any way for the offline gate to be off by
+    one or to fail open
   - `discover_aliases` is the one bulk writer, and it stops at the cap instead of
     aborting: aliases that fit are written, the rest come back in a new `rejected`
     array with a single `rejected_reason`, alongside a `complete` flag so a caller
