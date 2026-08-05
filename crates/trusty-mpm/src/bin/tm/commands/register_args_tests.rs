@@ -407,6 +407,32 @@ fn repo_named_like_a_web_path_is_ok() {
     assert_eq!(alias, "sub-blob");
 }
 
+/// A local path has no host, so it has no web UI and the keyword rule must not
+/// run on it. These all registered before #4912 and were then refused with
+/// "points inside a repository" — nonsense for a filesystem path, and with no
+/// workaround, since the suggested remedy does not apply. The `file://` form is
+/// the same shape wearing a scheme, which is why the guard keys off an empty
+/// host rather than a leading `/`.
+#[test]
+fn local_paths_skip_the_web_path_rule() {
+    for input in [
+        "/Users/me/actions/repo.git",
+        "/home/bob/raw/myrepo",
+        "/srv/git/tree/repo.git",
+        "file:///Users/me/actions/repo.git",
+    ] {
+        resolve_register_args(input, Some("local"))
+            .unwrap_or_else(|e| panic!("{input} must register, got: {e}"));
+    }
+
+    // `~/…` is expanded to an absolute path BEFORE the guard runs, so it is
+    // covered by the same empty-host rule. If that ordering ever changes, this
+    // is what catches it.
+    let (_, url) = resolve_register_args("~/tree/repo.git", Some("home")).unwrap();
+    assert!(url.ends_with("/tree/repo.git"), "unexpected: {url}");
+    assert!(!url.contains('~'), "tilde must not survive: {url}");
+}
+
 /// A query string or fragment is never part of a clone URL, and both corrupt the
 /// derived alias. Strip them rather than storing an unclonable string.
 #[test]

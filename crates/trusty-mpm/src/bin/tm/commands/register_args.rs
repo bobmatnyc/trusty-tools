@@ -293,12 +293,20 @@ fn resolved_url(s: &str) -> anyhow::Result<String> {
 /// the LAST segment and so escapes the interior rule. Other hosts nest
 /// legitimately (GitLab subgroups), so there a [`NON_REPO_SEGMENTS`] word counts
 /// only in an interior position, which leaves a repo actually NAMED `tree`
-/// registrable.
+/// registrable. A local path has no host and so gets neither rule.
 /// What: returns the offending segment, or `None` when the URL names a repo root.
 /// Test: `github_tab_urls_are_rejected`, `browser_paste_shapes_are_rejected`,
-/// `repo_named_like_a_web_path_is_ok`.
+/// `repo_named_like_a_web_path_is_ok`, `local_paths_skip_the_web_path_rule`.
 fn non_repo_segment<'a>(url: &str, segments: &[&'a str]) -> Option<&'a str> {
     let (host, _, _) = split_host(url);
+    // #4912: a local path has no host, so it has no web UI either and none of
+    // these words mean anything in it. Without this, `/Users/me/actions/repo.git`
+    // and `~/tree/repo.git` (expanded to an absolute path above, before this
+    // runs) were refused as browser pastes — a shape that registered fine before
+    // #4912, with an error naming a remedy that does not apply.
+    if host.is_empty() {
+        return None;
+    }
     if host.eq_ignore_ascii_case(GITHUB_HOST) && segments.len() > 2 {
         return Some(segments[2]);
     }
