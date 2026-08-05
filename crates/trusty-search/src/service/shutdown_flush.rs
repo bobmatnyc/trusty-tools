@@ -370,6 +370,9 @@ async fn flush_one_index_on_shutdown(
         // Issue #28: `flush_corpus_to_disk` writes to redb when a `CorpusStore`
         // is wired (final consistency sweep, no full JSON rewrite) and falls
         // back to the legacy `chunks.json` snapshot otherwise.
+        // #4226: both calls below are no-ops on a write-quarantined index —
+        // this was the last durable-write path a #4122-quarantined index still
+        // took, and it wrote its empty in-memory corpus over `chunks.json`.
         if let Err(e) = indexer.flush_corpus_to_disk(&chunks_path).await {
             tracing::warn!(
                 "shutdown: failed to flush chunk corpus for '{}': {e}",
